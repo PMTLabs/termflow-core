@@ -1,0 +1,74 @@
+{
+  "name": "auto-terminal-agent-monitor",
+  "version": "2.0.0",
+  "description": "Enhanced Multi-Agent Software Development Team Orchestration with communication enforcement, git discipline, quality gates, and intelligent terminal management",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "watch": "tsc -w",
+    "team": "node team-orchestrator.js",
+    "team:start": "node dist/team-manager.js start",
+    "team:enhanced": "node start-enhanced-team.js enhanced-team-config.json",
+    "team:enhanced:custom": "node start-enhanced-team.js",
+    "team:headless": "node start-headless-team.js",
+    "team:headless:config": "node start-headless-team.js team-config.json",
+    "team:ui": "USE_HEADLESS_MODE=false node team-orchestrator.js start",
+    "team:validate": "node dist/team-manager.js validate",
+    "team:example": "node dist/team-manager.js create-example",
+    "team:session": "node dist/team-manager.js session",
+    "team:test-setup": "node dist/team-manager.js test-setup",
+    "test:webhook": "node -r dotenv/config -e \"require('./dist/discord-alerts').DiscordAlerter.prototype.testWebhook.call({webhookUrl: process.env.DISCORD_WEBHOOK_URL})",
+    "test:enhanced": "node test-enhanced-features.js",
+    "validate:config": "node validate-enhanced-config.js"
+  },
+  "keywords": [
+    "auto-terminal",
+    "monitoring",
+    "ai",
+    "claude",
+    "gemini",
+    "team-orchestration",
+    "multi-agent",
+    "software-development",
+    "chathub",
+    "discord",
+    "task-routing",
+    "agent-coordination",
+    "communication-enforcement",
+    "git-discipline",
+    "quality-gates",
+    "terminal-naming",
+    "anti-pattern-prevention",
+    "project-lifecycle",
+    "enhanced-orchestration"
+  ],
+  "author": "Auto-Terminal Team",
+  "license": "MIT",
+  "dependencies": {
+    "@microsoft/signalr": "^8.0.7",
+    "axios": "^1.6.2",
+    "chalk": "^4.1.2",
+    "commander": "^11.1.0",
+    "dotenv": "^17.2.0",
+    "isomorphic-ws": "^5.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "ora": "^5.4.1",
+    "uuid": "^9.0.1",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^9.0.7",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.2"
+  },
+  "bin": {
+    "team-orchestrator": "./team-orchestrator.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

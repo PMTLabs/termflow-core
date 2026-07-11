@@ -1,0 +1,16 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "externalBin": [
+      "binaries/termflow-mcp-server",
+      "binaries/termflow-fabric"
+    ],
+    "resources": {
+      "../legal/EULA.txt": "legal/EULA.txt",
+      "../legal/PRIVACY.txt": "legal/PRIVACY.txt",
+      "../legal/LICENSE-apache-2.0.txt": "legal/LICENSE-apache-2.0.txt",
+      "../legal/THIRD-PARTY-NOTICES.txt": "legal/THIRD-PARTY-NOTICES.txt",
+      "../legal/LICENSE-fabric-fsl.txt": "legal/LICENSE-fabric-fsl.txt"
+    }
+  }
+}

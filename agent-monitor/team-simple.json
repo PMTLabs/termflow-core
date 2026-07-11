@@ -1,0 +1,39 @@
+{
+  "teamConfig": {
+    "projectName": "TODO App",
+    "projectFolder": "D:\\sources\\demo\\todo-app",
+    "requirementsFolder": "/docs",
+    "chatHubChannel": 20,
+    "discordWebhookUrl": "https://discord.com/api/webhooks/your-webhook-id/your-webhook-token",
+    "maxIdleTime": 300,
+    "heartbeatInterval": 120
+  },
+  "agents": [
+    {
+      "id": "coordinator-001",
+      "name": "Alex Coordinator",
+      "role": "Project Coordinator",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model sonnet --dangerously-skip-permissions",
+      "shellProfile": "cmd",
+      "priority": 1,
+      "specializations": ["Project Management", "Team Coordination"],
+      "maxConcurrentTasks": 3,
+      "kickoffPrompt": "You are the Project Coordinator for the {projectName} project. Review requirements in {requirementsFolder} to understand project scope. Join ChatHub channel {channelId} and coordinate team activities."
+    },
+    {
+      "id": "backend-001",
+      "name": "Jordan Backend",
+      "role": "Backend Developer", 
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model sonnet --dangerously-skip-permissions",
+      "shellProfile": "powershell",
+      "priority": 2,
+      "specializations": ["Node.js", "Express", "REST APIs"],
+      "maxConcurrentTasks": 2,
+      "kickoffPrompt": "You are the Backend Developer for the {projectName}. Review technical requirements in {requirementsFolder} and implement server-side logic. Join ChatHub channel {channelId} and coordinate with the team."
+    }
+  ]
+}

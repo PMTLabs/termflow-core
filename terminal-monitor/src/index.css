@@ -1,0 +1,74 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden; /* Prevent page scrolling */
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
+    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+code {
+  font-family:
+    source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+/* xterm.js specific styles to ensure proper sizing */
+.xterm {
+  height: 100%;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.xterm-screen {
+  width: 100%;
+  height: 100%;
+}
+
+.xterm-viewport {
+  /* Ensure the scrollbar is properly positioned */
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+/* Style the xterm scrollbar to make it more visible and prevent overlap */
+.xterm-viewport::-webkit-scrollbar {
+  width: 14px;
+}
+
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #1e1e1e;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 7px;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #666;
+}
+
+/* Pulse animation for connection status */
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+  100% {
+    opacity: 1;
+  }
+}

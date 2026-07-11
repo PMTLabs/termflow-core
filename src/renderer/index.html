@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- connect-src MUST allow the local API/WebSocket server (a different localhost
+         PORT than the renderer's origin), or the webview blocks fetch()/WebSocket with
+         "TypeError: Failed to fetch" — which silently broke /snapshot hydration and
+         thus scrollback restore. Any localhost port (dev 42051 / prod 42031 / user
+         override) + ws for the live stream and the dev HMR socket.
+         http://ipc.localhost / ipc://localhost are Tauri v2's invoke IPC origins
+         (WebView2 routes invoke() through a fetch to that host on Windows) —
+         without them every tauri command fetch is CSP-blocked. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* http://ipc.localhost ipc://localhost;">
+    <title>Auto Terminal</title>
+    <style>
+        body {
+            background-color: #141414;
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+    <script>
+        // Define global before any other scripts load
+        if (typeof global === 'undefined') {
+            var global = globalThis || window;
+        }
+    </script>
+    <style>
+        body {
+            background-color: #141414;
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+</body>
+</html>

@@ -1,0 +1,26 @@
+.tab-rename-popup {
+  position: fixed;
+  z-index: 1000;
+  background-color: #2d2d30;
+  border: 1px solid #464647;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+}
+
+.tab-rename-input {
+  /* Fixed, generous width independent of the source tab's own width — the
+     whole point is to give the user room to see/edit the full name even
+     when tabs are squeezed narrow. */
+  width: 260px;
+  max-width: calc(100vw - 20px);
+  background-color: #3c3c3c;
+  border: 1px solid #007acc;
+  border-radius: 3px;
+  color: #ffffff;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 5px 8px;
+  outline: none;
+  box-sizing: border-box;
+}

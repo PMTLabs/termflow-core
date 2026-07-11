@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Context Menu Test</title>
+    <style>
+        body {
+            background: #1e1e1e;
+            color: white;
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        .test-area {
+            border: 2px solid #666;
+            padding: 20px;
+            margin: 20px 0;
+            cursor: pointer;
+        }
+        .context-menu {
+            position: fixed;
+            background-color: #2d2d30;
+            border: 1px solid #464647;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            min-width: 220px;
+            z-index: 1000;
+            font-size: 13px;
+            color: #cccccc;
+            padding: 4px 0;
+            display: none;
+        }
+        .context-menu.show {
+            display: block;
+        }
+        .menu-item {
+            padding: 8px 16px;
+            cursor: pointer;
+        }
+        .menu-item:hover {
+            background-color: #094771;
+            color: #ffffff;
+        }
+    </style>
+</head>
+<body>
+    <h1>Context Menu Test</h1>
+    <p>Right-click on the areas below to test context menus:</p>
+    
+    <div class="test-area" id="test1">
+        Test Area 1 - Right-click here
+    </div>
+    
+    <div class="test-area" id="test2">
+        Test Area 2 - Right-click here
+    </div>
+    
+    <div id="contextMenu" class="context-menu">
+        <div class="menu-item">Menu Item 1</div>
+        <div class="menu-item">Menu Item 2</div>
+        <div class="menu-item">Menu Item 3</div>
+    </div>
+    
+    <div id="console" style="margin-top: 20px; padding: 10px; background: #333; font-family: monospace; font-size: 12px;">
+        Console output:
+    </div>
+    
+    <script>
+        const contextMenu = document.getElementById('contextMenu');
+        const consoleDiv = document.getElementById('console');
+        
+        function log(message) {
+            consoleDiv.innerHTML += '<br>' + new Date().toLocaleTimeString() + ': ' + message;
+        }
+        
+        // Add context menu to test areas
+        document.getElementById('test1').addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            log('Context menu triggered on Test Area 1');
+            contextMenu.style.left = e.clientX + 'px';
+            contextMenu.style.top = e.clientY + 'px';
+            contextMenu.classList.add('show');
+        });
+        
+        document.getElementById('test2').addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            log('Context menu triggered on Test Area 2');
+            contextMenu.style.left = e.clientX + 'px';
+            contextMenu.style.top = e.clientY + 'px';
+            contextMenu.classList.add('show');
+        });
+        
+        // Hide context menu on click outside
+        document.addEventListener('click', function() {
+            contextMenu.classList.remove('show');
+        });
+        
+        // Log all context menu events on the page
+        document.addEventListener('contextmenu', function(e) {
+            log('Global context menu event on: ' + (e.target.className || e.target.tagName));
+        }, true);
+    </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+Placeholder — replaced at build time.
+
+The Pro peering fabric (termflow-fabric) is licensed under the Functional Source
+License 1.1, Apache-2.0 Future License (FSL-1.1-Apache-2.0), © 2026 PMT Labs LLC.
+
+`scripts/build-fabric-sidecar.mjs` copies the fabric's actual `LICENSE` into this file
+during Pro builds (it is only meaningful in a `:pro` build that bundles the fabric).
+The canonical text lives in the private `termflow-fabric` repository's `LICENSE`.

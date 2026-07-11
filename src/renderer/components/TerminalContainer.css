@@ -1,0 +1,67 @@
+.terminal-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background-color: #0a0a0a;
+  overflow: hidden;
+}
+
+.tab-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+}
+
+.tab-content.active {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.terminal-container.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty-state {
+  text-align: center;
+  color: #666666;
+}
+
+.empty-state h2 {
+  font-size: 24px;
+  font-weight: 300;
+  margin-bottom: 16px;
+  color: #cccccc;
+}
+
+.empty-state p {
+  font-size: 16px;
+}
+
+.terminal-pane {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent;
+  transition: border-color 0.2s;
+}
+
+.terminal-pane.active {
+  border-color: #007acc;
+}
+
+.terminal-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: #666666;
+  font-size: 14px;
+}

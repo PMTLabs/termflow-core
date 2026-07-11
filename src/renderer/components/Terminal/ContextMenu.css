@@ -1,0 +1,77 @@
+/* ContextMenu.css - Styling for context menu component */
+
+.context-menu {
+  position: fixed;
+  background-color: var(--menu-background, #252526);
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  padding: 4px 0;
+  min-width: 200px;
+  z-index: 1000;
+  user-select: none;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 16px;
+  background: transparent;
+  border: none;
+  color: var(--menu-foreground, #cccccc);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s;
+}
+
+.context-menu-item:hover:not(:disabled) {
+  background-color: var(--menu-hover-background, #094771);
+}
+
+.context-menu-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.context-menu-icon {
+  flex-shrink: 0;
+  width: 20px;
+  margin-right: 8px;
+  font-size: 14px;
+  text-align: center;
+  line-height: 1;
+}
+
+.context-menu-label {
+  flex: 1;
+  margin-right: 20px;
+  /* Never wrap: keep the menu at its full intrinsic width so opening near the
+     right edge doesn't squash labels onto two lines — the edge-aware effect then
+     shifts the whole (full-width) menu left to stay on-screen. */
+  white-space: nowrap;
+}
+
+.context-menu-accelerator {
+  font-size: 11px;
+  color: var(--menu-accelerator-color, #969696);
+  text-align: right;
+}
+
+.context-menu-separator {
+  height: 1px;
+  background-color: var(--menu-separator, #454545);
+  margin: 4px 0;
+}
+
+/* Theme Variables */
+:root {
+  --menu-background: #252526;
+  --menu-border: #454545;
+  --menu-foreground: #cccccc;
+  --menu-hover-background: #094771;
+  --menu-accelerator-color: #969696;
+  --menu-separator: #454545;
+}

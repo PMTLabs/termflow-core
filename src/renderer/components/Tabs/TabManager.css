@@ -1,0 +1,491 @@
+/* TabManager.css - Styling for tab management component */
+
+.tab-manager {
+  width: 100%;
+  background-color: var(--tab-bar-background, #252526);
+  border-bottom: 1px solid var(--border-color, #3e3e42);
+  /* The tab toolbar (titles, +, folder, dropdown) is chrome — never selectable.
+     Renaming now happens in TabRenamePopup, a separate floating component. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tabs-container {
+  display: flex;
+  align-items: center;
+  height: 35px;
+  padding: 0 8px;
+}
+
+.tabs-list {
+  display: flex;
+  /* Don't grow: hug the tabs so the action buttons (layout / +/ ▼) sit right
+     after the last tab. Still shrinks + scrolls when tabs overflow the bar; the
+     leftover space to the right stays a window drag region (tabs-container). */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: center;
+  gap: 1px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.tabs-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* Shrink mode: compress every tab so the whole set stays visible — never scroll.
+   `min-width: 0` on the items lets them shrink below their normal 120px floor. */
+.tabs-list.shrink {
+  overflow: hidden;
+}
+
+.tabs-list.shrink .tab-item {
+  min-width: 0;
+}
+
+/* Scroll mode: keep tabs at full width and let the strip scroll horizontally
+   (mouse wheel + arrow buttons). This is the base overflow behavior already. */
+.tabs-list.scroll {
+  overflow-x: auto;
+}
+
+/* Fixed mode: every tab gets the same width (--fixed-tab-width, set inline from
+   settings) and the strip scrolls once tabs overflow, same as scroll mode. */
+.tabs-list.fixed {
+  overflow-x: auto;
+}
+
+.tabs-list.fixed .tab-item {
+  width: var(--fixed-tab-width);
+  min-width: var(--fixed-tab-width);
+  max-width: var(--fixed-tab-width);
+  flex-shrink: 0;
+}
+
+/* Left/right tab-strip scroll buttons (shown only in scroll mode when there is
+   off-screen content). Sit flush against the tab strip inside the title bar. */
+.tab-scroll-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 28px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--button-foreground, #cccccc);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 20px;
+  line-height: 1;
+  transition: background-color 0.2s ease;
+}
+
+.tab-scroll-button:hover {
+  background-color: var(--button-hover-background, rgba(255, 255, 255, 0.1));
+}
+
+.tab-scroll-button:active {
+  background-color: var(--button-active-background, rgba(255, 255, 255, 0.2));
+}
+
+.tab-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* Keep the buttons visible (and beside the last tab) even when tabs overflow. */
+  flex-shrink: 0;
+}
+
+.layout-manager-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  color: var(--button-foreground, #cccccc);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+
+.layout-manager-button:hover {
+  background-color: var(--button-hover-background, rgba(255, 255, 255, 0.1));
+}
+
+.layout-manager-button:active {
+  background-color: var(--button-active-background, rgba(255, 255, 255, 0.2));
+}
+
+/* Tab Item Styles */
+.tab-item {
+  display: flex;
+  align-items: center;
+  height: 33px;
+  padding: 0 12px;
+  background-color: var(--tab-background, #2d2d30);
+  color: var(--tab-foreground, #cccccc);
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  /* Own stacking context so the running-sweep ::after (z-index:-1) sits behind the
+     tab content but above the tab background, instead of washing over the text. */
+  isolation: isolate;
+  min-width: 120px;
+  max-width: 200px;
+  border: 1px solid transparent;
+  transition: background-color 0.2s ease;
+}
+
+.tab-item:hover {
+  background-color: var(--tab-hover-background, #323235);
+}
+
+.tab-item.active {
+  background-color: var(--tab-active-background, #141414);
+  color: var(--tab-active-foreground, #ffffff);
+  border-color: var(--tab-active-border, #141414);
+}
+
+.tab-item.dragging {
+  opacity: 0.5;
+  cursor: grabbing;
+}
+
+/* Exited tab: process is gone but tab kept open for review */
+.tab-item.exited {
+  opacity: 0.65;
+}
+
+.tab-item.exited .tab-title {
+  font-style: italic;
+}
+
+.tab-exited-icon {
+  margin-right: 6px;
+  font-size: 14px;
+  flex-shrink: 0;
+  color: var(--tab-exited-indicator, #e5a03f);
+}
+
+/* Tab Icon */
+.tab-icon {
+  margin-right: 6px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* Real binary icon (e.g. pwsh.exe / git-bash.exe) shown in place of the emoji. */
+.tab-icon-img {
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  flex-shrink: 0;
+  object-fit: contain;
+  vertical-align: middle;
+}
+
+/* Tab Title */
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  /* The close button is absolutely positioned (see .tab-close) and no longer
+     reserves flex space, so the title fills the tab's full width right up to
+     the tab's edge — the button overlays on top of the trailing text instead
+     of pushing it left. */
+}
+
+/* Tab Dirty Indicator */
+.tab-dirty {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--tab-dirty-indicator, #e7e7e7);
+  flex-shrink: 0;
+}
+
+/* Tab Background-Activity Indicator (external MCP/API interaction) */
+@keyframes tab-title-flash {
+  0%, 100% { color: var(--tab-foreground, #cccccc); }
+  50%      { color: var(--tab-activity-accent, #f0a020); }
+}
+
+.tab-item.has-activity .tab-title {
+  animation: tab-title-flash 0.5s ease-in-out 10; /* ~5s of pulsing, then static */
+}
+
+.tab-activity-dot {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--tab-activity-accent, #f0a020);
+  flex-shrink: 0;
+}
+
+/* Respect reduced-motion: skip the pulse; the static dot still signals activity. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-item.has-activity .tab-title { animation: none; }
+}
+
+/* Unseen-output bell (backlog 012) — a non-active tab produced output that has
+   settled (idle past the debounce). Sticky until the tab is focused, so it may
+   coexist with the running sweep if output later resumes. Distinct from the amber
+   MCP/API dot: its own glyph + accent so the two are visually separable. Static
+   (a persistent marker, not a flash). */
+.tab-unseen-bell {
+  margin-left: 4px;
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+/* Tab "running" sweep — a process inside the tab is actively producing output. */
+.tab-item.tab-running::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1; /* behind the tab content (title/icon/dot/close), above the background */
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.18;
+  /* A soft band tiled every 160px and scrolled one full tile per loop → continuous:
+     as one band exits the right, the next enters from the left, seamlessly. The tile
+     is pinned to 160px (background-size) so it holds exactly one period regardless of
+     the tab's width — a bare repeating-gradient would seam wherever the tab width
+     isn't a whole multiple of the period. The 160px MUST match the keyframe distance.
+     The band occupies only the back ~45% of the tile, so consecutive bands stay well
+     apart (no "two sweepers at once" look). */
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    transparent 55%,
+    var(--tab-running-accent, #3aa6ff) 78%,
+    transparent 100%
+  );
+  background-size: 160px 100%;
+  background-repeat: repeat-x;
+  animation: tab-running-sweep 1.2s linear infinite;
+}
+
+@keyframes tab-running-sweep {
+  /* Scroll by exactly one period (160px, in pixels so it works on a full-size
+     gradient) → the repeating pattern lands on itself, a seamless continuous loop. */
+  from { background-position-x: 0; }
+  to   { background-position-x: 160px; }
+}
+
+/* Reduced motion: the running sweep is an essential live-status cue, so keep it
+   rather than dropping to a static accent line (which read as a stray border, not
+   a "running" signal). Soften it instead — slow the sweep and lower its opacity. */
+@media (prefers-reduced-motion: reduce) {
+  .tab-item.tab-running::after {
+    animation-duration: 2.4s;
+    opacity: 0.14;
+  }
+}
+
+/* Active tab: its near-black background swallows the narrow base band, leaving only
+   a tiny visible stub. Give the active tab a wider, brighter glow band — it spans the
+   whole tile (peaking at a soft white-hot core) at higher opacity, so the sweep
+   reads as a moving glow. Keeps the base background-size, so it still scrolls
+   seamlessly. Higher specificity than the rules above → wins in both modes. */
+.tab-item.active.tab-running::after {
+  opacity: 0.55;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--tab-running-accent, #3aa6ff) 35%,
+    rgba(255, 255, 255, 0.5) 50%,
+    var(--tab-running-accent, #3aa6ff) 65%,
+    transparent 100%
+  );
+}
+
+/* Tab Close Button — overlays on top of the trailing edge of the title text
+   instead of sitting in normal flex flow, so the title isn't permanently
+   shortened to make room for a button that's invisible most of the time.
+   A solid backdrop (matching whichever background the tab currently shows)
+   sits behind the × so the text underneath doesn't bleed through once the
+   button becomes visible. */
+.tab-close {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  background: transparent;
+  border: none;
+  color: var(--tab-close-color, #cccccc);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+  z-index: 1;
+}
+
+.tab-item:hover .tab-close {
+  /* Full opacity (not a partial fade) — this is a solid backdrop covering the
+     overlaid title text underneath it, so a translucent button would let that
+     text bleed through and look muddy. */
+  opacity: 1;
+  background-color: var(--tab-hover-background, #323235);
+}
+
+.tab-item.active .tab-close {
+  opacity: 1;
+  background-color: var(--tab-active-background, #141414);
+}
+
+/* Higher source-order precedence than the two backdrop rules above (same
+   specificity) so hovering the button itself always wins over the tab's own
+   hover/active backdrop. Solid color, not translucent — a translucent
+   highlight here would let the overlaid text show back through. */
+.tab-item .tab-close:hover {
+  opacity: 1;
+  background-color: var(--tab-close-hover-background, #4d4d52);
+}
+
+/* New Tab Button */
+.new-tab-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 4px;
+  background: transparent;
+  border: none;
+  color: var(--button-foreground, #cccccc);
+  cursor: pointer;
+  border-radius: 3px;
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.new-tab-button:hover {
+  background-color: var(--button-hover-background, rgba(255, 255, 255, 0.1));
+}
+
+.new-tab-button:active {
+  background-color: var(--button-active-background, rgba(255, 255, 255, 0.2));
+}
+
+/* Drag and Drop Styles */
+.tab-item.drag-over {
+  border-left: 2px solid var(--drag-indicator, #007acc);
+}
+
+/* Dark Theme Variables */
+:root {
+  --tab-bar-background: #252526;
+  --border-color: #3e3e42;
+  --tab-background: #2d2d30;
+  --tab-foreground: #cccccc;
+  --tab-hover-background: #323235;
+  --tab-active-background: #141414;
+  --tab-active-foreground: #ffffff;
+  --tab-active-border: #141414;
+  --tab-dirty-indicator: #e7e7e7;
+  --tab-activity-accent: #f0a020;
+  --tab-running-accent: #3aa6ff;
+  --tab-close-color: #cccccc;
+  /* Solid, not translucent — this is a backdrop sitting on top of the
+     overlaid title text, so any transparency lets the text bleed through. */
+  --tab-close-hover-background: #4d4d52;
+  --button-foreground: #cccccc;
+  --button-hover-background: rgba(255, 255, 255, 0.1);
+  --button-active-background: rgba(255, 255, 255, 0.2);
+  --input-border: #3f3f46;
+  --input-background: #3c3c3c;
+  --input-active-border: #007acc;
+  --drag-indicator: #007acc;
+}
+
+/* Light Theme Override */
+.light-theme {
+  --tab-bar-background: #f3f3f3;
+  --border-color: #e5e5e5;
+  --tab-background: #ececec;
+  --tab-foreground: #333333;
+  --tab-hover-background: #e5e5e5;
+  --tab-active-background: #ffffff;
+  --tab-active-foreground: #000000;
+  --tab-active-border: #ffffff;
+  --tab-dirty-indicator: #333333;
+  /* Darker amber for adequate contrast on the light tab background. */
+  --tab-activity-accent: #b56b00;
+  --tab-running-accent: #1f6fb2;
+  --tab-close-color: #333333;
+  --tab-close-hover-background: #cfcfcf;
+  --button-foreground: #333333;
+  --button-hover-background: rgba(0, 0, 0, 0.1);
+  --button-active-background: rgba(0, 0, 0, 0.2);
+  --input-border: #d4d4d4;
+  --input-background: #ffffff;
+  --input-active-border: #0078d4;
+  --drag-indicator: #0078d4;
+}
+/* Window-shaped tear-off preview that follows the cursor while dragging a tab.
+   Positioned at the viewport origin and moved via `transform` (set in JS) for
+   smooth tracking. Reads as a small window that materializes on drop. */
+.tab-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100000;
+  pointer-events: none;
+  width: 280px;
+  height: 175px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--tab-active-border, #4a4a4a);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  opacity: 0.92;
+  transform: translate(-9999px, -9999px); /* offscreen until first move */
+}
+
+.tab-drag-ghost__bar {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--tab-active-foreground, #fff);
+  background: var(--tab-active-background, #2a2a2a);
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.tab-drag-ghost__body {
+  flex: 1 1 auto;
+  background: var(--terminal-background, #1a1a1a);
+}
+
+/* While a tab drag is active, hard-disable selection everywhere so dragging
+   across the toolbar/chrome never highlights tab/pane titles or icons. */
+body.tab-dragging,
+body.tab-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: grabbing !important;
+}

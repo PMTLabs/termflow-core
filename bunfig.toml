@@ -1,0 +1,7 @@
+[install]
+# CRA / react-scripts (terminal-monitor) and webpack tooling assume a flat,
+# npm-style node_modules layout so that transitive deps (e.g. eslint,
+# eslint-config-react-app, hoisted from react-scripts) resolve from the
+# consuming package directory. Bun defaults workspaces to the "isolated"
+# linker, which breaks that resolution. Force the hoisted (flat) linker.
+linker = "hoisted"

@@ -1,0 +1,56 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "TermFlow",
+  "mainBinaryName": "termflow",
+  "version": "0.1.0",
+  "identifier": "app.termflow.desktop",
+  "build": {
+    "frontendDist": "../dist/renderer",
+    "devUrl": "http://localhost:42010",
+    "beforeDevCommand": "bun run build:terminal-core && npm run dev:renderer",
+    "beforeBuildCommand": "bun run build:terminal-core && bun run build:renderer && bun run build:mcp-sidecar"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TermFlow",
+        "width": 1280,
+        "height": 800,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "zoomHotkeysEnabled": false,
+        "decorations": true,
+        "transparent": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": [
+      "binaries/termflow-mcp-server"
+    ],
+    "licenseFile": "../legal/EULA.rtf",
+    "license": "Apache-2.0",
+    "resources": {
+      "../legal/EULA.txt": "legal/EULA.txt",
+      "../legal/PRIVACY.txt": "legal/PRIVACY.txt",
+      "../legal/LICENSE-apache-2.0.txt": "legal/LICENSE-apache-2.0.txt",
+      "../legal/THIRD-PARTY-NOTICES.txt": "legal/THIRD-PARTY-NOTICES.txt"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

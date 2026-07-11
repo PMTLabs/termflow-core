@@ -1,0 +1,163 @@
+{
+  "teamConfig": {
+    "projectName": "E-Commerce Platform",
+    "projectFolder": "C:/Projects/ecommerce-platform",
+    "chatHubChannel": 1,
+    "requirementsFolder": "/docs",
+    "discordWebhookUrl": "https://discord.com/api/webhooks/your-webhook-url-here",
+    "maxIdleTime": 300,
+    "heartbeatInterval": 120
+  },
+  "agents": [
+    {
+      "id": "coordinator-001",
+      "name": "Alex Coordinator",
+      "role": "Project Coordinator",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model claude-3-5-sonnet",
+      "priority": 1,
+      "specializations": ["Project Management", "Team Coordination", "Requirements Analysis"],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the Project Coordinator for the {projectName} project. Your responsibilities include coordinating team activities, tracking progress, identifying blockers, and ensuring deliverables are completed on time. Review project requirements in {requirementsFolder} regularly to stay informed about project goals and scope. Join ChatHub channel {channelId} and actively monitor team communications."
+    },
+    {
+      "id": "architect-001", 
+      "name": "Morgan Architect",
+      "role": "System Architect",
+      "aiType": "Claude",
+      "model": "opus",
+      "cliCommand": "claude --model claude-3-opus",
+      "priority": 2,
+      "specializations": ["System Design", "Architecture Patterns", "Scalability", "Security"],
+      "maxConcurrentTasks": 3,
+      "kickoffPrompt": "You are the System Architect responsible for designing the overall architecture of the {projectName}. Focus on scalability, security, and maintainability. Review technical requirements and architecture documentation in {requirementsFolder} to understand system constraints and design goals. Join ChatHub channel {channelId} and collaborate with the team on architectural decisions."
+    },
+    {
+      "id": "product-001",
+      "name": "Taylor Product",
+      "role": "Product Manager",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model claude-3-5-sonnet",
+      "priority": 1,
+      "specializations": ["Product Strategy", "User Story Writing", "Requirements Analysis", "Stakeholder Management"],
+      "maxConcurrentTasks": 6,
+      "additionalResponsibilities": [
+        "Conduct user research and gather customer feedback",
+        "Create detailed user personas for the e-commerce platform",
+        "Define KPIs and success metrics for each feature",
+        "Coordinate with marketing team on feature launch strategies",
+        "Maintain competitive analysis and market research"
+      ],
+      "kickoffPrompt": "You are the Product Manager for the {projectName} project. Your primary focus is writing comprehensive user stories that guide development work. Review existing requirements and user stories in {requirementsFolder} to understand the current scope and identify gaps. Work closely with stakeholders to understand business requirements and translate them into actionable development tasks. Join ChatHub channel {channelId} and ensure all features have clear user stories with detailed acceptance criteria."
+    },
+    {
+      "id": "backend-001",
+      "name": "Jordan Backend",
+      "role": "Backend Developer", 
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model claude-3-5-sonnet",
+      "priority": 3,
+      "specializations": ["Node.js", "Express", "MongoDB", "REST APIs", "Authentication"],
+      "maxConcurrentTasks": 4,
+      "additionalResponsibilities": [
+        "Set up monitoring and alerting for production systems",
+        "Create API documentation using OpenAPI/Swagger",
+        "Implement caching strategies for improved performance"
+      ],
+      "kickoffPrompt": "You are the Backend Developer for the {projectName}. Implement server-side logic, APIs, database operations, and ensure security best practices. Join ChatHub channel {channelId} and coordinate with frontend and architecture teams."
+    },
+    {
+      "id": "frontend-001",
+      "name": "Casey Frontend",
+      "role": "Frontend Developer",
+      "aiType": "Gemini", 
+      "model": "gemini-2.0-flash-exp",
+      "cliCommand": "gemini --model gemini-2.0-flash-exp",
+      "priority": 3,
+      "specializations": ["React", "TypeScript", "CSS", "State Management", "Performance"],
+      "maxConcurrentTasks": 4,
+      "kickoffPrompt": "You are the Frontend Developer creating the user interface for the {projectName}. Build responsive, accessible, and performant React components. Join ChatHub channel {channelId} and work closely with UI/UX and backend teams."
+    },
+    {
+      "id": "uiux-001",
+      "name": "Riley Designer", 
+      "role": "UI/UX Engineer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "claude --model claude-3-5-sonnet",
+      "priority": 4,
+      "specializations": ["User Experience", "Interface Design", "Figma", "Accessibility", "Design Systems"],
+      "maxConcurrentTasks": 3,
+      "kickoffPrompt": "You are the UI/UX Engineer responsible for user experience and interface design. Create intuitive, accessible designs and work with frontend developers on implementation. Join ChatHub channel {channelId} and ensure design consistency across the {projectName}."
+    },
+    {
+      "id": "qa-001",
+      "name": "Sam QA",
+      "role": "QA Engineer",
+      "aiType": "Claude",
+      "model": "sonnet", 
+      "cliCommand": "claude --model claude-3-5-sonnet",
+      "priority": 2,
+      "specializations": ["Test Automation", "Jest", "Playwright", "API Testing", "Quality Assurance"],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the QA Engineer ensuring quality across all aspects of the {projectName}. Create comprehensive test suites, perform testing, and validate functionality. Join ChatHub channel {channelId} and coordinate testing activities with all team members."
+    }
+  ],
+  "workflows": [
+    {
+      "name": "Feature Development",
+      "description": "Standard workflow for developing new features",
+      "phases": [
+        {
+          "name": "Requirements Analysis",
+          "roles": ["Project Coordinator", "Product Manager", "System Architect"],
+          "dependencies": []
+        },
+        {
+          "name": "Design Phase", 
+          "roles": ["System Architect", "UI/UX Engineer"],
+          "dependencies": ["Requirements Analysis"]
+        },
+        {
+          "name": "Implementation",
+          "roles": ["Backend Developer", "Frontend Developer"],
+          "dependencies": ["Design Phase"]
+        },
+        {
+          "name": "Testing & QA",
+          "roles": ["QA Engineer"],
+          "dependencies": ["Implementation"]
+        },
+        {
+          "name": "Integration & Deployment",
+          "roles": ["Backend Developer", "Frontend Developer", "QA Engineer"],
+          "dependencies": ["Testing & QA"]
+        }
+      ]
+    },
+    {
+      "name": "Bug Fix",
+      "description": "Workflow for handling bug fixes",
+      "phases": [
+        {
+          "name": "Bug Triage",
+          "roles": ["Project Coordinator", "QA Engineer"],
+          "dependencies": []
+        },
+        {
+          "name": "Investigation & Fix",
+          "roles": ["Backend Developer", "Frontend Developer"],
+          "dependencies": ["Bug Triage"]
+        },
+        {
+          "name": "Verification",
+          "roles": ["QA Engineer"],
+          "dependencies": ["Investigation & Fix"]
+        }
+      ]
+    }
+  ]
+}

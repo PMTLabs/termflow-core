@@ -1,0 +1,337 @@
+{
+  "teamConfig": {
+    "projectName": "Enhanced TODO App",
+    "projectFolder": "D:\\sources\\demo\\todo-app",
+    "requirementsFolder": "/docs",
+    "chatHubChannel": 20,
+    "discordWebhookUrl": "https://discord.com/api/webhooks/your-webhook-id/your-webhook-token",
+    "maxIdleTime": 300,
+    "heartbeatInterval": 120
+  },
+  "agents": [
+    {
+      "id": "coordinator-001",
+      "name": "Alex Coordinator",
+      "role": "Project Coordinator",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 1,
+      "specializations": [
+        "Project Management",
+        "Team Coordination",
+        "Requirements Analysis",
+        "Quality Assurance",
+        "Git Discipline Enforcement"
+      ],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the Project Coordinator for the {projectName} project. Your responsibilities include coordinating team activities, tracking progress, identifying blockers, ensuring deliverables are completed on time, and enforcing communication protocols and git discipline. Join ChatHub channel {channelId} and actively monitor team communications.",
+      "additionalResponsibilities": [
+        "Enforce git discipline and remind team members to commit every 30 minutes",
+        "Validate that all team communications follow the required message templates",
+        "Ensure quality gates are met before allowing phase transitions",
+        "Monitor for communication anti-patterns and escalate when necessary"
+      ]
+    },
+    {
+      "id": "architect-001",
+      "name": "Morgan Architect",
+      "role": "System Architect",
+      "aiType": "Claude",
+      "model": "opus",
+      "cliCommand": "npx win-claude-code --model opus --dangerously-skip-permissions",
+      "priority": 2,
+      "specializations": [
+        "System Design",
+        "Architecture Patterns",
+        "Scalability",
+        "Security",
+        "Quality Standards"
+      ],
+      "maxConcurrentTasks": 3,
+      "kickoffPrompt": "You are the System Architect responsible for designing the overall architecture of the {projectName}. Follow git discipline by committing every 30 minutes with meaningful commit messages. Use the STATUS template for updates to the Project Coordinator. Focus on scalability, security, and maintainability. Join ChatHub channel {channelId} and collaborate with the team on architectural decisions.",
+      "onboardOnPhase": "Requirements Analysis"
+    },
+    {
+      "id": "backend-001",
+      "name": "Jordan Backend",
+      "role": "Backend Developer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 3,
+      "specializations": [
+        "Node.js",
+        "Express",
+        "MongoDB",
+        "REST APIs",
+        "Authentication",
+        "Git Best Practices"
+      ],
+      "maxConcurrentTasks": 4,
+      "additionalResponsibilities": [
+        "Follow feature branch workflow for all new development",
+        "Ensure 80%+ test coverage for all backend code",
+        "Use meaningful commit messages describing specific changes",
+        "Report status to Project Coordinator using STATUS template every 2 hours"
+      ],
+      "kickoffPrompt": "You are the Backend Developer for the {projectName}. CRITICAL: Follow git discipline by committing every 30 minutes and create feature branches for new work. Use STATUS template for progress reports. Implement server-side logic, APIs, database operations, and ensure security best practices. Join ChatHub channel {channelId} and coordinate with frontend and architecture teams."
+    },
+    {
+      "id": "frontend-001",
+      "name": "Casey Frontend",
+      "role": "Frontend Developer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 3,
+      "specializations": [
+        "React",
+        "TypeScript",
+        "CSS",
+        "State Management",
+        "Performance",
+        "Git Workflows"
+      ],
+      "maxConcurrentTasks": 4,
+      "kickoffPrompt": "You are the Frontend Developer creating the user interface for the {projectName}. MANDATORY: Commit your work every 30 minutes with descriptive messages and use feature branches. Report progress using the STATUS template every 2 hours. Build responsive, accessible, and performant React components. Join ChatHub channel {channelId} and work closely with UI/UX and backend teams.",
+      "additionalResponsibilities": [
+        "Maintain 85%+ test coverage for frontend components",
+        "Follow feature branch workflow with meaningful commit messages",
+        "Ensure accessibility compliance (WCAG 2.1 AA minimum)",
+        "Performance optimization with Core Web Vitals monitoring"
+      ]
+    },
+    {
+      "id": "qa-001",
+      "name": "Sam QA",
+      "role": "QA Engineer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 2,
+      "specializations": [
+        "Test Automation",
+        "Jest",
+        "Playwright",
+        "API Testing",
+        "Quality Assurance",
+        "Quality Gate Validation"
+      ],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the QA Engineer ensuring quality across all aspects of the {projectName}. CRITICAL: Follow git discipline and commit test code every 30 minutes. Validate quality gates and report using STATUS template. Create comprehensive test suites, perform testing, and validate functionality. Join ChatHub channel {channelId} and coordinate testing activities with all team members.",
+      "additionalResponsibilities": [
+        "Validate that all quality gates pass before approving phase transitions",
+        "Ensure test coverage meets minimum thresholds (80% unit, 70% integration)",
+        "Monitor performance metrics and ensure response times under 500ms",
+        "Verify security compliance and run automated security scans"
+      ]
+    }
+  ],
+  "enforcement": {
+    "gitDiscipline": {
+      "enabled": true,
+      "autoCommitInterval": 1800000,
+      "maxWorkTimeWithoutCommit": 3600000,
+      "enforceFeatureBranches": true,
+      "requireMeaningfulCommits": true,
+      "commitReminderEnabled": true,
+      "emergencyRecoveryEnabled": true,
+      "pmResponsibilities": true,
+      "emergencyRecoveryMode": false
+    },
+    "terminalNaming": {
+      "enabled": true,
+      "agentPattern": "Claude-{role}",
+      "servicePattern": "{service}-Dev",
+      "shellPattern": "{project}-Shell",
+      "autoRename": true,
+      "promptUser": true,
+      "autoPromptOnStartup": true,
+      "minimumConfidence": 0.6,
+      "customPatterns": {
+        "orchestrator": ["orchestrator", "agent.*monitor", "team.*coordination"],
+        "testing": ["jest.*watch", "cypress.*open", "playwright.*test"]
+      }
+    },
+    "communicationProtocol": {
+      "enabled": true,
+      "enforceTemplates": true,
+      "hubAndSpokeStrict": true,
+      "antiPatternDetection": true,
+      "maxExchangesBeforeEscalation": 3,
+      "rateLimitEnabled": true,
+      "broadcastPreventionEnabled": true
+    },
+    "qualityGates": {
+      "enabled": true,
+      "minTestCoverage": 80,
+      "maxResponseTime": 500,
+      "minSecurityScore": 85,
+      "maxTechnicalDebtRatio": 0.1,
+      "minDocumentationCoverage": 70,
+      "codeQualityThreshold": 0.8,
+      "automatedChecksEnabled": true,
+      "continuousMonitoringEnabled": true,
+      "blockingEnabled": true,
+      "pmVerificationRequired": true
+    },
+    "projectLifecycle": {
+      "enabled": true,
+      "projectDiscoveryEnabled": true,
+      "autoProjectStartup": true,
+      "systematicBriefingEnabled": true,
+      "defaultProjectsPath": "D:\\sources\\demo"
+    },
+    "antiPatternPrevention": {
+      "enabled": true,
+      "meetingPreventionEnabled": true,
+      "micromanagementDetectionEnabled": true,
+      "escalationTimeoutEnabled": true,
+      "qualityShortcutPrevention": true
+    },
+    "humanInteraction": {
+      "pauseResumeEnabled": true,
+      "confirmationRequired": false,
+      "notificationChannels": ["discord", "console"],
+      "escalationToHuman": true
+    }
+  },
+  "workflows": [
+    {
+      "name": "Feature Development with Quality Gates",
+      "description": "Enhanced workflow with communication enforcement and quality validation",
+      "phases": [
+        {
+          "name": "Requirements Analysis",
+          "roles": [
+            "Project Coordinator",
+            "System Architect"
+          ],
+          "dependencies": [],
+          "output": "Requirements Document",
+          "qualityGateRequired": true,
+          "communicationProtocol": "STATUS updates every 2 hours to Project Coordinator"
+        },
+        {
+          "name": "Design UI/UX",
+          "roles": [
+            "Frontend Developer"
+          ],
+          "dependencies": ["Requirements Analysis"],
+          "output": "UI/UX Design",
+          "qualityGateRequired": true,
+          "gitRequirements": "Feature branch required, commit every 30 minutes"
+        },
+        {
+          "name": "System Architecture Design",
+          "roles": [
+            "System Architect"
+          ],
+          "dependencies": ["Requirements Analysis"],
+          "output": "System Architecture Design",
+          "qualityGateRequired": true,
+          "communicationProtocol": "Coordinate with Project Coordinator using hub-and-spoke model"
+        },
+        {
+          "name": "Implementation",
+          "roles": [
+            "Backend Developer",
+            "Frontend Developer"
+          ],
+          "dependencies": [
+            "Design UI/UX",
+            "System Architecture Design"
+          ],
+          "output": "Application Code",
+          "qualityGateRequired": true,
+          "gitRequirements": "Feature branches, meaningful commits every 30 minutes, 80%+ test coverage",
+          "communicationProtocol": "Cross-team communication through Project Coordinator only"
+        },
+        {
+          "name": "Testing & QA",
+          "roles": [
+            "QA Engineer"
+          ],
+          "dependencies": [
+            "Implementation"
+          ],
+          "output": "Test Results",
+          "qualityGateRequired": true,
+          "qualityStandards": "80% test coverage, <500ms response time, security scan pass"
+        },
+        {
+          "name": "Integration & Deployment",
+          "roles": [
+            "Backend Developer",
+            "Frontend Developer",
+            "QA Engineer"
+          ],
+          "dependencies": [
+            "Testing & QA"
+          ],
+          "output": "Production Environment",
+          "qualityGateRequired": true,
+          "finalValidation": "All quality gates must pass, PM verification required"
+        }
+      ]
+    }
+  ],
+  "qualityStandards": {
+    "minTestCoverage": 80,
+    "maxResponseTime": 500,
+    "minSecurityScore": 85,
+    "maxTechnicalDebtRatio": 0.1,
+    "minDocumentationCoverage": 70,
+    "codeQualityThreshold": 0.8
+  },
+  "customRules": [
+    {
+      "id": "git-commit-frequency",
+      "name": "Git Commit Frequency Enforcement",
+      "description": "Ensure agents commit their work every 30 minutes maximum",
+      "condition": "timeSinceLastCommit > 30 * 60 * 1000",
+      "action": {
+        "type": "notify",
+        "parameters": {
+          "escalateAfter": 60,
+          "severity": "high"
+        },
+        "message": "CRITICAL: You must commit your work now. It's been over 30 minutes since your last commit."
+      },
+      "severity": "high",
+      "enabled": true
+    },
+    {
+      "id": "quality-gate-blocking",
+      "name": "Quality Gate Blocking",
+      "description": "Block agents from proceeding if quality gates are not met",
+      "condition": "hasFailedQualityGates && agent.role !== 'Project Coordinator'",
+      "action": {
+        "type": "block",
+        "parameters": {
+          "allowedActions": ["fix-quality-issues", "coordinate-with-pm"]
+        },
+        "message": "You are blocked by failed quality gates. Please resolve quality issues before proceeding."
+      },
+      "severity": "critical",
+      "enabled": true
+    },
+    {
+      "id": "communication-template-violation",
+      "name": "Communication Template Violation",
+      "description": "Enforce proper communication templates for team coordination",
+      "condition": "messageTemplate === null && messageCategory !== null",
+      "action": {
+        "type": "notify",
+        "parameters": {
+          "provideSuggestions": true,
+          "showExample": true
+        },
+        "message": "Please use the proper communication template for your message type."
+      },
+      "severity": "medium",
+      "enabled": true
+    }
+  ]
+}

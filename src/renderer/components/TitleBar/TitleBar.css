@@ -1,0 +1,481 @@
+/* TitleBar.css - Fluent UI Design Title Bar */
+
+.title-bar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  background: linear-gradient(180deg, #2d2d30 0%, #252526 100%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  user-select: none;
+  position: relative;
+  overflow: visible;
+}
+
+/* Subtle top highlight for depth */
+.title-bar::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, 
+    rgba(255, 255, 255, 0.03) 0%, 
+    rgba(255, 255, 255, 0.08) 50%, 
+    rgba(255, 255, 255, 0.03) 100%
+  );
+  pointer-events: none;
+}
+
+/* Server health (API + MCP) in the window title area. Rendered as a broadcast/
+   signal glyph rather than a dot, so it can't be mistaken for the round API-target
+   dot in the pill next to it. Colour carries the state (grey/green/amber/red). */
+.server-status-icon {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0 8px 0 10px;
+  color: #6e6e6e;                /* checking / unknown — grey */
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  -webkit-app-region: no-drag;
+  transition: color 0.2s ease, filter 0.2s ease;
+}
+.server-status-icon rect { fill: currentColor; stroke: none; }
+.server-status-icon path { fill: none; }
+
+.server-status-icon.online {
+  color: #3fb950;                /* green */
+  filter: drop-shadow(0 0 3px rgba(63, 185, 80, 0.55));
+}
+.server-status-icon.partial {
+  color: #d29922;                /* amber — one server down */
+  filter: drop-shadow(0 0 3px rgba(210, 153, 34, 0.5));
+}
+.server-status-icon.offline {
+  color: #f85149;                /* red — offline */
+  filter: drop-shadow(0 0 3px rgba(248, 81, 73, 0.5));
+}
+
+/* Active-window indicator (P0a): shows whether THIS window receives API/MCP-created
+   terminals. Click to make this window the target. */
+.active-window-indicator {
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  margin: 0 8px 0 0;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 11px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+.active-window-indicator .awi-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6e6e6e;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+.active-window-indicator:hover {
+  color: rgba(255, 255, 255, 0.75);
+  border-color: rgba(0, 120, 212, 0.6);
+}
+.active-window-indicator.active {
+  color: #3fb950;
+  border-color: rgba(63, 185, 80, 0.55);
+  background: rgba(63, 185, 80, 0.12);
+}
+.active-window-indicator.active .awi-dot {
+  background: #3fb950;
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+}
+.active-window-indicator:focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: 1px;
+}
+.light-theme .active-window-indicator {
+  border-color: rgba(0, 0, 0, 0.15);
+  color: rgba(0, 0, 0, 0.5);
+}
+.light-theme .active-window-indicator.active {
+  color: #1a7f37;
+  border-color: rgba(26, 127, 55, 0.5);
+  background: rgba(63, 185, 80, 0.14);
+}
+
+.title-bar-tabs {
+  display: flex;
+  align-items: center;
+  /* Hug the tabs + action menu and let the drag region below fill the middle.
+     Still shrinks (min-width:0) so the tab strip can compress/scroll when full. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: visible;
+  position: relative;
+  z-index: 100;
+}
+
+/* Override TabManager styles within title bar */
+.title-bar-tabs .tab-manager {
+  background-color: transparent;
+  border-bottom: none;
+}
+
+.title-bar-tabs .tabs-container {
+  height: 40px;
+  padding: 0;
+  padding-left: 12px;
+}
+
+.title-bar-tabs .tabs-list {
+  gap: 2px;
+}
+
+.title-bar-tabs .tab-item {
+  height: 34px;
+  border-radius: 6px 6px 0 0;
+  margin-top: 6px;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  transition: all 0.15s ease;
+}
+
+.title-bar-tabs .tab-item:hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.title-bar-tabs .tab-item.active {
+  background-color: #141414;
+  border-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: #141414;
+  position: relative;
+}
+
+/* Active tab bottom connection to terminal area */
+.title-bar-tabs .tab-item.active::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background-color: #141414;
+}
+
+/* Active tab accent indicator */
+.title-bar-tabs .tab-item.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #0078d4, transparent);
+  border-radius: 0 0 2px 2px;
+  opacity: 0.8;
+}
+
+/* New tab and layout buttons styling */
+.title-bar-tabs .new-tab-button,
+.title-bar-tabs .layout-manager-button {
+  height: 28px;
+  width: 28px;
+  border-radius: 4px;
+  margin: 0 2px;
+  transition: background-color 0.15s ease;
+}
+
+.title-bar-tabs .new-tab-button:hover,
+.title-bar-tabs .layout-manager-button:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.title-bar-tabs .new-tab-button:active,
+.title-bar-tabs .layout-manager-button:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Draggable region fills the space between the tab/action menu and the window
+   controls. Always keeps a minimum width so there's a grab handle even when the
+   tab strip is full. */
+.title-bar-drag-region {
+  flex: 1 1 auto;
+  height: 100%;
+  min-width: 24px;
+}
+
+/* Window Control Buttons */
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.window-control-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+  outline: none;
+}
+
+.window-control-btn svg {
+  width: 12px;
+  height: 12px;
+  transition: transform 0.1s ease;
+}
+
+.window-control-btn:hover svg {
+  transform: scale(1.1);
+}
+
+.window-control-btn:active svg {
+  transform: scale(0.95);
+}
+
+/* Minimize button */
+.window-control-btn.minimize:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.window-control-btn.minimize:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Maximize button */
+.window-control-btn.maximize:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.window-control-btn.maximize:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Close button - Fluent UI red accent */
+.window-control-btn.close:hover {
+  background-color: #e81123;
+  color: white;
+}
+
+.window-control-btn.close:active {
+  background-color: #c50f1f;
+  color: white;
+}
+
+/* Focus states for accessibility */
+.window-control-btn:focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: -2px;
+}
+
+/* Light theme support */
+.light-theme .title-bar {
+  background: linear-gradient(180deg, #f5f5f5 0%, #ebebeb 100%);
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+.light-theme .title-bar::before {
+  background: linear-gradient(90deg, 
+    rgba(255, 255, 255, 0.5) 0%, 
+    rgba(255, 255, 255, 1) 50%, 
+    rgba(255, 255, 255, 0.5) 100%
+  );
+}
+
+.light-theme .title-bar-tabs .tab-item:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+.light-theme .title-bar-tabs .tab-item.active {
+  background-color: #ffffff;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.light-theme .title-bar-tabs .tab-item.active::after {
+  background-color: #ffffff;
+}
+
+.light-theme .window-control-btn {
+  color: rgba(0, 0, 0, 0.85);
+}
+
+.light-theme .window-control-btn.minimize:hover,
+.light-theme .window-control-btn.maximize:hover {
+  background-color: rgba(0, 0, 0, 0.06);
+}
+
+.light-theme .window-control-btn.minimize:active,
+.light-theme .window-control-btn.maximize:active {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+/* Mica/Acrylic effect simulation (subtle noise texture) */
+.title-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%' height='100%' filter='url(%23noise)' opacity='0.02'/%3E%3C/svg%3E");
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+/* macOS Specific Styles */
+.title-bar.is-mac {
+  height: 36px; /* Thinner title bar */
+  background: #2d2d30;
+  padding-left: 12px;
+}
+
+.title-bar.is-mac.is-maximized {
+  height: 30px; /* Even tighter when maximized */
+}
+
+.title-bar.is-mac .title-bar-tabs {
+  margin-left: 0; /* Spacer handles the offset now */
+}
+
+.mac-native-spacer {
+  width: 80px; /* Space for native traffic lights */
+  flex-shrink: 0;
+}
+
+.title-bar.is-mac .title-bar-tabs .tabs-container {
+  height: 36px;
+}
+
+.title-bar.is-mac.is-maximized .title-bar-tabs .tabs-container {
+  height: 30px;
+}
+
+.title-bar.is-mac .title-bar-tabs .tab-item {
+  height: 30px;
+  margin-top: 6px;
+}
+
+.title-bar.is-mac.is-maximized .title-bar-tabs .tab-item {
+  height: 30px;
+  margin-top: 0;
+}
+
+.mac-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 1000;
+}
+
+.mac-controls .window-control-btn {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 0.5px solid rgba(0, 0, 0, 0.1);
+  padding: 0;
+  transition: all 0.2s ease;
+  position: relative;
+  cursor: pointer;
+}
+
+.mac-controls .mac-close {
+  background-color: #ff5f56;
+}
+
+.mac-controls .mac-close:hover {
+  background-color: #ff3b30;
+}
+
+.mac-controls .mac-minimize {
+  background-color: #ffbd2e;
+}
+
+.mac-controls .mac-minimize:hover {
+  background-color: #ffcc00;
+}
+
+.mac-controls .mac-maximize {
+  background-color: #27c93f;
+}
+
+.mac-controls .mac-maximize:hover {
+  background-color: #34c749;
+}
+
+/* Show icons on hover like native macOS traffic lights */
+.mac-controls:hover .window-control-btn::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0.6;
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+.mac-controls:hover .mac-close::before {
+  width: 6px;
+  height: 1px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+}
+
+.mac-controls:hover .mac-close::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 1px;
+  background-color: rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%) rotate(-45deg);
+  opacity: 0.6;
+}
+
+.mac-controls:hover .mac-minimize::before {
+  width: 6px;
+  height: 1px;
+}
+
+.mac-controls:hover .mac-maximize::before {
+  width: 5px;
+  height: 5px;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-right: none;
+  border-bottom: none;
+}
+
+.mac-controls:hover .mac-maximize::after {
+  content: '';
+  position: absolute;
+  top: 55%;
+  left: 55%;
+  width: 5px;
+  height: 5px;
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -50%) rotate(225deg);
+  border-right: none;
+  border-bottom: none;
+  opacity: 0.6;
+}

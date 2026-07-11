@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Tab Context Menu</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #1e1e1e;
+            color: white;
+        }
+        
+        /* Tab bar styles */
+        .tab-bar {
+            background: #252526;
+            height: 35px;
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+            border-bottom: 1px solid #3e3e42;
+        }
+        
+        /* Tab item styles - matching your app */
+        .tab-item {
+            display: flex;
+            align-items: center;
+            height: 33px;
+            padding: 0 12px;
+            background-color: #2d2d30;
+            color: #cccccc;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+            min-width: 120px;
+            max-width: 200px;
+            border: 2px solid red; /* Red border for visibility */
+            margin-right: 2px;
+        }
+        
+        .tab-item:hover {
+            background-color: #323235;
+        }
+        
+        .tab-item.active {
+            background-color: #1e1e1e;
+            color: #ffffff;
+        }
+        
+        /* Context menu styles */
+        .context-menu {
+            position: fixed;
+            background-color: #2d2d30;
+            border: 1px solid #464647;
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            min-width: 220px;
+            z-index: 1000;
+            font-size: 13px;
+            color: #cccccc;
+            padding: 4px 0;
+            display: none;
+        }
+        
+        .context-menu.show {
+            display: block;
+        }
+        
+        .context-menu-header {
+            padding: 8px 12px 4px;
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .context-menu-info {
+            padding: 4px 12px;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 12px;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+        }
+        
+        .context-menu-divider {
+            height: 1px;
+            background-color: #464647;
+            margin: 4px 0;
+        }
+        
+        .context-menu-item {
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+        
+        .context-menu-item:hover {
+            background-color: #094771;
+            color: #ffffff;
+        }
+        
+        /* Terminal area */
+        .terminal-area {
+            padding: 20px;
+            background: #1e1e1e;
+            height: 400px;
+        }
+        
+        /* Console */
+        .console {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #000;
+            color: #0f0;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            height: 150px;
+            overflow-y: auto;
+            border-top: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="tab-bar">
+        <div class="tab-item active" data-tab-id="tab-1">
+            Terminal 1
+        </div>
+        <div class="tab-item" data-tab-id="tab-2">
+            PowerShell
+        </div>
+        <div class="tab-item" data-tab-id="tab-3">
+            Git Bash
+        </div>
+    </div>
+    
+    <div class="terminal-area">
+        <h2>Test Instructions:</h2>
+        <p>1. Right-click on any tab above (with red border)</p>
+        <p>2. You should see a context menu with Tab ID and options to copy</p>
+        <p>3. Check the console at the bottom for debug messages</p>
+        <p>4. If this works but your app doesn't, we know it's a build/React issue</p>
+    </div>
+    
+    <div id="contextMenu" class="context-menu">
+        <div class="context-menu-header" id="menuTitle">Tab Title</div>
+        <div class="context-menu-info">
+            <div class="info-row">
+                <span>Tab ID:</span>
+                <span id="menuTabId">tab-xxx</span>
+            </div>
+            <div class="info-row">
+                <span>Process ID:</span>
+                <span id="menuProcessId">12345</span>
+            </div>
+        </div>
+        <div class="context-menu-divider"></div>
+        <div class="context-menu-item" onclick="copyTabId()">📋 Copy Tab ID</div>
+        <div class="context-menu-item" onclick="copyProcessId()">📋 Copy Process ID</div>
+        <div class="context-menu-item" onclick="copyAllInfo()">📄 Copy All Info</div>
+    </div>
+    
+    <div class="console" id="console">
+        Console output:<br>
+    </div>
+    
+    <script>
+        const contextMenu = document.getElementById('contextMenu');
+        const consoleDiv = document.getElementById('console');
+        let currentTabId = '';
+        let currentProcessId = '';
+        
+        function log(message) {
+            const time = new Date().toLocaleTimeString();
+            consoleDiv.innerHTML += `${time}: ${message}<br>`;
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
+        
+        // Add context menu to all tabs
+        document.querySelectorAll('.tab-item').forEach(tab => {
+            tab.addEventListener('contextmenu', function(e) {
+                e.preventDefault();
+                
+                const tabId = this.getAttribute('data-tab-id');
+                const tabTitle = this.textContent.trim();
+                currentTabId = tabId;
+                currentProcessId = Math.floor(Math.random() * 90000) + 10000; // Random process ID
+                
+                log(`Right-click on tab: ${tabTitle} (${tabId})`);
+                
+                // Update menu content
+                document.getElementById('menuTitle').textContent = tabTitle;
+                document.getElementById('menuTabId').textContent = tabId;
+                document.getElementById('menuProcessId').textContent = currentProcessId;
+                
+                // Show menu at click position
+                contextMenu.style.left = e.clientX + 'px';
+                contextMenu.style.top = e.clientY + 'px';
+                contextMenu.classList.add('show');
+            });
+        });
+        
+        // Hide menu on click outside
+        document.addEventListener('click', function() {
+            contextMenu.classList.remove('show');
+        });
+        
+        // Copy functions
+        function copyTabId() {
+            navigator.clipboard.writeText(currentTabId).then(() => {
+                log(`Copied Tab ID: ${currentTabId}`);
+                contextMenu.classList.remove('show');
+            });
+        }
+        
+        function copyProcessId() {
+            navigator.clipboard.writeText(currentProcessId).then(() => {
+                log(`Copied Process ID: ${currentProcessId}`);
+                contextMenu.classList.remove('show');
+            });
+        }
+        
+        function copyAllInfo() {
+            const info = `Tab ID: ${currentTabId}\nProcess ID: ${currentProcessId}`;
+            navigator.clipboard.writeText(info).then(() => {
+                log(`Copied all info`);
+                contextMenu.classList.remove('show');
+            });
+        }
+        
+        // Log all context menu events
+        document.addEventListener('contextmenu', function(e) {
+            const target = e.target;
+            log(`Global context menu on: ${target.className || target.tagName}`);
+        }, true);
+        
+        log('Test page loaded. Right-click on tabs to test context menu.');
+    </script>
+</body>
+</html>

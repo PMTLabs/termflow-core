@@ -1,0 +1,126 @@
+/* Peers settings panel (Plan 010). Reuses SettingsPage primitives
+   (.settings-section, .connection-card, .setting-input, .help-text, .save-btn,
+   .link-btn, .toggle-row) and only adds peer-specific layout + status dots. */
+
+.peers-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.peers-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-secondary, #888);
+}
+
+.pairing-code-card code.pairing-code {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.pairing-addresses {
+  margin-top: 8px;
+}
+
+.pairing-addresses .nic-ip {
+  margin-right: 8px;
+}
+
+/* One peer per card (reuses .connection-card border/padding). */
+.peer-card .peer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.peer-name {
+  font-weight: 600;
+}
+
+.peer-meta {
+  color: var(--text-secondary, #888);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.peer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Peer status dot — distinct from connection .status-indicator so peer
+   semantics (pending/revoked) read correctly. */
+.peer-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.peer-dot.online {
+  background-color: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.6);
+}
+
+.peer-dot.offline {
+  background-color: #777;
+}
+
+.peer-dot.pending {
+  background-color: #d29922;
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.7);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.peer-dot.revoked {
+  background-color: #f44336;
+}
+
+.peer-grants {
+  margin-top: 10px;
+  border-top: 1px solid var(--border-color, rgba(128, 128, 128, 0.25));
+  padding-top: 8px;
+}
+
+.peer-grant-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.peer-grant-row .grant-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-grant-row select.setting-input {
+  width: auto;
+  min-width: 96px;
+}
+
+.revoke-btn {
+  background: transparent;
+  border: 1px solid #f44336;
+  color: #f44336;
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.revoke-btn:hover {
+  background: rgba(244, 67, 54, 0.12);
+}
+
+.add-peer-error {
+  color: #f44336;
+  margin: 8px 0 0;
+  font-size: 13px;
+}

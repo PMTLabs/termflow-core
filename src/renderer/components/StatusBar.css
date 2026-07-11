@@ -1,0 +1,28 @@
+.status-bar {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  font-size: 12px;
+  user-select: none;
+}
+
+.status-section {
+  display: flex;
+  align-items: center;
+  margin-right: 20px;
+}
+
+.status-section.status-right {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.status-label {
+  margin-right: 5px;
+  opacity: 0.8;
+}
+
+.status-value {
+  font-weight: 500;
+}

@@ -1,0 +1,36 @@
+.pane-drag-ghost {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #e6e6e6;
+  background: rgba(40, 44, 52, 0.95);
+  border: 1px solid #3b82f6;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-drop-overlay {
+  border: 1px solid rgba(59, 130, 246, 0.6);
+  box-sizing: border-box;
+  border-radius: 3px;
+}
+
+.pane-drop-overlay__region {
+  background: rgba(59, 130, 246, 0.28);
+  border: 1.5px solid #3b82f6;
+  box-sizing: border-box;
+  transition: left 60ms ease, top 60ms ease, width 60ms ease, height 60ms ease;
+}
+
+/* While a pane drag is active, show the move cursor, keep terminals from
+   stealing the pointer so hit-testing stays on the pane chrome, and disable
+   selection so dragging never highlights pane titles/icons. */
+body.pane-dragging,
+body.pane-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}

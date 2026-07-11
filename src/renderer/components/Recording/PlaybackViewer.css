@@ -1,0 +1,227 @@
+.playback-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #1a1a1a;
+  color: #fff;
+}
+
+.playback-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 16px;
+}
+
+.playback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 16px;
+  background: #2d2d2d;
+  border-bottom: 1px solid #404040;
+}
+
+.recording-info h3 {
+  margin: 0 0 8px 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.recording-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #ccc;
+  flex-wrap: wrap;
+}
+
+.recording-meta span {
+  padding: 2px 8px;
+  background: #404040;
+  border-radius: 4px;
+}
+
+.playback-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.close-button {
+  background: #666;
+  border: 1px solid #777;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.close-button:hover {
+  background: #ff4444;
+  border-color: #ff5555;
+}
+
+.terminal-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+.terminal-display {
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-display .xterm {
+  height: 100%;
+}
+
+.terminal-display .xterm-viewport {
+  overflow-y: auto;
+}
+
+.keyboard-shortcuts {
+  padding: 8px 16px;
+  background: #1a1a1a;
+  border-top: 1px solid #333;
+}
+
+.shortcuts-info {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  color: #888;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.shortcuts-info span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.shortcuts-info kbd {
+  background: #333;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 10px;
+  color: #ccc;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .playback-header {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .recording-meta {
+    justify-content: center;
+  }
+  
+  .playback-actions {
+    align-self: flex-end;
+  }
+  
+  .shortcuts-info {
+    gap: 12px;
+  }
+  
+  .shortcuts-info span {
+    font-size: 10px;
+  }
+}
+
+/* Terminal theme customization */
+.terminal-display .xterm-screen {
+  background: #000 !important;
+}
+
+.terminal-display .xterm-cursor-layer .xterm-cursor {
+  background: #fff !important;
+}
+
+.terminal-display .xterm-selection-layer .xterm-selection {
+  background: rgba(255, 255, 255, 0.3) !important;
+}
+
+/* Scrollbar customization */
+.terminal-display .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #666;
+  border-radius: 4px;
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+/* Focus states for accessibility */
+.close-button:focus {
+  outline: 2px solid #0066cc;
+  outline-offset: 2px;
+}
+
+/* Loading state */
+.playback-loading::after {
+  content: "";
+  width: 20px;
+  height: 20px;
+  border: 2px solid #666;
+  border-top: 2px solid #0066cc;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-left: 12px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .playback-viewer {
+    border: 2px solid #fff;
+  }
+  
+  .recording-meta span {
+    border: 1px solid #ccc;
+  }
+  
+  .shortcuts-info kbd {
+    border: 1px solid #ccc;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .close-button {
+    transition: none;
+  }
+  
+  .playback-loading::after {
+    animation: none;
+  }
+}

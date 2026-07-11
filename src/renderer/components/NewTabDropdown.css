@@ -1,0 +1,183 @@
+.new-tab-dropdown {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.new-tab-buttons {
+  display: flex;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: visible;
+}
+
+.new-tab-button {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background-color 0.2s;
+}
+
+.new-tab-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.new-tab-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dropdown-button {
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 10px;
+  transition: background-color 0.2s;
+}
+
+.dropdown-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.dropdown-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10000;
+  /* Wide enough to keep long profile names (e.g. "WSL - Ubuntu-24.04 (v2)") on
+     a single line instead of wrapping. */
+  min-width: 260px;
+  max-width: 360px;
+  margin-top: 4px;
+}
+
+.dropdown-section {
+  padding: 4px 0;
+}
+
+.dropdown-header {
+  padding: 8px 12px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.dropdown-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* Regular weight/size — the profile names should read as plain list items,
+     not bold headings. Shared by profiles and the Settings row so they match. */
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.profile-icon {
+  flex-shrink: 0;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.profile-icon-img {
+  width: 16px;
+  height: 16px;
+  display: inline-block;
+  vertical-align: middle;
+  object-fit: contain;
+}
+
+.dropdown-item:hover:not(.disabled) {
+  background: var(--bg-hover);
+}
+
+.dropdown-item.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.dropdown-item.default {
+  background: var(--bg-accent-subtle);
+}
+
+.profile-name {
+  flex: 1;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.default-badge {
+  font-size: 0.75em;
+  background: var(--accent-color);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.dropdown-divider {
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.settings-panel {
+  background: var(--bg-primary);
+  border-top: 1px solid var(--border-color);
+  padding: 8px 0;
+}
+
+.settings-header {
+  padding: 4px 12px;
+  font-size: 0.8em;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.settings-option {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.settings-option:hover {
+  background: var(--bg-hover);
+}
+
+.settings-option input[type="radio"] {
+  margin-right: 8px;
+}
+
+.settings-option span {
+  color: var(--text-primary);
+  font-size: 0.9em;
+}

@@ -1,0 +1,204 @@
+.tab-context-menu {
+  position: fixed;
+  background-color: #2d2d30;
+  border: 1px solid #464647;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  min-width: 220px;
+  z-index: 1000;
+  font-size: 13px;
+  color: #cccccc;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.context-menu-header {
+  padding: 8px 12px 4px;
+  color: #ffffff;
+  font-size: 14px;
+}
+
+.context-menu-info {
+  padding: 4px 12px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 0;
+  gap: 8px;
+}
+
+.info-label {
+  color: #969696;
+  flex-shrink: 0;
+}
+
+.info-value {
+  color: #cccccc;
+  font-family: 'Consolas', 'Courier New', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Inline copy button sitting to the right of each ID value. */
+.info-copy-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: #969696;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1;
+  transition: background-color 0.1s, color 0.1s;
+}
+
+.info-copy-btn:hover {
+  background-color: #094771;
+  color: #ffffff;
+}
+
+.context-menu-divider {
+  height: 1px;
+  background-color: #464647;
+  margin: 4px 0;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  /* Explicit (not relying on the flex default) — guards against the icon +
+     label drifting to opposite ends of the row. */
+  justify-content: flex-start;
+  width: 100%;
+  padding: 6px 12px;
+  background: none;
+  border: none;
+  color: #cccccc;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s;
+  /* Keep items on one line so the menu holds its full width near a window edge. */
+  white-space: nowrap;
+}
+
+.context-menu-item:hover:not(:disabled) {
+  background-color: #094771;
+  color: #ffffff;
+}
+
+.context-menu-item:active:not(:disabled) {
+  background-color: #007acc;
+}
+
+/* Disabled close items at the tab-strip edges (e.g. "Close Tabs to the Right"
+   on the last tab) read as inert, not clickable. */
+.context-menu-item:disabled {
+  color: #6b6b6b;
+  cursor: default;
+}
+
+/* Keyboard focus ring for the bare-letter mnemonic affordance. */
+.context-menu-item:focus-visible {
+  outline: 1px solid #007acc;
+  outline-offset: -1px;
+}
+
+.menu-icon {
+  margin-right: 8px;
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.context-menu-expand-arrow {
+  margin-left: auto;
+  padding-left: 8px;
+  color: #969696;
+  font-size: 11px;
+}
+
+/* Accordion panel for the Color Schema / Tab Color sections — sits directly
+   below the header row it belongs to, inset to read as "expanded inside the
+   menu" rather than a separate flyout. */
+.context-menu-subpanel {
+  padding: 8px 12px;
+  background-color: #252526;
+}
+
+/* The reused SettingsPage .color-schema-grid can be wide; cap it to the
+   menu's width and let it scroll instead of overflowing. Scoped to this menu
+   only — SettingsPage.css itself is untouched. Right padding (separate from
+   the scrollbar's own inset border below) keeps the swatch cards from
+   touching the scrollbar track. */
+.tab-context-menu .color-schema-grid {
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.tab-context-menu .color-schema-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.tab-context-menu .color-schema-grid::-webkit-scrollbar-track {
+  background: #252526;
+}
+
+/* The thumb's border matches the track color, insetting it from both edges
+   so it never touches the swatch content beside it. */
+.tab-context-menu .color-schema-grid::-webkit-scrollbar-thumb {
+  background-color: #555;
+  border-radius: 5px;
+  border: 2px solid #252526;
+}
+
+.tab-context-menu .color-schema-grid::-webkit-scrollbar-thumb:hover {
+  background-color: #777;
+}
+
+.tab-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.tab-color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  padding: 0;
+}
+
+.tab-color-dot.active {
+  border-color: #007acc;
+  box-shadow: 0 0 0 1px #007acc;
+}
+
+.tab-color-reset {
+  background: none;
+  border: 1px solid #464647;
+  border-radius: 4px;
+  color: #cccccc;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.tab-color-reset:hover {
+  background-color: #094771;
+  color: #ffffff;
+}

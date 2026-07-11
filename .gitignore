@@ -1,0 +1,148 @@
+# Dependencies
+node_modules/
+jspm_packages/
+bower_components/
+web_modules/
+
+# mcp-server is not a root workspace; its bun.lock is a local install artifact
+# (the build uses `bun build --compile` on src directly). Keep it untracked.
+mcp-server/bun.lock
+
+# Build outputs
+dist/
+dist-*/
+build/
+out/
+release/
+.webpack/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage and testing
+coverage/
+*.lcov
+.nyc_output
+.vscode-test
+playwright-report/
+test-results/
+
+# Cache directories
+.npm
+.cache
+.parcel-cache
+.eslintcache
+.stylelintcache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# TypeScript
+*.tsbuildinfo
+typings/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temporary folders
+tmp/
+temp/
+.temp
+
+# Editor directories and files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.lnk
+
+# Framework specific
+.next/
+.nuxt/
+.docusaurus/
+.gatsby/
+.vuepress/dist/
+.serverless/
+.fusebox/
+
+# Package managers
+.yarn-integrity
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+
+# Build tools
+.grunt
+.lock-wscript
+build/Release
+lib-cov
+
+# Optional files
+.node_repl_history
+*.tgz
+.tern-port
+.dynamodb/
+
+# Storybook
+.out
+.storybook-out
+storybook-static
+
+# Diagnostic reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+.fake
+
+.ragsearch/
+!.ragsearch/config.json
+
+# Agent communication (ephemeral files)
+.agent-comms/requests/
+.agent-comms/responses/
+.agent-comms/status/
+.agent-comms/shared/findings/
+
+# Terminal-kit build outputs
+terminal-kit/node_modules/
+terminal-kit/dist/
+
+# Tauri sidecars
+src-tauri/binaries/
+
+# AI agent / editor tool config (local only, not tracked)
+.claude/
+.gemini/
+.kiro/
+
+# Subagent-driven-development scratch (briefs, reports, ledger, diffs)
+.superpowers/
+
+scratch/

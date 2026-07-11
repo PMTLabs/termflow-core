@@ -1,0 +1,80 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.88.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Opt-in: enables tauri's `test` feature (tauri::test::mock_app) so the Rust
+# integration tests can build a real AppState<MockRuntime> and drive handlers that
+# need a live AppHandle (e.g. the shell-writer concurrency regression test).
+#
+# OFF by default so a plain `cargo test` is unaffected. IMPORTANT: enabling this on
+# Windows breaks the test *binary* at loader time (STATUS_ENTRYPOINT_NOT_FOUND), so
+# run it on Linux/macOS only:  cargo test --features integration-tests
+integration-tests = ["tauri/test"]
+
+[build-dependencies]
+tauri-build = { version = "2.5.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.9.5", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+# OS notifications (Plan 010): fire a native "wants to pair" toast when a pairing
+# request arrives while no app window is focused (tray/background mode).
+tauri-plugin-notification = "2"
+# Native clipboard read/write so paste does NOT trigger the WebView's
+# "wants to see clipboard" permission popup (navigator.clipboard on the
+# localhost WebView origin prompts; the native plugin reads via Rust).
+tauri-plugin-clipboard-manager = "2"
+# Native "Browse…" file picker for the Settings "Default editor" field.
+tauri-plugin-dialog = "2"
+portable-pty = "0.8"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+jsonwebtoken = "9"
+dashmap = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+base64 = "0.22"
+flate2 = "1"
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"
+reqwest = { version = "0.12", features = ["json"] }
+sysinfo = "0.33"
+vt100 = "0.16"
+# Per-terminal scrollback persistence (history.db). `bundled` compiles SQLite
+# from source (via cc/MSVC, already used for Tauri) so no system SQLite is needed.
+rusqlite = { version = "0.31", features = ["bundled"] }
+if-addrs = "0.13"
+
+# Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
+# Versions pinned to what wry/tauri already resolve so the COM types unify.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"
+windows = { version = "0.61", features = [
+    "Win32_System_Com",
+    # Session-change notifications (RDP/console switch) → suppress the repaint-burst
+    # bell. See src/session_notify.rs.
+    "Win32_Foundation",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }

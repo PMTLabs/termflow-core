@@ -1,0 +1,95 @@
+.shell-selector-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.shell-selector {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 400px;
+  max-width: 500px;
+}
+
+.shell-selector h3 {
+  margin: 0 0 16px 0;
+  color: var(--text-primary);
+}
+
+.shell-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.shell-option {
+  display: flex;
+  align-items: center;
+  padding: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.shell-option:hover {
+  background: var(--bg-hover);
+}
+
+.shell-option input[type="radio"] {
+  margin-right: 12px;
+}
+
+.shell-name {
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-right: 8px;
+}
+
+.shell-path {
+  font-size: 0.9em;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.shell-selector-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.shell-selector-actions button {
+  padding: 8px 16px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.shell-selector-actions button:hover {
+  background: var(--bg-hover);
+}
+
+.shell-selector-actions button.primary {
+  background: var(--accent-color);
+  color: white;
+  border-color: var(--accent-color);
+}
+
+.shell-selector-actions button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}

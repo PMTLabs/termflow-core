@@ -1,0 +1,189 @@
+/* TerminalPane.css - Styling for terminal pane component */
+
+.terminal-pane {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--terminal-background, #0a0a0a);
+  /* inset box-shadow instead of `border`: at fractional Windows display
+     scaling (e.g. 4K monitors) a 1px border's bottom/right edges are
+     computed from width/height and can round below a device pixel and
+     disappear, while top/left (anchored at the element's exact offset)
+     stay sharp. box-shadow doesn't have this rounding failure mode. */
+  box-shadow: inset 0 0 0 1px var(--pane-border, #3e3e42);
+  position: relative;
+}
+
+.terminal-pane.active {
+  box-shadow: inset 0 0 0 1px var(--pane-active-border, #007acc);
+}
+
+/* Header */
+.terminal-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 8px;
+  background-color: var(--pane-header-background, #2d2d30);
+  border-bottom: 1px solid var(--pane-border, #3e3e42);
+  flex-shrink: 0;
+  /* Header is chrome — its title and split/close icons are never selectable.
+     Inherited by children; the rename input re-enables selection below. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.terminal-pane.active .terminal-pane-header {
+  background-color: var(--pane-header-active-background, #37373d);
+}
+
+/* --- Solo pane (the tab's only terminal) --------------------------------- */
+/* With a single terminal the header is noise, so it's hidden and the terminal
+   gets the full pane height. It floats back in only when the pointer is near the
+   top (the `header-peek` class, toggled in TerminalPane.tsx), or while the header
+   itself is hovered / the rename input is focused. The hidden header is
+   pointer-events:none, so it never blocks the terminal's top row. */
+.terminal-pane.solo .terminal-pane-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 8;
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+  /* Reads as a floating bar over the terminal rather than part of the chrome. */
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.terminal-pane.solo.header-peek .terminal-pane-header,
+.terminal-pane.solo .terminal-pane-header:hover,
+.terminal-pane.solo .terminal-pane-header:focus-within {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Respect reduced-motion: reveal/hide without the slide. */
+@media (prefers-reduced-motion: reduce) {
+  .terminal-pane.solo .terminal-pane-header {
+    transition: opacity 0.15s ease;
+  }
+}
+
+.terminal-pane-title {
+  font-size: 12px;
+  color: var(--pane-title-color, #cccccc);
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-name {
+  cursor: pointer;
+}
+
+.pane-name:hover {
+  background-color: var(--control-hover-background, rgba(255, 255, 255, 0.1));
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+
+.pane-name-input {
+  user-select: text;
+  -webkit-user-select: text;
+  background: var(--input-background, #3c3c3c);
+  color: var(--input-color, #cccccc);
+  border: 1px solid var(--input-border, #007acc);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+  outline: none;
+  width: 100px;
+}
+
+/* Controls */
+.terminal-pane-controls {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.pane-control-button {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--control-color, #cccccc);
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.6;
+  transition: opacity 0.2s, background-color 0.2s;
+}
+
+.pane-control-button:hover {
+  opacity: 1;
+  background-color: var(--control-hover-background, rgba(255, 255, 255, 0.1));
+}
+
+/* Maximize/restore toggle: highlighted while the pane is maximized so the
+   restore affordance reads as "active". */
+.pane-control-button.maximized {
+  opacity: 1;
+  color: var(--pane-active-border, #007acc);
+}
+
+.pane-control-button.close {
+  font-size: 18px;
+}
+
+.pane-control-button.close:hover {
+  background-color: var(--close-hover-background, #e81123);
+  color: white;
+}
+
+/* Content */
+.terminal-pane-content {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  min-height: 0; /* Important for flexbox children */
+}
+
+/* Placeholder for Terminal Display */
+.terminal-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--placeholder-color, #666666);
+  font-size: 14px;
+  text-align: center;
+  padding: 20px;
+}
+
+/* Theme Variables */
+:root {
+  --terminal-background: #0a0a0a;
+  --pane-border: #3e3e42;
+  --pane-active-border: #007acc;
+  --pane-header-background: #2d2d30;
+  --pane-header-active-background: #37373d;
+  --pane-title-color: #cccccc;
+  --control-color: #cccccc;
+  --control-hover-background: rgba(255, 255, 255, 0.1);
+  --close-hover-background: #e81123;
+  --placeholder-color: #666666;
+  --focus-outline: #007acc;
+}

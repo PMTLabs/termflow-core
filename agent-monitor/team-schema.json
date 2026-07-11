@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Software Development Team Configuration",
+  "description": "Configuration schema for provisioning a multi-agent software development team",
+  "type": "object",
+  "properties": {
+    "teamConfig": {
+      "type": "object",
+      "properties": {
+        "projectName": {
+          "type": "string",
+          "description": "Name of the software project"
+        },
+        "projectFolder": {
+          "type": "string",
+          "description": "Absolute path to the project directory"
+        },
+        "chatHubChannel": {
+          "type": "number",
+          "description": "ChatHub channel ID for team collaboration"
+        },
+        "requirementsFolder": {
+          "type": "string",
+          "description": "Relative path to requirements/documentation folder (e.g., '/docs', '/requirements')"
+        },
+        "discordWebhookUrl": {
+          "type": "string",
+          "format": "uri",
+          "description": "Discord webhook URL for escalations"
+        },
+        "maxIdleTime": {
+          "type": "number",
+          "default": 300,
+          "description": "Maximum idle time (seconds) before prompting agents"
+        },
+        "heartbeatInterval": {
+          "type": "number",
+          "default": 120,
+          "description": "Interval (seconds) for checking agent status"
+        }
+      },
+      "required": ["projectName", "projectFolder", "chatHubChannel"]
+    },
+    "agents": {
+      "type": "array",
+      "description": "List of agents in the development team",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for the agent"
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name for the agent"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "Project Coordinator",
+              "System Architect",
+              "Product Manager",
+              "Backend Developer",
+              "Frontend Developer",
+              "UI/UX Engineer",
+              "QA Engineer",
+              "DevOps Engineer",
+              "Database Engineer"
+            ],
+            "description": "Role/responsibility of the agent"
+          },
+          "aiType": {
+            "type": "string",
+            "enum": ["Claude", "Gemini", "GPT", "Custom"],
+            "description": "AI platform/service type"
+          },
+          "model": {
+            "type": "string",
+            "description": "Specific model to use (e.g., sonnet, opus, gemini-2.0-flash-exp)"
+          },
+          "cliCommand": {
+            "type": "string",
+            "description": "CLI command to start the AI agent"
+          },
+          "priority": {
+            "type": "number",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Priority level (1=highest, 10=lowest)"
+          },
+          "specializations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Specific technologies or skills this agent specializes in"
+          },
+          "maxConcurrentTasks": {
+            "type": "number",
+            "default": 3,
+            "description": "Maximum number of tasks this agent can handle simultaneously"
+          },
+          "kickoffPrompt": {
+            "type": "string", 
+            "description": "Custom kickoff prompt for this agent (optional). Supports variable tokens: {projectName}, {projectFolder}, {channelId}, {requirementsFolder}"
+          },
+          "additionalResponsibilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Project-specific additional responsibilities beyond core ChatHub role (optional)"
+          }
+        },
+        "required": ["id", "name", "role", "aiType", "model", "cliCommand"]
+      },
+      "minItems": 2
+    },
+    "workflows": {
+      "type": "array",
+      "description": "Predefined workflows and task dependencies",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Workflow name"
+          },
+          "description": {
+            "type": "string",
+            "description": "Workflow description"
+          },
+          "phases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "roles": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "dependencies": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": ["name", "roles"]
+            }
+          }
+        },
+        "required": ["name", "phases"]
+      }
+    }
+  },
+  "required": ["teamConfig", "agents"]
+}

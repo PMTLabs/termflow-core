@@ -1,0 +1,106 @@
+/* TerminalDisplay.css - Styling for terminal display component */
+
+/* Positioning context for the in-terminal search overlay (backlog 006). Fills the
+   pane exactly like .terminal-display used to, so the xterm mount keeps its size. */
+.terminal-display-wrapper {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.terminal-display {
+  width: 100%;
+  height: 100%;
+  background-color: var(--terminal-display-background, #000000);
+  padding: 4px;
+  box-sizing: border-box;
+}
+
+/* Override xterm.js styles for better integration */
+.terminal-display .xterm {
+  height: 100%;
+}
+
+/* Ensure xterm container hierarchy is visible */
+.terminal-display .xterm .xterm-screen {
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-display .xterm .xterm-viewport {
+  width: 100%;
+  height: 100%;
+  background-color: transparent;
+}
+
+/* Make sure terminal rows are visible */
+.terminal-display .xterm-rows {
+  color: #cccccc;
+}
+
+/* Canvas layers must be visible */
+.terminal-display canvas {
+  display: block !important;
+}
+
+/* xterm's WebGL renderer keeps a glyph-rasterization scratch canvas (_tmpCanvas)
+   as a DIRECT child of .xterm, normally display:none. It only re-asserts that
+   display:none on the frame it first appends the canvas, so a later glyph draw
+   can leave it laid out in normal flow — below the grid — painting the last
+   rasterized glyph as a stray sliver at the bottom-left. This shows when
+   alt-screen TUIs (e.g. the Antigravity CLI) or PSReadLine predictions
+   rasterize new glyphs. The real render layers live inside .xterm-screen, so a
+   direct-child canvas of .xterm is always the scratch surface; force it hidden.
+   2D drawing / getImageData on it are unaffected by CSS display. (Overrides the
+   .terminal-display canvas { display: block } rule above for this case.) */
+.terminal-display .xterm > canvas {
+  display: none !important;
+}
+
+/* Custom scrollbar styling */
+.terminal-display .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-track {
+  background: var(--terminal-display-background, #000000);
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #424242;
+  border-radius: 5px;
+}
+
+.terminal-display .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #4e4e4e;
+}
+
+/* Unstyled, the WebView2/Chromium scrollbar corner defaults to a solid fill
+   that's only invisible by coincidence when the schema background is also
+   black. At fractional Windows display scaling (e.g. 4K monitors) rounding
+   can leave a stray sliver of it visible even with no horizontal scrollbar. */
+.terminal-display .xterm-viewport::-webkit-scrollbar-corner {
+  background: var(--terminal-display-background, #000000);
+}
+
+/* Selection styling */
+.terminal-display .xterm-selection {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Cursor styling */
+.terminal-display .xterm-cursor-layer {
+  z-index: 2;
+}
+
+/* Link styling */
+.terminal-display .xterm-link {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.terminal-display .xterm-link:hover {
+  text-decoration: underline;
+  opacity: 0.8;
+}

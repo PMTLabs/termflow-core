@@ -1,0 +1,85 @@
+/* SplitPane.css - Styling for split pane component */
+
+.split-pane {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.split-pane.horizontal {
+  flex-direction: column;
+}
+
+.split-pane.vertical {
+  flex-direction: row;
+}
+
+.split-pane-1,
+.split-pane-2 {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Divider Styles */
+.split-pane-divider {
+  position: relative;
+  background-color: var(--divider-background, #3e3e42);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.split-pane-divider.horizontal {
+  height: 4px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+.split-pane-divider.vertical {
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+.split-pane-divider:hover {
+  background-color: var(--divider-hover, #007acc);
+}
+
+.split-pane.dragging .split-pane-divider {
+  background-color: var(--divider-active, #007acc);
+}
+
+.split-pane-divider-inner {
+  position: absolute;
+  background-color: transparent;
+}
+
+.split-pane-divider.horizontal .split-pane-divider-inner {
+  left: 0;
+  right: 0;
+  top: -5px;
+  bottom: -5px;
+}
+
+.split-pane-divider.vertical .split-pane-divider-inner {
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  right: -5px;
+}
+
+/* Disable text selection while dragging */
+.split-pane.dragging {
+  user-select: none;
+}
+
+.split-pane.dragging * {
+  user-select: none;
+}
+
+/* Theme Variables */
+:root {
+  --divider-background: #3e3e42;
+  --divider-hover: #007acc;
+  --divider-active: #007acc;
+}

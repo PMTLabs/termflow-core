@@ -1,0 +1,78 @@
+TermFlow — Privacy Notice
+
+Version 1.0
+Effective date: 2026-07-11
+Controller: PMT Labs LLC, Texas, USA
+Contact: privacy@termflow.app
+
+TermFlow is a local-first desktop terminal. We designed it to keep your data on
+your own machine. This Notice explains the limited data we process and why.
+
+1. OUR PRIVACY PRINCIPLE
+   Your terminal sessions, keystrokes, command output, command history, files, and
+   settings stay on your device. There is no first-party cloud storage and no
+   first-party hosted AI service. We do not collect, transmit, sell, or use the
+   contents of your terminals, and we do not use advertising or third-party tracking.
+
+2. WHAT WE PROCESS
+   a) Update checks. The Software may contact our update service to see whether a
+      newer version is available. This request necessarily reveals your IP address,
+      the app version, and basic platform information (e.g., operating system) to the
+      update host. We use this only to deliver updates; we do not use it to build a
+      profile of you.
+   b) Pro purchases (Pro tier only). If you buy a Pro license, we and our payment
+      processor collect the information needed to take payment and issue and validate
+      your license — such as your email address, billing details, and a license
+      record. Card/payment details are handled by our payment processor, not stored
+      by us. We retain the purchase and license record to provide the Pro license,
+      support you, and meet tax and accounting obligations.
+   c) Support correspondence. If you contact us, we process the information you choose
+      to send (e.g., your email address and message) to respond.
+
+3. WHAT WE DO NOT COLLECT
+   We do not collect terminal contents, keystrokes, command history, file contents,
+   or peering traffic. Cross-machine peering (Pro) connects your own devices directly
+   over your local/private network; that traffic does not pass through us.
+
+4. SERVICE PROVIDERS (SUB-PROCESSORS)
+   We share the limited data above only with providers that help us operate:
+   - an update/distribution host (to serve update checks and downloads); and
+   - a payment processor (to take Pro payments and manage licenses).
+   These providers process data on our behalf under their own terms and safeguards.
+
+5. LEGAL BASES AND PURPOSES
+   We process the data above to provide and secure the Software, deliver updates,
+   fulfill Pro purchases and licenses, respond to you, and comply with law.
+
+6. DATA RETENTION
+   We keep update-check logs only as long as needed to operate and secure the
+   service. We keep Pro purchase and license records for as long as needed to provide
+   the license and to meet legal, tax, and accounting requirements, then delete or
+   anonymize them.
+
+7. YOUR CHOICES AND RIGHTS
+   Depending on where you live, you may have rights to access, correct, delete, or
+   port your personal data, or to object to or restrict certain processing. To make a
+   request, email privacy@termflow.app; we will respond as required by applicable law.
+
+8. SECURITY
+   We use reasonable technical and organizational measures to protect the limited
+   data we process. No method of transmission or storage is completely secure.
+
+9. CHILDREN
+   TermFlow is a developer tool not directed to children, and we do not knowingly
+   collect personal data from children under 13 (or the age of digital consent in
+   your jurisdiction).
+
+10. INTERNATIONAL USERS
+    We operate from the United States. If you use the Software from outside the U.S.,
+    the limited data described above may be processed in the U.S. and other countries
+    where we or our providers operate.
+
+11. CHANGES
+    We may update this Notice for new versions of the Software. The current version is
+    published at https://termflow.app/privacy (when available); material changes will
+    be noted there.
+
+12. CONTACT
+    PMT Labs LLC, Texas, USA — privacy@termflow.app.

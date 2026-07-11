@@ -1,0 +1,212 @@
+{
+  "teamConfig": {
+    "projectName": "TODO App",
+    "projectFolder": "D:\\sources\\demo\\todo-app",
+    "requirementsFolder": "/docs",
+    "chatHubChannel": 20,
+    "discordWebhookUrl": "https://discord.com/api/webhooks/your-webhook-id/your-webhook-token",
+    "maxIdleTime": 300,
+    "heartbeatInterval": 120
+  },
+  "agents": [
+    {
+      "id": "coordinator-001",
+      "name": "Alex Coordinator",
+      "role": "Project Coordinator",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 1,
+      "specializations": [
+        "Project Management",
+        "Team Coordination",
+        "Requirements Analysis"
+      ],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the Project Coordinator for the {projectName} project. Your responsibilities include coordinating team activities, tracking progress, identifying blockers, and ensuring deliverables are completed on time. Join ChatHub channel {channelId} and actively monitor team communications.",
+      "onboardOnPhase": ""
+    },
+    {
+      "id": "architect-001",
+      "name": "Morgan Architect",
+      "role": "System Architect",
+      "aiType": "Claude",
+      "model": "opus",
+      "cliCommand": "npx win-claude-code --model opus --dangerously-skip-permissions",
+      "priority": 2,
+      "specializations": [
+        "System Design",
+        "Architecture Patterns",
+        "Scalability",
+        "Security"
+      ],
+      "maxConcurrentTasks": 3,
+      "kickoffPrompt": "You are the System Architect responsible for designing the overall architecture of the {projectName}. Focus on scalability, security, and maintainability. Join ChatHub channel {channelId} and collaborate with the team on architectural decisions.",
+      "onboardOnPhase": "Requirements Analysis"
+    },
+    {
+      "id": "backend-001",
+      "name": "Jordan Backend",
+      "role": "Backend Developer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 3,
+      "specializations": [
+        "Node.js",
+        "Express",
+        "MongoDB",
+        "REST APIs",
+        "Authentication"
+      ],
+      "maxConcurrentTasks": 4,
+      "additionalResponsibilities": [
+        "Set up monitoring and alerting for production systems",
+        "Create API documentation using OpenAPI/Swagger",
+        "Implement caching strategies for improved performance"
+      ],
+      "kickoffPrompt": "You are the Backend Developer for the {projectName}. Implement server-side logic, APIs, database operations, and ensure security best practices. Join ChatHub channel {channelId} and coordinate with frontend and architecture teams.",
+      "onboardOnPhase": "Implementation"
+    },
+    {
+      "id": "frontend-001",
+      "name": "Casey Frontend",
+      "role": "Frontend Developer",
+      "aiType": "claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 3,
+      "specializations": [
+        "React",
+        "TypeScript",
+        "CSS",
+        "State Management",
+        "Performance"
+      ],
+      "maxConcurrentTasks": 4,
+      "kickoffPrompt": "You are the Frontend Developer creating the user interface for the {projectName}. Build responsive, accessible, and performant React components. Join ChatHub channel {channelId} and work closely with UI/UX and backend teams."
+    },
+    {
+      "id": "qa-001",
+      "name": "Sam QA",
+      "role": "QA Engineer",
+      "aiType": "Claude",
+      "model": "sonnet",
+      "cliCommand": "npx win-claude-code --model sonnet --dangerously-skip-permissions",
+      "priority": 2,
+      "specializations": [
+        "Test Automation",
+        "Jest",
+        "Playwright",
+        "API Testing",
+        "Quality Assurance"
+      ],
+      "maxConcurrentTasks": 5,
+      "kickoffPrompt": "You are the QA Engineer ensuring quality across all aspects of the {projectName}. Create comprehensive test suites, perform testing, and validate functionality. Join ChatHub channel {channelId} and coordinate testing activities with all team members.",
+      "onboardOnPhase": "Implementation"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "Feature Development",
+      "description": "Standard workflow for developing new features",
+      "phases": [
+        {
+          "name": "Requirements Analysis",
+          "roles": [
+            "Project Coordinator",
+            "System Architect"
+          ],
+          "dependencies": [],
+          "output": "Requirements Document"
+        },
+        {
+          "name": "Design UI/UX",
+          "roles": [
+            "Frontend Developer"            
+          ],
+          "dependencies": ["Requirements Analysis"],
+          "output": "UI/UX Design"
+        },
+        
+        {
+          "name": "System Architecture Design",
+          "roles": [
+            "System Architect"            
+          ],
+          "dependencies": ["Requirements Analysis"],
+          "output": "System Architecture Design"
+        },
+        {
+          "name": "Implementation",
+          "roles": [
+            "Backend Developer",
+            "Frontend Developer"
+          ],
+          "dependencies": [
+            "Design UI/UX"
+          ],
+          "output": "Application Code"
+        },
+        {
+          "name": "Testing & QA",
+          "roles": [
+            "QA Engineer"
+          ],
+          "dependencies": [
+            "Implementation"
+          ],
+          "output": "Test Results"
+        },
+        {
+          "name": "Integration & Deployment",
+          "roles": [
+            "Backend Developer",
+            "Frontend Developer",
+            "QA Engineer"
+          ],
+          "dependencies": [
+            "Testing & QA"
+          ],
+          "output": "Production Environment"
+        }
+      ]
+    },
+    {
+      "name": "Bug Fix",
+      "description": "Workflow for handling bug fixes",
+      "phases": [
+        {
+          "name": "Bug Triage",
+          "roles": [
+            "Project Coordinator",
+            "QA Engineer"
+          ],
+          "dependencies": [],
+          "output": "Bug Report"
+        },
+        {
+          "name": "Investigation & Fix",
+          "roles": [
+            "Backend Developer",
+            "Frontend Developer"
+          ],
+          "dependencies": [
+            "Bug Triage"
+          ],
+          "output": "Fix"
+        },
+        {
+          "name": "Verification",
+          "roles": [
+            "QA Engineer"
+          ],
+          "dependencies": [
+            "Investigation & Fix"
+          ],
+          "output": "Test Results"
+        }
+      ]
+    }
+  ]
+}

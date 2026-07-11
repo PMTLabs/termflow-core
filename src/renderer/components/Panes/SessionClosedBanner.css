@@ -1,0 +1,111 @@
+/* SessionClosedBanner — an in-flow bar at the bottom of the pane (flex child of
+   .terminal-pane, below .terminal-pane-content). It reserves real vertical space
+   so the terminal area shrinks and re-fits above it instead of being covered. */
+
+.session-closed-banner {
+  /* In-flow (not absolute): occupies layout height so it pushes the terminal up.
+     position: relative keeps it the positioning context for the absolutely-placed
+     close button and centered actions below. */
+  position: relative;
+  flex-shrink: 0;
+  margin: 8px;
+
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  padding: 10px 12px;
+  border: 1px solid var(--session-closed-border, #5a4a2a);
+  border-radius: 6px;
+  background: var(--session-closed-background, rgba(40, 33, 20, 0.96));
+  color: var(--session-closed-color, #e6d8b8);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  /* font-size is set inline to follow the terminal font setting; child sizes
+     below use em so the whole banner scales with it. Fallback if unset. */
+  font-size: 12px;
+  /* Banner chrome is not selectable; it sits over the terminal text. */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.session-closed-banner__close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 1.33em;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.session-closed-banner__close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.session-closed-banner__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.session-closed-banner__title {
+  font-weight: 600;
+}
+
+.session-closed-banner__hint {
+  opacity: 0.85;
+}
+
+.session-closed-banner__hint kbd {
+  display: inline-block;
+  padding: 0 4px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  font-family: inherit;
+  font-size: 0.92em;
+}
+
+.session-closed-banner__actions {
+  /* Centered horizontally in the banner, independent of the left-aligned text. */
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.session-closed-banner__button {
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  cursor: pointer;
+  font-size: 1em;
+  transition: background-color 0.15s;
+}
+
+.session-closed-banner__button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.session-closed-banner__button--primary {
+  border-color: var(--pane-active-border, #007acc);
+  background: var(--pane-active-border, #007acc);
+  color: #ffffff;
+}
+
+.session-closed-banner__button--primary:hover {
+  background: #1a8fe0;
+}

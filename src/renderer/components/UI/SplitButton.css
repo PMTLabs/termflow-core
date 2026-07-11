@@ -1,0 +1,95 @@
+.split-button {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.split-button-main,
+.split-button-arrow {
+  background: transparent;
+  border: 1px solid #555;
+  color: #ddd;
+  /* Match .save-btn metrics so all three buttons line up: 9px vertical padding
+     + 1px border ≈ save-btn's 10px padding with no border. */
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.split-button-main {
+  padding: 9px 16px;
+  border-radius: 6px 0 0 6px;
+  border-right-width: 0;
+}
+
+.split-button-arrow {
+  padding: 9px 10px;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.7rem;
+}
+
+.split-button-main:hover:not(:disabled),
+.split-button-arrow:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.split-button-main:disabled,
+.split-button-arrow:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Stop = warning/red accent; Start = positive/green accent. */
+.split-button.stop .split-button-main,
+.split-button.stop .split-button-arrow {
+  border-color: #7a2a2a;
+  color: #ff8a8a;
+}
+.split-button.stop .split-button-main:hover:not(:disabled),
+.split-button.stop .split-button-arrow:hover:not(:disabled) {
+  background: rgba(229, 20, 0, 0.15);
+}
+
+.split-button.start .split-button-main,
+.split-button.start .split-button-arrow {
+  border-color: #2c6b3f;
+  color: #7fd99a;
+}
+.split-button.start .split-button-main:hover:not(:disabled),
+.split-button.start .split-button-arrow:hover:not(:disabled) {
+  background: rgba(35, 134, 54, 0.18);
+}
+
+.split-button-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 140px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+}
+
+.split-button-item {
+  background: transparent;
+  border: none;
+  color: #ddd;
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.split-button-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}

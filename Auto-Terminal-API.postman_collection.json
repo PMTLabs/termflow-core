@@ -1,0 +1,468 @@
+{
+  "info": {
+    "_postman_id": "auto-terminal-api-v1",
+    "name": "Auto-Terminal API",
+    "description": "Complete API collection for Auto-Terminal - a cross-platform terminal emulator with REST and WebSocket APIs.\n\n## ⚠️ IMPORTANT: Start the API Server First!\n\nThe API server runs separately from the Electron app. If you're getting HTML responses, the API server is not running.\n\n**Quick Start:**\n```bash\n# Start the API server\nnpm run api:dev\n```\n\nThis will start the API on port 3001 and show example tokens in the console.\n\n## Setup Instructions\n\n1. **Start the API server** (see above)\n2. **Copy a token** from the console output\n3. **Set collection variables**:\n   - `jwt_token`: Paste the token from console\n   - `base_url`: http://localhost:3001 (NOT 2010!)\n   - `ws_url`: ws://localhost:9876\n\n## Authentication\n\nAll endpoints require JWT authentication. Include the token in the Authorization header as 'Bearer {token}'.\n\n## Common Issues\n\n- **Getting HTML instead of JSON?** → API server not running, run `npm run api:dev`\n- **Port 3001 vs 2010?** → 3001 is API, 2010 is Electron app UI\n- **Invalid token?** → Copy token from API server console output",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{jwt_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3001",
+      "type": "string"
+    },
+    {
+      "key": "ws_url",
+      "value": "ws://localhost:9876",
+      "type": "string"
+    },
+    {
+      "key": "jwt_token",
+      "value": "",
+      "type": "string",
+      "description": "Your JWT token - generate using AuthManager"
+    },
+    {
+      "key": "terminal_id",
+      "value": "",
+      "type": "string",
+      "description": "Current terminal ID for testing"
+    },
+    {
+      "key": "process_id",
+      "value": "",
+      "type": "string",
+      "description": "Current process ID for testing"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health & System",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/health",
+              "host": ["{{base_url}}"],
+              "path": ["api", "health"]
+            },
+            "description": "Check API server health status. No authentication required."
+          },
+          "response": []
+        },
+        {
+          "name": "Get System Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/system/info",
+              "host": ["{{base_url}}"],
+              "path": ["api", "system", "info"]
+            },
+            "description": "Get system information including platform, architecture, hostname, etc.\n\nRequired permission: `system.info`"
+          },
+          "response": []
+        },
+        {
+          "name": "Get System Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/system/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["api", "system", "metrics"]
+            },
+            "description": "Get system performance metrics including CPU and memory usage.\n\nRequired permission: `system.info`"
+          },
+          "response": []
+        },
+        {
+          "name": "List Shell Profiles",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/profiles",
+              "host": ["{{base_url}}"],
+              "path": ["api", "profiles"]
+            },
+            "description": "Get available shell profiles (cmd, powershell, bash, etc.)\n\nRequired permission: `system.profiles`"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Terminal Management",
+      "item": [
+        {
+          "name": "Create Terminal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    const response = pm.response.json();",
+                  "    pm.collectionVariables.set('terminal_id', response.id);",
+                  "    pm.collectionVariables.set('process_id', response.processId);",
+                  "    console.log('Terminal created:', response.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profile\": \"bash\",\n  \"cwd\": \".\",\n  \"cols\": 80,\n  \"rows\": 24,\n  \"env\": {\n    \"CUSTOM_VAR\": \"value\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/terminals",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals"]
+            },
+            "description": "Create a new terminal instance.\n\nRequired permission: `terminal.create`\n\n**Request Body:**\n- `profile` (optional): Shell profile ID (e.g., 'bash', 'cmd', 'powershell')\n- `cwd` (optional): Working directory\n- `env` (optional): Environment variables\n- `cols` (optional): Terminal columns (default: 80)\n- `rows` (optional): Terminal rows (default: 24)"
+          },
+          "response": []
+        },
+        {
+          "name": "List All Terminals",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/terminals",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals"]
+            },
+            "description": "Get a list of all active terminals.\n\nRequired permission: `terminal.read`"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Terminal Details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}"]
+            },
+            "description": "Get details of a specific terminal.\n\nRequired permission: `terminal.read`"
+          },
+          "response": []
+        },
+        {
+          "name": "Close Terminal",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}"]
+            },
+            "description": "Close a terminal and kill its process.\n\nRequired permission: `terminal.delete`"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Terminal I/O",
+      "item": [
+        {
+          "name": "Send Input to Terminal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": \"echo 'Hello from API!'\\n\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}/input",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}", "input"]
+            },
+            "description": "Send input data (commands) to a terminal.\n\nRequired permission: `terminal.write`\n\n**Note:** Include `\\n` for Enter key, `\\r\\n` on Windows"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Terminal Output",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}/output?lines=100&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}", "output"],
+              "query": [
+                {
+                  "key": "lines",
+                  "value": "100",
+                  "description": "Number of lines to retrieve"
+                },
+                {
+                  "key": "offset",
+                  "value": "0",
+                  "description": "Line offset for pagination"
+                }
+              ]
+            },
+            "description": "Get terminal output history.\n\nRequired permission: `terminal.read`\n\n**Query Parameters:**\n- `lines`: Number of lines to retrieve (default: 100)\n- `offset`: Starting line offset (default: 0)"
+          },
+          "response": []
+        },
+        {
+          "name": "Resize Terminal",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cols\": 120,\n  \"rows\": 40\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}/resize",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}", "resize"]
+            },
+            "description": "Resize a terminal window.\n\nRequired permission: `terminal.write`"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Process Management",
+      "item": [
+        {
+          "name": "List Active Processes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/processes",
+              "host": ["{{base_url}}"],
+              "path": ["api", "processes"]
+            },
+            "description": "Get list of all active terminal processes.\n\nRequired permission: `process.monitor`"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Process Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/processes/{{process_id}}/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["api", "processes", "{{process_id}}", "metrics"]
+            },
+            "description": "Get CPU and memory metrics for a specific process.\n\nRequired permission: `process.monitor`"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "Get Event History",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/events/history?terminalId={{terminal_id}}&types=output.data,process.exit&limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "events", "history"],
+              "query": [
+                {
+                  "key": "terminalId",
+                  "value": "{{terminal_id}}",
+                  "description": "Filter by terminal ID (optional)"
+                },
+                {
+                  "key": "types",
+                  "value": "output.data,process.exit",
+                  "description": "Comma-separated event types (optional)"
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Maximum number of events (default: 100)"
+                }
+              ]
+            },
+            "description": "Get historical events from the event bus.\n\nRequired permission: `event.history`\n\n**Event Types:**\n- `output.data`: Terminal output\n- `input.data`: Terminal input\n- `process.start`: Process started\n- `process.exit`: Process exited\n- `terminal.resize`: Terminal resized\n- `error`: Error events"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "WebSocket Examples",
+      "item": [
+        {
+          "name": "WebSocket Connection Info",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/websocket-info",
+              "host": ["{{base_url}}"],
+              "path": ["websocket-info"]
+            },
+            "description": "## WebSocket API Usage\n\n**Connection URL:** `{{ws_url}}?token={{jwt_token}}`\n\n### Message Format\n\n```json\n{\n  \"id\": \"unique-message-id\",\n  \"type\": \"subscribe|unsubscribe|ping\",\n  \"payload\": { ... }\n}\n```\n\n### Subscribe to Events\n\n```json\n{\n  \"id\": \"sub-1\",\n  \"type\": \"subscribe\",\n  \"payload\": {\n    \"patterns\": [\"output.data\", \"process.*\", \"terminal.*\"]\n  }\n}\n```\n\n### Unsubscribe\n\n```json\n{\n  \"id\": \"unsub-1\",\n  \"type\": \"unsubscribe\",\n  \"payload\": {\n    \"patterns\": [\"output.data\"]\n  }\n}\n```\n\n### Event Types\n\n- `output.data`: Terminal output\n- `input.data`: Terminal input  \n- `process.start`: Process started\n- `process.exit`: Process exited\n- `terminal.created`: Terminal created\n- `terminal.closed`: Terminal closed\n- `terminal.resize`: Terminal resized\n- `error`: Error occurred\n\n### JavaScript Example\n\n```javascript\nconst ws = new WebSocket(`{{ws_url}}?token={{jwt_token}}`);\n\nws.on('open', () => {\n  // Subscribe to all terminal events\n  ws.send(JSON.stringify({\n    id: 'sub-1',\n    type: 'subscribe',\n    payload: {\n      patterns: ['terminal.*', 'output.data']\n    }\n  }));\n});\n\nws.on('message', (data) => {\n  const event = JSON.parse(data);\n  console.log('Event:', event);\n});\n```"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Examples & Workflows",
+      "item": [
+        {
+          "name": "Example: Run Command and Get Output",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/example-workflow",
+              "host": ["{{base_url}}"],
+              "path": ["example-workflow"]
+            },
+            "description": "## Complete Workflow Example\n\n### 1. Create Terminal\n```http\nPOST /api/terminals\n{\n  \"profile\": \"bash\"\n}\n```\n\n### 2. Send Command\n```http\nPOST /api/terminals/{id}/input\n{\n  \"data\": \"ls -la\\n\"\n}\n```\n\n### 3. Get Output\n```http\nGET /api/terminals/{id}/output?lines=50\n```\n\n### 4. Close Terminal\n```http\nDELETE /api/terminals/{id}\n```\n\n## JavaScript Client Example\n\n```javascript\nconst { TerminalAPIClient } = require('./TerminalAPIClient');\n\nconst client = new TerminalAPIClient({\n  host: 'localhost',\n  port: 3001,\n  token: 'your-jwt-token'\n});\n\n// Connect WebSocket\nawait client.connect();\n\n// Create terminal\nconst terminal = await client.createTerminal({ profile: 'bash' });\n\n// Listen for output\nterminal.on('output.data', (data) => {\n  console.log(data.content);\n});\n\n// Run command\nawait terminal.sendInput('echo \"Hello World\"\\n');\n\n// Close when done\nawait terminal.close();\nclient.disconnect();\n```"
+          },
+          "response": []
+        },
+        {
+          "name": "Example: Execute Script",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"data\": \"#!/bin/bash\\necho 'Starting script...'\\ndate\\npwd\\nls -la\\necho 'Script completed!'\\n\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/terminals/{{terminal_id}}/input",
+              "host": ["{{base_url}}"],
+              "path": ["api", "terminals", "{{terminal_id}}", "input"]
+            },
+            "description": "Example of executing a multi-line script in a terminal."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Check if JWT token is set",
+          "const token = pm.collectionVariables.get('jwt_token');",
+          "if (!token) {",
+          "    console.warn('Warning: jwt_token is not set. Please set it in collection variables.');",
+          "    console.log('Generate a token using:');",
+          "    console.log(\"const { AuthManager } = require('./src/api/auth');\");",
+          "    console.log(\"const authManager = new AuthManager({ jwtSecret: 'your-secret' });\");",
+          "    console.log(\"const token = authManager.generateToken('my-app', ['*']);\");",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Global test scripts",
+          "if (pm.response.code === 401) {",
+          "    console.error('Authentication failed. Check your JWT token.');",
+          "}",
+          "",
+          "if (pm.response.code === 403) {",
+          "    console.error('Permission denied. Token lacks required permissions.');",
+          "}"
+        ]
+      }
+    }
+  ]
+}

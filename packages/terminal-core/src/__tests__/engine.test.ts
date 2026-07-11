@@ -1,0 +1,640 @@
+import { TerminalEngine } from '../TerminalEngine';
+import { terminalCache } from '../cache';
+import type { TerminalBridge, Disposable } from '../types';
+// The jest moduleNameMapper points @xterm/xterm at our mock; importing the mock
+// class directly lets us reach into the captured callbacks / recorded writes.
+import { Terminal as MockTerminal } from '../__mocks__/xterm';
+
+// ---------------------------------------------------------------------------
+// Test doubles
+// ---------------------------------------------------------------------------
+
+interface BridgeCalls {
+  write: Array<[string, string]>;
+  resize: Array<[string, number, number]>;
+}
+
+function makeBridge(): { bridge: TerminalBridge; calls: BridgeCalls } {
+  const calls: BridgeCalls = { write: [], resize: [] };
+  const noopDisposable: Disposable = { dispose() {} };
+  const bridge: TerminalBridge = {
+    onData: () => noopDisposable,
+    onExit: () => noopDisposable,
+    write: (processId, data) => {
+      calls.write.push([processId, data]);
+    },
+    resize: (processId, cols, rows) => {
+      calls.resize.push([processId, cols, rows]);
+    },
+  };
+  return { bridge, calls };
+}
+
+// jsdom gives us a real element; force a usable size so the >50px guards pass.
+function makeContainer(width = 800, height = 600): HTMLElement {
+  const el = document.createElement('div');
+  Object.defineProperty(el, 'offsetWidth', { value: width, configurable: true });
+  Object.defineProperty(el, 'offsetHeight', { value: height, configurable: true });
+  document.body.appendChild(el);
+  return el;
+}
+
+// Reach the engine's live mock Terminal (the cache holds it).
+function mockTerm(cacheKey: string): MockTerminal {
+  const entry = terminalCache.get(cacheKey);
+  if (!entry) throw new Error('no cache entry');
+  return entry.terminal as unknown as MockTerminal;
+}
+
+beforeEach(() => {
+  terminalCache.clear();
+  // jsdom lacks ResizeObserver — provide a no-op so mount() doesn't throw.
+  if (typeof (global as any).ResizeObserver === 'undefined') {
+    (global as any).ResizeObserver = class {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    };
+  }
+});
+
+afterEach(() => {
+  terminalCache.clear();
+});
+
+// ---------------------------------------------------------------------------
+// Construction / options (R6)
+// ---------------------------------------------------------------------------
+
+test('mount creates a terminal preserving the load-bearing xterm options (R6)', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't1' });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('t1');
+  expect(term.options.allowProposedApi).toBe(true);
+  // Steady cursor (see TerminalEngine): a blinking cursor pulses on each keystroke under
+  // TUIs that re-send DECSCUSR (codex), so the calm default is non-blinking.
+  expect(term.options.cursorBlink).toBe(false);
+  expect(term.options.convertEol).toBe(false);
+  expect(term.options.scrollback).toBe(10000);
+  expect(term.options.lineHeight).toBe(1.1);
+  // default font size
+  expect(term.options.fontSize).toBe(14);
+});
+
+// Codex/ratatui rendering fix: on Windows the engine must configure xterm's ConPTY
+// compatibility via `windowsPty` (backend + real build number) and must NOT use the
+// legacy `windowsMode` flag. A build >= 21376 is what makes xterm disable the wrapping
+// heuristic that corrupts full-width TUIs (broken borders / invisible input bg / cursor
+// jump). See TerminalEngine FALLBACK_WINDOWS_BUILD.
+test('Windows: sets windowsPty {conpty, real build} and never the legacy windowsMode', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'wp1', isWindows: true, windowsBuildNumber: 26200 });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('wp1');
+  expect(term.options.windowsMode).toBeUndefined();
+  expect(term.options.windowsPty).toEqual({ backend: 'conpty', buildNumber: 26200 });
+});
+
+test('Windows: falls back to a modern build (>= 21376, heuristic off) when none/0 is supplied', () => {
+  const { bridge } = makeBridge();
+  // 0 models the startup race before the OS-build fetch resolves.
+  const engine = new TerminalEngine(bridge, { cacheKey: 'wp2', isWindows: true, windowsBuildNumber: 0 });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('wp2');
+  const pty = term.options.windowsPty as { backend: string; buildNumber: number };
+  expect(pty.backend).toBe('conpty');
+  expect(pty.buildNumber).toBeGreaterThanOrEqual(21376);
+});
+
+test('non-Windows: does not set windowsPty or windowsMode', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'wp3', isWindows: false, windowsBuildNumber: 26200 });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('wp3');
+  expect(term.options.windowsPty).toBeUndefined();
+  expect(term.options.windowsMode).toBeUndefined();
+});
+
+test('mount loads Fit/WebLinks/Unicode11 addons and activates unicode v11', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't2' });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('t2');
+  const names = term.loadedAddons.map((a) => (a as object).constructor.name);
+  expect(names).toContain('FitAddon');
+  expect(names).toContain('WebLinksAddon');
+  expect(names).toContain('Unicode11Addon');
+  // load order: Fit before WebLinks before Unicode11
+  expect(names.indexOf('FitAddon')).toBeLessThan(names.indexOf('WebLinksAddon'));
+  expect(names.indexOf('WebLinksAddon')).toBeLessThan(names.indexOf('Unicode11Addon'));
+  expect(term.unicode.activeVersion).toBe('11');
+});
+
+// ---------------------------------------------------------------------------
+// setFontSize
+// ---------------------------------------------------------------------------
+
+test('setFontSize updates terminal.options.fontSize', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't3' });
+  engine.mount(makeContainer());
+
+  engine.setFontSize(20);
+  expect(engine.terminal.options.fontSize).toBe(20);
+});
+
+// ---------------------------------------------------------------------------
+// Context menu actions + WebGL toggle
+// ---------------------------------------------------------------------------
+
+test('getContextMenuActions returns all six actions', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't4' });
+  engine.mount(makeContainer());
+
+  const actions = engine.getContextMenuActions();
+  for (const name of [
+    'copy',
+    'paste',
+    'clear',
+    'selectAll',
+    'resetRendering',
+    'toggleWebGL',
+  ] as const) {
+    expect(typeof actions[name]).toBe('function');
+  }
+});
+
+test('toggleWebGL flips isWebGLGloballyDisabled()', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't5' });
+  engine.mount(makeContainer());
+
+  const before = engine.isWebGLGloballyDisabled();
+  engine.getContextMenuActions().toggleWebGL();
+  expect(engine.isWebGLGloballyDisabled()).toBe(!before);
+  // flip back so global state doesn't leak across tests
+  engine.getContextMenuActions().toggleWebGL();
+  expect(engine.isWebGLGloballyDisabled()).toBe(before);
+});
+
+// ---------------------------------------------------------------------------
+// attach() — input routing
+// ---------------------------------------------------------------------------
+
+test('before attach(), term.onData does NOT call bridge.write', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't6' });
+  engine.mount(makeContainer());
+
+  mockTerm('t6').emitData('x');
+  expect(calls.write).toEqual([]);
+});
+
+test('after attach("p1"), term.onData routes input to bridge.write("p1", data)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't7' });
+  engine.mount(makeContainer());
+
+  engine.attach('p1');
+  mockTerm('t7').emitData('x');
+  expect(calls.write).toEqual([['p1', 'x']]);
+});
+
+// ---------------------------------------------------------------------------
+// Enhanced keyboard protocols (Kitty + modifyOtherKeys) — engine wiring
+// ---------------------------------------------------------------------------
+
+function keyEvent(over: Partial<KeyboardEvent>): KeyboardEvent {
+  return {
+    type: 'keydown', key: 'a', ctrlKey: false, altKey: false,
+    shiftKey: false, metaKey: false, repeat: false,
+    preventDefault() {}, stopPropagation() {},
+  } as unknown as KeyboardEvent;
+}
+function withKey(over: Partial<KeyboardEvent>): KeyboardEvent {
+  return { ...keyEvent({}), ...over } as KeyboardEvent;
+}
+
+test('app enables kitty (CSI >1u) -> Ctrl+C is sent as CSI 99;5u', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb1' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb1');
+
+  term.csiHandlers['>u']([1]); // app pushes kitty flag 1
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(false); // suppress xterm's legacy emission
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u']]);
+});
+
+test('without a protocol enabled, Ctrl+C falls through to legacy (no protocol write)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb2' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb2');
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(true); // xterm emits legacy \x03
+  expect(calls.write).toEqual([]);
+});
+
+test('kitty active: plain letter is NOT intercepted (text path preserved)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb3' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb3');
+
+  term.csiHandlers['>u']([1]);
+  const handled = term.keyHandler!(withKey({ key: 'a' }));
+
+  expect(handled).toBe(true); // let xterm handle plain text
+  expect(calls.write).toEqual([]);
+});
+
+test('CSI ?u query is answered with the active flags', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb4' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb4');
+
+  term.csiHandlers['>u']([3]); // flags 1+2
+  term.csiHandlers['?u']([]);
+
+  expect(calls.write).toEqual([['p1', '\x1b[?3u']]);
+});
+
+test('kill-switch off: enable sequence is ignored and keys stay legacy', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 'kb5',
+    enhancedKeyboard: () => false,
+  });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb5');
+
+  const consumed = term.csiHandlers['>u']([1]); // handler should no-op
+  expect(consumed).toBe(false); // not consumed -> xterm ignores it too
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+test('Ctrl+C keyup under kitty flag 2 emits a release event (not swallowed)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb7' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb7');
+
+  term.csiHandlers['>u']([3]); // flags 1+2
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true, type: 'keyup' }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[99;5:3u']]);
+});
+
+test('3-press Ctrl+C burst forces raw SIGINT even under an active protocol', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kb6' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kb6');
+  term.csiHandlers['>u']([1]);
+
+  // First two presses encode; the third within the burst window forces legacy \x03.
+  term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+  term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+  const third = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(third).toBe(true); // burst -> raw \x03 escape hatch (xterm emits it)
+  // Only the first two encoded sends reached the bridge; the burst press did not.
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u'], ['p1', '\x1b[99;5u']]);
+});
+
+test('after attach("p1"), term.onResize debounces then routes to bridge.resize("p1", cols, rows)', () => {
+  jest.useFakeTimers();
+  try {
+    const { bridge, calls } = makeBridge();
+    const engine = new TerminalEngine(bridge, { cacheKey: 't8' });
+    engine.mount(makeContainer());
+
+    engine.attach('p1');
+    mockTerm('t8').emitResize(120, 40);
+    // Backend resize is debounced — not sent synchronously (avoids ConPTY
+    // repaint spam / duplicated lines during a window drag).
+    expect(calls.resize).not.toContainEqual(['p1', 120, 40]);
+
+    jest.advanceTimersByTime(150);
+    expect(calls.resize).toContainEqual(['p1', 120, 40]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('rapid term.onResize events coalesce into a single backend resize (final size)', () => {
+  jest.useFakeTimers();
+  try {
+    const { bridge, calls } = makeBridge();
+    const engine = new TerminalEngine(bridge, { cacheKey: 't8b' });
+    engine.mount(makeContainer());
+    engine.attach('p1');
+
+    // Simulate a drag: many resizes in quick succession.
+    const term = mockTerm('t8b');
+    term.emitResize(100, 30);
+    term.emitResize(90, 28);
+    term.emitResize(80, 24);
+    jest.advanceTimersByTime(150);
+
+    // The final size reaches the backend; the intermediate sizes are coalesced away.
+    const p1Resizes = calls.resize.filter(([pid]) => pid === 'p1');
+    expect(p1Resizes).toContainEqual(['p1', 80, 24]);
+    expect(p1Resizes).not.toContainEqual(['p1', 100, 30]);
+    expect(p1Resizes).not.toContainEqual(['p1', 90, 28]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('unmount flushes a pending debounced resize (PTY not left at a stale size)', () => {
+  jest.useFakeTimers();
+  try {
+    const { bridge, calls } = makeBridge();
+    const engine = new TerminalEngine(bridge, { cacheKey: 't8c' });
+    engine.mount(makeContainer());
+    engine.attach('p1');
+
+    mockTerm('t8c').emitResize(70, 20);
+    // Debounced — not sent yet.
+    expect(calls.resize).not.toContainEqual(['p1', 70, 20]);
+
+    // Unmount before the 120ms debounce fires: it must flush, not drop, so the
+    // backend PTY reflects the final size (otherwise remount won't re-fit).
+    engine.unmount();
+    expect(calls.resize).toContainEqual(['p1', 70, 20]);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Shift+Enter → soft newline (LF) instead of submit (CR)
+// ---------------------------------------------------------------------------
+
+function pressKey(
+  term: MockTerminal,
+  init: Partial<KeyboardEvent> & { key: string },
+): boolean {
+  const event = {
+    type: 'keydown',
+    shiftKey: false,
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+    ...init,
+  } as unknown as KeyboardEvent;
+  // keyHandler is the engine's attachCustomKeyEventHandler callback.
+  return term.keyHandler ? term.keyHandler(event) : true;
+}
+
+test('Shift+Enter writes LF (\\n) to the PTY and is swallowed by xterm', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'se1' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+
+  const handled = pressKey(mockTerm('se1'), { key: 'Enter', shiftKey: true });
+
+  expect(calls.write).toEqual([['p1', '\n']]);
+  // returning false tells xterm NOT to also emit CR for this keypress
+  expect(handled).toBe(false);
+});
+
+test('plain Enter is left to xterm (no direct LF write)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'se2' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+
+  const handled = pressKey(mockTerm('se2'), { key: 'Enter', shiftKey: false });
+
+  expect(calls.write).toEqual([]); // engine doesn't intercept; xterm sends CR itself
+  expect(handled).toBe(true);
+});
+
+test('Ctrl+Shift+Enter is NOT treated as soft newline', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'se3' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+
+  pressKey(mockTerm('se3'), { key: 'Enter', shiftKey: true, ctrlKey: true });
+
+  expect(calls.write).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// paste() — routes through xterm (bracketed paste) → onData → bridge.write
+// ---------------------------------------------------------------------------
+
+test('engine.paste() routes through xterm.paste and reaches bridge.write', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'pa1' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+
+  engine.paste('line1\nline2');
+
+  const term = mockTerm('pa1');
+  expect(term.pasted).toEqual(['line1\nline2']); // went THROUGH xterm.paste
+  expect(calls.write).toEqual([['p1', 'line1\nline2']]); // emitted via onData
+});
+
+test('pasteToTerminal(cacheKey) pastes via the cached terminal; false when unmounted', () => {
+  const { bridge, calls } = makeBridge();
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { pasteToTerminal } = require('../cache') as typeof import('../cache');
+  const engine = new TerminalEngine(bridge, { cacheKey: 'pa2' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+
+  expect(pasteToTerminal('pa2', 'hi')).toBe(true);
+  expect(calls.write).toEqual([['p1', 'hi']]);
+  // unknown key → no terminal mounted → false (caller falls back to a raw write)
+  expect(pasteToTerminal('nope', 'x')).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// onTitleChange wiring
+// ---------------------------------------------------------------------------
+
+test('term.onTitleChange forwards to opts.onTitleChange', () => {
+  const { bridge } = makeBridge();
+  const titles: string[] = [];
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 't9',
+    onTitleChange: (t) => titles.push(t),
+  });
+  engine.mount(makeContainer());
+
+  mockTerm('t9').emitTitle('hello');
+  expect(titles).toEqual(['hello']);
+});
+
+// ---------------------------------------------------------------------------
+// onDiag — incoming PTY chunk emits a [TERM-OUT] diagnostic (restores §11 gate g)
+// ---------------------------------------------------------------------------
+
+test('onDiag fires with a [TERM-OUT] line when an incoming chunk arrives', () => {
+  // A bridge that captures the engine's cache-lifetime onData callback so the
+  // test can drive an incoming PTY chunk through it.
+  let emitData: ((data: string) => void) | undefined;
+  const noopDisposable: Disposable = { dispose() {} };
+  const bridge: TerminalBridge = {
+    onData: (_processId, cb) => {
+      emitData = cb;
+      return noopDisposable;
+    },
+    onExit: () => noopDisposable,
+    write: () => {},
+    resize: () => {},
+  };
+
+  const diagLines: string[] = [];
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 't-diag',
+    onDiag: (build) => diagLines.push(build()),
+  });
+  engine.mount(makeContainer());
+  engine.attach('p1'); // wires the cache-lifetime onData subscription
+
+  expect(typeof emitData).toBe('function');
+  emitData!('hello');
+
+  const termOut = diagLines.find((l) => l.startsWith('[TERM-OUT]'));
+  expect(termOut).toBeDefined();
+  expect(termOut).toContain('hello');
+});
+
+// ---------------------------------------------------------------------------
+// unmount must NOT dispose the terminal (preserved via cacheKey)
+// ---------------------------------------------------------------------------
+
+test('unmount runs local disposables (input stops routing) but keeps the terminal in the cache', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't10' });
+  engine.mount(makeContainer());
+
+  engine.attach('p1');
+  const term = mockTerm('t10');
+
+  // Sanity: input routes while mounted.
+  term.emitData('a');
+  expect(calls.write).toEqual([['p1', 'a']]);
+
+  engine.unmount();
+
+  // Cache entry (and its terminal) survives unmount — NOT disposed.
+  expect(terminalCache.has('t10')).toBe(true);
+  expect(terminalCache.get('t10')!.terminal).toBe(term as unknown as object);
+
+  // The local onData disposable was run, so further input no longer routes.
+  term.emitData('b');
+  expect(calls.write).toEqual([['p1', 'a']]);
+});
+
+// ---------------------------------------------------------------------------
+// autoFocus — mount focuses by default; autoFocus:false suppresses focus-on-mount
+// (grid focus-stealing fix). Click-to-focus is unaffected (not exercised here).
+// ---------------------------------------------------------------------------
+
+test('mount focuses the terminal by default (autoFocus omitted)', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 't-focus-default' });
+  engine.mount(makeContainer());
+
+  expect(mockTerm('t-focus-default').focusCount).toBeGreaterThanOrEqual(1);
+});
+
+test('mount does NOT focus the terminal when autoFocus is false', () => {
+  const { bridge } = makeBridge();
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 't-focus-off',
+    autoFocus: false,
+  });
+  engine.mount(makeContainer());
+
+  expect(mockTerm('t-focus-off').focusCount).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// keyboard zoom — dual path semantics (exactly +1 via capture, custom returns false)
+// ---------------------------------------------------------------------------
+
+test('Ctrl+= via custom key handler calls onFontSizeChange(+1) and returns false', () => {
+  const { bridge } = makeBridge();
+  const sizes: number[] = [];
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 't11',
+    fontSize: 14,
+    onFontSizeChange: (px) => sizes.push(px),
+  });
+  engine.mount(makeContainer());
+
+  const term = mockTerm('t11');
+  const handler = term.keyHandler!;
+  const evt = {
+    ctrlKey: true,
+    shiftKey: false,
+    type: 'keydown',
+    key: '=',
+    code: 'Equal',
+    preventDefault() {},
+    stopPropagation() {},
+  } as unknown as KeyboardEvent;
+
+  const result = handler(evt);
+  expect(result).toBe(false);
+  expect(sizes).toEqual([15]);
+});
+
+test('capture-phase zoom listener stops propagation so the custom handler does not double-fire', () => {
+  const { bridge } = makeBridge();
+  const sizes: number[] = [];
+  const container = makeContainer();
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 't12',
+    fontSize: 14,
+    onFontSizeChange: (px) => sizes.push(px),
+  });
+  engine.mount(container);
+
+  // Dispatch a real bubbling, cancelable Ctrl+= keydown on the container; assert
+  // the capture-phase zoom listener fires exactly once with the right +1 value.
+  const evt = new KeyboardEvent('keydown', {
+    key: '=',
+    code: 'Equal',
+    ctrlKey: true,
+    bubbles: true,
+    cancelable: true,
+  });
+  container.dispatchEvent(evt);
+
+  expect(sizes).toEqual([15]);
+});

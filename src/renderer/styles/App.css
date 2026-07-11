@@ -1,0 +1,17 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  background-color: #141414;
+  color: #cccccc;
+  overflow: hidden;
+  position: relative;
+}
+
+.app-body {
+  flex: 1;
+  overflow: hidden;
+}

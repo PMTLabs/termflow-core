@@ -1,0 +1,371 @@
+.search-interface {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #1a1a1a;
+  color: #fff;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.search-header {
+  background: #2d2d2d;
+  border-bottom: 1px solid #404040;
+  padding: 16px;
+}
+
+.search-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.search-title h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.close-button {
+  background: #666;
+  border: 1px solid #777;
+  color: #fff;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.close-button:hover {
+  background: #ff4444;
+  border-color: #ff5555;
+}
+
+.search-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.search-input-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-input {
+  flex: 1;
+  padding: 12px 16px;
+  background: #404040;
+  border: 2px solid #555;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 16px;
+  transition: border-color 0.2s ease;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #0066cc;
+}
+
+.search-input::placeholder {
+  color: #aaa;
+}
+
+.clear-search-button {
+  position: absolute;
+  right: 50px;
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color 0.2s ease;
+}
+
+.clear-search-button:hover {
+  color: #fff;
+  background: #666;
+}
+
+.search-button {
+  background: #0066cc;
+  border: 1px solid #0077dd;
+  color: #fff;
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: all 0.2s ease;
+}
+
+.search-button:hover:not(:disabled) {
+  background: #0077dd;
+}
+
+.search-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.suggestions-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 40px;
+  background: #333;
+  border: 1px solid #555;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.suggestions-section {
+  padding: 8px 0;
+}
+
+.suggestions-section:not(:last-child) {
+  border-bottom: 1px solid #444;
+}
+
+.suggestions-header {
+  padding: 8px 12px 4px;
+  font-size: 12px;
+  color: #aaa;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.suggestion-item {
+  width: 100%;
+  background: none;
+  border: none;
+  color: #fff;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.suggestion-item:hover {
+  background: #404040;
+}
+
+.suggestion-item.recent-search {
+  color: #ccc;
+}
+
+.search-options {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.search-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 14px;
+}
+
+.search-option input[type="checkbox"] {
+  accent-color: #0066cc;
+}
+
+.search-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.search-results-section {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.search-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 40px;
+  text-align: center;
+}
+
+.error-message {
+  color: #ff6666;
+  font-size: 16px;
+}
+
+.retry-button {
+  background: #0066cc;
+  border: none;
+  color: white;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.retry-button:hover {
+  background: #0077dd;
+}
+
+.search-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 40px;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #333;
+  border-top: 3px solid #0066cc;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.no-search-performed,
+.search-help {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #aaa;
+  text-align: center;
+}
+
+.search-placeholder {
+  font-size: 16px;
+}
+
+.help-section {
+  max-width: 500px;
+}
+
+.help-section h3 {
+  color: #fff;
+  margin-bottom: 16px;
+}
+
+.help-section ul {
+  text-align: left;
+  line-height: 1.6;
+}
+
+.help-section code {
+  background: #333;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+}
+
+.help-section kbd {
+  background: #333;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .search-header {
+    padding: 12px;
+  }
+  
+  .search-form {
+    gap: 8px;
+  }
+  
+  .search-input-container {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .search-button {
+    align-self: center;
+  }
+  
+  .search-options {
+    gap: 12px;
+    justify-content: center;
+  }
+  
+  .search-content {
+    flex-direction: column;
+  }
+}
+
+/* Focus states for accessibility */
+.close-button:focus,
+.search-button:focus,
+.clear-search-button:focus {
+  outline: 2px solid #0066cc;
+  outline-offset: 2px;
+}
+
+.search-input:focus {
+  outline: 2px solid #0066cc;
+  outline-offset: 2px;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  .search-interface {
+    border: 2px solid #fff;
+  }
+  
+  .search-input {
+    border: 2px solid #ccc;
+  }
+  
+  .suggestions-dropdown {
+    border: 2px solid #ccc;
+  }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .search-input,
+  .search-button,
+  .suggestion-item {
+    transition: none;
+  }
+  
+  .loading-spinner {
+    animation: none;
+  }
+}

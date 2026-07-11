@@ -1,0 +1,42 @@
+{
+  "name": "terminal-kit",
+  "version": "1.0.0",
+  "description": "CLI tool to initialize multi-team agent workflow assets for AI orchestration",
+  "type": "module",
+  "bin": {
+    "tk": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build",
+    "postinstall": "npm run build || true"
+  },
+  "keywords": [
+    "cli",
+    "terminal",
+    "ai",
+    "agent",
+    "orchestration",
+    "mcp",
+    "claude",
+    "gemini"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "fs-extra": "^11.2.0"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
