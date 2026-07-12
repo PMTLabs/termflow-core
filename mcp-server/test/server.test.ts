@@ -197,3 +197,13 @@ describe("list_terminals fleet passthrough", () => {
         expect(called(calls, "get", "/terminals")).toBe(false);
     });
 });
+
+describe("list_machines tool", () => {
+    it("reads the machine roster from GET /fleet/machines", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "list_machines", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(called(calls, "get", "/fleet/machines")).toBe(true);
+    });
+});

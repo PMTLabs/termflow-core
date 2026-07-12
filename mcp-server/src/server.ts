@@ -255,5 +255,23 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         }
     );
 
+    // Tool: list_machines — the fleet's machine roster (this instance + fabric peers).
+    // Fabric absent → just this machine (online). Each entry: machineId, deviceName, os, online, self.
+    server.registerTool(
+        "list_machines",
+        {
+            description: "List all machines in the fleet (this instance plus paired peers). Each entry includes machineId, deviceName, os, online, and self. Use a machineId with execute_command/get_terminal_screen to target a peer.",
+        },
+        async () => {
+            try {
+                const response = await api.get(`/fleet/machines`);
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
     return server;
 }
