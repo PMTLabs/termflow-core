@@ -1695,7 +1695,10 @@ async fn watch_for_sentinel(
                     // Bound the scan buffer for chatty commands; keep a tail large
                     // enough to hold a marker split across the drain boundary.
                     if acc.len() > 16384 {
-                        let cut = acc.len() - 4096;
+                        let mut cut = acc.len() - 4096;
+                        while cut < acc.len() && !acc.is_char_boundary(cut) {
+                            cut += 1;
+                        }
                         acc.drain(..cut);
                     }
                 }
@@ -1736,7 +1739,14 @@ async fn fleet_local_run(
     // otherwise spawn a NEW persistent terminal from the default profile.
     let terminal_id = match payload.terminal_id.as_ref() {
         Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
-        _ => {
+        // An explicit terminalId that is no longer live must NOT silently spawn a new
+        // terminal: a stale per-terminal Control grant (left when a fleet terminal was
+        // closed outside FleetClose) would otherwise run fresh commands after fleet_exec
+        // was revoked. Fail explicitly.
+        Some(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "terminal not found" }))).into_response();
+        }
+        None => {
             // KNOWN LIMITATION (cold-shell readiness): on a freshly-spawned terminal the shell's
             // profile (pwsh/cmd) may still be loading when the command is injected, so the first
             // command's bracketed-paste bytes can be dropped before the shell reads them, yielding a
@@ -3256,6 +3266,21 @@ mod tests {
             watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_millis(150)).await;
         assert!(!done);
         assert_eq!(code, None);
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_survives_multibyte_drain_boundary() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // 20000+ bytes of the 3-byte '€' (U+20AC) — forces the >16384 drain at a
+        // cut offset that is NOT a char boundary (would panic before the fix).
+        let big = "\u{20AC}".repeat(6667); // ~20001 bytes
+        tx.send(ChannelPayload { id: "pc-1".into(), data: big.into_bytes() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"@@TFDONE:n1:0@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(0));
     }
 
     mod fleet_tests {
