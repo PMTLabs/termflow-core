@@ -29,15 +29,17 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         version: "0.2.0",
     });
 
-    // Tool: list_terminals
+    // Tool: list_terminals — fleet roster: local terminals (tagged with this machine)
+    // plus peer terminals when the fabric is present. Each entry already carries
+    // machineId/os/deviceName from core.
     server.registerTool(
         "list_terminals",
         {
-            description: "List all active terminal sessions in Auto-Terminal",
+            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine.",
         },
         async () => {
             try {
-                const response = await api.get(`/terminals`);
+                const response = await api.get(`/fleet/terminals`);
                 return {
                     content: [
                         { type: "text", text: JSON.stringify((response.data as { terminals?: unknown }).terminals, null, 2) },

@@ -14,7 +14,7 @@ function makeFakeApi() {
     const api: ApiLike = {
         get: async (url: string) => {
             calls.push({ method: "get", url });
-            return { data: { id: "pc-self", pid: 123, tabId: "tb-1", name: "demo", url } };
+            return { data: { id: "pc-self", pid: 123, tabId: "tb-1", name: "demo", url, terminals: [] } };
         },
         post: async (url: string, body?: unknown) => {
             calls.push({ method: "post", url, body });
@@ -184,5 +184,16 @@ describe("execute_command fleet routing", () => {
         });
         expect(res.isError).toBe(true);
         expect(calls.some((c) => c.url === "/fleet/execute")).toBe(false);
+    });
+});
+
+describe("list_terminals fleet passthrough", () => {
+    it("reads the fleet roster from GET /fleet/terminals", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "list_terminals", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(called(calls, "get", "/fleet/terminals")).toBe(true);
+        expect(called(calls, "get", "/terminals")).toBe(false);
     });
 });
