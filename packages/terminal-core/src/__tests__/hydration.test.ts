@@ -491,6 +491,80 @@ test('exit banner written exactly once', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// One-shot protocol handshakes inside chunks the snapshot path DROPS must still
+// reach protocol state. ConPTY sends CSI ?9001h (Win32-Input-Mode) as the FIRST
+// output chunk of every Windows session — it races hydration, buffers into
+// pendingOutput, and the snapshot commit then discards it (a snapshot reproduces
+// screen CONTENT, never mode side-effects). The handshake never repeats, so
+// without applying it before the drop the whole session is stuck on legacy
+// encoding. (Live bug: found in manual acceptance testing of PR #2 — every
+// fresh Windows tab lost the handshake this way.)
+// ---------------------------------------------------------------------------
+function hydrationKeyEvent(over: Partial<KeyboardEvent>): KeyboardEvent {
+  return {
+    type: 'keydown', key: 'a', ctrlKey: false, altKey: false,
+    shiftKey: false, metaKey: false, repeat: false,
+    preventDefault() {}, stopPropagation() {},
+    ...over,
+  } as unknown as KeyboardEvent;
+}
+
+test('win32 ?9001h handshake dropped by snapshot hydration still enables Win32-Input-Mode', async () => {
+  let resolveSnap!: (v: { snapshot: string }) => void;
+  const snapPromise = new Promise<{ snapshot: string }>((res) => {
+    resolveSnap = res;
+  });
+  const bridge = makeFakeBridge({ snapshot: () => snapPromise });
+
+  const engine = new TerminalEngine(bridge, { cacheKey: 'h10', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('h10');
+
+  // ConPTY's real first chunk (captured live): handshake + focus mode + clear.
+  bridge.pushData('p1', '\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J');
+
+  // Snapshot resolves NON-empty (the backend parser already consumed that chunk),
+  // so the snapshot branch drops pendingOutput without parsing it.
+  resolveSnap({ snapshot: 'PS D:\\> ' });
+  await flush();
+  expect(terminalCache.get('h10')!.pendingOutput).toEqual([]); // dropped, as designed
+
+  // …but the protocol state must have been applied BEFORE the drop: Shift+Enter
+  // now encodes as a Win32-Input-Mode record, not the legacy LF shim.
+  const handled = term.keyHandler!(hydrationKeyEvent({ key: 'Enter', keyCode: 13, shiftKey: true }));
+  expect(handled).toBe(false);
+  expect(bridge.writeCalls).toContainEqual(['p1', '\x1b[13;28;13;1;16;1_']);
+  expect(bridge.writeCalls).not.toContainEqual(['p1', '\n']); // LF shim must NOT fire
+});
+
+test('dropped-chunk handshake scan preserves order: ?9001h then ?9001l -> stays legacy', async () => {
+  let resolveSnap!: (v: { snapshot: string }) => void;
+  const snapPromise = new Promise<{ snapshot: string }>((res) => {
+    resolveSnap = res;
+  });
+  const bridge = makeFakeBridge({ snapshot: () => snapPromise });
+
+  const engine = new TerminalEngine(bridge, { cacheKey: 'h11', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('h11');
+
+  // Both the enable AND a later disable land in the dropped window: last wins.
+  bridge.pushData('p1', '\x1b[?9001h\x1b[2J');
+  bridge.pushData('p1', '\x1b[?9001l');
+
+  resolveSnap({ snapshot: 'PS D:\\> ' });
+  await flush();
+
+  // Shift+Enter falls back to the LF shim (legacy path) — no Win32 record.
+  const handled = term.keyHandler!(hydrationKeyEvent({ key: 'Enter', keyCode: 13, shiftKey: true }));
+  expect(handled).toBe(false);
+  expect(bridge.writeCalls).toContainEqual(['p1', '\n']);
+  expect(bridge.writeCalls).not.toContainEqual(['p1', '\x1b[13;28;13;1;16;1_']);
+});
+
+// ---------------------------------------------------------------------------
 // No-getSnapshot bridge degrades gracefully (snapshot path skipped → flush pending).
 // ---------------------------------------------------------------------------
 test('bridge without getSnapshot degrades to pending flush (no reset)', async () => {

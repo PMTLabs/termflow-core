@@ -5,7 +5,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import type { ISearchOptions } from '@xterm/addon-search';
 import { KeyboardProtocolState, encodeKey } from './keyboardProtocol';
-import { Win32InputModeState, encodeWin32Key } from './win32InputMode';
+import { Win32InputModeState, encodeWin32Key, scanWin32ModeSequences } from './win32InputMode';
 import { HeuristicCapture, decideSuggestKey } from './commandCapture';
 import type { SuggestPopupState } from './commandCapture';
 
@@ -1661,6 +1661,18 @@ export class TerminalEngine {
         }
         // Authoritative cumulative screen — replace any pre-hydration paint and DROP
         // buffered chunks (already reflected in the snapshot); re-applying would dupe.
+        // "Already reflected" is true for screen CONTENT only: one-shot protocol
+        // handshakes are mode side-effects a snapshot never reproduces, and these
+        // dropped bytes never transit the xterm parser, so the CSI handler can't
+        // see them. ConPTY sends ?9001h (Win32-Input-Mode) exactly once, as the
+        // FIRST chunk of every Windows session — it reliably lands in this dropped
+        // window, and losing it sticks the whole session on legacy encoding (live
+        // bug: every fresh Windows tab lost the handshake). Apply it before the drop.
+        if (this.isWindowsPlatform()) {
+          const verdict = scanWin32ModeSequences(entry.pendingOutput.join(''));
+          if (verdict === 'enable') this.win32State.enable();
+          else if (verdict === 'disable') this.win32State.disable();
+        }
         term.reset();
         term.write(snapshot);
         entry.pendingOutput = [];

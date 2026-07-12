@@ -19,6 +19,32 @@ export class Win32InputModeState {
   isActive(): boolean { return this.active; }
 }
 
+/**
+ * Scan raw PTY output for `CSI ? … 9001 … h/l` (DECSET/DECRST of Win32-Input-Mode)
+ * and report the net effect: 'enable' / 'disable' for the LAST occurrence in the
+ * text, or null when mode 9001 never appears.
+ *
+ * Exists for exactly one caller: the hydration snapshot path drops buffered
+ * chunks without ever feeding them to the xterm parser (their screen effects are
+ * already in the snapshot — but a snapshot reproduces screen CONTENT, never mode
+ * side-effects). ConPTY sends ?9001h once, as the FIRST chunk of every Windows
+ * session, so it reliably lands in that dropped window and the handshake is
+ * otherwise lost for the session's lifetime. Semantics mirror the engine's CSI
+ * handler: any position in a combined param list counts, params match exactly
+ * (no substrings), later occurrences override earlier ones.
+ */
+export function scanWin32ModeSequences(text: string): 'enable' | 'disable' | null {
+  let verdict: 'enable' | 'disable' | null = null;
+  const re = /\x1b\[\?([0-9;]+)([hl])/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1].split(';').includes('9001')) {
+      verdict = m[2] === 'h' ? 'enable' : 'disable';
+    }
+  }
+  return verdict;
+}
+
 // Win32 KEY_EVENT_RECORD.dwControlKeyState bits we set. Right/Left Ctrl/Alt on a
 // CHORD (not the modifier key's own event) always emit the LEFT_* bit — a
 // deliberate, documented approximation, not a gap: crossterm (what Codex and

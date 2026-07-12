@@ -1,4 +1,4 @@
-import { Win32InputModeState, encodeWin32Key } from '../win32InputMode';
+import { Win32InputModeState, encodeWin32Key, scanWin32ModeSequences } from '../win32InputMode';
 
 function key(over: Partial<KeyboardEvent>): KeyboardEvent {
   return {
@@ -23,6 +23,44 @@ describe('Win32InputModeState', () => {
     const s = new Win32InputModeState();
     s.disable();
     expect(s.isActive()).toBe(false);
+  });
+});
+
+// Scanner for one-shot mode sequences inside raw text the hydration snapshot
+// path is about to DROP (the bytes never transit the xterm parser, so the CSI
+// handler can't see them — the scan is the only chance to observe the
+// handshake). Semantics must match the CSI handler exactly: any param position
+// counts, param-exact match (no substrings), last occurrence wins.
+describe('scanWin32ModeSequences', () => {
+  test('plain text -> null', () => {
+    expect(scanWin32ModeSequences('PS D:\\> dir')).toBeNull();
+  });
+  test('empty string -> null', () => {
+    expect(scanWin32ModeSequences('')).toBeNull();
+  });
+  test('?9001h -> enable', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001h')).toBe('enable');
+  });
+  test('?9001l -> disable', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001l')).toBe('disable');
+  });
+  test('ConPTY real first chunk (handshake embedded among other modes) -> enable', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[H')).toBe('enable');
+  });
+  test('enable then disable -> disable (last wins)', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001h...\x1b[?9001l')).toBe('disable');
+  });
+  test('disable then enable -> enable (last wins)', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001l...\x1b[?9001h')).toBe('enable');
+  });
+  test('9001 in a combined param list -> enable (matches CSI-handler semantics)', () => {
+    expect(scanWin32ModeSequences('\x1b[?9001;1004h')).toBe('enable');
+  });
+  test('other private modes only -> null (no false positive on 1004/25)', () => {
+    expect(scanWin32ModeSequences('\x1b[?1004h\x1b[?25l')).toBeNull();
+  });
+  test('param containing 9001 as a substring (19001) -> null (param-exact match)', () => {
+    expect(scanWin32ModeSequences('\x1b[?19001h')).toBeNull();
   });
 });
 
