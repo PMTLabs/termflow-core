@@ -362,6 +362,20 @@ test('attach() to a NEW processId resets win32State (new PTY session, own handsh
   expect(calls.write).toEqual([]); // nothing written via the protocol path
 });
 
+test('isWindows: false never activates Win32-Input-Mode even if ?9001h somehow arrives', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w4', isWindows: false });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w4');
+
+  term.csiHandlers['?h']([9001]); // must be a no-op off-Windows
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // falls through to xterm's own default handling
+  expect(calls.write).toEqual([]); // nothing written via the protocol path
+});
+
 test('after attach("p1"), term.onResize debounces then routes to bridge.resize("p1", cols, rows)', () => {
   jest.useFakeTimers();
   try {
