@@ -98,6 +98,9 @@ pub async fn start_api_server(
         // never collide with `/api/terminals/:id`. Registered before the auth layer.
         .route("/api/fleet/machines", get(fleet_machines))
         .route("/api/fleet/terminals", get(fleet_terminals))
+        .route("/api/fleet/execute", post(fleet_execute))
+        .route("/api/fleet/screen", post(fleet_screen))
+        .route("/api/fleet/close", post(fleet_close))
         // System info endpoints
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
@@ -1170,6 +1173,308 @@ async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
         })
         .collect();
     Json(json!({ "terminals": terminals }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetExecuteReq {
+    command: String,
+    target_os: Option<String>,
+    machine_id: Option<String>,
+    terminal_id: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetScreenReq {
+    machine_id: Option<String>,
+    terminal_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetCloseReq {
+    machine_id: Option<String>,
+    terminal_id: String,
+}
+
+/// Clamp a requested fleet timeout to `[1000, 3_600_000]` ms, defaulting to 60 s.
+/// Mirrors the responder-side clamp so both ends agree.
+fn clamp_fleet_timeout(ms: Option<u64>) -> u64 {
+    ms.unwrap_or(60_000).clamp(1_000, 3_600_000)
+}
+
+/// Run a command on THIS machine by proxying to the local responder endpoint
+/// `POST /api/fleet/local-run` over loopback (using this instance's own api port +
+/// token). Returns the responder JSON `{ terminalId, done, exitCode, screen }`.
+async fn local_fleet_run(
+    state: &AppState,
+    command: &str,
+    terminal_id: Option<&str>,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let cfg = state.network.read().clone();
+    let url = format!("http://127.0.0.1:{}/api/fleet/local-run", cfg.api_port);
+    // Give the loopback call the full command budget plus margin so it doesn't abort
+    // before the responder's own timeout returns a live (done=false) handle.
+    let client = crate::network_commands::localhost_client(timeout_ms.saturating_add(5_000))
+        .unwrap_or_else(reqwest::Client::new);
+    let mut body = json!({ "command": command, "timeoutMs": timeout_ms });
+    if let Some(tid) = terminal_id {
+        body["terminalId"] = json!(tid);
+    }
+    let resp = client
+        .post(&url)
+        .bearer_auth(&cfg.auth_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("local-run request failed: {e}")))?;
+    let status = resp.status();
+    let val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("local-run bad response: {e}")))?;
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("local-run returned {status}")));
+    }
+    Ok(val)
+}
+
+/// Map a `reqwest` failure from a fabric `/fleet/*` proxy call to an HTTP status +
+/// message. The fabric answers 403 for a denied grant and 502 for a peer-side error;
+/// preserve 403, fold everything else (incl. connect/timeout) to 502.
+fn map_fabric_fleet_error(op: &str, e: reqwest::Error) -> (StatusCode, serde_json::Value) {
+    if e.status() == Some(StatusCode::FORBIDDEN) {
+        (StatusCode::FORBIDDEN, json!({ "error": format!("{op}: denied by peer") }))
+    } else {
+        (StatusCode::BAD_GATEWAY, json!({ "error": format!("{op}: {e}") }))
+    }
+}
+
+/// The 501 body every remote fleet op returns when the fabric child is absent.
+fn peering_not_installed() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": "peering not installed" })))
+}
+
+/// POST /api/fleet/execute — resolve target, then dispatch Local (loopback local-run)
+/// or Remote (fabric `POST /fleet/exec`). Ambiguous OS → 409, unmatched OS → 404,
+/// remote-with-no-fabric → 501. Response: `{ machineId, terminalId, deviceName, done,
+/// exitCode, screen }`.
+async fn fleet_execute(
+    State(state): State<AppState>,
+    Json(body): Json<FleetExecuteReq>,
+) -> impl IntoResponse {
+    if body.command.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "command must be a non-empty string" })))
+            .into_response();
+    }
+    let roster = fleet_roster(&state).await;
+    let roster_json: Vec<serde_json::Value> = roster
+        .iter()
+        .map(|m| machine_to_json(m, m.machine_id == state.instance_id))
+        .collect();
+    let res = resolve_fleet_target(
+        body.target_os.as_deref(),
+        body.machine_id.as_deref(),
+        body.terminal_id.as_deref(),
+        &roster,
+        &state.instance_id,
+    );
+    let timeout_ms = clamp_fleet_timeout(body.timeout_ms);
+
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            match local_fleet_run(&state, &body.command, body.terminal_id.as_deref(), timeout_ms).await {
+                Ok(v) => (StatusCode::OK, Json(json!({
+                    "machineId": state.instance_id,
+                    "deviceName": self_hostname(),
+                    "terminalId": v.get("terminalId").cloned().unwrap_or(serde_json::Value::Null),
+                    "done": v.get("done").and_then(|d| d.as_bool()).unwrap_or(false),
+                    "exitCode": v.get("exitCode").cloned().unwrap_or(serde_json::Value::Null),
+                    "screen": v.get("screen").cloned().unwrap_or(serde_json::Value::Null),
+                }))).into_response(),
+                Err((code, msg)) => (code, Json(json!({ "error": msg }))).into_response(),
+            }
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let device_name = roster
+                .iter()
+                .find(|m| m.machine_id == device_id)
+                .map(|m| m.device_name.clone())
+                .unwrap_or_else(|| device_id.clone());
+            // The fabric long-polls the peer for up to `timeout_ms + 5s`. The DEFAULT
+            // FabricClient is hard-capped at 5s (localhost_client(5000)), which would abort
+            // every remote command >~5s with a spurious 502 — defeating the long-poll design.
+            // Use a loopback client sized to the command budget (+10s margin), mirroring
+            // `local_fleet_run`. The fabric control API is unauthenticated loopback, so no
+            // bearer token is sent.
+            let url = format!("http://127.0.0.1:{}/fleet/exec", state.fabric_control_port);
+            let client = crate::network_commands::localhost_client(timeout_ms.saturating_add(10_000))
+                .unwrap_or_else(reqwest::Client::new);
+            let mut fbody = json!({
+                "device_id": device_id,
+                "command": body.command,
+                "timeoutMs": timeout_ms,
+            });
+            if let Some(tid) = &terminal_id {
+                fbody["terminalId"] = json!(tid);
+            }
+            match client.post(&url).json(&fbody).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let v: serde_json::Value = resp.json().await.unwrap_or_else(|_| json!({}));
+                    (StatusCode::OK, Json(json!({
+                        "machineId": device_id,
+                        "deviceName": device_name,
+                        "terminalId": v.get("terminalId").cloned().unwrap_or(serde_json::Value::Null),
+                        "done": v.get("done").and_then(|d| d.as_bool()).unwrap_or(false),
+                        "exitCode": v.get("exitCode").cloned().unwrap_or(serde_json::Value::Null),
+                        "screen": v.get("screen").cloned().unwrap_or(serde_json::Value::Null),
+                    }))).into_response()
+                }
+                // Preserve the fabric's 403 with the spec-mandated, target-specific reason so
+                // the agent knows whether to ask the user to flip the peer's fleet toggle or to
+                // grant terminal Control; fold any other non-2xx / transport error to 502.
+                Ok(resp) if resp.status() == StatusCode::FORBIDDEN => {
+                    let msg = match &terminal_id {
+                        Some(tid) => format!("no Control grant on terminal {tid}"),
+                        None => "peer hasn't allowed fleet commands".to_string(),
+                    };
+                    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+                }
+                Ok(resp) => {
+                    let code = resp.status();
+                    (StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("fleet_execute: peer returned {code}") }))).into_response()
+                }
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_execute", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        ExecuteRoute::Ambiguous(candidates) => (StatusCode::CONFLICT, Json(json!({
+            "error": "ambiguous target: more than one online machine matches targetOS",
+            "candidates": candidates,
+            "machines": roster_json,
+        }))).into_response(),
+        ExecuteRoute::NoMatch => (StatusCode::NOT_FOUND, Json(json!({
+            "error": "no online machine matches targetOS",
+            "machines": roster_json,
+        }))).into_response(),
+    }
+}
+
+/// POST /api/fleet/screen — live screen of a terminal, Local (authoritative snapshot)
+/// or Remote (fabric `POST /fleet/screen`). Response: `{ machineId, terminalId, title,
+/// running, screen }`.
+async fn fleet_screen(
+    State(state): State<AppState>,
+    Json(body): Json<FleetScreenReq>,
+) -> impl IntoResponse {
+    // machineId is explicit here (no OS matching), so the roster is unused → &[].
+    let res = resolve_fleet_target(
+        None,
+        body.machine_id.as_deref(),
+        Some(&body.terminal_id),
+        &[],
+        &state.instance_id,
+    );
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            let Some(terminal) = state.terminals.get(&body.terminal_id) else {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+            };
+            let title = terminal.name.clone();
+            drop(terminal);
+            let screen = state
+                .screen_snapshot(&body.terminal_id)
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            (StatusCode::OK, Json(json!({
+                "machineId": state.instance_id,
+                "terminalId": body.terminal_id,
+                "title": title,
+                "running": true,
+                "screen": screen,
+            }))).into_response()
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+            let fbody = json!({ "device_id": device_id, "terminalId": terminal_id });
+            match client.post("/fleet/screen", fbody).await {
+                Ok(v) => {
+                    let mut obj = v.as_object().cloned().unwrap_or_default();
+                    obj.insert("machineId".to_string(), json!(device_id));
+                    (StatusCode::OK, Json(serde_json::Value::Object(obj))).into_response()
+                }
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_screen", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        // machineId is explicit, so OS-based Ambiguous/NoMatch are unreachable here.
+        _ => (StatusCode::BAD_REQUEST, Json(json!({ "error": "unresolved screen target" }))).into_response(),
+    }
+}
+
+/// POST /api/fleet/close — close a terminal, Local (kill + cleanup) or Remote (fabric
+/// `POST /fleet/close`). Response: `{ machineId, terminalId, status }`.
+async fn fleet_close(
+    State(state): State<AppState>,
+    Json(body): Json<FleetCloseReq>,
+) -> impl IntoResponse {
+    let res = resolve_fleet_target(
+        None,
+        body.machine_id.as_deref(),
+        Some(&body.terminal_id),
+        &[],
+        &state.instance_id,
+    );
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+            };
+            crate::pty_manager::kill_process_tree(pid);
+            state.cleanup_terminal_state(&body.terminal_id);
+            (StatusCode::OK, Json(json!({
+                "machineId": state.instance_id,
+                "terminalId": body.terminal_id,
+                "status": "ok",
+            }))).into_response()
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+            let fbody = json!({ "device_id": device_id, "terminalId": terminal_id });
+            match client.post("/fleet/close", fbody).await {
+                Ok(_) => (StatusCode::OK, Json(json!({
+                    "machineId": device_id,
+                    "terminalId": terminal_id,
+                    "status": "ok",
+                }))).into_response(),
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_close", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(json!({ "error": "unresolved close target" }))).into_response(),
+    }
 }
 
 /// Send a prompt (with its CLI-specific submit sequence) to a single terminal.
@@ -3162,6 +3467,19 @@ mod tests {
             let j = machine_to_json(&roster[0], true);
             assert_eq!(j["self"], true);
             assert_eq!(j["machineId"], self_id);
+        }
+
+        #[test]
+        fn remote_target_without_fabric_is_501_not_installed() {
+            // A remote (non-self) machine with the fabric absent must classify as
+            // NotInstalled, which the dispatchers render as HTTP 501 "peering not installed".
+            let roster = [m("self", Some("windows"), true), m("remote", Some("linux"), true)];
+            let res = resolve_fleet_target(None, Some("remote"), None, &roster, "self");
+            assert_eq!(classify_fleet_route(res, false), ExecuteRoute::NotInstalled);
+            // The exact 501 body the dispatchers return for that route.
+            let (status, body) = peering_not_installed();
+            assert_eq!(status.as_u16(), 501);
+            assert_eq!(body.0["error"], "peering not installed");
         }
     }
 }
