@@ -121,7 +121,7 @@ export const EulaAcceptModal: React.FC = () => {
                             {onlineLinks.map((l, i) => (
                                 <React.Fragment key={l.url}>
                                     {i > 0 && ' · '}
-                                    <a href={l.url} onClick={openLink(l.url)}>{l.label}</a>
+                                    <a href={l.url} onClick={openLink(l.url)} style={{ color: '#4ea1ff' }}>{l.label}</a>
                                 </React.Fragment>
                             ))}
                         </p>
