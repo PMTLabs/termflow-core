@@ -73,9 +73,11 @@ test('mount creates a terminal preserving the load-bearing xterm options (R6)', 
 
   const term = mockTerm('t1');
   expect(term.options.allowProposedApi).toBe(true);
-  // Steady cursor (see TerminalEngine): a blinking cursor pulses on each keystroke under
-  // TUIs that re-send DECSCUSR (codex), so the calm default is non-blinking.
-  expect(term.options.cursorBlink).toBe(false);
+  // Windows-Terminal-style cursor: slim blinking bar (user request; replaces the
+  // earlier steady-block default — DECSCUSR blink-phase restarts under codex are
+  // the same behavior Windows Terminal itself exhibits).
+  expect(term.options.cursorBlink).toBe(true);
+  expect(term.options.cursorStyle).toBe('bar');
   expect(term.options.convertEol).toBe(false);
   expect(term.options.scrollback).toBe(10000);
   expect(term.options.lineHeight).toBe(1.1);

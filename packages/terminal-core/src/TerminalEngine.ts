@@ -576,11 +576,15 @@ export class TerminalEngine {
         fontSize,
         lineHeight: this.opts.lineHeight ?? 1.1,
         theme: this.opts.theme ?? DEFAULT_THEME,
-        // Steady cursor (no blink). TUIs like codex re-send DECSCUSR (ESC[0 q) on every
-        // keystroke, which restarts xterm's blink phase and makes the cursor visibly pulse
-        // on each keypress (the "flash"). A steady cursor avoids that and is the calmer
-        // default; ESC[0 q falls back to this option, so codex inherits steady too.
-        cursorBlink: false,
+        // Windows-Terminal-style cursor: slim blinking bar (user request). Note the
+        // DECSCUSR interplay: TUIs like codex re-send ESC[0 q on every keystroke,
+        // which restarts xterm's blink phase — the cursor stays solid while typing
+        // and resumes blinking when idle. That matches Windows Terminal's own
+        // behavior, so it's accepted rather than avoided (this replaces the earlier
+        // steady-block default that existed to sidestep exactly that restart).
+        // ESC[0 q falls back to these options, so codex inherits bar+blink too.
+        cursorBlink: true,
+        cursorStyle: 'bar',
         // macOS Option-as-Meta (e.g. Option+P -> ESC p). Host opts in; no-op elsewhere.
         macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
         scrollback: this.opts.scrollback ?? 10000,
