@@ -296,6 +296,47 @@ test('popup keys: closed intercepts nothing; passive maps Down/Shift+Enter/Esc; 
   expect(actions).toEqual(['focus', 'accept', 'dismiss', 'up', 'accept', 'delete']);
 });
 
+// Triple review (codex, docs/review/051): popup-nav's own comment claims
+// "navigation never leaks to the PTY", but the matching keyup wasn't claimed,
+// so once an encoder that forwards keyup (Win32-Input-Mode, or Kitty flag 2)
+// was active, an unmatched release record leaked through. Ctrl+C's keyup is a
+// separate, deliberately-documented exception (see TerminalEngine.ts) and is
+// NOT covered by this fix.
+test('popup-navigation keydown is claimed and its keyup does not leak to the PTY under Win32-Input-Mode', () => {
+  const { engine, term, writes, actions } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  engine.setSuggestPopupState('passive');
+
+  const downHandled = term.keyHandler!(withKey({ key: 'ArrowDown', keyCode: 40 }));
+  expect(downHandled).toBe(false); // claimed by popup nav, not sent to the PTY
+  expect(actions).toEqual(['focus']);
+
+  const upHandled = term.keyHandler!(withKey({ key: 'ArrowDown', keyCode: 40, type: 'keyup' }));
+  expect(upHandled).toBe(false); // suppressed — must NOT reach the Win32 encoder
+  expect(writes).toEqual([]); // no Win32-encoded release record reached the PTY
+});
+
+test('zoom keydown is claimed and its keyup does not leak to the PTY under Win32-Input-Mode', () => {
+  const { term, writes } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]);
+
+  term.keyHandler!(withKey({ key: '=', keyCode: 187, ctrlKey: true }));
+  const upHandled = term.keyHandler!(withKey({ key: '=', keyCode: 187, ctrlKey: true, type: 'keyup' }));
+
+  expect(upHandled).toBe(false);
+  expect(writes).toEqual([]);
+});
+
+test('unrelated keyup (never claimed by a UI shortcut) still encodes normally under Win32-Input-Mode', () => {
+  const { term, writes } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]);
+
+  const upHandled = term.keyHandler!(withKey({ key: 'a', keyCode: 65, type: 'keyup' }));
+
+  expect(upHandled).toBe(false); // still encoded — just via the Win32 path, not suppressed
+  expect(writes).toEqual([['pid-1', '\x1b[65;30;97;0;0;1_']]);
+});
+
 test('passive Shift+Enter is intercepted BEFORE the Shift+Enter->LF shim (no \\n write)', () => {
   const { engine, term, writes } = makeEngine();
   engine.setSuggestPopupState('passive');

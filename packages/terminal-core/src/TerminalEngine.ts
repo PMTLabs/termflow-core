@@ -457,6 +457,16 @@ export class TerminalEngine {
   // and serve copy from it via pickCopyText(). Only consulted while mouse tracking is
   // active, so normal-shell copy behavior is byte-identical to before.
   private retainedSelection = '';
+  // Triple-review finding (docs/review/051): keys whose keydown was already
+  // claimed by an earlier UI shortcut in attachCustomKeyEventHandler (zoom, the
+  // post-accept repeat guard, popup navigation). Their matching keyup must not
+  // reach the Kitty/Win32 encoders below — unlike xterm's legacy default (a
+  // no-op on keyup), those encoders DO forward keyup as a release record when
+  // their protocol's event-reporting is active, so an unclaimed keyup would
+  // leak an unmatched release to the app for a press it was never shown. Ctrl+C's
+  // keyup is a deliberate, documented exception (see the smart-routing block
+  // below), so it's intentionally not tracked here.
+  private uiClaimedKeydownKeys = new Set<string>();
 
   // "Selection mode" (user-toggled): true while we've suspended the app's mouse capture
   // so a plain drag selects locally. savedMouseMode is the tracking mode to restore when
@@ -952,11 +962,21 @@ export class TerminalEngine {
           this.retainedSelection = '';
         }
       }
+      // Suppress the matching keyup for a keydown a UI shortcut already claimed
+      // below (see uiClaimedKeydownKeys) — must run before the Kitty/Win32
+      // encoder blocks, which unlike xterm's legacy default DO forward keyup.
+      if (event.type === 'keyup' && this.uiClaimedKeydownKeys.has(event.key)) {
+        this.uiClaimedKeydownKeys.delete(event.key);
+        event.preventDefault();
+        event.stopPropagation();
+        return false;
+      }
       // Zoom shortcuts — xterm can swallow these, so handle directly.
       if (event.ctrlKey && event.type === 'keydown') {
         if (event.key === '=' || event.key === '+' || event.code === 'NumpadAdd') {
           event.preventDefault();
           event.stopPropagation();
+          this.uiClaimedKeydownKeys.add(event.key);
           this.handleZoom('in');
           return false;
         }
@@ -968,12 +988,14 @@ export class TerminalEngine {
         ) {
           event.preventDefault();
           event.stopPropagation();
+          this.uiClaimedKeydownKeys.add(event.key);
           this.handleZoom('out');
           return false;
         }
         if (event.key === '0' || event.code === 'Digit0' || event.code === 'Numpad0') {
           event.preventDefault();
           event.stopPropagation();
+          this.uiClaimedKeydownKeys.add(event.key);
           this.handleZoom('reset');
           return false;
         }
@@ -990,6 +1012,7 @@ export class TerminalEngine {
       ) {
         event.preventDefault();
         event.stopPropagation();
+        this.uiClaimedKeydownKeys.add(event.key);
         return false;
       }
 
@@ -1010,6 +1033,7 @@ export class TerminalEngine {
         if (action) {
           event.preventDefault();
           event.stopPropagation();
+          this.uiClaimedKeydownKeys.add(event.key);
           this.opts.onSuggestAction?.(action);
           return false;
         }
