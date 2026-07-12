@@ -94,6 +94,10 @@ pub async fn start_api_server(
         // Fleet responder loopback (fabric -> core): run a sentinel-wrapped command
         // in a persistent labeled terminal and long-poll until the sentinel/timeout.
         .route("/api/fleet/local-run", post(fleet_local_run))
+        // Fleet routing (MCP → core → local | fabric-proxied). Static paths, so they
+        // never collide with `/api/terminals/:id`. Registered before the auth layer.
+        .route("/api/fleet/machines", get(fleet_machines))
+        .route("/api/fleet/terminals", get(fleet_terminals))
         // System info endpoints
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
@@ -1128,6 +1132,44 @@ async fn fleet_roster(state: &AppState) -> Vec<FleetMachine> {
         }
     }
     out
+}
+
+/// GET /api/fleet/machines — the fleet roster. Always includes THIS machine (online,
+/// `self: true`); adds fabric peers when the fabric is present. Never 501: with no
+/// fabric this returns exactly the self machine so an agent can still see where it is.
+async fn fleet_machines(State(state): State<AppState>) -> impl IntoResponse {
+    let roster = fleet_roster(&state).await;
+    let machines: Vec<serde_json::Value> = roster
+        .iter()
+        .map(|m| machine_to_json(m, m.machine_id == state.instance_id))
+        .collect();
+    Json(json!({ "machines": machines }))
+}
+
+/// GET /api/fleet/terminals — this machine's terminals, each tagged with this
+/// instance's machine identity so an agent can address them cross-machine. (Peer
+/// terminals are addressed directly via `/api/fleet/screen` with the machineId an
+/// agent learned from `/api/fleet/machines`.)
+async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
+    let machine_id = state.instance_id.clone();
+    let device_name = self_hostname();
+    let os = std::env::consts::OS.to_string();
+    let terminals: Vec<serde_json::Value> = state
+        .terminals
+        .iter()
+        .map(|entry| {
+            let t = entry.value();
+            json!({
+                "id": t.id,
+                "title": t.name,
+                "running": true,
+                "machineId": machine_id,
+                "os": os,
+                "deviceName": device_name,
+            })
+        })
+        .collect();
+    Json(json!({ "terminals": terminals }))
 }
 
 /// Send a prompt (with its CLI-specific submit sequence) to a single terminal.
@@ -3091,6 +3133,39 @@ mod tests {
             let pv = machine_to_json(&peer, false);
             assert!(pv["os"].is_null());
             assert_eq!(pv["self"], false);
+        }
+
+        #[cfg(feature = "integration-tests")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn machines_returns_self_only_when_fabric_absent() {
+            use tokio::net::TcpListener;
+            let app = tauri::test::mock_app();
+            let (tx, _rx) = tokio::sync::broadcast::channel(16);
+            let state = crate::state::AppState::new(
+                tx,
+                app.handle().clone(),
+                crate::app_config::NetworkConfig::defaults(),
+            );
+            let self_id = state.instance_id.clone();
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(super::super::start_api_server(state, listener, false, sd_rx));
+
+            let body: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/api/fleet/machines"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let machines = body["machines"].as_array().unwrap();
+            // Fabric child is absent in mock_app → exactly the self machine.
+            assert_eq!(machines.len(), 1);
+            assert_eq!(machines[0]["machineId"], self_id);
+            assert_eq!(machines[0]["self"], true);
+            assert_eq!(machines[0]["online"], true);
+            assert_eq!(machines[0]["os"], std::env::consts::OS);
         }
     }
 }
