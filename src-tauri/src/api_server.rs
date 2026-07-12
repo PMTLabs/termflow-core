@@ -944,6 +944,192 @@ fn dedup_preserve_order(ids: &[String]) -> Vec<String> {
     ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect()
 }
 
+// ---- Fleet routing (MCP → core) -------------------------------------------
+//
+// A pure, IO-free resolver decides whether a fleet request targets THIS machine
+// or a remote peer, plus a presence-aware classifier that turns a resolution into
+// an HTTP route. Both are unit-tested without an AppState; the async handlers
+// (below) supply the roster + fabric presence and perform the IO.
+
+/// One machine in the fleet roster (this instance plus any fabric peers).
+#[derive(Debug, Clone)]
+pub struct FleetMachine {
+    pub machine_id: String,
+    pub device_name: String,
+    /// Canonical `"windows"|"macos"|"linux"`, or `None`/other for a peer whose OS is
+    /// unknown or not one of the three (then targetable by machineId only).
+    pub os: Option<String>,
+    pub online: bool,
+}
+
+/// The outcome of resolving a fleet request against the roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetResolution {
+    /// This machine handles it.
+    Local,
+    /// A remote peer, whole-machine (spawn a new terminal there).
+    Remote { machine_id: String },
+    /// A specific existing terminal on a remote peer.
+    RemoteTerminal { machine_id: String, terminal_id: String },
+    /// A `targetOS` matched more than one online peer.
+    Ambiguous { candidates: Vec<String> },
+    /// A `targetOS` matched no online peer.
+    NoMatch,
+}
+
+/// A resolution combined with fabric presence — the concrete route the execute
+/// handler takes. Separated from [`FleetResolution`] so the 501/409/404 mapping is
+/// unit-testable without a live server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteRoute {
+    Local,
+    Proxy { device_id: String, terminal_id: Option<String> },
+    NotInstalled,
+    Ambiguous(Vec<String>),
+    NoMatch,
+}
+
+/// Canonicalize a caller-supplied OS string: lowercase, then `osx`/`darwin` → `macos`
+/// and `win`/`win32` → `windows`. Roster OS values are already canonical
+/// (`std::env::consts::OS`), so aliasing is applied to the request side only.
+fn alias_os(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "osx" | "darwin" | "macos" => "macos".to_string(),
+        "win" | "win32" | "windows" => "windows".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Pure resolver. Precedence: `terminalId` → `machineId` → `targetOS` → local.
+/// `self_machine_id` is this instance's id; a match on it collapses to `Local`.
+fn resolve_fleet_target(
+    target_os: Option<&str>,
+    machine_id: Option<&str>,
+    terminal_id: Option<&str>,
+    roster: &[FleetMachine],
+    self_machine_id: &str,
+) -> FleetResolution {
+    let machine_id = machine_id.filter(|s| !s.is_empty());
+    // 1. An explicit terminal id is the strongest signal. A remote machine id makes
+    //    it a RemoteTerminal; otherwise the terminal is local (the handler still has
+    //    the id to run in the existing local terminal).
+    if let Some(tid) = terminal_id.filter(|s| !s.is_empty()) {
+        return match machine_id {
+            Some(mid) if mid != self_machine_id => FleetResolution::RemoteTerminal {
+                machine_id: mid.to_string(),
+                terminal_id: tid.to_string(),
+            },
+            _ => FleetResolution::Local,
+        };
+    }
+    // 2. An explicit machine id: self → Local, else Remote (spawn a new terminal).
+    if let Some(mid) = machine_id {
+        return if mid == self_machine_id {
+            FleetResolution::Local
+        } else {
+            FleetResolution::Remote { machine_id: mid.to_string() }
+        };
+    }
+    // 3. targetOS: the UNIQUE online machine (self counts) with that canonical OS.
+    if let Some(os) = target_os.filter(|s| !s.is_empty()) {
+        let want = alias_os(os);
+        let candidates: Vec<&FleetMachine> = roster
+            .iter()
+            .filter(|m| m.online && m.os.as_deref() == Some(want.as_str()))
+            .collect();
+        return match candidates.as_slice() {
+            [] => FleetResolution::NoMatch,
+            [only] => {
+                if only.machine_id == self_machine_id {
+                    FleetResolution::Local
+                } else {
+                    FleetResolution::Remote { machine_id: only.machine_id.clone() }
+                }
+            }
+            many => FleetResolution::Ambiguous {
+                candidates: many.iter().map(|m| m.machine_id.clone()).collect(),
+            },
+        };
+    }
+    // 4. No routing signal → run here.
+    FleetResolution::Local
+}
+
+/// Fold a resolution together with fabric presence into the concrete execute route.
+/// Remote work with the fabric absent becomes [`ExecuteRoute::NotInstalled`] (HTTP 501).
+fn classify_fleet_route(res: FleetResolution, fabric_installed: bool) -> ExecuteRoute {
+    match res {
+        FleetResolution::Local => ExecuteRoute::Local,
+        FleetResolution::Remote { machine_id } => {
+            if fabric_installed {
+                ExecuteRoute::Proxy { device_id: machine_id, terminal_id: None }
+            } else {
+                ExecuteRoute::NotInstalled
+            }
+        }
+        FleetResolution::RemoteTerminal { machine_id, terminal_id } => {
+            if fabric_installed {
+                ExecuteRoute::Proxy { device_id: machine_id, terminal_id: Some(terminal_id) }
+            } else {
+                ExecuteRoute::NotInstalled
+            }
+        }
+        FleetResolution::Ambiguous { candidates } => ExecuteRoute::Ambiguous(candidates),
+        FleetResolution::NoMatch => ExecuteRoute::NoMatch,
+    }
+}
+
+/// Parse one entry of the fabric `GET /peers` array into a [`FleetMachine`].
+/// Returns `None` when `device_id` is absent (never fabricate a machine).
+fn peer_value_to_machine(p: &serde_json::Value) -> Option<FleetMachine> {
+    let machine_id = p.get("device_id").and_then(|v| v.as_str())?.to_string();
+    Some(FleetMachine {
+        machine_id,
+        device_name: p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        os: p.get("os").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        online: p.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Serialize a machine for the `/api/fleet/machines` roster, tagging `self`.
+fn machine_to_json(m: &FleetMachine, is_self: bool) -> serde_json::Value {
+    json!({
+        "machineId": m.machine_id,
+        "deviceName": m.device_name,
+        "os": m.os,
+        "online": m.online,
+        "self": is_self,
+    })
+}
+
+/// This instance's display name for the roster: the OS hostname, mirroring the
+/// `get_system_info` hostname logic.
+fn self_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "this-machine".to_string())
+}
+
+/// Build the fleet roster: this instance (always online) plus fabric peers when the
+/// fabric child is present. Never errors — a fabric read failure yields self only.
+async fn fleet_roster(state: &AppState) -> Vec<FleetMachine> {
+    let mut out = vec![FleetMachine {
+        machine_id: state.instance_id.clone(),
+        device_name: self_hostname(),
+        os: Some(std::env::consts::OS.to_string()),
+        online: true,
+    }];
+    if crate::fabric_manager::fabric_installed(state) {
+        let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+        if let Ok(raw) = client.get("/peers").await {
+            if let Some(arr) = raw.get("peers").and_then(|v| v.as_array()) {
+                out.extend(arr.iter().filter_map(peer_value_to_machine));
+            }
+        }
+    }
+    out
+}
+
 /// Send a prompt (with its CLI-specific submit sequence) to a single terminal.
 /// Shared by the single-id `/execute` handler and the batch `/batch/execute`
 /// handler. On success returns the JSON body the single-id handler returns;
@@ -2717,5 +2903,194 @@ mod tests {
             watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_millis(150)).await;
         assert!(!done);
         assert_eq!(code, None);
+    }
+
+    mod fleet_tests {
+        use super::super::*;
+
+        fn m(id: &str, os: Option<&str>, online: bool) -> FleetMachine {
+            FleetMachine {
+                machine_id: id.to_string(),
+                device_name: format!("dev-{id}"),
+                os: os.map(|s| s.to_string()),
+                online,
+            }
+        }
+
+        #[test]
+        fn alias_os_canonicalizes_known_aliases() {
+            assert_eq!(alias_os("osx"), "macos");
+            assert_eq!(alias_os("darwin"), "macos");
+            assert_eq!(alias_os("macos"), "macos");
+            assert_eq!(alias_os("win"), "windows");
+            assert_eq!(alias_os("win32"), "windows");
+            assert_eq!(alias_os("WINDOWS"), "windows");
+            assert_eq!(alias_os("linux"), "linux");
+            // Unknown OS passes through lowercased (targetable by machineId only).
+            assert_eq!(alias_os("FreeBSD"), "freebsd");
+        }
+
+        #[test]
+        fn terminal_id_with_remote_machine_is_remote_terminal() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            let r = resolve_fleet_target(None, Some("other"), Some("t-1"), &roster, "self");
+            assert_eq!(
+                r,
+                FleetResolution::RemoteTerminal {
+                    machine_id: "other".into(),
+                    terminal_id: "t-1".into()
+                }
+            );
+        }
+
+        #[test]
+        fn terminal_id_on_self_or_without_machine_is_local() {
+            let roster = [m("self", Some("windows"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, Some("self"), Some("t-1"), &roster, "self"),
+                FleetResolution::Local
+            );
+            assert_eq!(
+                resolve_fleet_target(None, None, Some("t-1"), &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn machine_id_precedence_local_vs_remote() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, Some("self"), None, &roster, "self"),
+                FleetResolution::Local
+            );
+            assert_eq!(
+                resolve_fleet_target(None, Some("other"), None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "other".into() }
+            );
+        }
+
+        #[test]
+        fn os_unique_online_resolves_remote_or_local() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            assert_eq!(
+                resolve_fleet_target(Some("linux"), None, None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "other".into() }
+            );
+            // self counts toward OS matching.
+            assert_eq!(
+                resolve_fleet_target(Some("windows"), None, None, &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn os_alias_matches_canonical_roster_os() {
+            let roster = [m("self", Some("windows"), true), m("mac1", Some("macos"), true)];
+            assert_eq!(
+                resolve_fleet_target(Some("darwin"), None, None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "mac1".into() }
+            );
+        }
+
+        #[test]
+        fn os_ambiguous_when_multiple_online_peers_share_os() {
+            let roster = [
+                m("self", Some("windows"), true),
+                m("lin1", Some("linux"), true),
+                m("lin2", Some("linux"), true),
+            ];
+            match resolve_fleet_target(Some("linux"), None, None, &roster, "self") {
+                FleetResolution::Ambiguous { candidates } => {
+                    assert_eq!(candidates, vec!["lin1".to_string(), "lin2".to_string()]);
+                }
+                other => panic!("expected Ambiguous, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn os_no_match_when_zero_or_only_offline() {
+            let roster = [m("self", Some("windows"), true), m("lin1", Some("linux"), false)];
+            // linux peer exists but is offline → NoMatch.
+            assert_eq!(
+                resolve_fleet_target(Some("linux"), None, None, &roster, "self"),
+                FleetResolution::NoMatch
+            );
+            // no macos peer at all → NoMatch.
+            assert_eq!(
+                resolve_fleet_target(Some("macos"), None, None, &roster, "self"),
+                FleetResolution::NoMatch
+            );
+        }
+
+        #[test]
+        fn no_signals_defaults_to_local() {
+            let roster = [m("self", Some("windows"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, None, None, &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn classify_maps_resolution_and_fabric_presence() {
+            assert_eq!(classify_fleet_route(FleetResolution::Local, false), ExecuteRoute::Local);
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Remote { machine_id: "o".into() }, true),
+                ExecuteRoute::Proxy { device_id: "o".into(), terminal_id: None }
+            );
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Remote { machine_id: "o".into() }, false),
+                ExecuteRoute::NotInstalled
+            );
+            assert_eq!(
+                classify_fleet_route(
+                    FleetResolution::RemoteTerminal { machine_id: "o".into(), terminal_id: "t".into() },
+                    true
+                ),
+                ExecuteRoute::Proxy { device_id: "o".into(), terminal_id: Some("t".into()) }
+            );
+            assert_eq!(
+                classify_fleet_route(
+                    FleetResolution::RemoteTerminal { machine_id: "o".into(), terminal_id: "t".into() },
+                    false
+                ),
+                ExecuteRoute::NotInstalled
+            );
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Ambiguous { candidates: vec!["a".into()] }, true),
+                ExecuteRoute::Ambiguous(vec!["a".into()])
+            );
+            assert_eq!(classify_fleet_route(FleetResolution::NoMatch, true), ExecuteRoute::NoMatch);
+        }
+
+        #[test]
+        fn peer_value_to_machine_reads_os_and_online() {
+            let p = serde_json::json!({
+                "device_id": "dev-x", "name": "Workstation", "os": "linux", "online": true
+            });
+            let machine = peer_value_to_machine(&p).expect("valid peer");
+            assert_eq!(machine.machine_id, "dev-x");
+            assert_eq!(machine.device_name, "Workstation");
+            assert_eq!(machine.os.as_deref(), Some("linux"));
+            assert!(machine.online);
+            // Missing device_id → None (skip, don't fabricate a machine).
+            assert!(peer_value_to_machine(&serde_json::json!({ "name": "x" })).is_none());
+        }
+
+        #[test]
+        fn machine_to_json_tags_self_and_carries_os() {
+            let mac = m("self", Some("windows"), true);
+            let v = machine_to_json(&mac, true);
+            assert_eq!(v["machineId"], "self");
+            assert_eq!(v["deviceName"], "dev-self");
+            assert_eq!(v["os"], "windows");
+            assert_eq!(v["online"], true);
+            assert_eq!(v["self"], true);
+            // A peer with no OS serializes os:null and self:false.
+            let peer = FleetMachine { machine_id: "p".into(), device_name: "P".into(), os: None, online: false };
+            let pv = machine_to_json(&peer, false);
+            assert!(pv["os"].is_null());
+            assert_eq!(pv["self"], false);
+        }
     }
 }
