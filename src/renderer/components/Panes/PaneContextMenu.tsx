@@ -191,13 +191,21 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🪟</span>
         Open New Window
       </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'vertical'))}>
-        <span className="menu-icon">▥</span>
-        Open New Pane Vertically
+      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'vertical', 'after'))}>
+        <span className="menu-icon">➡️</span>
+        Open New Pane Right
       </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'horizontal'))}>
-        <span className="menu-icon">▤</span>
-        Open New Pane Horizontally
+      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'vertical', 'before'))}>
+        <span className="menu-icon">⬅️</span>
+        Open New Pane Left
+      </button>
+      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'horizontal', 'before'))}>
+        <span className="menu-icon">⬆️</span>
+        Open New Pane Up
+      </button>
+      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'horizontal', 'after'))}>
+        <span className="menu-icon">⬇️</span>
+        Open New Pane Down
       </button>
       <div className="context-menu-divider" />
       <button className="context-menu-item" onClick={handleToggleMaximize}>

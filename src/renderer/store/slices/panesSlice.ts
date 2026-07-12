@@ -109,16 +109,19 @@ function splitLeafInTree(
 export const splitPaneWithTab = createAsyncThunk(
   'panes/splitPaneWithTab',
   async (
-    { paneId, direction, shellType = 'default', name, cwd }:
-      { paneId: string; direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; cwd?: string }
+    { paneId, direction, position = 'after', shellType = 'default', name, cwd }:
+      { paneId: string; direction: 'horizontal' | 'vertical'; position?: 'before' | 'after'; shellType?: string; name?: string; cwd?: string }
   ) => {
 
     // Create new terminal ID for the new pane.
     // Layout convention: a 'horizontal' split stacks panes top/bottom; a
-    // 'vertical' split places them left/right. Name the panes accordingly.
+    // 'vertical' split places them left/right. `position` says which side of the
+    // original the NEW pane lands on ('before' = top/left, 'after' = bottom/right).
+    // Name the panes accordingly.
     const newTerminalId = generateId('tm');
-    const uniqueTitle = name || `Terminal ${direction === 'horizontal' ? 'Bottom' : 'Right'}`;
-    const uniqueOriginalTitle = `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`;
+    const [firstLabel, secondLabel] = direction === 'horizontal' ? ['Top', 'Bottom'] : ['Left', 'Right'];
+    const uniqueTitle = name || `Terminal ${position === 'before' ? firstLabel : secondLabel}`;
+    const uniqueOriginalTitle = `Terminal ${position === 'before' ? secondLabel : firstLabel}`;
 
     // Backlog 004: stash the inherited cwd for the new pane's first spawn. Kept in
     // a transient registry (NOT the pane tree) so detach/restore payloads stay clean.
@@ -128,7 +131,7 @@ export const splitPaneWithTab = createAsyncThunk(
     // The pane split will happen in the reducer
 
     // Return data for the reducer
-    return { paneId, direction, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle };
+    return { paneId, direction, position, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle };
   }
 );
 
@@ -495,7 +498,7 @@ const panesSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder.addCase(splitPaneWithTab.fulfilled, (state, action) => {
-      const { paneId, direction, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle } = action.payload;
+      const { paneId, direction, position, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle } = action.payload;
       
       if (!state.paneTree) return;
       
@@ -523,9 +526,10 @@ const panesSlice = createSlice({
           node.type = 'split';
           node.direction = direction;
           node.size = 50;
-          node.children = [originalPane, newPane];
+          // 'before' puts the new pane on the top/left of the original.
+          node.children = position === 'before' ? [newPane, originalPane] : [originalPane, newPane];
           delete node.terminalId;
-          
+
           // Set the new pane as active
           state.activePaneId = newPaneId;
           // Splitting the maximized pane reshapes the tab — exit maximize so the new

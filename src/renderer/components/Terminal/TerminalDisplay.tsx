@@ -360,16 +360,28 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     return [
       ...(paneId ? [
         {
-          label: 'New Pane Horizontally',
-          icon: '▤',
-          title: 'Split this pane with a new terminal below it (stacked top/bottom).',
-          click: () => splitPaneById(paneId, 'horizontal'),
+          label: 'New Pane Right',
+          icon: '➡️',
+          title: 'Split this pane with a new terminal to its right.',
+          click: () => splitPaneById(paneId, 'vertical', 'after'),
         },
         {
-          label: 'New Pane Vertically',
-          icon: '▥',
-          title: 'Split this pane with a new terminal beside it (side-by-side left/right).',
-          click: () => splitPaneById(paneId, 'vertical'),
+          label: 'New Pane Left',
+          icon: '⬅️',
+          title: 'Split this pane with a new terminal to its left.',
+          click: () => splitPaneById(paneId, 'vertical', 'before'),
+        },
+        {
+          label: 'New Pane Up',
+          icon: '⬆️',
+          title: 'Split this pane with a new terminal above it.',
+          click: () => splitPaneById(paneId, 'horizontal', 'before'),
+        },
+        {
+          label: 'New Pane Down',
+          icon: '⬇️',
+          title: 'Split this pane with a new terminal below it.',
+          click: () => splitPaneById(paneId, 'horizontal', 'after'),
         },
       ] : []),
       {
