@@ -80,6 +80,13 @@ export interface TerminalCacheEntry {
   // persistence a remount mid-CLI-session would forget the gate and capture
   // agent-CLI input again.
   promptGate?: PromptGate | null;
+  // Enhanced keyboard protocol state, carried across remounts so a mid-session
+  // protocol handshake (Kitty flags pushed once, Win32-Input-Mode's ?9001h sent
+  // once per PTY session) isn't lost on a tab switch / pane split. Without this,
+  // a fresh TerminalEngine (created per React mount) starts with empty state even
+  // though the underlying cached Terminal/PTY session never re-sent the handshake.
+  kbState?: import('./keyboardProtocol').KeyboardProtocolState;
+  win32State?: import('./win32InputMode').Win32InputModeState;
 }
 
 export const terminalCache = new Map<string, TerminalCacheEntry>();

@@ -5,6 +5,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { SearchAddon } from '@xterm/addon-search';
 import type { ISearchOptions } from '@xterm/addon-search';
 import { KeyboardProtocolState, encodeKey } from './keyboardProtocol';
+import { Win32InputModeState, encodeWin32Key } from './win32InputMode';
 import { HeuristicCapture, decideSuggestKey } from './commandCapture';
 import type { SuggestPopupState } from './commandCapture';
 
@@ -323,6 +324,8 @@ export class TerminalEngine {
   private searchAddon: SearchAddon | null = null;
   // Enhanced keyboard protocol state (Kitty + modifyOtherKeys); see keyboardProtocol.ts.
   private kbState = new KeyboardProtocolState();
+  // Win32-Input-Mode (ConPTY-offered, Windows-only); see win32InputMode.ts.
+  private win32State = new Win32InputModeState();
   private enhancedKbEnabled(): boolean {
     return this.opts.enhancedKeyboard ? this.opts.enhancedKeyboard() : true;
   }
@@ -331,6 +334,14 @@ export class TerminalEngine {
       this.enhancedKbEnabled() &&
       (this.kbState.activeFlags() !== 0 || this.kbState.snapshot().modifyOtherKeys >= 1)
     );
+  }
+  // Deliberately orthogonal to protocolActive() (see design 043 "Why full-session
+  // activation"): ConPTY offers Win32-Input-Mode for every Windows session, not
+  // just TUIs, so folding this into protocolActive() would silently disable the
+  // command-suggest popup (suggestionsAllowed() requires !protocolActive() at a
+  // plain shell prompt) on every Windows machine.
+  private win32InputModeActive(): boolean {
+    return this.isWindowsPlatform() && this.enhancedKbEnabled() && this.win32State.isActive();
   }
   // Backlog 011 — command capture + suggest popup interception state.
   private capture: HeuristicCapture | null = null;
@@ -486,6 +497,16 @@ export class TerminalEngine {
     let term: Terminal | undefined;
     let fit: FitAddon | undefined;
     let search: SearchAddon | undefined;
+
+    // Adopt enhanced-keyboard-protocol state from a prior mount on this same
+    // cacheKey (review 046/047: TerminalEngine is a fresh JS object per React
+    // mount, so without this a remount permanently loses Kitty/Win32-Input-Mode
+    // state the underlying PTY session already negotiated — ConPTY sends
+    // ?9001h exactly once per session, it never repeats). Must happen before
+    // the CSI handlers below reassign kbState.getScreen, which is safe on an
+    // adopted (pre-existing) instance — it just rebinds the closure.
+    if (cached?.kbState) this.kbState = cached.kbState;
+    if (cached?.win32State) this.win32State = cached.win32State;
 
     const fontSize = this.opts.fontSize ?? DEFAULT_FONT_SIZE;
 
@@ -835,6 +856,7 @@ export class TerminalEngine {
         { intermediates: '!', final: 'p' },
         () => {
           this.kbState.reset();
+          if (this.isWindowsPlatform()) this.win32State.disable();
           return false; // observe only — xterm performs its own soft reset
         },
       );
@@ -847,12 +869,25 @@ export class TerminalEngine {
           const n = Array.isArray(v) ? v[0] : v;
           return n === 1049 || n === 1047 || n === 47;
         });
+      // Win32-Input-Mode (Windows-only): ConPTY sends CSI ?9001h unconditionally at
+      // the start of every session (confirmed live on a plain pwsh tab) — folded
+      // into the same ?h/?l handler as the alt-screen check above, gated on
+      // isWindowsPlatform() so win32State can never flip on off-Windows even if a
+      // stray ?9001h somehow appeared in a byte stream. See design 043 / plan 044.
+      const isWin32InputModeParam = (params: (number | number[])[]): boolean =>
+        params.some((v) => (Array.isArray(v) ? v[0] : v) === 9001);
       const altEnter = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
         if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+          this.win32State.enable();
+        }
         return false; // observe only — xterm handles the actual mode switch
       });
       const altExit = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
         if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+          this.win32State.disable();
+        }
         return false;
       });
       this.disposables.push(() => altEnter.dispose(), () => altExit.dispose());
@@ -994,7 +1029,8 @@ export class TerminalEngine {
         !event.metaKey &&
         // When a protocol is active, fall through so the encoder sends the real
         // (distinguishable) Shift+Enter the app expects, instead of the LF shim.
-        !this.protocolActive()
+        !this.protocolActive() &&
+        !this.win32InputModeActive()
       ) {
         event.preventDefault();
         event.stopPropagation();
@@ -1080,6 +1116,31 @@ export class TerminalEngine {
         }
       }
 
+      // Win32-Input-Mode: ConPTY offers this for every Windows session (not just
+      // TUIs), so once active it becomes the default encoding for this pane.
+      // Runs after Kitty/modifyOtherKeys so an app that explicitly opts into Kitty
+      // still wins; encodeWin32Key returns null only for IME/AltGr, which fall
+      // through to xterm's normal text path below.
+      if (this.win32InputModeActive()) {
+        const seq = encodeWin32Key(event, true);
+        if (seq !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          // Review 046/047: this write bypasses onData, the only other path that
+          // feeds command-suggest capture — route BEFORE the write reaches the
+          // PTY, same ordering rule as the existing onData path and the
+          // Shift+Enter LF-shim.
+          const captureSentinel = this.win32CaptureSentinel(event);
+          if (captureSentinel !== null) this.routeCaptureData(captureSentinel);
+          if (this.attachedProcessId) {
+            Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
+              this.opts.onDiag?.(() => `[TERM-DIAG] win32 kb write ignored: ${e}`);
+            });
+          }
+          return false;
+        }
+      }
+
       return true;
     });
 
@@ -1154,6 +1215,13 @@ export class TerminalEngine {
       // Backlog 011: mark survives the entry swap (live capture owns it now).
       captureMark: existingCache?.captureMark ?? null,
       promptGate: existingCache?.promptGate ?? null,
+      // Enhanced keyboard protocol state — see the adoption comment at the top
+      // of mount(). Writing `this.kbState`/`this.win32State` back here (rather
+      // than existingCache's) is correct in both cases: if we adopted the cached
+      // instance above, this is a no-op re-write of the same object; if this is
+      // a genuinely fresh terminal, it seeds the cache with the fresh instance.
+      kbState: this.kbState,
+      win32State: this.win32State,
     });
     enforceCacheCap();
 
@@ -1333,6 +1401,14 @@ export class TerminalEngine {
       // New shell: its own prompt hook re-proves itself (fresh gate state).
       this.setPromptGate(false, false);
       this.sawInputWhileDisarmed = false;
+      // Review 046/047: a new processId is a new PTY session with its own
+      // independent protocol handshake — carrying over the old session's
+      // Kitty/Win32-Input-Mode state would be wrong (stale flags, or a
+      // Win32-Input-Mode flag the new session hasn't actually reasserted yet).
+      // Safe now that mount() persists this state across remounts (Task 3):
+      // without this reset, that persistence would leak state across processes.
+      this.kbState.reset();
+      if (this.isWindowsPlatform()) this.win32State.disable();
     }
     const entry = terminalCache.get(this.cacheKey);
     if (!entry) {
@@ -1912,6 +1988,37 @@ export class TerminalEngine {
     // CLIs are covered by the prompt gate (routeCaptureData).
     if (!this.isWindowsPlatform() && this.term.modes.sendFocusMode) return false;
     return this.opts.commandSuggestions?.() ?? true;
+  }
+
+  // Set of DOM `key` values that must NOT plant a capture mark under
+  // Win32-Input-Mode — mirrors routeCaptureData's existing ESC-sequence
+  // exclusion for functional/nav keys in legacy mode (see its `beginsInput`
+  // check below), since those keys never reach routeCaptureData as marking
+  // input today.
+  private static readonly WIN32_CAPTURE_NONMARKING = new Set([
+    'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Insert', 'Delete',
+    'Escape', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+    'Control', 'Shift', 'Alt', 'Meta', 'CapsLock', 'NumLock', 'ScrollLock',
+  ]);
+
+  /** The legacy sentinel byte(s) to feed routeCaptureData() for this key, under
+   *  Win32-Input-Mode — never written to the PTY, only used so command-suggest
+   *  keeps tracking input the same way it does in legacy mode (review 046/047:
+   *  the Win32 write bypasses onData, the only other path that calls
+   *  routeCaptureData). Returns null to skip the call entirely (matches legacy's
+   *  "ESC sequence that isn't Up/Down/paste -> no mark" behavior). Shift+Enter
+   *  deliberately does NOT return '\r' here: under Win32-Input-Mode it's a
+   *  genuine newline-insert (PowerShell/PSReadLine), not submit, so capture must
+   *  not treat it as line-end either. */
+  private win32CaptureSentinel(e: KeyboardEvent): string | null {
+    if (e.type !== 'keydown') return null;
+    if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.shiftKey) return '\r';
+    if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'c') return '\x03';
+    if (e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'l') return '\x0c';
+    if (e.key === 'ArrowUp' && !e.ctrlKey && !e.altKey && !e.shiftKey) return '\x1b[A';
+    if (e.key === 'ArrowDown' && !e.ctrlKey && !e.altKey && !e.shiftKey) return '\x1b[B';
+    if (TerminalEngine.WIN32_CAPTURE_NONMARKING.has(e.key)) return null;
+    return [...e.key].length === 1 ? e.key : '\x08'; // Tab/Backspace/other -> any non-empty, non-special marker
   }
 
   /** Route typed input (pre-echo) into the capture heuristic. */

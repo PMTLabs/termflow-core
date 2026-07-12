@@ -325,6 +325,43 @@ test('3-press Ctrl+C burst forces raw SIGINT even under an active protocol', () 
   expect(calls.write).toEqual([['p1', '\x1b[99;5u'], ['p1', '\x1b[99;5u']]);
 });
 
+// ---------------------------------------------------------------------------
+// Win32-Input-Mode + kbState persistence across remounts (review 046/047)
+// ---------------------------------------------------------------------------
+
+test('kbState and win32State survive a remount (same cacheKey, new TerminalEngine instance)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine1 = new TerminalEngine(bridge, { cacheKey: 'remount1', isWindows: true });
+  engine1.mount(makeContainer());
+  engine1.attach('p1');
+  const term = mockTerm('remount1');
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  engine1.unmount();
+
+  const engine2 = new TerminalEngine(bridge, { cacheKey: 'remount1', isWindows: true });
+  engine2.mount(makeContainer()); // same cacheKey -> adopts the cached win32State
+  engine2.attach('p1');
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(false); // encoded via Win32-Input-Mode, not legacy passthrough
+  expect(calls.write).toEqual([['p1', '\x1b[65;30;97;1;0;1_']]);
+});
+
+test('attach() to a NEW processId resets win32State (new PTY session, own handshake)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'reattach1', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('reattach1');
+  term.csiHandlers['?h']([9001]);
+
+  engine.attach('p2'); // simulates the old shell exiting, a new one spawned in the same pane
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // legacy path — p2's own ?9001h hasn't arrived yet
+  expect(calls.write).toEqual([]); // nothing written via the protocol path
+});
+
 test('after attach("p1"), term.onResize debounces then routes to bridge.resize("p1", cols, rows)', () => {
   jest.useFakeTimers();
   try {

@@ -60,6 +60,19 @@ function key(k: string, init: KeyboardEventInit = {}): KeyboardEvent {
   return new KeyboardEvent('keydown', { key: k, ...init });
 }
 
+// Real `KeyboardEvent` (used by `key()` above) doesn't reliably carry `keyCode`
+// through its constructor init dict (not part of the spec'd KeyboardEventInit) —
+// Win32-Input-Mode needs it, so this mirrors engine.test.ts's plain-object
+// `withKey` pattern instead, for use with `term.keyHandler!(...)` directly.
+function withKey(over: Partial<KeyboardEvent>): KeyboardEvent {
+  return {
+    type: 'keydown', key: 'a', ctrlKey: false, altKey: false,
+    shiftKey: false, metaKey: false, repeat: false,
+    preventDefault() {}, stopPropagation() {},
+    ...over,
+  } as unknown as KeyboardEvent;
+}
+
 beforeEach(() => {
   terminalCache.clear();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -146,6 +159,51 @@ test('no capture while a keyboard protocol is active (TUI/REPL owns keys)', () =
   term.emitData('\r');
   expect(inputLines).toEqual([]);
   expect(submitted).toEqual([]);
+});
+
+// Review 046/047 (critical finding): win32InputModeActive() being orthogonal to
+// protocolActive() is necessary but not sufficient — the Win32 encoder bypasses
+// onData (the only OTHER path that feeds routeCaptureData), so without the
+// win32CaptureSentinel fix, capture would silently receive nothing at every
+// plain Windows shell prompt once ConPTY's ?9001h arrives. This proves the fix
+// actually works end-to-end (typed keys -> mark planted -> echo read -> submit),
+// not just that the popup isn't suppressed.
+test('command-suggest capture still works once Win32-Input-Mode is active (review 046/047 fix)', () => {
+  const { term, submitted } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  term.__setLine(0, 'PS> ');
+  term.__setCursor(4, 0);
+  term.keyHandler!(withKey({ key: 'g', keyCode: 71 })); // plants the mark via win32CaptureSentinel
+  term.__setLine(0, 'PS> git status'); // shell echoes the (win32-encoded) keystrokes
+  term.__setCursor(14, 0);
+  term.emitWriteParsed();
+  term.keyHandler!(withKey({ key: 'Enter', keyCode: 13 }));
+  expect(submitted).toEqual(['git status']);
+});
+
+test('Shift+Enter under Win32-Input-Mode is NOT treated as submit for capture (it is a real newline-insert now)', () => {
+  const { term, submitted, inputLines } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]);
+  term.__setLine(0, 'PS> ');
+  term.__setCursor(4, 0);
+  term.keyHandler!(withKey({ key: 'x', keyCode: 88 }));
+  term.__setLine(0, 'PS> x');
+  term.__setCursor(5, 0);
+  term.emitWriteParsed();
+  term.keyHandler!(withKey({ key: 'Enter', keyCode: 13, shiftKey: true }));
+  expect(submitted).toEqual([]); // not submitted — Shift+Enter inserts a line, doesn't accept it
+  expect(inputLines[inputLines.length - 1]).toBe('x'); // mark/line still live, not cleared
+});
+
+test('functional/nav keys under Win32-Input-Mode do not plant a spurious mark', () => {
+  const { term, inputLines } = makeEngine({ isWindows: true });
+  term.csiHandlers['?h']([9001]);
+  term.__setLine(0, 'PS> ');
+  term.__setCursor(4, 0);
+  term.keyHandler!(withKey({ key: 'F5', keyCode: 116 }));
+  term.keyHandler!(withKey({ key: 'ArrowLeft', keyCode: 37 }));
+  term.emitWriteParsed();
+  expect(inputLines).toEqual([]); // no mark was ever planted, so no line to report
 });
 
 test('no capture while an app holds mouse tracking (codex text area)', () => {
