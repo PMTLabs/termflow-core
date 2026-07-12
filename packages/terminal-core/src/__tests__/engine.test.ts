@@ -73,9 +73,11 @@ test('mount creates a terminal preserving the load-bearing xterm options (R6)', 
 
   const term = mockTerm('t1');
   expect(term.options.allowProposedApi).toBe(true);
-  // Steady cursor (see TerminalEngine): a blinking cursor pulses on each keystroke under
-  // TUIs that re-send DECSCUSR (codex), so the calm default is non-blinking.
-  expect(term.options.cursorBlink).toBe(false);
+  // Windows-Terminal-style cursor: slim blinking bar (user request; replaces the
+  // earlier steady-block default — DECSCUSR blink-phase restarts under codex are
+  // the same behavior Windows Terminal itself exhibits).
+  expect(term.options.cursorBlink).toBe(true);
+  expect(term.options.cursorStyle).toBe('bar');
   expect(term.options.convertEol).toBe(false);
   expect(term.options.scrollback).toBe(10000);
   expect(term.options.lineHeight).toBe(1.1);
@@ -323,6 +325,134 @@ test('3-press Ctrl+C burst forces raw SIGINT even under an active protocol', () 
   expect(third).toBe(true); // burst -> raw \x03 escape hatch (xterm emits it)
   // Only the first two encoded sends reached the bridge; the burst press did not.
   expect(calls.write).toEqual([['p1', '\x1b[99;5u'], ['p1', '\x1b[99;5u']]);
+});
+
+// ---------------------------------------------------------------------------
+// Win32-Input-Mode + kbState persistence across remounts (review 046/047)
+// ---------------------------------------------------------------------------
+
+test('kbState and win32State survive a remount (same cacheKey, new TerminalEngine instance)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine1 = new TerminalEngine(bridge, { cacheKey: 'remount1', isWindows: true });
+  engine1.mount(makeContainer());
+  engine1.attach('p1');
+  const term = mockTerm('remount1');
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  engine1.unmount();
+
+  const engine2 = new TerminalEngine(bridge, { cacheKey: 'remount1', isWindows: true });
+  engine2.mount(makeContainer()); // same cacheKey -> adopts the cached win32State
+  engine2.attach('p1');
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(false); // encoded via Win32-Input-Mode, not legacy passthrough
+  expect(calls.write).toEqual([['p1', '\x1b[65;30;97;1;0;1_']]);
+});
+
+test('attach() to a NEW processId resets win32State (new PTY session, own handshake)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'reattach1', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('reattach1');
+  term.csiHandlers['?h']([9001]);
+
+  engine.attach('p2'); // simulates the old shell exiting, a new one spawned in the same pane
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // legacy path — p2's own ?9001h hasn't arrived yet
+  expect(calls.write).toEqual([]); // nothing written via the protocol path
+});
+
+// Internal workflow review (docs/review/052) found and verified this live:
+// win32InputModeActive() alone is not enough to gate the Win32 block. Kitty's
+// encodeKey deliberately returns null (defer to legacy) for bare/unmodified
+// keys even while Kitty is active — without an explicit !protocolActive()
+// check, the Win32 block hijacked every one of those keys into a Win32-encoded
+// record instead of true legacy passthrough, breaking basic typing for any
+// Windows console app that pushes ANY Kitty flag.
+test('an app with Kitty active still gets true legacy passthrough for keys Kitty defers, even with Win32-Input-Mode also active', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kitty-win32-1', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kitty-win32-1');
+
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  term.csiHandlers['>u']([1]); // the app ALSO pushes Kitty flag 1
+
+  // Kitty deliberately defers a bare, unmodified letter to legacy (see
+  // keyboardProtocol.ts's encodeKitty: "bare modifier keys, plain/shift-only
+  // text -> null"). It must reach the app as true legacy passthrough, not get
+  // reinterpreted as a Win32-Input-Mode record.
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // true legacy passthrough — xterm's own default handling
+  expect(calls.write).toEqual([]); // nothing written via either protocol path
+});
+
+test('Ctrl+C still gets real Kitty encoding when Kitty is active, even with Win32-Input-Mode also active', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kitty-win32-2', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kitty-win32-2');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['>u']([1]);
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u']]); // real Kitty encoding, not a Win32 record
+});
+
+// Internal workflow review (docs/review/052): the ?9001l disable path and the
+// DECSTR-on-Windows disable path both had zero test coverage — only the
+// enable side was ever exercised, so a regression in either `if` condition
+// would have gone undetected by the full existing suite.
+test('CSI ?9001l disables win32State (the enable side is well-tested; the disable side was not)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w5', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w5');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['?l']([9001]); // app/ConPTY turns it back off
+
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+  expect(handled).toBe(true); // back to legacy passthrough
+  expect(calls.write).toEqual([]);
+});
+
+test('DECSTR soft reset disables win32State on Windows (only the Kitty-flags variant was tested before)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w6', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w6');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['p']([]); // DECSTR (intermediates '!', final 'p')
+
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+test('isWindows: false never activates Win32-Input-Mode even if ?9001h somehow arrives', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w4', isWindows: false });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w4');
+
+  term.csiHandlers['?h']([9001]); // must be a no-op off-Windows
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // falls through to xterm's own default handling
+  expect(calls.write).toEqual([]); // nothing written via the protocol path
 });
 
 test('after attach("p1"), term.onResize debounces then routes to bridge.resize("p1", cols, rows)', () => {
