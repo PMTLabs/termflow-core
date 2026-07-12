@@ -168,6 +168,16 @@ export const PeersPanel: React.FC = () => {
         }
     };
 
+    const toggleFleetExec = async (deviceId: string, enabled: boolean) => {
+        try {
+            await window.electronAPI?.peerSetFleetExec?.(deviceId, enabled);
+            await refreshPeers();
+        } catch (err) {
+            toastError("Couldn't update fleet permission.");
+            console.error('peerSetFleetExec failed:', err);
+        }
+    };
+
     const confirmRevoke = async () => {
         const target = revokeTarget;
         setRevokeTarget(null);
@@ -195,12 +205,13 @@ export const PeersPanel: React.FC = () => {
     if (!fabricInstalled) {
         return (
             <div className="settings-section">
-                <h2>Peers</h2>
+                <h2>Peers <span className="pro-chip">Pro</span></h2>
                 <div className="connection-card">
                     <p><strong>Peering is not installed.</strong></p>
                     <p className="help-text">
-                        This build doesn’t include the peering component, so pairing with other
-                        machines is unavailable. Everything else works normally.
+                        Multi-machine peering is a <strong>TermFlow Pro</strong> feature. This build
+                        doesn’t include the peering component, so pairing with other machines is
+                        unavailable. Everything else works normally.
                     </p>
                 </div>
             </div>
@@ -209,7 +220,7 @@ export const PeersPanel: React.FC = () => {
 
     return (
         <div className="settings-section">
-            <h2>Peers</h2>
+            <h2>Peers <span className="pro-chip">Pro</span></h2>
             <p className="section-description">
                 Pair this machine with other TermFlow instances to share terminal access over your
                 LAN or private network.
@@ -280,6 +291,7 @@ export const PeersPanel: React.FC = () => {
                                 <span className="peer-name">{peer.name || peer.deviceId}</span>
                                 <span className="peer-meta">
                                     {(peer.addresses[0] ?? 'no address')} · seen {lastSeenLabel(peer.lastSeen)}
+                                    {peer.os ? ` · ${peer.os}` : ''}
                                 </span>
                             </div>
                             <div className="peer-actions">
@@ -302,6 +314,14 @@ export const PeersPanel: React.FC = () => {
 
                             {isOpen && (
                                 <div className="peer-grants">
+                                    <label className="toggle-row">
+                                        <input
+                                            type="checkbox"
+                                            checked={peer.fleetExec}
+                                            onChange={(e) => { void toggleFleetExec(peer.deviceId, e.target.checked); }}
+                                        />
+                                        <span>Allow fleet commands (create &amp; run terminals)</span>
+                                    </label>
                                     {grantIds.length === 0 ? (
                                         <p className="help-text">No terminals to grant.</p>
                                     ) : (

@@ -218,11 +218,26 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
 /// True while the fabric child handle is present (cleared by [`shutdown_fabric`]).
 /// The SSE subscriber uses this to stop reconnecting once the fabric is shut down.
 fn fabric_alive<R: tauri::Runtime>(state: &AppState<R>) -> bool {
+    fabric_installed(state)
+}
+
+/// Whether the peering fabric child is currently running (its handle is stored).
+/// This is the open-core gate every `/api/fleet/*` handler consults: remote fleet
+/// ops with no fabric present return HTTP 501 "peering not installed" (the roster
+/// endpoint still returns self). Same check as [`fabric_alive`], exported for the
+/// fleet router in `api_server.rs`.
+pub(crate) fn fabric_installed<R: tauri::Runtime>(state: &AppState<R>) -> bool {
     state
         .fabric_process
         .lock()
-        .map(|g| g.is_some())
+        .map(|g| option_handle_present(&g))
         .unwrap_or(false)
+}
+
+/// Pure predicate: is an `Option` handle present? Extracted so the gate's logic is
+/// unit-testable without constructing an `AppState` (which needs `mock_app`).
+fn option_handle_present<T>(guard: &Option<T>) -> bool {
+    guard.is_some()
 }
 
 /// Subscribe to the fabric's SSE event stream (`GET /events` on the loopback
@@ -524,6 +539,14 @@ mod tests {
         mcp.mcp_port = 40001;
         mcp.expose_on_network = false;
         assert!(!fabric_respawn_needed(&base, &mcp));
+    }
+
+    #[test]
+    fn option_handle_present_reflects_some_and_none() {
+        // fabric_installed() reduces to "is the child handle present?" — pin that
+        // predicate so the gate can't silently invert (installed when absent).
+        assert!(!super::option_handle_present::<()>(&None));
+        assert!(super::option_handle_present(&Some(())));
     }
 }
 

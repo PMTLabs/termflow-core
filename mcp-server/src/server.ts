@@ -29,15 +29,17 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         version: "0.2.0",
     });
 
-    // Tool: list_terminals
+    // Tool: list_terminals — fleet roster: local terminals (tagged with this machine)
+    // plus peer terminals when the fabric is present. Each entry already carries
+    // machineId/os/deviceName from core.
     server.registerTool(
         "list_terminals",
         {
-            description: "List all active terminal sessions in Auto-Terminal",
+            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine.",
         },
         async () => {
             try {
-                const response = await api.get(`/terminals`);
+                const response = await api.get(`/fleet/terminals`);
                 return {
                     content: [
                         { type: "text", text: JSON.stringify((response.data as { terminals?: unknown }).terminals, null, 2) },
@@ -92,16 +94,40 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         {
             description: "Execute a command in one or more terminals. Returns immediately (command is async).",
             inputSchema: {
-                terminalId: z.union([z.string(), z.array(z.string())]).describe(
-                    `The ID(s) of the terminal(s) to execute on. Pass a single id or an array of ids to send the same command to several terminals. ${ME_HINT}`
+                terminalId: z.union([z.string(), z.array(z.string())]).optional().describe(
+                    `The ID(s) of the terminal(s) to execute on. Pass a single id or an array of ids to send the same command to several terminals. Optional for fleet routing (targetOS/machineId). ${ME_HINT}`
                 ),
                 command: z.string().describe("The command string to execute"),
                 cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot"]).optional().describe("The CLI personality/keystroke pattern. Defaults to copilot if omitted."),
                 useBracketedPaste: z.boolean().optional().describe("Whether to use bracketed paste mode for the prompt (more reliable for long inputs)"),
+                targetOS: z.enum(["windows", "macos", "linux"]).optional().describe("Route to the unique online peer running this OS (fleet). Mutually informative with machineId/terminalId."),
+                machineId: z.string().optional().describe("Route to a specific peer machine by its machineId (fleet)."),
+                timeoutMs: z.number().optional().describe("Fleet: max ms to wait for command completion before returning a live handle (done=false). Clamped server-side to [1000, 3600000]."),
             },
         },
-        async ({ terminalId, command, cliType, useBracketedPaste }) => {
+        async ({ terminalId, command, cliType, useBracketedPaste, targetOS, machineId, timeoutMs }) => {
             try {
+                // Fleet routing: an explicit targetOS or machineId means route through the
+                // cross-machine resolver (core POST /fleet/execute) instead of the local path.
+                // A bare terminalId (no targetOS/machineId) stays local — existing behavior.
+                if (targetOS !== undefined || machineId !== undefined) {
+                    if (Array.isArray(terminalId)) {
+                        return {
+                            content: [{ type: "text", text: "Error: fleet routing targets a single terminal; pass a string terminalId or omit it" }],
+                            isError: true,
+                        };
+                    }
+                    const fleetTerminalId = terminalId !== undefined ? resolveTerminalId(terminalId, getCallerId()) : undefined;
+                    const response = await api.post(`/fleet/execute`, {
+                        command,
+                        ...(targetOS !== undefined && { targetOS }),
+                        ...(machineId !== undefined && { machineId }),
+                        ...(fleetTerminalId !== undefined && { terminalId: fleetTerminalId }),
+                        ...(timeoutMs !== undefined && { timeoutMs }),
+                    });
+                    return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+                }
+
                 const extras = {
                     cliType: cliType || "copilot",
                     ...(useBracketedPaste !== undefined && { useBracketedPaste }),
@@ -117,6 +143,12 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                         ...extras,
                     });
                     return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+                }
+                if (terminalId === undefined) {
+                    return {
+                        content: [{ type: "text", text: "Error: terminalId is required for local execution (pass a terminal id or an array of ids, or use fleet routing via targetOS/machineId)" }],
+                        isError: true,
+                    };
                 }
                 const id = resolveTerminalId(terminalId, getCallerId());
                 const response = await api.post(`/terminals/${id}/execute`, {
@@ -216,6 +248,50 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 const id = resolveTerminalId(terminalId, getCallerId());
                 await api.delete(`/terminals/${id}`);
                 return { content: [{ type: "text", text: "Terminal closed successfully" }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
+    // Tool: list_machines — the fleet's machine roster (this instance + fabric peers).
+    // Fabric absent → just this machine (online). Each entry: machineId, deviceName, os, online, self.
+    server.registerTool(
+        "list_machines",
+        {
+            description: "List all machines in the fleet (this instance plus paired peers). Each entry includes machineId, deviceName, os, online, and self. Use a machineId with execute_command/get_terminal_screen to target a peer.",
+        },
+        async () => {
+            try {
+                const response = await api.get(`/fleet/machines`);
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
+    // Tool: get_terminal_screen — the authoritative LIVE screen of a terminal
+    // (local or a fleet peer). Preferred for observing progress; unlike
+    // get_terminal_output it is the exact on-screen content, not a lossy history.
+    server.registerTool(
+        "get_terminal_screen",
+        {
+            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer). Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
+            inputSchema: {
+                machineId: z.string().optional().describe("Target peer machineId. Omit for a terminal on this machine."),
+                terminalId: z.string().describe("The ID of the terminal whose live screen to read."),
+            },
+        },
+        async ({ machineId, terminalId }) => {
+            try {
+                const response = await api.post(`/fleet/screen`, {
+                    ...(machineId !== undefined && { machineId }),
+                    terminalId,
+                });
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
                 return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };

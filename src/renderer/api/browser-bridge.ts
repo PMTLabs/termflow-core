@@ -478,6 +478,10 @@ class BrowserBridge implements ElectronAPI {
         // No fabric in the browser host.
     }
 
+    async peerSetFleetExec(_deviceId: string, _enabled: boolean): Promise<void> {
+        // No fabric in the browser host.
+    }
+
     async setAcceptPeers(_enabled: boolean): Promise<void> {
         // No fabric in the browser host.
     }

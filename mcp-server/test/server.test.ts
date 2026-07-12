@@ -14,7 +14,7 @@ function makeFakeApi() {
     const api: ApiLike = {
         get: async (url: string) => {
             calls.push({ method: "get", url });
-            return { data: { id: "pc-self", pid: 123, tabId: "tb-1", name: "demo", url } };
+            return { data: { id: "pc-self", pid: 123, tabId: "tb-1", name: "demo", url, terminals: [] } };
         },
         post: async (url: string, body?: unknown) => {
             calls.push({ method: "post", url, body });
@@ -136,5 +136,97 @@ describe("createMcpServer tool wiring", () => {
         const second: any = await client.callTool({ name: "get_my_terminal", arguments: {} });
         expect(second.isError).toBeFalsy();
         expect(called(calls, "get", "/terminals/pc-late")).toBe(true);
+    });
+});
+
+describe("execute_command fleet routing", () => {
+    it("routes to /fleet/execute when targetOS is present", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "execute_command", arguments: { targetOS: "linux", command: "uname -a" } });
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/execute");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).targetOS).toBe("linux");
+        expect((call!.body as any).command).toBe("uname -a");
+        expect((call!.body as any).terminalId).toBeUndefined();
+        // Must NOT touch the local execute path.
+        expect(calls.some((c) => c.url.includes("/execute") && c.url.startsWith("/terminals"))).toBe(false);
+    });
+
+    it("routes to /fleet/execute when machineId is present and forwards terminalId + timeoutMs", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({
+            name: "execute_command",
+            arguments: { machineId: "mac-123", terminalId: "pc-remote", command: "ls", timeoutMs: 120000 },
+        });
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/execute");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).machineId).toBe("mac-123");
+        expect((call!.body as any).terminalId).toBe("pc-remote");
+        expect((call!.body as any).timeoutMs).toBe(120000);
+    });
+
+    it("keeps the local single-terminal path unchanged when no fleet field is set", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "execute_command", arguments: { terminalId: "me", command: "ls" } });
+        expect(called(calls, "post", "/terminals/pc-self/execute")).toBe(true);
+        expect(calls.some((c) => c.url === "/fleet/execute")).toBe(false);
+    });
+
+    it("errors when a fleet call is given an array of terminal ids", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({
+            name: "execute_command",
+            arguments: { machineId: "mac-123", terminalId: ["pc-a", "pc-b"], command: "ls" },
+        });
+        expect(res.isError).toBe(true);
+        expect(calls.some((c) => c.url === "/fleet/execute")).toBe(false);
+    });
+});
+
+describe("list_terminals fleet passthrough", () => {
+    it("reads the fleet roster from GET /fleet/terminals", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "list_terminals", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(called(calls, "get", "/fleet/terminals")).toBe(true);
+        expect(called(calls, "get", "/terminals")).toBe(false);
+    });
+});
+
+describe("list_machines tool", () => {
+    it("reads the machine roster from GET /fleet/machines", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "list_machines", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(called(calls, "get", "/fleet/machines")).toBe(true);
+    });
+});
+
+describe("get_terminal_screen tool", () => {
+    it("posts { terminalId } to /fleet/screen for a local screen", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "get_terminal_screen", arguments: { terminalId: "pc-local" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/screen");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).terminalId).toBe("pc-local");
+        expect((call!.body as any).machineId).toBeUndefined();
+    });
+
+    it("forwards machineId to /fleet/screen for a peer terminal", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "get_terminal_screen", arguments: { machineId: "mac-123", terminalId: "pc-remote" } });
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/screen");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).machineId).toBe("mac-123");
+        expect((call!.body as any).terminalId).toBe("pc-remote");
     });
 });

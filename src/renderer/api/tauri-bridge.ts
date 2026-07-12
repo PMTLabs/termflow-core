@@ -112,6 +112,7 @@ interface ElectronAPI {
   peerApprove: (deviceId: string, accept: boolean) => Promise<void>;
   peerRevoke: (deviceId: string) => Promise<void>;
   peerSetGrant: (deviceId: string, terminalId: string, level: GrantLevel | 'None') => Promise<void>;
+  peerSetFleetExec: (deviceId: string, enabled: boolean) => Promise<void>;
   setAcceptPeers: (enabled: boolean) => Promise<void>;
   fabricStatus: () => Promise<FabricStatus>;
   // Background mode (Plan 010)
@@ -543,6 +544,9 @@ const tauriBridge: ElectronAPI = {
   peerRevoke: async (deviceId) => { await invoke('peer_revoke', { deviceId }); },
   peerSetGrant: async (deviceId, terminalId, level) => {
     await invoke('peer_set_grant', { deviceId, terminalId, level });
+  },
+  peerSetFleetExec: async (deviceId, enabled) => {
+    await invoke('peer_set_fleet_exec', { deviceId, enabled });
   },
   setAcceptPeers: async (enabled) => { await invoke('set_accept_peers', { enabled }); },
   fabricStatus: async () => invoke<FabricStatus>('fabric_status'),

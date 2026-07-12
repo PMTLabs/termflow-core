@@ -33,6 +33,10 @@ export interface PeerInfo {
   online: boolean;
   lastSeen: number | null;
   grants: Record<string, GrantLevel>;
+  /** OS captured at pairing (canonical "windows" | "macos" | "linux", or other). */
+  os?: string;
+  /** Per-peer consent to create-and-run NEW fleet terminals here (default false). */
+  fleetExec: boolean;
 }
 
 /** A short-lived pairing code this machine offers to a peer. */
@@ -229,6 +233,7 @@ export interface ElectronAPI {
   peerApprove?: (deviceId: string, accept: boolean) => Promise<void>;
   peerRevoke?: (deviceId: string) => Promise<void>;
   peerSetGrant?: (deviceId: string, terminalId: string, level: GrantLevel | 'None') => Promise<void>;
+  peerSetFleetExec?: (deviceId: string, enabled: boolean) => Promise<void>;
   setAcceptPeers?: (enabled: boolean) => Promise<void>;
   fabricStatus?: () => Promise<FabricStatus>;
 

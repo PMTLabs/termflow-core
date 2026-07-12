@@ -1014,7 +1014,8 @@ pub fn run() {
         peer_commands::peer_approve,
         peer_commands::peer_revoke,
         peer_commands::peer_set_grant,
-        peer_commands::set_accept_peers
+        peer_commands::set_accept_peers,
+        peer_commands::peer_set_fleet_exec
     ])
     .on_menu_event(|app, event| {
         let id = event.id().as_ref();

@@ -16,7 +16,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use crate::state::AppState;
+use crate::state::{AppState, ChannelPayload};
 use crate::pty_manager::{self, ShellProfile};
 use crate::tmux_manager::{self, CapturedContent, TerminalBackend};
 use crate::recording_endpoints::{
@@ -91,6 +91,16 @@ pub async fn start_api_server(
         // Batch send (fan-out to multiple terminals)
         .route("/api/terminals/batch/execute", post(batch_execute_prompt))
         .route("/api/terminals/batch/input", post(batch_write_terminal))
+        // Fleet responder loopback (fabric -> core): run a sentinel-wrapped command
+        // in a persistent labeled terminal and long-poll until the sentinel/timeout.
+        .route("/api/fleet/local-run", post(fleet_local_run))
+        // Fleet routing (MCP → core → local | fabric-proxied). Static paths, so they
+        // never collide with `/api/terminals/:id`. Registered before the auth layer.
+        .route("/api/fleet/machines", get(fleet_machines))
+        .route("/api/fleet/terminals", get(fleet_terminals))
+        .route("/api/fleet/execute", post(fleet_execute))
+        .route("/api/fleet/screen", post(fleet_screen))
+        .route("/api/fleet/close", post(fleet_close))
         // System info endpoints
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
@@ -811,6 +821,91 @@ fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Which shell dialect a target terminal runs, for sentinel-command wrapping.
+/// pwsh/powershell collapse to `PowerShell`; bash/zsh/sh/wsl/dash to `Posix`;
+/// cmd.exe to `Cmd` (frozen SENTINEL contract).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellKind {
+    PowerShell,
+    Posix,
+    Cmd,
+}
+
+/// Classify a shell from its profile path + name. Unknown shells fall back to
+/// the platform default (cmd on Windows, posix elsewhere) — matching
+/// `spawn_terminal`'s own last-resort fallback.
+pub fn classify_shell_kind(path: &str, name: &str) -> ShellKind {
+    let hay = format!("{} {}", path.to_ascii_lowercase(), name.to_ascii_lowercase());
+    if hay.contains("powershell") || hay.contains("pwsh") {
+        ShellKind::PowerShell
+    } else if hay.contains("cmd") {
+        ShellKind::Cmd
+    } else if hay.contains("bash")
+        || hay.contains("zsh")
+        || hay.contains("wsl")
+        || hay.contains("dash")
+        || hay.contains("sh")
+    {
+        ShellKind::Posix
+    } else if cfg!(target_os = "windows") {
+        ShellKind::Cmd
+    } else {
+        ShellKind::Posix
+    }
+}
+
+/// Wrap `command` so the shell prints a unique done-marker carrying the process
+/// exit code on its own output line. The marker text is `@@TFDONE:NONCE:CODE@@`.
+/// The variable is left UNEXPANDED in the command text so the terminal's echo of
+/// the pasted command (which still shows `$LASTEXITCODE` / `%ERRORLEVEL%` / `$?`,
+/// no digits) never matches `sentinel_exit_code`; only the executed output does.
+pub fn build_sentinel_command(kind: ShellKind, command: &str, nonce: &str) -> String {
+    match kind {
+        ShellKind::PowerShell => {
+            // $LASTEXITCODE is $null in a fresh session and after any cmdlet (it only tracks
+            // EXTERNAL programs; cmdlets set $?). Guard so a NUMERIC code is ALWAYS emitted —
+            // otherwise the marker reads "@@TFDONE:N:@@" (empty between the colons),
+            // sentinel_exit_code never matches, and the run false-times-out.
+            format!(
+                "{} ; $c = if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }} ; Write-Output \"@@TFDONE:{}:$c@@\"",
+                command, nonce
+            )
+        }
+        ShellKind::Posix => {
+            format!("{} ; printf \"@@TFDONE:{}:%s@@\\n\" \"$?\"", command, nonce)
+        }
+        ShellKind::Cmd => {
+            // `%ERRORLEVEL%` percent-expands at PARSE time (the stale, pre-command value), so
+            // an `&`-chained echo would report the WRONG exit code. Run the marker in a child
+            // `cmd /v:on /c` so delayed-expansion `!ERRORLEVEL!` reads the INHERITED
+            // post-command exit code. `!...!` is not expanded by the outer shell, so it passes
+            // literally to the child (which has delayed expansion enabled).
+            format!("{} & cmd /v:on /c \"echo @@TFDONE:{}:!ERRORLEVEL!@@\"", command, nonce)
+        }
+    }
+}
+
+/// Scan decoded terminal output for THIS run's done-marker and return the exit
+/// code. Equivalent to the regex `@@TFDONE:NONCE:(-?\d+)@@` but dependency-free:
+/// finds `@@TFDONE:NONCE:`, then parses the signed integer up to the closing
+/// `@@`. A non-numeric token (the command echo's literal variable) fails the
+/// parse and the scan continues, so only the executed output line matches.
+pub fn sentinel_exit_code(haystack: &str, nonce: &str) -> Option<i32> {
+    let needle = format!("@@TFDONE:{}:", nonce);
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(&needle) {
+        let start = from + rel + needle.len();
+        let rest = &haystack[start..];
+        if let Some(end) = rest.find("@@") {
+            if let Ok(code) = rest[..end].parse::<i32>() {
+                return Some(code);
+            }
+        }
+        from = start;
+    }
+    None
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecutePromptReq {
@@ -854,6 +949,533 @@ fn default_cli_type() -> String {
 fn dedup_preserve_order(ids: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     ids.iter().filter(|id| seen.insert((*id).clone())).cloned().collect()
+}
+
+// ---- Fleet routing (MCP → core) -------------------------------------------
+//
+// A pure, IO-free resolver decides whether a fleet request targets THIS machine
+// or a remote peer, plus a presence-aware classifier that turns a resolution into
+// an HTTP route. Both are unit-tested without an AppState; the async handlers
+// (below) supply the roster + fabric presence and perform the IO.
+
+/// One machine in the fleet roster (this instance plus any fabric peers).
+#[derive(Debug, Clone)]
+pub struct FleetMachine {
+    pub machine_id: String,
+    pub device_name: String,
+    /// Canonical `"windows"|"macos"|"linux"`, or `None`/other for a peer whose OS is
+    /// unknown or not one of the three (then targetable by machineId only).
+    pub os: Option<String>,
+    pub online: bool,
+}
+
+/// The outcome of resolving a fleet request against the roster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetResolution {
+    /// This machine handles it.
+    Local,
+    /// A remote peer, whole-machine (spawn a new terminal there).
+    Remote { machine_id: String },
+    /// A specific existing terminal on a remote peer.
+    RemoteTerminal { machine_id: String, terminal_id: String },
+    /// A `targetOS` matched more than one online peer.
+    Ambiguous { candidates: Vec<String> },
+    /// A `targetOS` matched no online peer.
+    NoMatch,
+}
+
+/// A resolution combined with fabric presence — the concrete route the execute
+/// handler takes. Separated from [`FleetResolution`] so the 501/409/404 mapping is
+/// unit-testable without a live server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteRoute {
+    Local,
+    Proxy { device_id: String, terminal_id: Option<String> },
+    NotInstalled,
+    Ambiguous(Vec<String>),
+    NoMatch,
+}
+
+/// Canonicalize a caller-supplied OS string: lowercase, then `osx`/`darwin` → `macos`
+/// and `win`/`win32` → `windows`. Roster OS values are already canonical
+/// (`std::env::consts::OS`), so aliasing is applied to the request side only.
+fn alias_os(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "osx" | "darwin" | "macos" => "macos".to_string(),
+        "win" | "win32" | "windows" => "windows".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Pure resolver. Precedence: `terminalId` → `machineId` → `targetOS` → local.
+/// `self_machine_id` is this instance's id; a match on it collapses to `Local`.
+fn resolve_fleet_target(
+    target_os: Option<&str>,
+    machine_id: Option<&str>,
+    terminal_id: Option<&str>,
+    roster: &[FleetMachine],
+    self_machine_id: &str,
+) -> FleetResolution {
+    let machine_id = machine_id.filter(|s| !s.is_empty());
+    // 1. An explicit terminal id is the strongest signal. A remote machine id makes
+    //    it a RemoteTerminal; otherwise the terminal is local (the handler still has
+    //    the id to run in the existing local terminal).
+    if let Some(tid) = terminal_id.filter(|s| !s.is_empty()) {
+        return match machine_id {
+            Some(mid) if mid != self_machine_id => FleetResolution::RemoteTerminal {
+                machine_id: mid.to_string(),
+                terminal_id: tid.to_string(),
+            },
+            _ => FleetResolution::Local,
+        };
+    }
+    // 2. An explicit machine id: self → Local, else Remote (spawn a new terminal).
+    if let Some(mid) = machine_id {
+        return if mid == self_machine_id {
+            FleetResolution::Local
+        } else {
+            FleetResolution::Remote { machine_id: mid.to_string() }
+        };
+    }
+    // 3. targetOS: the UNIQUE online machine (self counts) with that canonical OS.
+    if let Some(os) = target_os.filter(|s| !s.is_empty()) {
+        let want = alias_os(os);
+        let candidates: Vec<&FleetMachine> = roster
+            .iter()
+            .filter(|m| m.online && m.os.as_deref() == Some(want.as_str()))
+            .collect();
+        return match candidates.as_slice() {
+            [] => FleetResolution::NoMatch,
+            [only] => {
+                if only.machine_id == self_machine_id {
+                    FleetResolution::Local
+                } else {
+                    FleetResolution::Remote { machine_id: only.machine_id.clone() }
+                }
+            }
+            many => FleetResolution::Ambiguous {
+                candidates: many.iter().map(|m| m.machine_id.clone()).collect(),
+            },
+        };
+    }
+    // 4. No routing signal → run here.
+    FleetResolution::Local
+}
+
+/// Fold a resolution together with fabric presence into the concrete execute route.
+/// Remote work with the fabric absent becomes [`ExecuteRoute::NotInstalled`] (HTTP 501).
+fn classify_fleet_route(res: FleetResolution, fabric_installed: bool) -> ExecuteRoute {
+    match res {
+        FleetResolution::Local => ExecuteRoute::Local,
+        FleetResolution::Remote { machine_id } => {
+            if fabric_installed {
+                ExecuteRoute::Proxy { device_id: machine_id, terminal_id: None }
+            } else {
+                ExecuteRoute::NotInstalled
+            }
+        }
+        FleetResolution::RemoteTerminal { machine_id, terminal_id } => {
+            if fabric_installed {
+                ExecuteRoute::Proxy { device_id: machine_id, terminal_id: Some(terminal_id) }
+            } else {
+                ExecuteRoute::NotInstalled
+            }
+        }
+        FleetResolution::Ambiguous { candidates } => ExecuteRoute::Ambiguous(candidates),
+        FleetResolution::NoMatch => ExecuteRoute::NoMatch,
+    }
+}
+
+/// Parse one entry of the fabric `GET /peers` array into a [`FleetMachine`].
+/// Returns `None` when `device_id` is absent (never fabricate a machine).
+fn peer_value_to_machine(p: &serde_json::Value) -> Option<FleetMachine> {
+    let machine_id = p.get("device_id").and_then(|v| v.as_str())?.to_string();
+    Some(FleetMachine {
+        machine_id,
+        device_name: p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        os: p.get("os").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        online: p.get("online").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+/// Serialize a machine for the `/api/fleet/machines` roster, tagging `self`.
+fn machine_to_json(m: &FleetMachine, is_self: bool) -> serde_json::Value {
+    json!({
+        "machineId": m.machine_id,
+        "deviceName": m.device_name,
+        "os": m.os,
+        "online": m.online,
+        "self": is_self,
+    })
+}
+
+/// This instance's display name for the roster: the OS hostname, mirroring the
+/// `get_system_info` hostname logic.
+fn self_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "this-machine".to_string())
+}
+
+/// Build the fleet roster: this instance (always online) plus fabric peers when the
+/// fabric child is present. Never errors — a fabric read failure yields self only.
+async fn fleet_roster<R: tauri::Runtime>(state: &AppState<R>) -> Vec<FleetMachine> {
+    let mut out = vec![FleetMachine {
+        machine_id: state.instance_id.clone(),
+        device_name: self_hostname(),
+        os: Some(std::env::consts::OS.to_string()),
+        online: true,
+    }];
+    if crate::fabric_manager::fabric_installed(state) {
+        let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+        if let Ok(raw) = client.get("/peers").await {
+            if let Some(arr) = raw.get("peers").and_then(|v| v.as_array()) {
+                out.extend(arr.iter().filter_map(peer_value_to_machine));
+            }
+        }
+    }
+    out
+}
+
+/// GET /api/fleet/machines — the fleet roster. Always includes THIS machine (online,
+/// `self: true`); adds fabric peers when the fabric is present. Never 501: with no
+/// fabric this returns exactly the self machine so an agent can still see where it is.
+async fn fleet_machines(State(state): State<AppState>) -> impl IntoResponse {
+    let roster = fleet_roster(&state).await;
+    let machines: Vec<serde_json::Value> = roster
+        .iter()
+        .map(|m| machine_to_json(m, m.machine_id == state.instance_id))
+        .collect();
+    Json(json!({ "machines": machines }))
+}
+
+/// GET /api/fleet/terminals — this machine's terminals, each tagged with this
+/// instance's machine identity so an agent can address them cross-machine. (Peer
+/// terminals are addressed directly via `/api/fleet/screen` with the machineId an
+/// agent learned from `/api/fleet/machines`.)
+async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
+    let machine_id = state.instance_id.clone();
+    let device_name = self_hostname();
+    let os = std::env::consts::OS.to_string();
+    let terminals: Vec<serde_json::Value> = state
+        .terminals
+        .iter()
+        .map(|entry| {
+            let t = entry.value();
+            json!({
+                "id": t.id,
+                "title": t.name,
+                "running": true,
+                "machineId": machine_id,
+                "os": os,
+                "deviceName": device_name,
+            })
+        })
+        .collect();
+    Json(json!({ "terminals": terminals }))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetExecuteReq {
+    command: String,
+    #[serde(rename = "targetOS")]
+    target_os: Option<String>,
+    machine_id: Option<String>,
+    terminal_id: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetScreenReq {
+    machine_id: Option<String>,
+    terminal_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetCloseReq {
+    machine_id: Option<String>,
+    terminal_id: String,
+}
+
+/// Clamp a requested fleet timeout to `[1000, 3_600_000]` ms, defaulting to 60 s.
+/// Mirrors the responder-side clamp so both ends agree.
+fn clamp_fleet_timeout(ms: Option<u64>) -> u64 {
+    ms.unwrap_or(60_000).clamp(1_000, 3_600_000)
+}
+
+/// Run a command on THIS machine by proxying to the local responder endpoint
+/// `POST /api/fleet/local-run` over loopback (using this instance's own api port +
+/// token). Returns the responder JSON `{ terminalId, done, exitCode, screen }`.
+async fn local_fleet_run(
+    state: &AppState,
+    command: &str,
+    terminal_id: Option<&str>,
+    timeout_ms: u64,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let cfg = state.network.read().clone();
+    let url = format!("http://127.0.0.1:{}/api/fleet/local-run", cfg.api_port);
+    // Give the loopback call the full command budget plus margin so it doesn't abort
+    // before the responder's own timeout returns a live (done=false) handle.
+    let client = crate::network_commands::localhost_client(timeout_ms.saturating_add(5_000))
+        .unwrap_or_else(reqwest::Client::new);
+    let mut body = json!({ "command": command, "timeoutMs": timeout_ms });
+    if let Some(tid) = terminal_id {
+        body["terminalId"] = json!(tid);
+    }
+    let resp = client
+        .post(&url)
+        .bearer_auth(&cfg.auth_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("local-run request failed: {e}")))?;
+    let status = resp.status();
+    let val: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("local-run bad response: {e}")))?;
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("local-run returned {status}")));
+    }
+    Ok(val)
+}
+
+/// Map a `reqwest` failure from a fabric `/fleet/*` proxy call to an HTTP status +
+/// message. The fabric answers 403 for a denied grant and 502 for a peer-side error;
+/// preserve 403, fold everything else (incl. connect/timeout) to 502.
+fn map_fabric_fleet_error(op: &str, e: reqwest::Error) -> (StatusCode, serde_json::Value) {
+    if e.status() == Some(StatusCode::FORBIDDEN) {
+        (StatusCode::FORBIDDEN, json!({ "error": format!("{op}: denied by peer") }))
+    } else {
+        (StatusCode::BAD_GATEWAY, json!({ "error": format!("{op}: {e}") }))
+    }
+}
+
+/// The 501 body every remote fleet op returns when the fabric child is absent.
+fn peering_not_installed() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": "peering not installed" })))
+}
+
+/// POST /api/fleet/execute — resolve target, then dispatch Local (loopback local-run)
+/// or Remote (fabric `POST /fleet/exec`). Ambiguous OS → 409, unmatched OS → 404,
+/// remote-with-no-fabric → 501. Response: `{ machineId, terminalId, deviceName, done,
+/// exitCode, screen }`.
+async fn fleet_execute(
+    State(state): State<AppState>,
+    Json(body): Json<FleetExecuteReq>,
+) -> impl IntoResponse {
+    if body.command.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "command must be a non-empty string" })))
+            .into_response();
+    }
+    let roster = fleet_roster(&state).await;
+    let roster_json: Vec<serde_json::Value> = roster
+        .iter()
+        .map(|m| machine_to_json(m, m.machine_id == state.instance_id))
+        .collect();
+    let res = resolve_fleet_target(
+        body.target_os.as_deref(),
+        body.machine_id.as_deref(),
+        body.terminal_id.as_deref(),
+        &roster,
+        &state.instance_id,
+    );
+    let timeout_ms = clamp_fleet_timeout(body.timeout_ms);
+
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            match local_fleet_run(&state, &body.command, body.terminal_id.as_deref(), timeout_ms).await {
+                Ok(v) => (StatusCode::OK, Json(json!({
+                    "machineId": state.instance_id,
+                    "deviceName": self_hostname(),
+                    "terminalId": v.get("terminalId").cloned().unwrap_or(serde_json::Value::Null),
+                    "done": v.get("done").and_then(|d| d.as_bool()).unwrap_or(false),
+                    "exitCode": v.get("exitCode").cloned().unwrap_or(serde_json::Value::Null),
+                    "screen": v.get("screen").cloned().unwrap_or(serde_json::Value::Null),
+                }))).into_response(),
+                Err((code, msg)) => (code, Json(json!({ "error": msg }))).into_response(),
+            }
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let device_name = roster
+                .iter()
+                .find(|m| m.machine_id == device_id)
+                .map(|m| m.device_name.clone())
+                .unwrap_or_else(|| device_id.clone());
+            // The fabric long-polls the peer for up to `timeout_ms + 5s`. The DEFAULT
+            // FabricClient is hard-capped at 5s (localhost_client(5000)), which would abort
+            // every remote command >~5s with a spurious 502 — defeating the long-poll design.
+            // Use a loopback client sized to the command budget (+10s margin), mirroring
+            // `local_fleet_run`. The fabric control API is unauthenticated loopback, so no
+            // bearer token is sent.
+            let url = format!("http://127.0.0.1:{}/fleet/exec", state.fabric_control_port);
+            let client = crate::network_commands::localhost_client(timeout_ms.saturating_add(10_000))
+                .unwrap_or_else(reqwest::Client::new);
+            let mut fbody = json!({
+                "device_id": device_id,
+                "command": body.command,
+                "timeoutMs": timeout_ms,
+            });
+            if let Some(tid) = &terminal_id {
+                fbody["terminalId"] = json!(tid);
+            }
+            match client.post(&url).json(&fbody).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let v: serde_json::Value = resp.json().await.unwrap_or_else(|_| json!({}));
+                    (StatusCode::OK, Json(json!({
+                        "machineId": device_id,
+                        "deviceName": device_name,
+                        "terminalId": v.get("terminalId").cloned().unwrap_or(serde_json::Value::Null),
+                        "done": v.get("done").and_then(|d| d.as_bool()).unwrap_or(false),
+                        "exitCode": v.get("exitCode").cloned().unwrap_or(serde_json::Value::Null),
+                        "screen": v.get("screen").cloned().unwrap_or(serde_json::Value::Null),
+                    }))).into_response()
+                }
+                // Preserve the fabric's 403 with the spec-mandated, target-specific reason so
+                // the agent knows whether to ask the user to flip the peer's fleet toggle or to
+                // grant terminal Control; fold any other non-2xx / transport error to 502.
+                Ok(resp) if resp.status() == StatusCode::FORBIDDEN => {
+                    let msg = match &terminal_id {
+                        Some(tid) => format!("no Control grant on terminal {tid}"),
+                        None => "peer hasn't allowed fleet commands".to_string(),
+                    };
+                    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+                }
+                Ok(resp) => {
+                    let code = resp.status();
+                    (StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("fleet_execute: peer returned {code}") }))).into_response()
+                }
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_execute", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        ExecuteRoute::Ambiguous(candidates) => (StatusCode::CONFLICT, Json(json!({
+            "error": "ambiguous target: more than one online machine matches targetOS",
+            "candidates": candidates,
+            "machines": roster_json,
+        }))).into_response(),
+        ExecuteRoute::NoMatch => (StatusCode::NOT_FOUND, Json(json!({
+            "error": "no online machine matches targetOS",
+            "machines": roster_json,
+        }))).into_response(),
+    }
+}
+
+/// POST /api/fleet/screen — live screen of a terminal, Local (authoritative snapshot)
+/// or Remote (fabric `POST /fleet/screen`). Response: `{ machineId, terminalId, title,
+/// running, screen }`.
+async fn fleet_screen(
+    State(state): State<AppState>,
+    Json(body): Json<FleetScreenReq>,
+) -> impl IntoResponse {
+    // machineId is explicit here (no OS matching), so the roster is unused → &[].
+    let res = resolve_fleet_target(
+        None,
+        body.machine_id.as_deref(),
+        Some(&body.terminal_id),
+        &[],
+        &state.instance_id,
+    );
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            let Some(terminal) = state.terminals.get(&body.terminal_id) else {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+            };
+            let title = terminal.name.clone();
+            drop(terminal);
+            let screen = state
+                .screen_snapshot(&body.terminal_id)
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            (StatusCode::OK, Json(json!({
+                "machineId": state.instance_id,
+                "terminalId": body.terminal_id,
+                "title": title,
+                "running": true,
+                "screen": screen,
+            }))).into_response()
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+            let fbody = json!({ "device_id": device_id, "terminalId": terminal_id });
+            match client.post("/fleet/screen", fbody).await {
+                Ok(v) => {
+                    let mut obj = v.as_object().cloned().unwrap_or_default();
+                    obj.insert("machineId".to_string(), json!(device_id));
+                    (StatusCode::OK, Json(serde_json::Value::Object(obj))).into_response()
+                }
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_screen", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        // machineId is explicit, so OS-based Ambiguous/NoMatch are unreachable here.
+        _ => (StatusCode::BAD_REQUEST, Json(json!({ "error": "unresolved screen target" }))).into_response(),
+    }
+}
+
+/// POST /api/fleet/close — close a terminal, Local (kill + cleanup) or Remote (fabric
+/// `POST /fleet/close`). Response: `{ machineId, terminalId, status }`.
+async fn fleet_close(
+    State(state): State<AppState>,
+    Json(body): Json<FleetCloseReq>,
+) -> impl IntoResponse {
+    let res = resolve_fleet_target(
+        None,
+        body.machine_id.as_deref(),
+        Some(&body.terminal_id),
+        &[],
+        &state.instance_id,
+    );
+    match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
+        ExecuteRoute::Local => {
+            let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
+                return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+            };
+            crate::pty_manager::kill_process_tree(pid);
+            state.cleanup_terminal_state(&body.terminal_id);
+            (StatusCode::OK, Json(json!({
+                "machineId": state.instance_id,
+                "terminalId": body.terminal_id,
+                "status": "ok",
+            }))).into_response()
+        }
+        ExecuteRoute::Proxy { device_id, terminal_id } => {
+            let client = crate::fabric_manager::FabricClient::new(state.fabric_control_port);
+            let fbody = json!({ "device_id": device_id, "terminalId": terminal_id });
+            match client.post("/fleet/close", fbody).await {
+                Ok(_) => (StatusCode::OK, Json(json!({
+                    "machineId": device_id,
+                    "terminalId": terminal_id,
+                    "status": "ok",
+                }))).into_response(),
+                Err(e) => {
+                    let (code, msg) = map_fabric_fleet_error("fleet_close", e);
+                    (code, Json(msg)).into_response()
+                }
+            }
+        }
+        ExecuteRoute::NotInstalled => {
+            let (code, body) = peering_not_installed();
+            (code, body).into_response()
+        }
+        _ => (StatusCode::BAD_REQUEST, Json(json!({ "error": "unresolved close target" }))).into_response(),
+    }
 }
 
 /// Send a prompt (with its CLI-specific submit sequence) to a single terminal.
@@ -1035,6 +1657,219 @@ async fn execute_prompt(
         Ok(body) => (StatusCode::OK, Json(body)),
         Err((code, msg)) => (code, Json(json!({ "error": msg }))),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetLocalRunReq {
+    command: String,
+    terminal_id: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    label: Option<String>,
+}
+
+/// Watch the broadcast output stream for THIS run's sentinel on `terminal_id`.
+/// Returns `(done, exit_code)`: `(true, Some(code))` when the marker is seen,
+/// `(false, None)` on timeout or if the channel closes first. Factored out of
+/// the handler so it is unit-testable without an `AppState`/tauri runtime.
+async fn watch_for_sentinel(
+    mut rx: tokio::sync::broadcast::Receiver<ChannelPayload>,
+    terminal_id: &str,
+    nonce: &str,
+    timeout: std::time::Duration,
+) -> (bool, Option<i32>) {
+    let watcher = async {
+        // Accumulate across chunks: the marker can straddle a PTY read boundary.
+        let mut acc = String::new();
+        loop {
+            match rx.recv().await {
+                Ok(payload) => {
+                    if payload.id != terminal_id {
+                        continue;
+                    }
+                    acc.push_str(&String::from_utf8_lossy(&payload.data));
+                    if let Some(code) = sentinel_exit_code(&acc, nonce) {
+                        return Some(code);
+                    }
+                    // Bound the scan buffer for chatty commands; keep a tail large
+                    // enough to hold a marker split across the drain boundary.
+                    if acc.len() > 16384 {
+                        let mut cut = acc.len() - 4096;
+                        while cut < acc.len() && !acc.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        acc.drain(..cut);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    };
+    match tokio::time::timeout(timeout, watcher).await {
+        Ok(Some(code)) => (true, Some(code)),
+        Ok(None) => (false, None),
+        Err(_) => (false, None),
+    }
+}
+
+/// Responder loopback endpoint: the fabric calls this to run a command locally
+/// on behalf of a paired peer. Spawns-or-reuses a PERSISTENT labeled terminal,
+/// injects a sentinel-wrapped command, and long-polls the live output until the
+/// sentinel exit-code appears or the (clamped) timeout elapses. The terminal is
+/// NEVER closed here — follow-up screen/close go through their own endpoints.
+async fn fleet_local_run(
+    State(state): State<AppState>,
+    Json(payload): Json<FleetLocalRunReq>,
+) -> impl IntoResponse {
+    use tauri::Emitter;
+
+    if payload.command.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "command must be a non-empty string" })),
+        )
+            .into_response();
+    }
+    // Clamp caller timeout to a sane band; default 60s (frozen contract).
+    let timeout_ms = payload.timeout_ms.unwrap_or(60_000).clamp(1_000, 3_600_000);
+
+    // Resolve the target terminal: reuse when the id is present AND live;
+    // otherwise spawn a NEW persistent terminal from the default profile.
+    let terminal_id = match payload.terminal_id.as_ref() {
+        Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
+        // An explicit terminalId that is no longer live must NOT silently spawn a new
+        // terminal: a stale per-terminal Control grant (left when a fleet terminal was
+        // closed outside FleetClose) would otherwise run fresh commands after fleet_exec
+        // was revoked. Fail explicitly.
+        Some(_) => {
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": "terminal not found" }))).into_response();
+        }
+        None => {
+            // KNOWN LIMITATION (cold-shell readiness): on a freshly-spawned terminal the shell's
+            // profile (pwsh/cmd) may still be loading when the command is injected, so the first
+            // command's bracketed-paste bytes can be dropped before the shell reads them, yielding a
+            // false `done:false` timeout on an otherwise-trivial command. The reused-terminal path is
+            // unaffected (already at a prompt). Mitigation deferred to backlog (prompt-readiness poll).
+            let profiles = crate::pty_manager::get_available_shells();
+            let profile = profiles.iter().find(|p| p.is_default);
+            let (shell_path, shell_args, shell_cwd, shell_name) = match profile {
+                Some(p) => (
+                    Some(p.path.clone()),
+                    Some(p.args.clone()),
+                    p.cwd.clone(),
+                    p.id.clone(),
+                ),
+                None => (None, None, None, "default".to_string()),
+            };
+            let terminal_name = payload.label.clone().unwrap_or_else(|| "Fleet".to_string());
+            let new_id = match crate::pty_manager::spawn_terminal(
+                state.clone(),
+                80,
+                24,
+                shell_path,
+                shell_args,
+                shell_cwd,
+                shell_name.clone(),
+                terminal_name.clone(),
+            ) {
+                Ok(id) => id,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
+                        .into_response()
+                }
+            };
+            // Make the fleet terminal VISIBLE as a labeled UI tab, mirroring
+            // create_terminal. The backend (`pc-`) id stays the map key; the
+            // `tb-` tab id is a cosmetic renderer alias.
+            let raw_uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let tab_id = format!("tb-{}", &raw_uuid[..9]);
+            let target_window = state.resolve_active_window_label();
+            if let Err(e) = state.app_handle.emit(
+                "api:createTerminalTab",
+                serde_json::json!({
+                    "name": terminal_name,
+                    "profile": shell_name,
+                    "terminalId": new_id,
+                    "tabId": Some(tab_id.clone()),
+                    "paneId": serde_json::Value::Null,
+                    "direction": serde_json::Value::Null,
+                    "targetWindow": target_window,
+                }),
+            ) {
+                log::warn!("Failed to emit api:createTerminalTab for fleet terminal: {}", e);
+            }
+            if let Some(mut entry) = state.terminals.get_mut(&new_id) {
+                entry.tab_id = Some(tab_id);
+            }
+            new_id
+        }
+    };
+
+    // Derive the shell dialect from the resolved terminal's profile so the
+    // sentinel wrapping matches (pwsh vs posix vs cmd).
+    let shell_profile_id = state.terminals.get(&terminal_id).map(|t| t.shell.clone());
+    let kind = match shell_profile_id
+        .as_deref()
+        .and_then(crate::pty_manager::get_profile)
+    {
+        Some(p) => classify_shell_kind(&p.path, &p.name),
+        None => crate::pty_manager::get_available_shells()
+            .iter()
+            .find(|p| p.is_default)
+            .map(|p| classify_shell_kind(&p.path, &p.name))
+            .unwrap_or(if cfg!(target_os = "windows") {
+                ShellKind::Cmd
+            } else {
+                ShellKind::Posix
+            }),
+    };
+
+    // Unique per-run nonce so a stale marker from a prior run can never match.
+    let nonce = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let wrapped = build_sentinel_command(kind, payload.command.trim(), &nonce);
+
+    // SUBSCRIBE before injecting so no output chunk (and thus the sentinel) can
+    // be missed between the write and the start of the watch.
+    let rx = state.output_tx.subscribe();
+
+    // Inject via the existing prompt path (bracketed-paste + shell submit).
+    let exec_req = ExecutePromptReq {
+        prompt: wrapped,
+        cli_type: "default".to_string(),
+        submission_signal: None,
+        custom_pattern: None,
+    };
+    if let Err((code, msg)) = send_prompt_to_terminal(&state, &terminal_id, &exec_req).await {
+        return (code, Json(json!({ "error": msg }))).into_response();
+    }
+
+    let (done, exit_code) = watch_for_sentinel(
+        rx,
+        &terminal_id,
+        &nonce,
+        std::time::Duration::from_millis(timeout_ms),
+    )
+    .await;
+
+    // Authoritative live screen; the terminal PERSISTS (never closed here). On
+    // timeout, done=false/exitCode=null and the screen shows the in-progress run.
+    let screen = state
+        .screen_snapshot(&terminal_id)
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "terminalId": terminal_id,
+            "done": done,
+            "exitCode": exit_code,
+            "screen": screen,
+        })),
+    )
+        .into_response()
 }
 
 /// Fan out one prompt to several terminals. Always returns HTTP 200 with a
@@ -2039,6 +2874,64 @@ mod tests {
         assert!(dedup_preserve_order(&input).is_empty());
     }
 
+    #[test]
+    fn build_sentinel_command_per_shell() {
+        assert_eq!(
+            build_sentinel_command(ShellKind::PowerShell, "Get-Date", "N1"),
+            "Get-Date ; $c = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } ; Write-Output \"@@TFDONE:N1:$c@@\""
+        );
+        assert_eq!(
+            build_sentinel_command(ShellKind::Posix, "ls -la", "N1"),
+            "ls -la ; printf \"@@TFDONE:N1:%s@@\\n\" \"$?\""
+        );
+        assert_eq!(
+            build_sentinel_command(ShellKind::Cmd, "dir", "N1"),
+            "dir & cmd /v:on /c \"echo @@TFDONE:N1:!ERRORLEVEL!@@\""
+        );
+    }
+
+    // NOTE for Task H2's integration test: exercise a REAL non-zero exit (e.g. a command
+    // that exits 3) AND a PowerShell cmdlet (e.g. `Get-Date`) end-to-end, asserting the
+    // captured exitCode is correct — the unit test above only checks the wrapper string,
+    // which cannot catch cmd.exe parse-time expansion or PowerShell's $null $LASTEXITCODE.
+
+    #[test]
+    fn classify_shell_kind_maps_common_shells() {
+        assert_eq!(
+            classify_shell_kind(
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "Windows PowerShell"
+            ),
+            ShellKind::PowerShell
+        );
+        assert_eq!(classify_shell_kind("/usr/bin/pwsh", "PowerShell"), ShellKind::PowerShell);
+        assert_eq!(
+            classify_shell_kind("C:\\Windows\\System32\\cmd.exe", "Command Prompt"),
+            ShellKind::Cmd
+        );
+        assert_eq!(classify_shell_kind("/bin/bash", "bash"), ShellKind::Posix);
+        assert_eq!(classify_shell_kind("/bin/zsh", "zsh"), ShellKind::Posix);
+        assert_eq!(classify_shell_kind("/bin/sh", "sh"), ShellKind::Posix);
+    }
+
+    #[test]
+    fn sentinel_ignores_command_echo_and_reads_output() {
+        let nonce = "deadbeef";
+        // The echoed pasted command still carries the LITERAL $LASTEXITCODE token
+        // (no digits between the colons) so it must NOT match.
+        let echo = "pwsh> Get-Item x ; Write-Output \"@@TFDONE:deadbeef:$LASTEXITCODE@@\"";
+        assert_eq!(sentinel_exit_code(echo, nonce), None);
+        // The real executed output line carries the substituted number.
+        let out = format!("{}\r\n@@TFDONE:deadbeef:0@@\r\n", echo);
+        assert_eq!(sentinel_exit_code(&out, nonce), Some(0));
+    }
+
+    #[test]
+    fn sentinel_parses_negative_exit_code() {
+        assert_eq!(sentinel_exit_code("x\n@@TFDONE:n9:-1@@\n", "n9"), Some(-1));
+        assert_eq!(sentinel_exit_code("no marker here", "n9"), None);
+    }
+
     // Real runtime proof that the new `/batch/...` static routes coexist with the
     // `/:id/...` param routes. Router construction PANICS on a matchit conflict,
     // so building it without panicking IS the assertion — and it needs no AppState.
@@ -2336,5 +3229,307 @@ mod tests {
         let row0 = shrink.screen().contents();
         assert!(row0.starts_with(&text[..40]), "first 40 cols preserved");
         assert!(!row0.contains(text), "content beyond width is clipped, not reflowed");
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_detects_exit_code_across_chunks() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // Marker deliberately split across two chunks to prove reassembly.
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"work\r\n@@TFDONE:abc12".to_vec() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"3:0@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "abc123", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_ignores_other_terminals_and_reads_negative() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // A marker for a DIFFERENT terminal must be ignored.
+        tx.send(ChannelPayload { id: "pc-other".into(), data: b"@@TFDONE:n1:0@@".to_vec() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"boom\r\n@@TFDONE:n1:-1@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(-1));
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_times_out_without_marker() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"still running...".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_millis(150)).await;
+        assert!(!done);
+        assert_eq!(code, None);
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_survives_multibyte_drain_boundary() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // 20000+ bytes of the 3-byte '€' (U+20AC) — forces the >16384 drain at a
+        // cut offset that is NOT a char boundary (would panic before the fix).
+        let big = "\u{20AC}".repeat(6667); // ~20001 bytes
+        tx.send(ChannelPayload { id: "pc-1".into(), data: big.into_bytes() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"@@TFDONE:n1:0@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(0));
+    }
+
+    mod fleet_tests {
+        use super::super::*;
+
+        fn m(id: &str, os: Option<&str>, online: bool) -> FleetMachine {
+            FleetMachine {
+                machine_id: id.to_string(),
+                device_name: format!("dev-{id}"),
+                os: os.map(|s| s.to_string()),
+                online,
+            }
+        }
+
+        #[test]
+        fn alias_os_canonicalizes_known_aliases() {
+            assert_eq!(alias_os("osx"), "macos");
+            assert_eq!(alias_os("darwin"), "macos");
+            assert_eq!(alias_os("macos"), "macos");
+            assert_eq!(alias_os("win"), "windows");
+            assert_eq!(alias_os("win32"), "windows");
+            assert_eq!(alias_os("WINDOWS"), "windows");
+            assert_eq!(alias_os("linux"), "linux");
+            // Unknown OS passes through lowercased (targetable by machineId only).
+            assert_eq!(alias_os("FreeBSD"), "freebsd");
+        }
+
+        #[test]
+        fn terminal_id_with_remote_machine_is_remote_terminal() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            let r = resolve_fleet_target(None, Some("other"), Some("t-1"), &roster, "self");
+            assert_eq!(
+                r,
+                FleetResolution::RemoteTerminal {
+                    machine_id: "other".into(),
+                    terminal_id: "t-1".into()
+                }
+            );
+        }
+
+        #[test]
+        fn terminal_id_on_self_or_without_machine_is_local() {
+            let roster = [m("self", Some("windows"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, Some("self"), Some("t-1"), &roster, "self"),
+                FleetResolution::Local
+            );
+            assert_eq!(
+                resolve_fleet_target(None, None, Some("t-1"), &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn machine_id_precedence_local_vs_remote() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, Some("self"), None, &roster, "self"),
+                FleetResolution::Local
+            );
+            assert_eq!(
+                resolve_fleet_target(None, Some("other"), None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "other".into() }
+            );
+        }
+
+        #[test]
+        fn os_unique_online_resolves_remote_or_local() {
+            let roster = [m("self", Some("windows"), true), m("other", Some("linux"), true)];
+            assert_eq!(
+                resolve_fleet_target(Some("linux"), None, None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "other".into() }
+            );
+            // self counts toward OS matching.
+            assert_eq!(
+                resolve_fleet_target(Some("windows"), None, None, &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn os_alias_matches_canonical_roster_os() {
+            let roster = [m("self", Some("windows"), true), m("mac1", Some("macos"), true)];
+            assert_eq!(
+                resolve_fleet_target(Some("darwin"), None, None, &roster, "self"),
+                FleetResolution::Remote { machine_id: "mac1".into() }
+            );
+        }
+
+        #[test]
+        fn os_ambiguous_when_multiple_online_peers_share_os() {
+            let roster = [
+                m("self", Some("windows"), true),
+                m("lin1", Some("linux"), true),
+                m("lin2", Some("linux"), true),
+            ];
+            match resolve_fleet_target(Some("linux"), None, None, &roster, "self") {
+                FleetResolution::Ambiguous { candidates } => {
+                    assert_eq!(candidates, vec!["lin1".to_string(), "lin2".to_string()]);
+                }
+                other => panic!("expected Ambiguous, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn os_no_match_when_zero_or_only_offline() {
+            let roster = [m("self", Some("windows"), true), m("lin1", Some("linux"), false)];
+            // linux peer exists but is offline → NoMatch.
+            assert_eq!(
+                resolve_fleet_target(Some("linux"), None, None, &roster, "self"),
+                FleetResolution::NoMatch
+            );
+            // no macos peer at all → NoMatch.
+            assert_eq!(
+                resolve_fleet_target(Some("macos"), None, None, &roster, "self"),
+                FleetResolution::NoMatch
+            );
+        }
+
+        #[test]
+        fn no_signals_defaults_to_local() {
+            let roster = [m("self", Some("windows"), true)];
+            assert_eq!(
+                resolve_fleet_target(None, None, None, &roster, "self"),
+                FleetResolution::Local
+            );
+        }
+
+        #[test]
+        fn classify_maps_resolution_and_fabric_presence() {
+            assert_eq!(classify_fleet_route(FleetResolution::Local, false), ExecuteRoute::Local);
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Remote { machine_id: "o".into() }, true),
+                ExecuteRoute::Proxy { device_id: "o".into(), terminal_id: None }
+            );
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Remote { machine_id: "o".into() }, false),
+                ExecuteRoute::NotInstalled
+            );
+            assert_eq!(
+                classify_fleet_route(
+                    FleetResolution::RemoteTerminal { machine_id: "o".into(), terminal_id: "t".into() },
+                    true
+                ),
+                ExecuteRoute::Proxy { device_id: "o".into(), terminal_id: Some("t".into()) }
+            );
+            assert_eq!(
+                classify_fleet_route(
+                    FleetResolution::RemoteTerminal { machine_id: "o".into(), terminal_id: "t".into() },
+                    false
+                ),
+                ExecuteRoute::NotInstalled
+            );
+            assert_eq!(
+                classify_fleet_route(FleetResolution::Ambiguous { candidates: vec!["a".into()] }, true),
+                ExecuteRoute::Ambiguous(vec!["a".into()])
+            );
+            assert_eq!(classify_fleet_route(FleetResolution::NoMatch, true), ExecuteRoute::NoMatch);
+        }
+
+        #[test]
+        fn peer_value_to_machine_reads_os_and_online() {
+            let p = serde_json::json!({
+                "device_id": "dev-x", "name": "Workstation", "os": "linux", "online": true
+            });
+            let machine = peer_value_to_machine(&p).expect("valid peer");
+            assert_eq!(machine.machine_id, "dev-x");
+            assert_eq!(machine.device_name, "Workstation");
+            assert_eq!(machine.os.as_deref(), Some("linux"));
+            assert!(machine.online);
+            // Missing device_id → None (skip, don't fabricate a machine).
+            assert!(peer_value_to_machine(&serde_json::json!({ "name": "x" })).is_none());
+        }
+
+        #[test]
+        fn machine_to_json_tags_self_and_carries_os() {
+            let mac = m("self", Some("windows"), true);
+            let v = machine_to_json(&mac, true);
+            assert_eq!(v["machineId"], "self");
+            assert_eq!(v["deviceName"], "dev-self");
+            assert_eq!(v["os"], "windows");
+            assert_eq!(v["online"], true);
+            assert_eq!(v["self"], true);
+            // A peer with no OS serializes os:null and self:false.
+            let peer = FleetMachine { machine_id: "p".into(), device_name: "P".into(), os: None, online: false };
+            let pv = machine_to_json(&peer, false);
+            assert!(pv["os"].is_null());
+            assert_eq!(pv["self"], false);
+        }
+
+        // Gated: needs tauri's `test` feature (mock_app), Linux/macOS CI only.
+        // Drives `fleet_roster` directly rather than the full HTTP server, because
+        // `start_api_server`/handlers are pinned to AppState<Wry> while mock_app yields
+        // MockRuntime. This still proves the open-core behavior: fabric absent -> self only.
+        #[cfg(feature = "integration-tests")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn machines_returns_self_only_when_fabric_absent() {
+            let app = tauri::test::mock_app();
+            let (tx, _rx) = tokio::sync::broadcast::channel(16);
+            let state = crate::state::AppState::new(
+                tx,
+                app.handle().clone(),
+                crate::app_config::NetworkConfig::defaults(),
+            );
+            let self_id = state.instance_id.clone();
+
+            // Fabric child is absent under mock_app -> roster is exactly the self machine.
+            let roster = fleet_roster(&state).await;
+            assert_eq!(roster.len(), 1);
+            assert_eq!(roster[0].machine_id, self_id);
+            assert!(roster[0].online);
+            assert_eq!(roster[0].os.as_deref(), Some(std::env::consts::OS));
+
+            // machine_to_json marks the self machine.
+            let j = machine_to_json(&roster[0], true);
+            assert_eq!(j["self"], true);
+            assert_eq!(j["machineId"], self_id);
+        }
+
+        #[test]
+        fn remote_target_without_fabric_is_501_not_installed() {
+            // A remote (non-self) machine with the fabric absent must classify as
+            // NotInstalled, which the dispatchers render as HTTP 501 "peering not installed".
+            let roster = [m("self", Some("windows"), true), m("remote", Some("linux"), true)];
+            let res = resolve_fleet_target(None, Some("remote"), None, &roster, "self");
+            assert_eq!(classify_fleet_route(res, false), ExecuteRoute::NotInstalled);
+            // The exact 501 body the dispatchers return for that route.
+            let (status, body) = peering_not_installed();
+            assert_eq!(status.as_u16(), 501);
+            assert_eq!(body.0["error"], "peering not installed");
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn fleet_execute_req_deserializes_targetOS_key() {
+            // The MCP sidecar / frozen wire contract sends `targetOS` (capital S), not
+            // the camelCase-derived `targetOs`. This must deserialize into target_os,
+            // otherwise OS-targeted fleet commands silently resolve to Local.
+            let req: FleetExecuteReq =
+                serde_json::from_str(r#"{"command":"echo hi","targetOS":"macos"}"#).unwrap();
+            assert_eq!(req.target_os.as_deref(), Some("macos"));
+            // camelCase siblings still work.
+            let req2: FleetExecuteReq = serde_json::from_str(
+                r#"{"command":"x","machineId":"m","terminalId":"t","timeoutMs":5000}"#,
+            )
+            .unwrap();
+            assert_eq!(req2.machine_id.as_deref(), Some("m"));
+            assert_eq!(req2.terminal_id.as_deref(), Some("t"));
+            assert_eq!(req2.timeout_ms, Some(5000));
+        }
     }
 }
