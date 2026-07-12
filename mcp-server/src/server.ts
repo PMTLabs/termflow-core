@@ -273,5 +273,31 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         }
     );
 
+    // Tool: get_terminal_screen — the authoritative LIVE screen of a terminal
+    // (local or a fleet peer). Preferred for observing progress; unlike
+    // get_terminal_output it is the exact on-screen content, not a lossy history.
+    server.registerTool(
+        "get_terminal_screen",
+        {
+            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer). Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
+            inputSchema: {
+                machineId: z.string().optional().describe("Target peer machineId. Omit for a terminal on this machine."),
+                terminalId: z.string().describe("The ID of the terminal whose live screen to read."),
+            },
+        },
+        async ({ machineId, terminalId }) => {
+            try {
+                const response = await api.post(`/fleet/screen`, {
+                    ...(machineId !== undefined && { machineId }),
+                    terminalId,
+                });
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
     return server;
 }

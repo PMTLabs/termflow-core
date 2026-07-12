@@ -207,3 +207,26 @@ describe("list_machines tool", () => {
         expect(called(calls, "get", "/fleet/machines")).toBe(true);
     });
 });
+
+describe("get_terminal_screen tool", () => {
+    it("posts { terminalId } to /fleet/screen for a local screen", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "get_terminal_screen", arguments: { terminalId: "pc-local" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/screen");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).terminalId).toBe("pc-local");
+        expect((call!.body as any).machineId).toBeUndefined();
+    });
+
+    it("forwards machineId to /fleet/screen for a peer terminal", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "get_terminal_screen", arguments: { machineId: "mac-123", terminalId: "pc-remote" } });
+        const call = calls.find((c) => c.method === "post" && c.url === "/fleet/screen");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).machineId).toBe("mac-123");
+        expect((call!.body as any).terminalId).toBe("pc-remote");
+    });
+});
