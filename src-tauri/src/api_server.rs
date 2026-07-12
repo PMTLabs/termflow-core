@@ -1116,7 +1116,7 @@ fn self_hostname() -> String {
 
 /// Build the fleet roster: this instance (always online) plus fabric peers when the
 /// fabric child is present. Never errors — a fabric read failure yields self only.
-async fn fleet_roster(state: &AppState) -> Vec<FleetMachine> {
+async fn fleet_roster<R: tauri::Runtime>(state: &AppState<R>) -> Vec<FleetMachine> {
     let mut out = vec![FleetMachine {
         machine_id: state.instance_id.clone(),
         device_name: self_hostname(),
@@ -3135,10 +3135,13 @@ mod tests {
             assert_eq!(pv["self"], false);
         }
 
+        // Gated: needs tauri's `test` feature (mock_app), Linux/macOS CI only.
+        // Drives `fleet_roster` directly rather than the full HTTP server, because
+        // `start_api_server`/handlers are pinned to AppState<Wry> while mock_app yields
+        // MockRuntime. This still proves the open-core behavior: fabric absent -> self only.
         #[cfg(feature = "integration-tests")]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn machines_returns_self_only_when_fabric_absent() {
-            use tokio::net::TcpListener;
             let app = tauri::test::mock_app();
             let (tx, _rx) = tokio::sync::broadcast::channel(16);
             let state = crate::state::AppState::new(
@@ -3148,24 +3151,17 @@ mod tests {
             );
             let self_id = state.instance_id.clone();
 
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(super::super::start_api_server(state, listener, false, sd_rx));
+            // Fabric child is absent under mock_app -> roster is exactly the self machine.
+            let roster = fleet_roster(&state).await;
+            assert_eq!(roster.len(), 1);
+            assert_eq!(roster[0].machine_id, self_id);
+            assert!(roster[0].online);
+            assert_eq!(roster[0].os.as_deref(), Some(std::env::consts::OS));
 
-            let body: serde_json::Value = reqwest::get(format!("http://127.0.0.1:{port}/api/fleet/machines"))
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            let machines = body["machines"].as_array().unwrap();
-            // Fabric child is absent in mock_app → exactly the self machine.
-            assert_eq!(machines.len(), 1);
-            assert_eq!(machines[0]["machineId"], self_id);
-            assert_eq!(machines[0]["self"], true);
-            assert_eq!(machines[0]["online"], true);
-            assert_eq!(machines[0]["os"], std::env::consts::OS);
+            // machine_to_json marks the self machine.
+            let j = machine_to_json(&roster[0], true);
+            assert_eq!(j["self"], true);
+            assert_eq!(j["machineId"], self_id);
         }
     }
 }
