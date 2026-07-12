@@ -45,6 +45,10 @@ struct FabricPeer {
     last_seen: Option<i64>,
     #[serde(default)]
     online: bool,
+    #[serde(default)]
+    os: Option<String>,
+    #[serde(default)]
+    fleet_exec: bool,
 }
 
 /// The `{ "peers": [...] }` envelope the fabric wraps the list in.
@@ -65,6 +69,8 @@ pub struct PeerInfoDto {
     online: bool,
     last_seen: Option<i64>,
     grants: BTreeMap<String, String>,
+    os: Option<String>,
+    fleet_exec: bool,
 }
 
 /// The fabric's `POST /pairing-code` body (snake_case `expires_in_secs`).
@@ -133,6 +139,8 @@ fn peers_from_fabric(raw: serde_json::Value) -> Result<Vec<PeerInfoDto>, serde_j
                 .into_iter()
                 .filter(|(_, level)| level != "None")
                 .collect(),
+            os: p.os,
+            fleet_exec: p.fleet_exec,
         })
         .collect())
 }
@@ -306,6 +314,27 @@ pub async fn peer_set_grant(
         .map_err(|e| control_err("peer_set_grant", e))
 }
 
+/// Toggle whether a peer may create-and-run NEW fleet terminals on this machine
+/// (`fleet_exec`, default OFF, revocable). POST `/peers/{device_id}/fleet`
+/// `{ enabled }`. This is the single per-peer consent for `FleetExec` with no
+/// target terminal; per-terminal grants still gate exec against an existing one.
+#[tauri::command]
+pub async fn peer_set_fleet_exec(
+    state: State<'_, AppState>,
+    device_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let client = FabricClient::new(state.fabric_control_port);
+    client
+        .post(
+            &format!("/peers/{}/fleet", device_id),
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+        .map_err(|e| control_err("peer_set_fleet_exec", e))?;
+    Ok(())
+}
+
 /// Toggle whether this machine accepts inbound pairing requests.
 /// POST `/accept-peers` `{ enabled }`.
 #[tauri::command]
@@ -337,7 +366,9 @@ mod tests {
                     "addresses": ["100.64.0.2", "192.168.1.5:8790"],
                     "grants": [["pc-term-1", "View"], ["pc-term-2", "Control"], ["pc-term-3", "None"]],
                     "last_seen": 1_752_000_000_i64,
-                    "online": true
+                    "online": true,
+                    "os": "windows",
+                    "fleet_exec": true
                 }
             ]
         })
@@ -353,6 +384,8 @@ mod tests {
         assert_eq!(v["deviceId"], "dev-abc");
         assert_eq!(v["name"], "workstation");
         assert_eq!(v["online"], true);
+        assert_eq!(v["os"], "windows");
+        assert_eq!(v["fleetExec"], true);
         assert_eq!(v["lastSeen"], 1_752_000_000_i64);
         // Grants become a `{ terminalId: level }` map; the `None` grant is dropped.
         assert_eq!(v["grants"]["pc-term-1"], "View");
