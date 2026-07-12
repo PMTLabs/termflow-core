@@ -92,16 +92,40 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         {
             description: "Execute a command in one or more terminals. Returns immediately (command is async).",
             inputSchema: {
-                terminalId: z.union([z.string(), z.array(z.string())]).describe(
-                    `The ID(s) of the terminal(s) to execute on. Pass a single id or an array of ids to send the same command to several terminals. ${ME_HINT}`
+                terminalId: z.union([z.string(), z.array(z.string())]).optional().describe(
+                    `The ID(s) of the terminal(s) to execute on. Pass a single id or an array of ids to send the same command to several terminals. Optional for fleet routing (targetOS/machineId). ${ME_HINT}`
                 ),
                 command: z.string().describe("The command string to execute"),
                 cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot"]).optional().describe("The CLI personality/keystroke pattern. Defaults to copilot if omitted."),
                 useBracketedPaste: z.boolean().optional().describe("Whether to use bracketed paste mode for the prompt (more reliable for long inputs)"),
+                targetOS: z.enum(["windows", "macos", "linux"]).optional().describe("Route to the unique online peer running this OS (fleet). Mutually informative with machineId/terminalId."),
+                machineId: z.string().optional().describe("Route to a specific peer machine by its machineId (fleet)."),
+                timeoutMs: z.number().optional().describe("Fleet: max ms to wait for command completion before returning a live handle (done=false). Clamped server-side to [1000, 3600000]."),
             },
         },
-        async ({ terminalId, command, cliType, useBracketedPaste }) => {
+        async ({ terminalId, command, cliType, useBracketedPaste, targetOS, machineId, timeoutMs }) => {
             try {
+                // Fleet routing: an explicit targetOS or machineId means route through the
+                // cross-machine resolver (core POST /fleet/execute) instead of the local path.
+                // A bare terminalId (no targetOS/machineId) stays local — existing behavior.
+                if (targetOS !== undefined || machineId !== undefined) {
+                    if (Array.isArray(terminalId)) {
+                        return {
+                            content: [{ type: "text", text: "Error: fleet routing targets a single terminal; pass a string terminalId or omit it" }],
+                            isError: true,
+                        };
+                    }
+                    const fleetTerminalId = terminalId !== undefined ? resolveTerminalId(terminalId, getCallerId()) : undefined;
+                    const response = await api.post(`/fleet/execute`, {
+                        command,
+                        ...(targetOS !== undefined && { targetOS }),
+                        ...(machineId !== undefined && { machineId }),
+                        ...(fleetTerminalId !== undefined && { terminalId: fleetTerminalId }),
+                        ...(timeoutMs !== undefined && { timeoutMs }),
+                    });
+                    return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+                }
+
                 const extras = {
                     cliType: cliType || "copilot",
                     ...(useBracketedPaste !== undefined && { useBracketedPaste }),
@@ -117,6 +141,12 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                         ...extras,
                     });
                     return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+                }
+                if (terminalId === undefined) {
+                    return {
+                        content: [{ type: "text", text: "Error: terminalId is required for local execution (pass a terminal id or an array of ids, or use fleet routing via targetOS/machineId)" }],
+                        isError: true,
+                    };
                 }
                 const id = resolveTerminalId(terminalId, getCallerId());
                 const response = await api.post(`/terminals/${id}/execute`, {
