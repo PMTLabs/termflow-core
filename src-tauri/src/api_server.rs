@@ -811,6 +811,91 @@ fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Which shell dialect a target terminal runs, for sentinel-command wrapping.
+/// pwsh/powershell collapse to `PowerShell`; bash/zsh/sh/wsl/dash to `Posix`;
+/// cmd.exe to `Cmd` (frozen SENTINEL contract).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellKind {
+    PowerShell,
+    Posix,
+    Cmd,
+}
+
+/// Classify a shell from its profile path + name. Unknown shells fall back to
+/// the platform default (cmd on Windows, posix elsewhere) — matching
+/// `spawn_terminal`'s own last-resort fallback.
+pub fn classify_shell_kind(path: &str, name: &str) -> ShellKind {
+    let hay = format!("{} {}", path.to_ascii_lowercase(), name.to_ascii_lowercase());
+    if hay.contains("powershell") || hay.contains("pwsh") {
+        ShellKind::PowerShell
+    } else if hay.contains("cmd") {
+        ShellKind::Cmd
+    } else if hay.contains("bash")
+        || hay.contains("zsh")
+        || hay.contains("wsl")
+        || hay.contains("dash")
+        || hay.contains("sh")
+    {
+        ShellKind::Posix
+    } else if cfg!(target_os = "windows") {
+        ShellKind::Cmd
+    } else {
+        ShellKind::Posix
+    }
+}
+
+/// Wrap `command` so the shell prints a unique done-marker carrying the process
+/// exit code on its own output line. The marker text is `@@TFDONE:NONCE:CODE@@`.
+/// The variable is left UNEXPANDED in the command text so the terminal's echo of
+/// the pasted command (which still shows `$LASTEXITCODE` / `%ERRORLEVEL%` / `$?`,
+/// no digits) never matches `sentinel_exit_code`; only the executed output does.
+pub fn build_sentinel_command(kind: ShellKind, command: &str, nonce: &str) -> String {
+    match kind {
+        ShellKind::PowerShell => {
+            // $LASTEXITCODE is $null in a fresh session and after any cmdlet (it only tracks
+            // EXTERNAL programs; cmdlets set $?). Guard so a NUMERIC code is ALWAYS emitted —
+            // otherwise the marker reads "@@TFDONE:N:@@" (empty between the colons),
+            // sentinel_exit_code never matches, and the run false-times-out.
+            format!(
+                "{} ; $c = if ($LASTEXITCODE -ne $null) {{ $LASTEXITCODE }} elseif ($?) {{ 0 }} else {{ 1 }} ; Write-Output \"@@TFDONE:{}:$c@@\"",
+                command, nonce
+            )
+        }
+        ShellKind::Posix => {
+            format!("{} ; printf \"@@TFDONE:{}:%s@@\\n\" \"$?\"", command, nonce)
+        }
+        ShellKind::Cmd => {
+            // `%ERRORLEVEL%` percent-expands at PARSE time (the stale, pre-command value), so
+            // an `&`-chained echo would report the WRONG exit code. Run the marker in a child
+            // `cmd /v:on /c` so delayed-expansion `!ERRORLEVEL!` reads the INHERITED
+            // post-command exit code. `!...!` is not expanded by the outer shell, so it passes
+            // literally to the child (which has delayed expansion enabled).
+            format!("{} & cmd /v:on /c \"echo @@TFDONE:{}:!ERRORLEVEL!@@\"", command, nonce)
+        }
+    }
+}
+
+/// Scan decoded terminal output for THIS run's done-marker and return the exit
+/// code. Equivalent to the regex `@@TFDONE:NONCE:(-?\d+)@@` but dependency-free:
+/// finds `@@TFDONE:NONCE:`, then parses the signed integer up to the closing
+/// `@@`. A non-numeric token (the command echo's literal variable) fails the
+/// parse and the scan continues, so only the executed output line matches.
+pub fn sentinel_exit_code(haystack: &str, nonce: &str) -> Option<i32> {
+    let needle = format!("@@TFDONE:{}:", nonce);
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(&needle) {
+        let start = from + rel + needle.len();
+        let rest = &haystack[start..];
+        if let Some(end) = rest.find("@@") {
+            if let Ok(code) = rest[..end].parse::<i32>() {
+                return Some(code);
+            }
+        }
+        from = start;
+    }
+    None
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecutePromptReq {
@@ -2037,6 +2122,64 @@ mod tests {
     fn test_dedup_preserve_order_empty() {
         let input: Vec<String> = vec![];
         assert!(dedup_preserve_order(&input).is_empty());
+    }
+
+    #[test]
+    fn build_sentinel_command_per_shell() {
+        assert_eq!(
+            build_sentinel_command(ShellKind::PowerShell, "Get-Date", "N1"),
+            "Get-Date ; $c = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } ; Write-Output \"@@TFDONE:N1:$c@@\""
+        );
+        assert_eq!(
+            build_sentinel_command(ShellKind::Posix, "ls -la", "N1"),
+            "ls -la ; printf \"@@TFDONE:N1:%s@@\\n\" \"$?\""
+        );
+        assert_eq!(
+            build_sentinel_command(ShellKind::Cmd, "dir", "N1"),
+            "dir & cmd /v:on /c \"echo @@TFDONE:N1:!ERRORLEVEL!@@\""
+        );
+    }
+
+    // NOTE for Task H2's integration test: exercise a REAL non-zero exit (e.g. a command
+    // that exits 3) AND a PowerShell cmdlet (e.g. `Get-Date`) end-to-end, asserting the
+    // captured exitCode is correct — the unit test above only checks the wrapper string,
+    // which cannot catch cmd.exe parse-time expansion or PowerShell's $null $LASTEXITCODE.
+
+    #[test]
+    fn classify_shell_kind_maps_common_shells() {
+        assert_eq!(
+            classify_shell_kind(
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "Windows PowerShell"
+            ),
+            ShellKind::PowerShell
+        );
+        assert_eq!(classify_shell_kind("/usr/bin/pwsh", "PowerShell"), ShellKind::PowerShell);
+        assert_eq!(
+            classify_shell_kind("C:\\Windows\\System32\\cmd.exe", "Command Prompt"),
+            ShellKind::Cmd
+        );
+        assert_eq!(classify_shell_kind("/bin/bash", "bash"), ShellKind::Posix);
+        assert_eq!(classify_shell_kind("/bin/zsh", "zsh"), ShellKind::Posix);
+        assert_eq!(classify_shell_kind("/bin/sh", "sh"), ShellKind::Posix);
+    }
+
+    #[test]
+    fn sentinel_ignores_command_echo_and_reads_output() {
+        let nonce = "deadbeef";
+        // The echoed pasted command still carries the LITERAL $LASTEXITCODE token
+        // (no digits between the colons) so it must NOT match.
+        let echo = "pwsh> Get-Item x ; Write-Output \"@@TFDONE:deadbeef:$LASTEXITCODE@@\"";
+        assert_eq!(sentinel_exit_code(echo, nonce), None);
+        // The real executed output line carries the substituted number.
+        let out = format!("{}\r\n@@TFDONE:deadbeef:0@@\r\n", echo);
+        assert_eq!(sentinel_exit_code(&out, nonce), Some(0));
+    }
+
+    #[test]
+    fn sentinel_parses_negative_exit_code() {
+        assert_eq!(sentinel_exit_code("x\n@@TFDONE:n9:-1@@\n", "n9"), Some(-1));
+        assert_eq!(sentinel_exit_code("no marker here", "n9"), None);
     }
 
     // Real runtime proof that the new `/batch/...` static routes coexist with the
