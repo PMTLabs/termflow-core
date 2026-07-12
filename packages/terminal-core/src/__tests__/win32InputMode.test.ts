@@ -73,3 +73,33 @@ describe('encodeWin32Key — printable + named keys', () => {
     expect(encodeWin32Key(key({ key: 'a', type: 'keypress' }), true)).toBeNull();
   });
 });
+
+describe('encodeWin32Key — chords, keyup, repeat, functional keys', () => {
+  test('Ctrl+C -> Uc is the control-translated char (3), Cs has LEFT_CTRL', () => {
+    expect(encodeWin32Key(key({ key: 'c', keyCode: 67, ctrlKey: true }), true)).toBe('\x1b[67;46;3;1;8;1_');
+  });
+  test('Ctrl+J -> Uc=10 (same byte as bare LF, but Cs carries the chord)', () => {
+    expect(encodeWin32Key(key({ key: 'j', keyCode: 74, ctrlKey: true }), true)).toBe('\x1b[74;36;10;1;8;1_');
+  });
+  test('Shift+Enter -> CSI 13;28;13;1;16;1 _ (SHIFT_PRESSED set)', () => {
+    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, shiftKey: true }), true)).toBe('\x1b[13;28;13;1;16;1_');
+  });
+  test('right Ctrl (location=2) sets RIGHT_CTRL_PRESSED', () => {
+    expect(encodeWin32Key(key({ key: 'Control', keyCode: 17, ctrlKey: true, location: 2 }), true)).toBe('\x1b[17;29;0;1;4;1_');
+  });
+  test('ArrowUp unmodified -> CSI 38;72;0;1;0;1 _', () => {
+    expect(encodeWin32Key(key({ key: 'ArrowUp', keyCode: 38 }), true)).toBe('\x1b[38;72;0;1;0;1_');
+  });
+  test('Ctrl+ArrowRight -> Cs carries ctrl, Uc stays 0 (no natural char)', () => {
+    expect(encodeWin32Key(key({ key: 'ArrowRight', keyCode: 39, ctrlKey: true }), true)).toBe('\x1b[39;77;0;1;8;1_');
+  });
+  test('F5 -> CSI 116;63;0;1;0;1 _', () => {
+    expect(encodeWin32Key(key({ key: 'F5', keyCode: 116 }), true)).toBe('\x1b[116;63;0;1;0;1_');
+  });
+  test('keyup -> Kd=0, same fields otherwise', () => {
+    expect(encodeWin32Key(key({ key: 'a', keyCode: 65, type: 'keyup' }), true)).toBe('\x1b[65;30;97;0;0;1_');
+  });
+  test('repeat=true still encodes Rc=1 (browsers deliver repeat as separate events)', () => {
+    expect(encodeWin32Key(key({ key: 'a', keyCode: 65, repeat: true }), true)).toBe('\x1b[65;30;97;1;0;1_');
+  });
+});
