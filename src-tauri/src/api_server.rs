@@ -1179,6 +1179,7 @@ async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
 #[serde(rename_all = "camelCase")]
 struct FleetExecuteReq {
     command: String,
+    #[serde(rename = "targetOS")]
     target_os: Option<String>,
     machine_id: Option<String>,
     terminal_id: Option<String>,
@@ -1736,6 +1737,11 @@ async fn fleet_local_run(
     let terminal_id = match payload.terminal_id.as_ref() {
         Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
         _ => {
+            // KNOWN LIMITATION (cold-shell readiness): on a freshly-spawned terminal the shell's
+            // profile (pwsh/cmd) may still be loading when the command is injected, so the first
+            // command's bracketed-paste bytes can be dropped before the shell reads them, yielding a
+            // false `done:false` timeout on an otherwise-trivial command. The reused-terminal path is
+            // unaffected (already at a prompt). Mitigation deferred to backlog (prompt-readiness poll).
             let profiles = crate::pty_manager::get_available_shells();
             let profile = profiles.iter().find(|p| p.is_default);
             let (shell_path, shell_args, shell_cwd, shell_name) = match profile {
@@ -3480,6 +3486,25 @@ mod tests {
             let (status, body) = peering_not_installed();
             assert_eq!(status.as_u16(), 501);
             assert_eq!(body.0["error"], "peering not installed");
+        }
+
+        #[test]
+        #[allow(non_snake_case)]
+        fn fleet_execute_req_deserializes_targetOS_key() {
+            // The MCP sidecar / frozen wire contract sends `targetOS` (capital S), not
+            // the camelCase-derived `targetOs`. This must deserialize into target_os,
+            // otherwise OS-targeted fleet commands silently resolve to Local.
+            let req: FleetExecuteReq =
+                serde_json::from_str(r#"{"command":"echo hi","targetOS":"macos"}"#).unwrap();
+            assert_eq!(req.target_os.as_deref(), Some("macos"));
+            // camelCase siblings still work.
+            let req2: FleetExecuteReq = serde_json::from_str(
+                r#"{"command":"x","machineId":"m","terminalId":"t","timeoutMs":5000}"#,
+            )
+            .unwrap();
+            assert_eq!(req2.machine_id.as_deref(), Some("m"));
+            assert_eq!(req2.terminal_id.as_deref(), Some("t"));
+            assert_eq!(req2.timeout_ms, Some(5000));
         }
     }
 }
