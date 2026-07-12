@@ -52,10 +52,15 @@ export async function openNewWindow(): Promise<void> {
 }
 
 /** Split a specific pane. Direction matches the pane split buttons: 'horizontal'
- *  stacks the new pane below, 'vertical' places it to the right. Backlog 004: the
- *  new pane inherits the SOURCE pane's live CWD (falls back to the app default if
- *  it can't be read). */
-export async function splitPaneById(paneId: string, direction: 'horizontal' | 'vertical'): Promise<void> {
+ *  stacks panes top/bottom, 'vertical' places them side-by-side. `position` says
+ *  which side of the original the NEW pane lands on ('before' = top/left,
+ *  'after' = bottom/right, the default). Backlog 004: the new pane inherits the
+ *  SOURCE pane's live CWD (falls back to the app default if it can't be read). */
+export async function splitPaneById(
+  paneId: string,
+  direction: 'horizontal' | 'vertical',
+  position: 'before' | 'after' = 'after',
+): Promise<void> {
   const state = store.getState();
   const shellType = state.settings.defaultProfile || 'default';
 
@@ -72,7 +77,7 @@ export async function splitPaneById(paneId: string, direction: 'horizontal' | 'v
     console.warn('paneActions: could not read source pane cwd; using default', err);
   }
 
-  store.dispatch(splitPaneWithTab({ paneId, direction, shellType, cwd }));
+  store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
 }
 
 /** Resolve the best pane to split for a given tab: its focused pane if that pane
