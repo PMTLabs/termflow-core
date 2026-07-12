@@ -362,6 +362,83 @@ test('attach() to a NEW processId resets win32State (new PTY session, own handsh
   expect(calls.write).toEqual([]); // nothing written via the protocol path
 });
 
+// Internal workflow review (docs/review/052) found and verified this live:
+// win32InputModeActive() alone is not enough to gate the Win32 block. Kitty's
+// encodeKey deliberately returns null (defer to legacy) for bare/unmodified
+// keys even while Kitty is active — without an explicit !protocolActive()
+// check, the Win32 block hijacked every one of those keys into a Win32-encoded
+// record instead of true legacy passthrough, breaking basic typing for any
+// Windows console app that pushes ANY Kitty flag.
+test('an app with Kitty active still gets true legacy passthrough for keys Kitty defers, even with Win32-Input-Mode also active', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kitty-win32-1', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kitty-win32-1');
+
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+  term.csiHandlers['>u']([1]); // the app ALSO pushes Kitty flag 1
+
+  // Kitty deliberately defers a bare, unmodified letter to legacy (see
+  // keyboardProtocol.ts's encodeKitty: "bare modifier keys, plain/shift-only
+  // text -> null"). It must reach the app as true legacy passthrough, not get
+  // reinterpreted as a Win32-Input-Mode record.
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // true legacy passthrough — xterm's own default handling
+  expect(calls.write).toEqual([]); // nothing written via either protocol path
+});
+
+test('Ctrl+C still gets real Kitty encoding when Kitty is active, even with Win32-Input-Mode also active', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'kitty-win32-2', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('kitty-win32-2');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['>u']([1]);
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u']]); // real Kitty encoding, not a Win32 record
+});
+
+// Internal workflow review (docs/review/052): the ?9001l disable path and the
+// DECSTR-on-Windows disable path both had zero test coverage — only the
+// enable side was ever exercised, so a regression in either `if` condition
+// would have gone undetected by the full existing suite.
+test('CSI ?9001l disables win32State (the enable side is well-tested; the disable side was not)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w5', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w5');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['?l']([9001]); // app/ConPTY turns it back off
+
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+  expect(handled).toBe(true); // back to legacy passthrough
+  expect(calls.write).toEqual([]);
+});
+
+test('DECSTR soft reset disables win32State on Windows (only the Kitty-flags variant was tested before)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'w6', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('w6');
+
+  term.csiHandlers['?h']([9001]);
+  term.csiHandlers['p']([]); // DECSTR (intermediates '!', final 'p')
+
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
 test('isWindows: false never activates Win32-Input-Mode even if ?9001h somehow arrives', () => {
   const { bridge, calls } = makeBridge();
   const engine = new TerminalEngine(bridge, { cacheKey: 'w4', isWindows: false });

@@ -87,6 +87,15 @@ describe('encodeWin32Key — chords, keyup, repeat, functional keys', () => {
   test('right Ctrl (location=2) sets RIGHT_CTRL_PRESSED', () => {
     expect(encodeWin32Key(key({ key: 'Control', keyCode: 17, ctrlKey: true, location: 2 }), true)).toBe('\x1b[17;29;0;1;4;1_');
   });
+  // Internal workflow review (docs/review/052): the Alt bits had zero coverage
+  // — a swapped LEFT_ALT_PRESSED/RIGHT_ALT_PRESSED assignment would have gone
+  // undetected by the full existing suite.
+  test('left Alt+a sets LEFT_ALT_PRESSED (0x02)', () => {
+    expect(encodeWin32Key(key({ key: 'a', keyCode: 65, altKey: true }), true)).toBe('\x1b[65;30;97;1;2;1_');
+  });
+  test('right Alt (location=2) sets RIGHT_ALT_PRESSED (0x01)', () => {
+    expect(encodeWin32Key(key({ key: 'a', keyCode: 65, altKey: true, location: 2 }), true)).toBe('\x1b[65;30;97;1;1;1_');
+  });
   test('ArrowUp unmodified -> CSI 38;72;0;1;0;1 _', () => {
     expect(encodeWin32Key(key({ key: 'ArrowUp', keyCode: 38 }), true)).toBe('\x1b[38;72;0;1;0;1_');
   });

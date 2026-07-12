@@ -119,7 +119,7 @@ function modSuffix(mods: number, evt: number): string {
   return needEvt ? `;${mods}:${evt}` : `;${mods}`;
 }
 
-function isSingleChar(key: string): boolean {
+export function isSingleChar(key: string): boolean {
   return [...key].length === 1;
 }
 
@@ -137,7 +137,7 @@ function unshiftedCodepoint(e: KeyboardEvent): number {
 
 /** AltGr (reported as Ctrl+Alt on Windows/Chromium) produces a printable char that
  *  must flow through as text, not be re-encoded as a chord (constraint #1). */
-function isAltGraph(e: KeyboardEvent): boolean {
+export function isAltGraph(e: KeyboardEvent): boolean {
   return typeof e.getModifierState === 'function' && e.getModifierState('AltGraph');
 }
 

@@ -1142,10 +1142,19 @@ export class TerminalEngine {
 
       // Win32-Input-Mode: ConPTY offers this for every Windows session (not just
       // TUIs), so once active it becomes the default encoding for this pane.
-      // Runs after Kitty/modifyOtherKeys so an app that explicitly opts into Kitty
-      // still wins; encodeWin32Key returns null only for IME/AltGr, which fall
-      // through to xterm's normal text path below.
-      if (this.win32InputModeActive()) {
+      // Internal workflow review (docs/review/052) caught a real regression here:
+      // gating on win32InputModeActive() alone is not enough. Kitty's encodeKey
+      // deliberately returns null (not "encode nothing", but "defer to legacy")
+      // for bare/unmodified letters, digits, Enter/Tab/Backspace, and functional
+      // keys even while Kitty is active — the block above only wins when it
+      // returns a real sequence. Without the explicit !this.protocolActive()
+      // check, this block would hijack every one of those "deferred to legacy"
+      // keys into a Win32-Input-Mode record instead, breaking basic typing for
+      // any Windows console app that pushes ANY Kitty flag. Verified live via a
+      // reproduction test before this fix landed (handled=false, a bare 'a'
+      // encoded as a Win32 record) and after (handled=true, true legacy
+      // passthrough, matching the Shift+Enter shim's established pattern).
+      if (this.win32InputModeActive() && !this.protocolActive()) {
         const seq = encodeWin32Key(event, true);
         if (seq !== null) {
           event.preventDefault();

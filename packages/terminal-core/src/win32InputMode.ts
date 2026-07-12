@@ -7,6 +7,8 @@
 //
 // Spec: https://github.com/microsoft/terminal/blob/main/doc/specs/%234999%20-%20Improved%20keyboard%20handling%20in%20Conpty.md
 
+import { isSingleChar, isAltGraph } from './keyboardProtocol';
+
 /** Tracks whether ConPTY has asked us to use Win32-Input-Mode encoding. A single
  *  session-level flag — unlike Kitty's per-screen stack, ConPTY asserts this once
  *  per session and does not push/pop it. */
@@ -71,14 +73,6 @@ const SCAN_CODE_TABLE: Record<number, number> = {
   0xba: 0x27, 0xbb: 0x0d, 0xbc: 0x33, 0xbd: 0x0c, 0xbe: 0x34, 0xbf: 0x35, // ; = , - . /
   0xc0: 0x29, 0xdb: 0x1a, 0xdc: 0x2b, 0xdd: 0x1b, 0xde: 0x28, // ` [ \ ] '
 };
-
-function isSingleChar(key: string): boolean {
-  return [...key].length === 1;
-}
-
-function isAltGraph(e: KeyboardEvent): boolean {
-  return typeof e.getModifierState === 'function' && e.getModifierState('AltGraph');
-}
 
 /** Ctrl+letter's real Windows console Unicode value is the legacy control
  *  character (Ctrl+A=1 .. Ctrl+Z=26), not the plain letter. */
