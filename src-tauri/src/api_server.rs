@@ -16,7 +16,7 @@ use std::fs;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use crate::state::AppState;
+use crate::state::{AppState, ChannelPayload};
 use crate::pty_manager::{self, ShellProfile};
 use crate::tmux_manager::{self, CapturedContent, TerminalBackend};
 use crate::recording_endpoints::{
@@ -91,6 +91,9 @@ pub async fn start_api_server(
         // Batch send (fan-out to multiple terminals)
         .route("/api/terminals/batch/execute", post(batch_execute_prompt))
         .route("/api/terminals/batch/input", post(batch_write_terminal))
+        // Fleet responder loopback (fabric -> core): run a sentinel-wrapped command
+        // in a persistent labeled terminal and long-poll until the sentinel/timeout.
+        .route("/api/fleet/local-run", post(fleet_local_run))
         // System info endpoints
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
@@ -1120,6 +1123,204 @@ async fn execute_prompt(
         Ok(body) => (StatusCode::OK, Json(body)),
         Err((code, msg)) => (code, Json(json!({ "error": msg }))),
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FleetLocalRunReq {
+    command: String,
+    terminal_id: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    label: Option<String>,
+}
+
+/// Watch the broadcast output stream for THIS run's sentinel on `terminal_id`.
+/// Returns `(done, exit_code)`: `(true, Some(code))` when the marker is seen,
+/// `(false, None)` on timeout or if the channel closes first. Factored out of
+/// the handler so it is unit-testable without an `AppState`/tauri runtime.
+async fn watch_for_sentinel(
+    mut rx: tokio::sync::broadcast::Receiver<ChannelPayload>,
+    terminal_id: &str,
+    nonce: &str,
+    timeout: std::time::Duration,
+) -> (bool, Option<i32>) {
+    let watcher = async {
+        // Accumulate across chunks: the marker can straddle a PTY read boundary.
+        let mut acc = String::new();
+        loop {
+            match rx.recv().await {
+                Ok(payload) => {
+                    if payload.id != terminal_id {
+                        continue;
+                    }
+                    acc.push_str(&String::from_utf8_lossy(&payload.data));
+                    if let Some(code) = sentinel_exit_code(&acc, nonce) {
+                        return Some(code);
+                    }
+                    // Bound the scan buffer for chatty commands; keep a tail large
+                    // enough to hold a marker split across the drain boundary.
+                    if acc.len() > 16384 {
+                        let cut = acc.len() - 4096;
+                        acc.drain(..cut);
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+            }
+        }
+    };
+    match tokio::time::timeout(timeout, watcher).await {
+        Ok(Some(code)) => (true, Some(code)),
+        Ok(None) => (false, None),
+        Err(_) => (false, None),
+    }
+}
+
+/// Responder loopback endpoint: the fabric calls this to run a command locally
+/// on behalf of a paired peer. Spawns-or-reuses a PERSISTENT labeled terminal,
+/// injects a sentinel-wrapped command, and long-polls the live output until the
+/// sentinel exit-code appears or the (clamped) timeout elapses. The terminal is
+/// NEVER closed here — follow-up screen/close go through their own endpoints.
+async fn fleet_local_run(
+    State(state): State<AppState>,
+    Json(payload): Json<FleetLocalRunReq>,
+) -> impl IntoResponse {
+    use tauri::Emitter;
+
+    if payload.command.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "command must be a non-empty string" })),
+        )
+            .into_response();
+    }
+    // Clamp caller timeout to a sane band; default 60s (frozen contract).
+    let timeout_ms = payload.timeout_ms.unwrap_or(60_000).clamp(1_000, 3_600_000);
+
+    // Resolve the target terminal: reuse when the id is present AND live;
+    // otherwise spawn a NEW persistent terminal from the default profile.
+    let terminal_id = match payload.terminal_id.as_ref() {
+        Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
+        _ => {
+            let profiles = crate::pty_manager::get_available_shells();
+            let profile = profiles.iter().find(|p| p.is_default);
+            let (shell_path, shell_args, shell_cwd, shell_name) = match profile {
+                Some(p) => (
+                    Some(p.path.clone()),
+                    Some(p.args.clone()),
+                    p.cwd.clone(),
+                    p.id.clone(),
+                ),
+                None => (None, None, None, "default".to_string()),
+            };
+            let terminal_name = payload.label.clone().unwrap_or_else(|| "Fleet".to_string());
+            let new_id = match crate::pty_manager::spawn_terminal(
+                state.clone(),
+                80,
+                24,
+                shell_path,
+                shell_args,
+                shell_cwd,
+                shell_name.clone(),
+                terminal_name.clone(),
+            ) {
+                Ok(id) => id,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
+                        .into_response()
+                }
+            };
+            // Make the fleet terminal VISIBLE as a labeled UI tab, mirroring
+            // create_terminal. The backend (`pc-`) id stays the map key; the
+            // `tb-` tab id is a cosmetic renderer alias.
+            let raw_uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
+            let tab_id = format!("tb-{}", &raw_uuid[..9]);
+            let target_window = state.resolve_active_window_label();
+            if let Err(e) = state.app_handle.emit(
+                "api:createTerminalTab",
+                serde_json::json!({
+                    "name": terminal_name,
+                    "profile": shell_name,
+                    "terminalId": new_id,
+                    "tabId": Some(tab_id.clone()),
+                    "paneId": serde_json::Value::Null,
+                    "direction": serde_json::Value::Null,
+                    "targetWindow": target_window,
+                }),
+            ) {
+                log::warn!("Failed to emit api:createTerminalTab for fleet terminal: {}", e);
+            }
+            if let Some(mut entry) = state.terminals.get_mut(&new_id) {
+                entry.tab_id = Some(tab_id);
+            }
+            new_id
+        }
+    };
+
+    // Derive the shell dialect from the resolved terminal's profile so the
+    // sentinel wrapping matches (pwsh vs posix vs cmd).
+    let shell_profile_id = state.terminals.get(&terminal_id).map(|t| t.shell.clone());
+    let kind = match shell_profile_id
+        .as_deref()
+        .and_then(crate::pty_manager::get_profile)
+    {
+        Some(p) => classify_shell_kind(&p.path, &p.name),
+        None => crate::pty_manager::get_available_shells()
+            .iter()
+            .find(|p| p.is_default)
+            .map(|p| classify_shell_kind(&p.path, &p.name))
+            .unwrap_or(if cfg!(target_os = "windows") {
+                ShellKind::Cmd
+            } else {
+                ShellKind::Posix
+            }),
+    };
+
+    // Unique per-run nonce so a stale marker from a prior run can never match.
+    let nonce = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let wrapped = build_sentinel_command(kind, payload.command.trim(), &nonce);
+
+    // SUBSCRIBE before injecting so no output chunk (and thus the sentinel) can
+    // be missed between the write and the start of the watch.
+    let rx = state.output_tx.subscribe();
+
+    // Inject via the existing prompt path (bracketed-paste + shell submit).
+    let exec_req = ExecutePromptReq {
+        prompt: wrapped,
+        cli_type: "default".to_string(),
+        submission_signal: None,
+        custom_pattern: None,
+    };
+    if let Err((code, msg)) = send_prompt_to_terminal(&state, &terminal_id, &exec_req).await {
+        return (code, Json(json!({ "error": msg }))).into_response();
+    }
+
+    let (done, exit_code) = watch_for_sentinel(
+        rx,
+        &terminal_id,
+        &nonce,
+        std::time::Duration::from_millis(timeout_ms),
+    )
+    .await;
+
+    // Authoritative live screen; the terminal PERSISTS (never closed here). On
+    // timeout, done=false/exitCode=null and the screen shows the in-progress run.
+    let screen = state
+        .screen_snapshot(&terminal_id)
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "terminalId": terminal_id,
+            "done": done,
+            "exitCode": exit_code,
+            "screen": screen,
+        })),
+    )
+        .into_response()
 }
 
 /// Fan out one prompt to several terminals. Always returns HTTP 200 with a
@@ -2479,5 +2680,42 @@ mod tests {
         let row0 = shrink.screen().contents();
         assert!(row0.starts_with(&text[..40]), "first 40 cols preserved");
         assert!(!row0.contains(text), "content beyond width is clipped, not reflowed");
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_detects_exit_code_across_chunks() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // Marker deliberately split across two chunks to prove reassembly.
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"work\r\n@@TFDONE:abc12".to_vec() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"3:0@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "abc123", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_ignores_other_terminals_and_reads_negative() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        // A marker for a DIFFERENT terminal must be ignored.
+        tx.send(ChannelPayload { id: "pc-other".into(), data: b"@@TFDONE:n1:0@@".to_vec() }).unwrap();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"boom\r\n@@TFDONE:n1:-1@@\r\n".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_secs(2)).await;
+        assert!(done);
+        assert_eq!(code, Some(-1));
+    }
+
+    #[tokio::test]
+    async fn watch_for_sentinel_times_out_without_marker() {
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ChannelPayload>(64);
+        let rx = tx.subscribe();
+        tx.send(ChannelPayload { id: "pc-1".into(), data: b"still running...".to_vec() }).unwrap();
+        let (done, code) =
+            watch_for_sentinel(rx, "pc-1", "n1", std::time::Duration::from_millis(150)).await;
+        assert!(!done);
+        assert_eq!(code, None);
     }
 }
