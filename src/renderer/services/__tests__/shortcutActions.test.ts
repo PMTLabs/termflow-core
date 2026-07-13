@@ -79,8 +79,19 @@ describe('findConflict', () => {
     expect(findConflict('paste', 'Ctrl+Shift+V', {})).toEqual({ type: 'reserved' });
   });
 
-  it('reports a reserved-combo conflict for the fixed Alt+Arrow pane-nav slots', () => {
-    expect(findConflict('nextTab', 'Alt+ArrowLeft', {})).toEqual({ type: 'reserved' });
+  it('does NOT reserve Alt+Arrow — those keys pass through to the terminal for word movement', () => {
+    // The old pane-navigation stub swallowed Alt+Left/Right before xterm saw
+    // them, breaking word-jump at the shell prompt. The stub and its
+    // reservation were removed; Alt+Arrow is a free combo like any other.
+    expect(findConflict('nextTab', 'Alt+ArrowLeft', {})).toBeNull();
+    expect(findConflict('nextTab', 'Alt+ArrowRight', {})).toBeNull();
+  });
+
+  it('reports a reserved-combo conflict for the fixed Alt+Shift+Arrow pane-resize bindings', () => {
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowLeft', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowRight', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowUp', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowDown', {})).toEqual({ type: 'reserved' });
   });
 
   it('normalizes arrow-key combos the same way InputHandler does, so an arrow override still detects conflicts', () => {

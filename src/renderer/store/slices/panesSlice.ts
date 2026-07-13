@@ -34,6 +34,9 @@ interface PanesState {
   maximizedPaneByTabId: Record<string, string>;
 }
 
+/** Percentage a keyboard resize (Alt+Shift+Arrow) moves a split divider per press. */
+const PANE_RESIZE_STEP = 5;
+
 const initialState: PanesState = {
   paneTree: null,
   activePaneId: null,
@@ -305,6 +308,46 @@ const panesSlice = createSlice({
       syncActive(state);
     },
 
+    /**
+     * Keyboard resize (Alt+Shift+Arrow): nudge the divider of the nearest
+     * ancestor split — of the focused pane — whose orientation matches the
+     * arrow axis. Left/Right target a side-by-side ('vertical') split, Up/Down
+     * a stacked ('horizontal') one. The arrow gives the divider's absolute
+     * travel direction (Right/Down = size up, Left/Up = size down), regardless
+     * of which child holds the focus, so Left always undoes Right. Same 10-90
+     * clamp as drag resize. No matching ancestor → no-op.
+     */
+    resizeFocusedPane: (state, action: PayloadAction<{ direction: 'left' | 'right' | 'up' | 'down' }>) => {
+      const { direction } = action.payload;
+      if (!state.paneTree || !state.activePaneId) return;
+      // While a pane is maximized no divider is visible — resizing would silently
+      // distort the hidden layout, revealed only on restore (reviews 053/054).
+      if (state.activeTabId && state.maximizedPaneByTabId[state.activeTabId]) return;
+
+      const wantedOrientation = direction === 'left' || direction === 'right' ? 'vertical' : 'horizontal';
+      const delta = direction === 'right' || direction === 'down' ? PANE_RESIZE_STEP : -PANE_RESIZE_STEP;
+
+      // Walk to the focused pane, carrying the nearest matching-orientation split.
+      let target: PaneNode | null = null;
+      const visit = (node: PaneNode, nearest: PaneNode | null): boolean => {
+        if (node.id === state.activePaneId) {
+          target = nearest;
+          return true;
+        }
+        if (node.type === 'split' && node.children) {
+          const next = node.direction === wantedOrientation ? node : nearest;
+          return node.children.some(child => visit(child, next));
+        }
+        return false;
+      };
+      visit(state.paneTree, null);
+      if (!target) return;
+
+      const split: PaneNode = target;
+      split.size = Math.max(10, Math.min(90, (split.size ?? 50) + delta));
+      syncActive(state);
+    },
+
     focusPane: (state, action: PayloadAction<string>) => {
       state.activePaneId = action.payload;
     },
@@ -561,6 +604,7 @@ export const {
   toggleMaximizePane,
   closePane,
   resizePane,
+  resizeFocusedPane,
   focusPane,
   renamePanes,
   setPaneTree,

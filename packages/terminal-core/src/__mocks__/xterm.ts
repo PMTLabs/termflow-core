@@ -68,6 +68,7 @@ export class Terminal {
   // instead of letting the search addon yank it to the active match.
   scrollToBottomCount = 0;
   scrollToLineCalls: number[] = [];
+  scrollPagesCalls: number[] = [];
 
   scrollToBottom(): void {
     this.scrollToBottomCount++;
@@ -79,6 +80,15 @@ export class Terminal {
   scrollToLine(line: number): void {
     this.scrollToLineCalls.push(line);
     this.buffer.active.viewportY = line;
+  }
+
+  scrollPages(pageCount: number): void {
+    this.scrollPagesCalls.push(pageCount);
+    // Mirror real xterm: move by a viewport height per page, clamped to the buffer.
+    this.buffer.active.viewportY = Math.max(
+      0,
+      Math.min(this.buffer.active.baseY, this.buffer.active.viewportY + pageCount * this.rows),
+    );
   }
 
   // Captured callbacks — tests drive these to simulate real xterm events.

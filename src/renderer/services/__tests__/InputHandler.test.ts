@@ -34,6 +34,7 @@ jest.mock('../openSettings', () => ({ openSettingsTab: () => openSettingsTab() }
 
 import { inputHandler, InputHandler } from '../InputHandler';
 import { removeTab, addTab } from '../../store/slices/tabsSlice';
+import { resizeFocusedPane } from '../../store/slices/panesSlice';
 
 afterAll(() => inputHandler.destroy());
 
@@ -248,6 +249,32 @@ describe('InputHandler.applyKeybindingOverrides', () => {
     await Promise.resolve(); // flush the microtask queue
 
     expect(subscribe).not.toHaveBeenCalled();
+  });
+});
+
+describe('InputHandler Alt+Arrow ownership (review 054: capture-phase behavior)', () => {
+  beforeEach(() => dispatch.mockClear());
+
+  it('leaves plain Alt+Arrow unclaimed so it reaches the terminal (word movement)', () => {
+    for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']) {
+      const event = new KeyboardEvent('keydown', { key, altKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('claims Alt+Shift+Arrow and dispatches resizeFocusedPane with the matching direction', () => {
+    const cases: Array<[string, 'left' | 'right' | 'up' | 'down']> = [
+      ['ArrowLeft', 'left'], ['ArrowRight', 'right'], ['ArrowUp', 'up'], ['ArrowDown', 'down'],
+    ];
+    for (const [key, direction] of cases) {
+      dispatch.mockClear();
+      const event = new KeyboardEvent('keydown', { key, altKey: true, shiftKey: true, bubbles: true, cancelable: true });
+      window.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(dispatch).toHaveBeenCalledWith(resizeFocusedPane({ direction }));
+    }
   });
 });
 

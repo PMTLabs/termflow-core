@@ -4,6 +4,7 @@ import reducer, {
   splitPaneInTab,
   closePane,
   focusPane,
+  resizeFocusedPane,
   setActiveTabId,
   addTabTree,
   removeTabTree,
@@ -371,5 +372,100 @@ describe('panesSlice maximize (pane zoom)', () => {
       tabId: 'tb-1', targetPaneId: aId, zone: 'right', node: leaf('pn-new', 'tm-new'),
     }));
     expect(s.maximizedPaneByTabId['tb-1']).toBeUndefined();
+  });
+});
+
+describe('panesSlice resizeFocusedPane (Alt+Shift+Arrow)', () => {
+  // Active tab tb-1 with a side-by-side ('vertical') split [a | b], size 50.
+  const sideBySide = () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    s = reducer(s, splitPane({ paneId: s.paneTree!.id, direction: 'vertical', terminalId: 'tm-2' }));
+    const [a, b] = s.paneTree!.children!;
+    return { s, aId: a.id, bId: b.id };
+  };
+
+  it('right/left nudge the divider of a side-by-side split by 5%', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(55);
+    s = reducer(s, resizeFocusedPane({ direction: 'left' }));
+    expect(s.paneTree!.size).toBe(50);
+  });
+
+  it('divider direction is absolute — same delta whichever child is focused', () => {
+    let { s, bId } = sideBySide();
+    s = reducer(s, focusPane(bId));
+    // Focus on the RIGHT pane: Right still moves the shared divider right (grows a, shrinks b).
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(55);
+  });
+
+  it('up/down are a no-op when the focused pane has no stacked ancestor', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    const before = JSON.stringify(s.paneTree);
+    s = reducer(s, resizeFocusedPane({ direction: 'up' }));
+    s = reducer(s, resizeFocusedPane({ direction: 'down' }));
+    expect(JSON.stringify(s.paneTree)).toEqual(before);
+  });
+
+  it('targets the NEAREST matching-orientation ancestor in a nested layout', () => {
+    // Root: [a | (b over c)] — vertical root, second child split horizontally.
+    let { s, bId } = sideBySide();
+    s = reducer(s, splitPane({ paneId: bId, direction: 'horizontal', terminalId: 'tm-3' }));
+    const inner = s.paneTree!.children![1];
+    const cId = inner.children![1].id;
+    s = reducer(s, focusPane(cId));
+
+    // Down adjusts the inner stacked split; Right walks up to the vertical root.
+    s = reducer(s, resizeFocusedPane({ direction: 'down' }));
+    expect(s.paneTree!.children![1].size).toBe(55);
+    expect(s.paneTree!.size).toBe(50);
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(55);
+    expect(s.paneTree!.children![1].size).toBe(55);
+  });
+
+  it('clamps to the same 10-90 range as drag resize', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    for (let i = 0; i < 12; i++) {
+      s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    }
+    expect(s.paneTree!.size).toBe(90);
+    for (let i = 0; i < 20; i++) {
+      s = reducer(s, resizeFocusedPane({ direction: 'left' }));
+    }
+    expect(s.paneTree!.size).toBe(10);
+  });
+
+  it('no-op on a single-pane tab and when no tree exists', () => {
+    let s = withActive('tb-1');
+    expect(() => reducer(s, resizeFocusedPane({ direction: 'right' }))).not.toThrow();
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    const before = JSON.stringify(s.paneTree);
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(JSON.stringify(s.paneTree)).toEqual(before);
+  });
+
+  it('is a no-op while the tab has a maximized pane (review 053 F2: no invisible layout drift)', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    s = reducer(s, toggleMaximizePane({ tabId: 'tb-1', paneId: aId }));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(50);
+    // Un-maximize -> resizing works again.
+    s = reducer(s, toggleMaximizePane({ tabId: 'tb-1', paneId: aId }));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(55);
+  });
+
+  it('mirrors the resized tree into treesByTabId (syncActive)', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.treesByTabId['tb-1'].size).toBe(55);
   });
 });
