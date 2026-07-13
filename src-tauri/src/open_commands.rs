@@ -218,6 +218,18 @@ fn to_native_path(path: &str) -> String {
     normalize_separators(path)
 }
 
+/// True when `program` is a Windows batch launcher (`.cmd`/`.bat`), which std runs
+/// through cmd.exe. From this GUI (windows-subsystem) process that intermediate
+/// cmd.exe would get a brand-new console window — a visible flash on every
+/// ctrl-click open — unless suppressed with CREATE_NO_WINDOW (see open_in_editor).
+/// Compiled on every platform so the Linux CI can unit-test it; only consulted on
+/// Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_batch_shim(program: &str) -> bool {
+    let lower = program.to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
 fn is_executable_path(path: &str) -> bool {
     Path::new(path)
         .extension()
@@ -541,11 +553,23 @@ pub async fn open_in_editor(
     // but cmd.exe still expands `%VAR%` inside the file-path arg. In practice the
     // path is a real on-disk file the user clicked; a literal `%name%` segment is
     // an accepted edge-case limitation of launching through a batch shim.
-    std::process::Command::new(&program)
-        // Build args from the user-typed name so VS Code detection (-g go-to-line)
-        // still fires even though `program` may now be `…\code.cmd`.
-        .args(editor_args(&editor, &path, line, col))
-        .spawn()
+    let mut cmd = std::process::Command::new(&program);
+    // Build args from the user-typed name so VS Code detection (-g go-to-line)
+    // still fires even though `program` may now be `…\code.cmd`.
+    cmd.args(editor_args(&editor, &path, line, col));
+    // Batch shims run through cmd.exe, which — spawned from a GUI process — pops a
+    // console window that flashes and closes. CREATE_NO_WINDOW suppresses it.
+    // Scoped to `.cmd`/`.bat` only: a console editor the user configured directly
+    // (e.g. vim.exe) still needs a real console window to appear in.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if is_batch_shim(&program) {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+    cmd.spawn()
         .map(|_| ())
         // A missing editor surfaces as a bare OS error ("No such file or directory");
         // name the editor so the user can fix the defaultEditor setting.
@@ -555,8 +579,8 @@ pub async fn open_in_editor(
 #[cfg(test)]
 mod tests {
     use super::{
-        editor_args, find_descendants, is_executable_path, is_vscode_family, msys_or_wsl_drive,
-        normalize_separators, resolve_blocking, resolve_in_path,
+        editor_args, find_descendants, is_batch_shim, is_executable_path, is_vscode_family,
+        msys_or_wsl_drive, normalize_separators, resolve_blocking, resolve_in_path,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -736,6 +760,18 @@ mod tests {
         assert!(is_vscode_family("code-insiders"));
         assert!(!is_vscode_family("notepad"));
         assert!(!is_vscode_family("vim"));
+    }
+
+    #[test]
+    fn detects_batch_shims_for_console_suppression() {
+        // .cmd/.bat launchers run via cmd.exe → console flash without CREATE_NO_WINDOW.
+        assert!(is_batch_shim(r"C:\Users\me\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd"));
+        assert!(is_batch_shim("code.CMD")); // case-insensitive
+        assert!(is_batch_shim("tool.bat"));
+        // Real executables (incl. console editors like vim) keep their own window.
+        assert!(!is_batch_shim(r"C:\Program Files\Vim\vim.exe"));
+        assert!(!is_batch_shim("code"));
+        assert!(!is_batch_shim("/usr/bin/code"));
     }
 
     #[test]

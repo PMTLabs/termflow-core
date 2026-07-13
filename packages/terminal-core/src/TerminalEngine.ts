@@ -298,6 +298,79 @@ export function findPathLinks(text: string): PathLinkMatch[] {
   return out;
 }
 
+// A logical line can span many buffer rows when it soft-wraps. Cap how many rows
+// get stitched together per hover so a pathological single line (e.g. `cat` of a
+// minified file) can't turn every provideLinks call into a huge walk.
+const MAX_WRAPPED_LINK_ROWS = 64;
+
+export interface WrappedLineInfo {
+  /** 0-based buffer row where the logical line starts. */
+  firstRow: number;
+  /** The logical line with wrapped continuation rows joined. */
+  text: string;
+  /** rowStarts[i] = index in `text` where buffer row (firstRow + i) begins. */
+  rowStarts: number[];
+}
+
+interface LinkableBufferLine {
+  isWrapped: boolean;
+  translateToString(trimRight?: boolean): string;
+}
+
+/**
+ * Stitch the full logical line containing buffer row `row` (0-based). A row with
+ * `isWrapped` continues the PREVIOUS row (real xterm semantics), so walk back to
+ * the line start, then join forward across continuations. Interior rows keep
+ * trailing spaces (they are real characters of the logical line); only the final
+ * row is right-trimmed. Returns null for a missing row or a line over the cap.
+ */
+export function collectWrappedLine(
+  buffer: { getLine(n: number): LinkableBufferLine | undefined },
+  row: number,
+  maxRows = MAX_WRAPPED_LINK_ROWS,
+): WrappedLineInfo | null {
+  if (!buffer.getLine(row)) return null;
+  let first = row;
+  let guard = maxRows;
+  while (first > 0 && buffer.getLine(first)?.isWrapped) {
+    if (--guard <= 0) return null;
+    first--;
+  }
+  const rowStarts: number[] = [];
+  let text = '';
+  for (let r = first; r - first < maxRows; r++) {
+    const line = buffer.getLine(r);
+    if (!line) break; // a line shouldn't vanish mid-walk, but stop cleanly
+    rowStarts.push(text.length);
+    if (buffer.getLine(r + 1)?.isWrapped) {
+      text += line.translateToString(false);
+    } else {
+      text += line.translateToString(true);
+      return { firstRow: first, text, rowStarts };
+    }
+  }
+  return null; // hit the cap (or a hole) before the logical line ended
+}
+
+/**
+ * Map a [start, endExclusive) character range in a stitched logical line back to
+ * xterm 1-based buffer coordinates (range end is inclusive of the last cell).
+ * Equals the old single-row mapping (`{x: start+1}` / `{x: end}`) when the line
+ * occupies one row.
+ */
+export function wrappedBufferRange(
+  info: WrappedLineInfo,
+  start: number,
+  endExclusive: number,
+): { start: { x: number; y: number }; end: { x: number; y: number } } {
+  const locate = (idx: number): { x: number; y: number } => {
+    let r = info.rowStarts.length - 1;
+    while (r > 0 && info.rowStarts[r] > idx) r--;
+    return { x: idx - info.rowStarts[r] + 1, y: info.firstRow + r + 1 };
+  };
+  return { start: locate(start), end: locate(endExclusive - 1) };
+}
+
 /**
  * Framework-agnostic terminal engine. Owns xterm construction, addon wiring,
  * fit/resize handling, keyboard handling and the cross-mount instance cache.
@@ -1227,17 +1300,17 @@ export class TerminalEngine {
     // bound to a stale engine instance after a tab switch.)
     const pathLinkDisposable = boundTerm.registerLinkProvider({
       provideLinks: (bufferLineNumber, callback) => {
-        const line = boundTerm.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) { callback(undefined); return; }
-        const text = line.translateToString(true);
-        const matches = findPathLinks(text);
+        // Wrapped-line aware: a long path that soft-wraps continues on further
+        // buffer rows (isWrapped), so stitch the full logical line before
+        // matching — a single row would only ever see the path's first fragment.
+        const info = collectWrappedLine(boundTerm.buffer.active, bufferLineNumber - 1);
+        if (!info) { callback(undefined); return; }
+        const matches = findPathLinks(info.text);
         if (matches.length === 0) { callback(undefined); return; }
         callback(matches.map((mt) => ({
-          // xterm coords are 1-based; range end is inclusive of the last cell.
-          range: {
-            start: { x: mt.start + 1, y: bufferLineNumber },
-            end: { x: mt.end, y: bufferLineNumber },
-          },
+          // Map string offsets back to 1-based buffer coords; the range may span
+          // several rows (end is inclusive of the last cell).
+          range: wrappedBufferRange(info, mt.start, mt.end),
           text: mt.path,
           activate: (event) => {
             // Require the modifier (Ctrl on Win/Linux, Cmd on macOS); a plain click
