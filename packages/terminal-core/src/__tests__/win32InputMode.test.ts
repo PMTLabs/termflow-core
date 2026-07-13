@@ -119,8 +119,22 @@ describe('encodeWin32Key — chords, keyup, repeat, functional keys', () => {
   test('Ctrl+J -> Uc=10 (same byte as bare LF, but Cs carries the chord)', () => {
     expect(encodeWin32Key(key({ key: 'j', keyCode: 74, ctrlKey: true }), true)).toBe('\x1b[74;36;10;1;8;1_');
   });
-  test('Shift+Enter -> CSI 13;28;13;1;16;1 _ (SHIFT_PRESSED set)', () => {
-    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, shiftKey: true }), true)).toBe('\x1b[13;28;13;1;16;1_');
+  // Shift+Enter carries Uc=10 (LF), not 13: INPUT_RECORD readers (codex/crossterm)
+  // key off Vk+SHIFT and ignore Uc, while VT-byte readers (claude, gemini) only ever
+  // see ConPTY's translation OF Uc — 13 would collapse to a plain-Enter submit.
+  // Verified live against both consumer types; see the SHIFT_ENTER rationale in
+  // win32InputMode.ts.
+  test('Shift+Enter -> CSI 13;28;10;1;16;1 _ (SHIFT_PRESSED set, Uc=LF)', () => {
+    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, shiftKey: true }), true)).toBe('\x1b[13;28;10;1;16;1_');
+  });
+  test('Shift+Enter keyup keeps Uc=10 (symmetric with the press)', () => {
+    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, shiftKey: true, type: 'keyup' }), true)).toBe('\x1b[13;28;10;0;16;1_');
+  });
+  test('Ctrl+Shift+Enter -> Uc=10 via the ctrl override (unchanged by the shift rule)', () => {
+    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, ctrlKey: true, shiftKey: true }), true)).toBe('\x1b[13;28;10;1;24;1_');
+  });
+  test('Alt+Shift+Enter keeps the named-key Uc=13 (LF rule is shift-only)', () => {
+    expect(encodeWin32Key(key({ key: 'Enter', keyCode: 13, altKey: true, shiftKey: true }), true)).toBe('\x1b[13;28;13;1;18;1_');
   });
   test('right Ctrl (location=2) sets RIGHT_CTRL_PRESSED', () => {
     expect(encodeWin32Key(key({ key: 'Control', keyCode: 17, ctrlKey: true, location: 2 }), true)).toBe('\x1b[17;29;0;1;4;1_');

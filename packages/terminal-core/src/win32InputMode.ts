@@ -106,8 +106,23 @@ function controlTranslatedChar(key: string): number {
   return key.toUpperCase().charCodeAt(0) - 64;
 }
 
+// Shift+Enter's Uc is LF (10), not the named key's CR (13). The two consumer
+// types see different halves of the record: INPUT_RECORD readers (codex — every
+// crossterm app) key off Vk=VK_RETURN + SHIFT_PRESSED and ignore Uc, while
+// VT-byte readers (claude, gemini — Node/Bun stdin) never see Vk or Cs at all;
+// ConPTY hands them only its translation of Uc. With Uc=13 that translation is a
+// bare CR — indistinguishable from plain Enter, so Shift+Enter submits instead of
+// inserting a newline. Uc=10 preserves the LF-shim semantics those CLIs rely on
+// (their Windows Terminal story is a user keybinding that sends "\n") without
+// costing INPUT_RECORD readers anything. Shift-only: Ctrl+Enter already maps to
+// 10 via CTRL_CHAR_OVERRIDE, and Alt chords keep the canonical 13.
+function shiftEnterLf(e: KeyboardEvent): boolean {
+  return e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+}
+
 function unicodeChar(e: KeyboardEvent): number {
   if (e.ctrlKey && e.key in CTRL_CHAR_OVERRIDE) return CTRL_CHAR_OVERRIDE[e.key];
+  if (shiftEnterLf(e)) return 10;
   if (e.key in NAMED_KEY_CHAR) return NAMED_KEY_CHAR[e.key];
   if (!isSingleChar(e.key)) return 0;
   if (e.ctrlKey && /^[a-zA-Z]$/.test(e.key)) return controlTranslatedChar(e.key);
