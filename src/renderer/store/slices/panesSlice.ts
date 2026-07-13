@@ -320,6 +320,9 @@ const panesSlice = createSlice({
     resizeFocusedPane: (state, action: PayloadAction<{ direction: 'left' | 'right' | 'up' | 'down' }>) => {
       const { direction } = action.payload;
       if (!state.paneTree || !state.activePaneId) return;
+      // While a pane is maximized no divider is visible — resizing would silently
+      // distort the hidden layout, revealed only on restore (reviews 053/054).
+      if (state.activeTabId && state.maximizedPaneByTabId[state.activeTabId]) return;
 
       const wantedOrientation = direction === 'left' || direction === 'right' ? 'vertical' : 'horizontal';
       const delta = direction === 'right' || direction === 'down' ? PANE_RESIZE_STEP : -PANE_RESIZE_STEP;

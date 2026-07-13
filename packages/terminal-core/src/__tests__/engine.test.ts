@@ -512,6 +512,31 @@ test('win32 input mode active: PageUp still scrolls instead of being encoded, an
   expect(calls.write).toEqual([]);
 });
 
+test('End auto-repeat after the claimed first press stays swallowed until keyup (review 053 F1)', () => {
+  const { term, calls } = scrollEngine('sc8', { isWindows: true });
+  term.csiHandlers['?h']([9001]); // win32 input mode: encoders would forward leaks
+  term.buffer.active.viewportY = 40; // scrolled up
+
+  // First press: claims the key and synchronously scrolls to the bottom.
+  expect(term.keyHandler!(withKey({ key: 'End' }))).toBe(false);
+  expect(term.scrollToBottomCount).toBe(1);
+  // Auto-repeat keydowns now see scrolledUp=false — they must STILL be
+  // swallowed while the claim is held, not fall through to the Win32 encoder
+  // (the eventual keyup is swallowed by the claim, so a leaked repeat keydown
+  // would leave the PTY with a press and no release).
+  expect(term.keyHandler!(withKey({ key: 'End', repeat: true }))).toBe(false);
+  expect(term.keyHandler!(withKey({ key: 'End', repeat: true }))).toBe(false);
+  // Release clears the claim and is swallowed.
+  expect(term.keyHandler!(withKey({ key: 'End', type: 'keyup' }))).toBe(false);
+  expect(calls.write).toEqual([]);
+
+  // Claim cleared: a fresh End at the bottom reaches the PTY again — under
+  // active win32 input mode that means the encoder consumes it and WRITES a
+  // record (handled=false + write), not xterm legacy passthrough.
+  expect(term.keyHandler!(withKey({ key: 'End' }))).toBe(false);
+  expect(calls.write.length).toBe(1);
+});
+
 test('kitty protocol active: scroll keys defer to the app (e.g. Claude Code input editor)', () => {
   const { term, calls } = scrollEngine('sc7');
   term.csiHandlers['>u']([1]); // app pushes kitty flag 1

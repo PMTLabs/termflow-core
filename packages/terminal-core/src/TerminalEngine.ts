@@ -1064,7 +1064,12 @@ export class TerminalEngine {
       ) {
         const buf = boundTerm.buffer.active;
         const scrolledUp = buf.viewportY < buf.baseY;
-        if (event.key !== 'End' || scrolledUp) {
+        // The uiClaimedKeydownKeys check keeps a held End claimed across auto-
+        // repeat: the first press scrolls to the bottom synchronously, so repeat
+        // keydowns see scrolledUp=false and would otherwise fall through to the
+        // Kitty/Win32 encoders — while the eventual keyup stays swallowed by the
+        // claim, leaving the PTY with presses and no release (review 053 F1).
+        if (event.key !== 'End' || scrolledUp || this.uiClaimedKeydownKeys.has(event.key)) {
           event.preventDefault();
           event.stopPropagation();
           this.uiClaimedKeydownKeys.add(event.key);

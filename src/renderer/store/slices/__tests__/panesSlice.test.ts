@@ -450,6 +450,18 @@ describe('panesSlice resizeFocusedPane (Alt+Shift+Arrow)', () => {
     expect(JSON.stringify(s.paneTree)).toEqual(before);
   });
 
+  it('is a no-op while the tab has a maximized pane (review 053 F2: no invisible layout drift)', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, focusPane(aId));
+    s = reducer(s, toggleMaximizePane({ tabId: 'tb-1', paneId: aId }));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(50);
+    // Un-maximize -> resizing works again.
+    s = reducer(s, toggleMaximizePane({ tabId: 'tb-1', paneId: aId }));
+    s = reducer(s, resizeFocusedPane({ direction: 'right' }));
+    expect(s.paneTree!.size).toBe(55);
+  });
+
   it('mirrors the resized tree into treesByTabId (syncActive)', () => {
     let { s, aId } = sideBySide();
     s = reducer(s, focusPane(aId));
