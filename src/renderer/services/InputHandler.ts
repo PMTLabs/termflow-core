@@ -49,11 +49,11 @@ export class InputHandler {
     this.registerShortcut(this.defaultComboFor('closePane'), this.handleClosePane);
     this.registerShortcut(this.defaultComboFor('toggleMaximizePane'), this.handleToggleMaximizePane);
 
-    // Pane navigation — stub (no real behavior yet), fixed, not user-customizable.
-    this.registerShortcut('Alt+ArrowLeft', () => this.handlePaneNavigation('left'));
-    this.registerShortcut('Alt+ArrowRight', () => this.handlePaneNavigation('right'));
-    this.registerShortcut('Alt+ArrowUp', () => this.handlePaneNavigation('up'));
-    this.registerShortcut('Alt+ArrowDown', () => this.handlePaneNavigation('down'));
+    // Note: Alt+Arrow is intentionally NOT bound. It must pass through to the
+    // terminal so xterm emits \x1b[1;3D / \x1b[1;3C etc. — shells map those to
+    // word-wise cursor movement. A pane-navigation stub used to claim these
+    // combos and (via capture-phase stopPropagation) swallowed them before
+    // xterm saw the keys, breaking Alt+Left/Right word-jump at the prompt.
 
     // Terminal actions
     // Note: Ctrl+C is handled directly in terminal for interrupt signal.
@@ -379,11 +379,6 @@ export class InputHandler {
     if (tabId && paneId) {
       store.dispatch(toggleMaximizePane({ tabId, paneId }));
     }
-  };
-
-  private handlePaneNavigation = (direction: 'left' | 'right' | 'up' | 'down'): void => {
-    // This would use the navigatePane helper from PaneManager
-    console.log(`Navigate pane ${direction}`);
   };
 
   private handlePaste = async (): Promise<void> => {
