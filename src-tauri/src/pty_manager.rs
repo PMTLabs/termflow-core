@@ -512,6 +512,42 @@ pub fn spawn_terminal(
     cmd_builder.env("COLORTERM", "truecolor");
     cmd_builder.env("TERMFLOW_TERMINAL_ID", &id);
 
+    // Identify ourselves — and stop leaking the identity of whatever terminal the
+    // APP was launched from. Same inheritance mechanism as COLORTERM above, but
+    // worse than cosmetic: `tauri dev` launched from Warp handed every PTY
+    // TERM_PROGRAM=WarpTerminal, which made Claude Code enable the Kitty keyboard
+    // protocol in dev builds only — Shift+Enter then behaved differently in dev vs
+    // release (see docs/review 046-052 follow-up). CLIs also detect terminals via
+    // the per-terminal session vars below, so overriding TERM_PROGRAM alone isn't
+    // enough; scrub the known identity markers too.
+    cmd_builder.env("TERM_PROGRAM", "TermFlow");
+    cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    const FOREIGN_TERMINAL_ENV: &[&str] = &[
+        "WT_SESSION",                 // Windows Terminal
+        "WT_PROFILE_ID",
+        "WARP_TERMINAL_SESSION_UUID", // Warp
+        "WARP_IS_LOCAL_SHELL_SESSION",
+        "WARP_HONOR_PS1",
+        "KITTY_WINDOW_ID",            // kitty
+        "KITTY_PID",
+        "ALACRITTY_LOG",              // Alacritty
+        "ALACRITTY_WINDOW_ID",
+        "KONSOLE_VERSION",            // Konsole
+        "VTE_VERSION",                // GNOME/VTE family
+        "ZED_TERM",                   // Zed
+        "WEZTERM_PANE",               // WezTerm
+        "WEZTERM_EXECUTABLE",
+        "ITERM_SESSION_ID",           // iTerm2
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        "TERM_SESSION_ID",            // Apple Terminal
+        "TILIX_ID",                   // Tilix
+        "TERMINATOR_UUID",            // Terminator
+    ];
+    for key in FOREIGN_TERMINAL_ENV {
+        cmd_builder.env_remove(key);
+    }
+
     let mut has_command_flag = false;
     if let Some(args) = shell_args {
         has_command_flag = args.iter().any(|a| {

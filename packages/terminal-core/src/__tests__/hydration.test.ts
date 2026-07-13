@@ -534,7 +534,7 @@ test('win32 ?9001h handshake dropped by snapshot hydration still enables Win32-I
   // now encodes as a Win32-Input-Mode record, not the legacy LF shim.
   const handled = term.keyHandler!(hydrationKeyEvent({ key: 'Enter', keyCode: 13, shiftKey: true }));
   expect(handled).toBe(false);
-  expect(bridge.writeCalls).toContainEqual(['p1', '\x1b[13;28;13;1;16;1_']);
+  expect(bridge.writeCalls).toContainEqual(['p1', '\x1b[13;28;10;1;16;1_']);
   expect(bridge.writeCalls).not.toContainEqual(['p1', '\n']); // LF shim must NOT fire
 });
 
@@ -561,7 +561,7 @@ test('dropped-chunk handshake scan preserves order: ?9001h then ?9001l -> stays 
   const handled = term.keyHandler!(hydrationKeyEvent({ key: 'Enter', keyCode: 13, shiftKey: true }));
   expect(handled).toBe(false);
   expect(bridge.writeCalls).toContainEqual(['p1', '\n']);
-  expect(bridge.writeCalls).not.toContainEqual(['p1', '\x1b[13;28;13;1;16;1_']);
+  expect(bridge.writeCalls).not.toContainEqual(['p1', '\x1b[13;28;10;1;16;1_']);
 });
 
 // ---------------------------------------------------------------------------
