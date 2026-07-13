@@ -87,6 +87,13 @@ describe('findConflict', () => {
     expect(findConflict('nextTab', 'Alt+ArrowRight', {})).toBeNull();
   });
 
+  it('reports a reserved-combo conflict for the fixed Alt+Shift+Arrow pane-resize bindings', () => {
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowLeft', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowRight', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowUp', {})).toEqual({ type: 'reserved' });
+    expect(findConflict('nextTab', 'Alt+Shift+ArrowDown', {})).toEqual({ type: 'reserved' });
+  });
+
   it('normalizes arrow-key combos the same way InputHandler does, so an arrow override still detects conflicts', () => {
     const overrides = { prevTab: 'Ctrl+ArrowLeft' };
     expect(findConflict('nextTab', 'Ctrl+ArrowLeft', overrides)).toEqual({ type: 'action', actionId: 'prevTab', label: 'Previous Tab' });

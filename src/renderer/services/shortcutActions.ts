@@ -76,14 +76,16 @@ export function effectiveCombo(actionId: string, customKeybindings: Record<strin
 
 /**
  * Combos permanently owned by non-customizable shortcuts in InputHandler —
- * Ctrl+1-9 (tab-jump) and Ctrl+Shift+V (fixed secondary paste fallback).
- * A customizable action can never be assigned one of these (see design doc
- * §3 non-goals). Alt+Arrow was removed from this list when the pane-nav stub
- * was deleted: those keys now pass through to the terminal (word movement).
+ * Ctrl+1-9 (tab-jump), Ctrl+Shift+V (fixed secondary paste fallback), and the
+ * 4 Alt+Shift+Arrow pane-resize bindings. A customizable action can never be
+ * assigned one of these (see design doc §3 non-goals). Plain Alt+Arrow was
+ * removed from this list when the pane-nav stub was deleted: those keys now
+ * pass through to the terminal (word movement).
  */
 const RESERVED_COMBOS = [
   'Ctrl+1', 'Ctrl+2', 'Ctrl+3', 'Ctrl+4', 'Ctrl+5', 'Ctrl+6', 'Ctrl+7', 'Ctrl+8', 'Ctrl+9',
   'Ctrl+Shift+V',
+  'Alt+Shift+ArrowLeft', 'Alt+Shift+ArrowRight', 'Alt+Shift+ArrowUp', 'Alt+Shift+ArrowDown',
 ].map(canonicalizeCombo);
 
 export type ShortcutConflict =
