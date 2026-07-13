@@ -1043,6 +1043,40 @@ export class TerminalEngine {
         }
       }
 
+      // Scroll keys: at a plain prompt on the normal buffer, plain PageUp/PageDown
+      // scroll the viewport by a page and End jumps back to the live bottom when
+      // scrolled up (at the bottom End still reaches the shell as end-of-line).
+      // Gated off the alternate screen (vim/less own these keys) and off active
+      // keyboard protocols (the app owns them — e.g. Claude Code's input editor
+      // uses End). Must run BEFORE the Kitty/Win32 encoder blocks: on Windows the
+      // Win32-Input-Mode encoder would otherwise consume the keydown and forward
+      // it to the PTY, where PSReadLine's ScrollDisplay* actions cannot move an
+      // xterm viewport — which is exactly why these keys did nothing before.
+      if (
+        event.type === 'keydown' &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        (event.key === 'PageUp' || event.key === 'PageDown' || event.key === 'End') &&
+        boundTerm.buffer.active.type === 'normal' &&
+        !this.protocolActive()
+      ) {
+        const buf = boundTerm.buffer.active;
+        const scrolledUp = buf.viewportY < buf.baseY;
+        if (event.key !== 'End' || scrolledUp) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.uiClaimedKeydownKeys.add(event.key);
+          if (event.key === 'End') {
+            boundTerm.scrollToBottom();
+          } else {
+            boundTerm.scrollPages(event.key === 'PageUp' ? -1 : 1);
+          }
+          return false;
+        }
+      }
+
       // Shift+Enter → soft newline. Emit LF (0x0A) instead of the CR (0x0D) xterm
       // would otherwise send: Claude Code inserts a newline on LF (a bare CR submits),
       // and Gemini CLI's universal newline is Ctrl+J — which IS LF — so one sequence

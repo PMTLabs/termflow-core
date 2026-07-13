@@ -441,6 +441,91 @@ test('DECSTR soft reset disables win32State on Windows (only the Kitty-flags var
   expect(calls.write).toEqual([]);
 });
 
+// ---------------------------------------------------------------------------
+// Scroll keys: plain PageUp/PageDown scroll the viewport; End jumps to bottom
+// ---------------------------------------------------------------------------
+
+function scrollEngine(cacheKey: string, opts: { isWindows?: boolean } = {}) {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey, ...opts });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm(cacheKey);
+  // A tab with scrollback: viewport pinned to the live bottom.
+  term.buffer.active.baseY = 100;
+  term.buffer.active.viewportY = 100;
+  return { engine, term, calls };
+}
+
+test('plain PageUp/PageDown scroll the viewport by a page and never reach the PTY', () => {
+  const { term, calls } = scrollEngine('sc1');
+
+  expect(term.keyHandler!(withKey({ key: 'PageUp' }))).toBe(false);
+  expect(term.scrollPagesCalls).toEqual([-1]);
+  expect(term.keyHandler!(withKey({ key: 'PageDown' }))).toBe(false);
+  expect(term.scrollPagesCalls).toEqual([-1, 1]);
+  expect(calls.write).toEqual([]);
+});
+
+test('PageUp/PageDown pass through on the alternate screen (vim/less own the keys)', () => {
+  const { term, calls } = scrollEngine('sc2');
+  term.__setBufferType('alternate');
+
+  expect(term.keyHandler!(withKey({ key: 'PageUp' }))).toBe(true);
+  expect(term.keyHandler!(withKey({ key: 'PageDown' }))).toBe(true);
+  expect(term.scrollPagesCalls).toEqual([]);
+  expect(calls.write).toEqual([]);
+});
+
+test('modified PageUp (Shift) is not claimed — xterm keeps its own Shift+PageUp scroll', () => {
+  const { term } = scrollEngine('sc3');
+
+  expect(term.keyHandler!(withKey({ key: 'PageUp', shiftKey: true }))).toBe(true);
+  expect(term.scrollPagesCalls).toEqual([]);
+});
+
+test('End while scrolled up jumps to the bottom and is consumed', () => {
+  const { term, calls } = scrollEngine('sc4');
+  term.buffer.active.viewportY = 40; // user scrolled up
+
+  expect(term.keyHandler!(withKey({ key: 'End' }))).toBe(false);
+  expect(term.scrollToBottomCount).toBe(1);
+  expect(calls.write).toEqual([]);
+});
+
+test('End at the bottom passes through to the shell (readline end-of-line)', () => {
+  const { term, calls } = scrollEngine('sc5');
+
+  expect(term.keyHandler!(withKey({ key: 'End' }))).toBe(true);
+  expect(term.scrollToBottomCount).toBe(0);
+  expect(calls.write).toEqual([]);
+});
+
+test('win32 input mode active: PageUp still scrolls instead of being encoded, and its keyup is swallowed', () => {
+  const { term, calls } = scrollEngine('sc6', { isWindows: true });
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer
+
+  expect(term.keyHandler!(withKey({ key: 'PageUp' }))).toBe(false);
+  expect(term.scrollPagesCalls).toEqual([-1]);
+  // The matching keyup must not leak a stray Win32 release record to the PTY.
+  expect(term.keyHandler!(withKey({ key: 'PageUp', type: 'keyup' }))).toBe(false);
+  expect(calls.write).toEqual([]);
+});
+
+test('kitty protocol active: scroll keys defer to the app (e.g. Claude Code input editor)', () => {
+  const { term, calls } = scrollEngine('sc7');
+  term.csiHandlers['>u']([1]); // app pushes kitty flag 1
+  term.buffer.active.viewportY = 40;
+
+  // Bare functional keys under flag 1 defer to xterm's legacy emission — the
+  // app receives \x1b[5~ / \x1b[F; we must not hijack them for scrolling.
+  expect(term.keyHandler!(withKey({ key: 'PageUp' }))).toBe(true);
+  expect(term.keyHandler!(withKey({ key: 'End' }))).toBe(true);
+  expect(term.scrollPagesCalls).toEqual([]);
+  expect(term.scrollToBottomCount).toBe(0);
+  expect(calls.write).toEqual([]);
+});
+
 test('isWindows: false never activates Win32-Input-Mode even if ?9001h somehow arrives', () => {
   const { bridge, calls } = makeBridge();
   const engine = new TerminalEngine(bridge, { cacheKey: 'w4', isWindows: false });
