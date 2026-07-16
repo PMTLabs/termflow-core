@@ -1492,10 +1492,14 @@ const App: React.FC = () => {
         message={isLastWindow
           ? 'Are you sure you want to quit? All open terminals and running processes will be terminated.'
           : 'Close this window? Its terminals and running processes will be terminated. Other windows stay open.'}
-        onConfirm={() => {
+        onConfirm={async () => {
           setShowCloseConfirm(false);
           // Persist state before this window closes (or the app exits).
-          StateManager.saveState();
+          // Unlike `beforeunload` (which cannot await), this is a plain onClick
+          // handler, so it can safely await the cwd refresh before saving —
+          // capturing fresh directories instead of relying on the last 30s
+          // autosave tick.
+          await saveStateWithCwds();
           // Rust decides: destroy just this window, or exit if it's the last one.
           window.electronAPI?.confirmCloseApp?.();
         }}
