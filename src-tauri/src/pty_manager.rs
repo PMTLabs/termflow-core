@@ -1,5 +1,6 @@
 use crate::state::{AppState, Terminal, ChannelPayload};
 use crate::tmux_manager::TerminalBackend;
+use dashmap::DashMap;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::thread;
 use std::io::Read;
@@ -685,6 +686,12 @@ pub fn spawn_terminal(
                 Err(_) => break, // Error
             }
         }
+        // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
+        // removes `terminal_cwds` and `terminals`, so this is the last moment the
+        // shell's final directory is knowable. The renderer needs it to restart
+        // the session in place (it cannot read it back afterwards).
+        let exit_cwd = exit_cwd_for(&app_state.terminal_cwds, &app_state.terminals, &thread_id);
+
         // Cleanup on exit
         log::info!("Terminal {} process exited, cleaning up state", thread_id);
         app_state.cleanup_terminal_state(&thread_id);
@@ -692,7 +699,8 @@ pub fn spawn_terminal(
         // Notify UI
         if let Err(e) = app_state.app_handle.emit("terminal:exit", serde_json::json!({
             "id": thread_id,
-            "exitCode": 0 // portable-pty doesn't easily give exit code here without more work
+            "exitCode": 0, // portable-pty doesn't easily give exit code here without more work
+            "cwd": exit_cwd
         })) {
             log::warn!("Failed to emit terminal exit: {}", e);
         }
@@ -995,6 +1003,30 @@ pub fn parse_osc_cwd(data: &[u8]) -> Option<String> {
     last
 }
 
+/// Last-known cwd for a terminal, for the exit event (spec 045 §3.3).
+/// MUST be called BEFORE `cleanup_terminal_state`, which removes both
+/// `terminal_cwds` and `terminals` — after cleanup this is unrecoverable and the
+/// renderer would silently fall back to the profile default.
+/// Mirrors `commands::get_terminal_cwd`: OSC-reported shell cwd first, then the
+/// live OS process cwd (for shells that don't report one).
+///
+/// Takes the two maps directly (rather than `&AppState`) so this can be unit
+/// tested without constructing a full `AppState`, which requires a real
+/// `AppHandle<Wry>` (`tauri::test::mock_app()` yields `AppState<MockRuntime>`
+/// instead, and only under the Linux/macOS-only `integration-tests` feature —
+/// see `api_server.rs`).
+fn exit_cwd_for(
+    terminal_cwds: &DashMap<String, String>,
+    terminals: &DashMap<String, Terminal>,
+    id: &str,
+) -> Option<String> {
+    if let Some(cwd) = terminal_cwds.get(id) {
+        return Some(cwd.value().clone());
+    }
+    let pid = terminals.get(id).map(|t| t.pid)?;
+    get_process_cwd(pid)
+}
+
 #[cfg(test)]
 mod cwd_tests {
     use super::get_process_cwd;
@@ -1141,5 +1173,45 @@ mod cwd_tests {
             let expected = std::env::current_dir().unwrap();
             assert_eq!(std::path::Path::new(&cwd), expected.as_path());
         }
+    }
+
+    // exit_cwd_for takes the two DashMaps directly rather than `&AppState`: an
+    // `AppState<Wry>` (what spawn_terminal/exit_cwd_for actually use) needs a real
+    // `AppHandle<Wry>`, which cannot be constructed in a unit test on this platform
+    // (`tauri::test::mock_app()` yields `AppState<MockRuntime>`, gated behind the
+    // Linux/macOS-only `integration-tests` feature — see api_server.rs). Testing
+    // the two maps directly exercises the same precedence logic without that
+    // machinery.
+    use super::exit_cwd_for;
+    use super::Terminal;
+    use dashmap::DashMap;
+
+    /// Spec 045 §3.3: the exit payload must carry the cwd, because
+    /// cleanup_terminal_state() wipes `terminal_cwds` + `terminals` BEFORE the
+    /// event is emitted — so a renderer-side get_terminal_cwd() after the event
+    /// can only ever return None. This pins the ordering the fix depends on.
+    /// The removals below mirror exactly what cleanup_terminal_state does to
+    /// these two maps.
+    #[test]
+    fn exit_cwd_is_read_before_cleanup_wipes_it() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        let terminals: DashMap<String, Terminal> = DashMap::new();
+        terminal_cwds.insert("t-1".to_string(), "D:\\work\\project".to_string());
+
+        // What the exit path must do: capture first...
+        let captured = exit_cwd_for(&terminal_cwds, &terminals, "t-1");
+        assert_eq!(captured.as_deref(), Some("D:\\work\\project"));
+
+        // ...then clean up. After cleanup the value is unrecoverable.
+        terminal_cwds.remove("t-1");
+        terminals.remove("t-1");
+        assert!(exit_cwd_for(&terminal_cwds, &terminals, "t-1").is_none());
+    }
+
+    #[test]
+    fn exit_cwd_is_none_for_an_unknown_terminal() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        let terminals: DashMap<String, Terminal> = DashMap::new();
+        assert!(exit_cwd_for(&terminal_cwds, &terminals, "nope").is_none());
     }
 }
