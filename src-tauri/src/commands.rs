@@ -163,6 +163,16 @@ pub fn set_active_window(
 /// process cwd is not live), then falls back to the OS process cwd (cmd / Unix
 /// shells keep that current). Returns `Ok(None)` for an unknown terminal or when
 /// neither source has a value, so the renderer falls back to the app default.
+///
+/// The OSC hit is a cheap map lookup and stays on the async worker. The FALLBACK is
+/// not: `get_process_cwd` runs a full `System::new_all()` scan (every process, plus a
+/// re-scan per descendant generation), so it runs on a blocking worker — exactly as
+/// `resolve_terminal_path` below does, and for the same reason. This command is fanned
+/// out ONE INVOKE PER LIVE TERMINAL by the renderer's 30s cwd refresh, and every
+/// non-PowerShell shell (cmd/WSL/bash/zsh — the OSC injection is PowerShell-only) takes
+/// the fallback EVERY time. Left on the async pool, N concurrent scans would starve the
+/// shared tokio workers that `write_terminal`/`resize_terminal` need, stalling
+/// keystrokes and resizes.
 #[tauri::command]
 pub async fn get_terminal_cwd(
     state: State<'_, AppState>,
@@ -171,11 +181,14 @@ pub async fn get_terminal_cwd(
     if let Some(cwd) = state.terminal_cwds.get(&id) {
         return Ok(Some(cwd.value().clone()));
     }
+    // Read the pid off `state` BEFORE the closure: `State` is not Send into it.
     let pid = match state.terminals.get(&id) {
         Some(t) => t.pid,
         None => return Ok(None),
     };
-    Ok(pty_manager::get_process_cwd(pid))
+    tokio::task::spawn_blocking(move || pty_manager::get_process_cwd(pid))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Resolve a relative path the terminal printed into the actual file(s) on disk
