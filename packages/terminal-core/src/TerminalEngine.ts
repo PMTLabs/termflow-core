@@ -616,6 +616,10 @@ export class TerminalEngine {
     let term: Terminal | undefined;
     let fit: FitAddon | undefined;
     let search: SearchAddon | undefined;
+    // Set only when the reattach fit below actually ran. That fit is the one whose
+    // onResize event is orphaned (no listener is wired yet), so it is the only one
+    // whose size must be re-delivered to the backend at the end of mount().
+    let didReattachFit = false;
 
     // Adopt enhanced-keyboard-protocol state from a prior mount on this same
     // cacheKey (review 046/047: TerminalEngine is a fresh JS object per React
@@ -649,6 +653,7 @@ export class TerminalEngine {
           // Move the existing render element into the new container, then re-fit.
           container.appendChild(existingElement);
           fit.fit();
+          didReattachFit = true;
         } else {
           terminalCache.delete(this.cacheKey);
           cached = undefined;
@@ -1496,6 +1501,12 @@ export class TerminalEngine {
       pendingOutput: existingCache?.pendingOutput ?? [],
       pendingOutputBytes: existingCache?.pendingOutputBytes ?? 0,
       lastHydratedProcessId: existingCache?.lastHydratedProcessId,
+      // The last size actually dispatched to the backend MUST survive the entry
+      // swap: it is the dedup key for the mount-end backend-size reconcile below
+      // (and for hydrate's :1962 sync). Dropping it made every remount look like
+      // "never sent", which would fire a redundant ConPTY resize on every tab
+      // switch — exactly the repaint storm 035 warns about.
+      lastSentSize: existingCache?.lastSentSize,
       disposables: this.disposables,
       dataDisposable: existingCache?.dataDisposable,
       exitDisposable: existingCache?.exitDisposable,
@@ -1656,6 +1667,38 @@ export class TerminalEngine {
         });
         resizeObserver.observe(container);
         this.resizeObserver = resizeObserver;
+      }
+    }
+
+    // Reconcile the BACKEND size with the size xterm already adopted on REATTACH.
+    //
+    // The reattach fit (:651) runs BEFORE the onResize listener above is wired
+    // (:890) — the previous mount's was disposed at :644 — so its resize event is
+    // ORPHANED and scheduleBackendResize() never runs. That is the pane-collapse
+    // reflow bug: the survivor's xterm is correct but the PTY keeps the old width,
+    // so the shell wraps output to stale dims. No later fit can recover it
+    // (FitAddon.fit() no-ops once xterm already matches), and a same-pid attach()
+    // can't either (hydrate() early-returns at :1842).
+    //
+    // Scoped to didReattachFit on purpose: on the CREATE path every fit (the rAF
+    // settle-fit, the ResizeObserver) happens AFTER the wiring above, so its event
+    // is caught normally — there is nothing to re-deliver. Running this there would
+    // instead push xterm's pre-fit DEFAULT size (80x24) to the PTY, an extra ConPTY
+    // resize at the wrong size on every fresh terminal.
+    //
+    // Deliver the size that fit ALREADY computed — no second fit — through the
+    // existing 120ms debounce. Deduped against lastSentSize (carried across the
+    // entry swap above), so an unchanged-size remount (a plain tab switch) sends
+    // nothing. Guarded on !resizeInFlight && !pendingResize per the Task-4 fix D
+    // double-send race, mirroring hydrate()'s :1962 expression verbatim.
+    //
+    // Ordering-safe: mount() runs before attach(), but flushBackendResize() reads
+    // attachedProcessId at call time (:2113) and the debounce fires after attach().
+    if (didReattachFit && !this.opts.mirror && boundTerm.cols > 0 && boundTerm.rows > 0
+        && !this.resizeInFlight && !this.pendingResize) {
+      const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
+      if (!sent || sent.cols !== boundTerm.cols || sent.rows !== boundTerm.rows) {
+        this.scheduleBackendResize(boundTerm.cols, boundTerm.rows);
       }
     }
 
