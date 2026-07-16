@@ -1,5 +1,6 @@
 use crate::state::{AppState, Terminal, ChannelPayload};
 use crate::tmux_manager::TerminalBackend;
+use dashmap::DashMap;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::thread;
 use std::io::Read;
@@ -685,6 +686,12 @@ pub fn spawn_terminal(
                 Err(_) => break, // Error
             }
         }
+        // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
+        // removes `terminal_cwds` and `terminals`, so this is the last moment the
+        // shell's final directory is knowable. The renderer needs it to restart
+        // the session in place (it cannot read it back afterwards).
+        let exit_cwd = exit_cwd_for(&app_state.terminal_cwds, &thread_id);
+
         // Cleanup on exit
         log::info!("Terminal {} process exited, cleaning up state", thread_id);
         app_state.cleanup_terminal_state(&thread_id);
@@ -692,7 +699,8 @@ pub fn spawn_terminal(
         // Notify UI
         if let Err(e) = app_state.app_handle.emit("terminal:exit", serde_json::json!({
             "id": thread_id,
-            "exitCode": 0 // portable-pty doesn't easily give exit code here without more work
+            "exitCode": 0, // portable-pty doesn't easily give exit code here without more work
+            "cwd": exit_cwd
         })) {
             log::warn!("Failed to emit terminal exit: {}", e);
         }
@@ -919,9 +927,17 @@ fn cwd_of(sys: &System, pid: u32) -> Option<String> {
 /// and Unix shells keep current but **PowerShell does NOT** update on `Set-Location`
 /// — for PowerShell we rely on OSC cwd reporting (`parse_osc_cwd`) instead.
 pub fn get_process_cwd(parent_pid: u32) -> Option<String> {
-    let sys = System::new_all();
-    let (fg_pid, _name) = get_foreground_process_info(parent_pid, Some(&sys));
-    cwd_of(&sys, fg_pid).or_else(|| cwd_of(&sys, parent_pid))
+    get_process_cwd_with(&System::new_all(), parent_pid)
+}
+
+/// [`get_process_cwd`] against a process snapshot the caller already has.
+///
+/// `System::new_all()` is sysinfo's heaviest constructor (every process, plus cpu /
+/// mem / disks / networks), so resolving a BATCH of terminals must scan once and
+/// reuse it here, not once per terminal — see `commands::get_terminal_cwds`.
+pub fn get_process_cwd_with(sys: &System, parent_pid: u32) -> Option<String> {
+    let (fg_pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
+    cwd_of(sys, fg_pid).or_else(|| cwd_of(sys, parent_pid))
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -995,9 +1011,40 @@ pub fn parse_osc_cwd(data: &[u8]) -> Option<String> {
     last
 }
 
+/// Last-known cwd for a terminal, for the exit event (spec 045 §3.3).
+/// MUST be called BEFORE `cleanup_terminal_state`, which removes `terminal_cwds`
+/// — after cleanup this is unrecoverable and the renderer would silently fall
+/// back to the profile default.
+///
+/// The OSC-reported cwd is the ONLY source here. Unlike `commands::get_terminal_cwd`
+/// there is deliberately NO `get_process_cwd(pid)` fallback, because this runs from
+/// the PTY reader loop only once that loop has BROKEN — i.e. the shell is already
+/// dead. Scanning for its pid would:
+///   1. almost always return None anyway (the process is gone), while
+///   2. paying a full `System::new_all()` scan ON THE READER THREAD, delaying the
+///      `terminal:exit` emit + cleanup by ~100-500ms (late ended-tint/banner), and
+///   3. worst of all, silently return the WRONG directory if the OS had already
+///      RECYCLED that pid onto an unrelated process — restart would then open in a
+///      random directory, attributed to this terminal.
+///
+/// Non-PowerShell shells (cmd/bash/WSL/zsh), which never populate `terminal_cwds`,
+/// lose nothing: the renderer's 30s `refreshLiveCwds` tick already snapshots their
+/// cwd from a LIVE process, `setCwdSnapshot` ignores a falsy value so a `cwd: None`
+/// exit payload cannot erase it, and restart precedence is
+/// `getCwdSnapshot ?? takeInitialCwd ?? profile` — so they resume in the last
+/// refreshed directory.
+///
+/// Takes the map directly (rather than `&AppState`) so this can be unit tested
+/// without constructing a full `AppState`, which requires a real `AppHandle<Wry>`
+/// (`tauri::test::mock_app()` yields `AppState<MockRuntime>` instead, and only
+/// under the Linux/macOS-only `integration-tests` feature — see `api_server.rs`).
+fn exit_cwd_for(terminal_cwds: &DashMap<String, String>, id: &str) -> Option<String> {
+    terminal_cwds.get(id).map(|cwd| cwd.value().clone())
+}
+
 #[cfg(test)]
 mod cwd_tests {
-    use super::get_process_cwd;
+    use super::{get_process_cwd, get_process_cwd_with};
 
     use super::parse_osc_cwd;
 
@@ -1130,6 +1177,17 @@ mod cwd_tests {
         assert_eq!(label_only, with_exe.clone().map(|(a, _)| a));
     }
 
+    /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
+    /// against one shared `System::new_all()` instead of paying that scan per terminal.
+    /// That reuse is only safe if it is a faithful projection of the owned-scan
+    /// version, which is what this pins.
+    #[test]
+    fn process_cwd_with_a_shared_system_matches_the_owned_scan() {
+        let pid = std::process::id();
+        let sys = System::new_all();
+        assert_eq!(get_process_cwd_with(&sys, pid), get_process_cwd(pid));
+    }
+
     #[test]
     fn process_cwd_resolves_for_current_process() {
         // The test binary has no child processes, so the foreground walk returns
@@ -1141,5 +1199,60 @@ mod cwd_tests {
             let expected = std::env::current_dir().unwrap();
             assert_eq!(std::path::Path::new(&cwd), expected.as_path());
         }
+    }
+
+    // exit_cwd_for takes the DashMap directly rather than `&AppState`: an
+    // `AppState<Wry>` (what spawn_terminal/exit_cwd_for actually use) needs a real
+    // `AppHandle<Wry>`, which cannot be constructed in a unit test on this platform
+    // (`tauri::test::mock_app()` yields `AppState<MockRuntime>`, gated behind the
+    // Linux/macOS-only `integration-tests` feature — see api_server.rs). Testing
+    // the map directly exercises the same logic without that machinery.
+    use super::exit_cwd_for;
+    use dashmap::DashMap;
+
+    /// Spec 045 §3.3: the exit payload must carry the cwd, because
+    /// cleanup_terminal_state() wipes `terminal_cwds` BEFORE the event is emitted
+    /// — so a renderer-side get_terminal_cwd() after the event can only ever
+    /// return None. This pins the ordering the fix depends on. The removal below
+    /// mirrors exactly what cleanup_terminal_state does to this map.
+    #[test]
+    fn exit_cwd_is_read_before_cleanup_wipes_it() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        terminal_cwds.insert("t-1".to_string(), "D:\\work\\project".to_string());
+
+        // What the exit path must do: capture first...
+        let captured = exit_cwd_for(&terminal_cwds, "t-1");
+        assert_eq!(captured.as_deref(), Some("D:\\work\\project"));
+
+        // ...then clean up. After cleanup the value is unrecoverable.
+        terminal_cwds.remove("t-1");
+        assert!(exit_cwd_for(&terminal_cwds, "t-1").is_none());
+    }
+
+    #[test]
+    fn exit_cwd_is_none_for_an_unknown_terminal() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        assert!(exit_cwd_for(&terminal_cwds, "nope").is_none());
+    }
+
+    /// Replaces `exit_cwd_falls_back_to_live_process_cwd_when_absent_from_terminal_cwds`,
+    /// which was green over a branch production can never reach: it fed exit_cwd_for
+    /// the TEST BINARY's own (live) pid, while in production exit_cwd_for only ever
+    /// runs after the PTY reader loop broke — i.e. the shell's pid is already DEAD.
+    /// The scan therefore returned None (after a costly `System::new_all()` on the
+    /// reader thread), or, if the OS had recycled the pid, some unrelated process's
+    /// directory. The fallback is gone; a miss must be a cheap, honest None.
+    ///
+    /// Non-PowerShell shells (the ones that never populate `terminal_cwds`) are
+    /// covered by the renderer's live `refreshLiveCwds` tick instead — see the
+    /// exit_cwd_for doc comment.
+    #[test]
+    fn exit_cwd_is_none_when_no_osc_cwd_was_reported() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        // A cmd/bash terminal: known to the app, but it never reported an OSC cwd.
+        // Even with a resolvable live pid available, exit_cwd_for must not go
+        // looking for one — at exit time that pid is dead and possibly recycled.
+        terminal_cwds.insert("other".to_string(), "D:\\elsewhere".to_string());
+        assert!(exit_cwd_for(&terminal_cwds, "t-1").is_none());
     }
 }

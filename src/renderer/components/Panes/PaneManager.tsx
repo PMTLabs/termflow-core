@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
@@ -13,6 +13,7 @@ import { SplitPane } from './SplitPane';
 import { TerminalPane } from './TerminalPane';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { terminalService } from '../../services/TerminalService';
+import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -65,6 +66,22 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
     setPendingClosePaneId(paneId);
   }, []);
 
+  // Spec 045 §3.4: Ctrl+Shift+W asks for a close; the dialog below confirms it,
+  // exactly as the pane's (x) button does. PaneManager is mounted per tab
+  // (TerminalContainer.tsx:162), so every tab's listener fires — the tree guard
+  // ensures only the owning tab responds.
+  useEffect(() => {
+    const onRequest = (e: Event) => {
+      const paneId = (e as CustomEvent).detail?.paneId;
+      if (!paneId || !paneTree) return;
+      const inThisTree = (node: PaneNode): boolean =>
+        node.id === paneId || (node.children?.some(inThisTree) ?? false);
+      if (inThisTree(paneTree)) handleClose(paneId);
+    };
+    window.addEventListener('ui:requestPaneClose', onRequest);
+    return () => window.removeEventListener('ui:requestPaneClose', onRequest);
+  }, [handleClose, paneTree]);
+
   const performClose = useCallback(async (paneId: string) => {
     // Find the terminal ID for this pane
     const findTerminalId = (node: PaneNode): string | null => {
@@ -85,6 +102,9 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       if (terminalId) {
         try {
           await terminalService.closeTerminal(terminalId);
+          // Spec 045 §3.3: the pane is gone for good — drop its directory so the
+          // map cannot grow without bound and a recycled id can't inherit it.
+          clearCwdSnapshot(terminalId);
           console.log(`PaneManager: Closed terminal ${terminalId} for pane ${paneId}`);
         } catch (error) {
           console.error(`Failed to close terminal for pane ${paneId}:`, error);

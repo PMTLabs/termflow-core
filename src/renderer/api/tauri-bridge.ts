@@ -38,6 +38,7 @@ interface ElectronAPI {
   getTerminalSize: (id: string) => Promise<{ cols: number; rows: number }>;
   updateTerminalName: (id: string, name: string) => Promise<boolean>;
   getTerminalCwd: (processId: string) => Promise<string | null>;
+  getTerminalCwds: (processIds: string[]) => Promise<Record<string, string | null>>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
   openPath: (path: string) => Promise<void>;
@@ -46,7 +47,7 @@ interface ElectronAPI {
   sendToPty: (processId: string, data: string) => Promise<void>;
   resizePty: (processId: string, cols: number, rows: number) => Promise<void>;
   onTerminalData: (callback: (id: string, data: string) => void) => void;
-  onTerminalExit: (callback: (id: string, code: number) => void) => void;
+  onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
   getShellProfiles: () => Promise<any[]>;
   getExecutableIcon: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
@@ -264,6 +265,10 @@ const tauriBridge: ElectronAPI = {
     return invoke('get_terminal_cwd', { id: processId });
   },
 
+  getTerminalCwds: async (processIds) => {
+    return invoke('get_terminal_cwds', { ids: processIds });
+  },
+
   resolveTerminalPath: async (processId, rel) => {
     return invoke('resolve_terminal_path', { id: processId, rel });
   },
@@ -313,8 +318,8 @@ const tauriBridge: ElectronAPI = {
 
   onTerminalExit: (callback) => {
     trackUnlisten(listen('terminal:exit', (event: any) => {
-      const { id, exitCode } = event.payload;
-      callback(id, exitCode);
+      const { id, exitCode, cwd } = event.payload;
+      callback(id, exitCode, cwd);
     }));
   },
 

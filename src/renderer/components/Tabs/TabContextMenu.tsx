@@ -239,13 +239,21 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       </button>
       {hasPanes && (
         <>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'vertical'))}>
-            <span className="menu-icon">▥</span>
-            Open New Pane Vertically
+          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'vertical', 'after'))}>
+            <span className="menu-icon">➡️</span>
+            Open New Pane Right
           </button>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'horizontal'))}>
-            <span className="menu-icon">▤</span>
-            Open New Pane Horizontally
+          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'vertical', 'before'))}>
+            <span className="menu-icon">⬅️</span>
+            Open New Pane Left
+          </button>
+          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'horizontal', 'before'))}>
+            <span className="menu-icon">⬆️</span>
+            Open New Pane Up
+          </button>
+          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'horizontal', 'after'))}>
+            <span className="menu-icon">⬇️</span>
+            Open New Pane Down
           </button>
         </>
       )}

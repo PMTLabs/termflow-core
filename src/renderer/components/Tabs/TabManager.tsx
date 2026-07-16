@@ -14,6 +14,7 @@ import { CloseSummary } from './CloseSummary';
 import { computeAffectedTabs, filterMeaningfulProcesses } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
+import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
 import { getCachedIcon, loadIcon } from '../../services/binaryIcons';
@@ -477,6 +478,10 @@ export const TabManager: React.FC<TabManagerProps> = () => {
         terminalService.closeTerminal(node.terminalId).catch(error => {
           console.error(`Failed to close terminal ${node.terminalId}:`, error);
         });
+        // Spec 045 §3.3: the terminal is gone for good — drop its directory, as
+        // PaneManager.performClose does for a single pane. Without this, closing a
+        // whole tab leaked its panes' entries for the rest of the session.
+        clearCwdSnapshot(node.terminalId);
       } else if (node.type === 'split' && node.children) {
         node.children.forEach(closeAllTerminalsInNode);
       }
@@ -495,6 +500,10 @@ export const TabManager: React.FC<TabManagerProps> = () => {
       // backend close with a removed tab = invisible orphaned PTY.
       console.warn(`TabManager: closeTerminal(${id}) failed:`, error);
     });
+    // Mirrors the close above: the root pane's terminalId is usually the tab id
+    // (so the walk covered it), but clear it unconditionally for the same reason
+    // the close is unconditional — a tab whose tree we never saw.
+    clearCwdSnapshot(id);
 
     // Remove tab from Redux state (UI update)
     dispatch(removeTab(id));

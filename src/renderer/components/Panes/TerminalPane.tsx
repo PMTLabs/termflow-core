@@ -8,10 +8,12 @@ import { renamePanes } from '../../store/slices/panesSlice';
 import { findTabIdByTerminalId, getSelectedPaneId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
+import { EndedOverlay, paneClassName } from './EndedOverlay';
 import { PaneContextMenu } from './PaneContextMenu';
 import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
+import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import './TerminalPane.css';
 
@@ -165,11 +167,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const isSplitPane = terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
     const finalShellType = shellType || (isSplitPane ? (defaultProfile || 'default') : (tab?.shellType || defaultProfile || 'default'));
 
-    // Resolve CWD: an inherited cwd from a pane split (backlog 004) wins over the
-    // profile's default. takeInitialCwd consumes it once — we've already passed the
-    // reuse/lock guards above, so this runs only when we genuinely spawn.
+    // Resolve CWD — FIRST-SPAWN precedence (spec 045 §3.3):
+    //   1. a cwd inherited from a pane split (backlog 004) — the user's most
+    //      recent intent, and it must win;
+    //   2. a directory restored from a previous session;
+    //   3. the profile default.
+    // Deliberately the REVERSE of handleRestart's rule, where there is no live
+    // split to inherit from. takeInitialCwd consumes its value once — we've
+    // already passed the reuse/lock guards above, so this runs only on a genuine
+    // spawn.
     const profile = shellProfiles.find(p => p.id === finalShellType);
-    const cwd = takeInitialCwd(terminalId) ?? profile?.cwd;
+    const cwd = takeInitialCwd(terminalId) ?? getCwdSnapshot(terminalId) ?? profile?.cwd;
 
     console.log(`TerminalPane: Terminal ${terminalId} - isSplitPane: ${isSplitPane}, tab exists: ${!!tab}, tab shellType: ${tab?.shellType}, defaultProfile: ${defaultProfile}, shellType prop: ${shellType}, final shellType: ${finalShellType}, cwd: ${cwd}`);
 
@@ -309,12 +317,25 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // which is why it works for split panes too (App ignores those).
   useEffect(() => {
     if (!terminalId) return undefined;
+    // Sampled here, while this pane's terminal is LIVE. If the pane is closed
+    // before its exit event lands (performClose clears the snapshot synchronously,
+    // the event arrives after), the generation moves and the write below is
+    // dropped — a pane that no longer exists must not re-add its entry. Re-sampled
+    // on restart, when processId changes and this effect re-subscribes, so a
+    // restarted shell's own exit still records its directory.
+    const generation = sampleCwdGeneration(terminalId);
     const onExit = (e: Event) => {
       const d = (e as CustomEvent).detail || {};
       const matches =
         (d.terminalId && d.terminalId === terminalId) ||
         (processId && d.processId === processId);
       if (matches) {
+        // Spec 045 §3.3: the backend hands us the shell's final directory here
+        // (it wipes its own record before emitting, so we cannot read it back).
+        // `final` because this is the directory the shell actually died in: it
+        // outranks any 30s-tick refresh still in flight, which can only carry a
+        // reading from while the shell was alive (i.e. before its last `cd`).
+        setCwdSnapshot(terminalId, d.cwd, { final: true, generation });
         setClosedInfo({ exitCode: typeof d.exitCode === 'number' ? d.exitCode : null });
       }
     };
@@ -339,7 +360,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         ? defaultProfile || 'default'
         : tab?.shellType || defaultProfile || 'default');
     const profile = shellProfiles.find(p => p.id === finalShellType);
-    const cwd = profile?.cwd;
+    // Spec 045 §3.3 — RESTART precedence: the directory the shell died in wins,
+    // then a cwd inherited from a split, then the profile default. This is
+    // deliberately the REVERSE of the first-spawn rule below (there is no live
+    // split to inherit from at restart). A directory that no longer exists is
+    // handled by the backend (pty_manager.rs is_dir()-checks the spawn cwd).
+    const cwd = getCwdSnapshot(terminalId) ?? takeInitialCwd(terminalId) ?? profile?.cwd;
     const terminalName = name || tab?.title || 'Terminal';
 
     try {
@@ -352,6 +378,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
       setClosedInfo(null);
+      // The snapshot has been consumed. Clearing it stops a LATER exit that
+      // carries no cwd from silently reusing this directory (spec 045 §3.3).
+      clearCwdSnapshot(terminalId);
       // A restarted session is a fresh shell — return its zoom to 100%.
       dispatch(resetZoom(terminalId));
       // A tab can be marked "exited" once every pane in its tree has exited
@@ -476,7 +505,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     <>
       <div
         ref={paneRef}
-        className={`terminal-pane ${isActive ? 'active' : ''} ${solo ? 'solo' : ''}`}
+        className={paneClassName({ isActive, solo, closedInfo })}
         data-pane-id={paneId}
         onContextMenu={handleContextMenu}
       >
@@ -599,6 +628,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           {/* Floating agent-identity chip (top-right); shows the detected agent
               CLI while one runs in this pane, hides on exit. */}
           {terminalId && processId && <AgentChip terminalId={terminalId} />}
+          <EndedOverlay closedInfo={closedInfo} />
         </div>
         {/* In-flow below the terminal content (not overlaying it): the content
             area shrinks to make room, so the banner never covers the last rows. */}

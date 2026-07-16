@@ -44,6 +44,12 @@ export interface DetachTerminal {
   // wrongly captured into command history in the new window (no OSC 9;9/7 will
   // ever arrive there while the agent CLI owns the pty).
   promptGate?: PromptGate | null;
+  // Last-known working directory (spec 045 §3.3), carried because the snapshot map
+  // is module-local to a renderer — the destination window starts with an empty one.
+  // Without this, a shell that reports no cwd via OSC (cmd/WSL/bash) and exits in the
+  // new window before its first refresh tick restarts at the profile default, even
+  // though the source window knew exactly where it was.
+  cwd?: string;
 }
 
 export interface DetachPayload {

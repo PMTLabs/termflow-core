@@ -158,6 +158,13 @@
   overflow: hidden;
   position: relative;
   min-height: 0; /* Important for flexbox children */
+  /* NOTE: deliberately NOT a stacking context. This element's descendants
+     include the search bar (z-index 10, chosen to beat the solo header's 8),
+     the command-suggest popup (30) and the terminal context menu (1000) — all
+     of which must keep resolving against .terminal-pane / the split tree.
+     Isolating here would trap them and let the header steal the search bar and
+     a sibling .split-pane-2 paint over the context menu. xterm's own z-indexed
+     chrome is contained by .terminal-display instead (TerminalDisplay.css). */
 }
 
 /* Placeholder for Terminal Display */
@@ -186,4 +193,18 @@
   --close-hover-background: #e81123;
   --placeholder-color: #666666;
   --focus-outline: #007acc;
+}
+
+/* Spec 045 §3.1 — ended-session tint. A neutral low-alpha wash composited over
+   the terminal grid: renderer-agnostic (WebGL/canvas/DOM) and scheme-agnostic
+   (reads as "inactive" over light and dark palettes without per-schema tuning),
+   leaving xterm's own theme alone so it cannot fight the per-agent colour
+   resolver or colorGuard. Alpha stays low: the spec requires prior output to
+   remain inspectable. */
+.terminal-pane.is-ended .pane-ended-overlay {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(128, 128, 128, 0.13);
+  pointer-events: none;
+  z-index: 1;
 }

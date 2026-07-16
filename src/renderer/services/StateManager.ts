@@ -7,6 +7,8 @@ import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
+import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
+import { getAllCwdSnapshots } from './cwdSnapshot';
 
 export interface AppState {
   tabs: any[];
@@ -17,6 +19,10 @@ export interface AppState {
   defaultProfile: string;
   timestamp: number;
   tabPanes?: { [tabId: string]: any };
+  /** Spec 045 §3.3: last-known cwd per terminal id, so a restored terminal
+   *  resumes where it left off. Optional — state saved by older builds has no
+   *  such key and must still load. */
+  terminalCwds?: { [terminalId: string]: string };
 }
 
 export interface SavedLayout {
@@ -34,6 +40,19 @@ export interface SavedLayout {
 class StateManagerClass {
   private readonly STATE_KEY = 'auto-terminal-state';
   private readonly LAYOUTS_KEY = 'auto-terminal-layouts';
+
+  /** Every terminal id currently present in any tab's pane tree. */
+  private collectLiveTerminalIds(state: RootState): Set<string> {
+    const keep = new Set<string>();
+    const walk = (node: any): void => {
+      if (!node) return;
+      if (node.terminalId) keep.add(node.terminalId);
+      node.children?.forEach(walk);
+    };
+    Object.values(state.panes.treesByTabId || {}).forEach(walk);
+    walk(state.panes.paneTree);
+    return keep;
+  }
 
   /**
    * Save current application state to localStorage
@@ -58,6 +77,12 @@ class StateManagerClass {
         timestamp: Date.now(),
         // Include tab panes mapping
         tabPanes,
+        // Spec 045 §3.3: pruned to the terminals that still exist, so the map
+        // cannot grow without bound across sessions. The values were refreshed
+        // on the autosave tick — this call must stay synchronous, because
+        // saveState also runs from `beforeunload`, where an await would mean
+        // localStorage.setItem never runs.
+        terminalCwds: pruneCwds(getAllCwdSnapshots(), this.collectLiveTerminalIds(state)),
       };
 
       localStorage.setItem(this.STATE_KEY, JSON.stringify(appState));
@@ -102,6 +127,10 @@ class StateManagerClass {
       if (appState.defaultProfile) {
         dispatch(setDefaultProfile(appState.defaultProfile));
       }
+
+      // Spec 045 §3.3: seed saved directories BEFORE any tab/pane is created, so
+      // the spawn path (TerminalPane) resolves them for each restored terminal.
+      seedRestoredCwds(appState.terminalCwds);
 
       // Clear any existing state first
       this.clearCurrentState(dispatch);

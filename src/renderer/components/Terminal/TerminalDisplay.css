@@ -15,6 +15,15 @@
   background-color: var(--terminal-display-background, #000000);
   padding: 4px;
   box-sizing: border-box;
+  /* Spec 045 §3.1: trap xterm's own z-indexed chrome (helpers 5, decorations
+     6-8, message 10, scrollable-element 11) inside this box, so the ended-tint
+     overlay (.pane-ended-overlay, z-index 1 in .terminal-pane-content) covers
+     them instead of letting them punch through it. This element is
+     non-positioned, so the whole isolated subtree paints below the overlay.
+     The isolate belongs HERE and not on .terminal-pane-content: the search bar,
+     suggest popup and context menu are siblings of this element and must stay
+     in the outer context (see TerminalPane.css). */
+  isolation: isolate;
 }
 
 /* Override xterm.js styles for better integration */

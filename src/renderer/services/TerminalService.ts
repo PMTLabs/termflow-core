@@ -42,7 +42,7 @@ class TerminalServiceClass {
       }));
     });
 
-    window.electronAPI.onTerminalExit((processId: string, exitCode: number) => {
+    window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
@@ -71,8 +71,10 @@ class TerminalServiceClass {
       }
 
       // Always emit the event (with the resolved terminalId when known)
+      // `cwd` (spec 045 §3.3): the shell's last directory, captured backend-side
+      // before cleanup. The renderer cannot read it back after this event.
       window.dispatchEvent(new CustomEvent('pty:exit', {
-        detail: { processId, exitCode, terminalId: exitedTerminalId }
+        detail: { processId, exitCode, terminalId: exitedTerminalId, cwd }
       }));
     });
 

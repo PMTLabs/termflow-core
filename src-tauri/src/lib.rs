@@ -961,6 +961,7 @@ pub fn run() {
         commands::get_active_window,
         commands::set_active_window,
         commands::get_terminal_cwd,
+        commands::get_terminal_cwds,
         commands::resolve_terminal_path,
         commands::get_os_build_number,
         open_commands::open_external,

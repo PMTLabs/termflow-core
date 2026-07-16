@@ -119,6 +119,9 @@ export interface ElectronAPI {
 
   // Best-effort live CWD of a terminal's foreground process (null if unavailable).
   getTerminalCwd?: (processId: string) => Promise<string | null>;
+  /** Batched `getTerminalCwd`, keyed by process id. One process scan for all of
+   *  them — see the `get_terminal_cwds` command for why that matters. */
+  getTerminalCwds?: (processIds: string[]) => Promise<Record<string, string | null>>;
 
   // Backlog 003 follow-up: resolve a relative path the terminal printed to actual
   // file(s) on disk — direct join (shell cwd, then foreground-process cwd), else a
@@ -140,7 +143,9 @@ export interface ElectronAPI {
 
   // Event listeners
   onTerminalData: (callback: (id: string, data: string) => void) => void;
-  onTerminalExit: (callback: (id: string, code: number) => void) => void;
+  // `cwd`: the shell's last directory, captured backend-side before cleanup
+  // (spec 045 §3.3). Absent when the backend could not determine one.
+  onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
 
   // System info
   getShellProfiles: () => Promise<any[]>;

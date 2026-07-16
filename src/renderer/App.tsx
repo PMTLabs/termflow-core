@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
@@ -47,6 +47,7 @@ import { inputHandler } from './services/InputHandler';
 import { commandHistoryService } from './services/commandHistoryService';
 import { StateManager } from './services/StateManager';
 import { terminalService } from './services/TerminalService';
+import { refreshLiveCwds } from './services/cwdSnapshot';
 import './styles/App.css';
 import { generateId } from './utils/id';
 
@@ -88,6 +89,9 @@ const App: React.FC = () => {
   // Whether the "quit the app?" confirmation dialog is showing.
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [isLastWindow, setIsLastWindow] = useState(true);
+  // When the last cwd refresh STARTED, to throttle the visibilitychange trigger
+  // (see handleVisibilityChange). A ref, not state: it must not re-render.
+  const lastCwdRefreshAt = useRef(0);
 
   // The native window close is intercepted in Rust (prevent_close) and forwarded
   // as `app:close-requested`; show an in-app confirm before actually closing. The
@@ -161,6 +165,35 @@ const App: React.FC = () => {
     })();
   }, [activeTitle]);
 
+  // Spec 045 §3.3b: warm every running terminal's cwd BEFORE saving. saveState()
+  // is synchronous through to localStorage.setItem (it also runs from
+  // `beforeunload`, which cannot await), so the map has to be populated ahead of
+  // it. A terminal still running at quit never fires an exit event, so this is
+  // the only path that can capture its directory.
+  //
+  // `timeoutMs` bounds the refresh: a stale directory is a far better outcome than
+  // a save that appears to hang. The save runs either way.
+  const saveStateWithCwds = async (timeoutMs?: number): Promise<void> => {
+    try {
+      const st = store.getState();
+      const ids = new Set<string>();
+      const walk = (node: any): void => {
+        if (!node) return;
+        if (node.terminalId) ids.add(node.terminalId);
+        node.children?.forEach(walk);
+      };
+      Object.values(st.panes.treesByTabId || {}).forEach(walk);
+      lastCwdRefreshAt.current = Date.now();
+      const refresh = refreshLiveCwds([...ids]);
+      await (timeoutMs === undefined
+        ? refresh
+        : Promise.race([refresh, new Promise(resolve => setTimeout(resolve, timeoutMs))]));
+    } catch (err) {
+      console.warn('App: cwd refresh failed; saving with the previous values', err);
+    }
+    StateManager.saveState();
+  };
+
   useEffect(() => {
     // Initialize app
     initializeApp();
@@ -174,14 +207,28 @@ const App: React.FC = () => {
 
     // Auto-save state every 30 seconds
     const autoSaveInterval = setInterval(() => {
-      StateManager.saveState();
+      void saveStateWithCwds();
     }, 30000);
 
-    // Save state when visibility changes (e.g., switching apps)
+    // Save state when visibility changes (e.g., switching apps).
+    //
+    // Throttled: every refresh costs a full process-table scan for any terminal
+    // without an OSC-reported cwd (cmd/WSL/bash/zsh — i.e. every terminal on
+    // Linux), and alt-tabbing fires this event as fast as the user can switch.
+    // Unthrottled that is a burst of scans per second, for a directory that
+    // cannot meaningfully have changed between them. The window matches the
+    // autosave tick's granularity: anything newer than this is already warm, and
+    // the worst case is a save carrying directories a few seconds old — which is
+    // exactly what the 30s autosave already persists.
+    const CWD_REFRESH_THROTTLE_MS = 5000;
     const handleVisibilityChange = () => {
-      if (document.hidden) {
+      if (!document.hidden) return;
+      if (Date.now() - lastCwdRefreshAt.current < CWD_REFRESH_THROTTLE_MS) {
+        // Still save — only the (expensive) cwd warm-up is skipped.
         StateManager.saveState();
+        return;
       }
+      void saveStateWithCwds();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -1469,10 +1516,19 @@ const App: React.FC = () => {
         message={isLastWindow
           ? 'Are you sure you want to quit? All open terminals and running processes will be terminated.'
           : 'Close this window? Its terminals and running processes will be terminated. Other windows stay open.'}
-        onConfirm={() => {
+        onConfirm={async () => {
           setShowCloseConfirm(false);
           // Persist state before this window closes (or the app exits).
-          StateManager.saveState();
+          // Unlike `beforeunload` (which cannot await), this is a plain onClick
+          // handler, so it can safely await the cwd refresh before saving —
+          // capturing fresh directories instead of relying on the last 30s
+          // autosave tick.
+          //
+          // BOUNDED, though: the dialog is already gone by this point, so the
+          // user is staring at an app that has visibly accepted "Quit" while we
+          // wait on a process scan. Past this budget we save what we have — a
+          // stale directory is a far better outcome than a quit that looks hung.
+          await saveStateWithCwds(500);
           // Rust decides: destroy just this window, or exit if it's the last one.
           window.electronAPI?.confirmCloseApp?.();
         }}
