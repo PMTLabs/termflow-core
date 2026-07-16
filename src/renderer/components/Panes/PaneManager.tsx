@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
@@ -65,6 +65,22 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
   const handleClose = useCallback((paneId: string) => {
     setPendingClosePaneId(paneId);
   }, []);
+
+  // Spec 045 §3.4: Ctrl+Shift+W asks for a close; the dialog below confirms it,
+  // exactly as the pane's (x) button does. PaneManager is mounted per tab
+  // (TerminalContainer.tsx:162), so every tab's listener fires — the tree guard
+  // ensures only the owning tab responds.
+  useEffect(() => {
+    const onRequest = (e: Event) => {
+      const paneId = (e as CustomEvent).detail?.paneId;
+      if (!paneId || !paneTree) return;
+      const inThisTree = (node: PaneNode): boolean =>
+        node.id === paneId || (node.children?.some(inThisTree) ?? false);
+      if (inThisTree(paneTree)) handleClose(paneId);
+    };
+    window.addEventListener('ui:requestPaneClose', onRequest);
+    return () => window.removeEventListener('ui:requestPaneClose', onRequest);
+  }, [handleClose, paneTree]);
 
   const performClose = useCallback(async (paneId: string) => {
     // Find the terminal ID for this pane

@@ -374,10 +374,14 @@ export class InputHandler {
   private handleClosePane = (): void => {
     const state = store.getState();
     const activePaneId = state.panes.activePaneId;
-    if (activePaneId) {
-      const { closePane } = require('../store/slices/panesSlice');
-      store.dispatch(closePane(activePaneId));
-    }
+    if (!activePaneId) return;
+    // Spec 045 §3.4: route Ctrl+Shift+W through PaneManager's close-confirmation
+    // dialog rather than dropping the pane outright — the same fix Ctrl+W already
+    // uses (see handleCloseTab). This handler runs in the capture phase and stops
+    // propagation, so it would otherwise shadow PaneManager and close without
+    // confirming. It also skipped terminalService.closeTerminal, orphaning the
+    // PTY; performClose (which the dialog calls) does both.
+    window.dispatchEvent(new CustomEvent('ui:requestPaneClose', { detail: { paneId: activePaneId } }));
   };
 
   private handleToggleMaximizePane = (): void => {

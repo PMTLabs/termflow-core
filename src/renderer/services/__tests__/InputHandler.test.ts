@@ -12,9 +12,11 @@ const subscribe = jest.fn(() => () => {});
 const mockState: {
   tabs: { tabs: Array<{ id: string; isActive: boolean; title?: string }> };
   settings: { shellProfiles: Array<{ id: string; name: string }>; defaultProfile: string; customKeybindings: Record<string, string> };
+  panes: { activePaneId: string | null; activeTabId: string | null };
 } = {
   tabs: { tabs: [{ id: 'tb-1', isActive: true, title: 'Bash' }] },
   settings: { shellProfiles: [{ id: 'bash', name: 'Bash' }, { id: 'zsh', name: 'Zsh' }], defaultProfile: 'zsh', customKeybindings: {} },
+  panes: { activePaneId: 'p-1', activeTabId: 'tb-1' },
 };
 jest.mock('../../store', () => ({
   store: {
@@ -293,5 +295,45 @@ describe('InputHandler Ctrl/Cmd+, opens Settings', () => {
       new KeyboardEvent('keydown', { key: ',', metaKey: true, bubbles: true, cancelable: true }),
     );
     expect(openSettingsTab).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Spec 045 §3.4 — the pane-level twin of the Ctrl+W bug guarded above: the
+// capture-phase listener claims Ctrl+Shift+W and stops propagation, so it must
+// route through PaneManager's confirmation dialog rather than dropping the pane
+// (which also skipped terminalService.closeTerminal, orphaning the PTY).
+describe('InputHandler Ctrl+Shift+W routing', () => {
+  beforeEach(() => {
+    dispatch.mockClear();
+    mockState.panes = { activePaneId: 'p-1', activeTabId: 'tb-1' };
+  });
+
+  it('routes Ctrl+Shift+W through the ui:requestPaneClose confirmation flow', () => {
+    const requests: string[] = [];
+    const listener = (e: Event) => requests.push((e as CustomEvent).detail?.paneId);
+    window.addEventListener('ui:requestPaneClose', listener);
+    try {
+      pressShortcut('W', { ctrlKey: true, shiftKey: true });
+    } finally {
+      window.removeEventListener('ui:requestPaneClose', listener);
+    }
+    // The focused pane is sent to the confirmation flow…
+    expect(requests).toEqual(['p-1']);
+    // …and the pane is NOT dropped directly (that bypassed the dialog AND
+    // leaked the PTY, since only PaneManager.performClose closes the terminal).
+    expect(dispatch.mock.calls.map(([a]) => a?.type)).not.toContain('panes/closePane');
+  });
+
+  it('does nothing when no pane is focused', () => {
+    const requests: Event[] = [];
+    const listener = (e: Event) => requests.push(e);
+    window.addEventListener('ui:requestPaneClose', listener);
+    mockState.panes = { activePaneId: null, activeTabId: 'tb-1' };
+    try {
+      pressShortcut('W', { ctrlKey: true, shiftKey: true });
+    } finally {
+      window.removeEventListener('ui:requestPaneClose', listener);
+    }
+    expect(requests).toEqual([]);
   });
 });
