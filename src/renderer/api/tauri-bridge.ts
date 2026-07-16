@@ -46,7 +46,7 @@ interface ElectronAPI {
   sendToPty: (processId: string, data: string) => Promise<void>;
   resizePty: (processId: string, cols: number, rows: number) => Promise<void>;
   onTerminalData: (callback: (id: string, data: string) => void) => void;
-  onTerminalExit: (callback: (id: string, code: number) => void) => void;
+  onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
   getShellProfiles: () => Promise<any[]>;
   getExecutableIcon: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
@@ -313,8 +313,8 @@ const tauriBridge: ElectronAPI = {
 
   onTerminalExit: (callback) => {
     trackUnlisten(listen('terminal:exit', (event: any) => {
-      const { id, exitCode } = event.payload;
-      callback(id, exitCode);
+      const { id, exitCode, cwd } = event.payload;
+      callback(id, exitCode, cwd);
     }));
   },
 

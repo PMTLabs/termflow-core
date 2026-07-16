@@ -13,6 +13,7 @@ import { PaneContextMenu } from './PaneContextMenu';
 import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
+import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import './TerminalPane.css';
 
@@ -316,6 +317,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         (d.terminalId && d.terminalId === terminalId) ||
         (processId && d.processId === processId);
       if (matches) {
+        // Spec 045 §3.3: the backend hands us the shell's final directory here
+        // (it wipes its own record before emitting, so we cannot read it back).
+        setCwdSnapshot(terminalId, d.cwd);
         setClosedInfo({ exitCode: typeof d.exitCode === 'number' ? d.exitCode : null });
       }
     };
@@ -340,7 +344,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         ? defaultProfile || 'default'
         : tab?.shellType || defaultProfile || 'default');
     const profile = shellProfiles.find(p => p.id === finalShellType);
-    const cwd = profile?.cwd;
+    // Spec 045 §3.3 — RESTART precedence: the directory the shell died in wins,
+    // then a cwd inherited from a split, then the profile default. This is
+    // deliberately the REVERSE of the first-spawn rule below (there is no live
+    // split to inherit from at restart). A directory that no longer exists is
+    // handled by the backend (pty_manager.rs is_dir()-checks the spawn cwd).
+    const cwd = getCwdSnapshot(terminalId) ?? takeInitialCwd(terminalId) ?? profile?.cwd;
     const terminalName = name || tab?.title || 'Terminal';
 
     try {
@@ -353,6 +362,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
       setClosedInfo(null);
+      // The snapshot has been consumed. Clearing it stops a LATER exit that
+      // carries no cwd from silently reusing this directory (spec 045 §3.3).
+      clearCwdSnapshot(terminalId);
       // A restarted session is a fresh shell — return its zoom to 100%.
       dispatch(resetZoom(terminalId));
       // A tab can be marked "exited" once every pane in its tree has exited

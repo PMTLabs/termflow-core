@@ -140,7 +140,9 @@ export interface ElectronAPI {
 
   // Event listeners
   onTerminalData: (callback: (id: string, data: string) => void) => void;
-  onTerminalExit: (callback: (id: string, code: number) => void) => void;
+  // `cwd`: the shell's last directory, captured backend-side before cleanup
+  // (spec 045 §3.3). Absent when the backend could not determine one.
+  onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
 
   // System info
   getShellProfiles: () => Promise<any[]>;

@@ -11,7 +11,7 @@ console.log('Initializing Browser Bridge...');
 class BrowserBridge implements ElectronAPI {
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];
-    private exitListeners: ((id: string, code: number) => void)[] = [];
+    private exitListeners: ((id: string, code: number, cwd?: string | null) => void)[] = [];
     private connectionRetries = 0;
     private maxRetries = 5;
 
@@ -241,7 +241,7 @@ class BrowserBridge implements ElectronAPI {
         this.dataListeners.push(callback);
     }
 
-    onTerminalExit(callback: (id: string, code: number) => void): void {
+    onTerminalExit(callback: (id: string, code: number, cwd?: string | null) => void): void {
         this.exitListeners.push(callback);
     }
 
