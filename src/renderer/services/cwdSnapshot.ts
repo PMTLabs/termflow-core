@@ -25,10 +25,36 @@ import { terminalService } from './TerminalService';
 
 const snapshots = new Map<string, string>();
 
+/**
+ * Write generation per terminal, bumped by the two AUTHORITATIVE events: an exit
+ * write (`{final: true}`) and a clear. refreshLiveCwds samples it before its await
+ * and drops its result if it moved — see the guard there for why.
+ *
+ * Entries deliberately OUTLIVE their snapshot: deleting one on clear would reset
+ * the count to 0 and let a refresh that sampled 0 before the clear look current
+ * again, resurrecting exactly the entry the clear removed.
+ */
+const writeGenerations = new Map<string, number>();
+
+function bumpGeneration(terminalId: string): void {
+  writeGenerations.set(terminalId, (writeGenerations.get(terminalId) ?? 0) + 1);
+}
+
 /** Remember a terminal's directory. Ignores empty/absent values so a cwd-less
- *  exit payload never erases a good one. */
-export function setCwdSnapshot(terminalId: string, cwd: string | null | undefined): void {
-  if (cwd) snapshots.set(terminalId, cwd);
+ *  exit payload never erases a good one.
+ *
+ *  `final` marks a write as authoritative — the directory the shell actually died
+ *  in, from the `terminal:exit` payload. It outranks any refresh still in flight
+ *  (a refresh only ever holds a guess about a shell that was alive when it
+ *  started). Refresh and session-restore writes leave it off. */
+export function setCwdSnapshot(
+  terminalId: string,
+  cwd: string | null | undefined,
+  opts?: { final?: boolean },
+): void {
+  if (!cwd) return;
+  snapshots.set(terminalId, cwd);
+  if (opts?.final) bumpGeneration(terminalId);
 }
 
 /** Last-known cwd for a terminal, or undefined if we never captured one. */
@@ -42,6 +68,9 @@ export function getCwdSnapshot(terminalId: string): string | undefined {
  *  falling back to the profile default. */
 export function clearCwdSnapshot(terminalId: string): void {
   snapshots.delete(terminalId);
+  // Also invalidates any refresh in flight, which would otherwise resolve later
+  // and repopulate the entry we just removed.
+  bumpGeneration(terminalId);
 }
 
 /** All snapshots, for persistence by StateManager. */
@@ -58,7 +87,13 @@ export async function refreshLiveCwds(terminalIds: string[]): Promise<void> {
       try {
         const processId = terminalService.getProcessId(terminalId);
         if (!processId) return;
+        // Sample BEFORE the await: the read can take long enough for the terminal
+        // to `cd` and exit, or be restarted, while it is in flight. Anything we
+        // learned before that is stale, and storing it would reopen the shell in
+        // the pre-`cd` directory — the bug this snapshot exists to prevent.
+        const generation = writeGenerations.get(terminalId) ?? 0;
         const cwd = await window.electronAPI?.getTerminalCwd?.(processId);
+        if ((writeGenerations.get(terminalId) ?? 0) !== generation) return;
         setCwdSnapshot(terminalId, cwd);
       } catch {
         // Terminal died mid-refresh, or the API is unavailable. Keep any
@@ -71,4 +106,5 @@ export async function refreshLiveCwds(terminalIds: string[]): Promise<void> {
 /** Test-only: reset module state between cases. */
 export function __resetCwdSnapshots(): void {
   snapshots.clear();
+  writeGenerations.clear();
 }

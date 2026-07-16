@@ -325,7 +325,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (matches) {
         // Spec 045 §3.3: the backend hands us the shell's final directory here
         // (it wipes its own record before emitting, so we cannot read it back).
-        setCwdSnapshot(terminalId, d.cwd);
+        // `final` because this is the directory the shell actually died in: it
+        // outranks any 30s-tick refresh still in flight, which can only carry a
+        // reading from while the shell was alive (i.e. before its last `cd`).
+        setCwdSnapshot(terminalId, d.cwd, { final: true });
         setClosedInfo({ exitCode: typeof d.exitCode === 'number' ? d.exitCode : null });
       }
     };
