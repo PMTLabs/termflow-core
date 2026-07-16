@@ -158,11 +158,13 @@
   overflow: hidden;
   position: relative;
   min-height: 0; /* Important for flexbox children */
-  /* Spec 045 §3.1: create a stacking context so .pane-ended-overlay layers
-     against this pane only. Without it the overlay competes with xterm's own
-     z-indexed descendants (helpers 5, decorations 6-8, message 10,
-     scrollable-element 11) and would be painted under them. */
-  isolation: isolate;
+  /* NOTE: deliberately NOT a stacking context. This element's descendants
+     include the search bar (z-index 10, chosen to beat the solo header's 8),
+     the command-suggest popup (30) and the terminal context menu (1000) — all
+     of which must keep resolving against .terminal-pane / the split tree.
+     Isolating here would trap them and let the header steal the search bar and
+     a sibling .split-pane-2 paint over the context menu. xterm's own z-indexed
+     chrome is contained by .terminal-display instead (TerminalDisplay.css). */
 }
 
 /* Placeholder for Terminal Display */
