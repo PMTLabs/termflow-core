@@ -173,6 +173,38 @@ export class Terminal {
     this.rows = rows;
   }
 
+  // --- Marker / decoration surface -----------------------------------------
+  // Real xterm anchors a marker at `buffer.ybase + buffer.y + offset` and returns
+  // a NON-nullable IMarker (xterm.d.ts:1147 — its "or undefined" docstring is
+  // stale). registerDecoration DOES return undefined on the alt buffer or a
+  // disposed marker. Modelled here so EndedRegionTracker tests mean something.
+  private __cursorLine = 0;
+  decorations: { options: Record<string, unknown>; disposed: boolean; dispose(): void }[] = [];
+  private __decorationsFail = false;
+
+  registerMarker(offset: number = 0): { line: number; isDisposed: boolean; dispose(): void } {
+    const marker = {
+      line: this.__cursorLine + offset,
+      isDisposed: false,
+      dispose(): void { marker.isDisposed = true; },
+    };
+    return marker;
+  }
+
+  registerDecoration(
+    options: Record<string, unknown>,
+  ): { options: Record<string, unknown>; disposed: boolean; dispose(): void } | undefined {
+    if (this.__decorationsFail) return undefined;
+    const d = { options, disposed: false, dispose(): void { d.disposed = true; } };
+    this.decorations.push(d);
+    return d;
+  }
+
+  /** Test hook: move the modelled cursor so the next marker anchors lower. */
+  __setCursorLine(line: number): void { this.__cursorLine = line; }
+  /** Test hook: model the alt-buffer / disposed-marker case. */
+  __failDecorations(v: boolean): void { this.__decorationsFail = v; }
+
   write(data: string): void {
     this.written.push(data);
     if (data.includes('\x1b[?1003h')) {

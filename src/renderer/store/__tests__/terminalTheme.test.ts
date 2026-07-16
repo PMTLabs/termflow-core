@@ -6,6 +6,9 @@
 jest.mock('@termflow/terminal-core', () => ({
   applyColorSchemaToTerminals: jest.fn(),
   setAgentColorLock: jest.fn(),
+  // applyEffectiveThemes also repaints the ended-program marks, since this is
+  // where an effective-scheme change actually lands.
+  setEndedRegionColorsFor: jest.fn(),
 }));
 import { resolveSchemaId, applyEffectiveThemes } from '../terminalTheme';
 import { setAgentColorLock } from '@termflow/terminal-core';

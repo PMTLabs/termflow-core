@@ -1,7 +1,12 @@
 import type { RootState } from './index';
 import { findTabIdByTerminalId, getSelectedPaneId, findLeaf } from './slices/paneTreeOps';
 import { getSchemaTheme } from './colorSchemas';
-import { applyColorSchemaToTerminals, setAgentColorLock } from '@termflow/terminal-core';
+import {
+  applyColorSchemaToTerminals,
+  setAgentColorLock,
+  setEndedRegionColorsFor,
+} from '@termflow/terminal-core';
+import { blendEndedTint, endedRailColor } from './endedTint';
 
 /**
  * Effective color-schema id for a single terminal, resolving the three override
@@ -54,6 +59,11 @@ export function applyEffectiveThemes(
     const theme = getSchemaTheme(resolveSchemaId(id, state, agentFor));
     applyColorSchemaToTerminals(theme, [id]);
     setPaneBackgroundVar(id, theme.background);
+    // The ended-program marks must be pre-blended (xterm's decoration colours take
+    // no alpha) and recomputed whenever the effective scheme changes — including a
+    // per-agent override. This is where scheme changes actually land; the pane
+    // component never re-renders for them.
+    setEndedRegionColorsFor([id], blendEndedTint(theme.background), endedRailColor(theme.background));
     // Lock the pane's colors ONLY when an assigned agent override owns it, so the
     // agent's own color-control sequences can't overwrite our scheme (colorGuard).
     // Plain shells / unmapped agents stay unlocked → normal terminal behavior.
