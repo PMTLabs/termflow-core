@@ -157,7 +157,7 @@ export const TerminalContainer: React.FC = () => {
             data-tab-id={tab.id}
           >
             {isSettings ? (
-              <SettingsPage />
+              <SettingsPage isActive={isActive} />
             ) : displayPaneTree ? (
               <PaneManager
                 paneTree={displayPaneTree}

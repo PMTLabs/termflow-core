@@ -62,7 +62,13 @@ const defaultConnections: ConnectionInfo[] = [
     }
 ];
 
-export const SettingsPage: React.FC = () => {
+interface SettingsPageProps {
+    /** Whether the settings tab is the visible one. Inactive tabs stay mounted but
+        hidden, so the nav guard's prompt can only be answered while active. */
+    isActive?: boolean;
+}
+
+export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) => {
     const dispatch = useDispatch<AppDispatch>();
     const settings = useSelector((state: RootState) => state.settings);
 
@@ -211,10 +217,44 @@ export const SettingsPage: React.FC = () => {
         setShowUnsaved(true);
         return true;
     };
+    // Only armed while this tab is visible: the guard answers by rendering its
+    // Save/Discard prompt *in this tab*, so a guard armed from a hidden tab blocks
+    // navigation on a prompt the user can neither see nor click. Entry points that
+    // don't consult the guard (the "+" new-tab button) can leave a dirty settings
+    // tab hidden, which used to deadlock tab switching entirely.
     useEffect(() => {
+        if (!isActive) {
+            // Drop any prompt raised for a navigation we've since left behind.
+            setShowUnsaved(false);
+            setPendingAction(null);
+            return;
+        }
         registerSettingsGuard((proceed) => guardImplRef.current(proceed));
         return () => clearSettingsGuard();
-    }, []);
+    }, [isActive]);
+
+    // The baseline means "state as of entering the page", but this tab is never
+    // unmounted (only hidden), so a mount-time snapshot goes stale while you're
+    // away. This screen is not the only writer of the fields it tracks — the
+    // terminal's right-click "color scheme for agent" menu dispatches
+    // setAgentColorScheme from outside it — and such an external write drifted
+    // settings away from the stale baseline, leaving an untouched page dirty and
+    // prompting to save changes the user never made here. So re-snapshot on entry,
+    // the same thing an internal category switch already does.
+    //
+    // Exception: edits left unsaved on the way out (the "+" new-tab button skips
+    // the guard) must stay revertable, so their baseline is preserved.
+    const dirtyOnLeaveRef = useRef(false);
+    useEffect(() => {
+        if (!isActive) {
+            dirtyOnLeaveRef.current = isDirty();
+            return;
+        }
+        if (!dirtyOnLeaveRef.current) resnapshot(activeCategory);
+        // Deliberately keyed on isActive alone: this is an entry/exit edge, not a
+        // reaction to settings changing.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isActive]);
 
     // This screen has its own zoom (Ctrl/Cmd +/-/0 + modifier+wheel), independent
     // of the terminals and persisted across restarts under the 'settingsZoom' key.
