@@ -1,4 +1,4 @@
-import { TerminalEngine } from '../TerminalEngine';
+import { TerminalEngine, defaultFontFamily } from '../TerminalEngine';
 import { terminalCache } from '../cache';
 import type { TerminalBridge, Disposable } from '../types';
 // The jest moduleNameMapper points @xterm/xterm at our mock; importing the mock
@@ -66,16 +66,50 @@ afterEach(() => {
 // Construction / options (R6)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Platform-native default font stacks (cross-platform correctness)
+// ---------------------------------------------------------------------------
+
+test('macOS default font stack leads with the system monospace + macOS-native faces', () => {
+  const fam = defaultFontFamily(true, false);
+  expect(fam.startsWith('ui-monospace')).toBe(true);
+  expect(fam).toContain('SF Mono');
+  expect(fam).toContain('Menlo');
+  // must NOT force a Windows-only font ahead of the mac fonts
+  expect(fam).not.toContain('Consolas');
+  // Nerd-font glyph fallback stays available, but not first
+  expect(fam).toContain('MesloLGS NF');
+  expect(fam.indexOf('MesloLGS NF')).toBeGreaterThan(fam.indexOf('ui-monospace'));
+});
+
+test('Windows default font stack uses Windows-native faces (Consolas/Cascadia)', () => {
+  const fam = defaultFontFamily(false, true);
+  expect(fam.startsWith('ui-monospace')).toBe(true);
+  expect(fam).toContain('Consolas');
+  expect(fam).toContain('Cascadia Mono');
+  expect(fam).not.toContain('SF Mono'); // never a macOS font on Windows
+});
+
+test('Linux/other default font stack uses libre monospace faces', () => {
+  const fam = defaultFontFamily(false, false);
+  expect(fam).toContain('DejaVu Sans Mono');
+  expect(fam).not.toContain('SF Mono');
+  expect(fam).not.toContain('Consolas');
+});
+
+test('isMac wins over isWindows so a Mac never gets the Windows stack', () => {
+  expect(defaultFontFamily(true, true)).toBe(defaultFontFamily(true, false));
+});
+
 test('mount creates a terminal preserving the load-bearing xterm options (R6)', () => {
   const { bridge } = makeBridge();
-  const engine = new TerminalEngine(bridge, { cacheKey: 't1' });
+  // isMac:false pins the non-mac cursor (bar); the mac block cursor is covered below.
+  const engine = new TerminalEngine(bridge, { cacheKey: 't1', isMac: false });
   engine.mount(makeContainer());
 
   const term = mockTerm('t1');
   expect(term.options.allowProposedApi).toBe(true);
-  // Windows-Terminal-style cursor: slim blinking bar (user request; replaces the
-  // earlier steady-block default — DECSCUSR blink-phase restarts under codex are
-  // the same behavior Windows Terminal itself exhibits).
+  // Non-macOS: slim blinking bar (the Windows-Terminal look requested earlier).
   expect(term.options.cursorBlink).toBe(true);
   expect(term.options.cursorStyle).toBe('bar');
   expect(term.options.convertEol).toBe(false);
@@ -83,6 +117,18 @@ test('mount creates a terminal preserving the load-bearing xterm options (R6)', 
   expect(term.options.lineHeight).toBe(1.1);
   // default font size
   expect(term.options.fontSize).toBe(14);
+});
+
+test('macOS uses a block (box) cursor; other platforms keep the bar', () => {
+  const { bridge } = makeBridge();
+  const macEngine = new TerminalEngine(bridge, { cacheKey: 'cur-mac', isMac: true });
+  macEngine.mount(makeContainer());
+  expect(mockTerm('cur-mac').options.cursorStyle).toBe('block');
+  expect(mockTerm('cur-mac').options.cursorBlink).toBe(true);
+
+  const winEngine = new TerminalEngine(bridge, { cacheKey: 'cur-win', isMac: false });
+  winEngine.mount(makeContainer());
+  expect(mockTerm('cur-win').options.cursorStyle).toBe('bar');
 });
 
 // Codex/ratatui rendering fix: on Windows the engine must configure xterm's ConPTY
@@ -437,6 +483,160 @@ test('DECSTR soft reset disables win32State on Windows (only the Kitty-flags var
   term.csiHandlers['p']([]); // DECSTR (intermediates '!', final 'p')
 
   const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// macOS: Cmd+Left/Right = jump to start/end of line (no physical Home/End key)
+// ---------------------------------------------------------------------------
+
+test('macOS: Cmd+ArrowLeft at a plain prompt sends Ctrl+A (zsh/bash do NOT bind Home by default)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-home', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-home');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', metaKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x01']]);
+});
+
+test('macOS: Cmd+ArrowRight at a plain prompt sends Ctrl+E (zsh/bash do NOT bind End by default)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-end', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-end');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowRight', metaKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x05']]);
+});
+
+test('macOS: Cmd+ArrowLeft on the alternate screen (vim/less) sends the real Home sequence, not Ctrl+A', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-home-alt', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-home-alt');
+  term.__setBufferType('alternate');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', metaKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[H']]); // vim reads khome from terminfo directly
+});
+
+test('macOS: Cmd+ArrowRight with an enhanced keyboard protocol active sends the real End sequence, not Ctrl+E', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-end-kitty', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-end-kitty');
+  term.csiHandlers['>u']([1]); // app pushes kitty flag 1 (e.g. Claude Code's editor)
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowRight', metaKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[F']]); // the app's own editor expects the real End key
+});
+
+test('non-macOS: Cmd/Ctrl+ArrowLeft is left alone (Windows/Linux keyboards have a real Home key)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'win-left', isMac: false });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('win-left');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', metaKey: true }));
+
+  expect(handled).toBe(true); // xterm's own default handling
+  expect(calls.write).toEqual([]);
+});
+
+test('macOS: a plain ArrowLeft (no Cmd) is left alone', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-plain', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-plain');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft' }));
+
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+test('macOS: Cmd+Shift+ArrowLeft (selection extend) is left alone — only the bare Cmd+Arrow is remapped', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-shift', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-shift');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', metaKey: true, shiftKey: true }));
+
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// macOS: Option+Left/Right = move by word, at a plain shell prompt only
+// ---------------------------------------------------------------------------
+
+test('macOS: Option+ArrowLeft sends ESC b (readline backward-word) at a plain prompt', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-word-left', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-word-left');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', altKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1bb']]);
+});
+
+test('macOS: Option+ArrowRight sends ESC f (readline forward-word) at a plain prompt', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-word-right', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-word-right');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowRight', altKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1bf']]);
+});
+
+test('macOS: Option+ArrowLeft is left alone while an enhanced keyboard protocol is active (TUI handles it itself)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'mac-word-kitty', isMac: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('mac-word-kitty');
+  term.csiHandlers['>u']([1]); // app pushes kitty flag 1
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', altKey: true }));
+
+  expect(handled).toBe(false); // our word-nav shim skips it, but the Kitty encoder below claims it
+  expect(calls.write).toEqual([['p1', '\x1b[1;3D']]);
+});
+
+test('non-macOS: Alt+ArrowLeft is left alone (Windows/Linux already get CSI 1;3D from xterm)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'win-word-left', isMac: false });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('win-word-left');
+
+  const handled = term.keyHandler!(withKey({ key: 'ArrowLeft', altKey: true }));
+
   expect(handled).toBe(true);
   expect(calls.write).toEqual([]);
 });
