@@ -204,6 +204,10 @@ class BrowserBridge implements ElectronAPI {
         return null;
     }
 
+    async getTerminalCwds(_processIds: string[]): Promise<Record<string, string | null>> {
+        return {};
+    }
+
     async resolveTerminalPath(_processId: string, _rel: string): Promise<string[]> {
         return [];
     }

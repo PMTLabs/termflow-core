@@ -927,9 +927,17 @@ fn cwd_of(sys: &System, pid: u32) -> Option<String> {
 /// and Unix shells keep current but **PowerShell does NOT** update on `Set-Location`
 /// — for PowerShell we rely on OSC cwd reporting (`parse_osc_cwd`) instead.
 pub fn get_process_cwd(parent_pid: u32) -> Option<String> {
-    let sys = System::new_all();
-    let (fg_pid, _name) = get_foreground_process_info(parent_pid, Some(&sys));
-    cwd_of(&sys, fg_pid).or_else(|| cwd_of(&sys, parent_pid))
+    get_process_cwd_with(&System::new_all(), parent_pid)
+}
+
+/// [`get_process_cwd`] against a process snapshot the caller already has.
+///
+/// `System::new_all()` is sysinfo's heaviest constructor (every process, plus cpu /
+/// mem / disks / networks), so resolving a BATCH of terminals must scan once and
+/// reuse it here, not once per terminal — see `commands::get_terminal_cwds`.
+pub fn get_process_cwd_with(sys: &System, parent_pid: u32) -> Option<String> {
+    let (fg_pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
+    cwd_of(sys, fg_pid).or_else(|| cwd_of(sys, parent_pid))
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -1036,7 +1044,7 @@ fn exit_cwd_for(terminal_cwds: &DashMap<String, String>, id: &str) -> Option<Str
 
 #[cfg(test)]
 mod cwd_tests {
-    use super::get_process_cwd;
+    use super::{get_process_cwd, get_process_cwd_with};
 
     use super::parse_osc_cwd;
 
@@ -1167,6 +1175,17 @@ mod cwd_tests {
         let label_only = get_foreground_agent(pid, &sys);
         let with_exe = get_foreground_agent_with_exe(pid, &sys);
         assert_eq!(label_only, with_exe.clone().map(|(a, _)| a));
+    }
+
+    /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
+    /// against one shared `System::new_all()` instead of paying that scan per terminal.
+    /// That reuse is only safe if it is a faithful projection of the owned-scan
+    /// version, which is what this pins.
+    #[test]
+    fn process_cwd_with_a_shared_system_matches_the_owned_scan() {
+        let pid = std::process::id();
+        let sys = System::new_all();
+        assert_eq!(get_process_cwd_with(&sys, pid), get_process_cwd(pid));
     }
 
     #[test]

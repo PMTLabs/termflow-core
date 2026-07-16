@@ -16,19 +16,28 @@ import {
   clearCwdSnapshot,
   getAllCwdSnapshots,
   refreshLiveCwds,
+  sampleCwdGeneration,
   __resetCwdSnapshots,
 } from '../cwdSnapshot';
 
-const getTerminalCwd = jest.fn();
+const getTerminalCwds = jest.fn();
 const getProcessId = jest.fn();
 jest.mock('../TerminalService', () => ({
   terminalService: { getProcessId: (id: string) => getProcessId(id) },
 }));
 
+/** The batch command is keyed by PROCESS id (the backend's terminal id — what the
+ *  renderer passes as `id`), so tests answer in those terms. */
+function mockCwdsByPid(byPid: Record<string, string | null>) {
+  getTerminalCwds.mockImplementation(async (pids: string[]) =>
+    Object.fromEntries(pids.map(pid => [pid, byPid[pid] ?? null])),
+  );
+}
+
 beforeEach(() => {
   __resetCwdSnapshots();
   jest.clearAllMocks();
-  (window as any).electronAPI = { getTerminalCwd };
+  (window as any).electronAPI = { getTerminalCwds };
 });
 
 describe('snapshot store', () => {
@@ -61,17 +70,23 @@ describe('snapshot store', () => {
 describe('refreshLiveCwds (spec 045 §3.3b)', () => {
   it('captures the cwd of RUNNING terminals — the session-restore case', async () => {
     getProcessId.mockImplementation((id: string) => (id === 'tm-1' ? 'proc-1' : 'proc-2'));
-    getTerminalCwd.mockImplementation(async (pid: string) =>
-      pid === 'proc-1' ? 'D:\\one' : 'D:\\two',
-    );
+    mockCwdsByPid({ 'proc-1': 'D:\\one', 'proc-2': 'D:\\two' });
     await refreshLiveCwds(['tm-1', 'tm-2']);
     expect(getAllCwdSnapshots()).toEqual({ 'tm-1': 'D:\\one', 'tm-2': 'D:\\two' });
+  });
+
+  it('reads every terminal in ONE call — a full process scan per terminal is the cost this batch exists to avoid', async () => {
+    getProcessId.mockImplementation((id: string) => `proc-${id.slice(3)}`);
+    mockCwdsByPid({ 'proc-1': 'D:\\one', 'proc-2': 'D:\\two', 'proc-3': 'D:\\three' });
+    await refreshLiveCwds(['tm-1', 'tm-2', 'tm-3']);
+    expect(getTerminalCwds).toHaveBeenCalledTimes(1);
+    expect(getTerminalCwds).toHaveBeenCalledWith(['proc-1', 'proc-2', 'proc-3']);
   });
 
   it('keeps the previous value when a terminal reports no cwd', async () => {
     setCwdSnapshot('tm-1', 'D:\\old');
     getProcessId.mockReturnValue('proc-1');
-    getTerminalCwd.mockResolvedValue(null);
+    mockCwdsByPid({ 'proc-1': null });
     await refreshLiveCwds(['tm-1']);
     expect(getCwdSnapshot('tm-1')).toBe('D:\\old');
   });
@@ -79,22 +94,31 @@ describe('refreshLiveCwds (spec 045 §3.3b)', () => {
   it('skips terminals with no live process', async () => {
     getProcessId.mockReturnValue(undefined);
     await refreshLiveCwds(['tm-1']);
-    expect(getTerminalCwd).not.toHaveBeenCalled();
+    expect(getTerminalCwds).not.toHaveBeenCalled();
     expect(getAllCwdSnapshots()).toEqual({});
   });
 
-  it('never rejects when one terminal read fails — autosave must not break', async () => {
-    getProcessId.mockImplementation((id: string) => (id === 'tm-1' ? 'proc-1' : 'proc-2'));
-    getTerminalCwd.mockImplementation(async (pid: string) => {
-      if (pid === 'proc-1') throw new Error('gone');
-      return 'D:\\two';
-    });
-    await expect(refreshLiveCwds(['tm-1', 'tm-2'])).resolves.toBeUndefined();
-    // The healthy terminal is still captured.
-    expect(getCwdSnapshot('tm-2')).toBe('D:\\two');
+  it('does not call the backend at all when no terminal needs a read', async () => {
+    getProcessId.mockReturnValue(undefined);
+    await refreshLiveCwds([]);
+    expect(getTerminalCwds).not.toHaveBeenCalled();
   });
 
-  it('survives a missing getTerminalCwd API', async () => {
+  it('never rejects when the read fails — autosave must not break', async () => {
+    getProcessId.mockImplementation((id: string) => (id === 'tm-1' ? 'proc-1' : 'proc-2'));
+    getTerminalCwds.mockRejectedValue(new Error('gone'));
+    await expect(refreshLiveCwds(['tm-1', 'tm-2'])).resolves.toBeUndefined();
+  });
+
+  it('stores the terminals the batch did answer for, ignoring the ones it omitted', async () => {
+    getProcessId.mockImplementation((id: string) => (id === 'tm-1' ? 'proc-1' : 'proc-2'));
+    // proc-1 died mid-scan, so the backend has no entry for it.
+    getTerminalCwds.mockResolvedValue({ 'proc-2': 'D:\\two' });
+    await refreshLiveCwds(['tm-1', 'tm-2']);
+    expect(getAllCwdSnapshots()).toEqual({ 'tm-2': 'D:\\two' });
+  });
+
+  it('survives a missing getTerminalCwds API', async () => {
     (window as any).electronAPI = {};
     getProcessId.mockReturnValue('proc-1');
     await expect(refreshLiveCwds(['tm-1'])).resolves.toBeUndefined();
@@ -113,13 +137,14 @@ describe('exit writes outrank a refresh in flight (spec 045 §3.3)', () => {
   /** Start a refresh whose read is stuck, so the test can act "during" it. */
   function refreshWithPendingRead(terminalId: string) {
     getProcessId.mockReturnValue('proc-1');
-    let resolveRead!: (cwd: string) => void;
-    getTerminalCwd.mockReturnValue(
-      new Promise<string>((resolve) => {
-        resolveRead = resolve;
+    let resolveBatch!: (byPid: Record<string, string>) => void;
+    getTerminalCwds.mockReturnValue(
+      new Promise<Record<string, string>>((resolve) => {
+        resolveBatch = resolve;
       }),
     );
-    return { done: refreshLiveCwds([terminalId]), resolveRead };
+    const done = refreshLiveCwds([terminalId]);
+    return { done, resolveRead: (cwd: string) => resolveBatch({ 'proc-1': cwd }) };
   }
 
   it('a stale refresh must not overwrite the cwd captured at exit', async () => {
@@ -174,8 +199,59 @@ describe('exit writes outrank a refresh in flight (spec 045 §3.3)', () => {
     setCwdSnapshot('tm-1', 'D:\\b', { final: true });
     clearCwdSnapshot('tm-1');
     getProcessId.mockReturnValue('proc-9');
-    getTerminalCwd.mockResolvedValue('D:\\fresh');
+    mockCwdsByPid({ 'proc-9': 'D:\\fresh' });
     await refreshLiveCwds(['tm-1']);
     expect(getCwdSnapshot('tm-1')).toBe('D:\\fresh');
+  });
+});
+
+/**
+ * A pane's close path runs `closeTerminal()` then `clearCwdSnapshot()`, but the
+ * resulting `terminal:exit` lands AFTERWARDS. An unconditional `final` write would
+ * re-add the entry of a pane that no longer exists — contradicting the "cannot grow
+ * without bound" guarantee the clear is there to provide.
+ *
+ * The exit write gets the same contract the refresh has: sample the generation while
+ * the terminal is known live (the pane subscribes), and drop the write if a clear
+ * moved it in the meantime.
+ */
+describe('a cleared pane is not resurrected by its own late exit (spec 045 §3.3)', () => {
+  it('drops a final write whose terminal was cleared after the sample — the closed-pane case', () => {
+    // The pane subscribes to pty:exit while its terminal is live.
+    const generation = sampleCwdGeneration('tm-1');
+    setCwdSnapshot('tm-1', 'D:\\live');
+
+    // performClose: closeTerminal() then clearCwdSnapshot(). The pane is gone.
+    clearCwdSnapshot('tm-1');
+
+    // The backend's exit event finally arrives, carrying the shell's last cwd.
+    setCwdSnapshot('tm-1', 'D:\\dead', { final: true, generation });
+
+    expect(getCwdSnapshot('tm-1')).toBeUndefined();
+    expect(getAllCwdSnapshots()).toEqual({});
+  });
+
+  it('still lands a final write for a LIVE terminal — the restart case, requirement 3', () => {
+    // The pane subscribed while live; nothing cleared since.
+    const generation = sampleCwdGeneration('tm-1');
+
+    // The shell exits normally. This directory is what Restart must reopen in.
+    setCwdSnapshot('tm-1', 'D:\\b', { final: true, generation });
+
+    expect(getCwdSnapshot('tm-1')).toBe('D:\\b');
+  });
+
+  it('lands a final write for a terminal that was restarted after a clear', () => {
+    // Restart clears, then the pane re-subscribes (processId changed) and so
+    // re-samples. The guard must not freeze the id forever.
+    clearCwdSnapshot('tm-1');
+    const generation = sampleCwdGeneration('tm-1');
+    setCwdSnapshot('tm-1', 'D:\\after-restart', { final: true, generation });
+    expect(getCwdSnapshot('tm-1')).toBe('D:\\after-restart');
+  });
+
+  it('an ungated final write still lands — callers that never sampled are unaffected', () => {
+    setCwdSnapshot('tm-1', 'D:\\b', { final: true });
+    expect(getCwdSnapshot('tm-1')).toBe('D:\\b');
   });
 });

@@ -38,6 +38,7 @@ interface ElectronAPI {
   getTerminalSize: (id: string) => Promise<{ cols: number; rows: number }>;
   updateTerminalName: (id: string, name: string) => Promise<boolean>;
   getTerminalCwd: (processId: string) => Promise<string | null>;
+  getTerminalCwds: (processIds: string[]) => Promise<Record<string, string | null>>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
   openPath: (path: string) => Promise<void>;
@@ -262,6 +263,10 @@ const tauriBridge: ElectronAPI = {
 
   getTerminalCwd: async (processId) => {
     return invoke('get_terminal_cwd', { id: processId });
+  },
+
+  getTerminalCwds: async (processIds) => {
+    return invoke('get_terminal_cwds', { ids: processIds });
   },
 
   resolveTerminalPath: async (processId, rel) => {

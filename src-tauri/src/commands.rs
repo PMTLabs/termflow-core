@@ -4,7 +4,9 @@ use crate::pty_manager;
 use jsonwebtoken::{encode, Header, EncodingKey};
 use serde::{Deserialize, Serialize};
 use chrono::{Utc, Duration};
+use std::collections::HashMap;
 use std::io::Write;
+use sysinfo::System;
 
 #[tauri::command]
 pub async fn get_shell_profiles() -> Result<Vec<pty_manager::ShellProfile>, String> {
@@ -189,6 +191,58 @@ pub async fn get_terminal_cwd(
     tokio::task::spawn_blocking(move || pty_manager::get_process_cwd(pid))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// [`get_terminal_cwd`] for MANY terminals, in ONE process scan.
+///
+/// The renderer's session-save refresh needs every live terminal's directory at once.
+/// Per-terminal invokes meant N × `System::new_all()` — sysinfo's heaviest constructor
+/// (every process, plus cpu / mem / disks / networks, 50-200ms) — because the OSC fast
+/// path is only ever populated for PowerShell (pty_manager.rs injects PS_CWD_INTEGRATION),
+/// so cmd / WSL / bash / zsh terminals — i.e. EVERY terminal on Linux — take the process
+/// fallback on every single refresh.
+///
+/// Here the OSC hits are resolved first as cheap map lookups, and the scan happens ONCE
+/// on a blocking worker (same reason as `get_terminal_cwd`: N concurrent scans on the
+/// async pool would starve the workers `write_terminal` / `resize_terminal` need) and
+/// only if at least one terminal actually needs it. Unknown terminals and unresolvable
+/// directories map to `None`, so the renderer keeps its previous value.
+#[tauri::command]
+pub async fn get_terminal_cwds(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<HashMap<String, Option<String>>, String> {
+    let mut out: HashMap<String, Option<String>> = HashMap::new();
+    // Read everything off `state` BEFORE the closure: `State` is not Send into it.
+    let mut needs_scan: Vec<(String, u32)> = Vec::new();
+    for id in ids {
+        if let Some(cwd) = state.terminal_cwds.get(&id) {
+            out.insert(id, Some(cwd.value().clone()));
+            continue;
+        }
+        match state.terminals.get(&id) {
+            Some(t) => needs_scan.push((id, t.pid)),
+            None => {
+                out.insert(id, None);
+            }
+        }
+    }
+    if needs_scan.is_empty() {
+        return Ok(out);
+    }
+
+    let scanned = tokio::task::spawn_blocking(move || {
+        let sys = System::new_all();
+        needs_scan
+            .into_iter()
+            .map(|(id, pid)| (id, pty_manager::get_process_cwd_with(&sys, pid)))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    out.extend(scanned);
+    Ok(out)
 }
 
 /// Resolve a relative path the terminal printed into the actual file(s) on disk

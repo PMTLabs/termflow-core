@@ -13,7 +13,7 @@ import { PaneContextMenu } from './PaneContextMenu';
 import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
-import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot } from '../../services/cwdSnapshot';
+import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import './TerminalPane.css';
 
@@ -317,6 +317,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // which is why it works for split panes too (App ignores those).
   useEffect(() => {
     if (!terminalId) return undefined;
+    // Sampled here, while this pane's terminal is LIVE. If the pane is closed
+    // before its exit event lands (performClose clears the snapshot synchronously,
+    // the event arrives after), the generation moves and the write below is
+    // dropped — a pane that no longer exists must not re-add its entry. Re-sampled
+    // on restart, when processId changes and this effect re-subscribes, so a
+    // restarted shell's own exit still records its directory.
+    const generation = sampleCwdGeneration(terminalId);
     const onExit = (e: Event) => {
       const d = (e as CustomEvent).detail || {};
       const matches =
@@ -328,7 +335,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // `final` because this is the directory the shell actually died in: it
         // outranks any 30s-tick refresh still in flight, which can only carry a
         // reading from while the shell was alive (i.e. before its last `cd`).
-        setCwdSnapshot(terminalId, d.cwd, { final: true });
+        setCwdSnapshot(terminalId, d.cwd, { final: true, generation });
         setClosedInfo({ exitCode: typeof d.exitCode === 'number' ? d.exitCode : null });
       }
     };

@@ -27,8 +27,9 @@ const snapshots = new Map<string, string>();
 
 /**
  * Write generation per terminal, bumped by the two AUTHORITATIVE events: an exit
- * write (`{final: true}`) and a clear. refreshLiveCwds samples it before its await
- * and drops its result if it moved — see the guard there for why.
+ * write (`{final: true}`) and a clear. Both async writers sample it while the
+ * terminal is live and drop their result if it moved: refreshLiveCwds before its
+ * await, and the exit write when its pane subscribes — see the guards for why.
  *
  * Entries deliberately OUTLIVE their snapshot: deleting one on clear would reset
  * the count to 0 and let a refresh that sampled 0 before the clear look current
@@ -40,19 +41,35 @@ function bumpGeneration(terminalId: string): void {
   writeGenerations.set(terminalId, (writeGenerations.get(terminalId) ?? 0) + 1);
 }
 
+/** Read a terminal's current write generation, to be handed back to a later
+ *  `setCwdSnapshot({final})`. Callers sample this at the moment the terminal is
+ *  known LIVE (the pane subscribing to `pty:exit`); the write is then dropped if a
+ *  clear moved the generation while the event was in flight. Same contract as the
+ *  refresh guard below, for the same reason — see setCwdSnapshot. */
+export function sampleCwdGeneration(terminalId: string): number {
+  return writeGenerations.get(terminalId) ?? 0;
+}
+
 /** Remember a terminal's directory. Ignores empty/absent values so a cwd-less
  *  exit payload never erases a good one.
  *
  *  `final` marks a write as authoritative — the directory the shell actually died
  *  in, from the `terminal:exit` payload. It outranks any refresh still in flight
  *  (a refresh only ever holds a guess about a shell that was alive when it
- *  started). Refresh and session-restore writes leave it off. */
+ *  started). Refresh and session-restore writes leave it off.
+ *
+ *  `generation` gates the write against a clear that happened since it was sampled.
+ *  A pane's close path clears SYNCHRONOUSLY (right after closeTerminal), but the
+ *  `terminal:exit` it triggers arrives later — so without this an entry the clear
+ *  just removed comes straight back for a pane that no longer exists. Omitting it
+ *  leaves the write ungated (session-restore and other non-racing callers). */
 export function setCwdSnapshot(
   terminalId: string,
   cwd: string | null | undefined,
-  opts?: { final?: boolean },
+  opts?: { final?: boolean; generation?: number },
 ): void {
   if (!cwd) return;
+  if (opts?.generation !== undefined && sampleCwdGeneration(terminalId) !== opts.generation) return;
   snapshots.set(terminalId, cwd);
   if (opts?.final) bumpGeneration(terminalId);
 }
@@ -80,27 +97,42 @@ export function getAllCwdSnapshots(): Record<string, string> {
 
 /** Refresh the directories of terminals that are still RUNNING, so a session
  *  save has something to persist for them. Never rejects: it runs on the
- *  autosave tick and one dead terminal must not break the rest. */
+ *  autosave tick and one dead terminal must not break the rest.
+ *
+ *  ONE batch call, not one per terminal. Only PowerShell populates the backend's
+ *  OSC cwd map, so every cmd/WSL/bash/zsh terminal (i.e. every terminal on Linux)
+ *  falls back to a full `System::new_all()` process scan — 50-200ms each. Fanned
+ *  out per terminal that was N scans per tick; the batch command builds the process
+ *  snapshot once and resolves every pid against it. */
 export async function refreshLiveCwds(terminalIds: string[]): Promise<void> {
-  await Promise.all(
-    terminalIds.map(async terminalId => {
-      try {
-        const processId = terminalService.getProcessId(terminalId);
-        if (!processId) return;
-        // Sample BEFORE the await: the read can take long enough for the terminal
-        // to `cd` and exit, or be restarted, while it is in flight. Anything we
-        // learned before that is stale, and storing it would reopen the shell in
-        // the pre-`cd` directory — the bug this snapshot exists to prevent.
-        const generation = writeGenerations.get(terminalId) ?? 0;
-        const cwd = await window.electronAPI?.getTerminalCwd?.(processId);
-        if ((writeGenerations.get(terminalId) ?? 0) !== generation) return;
-        setCwdSnapshot(terminalId, cwd);
-      } catch {
-        // Terminal died mid-refresh, or the API is unavailable. Keep any
-        // previous value; the profile default is the ultimate fallback.
-      }
-    }),
-  );
+  try {
+    // Sample BEFORE the await: the read can take long enough for a terminal to
+    // `cd` and exit, or be restarted, while it is in flight. Anything we learned
+    // before that is stale, and storing it would reopen the shell in the pre-`cd`
+    // directory — the bug this snapshot exists to prevent. Per terminal, so one
+    // terminal exiting mid-batch doesn't discard the others' results.
+    const pending = terminalIds
+      .map(terminalId => ({
+        terminalId,
+        processId: terminalService.getProcessId(terminalId),
+        generation: sampleCwdGeneration(terminalId),
+      }))
+      .filter((t): t is typeof t & { processId: string } => Boolean(t.processId));
+    if (pending.length === 0) return;
+
+    const byProcessId = await window.electronAPI?.getTerminalCwds?.(
+      pending.map(t => t.processId),
+    );
+    if (!byProcessId) return;
+
+    for (const { terminalId, processId, generation } of pending) {
+      if (sampleCwdGeneration(terminalId) !== generation) continue;
+      setCwdSnapshot(terminalId, byProcessId[processId]);
+    }
+  } catch {
+    // The read failed, or the API is unavailable. Keep any previous values; the
+    // profile default is the ultimate fallback.
+  }
 }
 
 /** Test-only: reset module state between cases. */
