@@ -47,6 +47,7 @@ import { inputHandler } from './services/InputHandler';
 import { commandHistoryService } from './services/commandHistoryService';
 import { StateManager } from './services/StateManager';
 import { terminalService } from './services/TerminalService';
+import { refreshLiveCwds } from './services/cwdSnapshot';
 import './styles/App.css';
 import { generateId } from './utils/id';
 
@@ -161,6 +162,28 @@ const App: React.FC = () => {
     })();
   }, [activeTitle]);
 
+  // Spec 045 §3.3b: warm every running terminal's cwd BEFORE saving. saveState()
+  // is synchronous through to localStorage.setItem (it also runs from
+  // `beforeunload`, which cannot await), so the map has to be populated ahead of
+  // it. A terminal still running at quit never fires an exit event, so this is
+  // the only path that can capture its directory.
+  const saveStateWithCwds = async (): Promise<void> => {
+    try {
+      const st = store.getState();
+      const ids = new Set<string>();
+      const walk = (node: any): void => {
+        if (!node) return;
+        if (node.terminalId) ids.add(node.terminalId);
+        node.children?.forEach(walk);
+      };
+      Object.values(st.panes.treesByTabId || {}).forEach(walk);
+      await refreshLiveCwds([...ids]);
+    } catch (err) {
+      console.warn('App: cwd refresh failed; saving with the previous values', err);
+    }
+    StateManager.saveState();
+  };
+
   useEffect(() => {
     // Initialize app
     initializeApp();
@@ -174,13 +197,13 @@ const App: React.FC = () => {
 
     // Auto-save state every 30 seconds
     const autoSaveInterval = setInterval(() => {
-      StateManager.saveState();
+      void saveStateWithCwds();
     }, 30000);
 
     // Save state when visibility changes (e.g., switching apps)
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        StateManager.saveState();
+        void saveStateWithCwds();
       }
     };
 

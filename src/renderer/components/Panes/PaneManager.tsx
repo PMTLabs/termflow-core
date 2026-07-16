@@ -13,6 +13,7 @@ import { SplitPane } from './SplitPane';
 import { TerminalPane } from './TerminalPane';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { terminalService } from '../../services/TerminalService';
+import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -85,6 +86,9 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       if (terminalId) {
         try {
           await terminalService.closeTerminal(terminalId);
+          // Spec 045 §3.3: the pane is gone for good — drop its directory so the
+          // map cannot grow without bound and a recycled id can't inherit it.
+          clearCwdSnapshot(terminalId);
           console.log(`PaneManager: Closed terminal ${terminalId} for pane ${paneId}`);
         } catch (error) {
           console.error(`Failed to close terminal for pane ${paneId}:`, error);

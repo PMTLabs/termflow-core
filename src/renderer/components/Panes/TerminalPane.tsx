@@ -167,11 +167,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const isSplitPane = terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
     const finalShellType = shellType || (isSplitPane ? (defaultProfile || 'default') : (tab?.shellType || defaultProfile || 'default'));
 
-    // Resolve CWD: an inherited cwd from a pane split (backlog 004) wins over the
-    // profile's default. takeInitialCwd consumes it once — we've already passed the
-    // reuse/lock guards above, so this runs only when we genuinely spawn.
+    // Resolve CWD — FIRST-SPAWN precedence (spec 045 §3.3):
+    //   1. a cwd inherited from a pane split (backlog 004) — the user's most
+    //      recent intent, and it must win;
+    //   2. a directory restored from a previous session;
+    //   3. the profile default.
+    // Deliberately the REVERSE of handleRestart's rule, where there is no live
+    // split to inherit from. takeInitialCwd consumes its value once — we've
+    // already passed the reuse/lock guards above, so this runs only on a genuine
+    // spawn.
     const profile = shellProfiles.find(p => p.id === finalShellType);
-    const cwd = takeInitialCwd(terminalId) ?? profile?.cwd;
+    const cwd = takeInitialCwd(terminalId) ?? getCwdSnapshot(terminalId) ?? profile?.cwd;
 
     console.log(`TerminalPane: Terminal ${terminalId} - isSplitPane: ${isSplitPane}, tab exists: ${!!tab}, tab shellType: ${tab?.shellType}, defaultProfile: ${defaultProfile}, shellType prop: ${shellType}, final shellType: ${finalShellType}, cwd: ${cwd}`);
 
