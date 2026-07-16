@@ -1184,6 +1184,7 @@ mod cwd_tests {
     // machinery.
     use super::exit_cwd_for;
     use super::Terminal;
+    use super::TerminalBackend;
     use dashmap::DashMap;
 
     /// Spec 045 §3.3: the exit payload must carry the cwd, because
@@ -1213,5 +1214,47 @@ mod cwd_tests {
         let terminal_cwds: DashMap<String, String> = DashMap::new();
         let terminals: DashMap<String, Terminal> = DashMap::new();
         assert!(exit_cwd_for(&terminal_cwds, &terminals, "nope").is_none());
+    }
+
+    /// The path non-PowerShell shells (cmd, bash) actually take in production:
+    /// no OSC-reported cwd was ever captured into `terminal_cwds`, but the
+    /// terminal's pid is present in `terminals`, so exit_cwd_for must fall back
+    /// to the live OS process cwd via get_process_cwd(pid) — the same fallback
+    /// commands::get_terminal_cwd uses. Uses the test binary's own pid (mirrors
+    /// process_cwd_resolves_for_current_process) so the cwd is genuinely
+    /// resolvable rather than asserting on an unresolvable/fabricated pid.
+    #[test]
+    fn exit_cwd_falls_back_to_live_process_cwd_when_absent_from_terminal_cwds() {
+        let terminal_cwds: DashMap<String, String> = DashMap::new();
+        let terminals: DashMap<String, Terminal> = DashMap::new();
+        let pid = std::process::id();
+        terminals.insert(
+            "t-1".to_string(),
+            Terminal {
+                id: "t-1".to_string(),
+                pid,
+                shell: "bash".to_string(),
+                name: "bash".to_string(),
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                cols: 80,
+                rows: 24,
+                backend: TerminalBackend::PortablePty,
+                tab_id: Some("t-1".to_string()),
+                last_input_source: None,
+                last_input_at: None,
+            },
+        );
+
+        let got = exit_cwd_for(&terminal_cwds, &terminals, "t-1");
+        // Must match get_process_cwd's own result for this pid exactly — proves
+        // the miss-in-terminal_cwds path genuinely falls through to the live
+        // OS process cwd rather than returning None early.
+        assert_eq!(got, get_process_cwd(pid));
+        // cwd() can be None on a locked-down platform; only assert the concrete
+        // value when present (mirrors process_cwd_resolves_for_current_process).
+        if let Some(cwd) = &got {
+            let expected = std::env::current_dir().unwrap();
+            assert_eq!(std::path::Path::new(cwd), expected.as_path());
+        }
     }
 }
