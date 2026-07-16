@@ -66,8 +66,10 @@ export async function splitPaneById(
 
   let cwd: string | undefined;
   try {
-    const tree = state.panes.paneTree;
-    const node = tree ? findLeaf(tree, paneId) : null;
+    // Spec 045 §3.6: search every tab's tree, not just `panes.paneTree` — that
+    // mirrors the ACTIVE tab only, so a split requested from a BACKGROUND tab's
+    // header found no source pane and silently inherited no cwd.
+    const node = findLeafInAnyTree(state.panes, paneId);
     const srcTerminalId = node?.terminalId;
     const processId = srcTerminalId ? terminalService.getProcessId(srcTerminalId) : undefined;
     if (processId) {
@@ -80,15 +82,36 @@ export async function splitPaneById(
   store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
 }
 
+/** Find a leaf by id in any tab's tree (falling back to the active mirror).
+ *  Spec 045 §3.6 — the tab context menu can target a background tab. */
+function findLeafInAnyTree(panes: { treesByTabId: Record<string, any>; paneTree: any }, paneId: string): any {
+  for (const tree of Object.values(panes.treesByTabId || {})) {
+    const found = tree ? findLeaf(tree, paneId) : null;
+    if (found) return found;
+  }
+  return panes.paneTree ? findLeaf(panes.paneTree, paneId) : null;
+}
+
 /** Resolve the best pane to split for a given tab: its focused pane if that pane
  *  lives in the tab, otherwise the tab's first leaf. Used by the tab menu, which
- *  isn't bound to one specific pane. Returns null if the tab has no panes. */
-export function splitTabPane(tabId: string, direction: 'horizontal' | 'vertical'): void {
+ *  isn't bound to one specific pane. No-op if the tab has no panes.
+ *
+ *  `activePaneId` is global, so for a BACKGROUND tab it never matches this tab's
+ *  tree and we fall back to its first leaf — deliberate, and the documented
+ *  answer to spec 045 §6's open item.
+ *
+ *  `position` mirrors splitPaneById's (spec 045 §3.2) so the tab-header menu
+ *  offers the same four directional actions as the pane-header menu. */
+export function splitTabPane(
+  tabId: string,
+  direction: 'horizontal' | 'vertical',
+  position: 'before' | 'after' = 'after',
+): void {
   const panes = store.getState().panes;
   const tree = panes.treesByTabId[tabId];
   if (!tree) return;
   const focused = panes.activePaneId && findLeaf(tree, panes.activePaneId)
     ? panes.activePaneId
     : firstLeafId(tree);
-  if (focused) void splitPaneById(focused, direction);
+  if (focused) void splitPaneById(focused, direction, position);
 }
