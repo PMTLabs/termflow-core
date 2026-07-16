@@ -30,17 +30,36 @@ import {
   isWebGLGloballyDisabled,
 } from './webgl';
 
-// Default font stack — preserves the Nerd-Font prompt glyphs (MesloLGS NF) the
-// main app relies on. Ported verbatim from TerminalDisplay.tsx:298.
-const DEFAULT_FONT_FAMILY =
-  'MesloLGS NF, "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace';
+// Platform-native default font stacks. Cross-platform correctness matters here:
+// each OS must resolve to ITS OWN crisp system monospace, not another platform's
+// font or a coarse generic. Every stack leads with `ui-monospace` (the OS system
+// monospace — SF Mono on macOS, Cascadia/Consolas on Windows) then names that
+// platform's guaranteed fonts explicitly as a hard guarantee. The prior single
+// stack led with fonts absent from a stock macOS install (MesloLGS NF, Cascadia
+// Code, Consolas) and fell through to Courier New / generic monospace, which
+// WKWebView renders coarsely (the "not smooth on macOS" report). MesloLGS NF
+// stays in each chain (not first) so an installed Nerd font still supplies
+// powerline/prompt glyphs via per-glyph fallback while the system font handles
+// normal text. Pure (platform passed in) so it is unit-testable.
+export function defaultFontFamily(isMac: boolean, isWindows: boolean): string {
+  if (isMac) {
+    // SF Mono / Menlo / Monaco all ship with macOS; Menlo is the guaranteed catch.
+    return 'ui-monospace, "SF Mono", Menlo, Monaco, "MesloLGS NF", monospace';
+  }
+  if (isWindows) {
+    // Consolas ships with every Windows; Cascadia Mono/Code come with Windows Terminal.
+    return 'ui-monospace, Consolas, "Cascadia Mono", "Cascadia Code", "MesloLGS NF", "Courier New", monospace';
+  }
+  // Linux / other: common libre monospace faces, then generic.
+  return 'ui-monospace, "DejaVu Sans Mono", "Liberation Mono", "JetBrains Mono", "MesloLGS NF", monospace';
+}
 
 // Full 16-color theme — copied byte-for-byte from TerminalDisplay.tsx:301-322.
 // Exported so hosts (e.g. the monitor) can reuse the exact main-app ANSI palette
 // for color parity while overriding only background/cursor for their own cohesion.
 export const DEFAULT_THEME: Record<string, string> = {
   background: '#000000',
-  foreground: '#cccccc',
+  foreground: '#f2f2f2',
   cursor: '#ffffff',
   cursorAccent: '#000000',
   black: '#000000',
@@ -51,7 +70,7 @@ export const DEFAULT_THEME: Record<string, string> = {
   magenta: '#bc3fbc',
   cyan: '#11a8cd',
   white: '#e5e5e5',
-  brightBlack: '#8a8a8a',
+  brightBlack: '#959595',
   brightRed: '#f14c4c',
   brightGreen: '#23d18b',
   brightYellow: '#f5f543',
@@ -509,6 +528,23 @@ export class TerminalEngine {
     );
   }
 
+  private isMacPlatform(): boolean {
+    return (
+      this.opts.isMac ??
+      (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac'))
+    );
+  }
+
+  // Resolved font family: an explicit host override, else this platform's native
+  // default stack (defaultFontFamily). isMac wins over isWindows so a mac never
+  // gets the Windows stack. Used both to configure xterm and to prime the
+  // font-ready fit below.
+  private resolvedFontFamily(): string {
+    return (
+      this.opts.fontFamily ?? defaultFontFamily(this.isMacPlatform(), this.isWindowsPlatform())
+    );
+  }
+
   // Backlog 003: a detected link only opens on modifier+click (Ctrl on Win/Linux,
   // Cmd on macOS) so a plain click still selects text. macOS is sniffed when isMac
   // isn't passed, matching the zoom-modifier logic.
@@ -645,19 +681,19 @@ export class TerminalEngine {
         : undefined;
 
       term = new Terminal({
-        fontFamily: this.opts.fontFamily ?? DEFAULT_FONT_FAMILY,
+        fontFamily: this.resolvedFontFamily(),
         fontSize,
         lineHeight: this.opts.lineHeight ?? 1.1,
         theme: this.opts.theme ?? DEFAULT_THEME,
-        // Windows-Terminal-style cursor: slim blinking bar (user request). Note the
-        // DECSCUSR interplay: TUIs like codex re-send ESC[0 q on every keystroke,
-        // which restarts xterm's blink phase — the cursor stays solid while typing
-        // and resumes blinking when idle. That matches Windows Terminal's own
-        // behavior, so it's accepted rather than avoided (this replaces the earlier
-        // steady-block default that existed to sidestep exactly that restart).
-        // ESC[0 q falls back to these options, so codex inherits bar+blink too.
+        // Cursor: block on macOS (matching Terminal.app/iTerm2's default box
+        // cursor, per user request), slim bar elsewhere (the Windows-Terminal
+        // look requested earlier). Note the DECSCUSR interplay: TUIs like codex
+        // re-send ESC[0 q on every keystroke, which restarts xterm's blink phase —
+        // the cursor stays solid while typing and resumes blinking when idle. That
+        // matches Windows Terminal's own behavior, so it's accepted rather than
+        // avoided. ESC[0 q falls back to these options, so codex inherits them too.
         cursorBlink: true,
-        cursorStyle: 'bar',
+        cursorStyle: this.isMacPlatform() ? 'block' : 'bar',
         // macOS Option-as-Meta (e.g. Option+P -> ESC p). Host opts in; no-op elsewhere.
         macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
         scrollback: this.opts.scrollback ?? 10000,
@@ -678,7 +714,22 @@ export class TerminalEngine {
         // unreadable. Rather than hand-tuning every schema's palette (which trades
         // this bug for making "blue" nearly invisible as normal foreground text),
         // let xterm dynamically darken/lighten the foreground only when the actual
-        // rendered pair falls below WCAG AA contrast.
+        // rendered pair falls below the target contrast ratio.
+        //
+        // MUST stay modest. xterm forces ANY cell whose contrast can't reach the
+        // target up to pure white/black — killing its hue. On a not-quite-black
+        // background the max achievable contrast is capped (e.g. Sunset #3B2C35
+        // tops out at 13.1:1, Nord at 12.5:1), so a high value like 14 makes EVERY
+        // colored cell unreachable and collapses the whole palette to white. 4.5
+        // (WCAG AA) is reachable by every color on every bundled scheme, so it only
+        // gently lifts the few low-contrast pairs and never desaturates the palette.
+        //
+        // This is NOT the dim-text lever. xterm halves this target for SGR-dim text
+        // (`minimumContrastRatio / (isDim() ? 2 : 1)`), so pushing it up to brighten
+        // dim output would wreck colors long before it helped. Dim-text legibility
+        // instead comes from each scheme's brightened `foreground` (dim renders as a
+        // fixed 50% blend of foreground toward background, landing ~4.2-4.8:1 on the
+        // dark schemes on its own). See docs/guides/001-terminal-color-contrast.md.
         minimumContrastRatio: 4.5,
         ...(windowsPty ? { windowsPty } : {}),
       });
@@ -1237,6 +1288,99 @@ export class TerminalEngine {
         // block below, which emits the protocol-encoded Ctrl+C when a protocol is
         // active (else the handler's default return sends legacy \x03).
         if (burst) return true;
+      }
+
+      // macOS: Cmd+Left/Cmd+Right = jump to start/end of line. macOS keyboards have
+      // no physical Home/End key, so every native macOS terminal (Terminal.app,
+      // iTerm2) treats Cmd+Arrow as that OS-wide text-editing convention; xterm.js
+      // only reads e.key, so it never sees this and just moves the cursor one
+      // column.
+      //
+      // At a plain shell prompt (normal buffer, no enhanced keyboard protocol),
+      // sending the legacy Home/End VT sequence (\x1b[H / \x1b[F) does NOT work
+      // out of the box: bash's readline binds it via terminfo, but zsh's ZLE does
+      // NOT bind khome/kend by default (verified live — a vanilla zsh answers with
+      // a bell, i.e. "unbound key"), so most macOS users would see this silently
+      // fail. Ctrl+A / Ctrl+E (beginning-of-line / end-of-line) are readline/ZLE's
+      // actual built-in emacs-keymap defaults, needing zero shell configuration —
+      // this is also exactly what Terminal.app/iTerm2 send for Cmd+Left/Right.
+      //
+      // Full-screen TUIs (vim/less on the alternate screen, or any app that has
+      // negotiated Kitty/modifyOtherKeys) DO understand the real Home/End
+      // sequence — vim reads khome/kend from terminfo directly, and an enhanced-
+      // protocol app (e.g. Claude Code's input editor, which already relies on a
+      // literal End keypress — see the scroll-key block above) expects the actual
+      // functional key, not Ctrl+A/E. So only the plain-prompt case gets the
+      // Ctrl+A/E shim; everything else gets the real Home/End sequence.
+      if (
+        event.type === 'keydown' &&
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        (this.opts.isMac ??
+          (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac')))
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        const home = event.key === 'ArrowLeft';
+        const plainPrompt = boundTerm.buffer.active.type === 'normal' && !this.protocolActive();
+        const seq = plainPrompt
+          ? home
+            ? '\x01'
+            : '\x05'
+          : boundTerm.modes.applicationCursorKeysMode
+            ? home
+              ? '\x1bOH'
+              : '\x1bOF'
+            : home
+              ? '\x1b[H'
+              : '\x1b[F';
+        // Bypasses onData like the Shift+Enter/Win32 shims above — route into
+        // capture first (routeCaptureData treats ESC-prefixed sequences and
+        // Ctrl+A/E as non-marking, matching how a literal Home/End keypress —
+        // or Ctrl+A/E typed directly — is already handled).
+        this.routeCaptureData(seq);
+        if (this.attachedProcessId) {
+          Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
+            this.opts.onDiag?.(() => `[TERM-DIAG] cmd-arrow home/end write ignored: ${e}`);
+          });
+        }
+        return false;
+      }
+
+      // macOS: Option+Left/Option+Right = move by word, at a plain shell prompt.
+      // A TUI with an enhanced keyboard protocol active already gets this via the
+      // Kitty/modifyOtherKeys encoder below (CSI 1;3D / CSI 1;3C) and interprets
+      // it itself — this branch is deliberately gated off while a protocol is
+      // active so that path is untouched. At a PLAIN prompt (no protocol), the
+      // key falls through to xterm's own legacy default, which emits that same
+      // CSI 1;3 form — but bash/zsh's default readline bindings don't recognize
+      // it without extra .inputrc config. `ESC b` / `ESC f` (Meta+b / Meta+f) is
+      // readline's actual built-in default for backward-word/forward-word (the
+      // same convention Terminal.app/iTerm2 use), so send that instead.
+      if (
+        event.type === 'keydown' &&
+        event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        !this.protocolActive() &&
+        (this.opts.isMac ??
+          (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac')))
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        const seq = event.key === 'ArrowLeft' ? '\x1bb' : '\x1bf';
+        this.routeCaptureData(seq);
+        if (this.attachedProcessId) {
+          Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
+            this.opts.onDiag?.(() => `[TERM-DIAG] option-arrow word-nav write ignored: ${e}`);
+          });
+        }
+        return false;
       }
 
       // Enhanced keyboard protocols: encode the key ourselves when an app has
@@ -1928,7 +2072,7 @@ export class TerminalEngine {
   private ensureFontReady(): Promise<void> {
     if (typeof document === 'undefined' || !document.fonts) return Promise.resolve();
     const px = this.opts.fontSize ?? DEFAULT_FONT_SIZE;
-    const fam = firstFontFamily(this.opts.fontFamily ?? DEFAULT_FONT_FAMILY);
+    const fam = firstFontFamily(this.resolvedFontFamily());
     const ready = Promise.all([
       document.fonts.ready,
       Promise.resolve(document.fonts.load(`${px}px ${fam}`)).catch(() => undefined),

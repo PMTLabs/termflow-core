@@ -834,20 +834,33 @@ fn extract_executable_icon(path: &str) -> Result<String, String> {
 }
 
 /// macOS: ask AppKit's `NSWorkspace` for the file's icon and encode it as PNG, via
-/// JXA (`osascript -l JavaScript`) — available on a stock macOS with no Xcode. Works
-/// for `.app` bundles and plain binaries (the latter get the generic executable icon).
+/// JXA (`osascript -l JavaScript`) — available on a stock macOS with no Xcode. A real
+/// `.app` bundle returns its own icon; a plain binary or script with no icon resource
+/// (most coding-agent CLIs — `codex`, `opencode`, `aider`, a `node`/`python` shim, …)
+/// gets macOS's *generic* icon: a blank document or a unix-executable glyph. We reject
+/// that generic icon (return `Err`) so callers fall back to a glyph/dot rather than
+/// showing the meaningless blank document. Detection compares the file's icon bytes
+/// against the generic `public.unix-executable` and `public.data` icons — unlike
+/// Windows/`ExtractAssociatedIcon`, `NSWorkspace.iconForFile` never returns null, so
+/// the comparison is what stands in for "no icon".
 #[cfg(target_os = "macos")]
 fn extract_executable_icon(path: &str) -> Result<String, String> {
-    // `{:?}` emits a quoted, escaped JS string literal for the path.
+    // `{:?}` emits a quoted, escaped JS string literal for the path. Literal JS braces
+    // are doubled ({{ }}) to survive `format!`.
     let script = format!(
         "ObjC.import('AppKit');\
+         var ws = $.NSWorkspace.sharedWorkspace;\
+         function enc(image) {{\
+           if (!image) return '';\
+           var rep = $.NSBitmapImageRep.imageRepWithData(image.TIFFRepresentation);\
+           return rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $()).base64EncodedStringWithOptions(0).js;\
+         }}\
          var p = {:?};\
-         var img = $.NSWorkspace.sharedWorkspace.iconForFile(p);\
+         var img = ws.iconForFile(p);\
          if (!img) throw new Error('no icon');\
-         var tiff = img.TIFFRepresentation;\
-         var rep = $.NSBitmapImageRep.imageRepWithData(tiff);\
-         var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());\
-         png.base64EncodedStringWithOptions(0).js",
+         var actual = enc(img);\
+         if (actual === enc(ws.iconForFileType('public.unix-executable')) || actual === enc(ws.iconForFileType('public.data'))) throw new Error('generic icon');\
+         actual",
         path
     );
     let output = std::process::Command::new("osascript")
