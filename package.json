@@ -4,6 +4,8 @@
   "description": "Cross-platform terminal emulator with developer API",
   "workspaces": ["terminal-monitor", "packages/*"],
   "scripts": {
+    "postinstall": "node patches/xterm-dim-patch.js",
+    "patch:xterm-dim": "node patches/xterm-dim-patch.js",
     "build:renderer": "cross-env NODE_ENV=production webpack --config webpack.renderer.config.js",
     "build:terminal-core": "bun --filter @termflow/terminal-core build",
     "build": "bun run build:terminal-core && bun run build:renderer",

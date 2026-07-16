@@ -120,9 +120,12 @@
 
 .settings-content-inner {
   padding: 2rem;
-  /* Stretch to fill the content pane (no fixed column) so zooming in on a
-     high-DPI display uses the full width instead of leaving a wide empty gap. */
+  /* Cap the settings column at 1000px and center it, so on a wide window the
+     content stays a comfortable reading width instead of stretching edge to
+     edge. Narrower panes still get the full width (width:100% + max-width). */
   width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
   box-sizing: border-box;
 }
 
