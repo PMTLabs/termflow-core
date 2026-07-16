@@ -158,6 +158,11 @@
   overflow: hidden;
   position: relative;
   min-height: 0; /* Important for flexbox children */
+  /* Spec 045 §3.1: create a stacking context so .pane-ended-overlay layers
+     against this pane only. Without it the overlay competes with xterm's own
+     z-indexed descendants (helpers 5, decorations 6-8, message 10,
+     scrollable-element 11) and would be painted under them. */
+  isolation: isolate;
 }
 
 /* Placeholder for Terminal Display */
@@ -186,4 +191,18 @@
   --close-hover-background: #e81123;
   --placeholder-color: #666666;
   --focus-outline: #007acc;
+}
+
+/* Spec 045 §3.1 — ended-session tint. A neutral low-alpha wash composited over
+   the terminal grid: renderer-agnostic (WebGL/canvas/DOM) and scheme-agnostic
+   (reads as "inactive" over light and dark palettes without per-schema tuning),
+   leaving xterm's own theme alone so it cannot fight the per-agent colour
+   resolver or colorGuard. Alpha stays low: the spec requires prior output to
+   remain inspectable. */
+.terminal-pane.is-ended .pane-ended-overlay {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(128, 128, 128, 0.13);
+  pointer-events: none;
+  z-index: 1;
 }

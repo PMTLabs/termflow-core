@@ -8,6 +8,7 @@ import { renamePanes } from '../../store/slices/panesSlice';
 import { findTabIdByTerminalId, getSelectedPaneId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
+import { EndedOverlay, paneClassName } from './EndedOverlay';
 import { PaneContextMenu } from './PaneContextMenu';
 import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
@@ -476,7 +477,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     <>
       <div
         ref={paneRef}
-        className={`terminal-pane ${isActive ? 'active' : ''} ${solo ? 'solo' : ''}`}
+        className={paneClassName({ isActive, solo, closedInfo })}
         data-pane-id={paneId}
         onContextMenu={handleContextMenu}
       >
@@ -599,6 +600,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           {/* Floating agent-identity chip (top-right); shows the detected agent
               CLI while one runs in this pane, hides on exit. */}
           {terminalId && processId && <AgentChip terminalId={terminalId} />}
+          <EndedOverlay closedInfo={closedInfo} />
         </div>
         {/* In-flow below the terminal content (not overlaying it): the content
             area shrinks to make room, so the banner never covers the last rows. */}
