@@ -235,13 +235,24 @@ pub async fn get_terminal_cwds(
         let sys = System::new_all();
         needs_scan
             .into_iter()
-            .map(|(id, pid)| (id, pty_manager::get_process_cwd_with(&sys, pid)))
+            .map(|(id, pid)| (id, pid, pty_manager::get_process_cwd_with(&sys, pid)))
             .collect::<Vec<_>>()
     })
     .await
     .map_err(|e| e.to_string())?;
 
-    out.extend(scanned);
+    for (id, pid, cwd) in scanned {
+        // Discard a result whose terminal died while we were scanning. The scan can
+        // take 50-200ms, and a shell that exits inside that window frees its pid —
+        // which Windows recycles aggressively, so `cwd` may belong to an unrelated
+        // process that inherited the number. Attributing that to this terminal would
+        // silently restart the user in a stranger's directory. `cleanup_terminal_state`
+        // removes the entry on exit, so a still-matching pid means the shell we asked
+        // about is the shell we measured. (The renderer closes the remaining sliver:
+        // an exit invalidates any refresh that was in flight — see cwdSnapshot.ts.)
+        let still_same_process = state.terminals.get(&id).map(|t| t.pid) == Some(pid);
+        out.insert(id, if still_same_process { cwd } else { None });
+    }
     Ok(out)
 }
 

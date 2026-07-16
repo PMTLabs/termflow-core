@@ -68,9 +68,16 @@ export function setCwdSnapshot(
   cwd: string | null | undefined,
   opts?: { final?: boolean; generation?: number },
 ): void {
-  if (!cwd) return;
   if (opts?.generation !== undefined && sampleCwdGeneration(terminalId) !== opts.generation) return;
-  snapshots.set(terminalId, cwd);
+  // Store only a real directory — a cwd-less payload must never erase a good value.
+  if (cwd) snapshots.set(terminalId, cwd);
+  // …but bump for EVERY accepted exit, cwd or not. Only PowerShell reports its cwd
+  // via OSC, so for cmd/WSL/bash the payload is empty — and returning early on that
+  // (as this did) left a refresh in flight free to commit afterwards. Its read is a
+  // POST-EXIT read of a dead pid, which the OS may already have recycled to an
+  // unrelated process, so its answer can belong to somebody else entirely. The exit
+  // is the authoritative "stop listening to guesses about this terminal" signal
+  // whether or not it carried a directory.
   if (opts?.final) bumpGeneration(terminalId);
 }
 
@@ -105,6 +112,23 @@ export function getAllCwdSnapshots(): Record<string, string> {
  *  out per terminal that was N scans per tick; the batch command builds the process
  *  snapshot once and resolves every pid against it. */
 export async function refreshLiveCwds(terminalIds: string[]): Promise<void> {
+  // Coalesce: with two refreshes in flight, a slow one sampled before a `cd` could
+  // commit AFTER a faster one that already saw the new directory, regressing the
+  // saved cwd to the older value. Ordinary refresh writes deliberately do not move
+  // the generation (that would invalidate a pane's long-lived exit sample), so the
+  // guard below cannot catch refresh-vs-refresh. Keeping one in flight removes the
+  // ordering entirely. A caller that arrives mid-refresh gets that refresh's result,
+  // which is at most a few hundred ms older than its own would have been.
+  if (inFlightRefresh) return inFlightRefresh;
+  inFlightRefresh = runRefresh(terminalIds).finally(() => {
+    inFlightRefresh = null;
+  });
+  return inFlightRefresh;
+}
+
+let inFlightRefresh: Promise<void> | null = null;
+
+async function runRefresh(terminalIds: string[]): Promise<void> {
   try {
     // Sample BEFORE the await: the read can take long enough for a terminal to
     // `cd` and exit, or be restarted, while it is in flight. Anything we learned
@@ -139,4 +163,5 @@ export async function refreshLiveCwds(terminalIds: string[]): Promise<void> {
 export function __resetCwdSnapshots(): void {
   snapshots.clear();
   writeGenerations.clear();
+  inFlightRefresh = null;
 }

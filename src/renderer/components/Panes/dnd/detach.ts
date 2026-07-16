@@ -11,6 +11,7 @@ import {
 import { terminalService } from '../../../services/TerminalService';
 import { terminalCache } from '@termflow/terminal-core';
 import { setZoom, ZOOM_DEFAULT } from '../../../store/slices/zoomSlice';
+import { getCwdSnapshot, setCwdSnapshot } from '../../../services/cwdSnapshot';
 import { generateId } from '../../../utils/id';
 import { computeZone } from './zone';
 import { DetachPayload, DetachTerminal } from './types';
@@ -37,6 +38,9 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
       // agent CLI still running in the pty isn't miscaptured as command history
       // once reattached in a window with no cache entry of its own.
       const promptGate = terminalCache.get(node.terminalId)?.promptGate;
+      // Carry the last-known cwd: the snapshot map is module-local to this renderer,
+      // so the destination window would otherwise start blind (spec 045 §3.3).
+      const cwd = getCwdSnapshot(node.terminalId);
       acc.push({
         terminalId: node.terminalId,
         processId,
@@ -44,6 +48,7 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
         name: node.name,
         ...(zoom !== undefined && zoom !== ZOOM_DEFAULT ? { zoom } : {}),
         ...(promptGate ? { promptGate } : {}),
+        ...(cwd ? { cwd } : {}),
       });
     } else {
       // No live process for this pane — it can't be reattached and will be
@@ -240,6 +245,9 @@ export function applyDetachPayload(payload: DetachPayload): void {
   payload.terminals.forEach((t) => {
     terminalService.attachExistingTerminal(t.terminalId, t.processId, t.promptGate);
     if (typeof t.zoom === 'number') store.dispatch(setZoom({ key: t.terminalId, level: t.zoom }));
+    // Seed the last-known cwd into THIS renderer's snapshot map (spec 045 §3.3) —
+    // it travelled with the payload because the map doesn't cross windows.
+    setCwdSnapshot(t.terminalId, t.cwd);
   });
   store.dispatch(addTab({
     id: payload.tabId,
@@ -286,6 +294,9 @@ export function applyCrossWindowPayload(payload: DetachPayload, x?: number, y?: 
   payload.terminals.forEach((t) => {
     terminalService.attachExistingTerminal(t.terminalId, t.processId, t.promptGate);
     if (typeof t.zoom === 'number') store.dispatch(setZoom({ key: t.terminalId, level: t.zoom }));
+    // Seed the last-known cwd into THIS renderer's snapshot map (spec 045 §3.3) —
+    // it travelled with the payload because the map doesn't cross windows.
+    setCwdSnapshot(t.terminalId, t.cwd);
   });
 
   const target = (typeof x === 'number' && typeof y === 'number') ? resolveLocalTarget(x, y) : null;

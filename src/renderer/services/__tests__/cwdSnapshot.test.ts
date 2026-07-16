@@ -178,6 +178,27 @@ describe('exit writes outrank a refresh in flight (spec 045 §3.3)', () => {
     expect(getCwdSnapshot('tm-1')).toBeUndefined();
   });
 
+  // External review (codex), finding 1. Only PowerShell reports its cwd via OSC, so
+  // for cmd/WSL/bash the exit payload carries NO cwd — and the early `if (!cwd)`
+  // return used to skip the generation bump, leaving an in-flight refresh free to
+  // commit afterwards. That read is a POST-EXIT read of a dead pid, which the OS may
+  // already have recycled to an unrelated process (see the batch command's guard) —
+  // so its answer is not merely stale, it can belong to somebody else entirely.
+  it('a cwd-LESS exit still invalidates a refresh in flight', async () => {
+    // tm-1 was last seen in D:\a by an earlier tick.
+    setCwdSnapshot('tm-1', 'D:\\a');
+    const { done, resolveRead } = refreshWithPendingRead('tm-1');
+
+    // A bash shell exits: the backend has no OSC cwd for it, so cwd is null.
+    setCwdSnapshot('tm-1', null, { final: true });
+
+    // The in-flight read resolves with a post-exit answer. It must be discarded.
+    resolveRead('D:\\recycled-pid-victim');
+    await done;
+
+    // The last directory we legitimately knew about survives untouched.
+    expect(getCwdSnapshot('tm-1')).toBe('D:\\a');
+  });
   it('a clear alone (pane closed) also invalidates a refresh in flight', async () => {
     const { done, resolveRead } = refreshWithPendingRead('tm-1');
     clearCwdSnapshot('tm-1');
@@ -253,5 +274,60 @@ describe('a cleared pane is not resurrected by its own late exit (spec 045 §3.3
   it('an ungated final write still lands — callers that never sampled are unaffected', () => {
     setCwdSnapshot('tm-1', 'D:\\b', { final: true });
     expect(getCwdSnapshot('tm-1')).toBe('D:\\b');
+  });
+});
+
+/**
+ * External review (codex), finding 2. Two refreshes in flight at once could commit
+ * out of order — a slow autosave tick sampled before a `cd` could land AFTER a
+ * faster quit-path refresh that already saw the new directory, regressing the saved
+ * cwd to the older value. Ordinary refresh writes deliberately never move the write
+ * generation (that would invalidate a pane's long-lived exit sample), so the guard
+ * above cannot catch refresh-vs-refresh. Coalescing keeps exactly one in flight.
+ */
+describe('concurrent refreshes cannot commit out of order (spec 045 §3.3b)', () => {
+  it('coalesces an overlapping refresh into the one already running', async () => {
+    getProcessId.mockReturnValue('proc-1');
+    let resolveBatch!: (byPid: Record<string, string>) => void;
+    getTerminalCwds.mockReturnValue(
+      new Promise<Record<string, string>>((resolve) => {
+        resolveBatch = resolve;
+      }),
+    );
+
+    // A: the 30s autosave tick starts.
+    const a = refreshLiveCwds(['tm-1']);
+    // B: the user hits Quit ~immediately. It must NOT start a second read.
+    const b = refreshLiveCwds(['tm-1']);
+
+    resolveBatch({ 'proc-1': 'D:\new' });
+    await Promise.all([a, b]);
+
+    // One read, one commit — no ordering left to get wrong.
+    expect(getTerminalCwds).toHaveBeenCalledTimes(1);
+    expect(getCwdSnapshot('tm-1')).toBe('D:\new');
+  });
+
+  it('allows a fresh refresh once the previous one has settled', async () => {
+    getProcessId.mockReturnValue('proc-1');
+    getTerminalCwds.mockResolvedValue({ 'proc-1': 'D:\first' });
+    await refreshLiveCwds(['tm-1']);
+
+    getTerminalCwds.mockResolvedValue({ 'proc-1': 'D:\second' });
+    await refreshLiveCwds(['tm-1']);
+
+    expect(getTerminalCwds).toHaveBeenCalledTimes(2);
+    expect(getCwdSnapshot('tm-1')).toBe('D:\second');
+  });
+
+  it('does not wedge the coalesce latch when a refresh fails', async () => {
+    getProcessId.mockReturnValue('proc-1');
+    getTerminalCwds.mockRejectedValue(new Error('backend gone'));
+    await refreshLiveCwds(['tm-1']);
+
+    // A later tick must still be able to run.
+    getTerminalCwds.mockResolvedValue({ 'proc-1': 'D:\after' });
+    await refreshLiveCwds(['tm-1']);
+    expect(getCwdSnapshot('tm-1')).toBe('D:\after');
   });
 });
