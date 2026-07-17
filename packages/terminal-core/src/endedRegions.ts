@@ -282,13 +282,12 @@ export class EndedRegionTracker {
    * covered again, and re-spans the wash to the new width in the same pass. We never
    * DROP the marks — vanishing on resize is worse than any imperfection.
    *
-   * start/end ride the reflow: xterm adjusts them on a narrow (onInsert via
-   * _reflowSmaller). A column-WIDEN is the known limitation: reflowLargerApplyNewLayout
-   * moves lines with CircularList.set / length=, which emit nothing, so xterm never
-   * adjusts marker line numbers on a widen (verified in its minified source) — the
-   * span can then sit a few lines off until the next command re-anchors it. That is
-   * an xterm constraint no marker-anchored mark can beat; coverage stays contiguous
-   * regardless, just possibly shifted.
+   * start/end ride the reflow differently by direction. NARROW: xterm's _reflowSmaller
+   * fires onInsert so the markers adjust, and paint() rebuilds coverage for the new row
+   * span. WIDEN: reflowLargerApplyNewLayout moves lines via CircularList.set / length=
+   * which emit nothing, so xterm leaves the marker line numbers stale — so
+   * reanchorForWiden() re-derives each marker's row from its reflow-invariant
+   * logical-line index and re-registers it (see that method). We never drop the marks.
    */
   onResize(cols: number): void {
     if (cols === this.lastCols) return;

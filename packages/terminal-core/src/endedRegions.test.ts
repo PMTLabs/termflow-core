@@ -337,9 +337,11 @@ describe('rendering', () => {
  * Resize handling is asymmetric because xterm's reflow is. NARROWING is exact —
  * _reflowSmaller fires onInsert so markers adjust — so we rebuild coverage for the
  * new (re-wrapped) row span. A column-WIDEN is not: reflowLarger neither adjusts nor
- * reliably keeps markers (they drift into live content, or are disposed), so any
- * marker-anchored mark would "stretch" over the new prompt. There is no correct
- * re-anchor, so we DROP on widen; the marks reappear on the next command.
+ * reliably keeps markers (they drift into live content, or are disposed), so instead
+ * of riding xterm's markers we re-anchor each region — and, once Task 4 lands, the
+ * open span — from its reflow-invariant logical-line index, re-registering the
+ * marker at the row where that logical line now starts. The marks survive a widen;
+ * they are never dropped.
  */
 describe('reflow', () => {
   it('KEEPS regions when the terminal narrows', () => {
