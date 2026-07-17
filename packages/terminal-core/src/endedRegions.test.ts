@@ -16,6 +16,7 @@ type MockTerm = Terminal & {
   markers: { line: number; isDisposed: boolean }[];
   __setCursorLine(line: number): void;
   __failDecorations(v: boolean): void;
+  __setLines(lines: Array<{ text: string; isWrapped: boolean }>): void;
 };
 
 const newTerm = (cols = 80): MockTerm => {
@@ -34,6 +35,14 @@ function withRegion(cols = 80, height = 5) {
   term.__setCursorLine(height);
   t.onPrompt(); // closing marker at `height`
   return { term, t };
+}
+
+/** Live (non-disposed) bottom-layer wash rows, by their marker line, ascending. */
+function liveWashRows(term: MockTerm): number[] {
+  return term.decorations
+    .filter((d) => !d.disposed && d.options.layer === 'bottom')
+    .map((d) => (d.options.marker as { line: number }).line)
+    .sort((a, b) => a - b);
 }
 
 describe('logical-line mapping helpers', () => {
@@ -345,11 +354,38 @@ describe('reflow', () => {
     expect(t.regionCount()).toBe(1);
   });
 
-  it('DROPS regions on a widen — xterm cannot keep markers, so marks are cleared not drifted', () => {
-    const { term, t } = withRegion(80);
-    t.onResize(120);
-    expect(t.regionCount()).toBe(0);
-    for (const d of term.decorations) expect(d.disposed).toBe(true);
+  it('RE-ANCHORS regions on a widen via logical lines (marks survive, no drift)', () => {
+    const term = newTerm(40);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    // NARROW: L0 wraps rows 0-1, L1 wraps rows 2-3, boundary prompt L2 at row 4.
+    term.__setLines([
+      { text: 'L0 first half', isWrapped: false },
+      { text: 'L0 second half', isWrapped: true },
+      { text: 'L1 first half', isWrapped: false },
+      { text: 'L1 second half', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    t.onPrompt(); // start at row 0
+    t.markProgramActive();
+    term.__setCursorLine(4);
+    t.onPrompt(); // region logical [0,2): start row 0, end row 4
+    expect(liveWashRows(term)).toEqual([0, 1, 2, 3]); // clamped to cursor row 4
+
+    // WIDEN: each logical line now fits one row; boundary L2 at row 2; cursor at 4.
+    term.__setLines([
+      { text: 'L0 first half L0 second half', isWrapped: false },
+      { text: 'L1 first half L1 second half', isWrapped: false },
+      { text: 'prompt$', isWrapped: false },
+      { text: '', isWrapped: false },
+      { text: '', isWrapped: false },
+    ]);
+    term.__setCursorLine(4);
+    term.resize(80, 24); // xterm updates cols before firing onResize
+    t.onResize(80); // WIDEN -> re-anchor, not drop
+
+    expect(t.regionCount()).toBe(1); // survived
+    expect(liveWashRows(term)).toEqual([0, 1]); // re-anchored to L0/L1; boundary row 2 NOT covered
   });
 
   it('repaints the wash to the new width on a NARROW (no un-tinted strip)', () => {
@@ -381,15 +417,15 @@ describe('reflow', () => {
     expect(t.regionCount()).toBe(0);
   });
 
-  it('starts fresh after a widen clears the old regions', () => {
+  it('KEEPS old regions on a widen and still tracks new ones', () => {
     const { term, t } = withRegion(80); // region 1
-    t.onResize(120);                    // dropped
-    expect(t.regionCount()).toBe(0);
-    // A brand-new region builds from scratch.
-    t.onPrompt();                       // opens a span
-    t.markProgramActive();
-    term.__setCursorLine(30);           // program produced output
-    t.onPrompt();                       // closes it into a region
+    t.onResize(120); // widen -> re-anchored, not dropped
     expect(t.regionCount()).toBe(1);
+    // A new command still adds a second region.
+    t.onPrompt();
+    t.markProgramActive();
+    term.__setCursorLine(30);
+    t.onPrompt();
+    expect(t.regionCount()).toBe(2);
   });
 });

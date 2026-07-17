@@ -124,6 +124,14 @@ interface Region {
   /** The rail <div> for this region (in the wrapper's rail layer), or undefined
    *  until the terminal is live / a screen exists. */
   railEl: HTMLElement | undefined;
+  /** Reflow-invariant logical-line index of `start` / `end`, refreshed from the
+   *  markers on cols-stable renders. A column-WIDEN leaves xterm's markers stale
+   *  (reflowLarger emits nothing), so these let onResize re-derive the true rows. */
+  startLogical: number;
+  endLogical: number;
+  /** `start.line` at the last cache refresh; the walk is skipped when it hasn't moved
+   *  (a region-internal re-wrap moves end.line but not the reflow-invariant span). */
+  cachedAtLine: number;
 }
 
 export interface EndedRegionOptions {
@@ -166,6 +174,9 @@ export interface EndedRegionOptions {
 export class EndedRegionTracker {
   private openStart: IMarker | undefined;
   private openHadProgram = false;
+  /** Cached logical anchor for the OPEN span's start, mirrored from openStart. */
+  private openLogical = -1;
+  private openCachedAtLine = -1;
   private regions: Region[] = [];
   private washColor: string | undefined;
   private railColor: string | undefined;
@@ -179,7 +190,15 @@ export class EndedRegionTracker {
     this.lastCols = term.cols;
     // The rail mirrors the wash, so it must be re-placed whenever xterm re-renders
     // (scroll, output, reflow). onRender fires on every frame the grid changes.
-    this.renderSub = this.term.onRender?.(() => this.positionRails());
+    this.renderSub = this.term.onRender?.(() => {
+      this.positionRails();
+      // Refresh the reflow-invariant logical anchors from the (valid) markers, but
+      // only when no width change is pending: the reflow render itself fires with
+      // stale markers on a widen and must not poison the cache. (Ordering is on our
+      // side — xterm fires onResize before onRender — but this guard is belt-and-
+      // suspenders regardless of which fires first.)
+      if (this.term.cols === this.lastCols) this.refreshLogicalCache();
+    });
   }
 
   /** The shell rendered a prompt: close any open span, then open the next.
@@ -192,7 +211,17 @@ export class EndedRegionTracker {
       // coverage. A separate end marker (same line as `closing`) is needed because
       // `closing` becomes the NEXT span's start and must keep its own identity.
       const end = this.term.registerMarker(0);
-      this.addRegion({ start: this.openStart, end, lineMarkers: [], decorations: [], railEl: undefined });
+      const buffer = this.term.buffer.active;
+      this.addRegion({
+        start: this.openStart,
+        end,
+        lineMarkers: [],
+        decorations: [],
+        railEl: undefined,
+        startLogical: logicalIndexOfRow(buffer, this.openStart.line),
+        endLogical: logicalIndexOfRow(buffer, end.line),
+        cachedAtLine: this.openStart.line,
+      });
     } else {
       // Nothing to mark: no program ran, or a zero-height span (prompt, no output).
       this.openStart?.dispose();
@@ -265,20 +294,70 @@ export class EndedRegionTracker {
     if (cols === this.lastCols) return;
     const widened = cols > this.lastCols;
     this.lastCols = cols;
-    if (widened) {
-      // A column-WIDEN reflows the scrollback and xterm does NOT reliably keep the
-      // region's markers — they drift down into live content (the tint "stretching"
-      // over the new prompt) or are disposed outright (verified in a spike). There is
-      // no correct re-anchor, so DROP the marks; they reappear on the next command.
-      // Narrowing IS exact (onInsert adjusts markers), so it rebuilds instead.
-      for (const r of this.regions) this.disposeRegion(r);
-      this.regions = [];
-      this.openStart?.dispose();
-      this.openStart = undefined;
-      this.openHadProgram = false;
-      return;
-    }
+    // NARROW is exact — xterm's _reflowSmaller fires onInsert so markers ride the
+    // reflow; repaintAll rebuilds coverage for the new row span. A column-WIDEN
+    // leaves markers stale (reflowLarger emits nothing), so re-anchor from the
+    // reflow-invariant logical indices before repainting.
+    if (widened) this.reanchorForWiden();
     this.repaintAll();
+  }
+
+  /**
+   * Re-derive each region's start/end from their cached logical-line indices (valid
+   * as of the last cols-stable render) and re-register the markers at the corrected
+   * rows via an isWrapped walk of the reflowed buffer. Replaces the old drop-on-widen:
+   * the marks stay on the region instead of drifting onto the live prompt or vanishing.
+   * A region whose bracket was disposed (line -1, trimmed out of scrollback) is left
+   * for repaintAll to drop.
+   */
+  private reanchorForWiden(): void {
+    const buffer = this.term.buffer.active;
+    const cursorAbs = buffer.baseY + buffer.cursorY;
+    for (const r of this.regions) {
+      if (r.start.line < 0 || r.end.line < 0) continue;
+      r.start = this.reanchorMarker(r.start, r.startLogical, cursorAbs);
+      r.end = this.reanchorMarker(r.end, r.endLogical, cursorAbs);
+      // Re-sync the cache from the fresh markers so a rapid chain of widen events
+      // during a monitor drag stays correct without an interleaved render.
+      r.startLogical = logicalIndexOfRow(buffer, r.start.line);
+      r.endLogical = logicalIndexOfRow(buffer, r.end.line);
+      r.cachedAtLine = r.start.line;
+    }
+    // The open span's anchor is equally stale on a widen. Task 4 re-anchors it;
+    // until then, drop it (its region reappears on the next command).
+    this.openStart?.dispose();
+    this.openStart = undefined;
+    this.openHadProgram = false;
+  }
+
+  /** Dispose a stale marker and register a fresh one at the row where logical line
+   *  `logical` currently starts (via the reflowed buffer's isWrapped flags). */
+  private reanchorMarker(stale: IMarker, logical: number, cursorAbs: number): IMarker {
+    const row = rowForLogicalIndex(this.term.buffer.active, logical);
+    stale.dispose();
+    return this.term.registerMarker(row - cursorAbs);
+  }
+
+  /** Refresh cached logical anchors from the CURRENT (valid) markers. Walks only when
+   *  a region's start.line moved since the last refresh (trim / insert-above); a
+   *  region-internal re-wrap moves end.line but not the reflow-invariant endLogical. */
+  private refreshLogicalCache(): void {
+    const buffer = this.term.buffer.active;
+    for (const r of this.regions) {
+      if (r.start.line < 0 || r.end.line < 0) continue;
+      if (r.start.line === r.cachedAtLine) continue;
+      r.startLogical = logicalIndexOfRow(buffer, r.start.line);
+      r.endLogical = logicalIndexOfRow(buffer, r.end.line);
+      r.cachedAtLine = r.start.line;
+    }
+    if (
+      this.openStart &&
+      this.openStart.line >= 0 &&
+      this.openStart.line !== this.openCachedAtLine
+    ) {
+      this.openLogical = logicalIndexOfRow(buffer, this.openStart.line);
+      this.openCachedAtLine = this.openStart.line;
+    }
   }
 
   regionCount(): number {
