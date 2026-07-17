@@ -9,7 +9,7 @@
  * classList) — the tracker tags them and CSS does the geometry.
  */
 import { Terminal } from '@xterm/xterm';
-import { EndedRegionTracker } from './endedRegions';
+import { EndedRegionTracker, logicalIndexOfRow, rowForLogicalIndex } from './endedRegions';
 
 type MockTerm = Terminal & {
   decorations: { options: Record<string, unknown>; disposed: boolean; element: HTMLElement }[];
@@ -35,6 +35,41 @@ function withRegion(cols = 80, height = 5) {
   t.onPrompt(); // closing marker at `height`
   return { term, t };
 }
+
+describe('logical-line mapping helpers', () => {
+  // L0 spans rows 0-1 (wrapped), L1 is row 2, L2 spans rows 3-4-5.
+  const wraps = [false, true, false, false, true, true];
+  const buffer = {
+    length: wraps.length,
+    getLine(n: number) {
+      return wraps[n] === undefined ? undefined : { isWrapped: wraps[n] };
+    },
+  };
+
+  it('logicalIndexOfRow counts logical-line starts up to and including the row', () => {
+    expect(logicalIndexOfRow(buffer, 0)).toBe(0);
+    expect(logicalIndexOfRow(buffer, 1)).toBe(0); // wrapped continuation of L0
+    expect(logicalIndexOfRow(buffer, 2)).toBe(1);
+    expect(logicalIndexOfRow(buffer, 3)).toBe(2);
+    expect(logicalIndexOfRow(buffer, 5)).toBe(2); // still L2
+  });
+
+  it('rowForLogicalIndex returns the first row of the logical line', () => {
+    expect(rowForLogicalIndex(buffer, 0)).toBe(0);
+    expect(rowForLogicalIndex(buffer, 1)).toBe(2);
+    expect(rowForLogicalIndex(buffer, 2)).toBe(3);
+  });
+
+  it('round-trips row -> logical -> row for each logical-line start', () => {
+    for (const startRow of [0, 2, 3]) {
+      expect(rowForLogicalIndex(buffer, logicalIndexOfRow(buffer, startRow))).toBe(startRow);
+    }
+  });
+
+  it('clamps a logical index past the end to buffer.length', () => {
+    expect(rowForLogicalIndex(buffer, 99)).toBe(6);
+  });
+});
 
 describe('span bookkeeping', () => {
   it('makes no region for a span with no program (plain ls)', () => {

@@ -42,6 +42,11 @@ export class Terminal {
       type: 'normal' as 'normal' | 'alternate',
       // Settable line content so capture/suggest tests can simulate shell echo.
       __lines: [] as Array<{ text: string; isWrapped: boolean } | undefined>,
+      // Total addressable rows (scrollback + screen). Real xterm exposes
+      // buffer.active.length; the logical-line math walks [0, length).
+      get length(): number {
+        return this.__lines.length;
+      },
       getLine(
         n: number,
       ):
@@ -392,6 +397,12 @@ export class Terminal {
   /** Set a buffer line's text for capture/suggest tests (backlog 011). */
   __setLine(row: number, text: string, isWrapped = false): void {
     this.buffer.active.__lines[row] = { text, isWrapped };
+  }
+
+  /** Test hook: replace the whole buffer grid (rows 0..n-1) so logical-line reflow
+   *  math (isWrapped walking) and buffer.active.length see a full, contiguous grid. */
+  __setLines(lines: Array<{ text: string; isWrapped: boolean }>): void {
+    this.buffer.active.__lines = lines.map((l) => ({ text: l.text, isWrapped: l.isWrapped }));
   }
 
   /** Move the fake cursor for capture/suggest tests (backlog 011). */

@@ -1,5 +1,45 @@
 import type { IDecoration, IDisposable, IMarker, Terminal } from '@xterm/xterm';
 
+/** Minimal buffer surface for logical-line math (real xterm's `buffer.active`). */
+interface LogicalBuffer {
+  length: number;
+  getLine(n: number): { isWrapped: boolean } | undefined;
+}
+
+/**
+ * Logical-line index of absolute row `row`: the count of logical-line STARTS in
+ * [0, row]. A row whose `isWrapped` is true CONTINUES the previous row (xterm
+ * semantics; mirrors collectWrappedLine in TerminalEngine); a non-wrapped or absent
+ * row starts a new logical line. Reflow-invariant: a widen/narrow changes which rows
+ * a logical line occupies, never its index — this is what lets a WIDEN re-anchor.
+ */
+export function logicalIndexOfRow(buffer: LogicalBuffer, row: number): number {
+  const end = Math.min(row, buffer.length - 1);
+  let logical = -1;
+  for (let r = 0; r <= end; r++) {
+    const line = buffer.getLine(r);
+    if (!line || !line.isWrapped) logical++;
+  }
+  return logical < 0 ? 0 : logical;
+}
+
+/**
+ * Inverse: the absolute row where logical line `logical` starts, by walking from row
+ * 0 counting logical-line starts. Returns `buffer.length` when `logical` is past the
+ * end, so a boundary at/after the last line clamps to the buffer bottom.
+ */
+export function rowForLogicalIndex(buffer: LogicalBuffer, logical: number): number {
+  let count = -1;
+  for (let r = 0; r < buffer.length; r++) {
+    const line = buffer.getLine(r);
+    if (!line || !line.isWrapped) {
+      count++;
+      if (count === logical) return r;
+    }
+  }
+  return buffer.length;
+}
+
 /**
  * terminalId -> tracker, so a scheme change can repaint the marks without a React
  * re-render. Scheme changes land in the renderer's applyEffectiveThemes, which
