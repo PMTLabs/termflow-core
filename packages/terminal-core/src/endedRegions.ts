@@ -226,7 +226,7 @@ export class EndedRegionTracker {
       // Nothing to mark: no program ran, or a zero-height span (prompt, no output).
       this.openStart?.dispose();
     }
-    this.openStart = closing;
+    this.setOpenStart(closing);
     this.openHadProgram = false;
   }
 
@@ -246,7 +246,7 @@ export class EndedRegionTracker {
    */
   openSpanHere(): void {
     if (this.openStart) return;
-    this.openStart = this.term.registerMarker(0);
+    this.setOpenStart(this.term.registerMarker(0));
   }
 
   /** Detection saw a non-shell program while this span is open. Tolerant by
@@ -268,6 +268,19 @@ export class EndedRegionTracker {
     this.railColor = rail;
     this.repaintAll();
     this.positionRails(); // pick up the new rail colour immediately
+  }
+
+  /** Assign the open span's start marker and cache its logical anchor immediately, so
+   *  a widen that lands before any render can still re-derive it. */
+  private setOpenStart(marker: IMarker | undefined): void {
+    this.openStart = marker;
+    if (marker && marker.line >= 0) {
+      this.openLogical = logicalIndexOfRow(this.term.buffer.active, marker.line);
+      this.openCachedAtLine = marker.line;
+    } else {
+      this.openLogical = -1;
+      this.openCachedAtLine = -1;
+    }
   }
 
   /**
@@ -322,11 +335,12 @@ export class EndedRegionTracker {
       r.endLogical = logicalIndexOfRow(buffer, r.end.line);
       r.cachedAtLine = r.start.line;
     }
-    // The open span's anchor is equally stale on a widen. Task 4 re-anchors it;
-    // until then, drop it (its region reappears on the next command).
-    this.openStart?.dispose();
-    this.openStart = undefined;
-    this.openHadProgram = false;
+    // The open span's anchor is equally stale on a widen — re-anchor it too, so a
+    // program running RIGHT NOW keeps its in-progress region markable when it ends.
+    // openHadProgram is intentionally preserved: the program is still running.
+    if (this.openStart && this.openStart.line >= 0) {
+      this.setOpenStart(this.reanchorMarker(this.openStart, this.openLogical, cursorAbs));
+    }
   }
 
   /** Dispose a stale marker and register a fresh one at the row where logical line
@@ -370,7 +384,7 @@ export class EndedRegionTracker {
     this.railLayer?.remove();
     this.railLayer = undefined;
     this.openStart?.dispose();
-    this.openStart = undefined;
+    this.setOpenStart(undefined);
     this.openHadProgram = false;
   }
 

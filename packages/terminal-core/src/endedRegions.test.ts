@@ -17,6 +17,7 @@ type MockTerm = Terminal & {
   __setCursorLine(line: number): void;
   __failDecorations(v: boolean): void;
   __setLines(lines: Array<{ text: string; isWrapped: boolean }>): void;
+  emitRender(): void;
 };
 
 const newTerm = (cols = 80): MockTerm => {
@@ -407,16 +408,36 @@ describe('reflow', () => {
     expect(after).toBe(before); // nothing disposed/recreated
   });
 
-  it('drops the OPEN span on a widen too — its anchor is equally unreliable', () => {
-    const term = newTerm(80);
+  it('RE-ANCHORS the OPEN span on a widen (a running program stays markable)', () => {
+    const term = newTerm(40);
     const t = new EndedRegionTracker(term);
     t.setColors('#2a2a2a', '#7aa2f7');
-    t.onPrompt();
+    // NARROW: a prompt at row 0, then a program running (open span, not closed yet).
+    term.__setLines([
+      { text: 'prompt$ run', isWrapped: false },
+      { text: 'output line', isWrapped: false },
+      { text: 'more output', isWrapped: true },
+    ]);
+    t.onPrompt(); // open span start at row 0
     t.markProgramActive(); // a program is running RIGHT NOW
-    t.onResize(120);       // widen — open span dropped
-    term.__setCursorLine(9);
-    t.onPrompt();          // no open span to close → no region
-    expect(t.regionCount()).toBe(0);
+    term.emitRender(); // cache the open span's logical anchor while cols are stable
+
+    // WIDEN: same logical content; cursor now at row 5.
+    term.__setLines([
+      { text: 'prompt$ run', isWrapped: false },
+      { text: 'output line more output', isWrapped: false },
+      { text: '', isWrapped: false },
+      { text: '', isWrapped: false },
+      { text: '', isWrapped: false },
+      { text: 'closing$', isWrapped: false },
+    ]);
+    term.__setCursorLine(5);
+    term.resize(80, 24);
+    t.onResize(80); // WIDEN -> open span re-anchored, NOT dropped
+
+    // Close the span: it survived, so a region is created (old drop -> regionCount 0).
+    t.onPrompt();
+    expect(t.regionCount()).toBe(1);
   });
 
   it('KEEPS old regions on a widen and still tracks new ones', () => {
