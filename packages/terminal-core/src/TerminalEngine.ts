@@ -2088,6 +2088,14 @@ export class TerminalEngine {
         if (entry) {
           entry.hydrating = false;
         }
+        // Anchor the first ended-program span HERE: hydration has just replayed
+        // the backend's SNAPSHOT (a rendered screen — OSC sequences are consumed
+        // by the backend's parser and are NOT in it), so the prompt already on
+        // screen never reached our OSC handler. Without an anchor, a program
+        // launched from that prompt is detected with no span to attach to and its
+        // output is never marked. Everything below this line is new output, which
+        // is the best boundary available when no prompt was observed.
+        this.endedRegions?.openSpanHere();
       }
     }
   }

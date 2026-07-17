@@ -178,30 +178,66 @@ export class Terminal {
   // a NON-nullable IMarker (xterm.d.ts:1147 — its "or undefined" docstring is
   // stale). registerDecoration DOES return undefined on the alt buffer or a
   // disposed marker. Modelled here so EndedRegionTracker tests mean something.
-  private __cursorLine = 0;
-  decorations: { options: Record<string, unknown>; disposed: boolean; dispose(): void }[] = [];
+  decorations: {
+    options: Record<string, unknown>;
+    disposed: boolean;
+    element: HTMLElement;
+    dispose(): void;
+    onRender(cb: (el: HTMLElement) => void): Disposable;
+  }[] = [];
   private __decorationsFail = false;
 
+  // Every marker ever registered, in creation order — lets tests reach the region's
+  // start/end brackets (markers[0]/markers[2] for a single withRegion) to simulate
+  // scrollback trims and reflow span changes.
+  markers: { line: number; isDisposed: boolean; dispose(): void }[] = [];
+
   registerMarker(offset: number = 0): { line: number; isDisposed: boolean; dispose(): void } {
+    // Real xterm anchors at buffer.ybase + buffer.y + offset. __setCursorLine sets
+    // that absolute cursor line so paint()'s `row - (baseY+cursorY)` offsets resolve.
     const marker = {
-      line: this.__cursorLine + offset,
+      line: this.buffer.active.baseY + this.buffer.active.cursorY + offset,
       isDisposed: false,
       dispose(): void { marker.isDisposed = true; },
     };
+    this.markers.push(marker);
     return marker;
   }
 
   registerDecoration(
     options: Record<string, unknown>,
-  ): { options: Record<string, unknown>; disposed: boolean; dispose(): void } | undefined {
+  ):
+    | {
+        options: Record<string, unknown>;
+        disposed: boolean;
+        element: HTMLElement;
+        dispose(): void;
+        onRender(cb: (el: HTMLElement) => void): Disposable;
+      }
+    | undefined {
     if (this.__decorationsFail) return undefined;
-    const d = { options, disposed: false, dispose(): void { d.disposed = true; } };
+    // Real IDecoration.onRender fires with the rendered element each frame; the
+    // rail styling narrows that element. Model it with a jsdom element so the
+    // onRender path is exercised and its px styling can be asserted.
+    const element =
+      typeof document !== 'undefined' ? document.createElement('div') : ({ style: {} } as HTMLElement);
+    const d = {
+      options,
+      disposed: false,
+      element,
+      dispose(): void { d.disposed = true; },
+      onRender(cb: (el: HTMLElement) => void): Disposable {
+        cb(element);
+        return makeDisposable(() => {});
+      },
+    };
     this.decorations.push(d);
     return d;
   }
 
-  /** Test hook: move the modelled cursor so the next marker anchors lower. */
-  __setCursorLine(line: number): void { this.__cursorLine = line; }
+  /** Test hook: move the modelled cursor (absolute line) so the next marker anchors
+   *  there and paint()'s per-row offsets resolve to the right rows. */
+  __setCursorLine(line: number): void { this.buffer.active.cursorY = line; }
   /** Test hook: model the alt-buffer / disposed-marker case. */
   __failDecorations(v: boolean): void { this.__decorationsFail = v; }
 
@@ -308,6 +344,21 @@ export class Terminal {
     return makeDisposable(() => {
       this.scrollCallbacks = this.scrollCallbacks.filter((c) => c !== cb);
     });
+  }
+
+  // Real xterm fires onRender({start,end}) each time the grid re-renders; the ended-
+  // region tracker uses it to re-place the HTML rail against the wash.
+  renderCallbacks: Array<(e: { start: number; end: number }) => void> = [];
+
+  onRender(cb: (e: { start: number; end: number }) => void): Disposable {
+    this.renderCallbacks.push(cb);
+    return makeDisposable(() => {
+      this.renderCallbacks = this.renderCallbacks.filter((c) => c !== cb);
+    });
+  }
+
+  emitRender(): void {
+    this.renderCallbacks.forEach((cb) => cb({ start: 0, end: Math.max(0, this.rows - 1) }));
   }
 
   onSelectionChange(cb: () => void): Disposable {
