@@ -339,10 +339,9 @@ describe('rendering', () => {
  * _reflowSmaller fires onInsert so markers adjust — so we rebuild coverage for the
  * new (re-wrapped) row span. A column-WIDEN is not: reflowLarger neither adjusts nor
  * reliably keeps markers (they drift into live content, or are disposed), so instead
- * of riding xterm's markers we re-anchor each region — and, once Task 4 lands, the
- * open span — from its reflow-invariant logical-line index, re-registering the
- * marker at the row where that logical line now starts. The marks survive a widen;
- * they are never dropped.
+ * of riding xterm's markers we re-anchor each region and the open span from its
+ * reflow-invariant logical-line index, re-registering the marker at the row where
+ * that logical line now starts. The marks survive a widen; they are never dropped.
  */
 describe('reflow', () => {
   it('KEEPS regions when the terminal narrows', () => {
@@ -391,6 +390,104 @@ describe('reflow', () => {
     expect(liveWashRows(term)).toEqual([0, 1]); // re-anchored to L0/L1; boundary row 2 NOT covered
   });
 
+  it('re-anchors correctly across a CHAINED widen (two widens, no render between)', () => {
+    const term = newTerm(40);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    term.__setLines([
+      { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    t.onPrompt(); t.markProgramActive(); term.__setCursorLine(4); t.onPrompt();
+    expect(liveWashRows(term)).toEqual([0, 1, 2, 3]);
+
+    // WIDEN 1 (80): L1 still wraps (rows 1-2), boundary at row 3.
+    term.__setLines([
+      { text: 'L0 a L0 b', isWrapped: false },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    term.__setCursorLine(3); term.resize(80, 24); t.onResize(80);
+    expect(liveWashRows(term)).toEqual([0, 1, 2]);
+
+    // WIDEN 2 (120): everything unwraps. NO emitRender between the two widens.
+    term.__setLines([
+      { text: 'L0 a L0 b', isWrapped: false },
+      { text: 'L1 a L1 b', isWrapped: false },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    term.__setCursorLine(2); term.resize(120, 24); t.onResize(120);
+    expect(t.regionCount()).toBe(1);
+    expect(liveWashRows(term)).toEqual([0, 1]);
+  });
+
+  it('re-anchors after a scrollback TRIM (refreshed on render) then a widen', () => {
+    const term = newTerm(40);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    // NARROW with 2 filler logical lines ABOVE the region (so a trim can remove them).
+    // rows: 0 F0(F) 1 F1(F) 2 L0a(F) 3 L0b(T) 4 L1a(F) 5 L1b(T) 6 prompt(F)
+    term.__setLines([
+      { text: 'F0', isWrapped: false }, { text: 'F1', isWrapped: false },
+      { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    term.__setCursorLine(2); t.onPrompt();      // open span start at row 2
+    t.markProgramActive();
+    term.__setCursorLine(6); t.onPrompt();       // close: region start=row2, end=row6
+    expect(liveWashRows(term)).toEqual([2, 3, 4, 5]);
+
+    // TRIM: the 2 filler lines scroll off the top. xterm decrements every surviving
+    // marker by 2 and the buffer top drops F0/F1.
+    for (const m of term.markers) if (m.line >= 0) m.line -= 2;
+    term.__setLines([
+      { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    term.__setCursorLine(4);
+    term.emitRender(); // cols unchanged -> refreshLogicalCache picks up the trim-adjusted lines
+
+    // WIDEN (80): logical lines unwrap. The re-anchor must use the TRIM-ADJUSTED cache.
+    term.__setLines([
+      { text: 'L0 a L0 b', isWrapped: false },
+      { text: 'L1 a L1 b', isWrapped: false },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    term.__setCursorLine(4); term.resize(80, 24); t.onResize(80);
+    expect(t.regionCount()).toBe(1);
+    expect(liveWashRows(term)).toEqual([0, 1]); // boundary row 2 excluded; NOT [2,3] from a stale cache
+  });
+
+  it('a reflow render fired BEFORE onResize does not corrupt the widen re-anchor', () => {
+    const term = newTerm(40);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    term.__setLines([
+      { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    t.onPrompt(); t.markProgramActive(); term.__setCursorLine(4); t.onPrompt();
+    expect(liveWashRows(term)).toEqual([0, 1, 2, 3]);
+
+    // xterm reflows + fires a render BEFORE our onResize: buffer already wide and
+    // term.cols already 80, but lastCols still 40 and the markers still stale.
+    term.__setLines([
+      { text: 'L0 a L0 b', isWrapped: false },
+      { text: 'L1 a L1 b', isWrapped: false },
+      { text: 'prompt$', isWrapped: false },
+      { text: '', isWrapped: false }, { text: '', isWrapped: false },
+    ]);
+    term.__setCursorLine(4); term.resize(80, 24);
+    term.emitRender();   // cols(80) != lastCols(40) -> cache refresh guarded off
+
+    t.onResize(80);      // the real widen, using the un-poisoned cache
+    expect(liveWashRows(term)).toEqual([0, 1]); // boundary row 2 not covered
+  });
+
   it('repaints the wash to the new width on a NARROW (no un-tinted strip)', () => {
     const { term, t } = withRegion(120, 3);
     term.resize(80, 24); // narrow: xterm updates cols before firing onResize
@@ -420,7 +517,7 @@ describe('reflow', () => {
     ]);
     t.onPrompt(); // open span start at row 0
     t.markProgramActive(); // a program is running RIGHT NOW
-    term.emitRender(); // cache the open span's logical anchor while cols are stable
+    term.emitRender(); // a cols-stable render (no-op here: the anchor was already cached at onPrompt)
 
     // WIDEN: same logical content; cursor now at row 5.
     term.__setLines([
@@ -440,11 +537,30 @@ describe('reflow', () => {
     expect(t.regionCount()).toBe(1);
   });
 
-  it('KEEPS old regions on a widen and still tracks new ones', () => {
-    const { term, t } = withRegion(80); // region 1
-    t.onResize(120); // widen -> re-anchored, not dropped
+  it('KEEPS old regions on a widen (with real coverage) and still tracks new ones', () => {
+    const term = newTerm(40);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    term.__setLines([
+      { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+      { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+      { text: 'prompt$', isWrapped: false },
+    ]);
+    t.onPrompt(); t.markProgramActive(); term.__setCursorLine(4); t.onPrompt();
+    expect(liveWashRows(term)).toEqual([0, 1, 2, 3]);
+
+    // WIDEN: the region survives with REAL re-anchored coverage, not a collapsed ghost.
+    term.__setLines([
+      { text: 'L0 a L0 b', isWrapped: false },
+      { text: 'L1 a L1 b', isWrapped: false },
+      { text: 'prompt$', isWrapped: false },
+      { text: '', isWrapped: false }, { text: '', isWrapped: false },
+    ]);
+    term.__setCursorLine(4); term.resize(80, 24); t.onResize(80);
     expect(t.regionCount()).toBe(1);
-    // A new command still adds a second region.
+    expect(liveWashRows(term)).toEqual([0, 1]); // survived with real coverage
+
+    // A new command still adds a SECOND region.
     t.onPrompt();
     t.markProgramActive();
     term.__setCursorLine(30);
