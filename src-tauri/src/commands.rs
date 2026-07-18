@@ -475,8 +475,11 @@ pub fn show_activity_notification(
         .filter(|(label, _)| label.as_str() != "drag-preview")
         .any(|(_, w)| w.is_focused().unwrap_or(false));
     if any_focused {
-        return Ok(false); // app is focused → in-app channels cover it; don't double-notify
+        // app is focused → in-app channels cover it; don't double-notify
+        log::info!("show_activity_notification: a window is focused; suppressing OS toast for tab {tab_id}");
+        return Ok(false);
     }
+    log::info!("show_activity_notification: no window focused; showing OS toast for tab {tab_id} (window {window_label})");
     let body = if title.trim().is_empty() {
         "New terminal activity".to_string()
     } else {
@@ -484,23 +487,21 @@ pub fn show_activity_notification(
     };
     #[cfg(windows)]
     {
-        if let Err(native_error) = crate::native_notify::show_activity_notification(
-            &app,
-            &window_label,
-            &tab_id,
-            &body,
-        ) {
-            // Keep notifications best-effort even on machines where WinRT is
-            // disabled by policy. The plugin toast has no click callback, but is
-            // still preferable to silently dropping the activity notification.
-            log::warn!("Native activity notification failed: {}; using plugin fallback", native_error);
-            use tauri_plugin_notification::NotificationExt;
-            app.notification()
-                .builder()
-                .title("TermFlow")
-                .body(body)
-                .show()
-                .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
+        match crate::native_notify::show_activity_notification(&app, &window_label, &tab_id, &body) {
+            Ok(()) => log::info!("show_activity_notification: native WinRT toast shown for tab {tab_id}"),
+            Err(native_error) => {
+                // Keep notifications best-effort even on machines where WinRT is
+                // disabled by policy. The plugin toast has no click callback, but is
+                // still preferable to silently dropping the activity notification.
+                log::warn!("Native activity notification failed: {native_error}; using plugin fallback");
+                use tauri_plugin_notification::NotificationExt;
+                app.notification()
+                    .builder()
+                    .title("TermFlow")
+                    .body(body)
+                    .show()
+                    .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
+            }
         }
     }
     #[cfg(not(windows))]

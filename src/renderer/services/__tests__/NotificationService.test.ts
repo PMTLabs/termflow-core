@@ -103,17 +103,19 @@ describe('NotificationService — OS notification + return-to-app routing', () =
   });
   afterEach(() => notificationService.stop());
 
-  it('requests an OS notification only when this window is unfocused', async () => {
+  it('requests an OS notification when a background-tab bell fires', async () => {
     bell('tb-1', AFTER_SETTLE());
     await flush();
     expect(invokeMock).toHaveBeenCalledWith('show_activity_notification', expect.objectContaining({ tabId: 'tb-1' }));
   });
 
-  it('does NOT request an OS notification when the window is focused', async () => {
+  it('still requests even if this window\'s cached focus says focused (backend is the authority)', async () => {
+    // A stuck/stale renderer focus flag must NOT suppress the OS path — the backend does
+    // the authoritative app-wide focus check and returns shown=false when actually focused.
     mockFocused = true;
     bell('tb-1', AFTER_SETTLE());
     await flush();
-    expect(invokeMock).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith('show_activity_notification', expect.objectContaining({ tabId: 'tb-1' }));
   });
 
   it('routes to the belled tab on focus regain when a toast was shown', async () => {

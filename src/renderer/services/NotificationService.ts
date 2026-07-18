@@ -12,7 +12,7 @@ import { addToast } from '../store/slices/uiSlice';
 import { setActiveTab } from '../store/slices/tabsSlice';
 import { NOTIF_SETTLE_MS, shouldNotify } from './notificationLogic';
 import { ACTIVITY_CHIME_DATA_URI } from '../assets/activityChime';
-import { isWindowFocused, onWindowFocusChange, startWindowFocusTracking } from './windowFocus';
+import { onWindowFocusChange, startWindowFocusTracking } from './windowFocus';
 
 const SOUND_THROTTLE_MS = 1500; // min gap between chimes so a flurry doesn't machine-gun
 const BURST_MS = 1500; // suppress notifications this long after a visibility/session burst
@@ -99,7 +99,14 @@ class NotificationService {
       // notification that arrives while they're away isn't missed on return.
       store.dispatch(addToast({ message: `New activity in "${tabTitle}"`, type: 'info', sticky: true }));
     }
-    if (s.notifyOsEnabled && !isWindowFocused()) {
+    if (s.notifyOsEnabled) {
+      // Do NOT pre-gate on this window's isWindowFocused(): that per-window cached flag
+      // (windowFocus.ts, seeded true + updated only via onFocusChanged) can get stuck
+      // true — a missed/late focus event, a multi-window setup, or an init race — and
+      // would then silently drop EVERY OS notification. The backend
+      // (show_activity_notification) does the AUTHORITATIVE app-wide focus check and
+      // returns shown=false when any window is focused, so double-notify is still
+      // prevented and the return-to-app routing (which keys off shown) stays correct.
       this.showOsNotification(detail.tabId, tabTitle);
     }
   }
