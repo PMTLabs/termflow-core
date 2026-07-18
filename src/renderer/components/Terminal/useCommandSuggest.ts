@@ -22,7 +22,10 @@ const CLOSED: SuggestViewState = {
 /** Owns the suggest popup's view state (backlog 011). The engine owns key
  *  interception and reports actions here; this hook owns what is shown and
  *  tells the engine the popup state back (closed/passive/focused). */
-export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | null>) {
+export function useCommandSuggest(
+  engineRef: MutableRefObject<TerminalEngine | null>,
+  getCwd?: () => string | undefined,
+) {
   const [state, setState] = useState<SuggestViewState>(CLOSED);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -32,13 +35,19 @@ export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | n
     setState(CLOSED);
   }, [engineRef]);
 
+  const lastInputRef = useRef('');
+
   const onInputLineChanged = useCallback(
     (text: string) => {
       if (!text.trim()) {
+        lastInputRef.current = '';
         close();
         return;
       }
-      const items = commandHistoryService.match(text);
+      lastInputRef.current = text;
+      // Stream 4: rank suggestions by the terminal's current directory.
+      const cwd = getCwd?.();
+      const items = commandHistoryService.match(text, { cwd });
       if (items.length === 0) {
         close();
         return;
@@ -47,8 +56,23 @@ export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | n
       // Typing always returns the popup to passive (spec: focused + typing -> passive).
       engineRef.current?.setSuggestPopupState('passive');
       setState({ open: true, items, selectedIndex: 0, focused: false, anchor });
+
+      // The first render for a directory may use global order (affinity not loaded yet).
+      // Warm the cache, then re-rank the SAME text once it resolves — but only if the
+      // user hasn't typed further and the popup is still passively open (never yank the
+      // selection out from under an active focus/navigation).
+      if (cwd) {
+        void commandHistoryService.ensureDirLoaded(cwd).then(() => {
+          if (lastInputRef.current !== text) return;
+          const s = stateRef.current;
+          if (!s.open || s.focused) return;
+          const reItems = commandHistoryService.match(text, { cwd });
+          if (reItems.length === 0) return; // never surfaced new emptiness; keep showing
+          setState({ ...s, items: reItems, selectedIndex: 0 });
+        });
+      }
     },
-    [close, engineRef],
+    [close, engineRef, getCwd],
   );
 
   const onAction = useCallback(

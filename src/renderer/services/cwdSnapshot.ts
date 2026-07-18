@@ -86,6 +86,23 @@ export function getCwdSnapshot(terminalId: string): string | undefined {
   return snapshots.get(terminalId);
 }
 
+/** Stream 4: update the live cwd from a backend `terminal:cwd` event, which fires on
+ *  every `cd` (OSC 9;9/7). The event is keyed by the backend processId, so convert to
+ *  the renderer terminalId this map uses. This keeps the snapshot FRESH between the 30s
+ *  autosave ticks so command-history recording/ranking sees the current directory.
+ *
+ *  NOTE: the live feed only fires for shells that report their cwd via OSC — today that
+ *  is PowerShell (its injected prompt emits OSC 9;9) and any shell whose rc happens to
+ *  emit OSC 7. cmd/bash/WSL/zsh don't, so for those the snapshot still comes from the
+ *  30s `refreshLiveCwds` process-scan poll — a "cd then immediately submit" can record
+ *  under the previous directory until the next poll. That's a pre-existing cwd-tracking
+ *  limitation (backlog 004), not specific to this feature; ranking still degrades to the
+ *  global order when the cwd is stale/unknown. */
+export function setCwdSnapshotByProcessId(processId: string, cwd: string | null | undefined): void {
+  const terminalId = terminalService.getTerminalIdForProcess(processId);
+  if (terminalId) setCwdSnapshot(terminalId, cwd);
+}
+
 /** Forget a terminal's directory (restarted, or its pane is gone for good).
  *  Load-bearing: without it a second exit that carries no cwd would silently
  *  reuse the FIRST exit's directory — a wrong-directory bug that is worse than

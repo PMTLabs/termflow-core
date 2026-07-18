@@ -417,6 +417,41 @@ pub async fn load_command_history(
         .map_err(|e| e.to_string())
 }
 
+/// Stream 4: record that a command was run in a directory (cwd-relevant ranking).
+/// `dir` must already be normalized by the caller (forward-slash; lowercased on
+/// Windows). Blocking worker for the same contention reason as add_command_history.
+#[tauri::command]
+pub async fn add_command_dir_usage(
+    state: State<'_, AppState>,
+    command: String,
+    dir: String,
+) -> Result<(), String> {
+    let trimmed = command.trim().to_string();
+    let dir = dir.trim().to_string();
+    if trimmed.is_empty() || trimmed.chars().count() > 500 || dir.is_empty() {
+        return Ok(()); // silently drop garbage / unknown-cwd (global history still records)
+    }
+    let store = state.history_store.clone();
+    tokio::task::spawn_blocking(move || {
+        store.add_command_dir(&trimmed, &dir, chrono::Utc::now().timestamp_millis());
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Stream 4: usage rows relevant to the current directory (exact + ancestors +
+/// descendants) for the renderer to rank suggestions by cwd affinity.
+#[tauri::command]
+pub async fn load_command_dir_usage(
+    state: State<'_, AppState>,
+    cwd: String,
+) -> Result<Vec<crate::history_store::DirUsageRow>, String> {
+    let store = state.history_store.clone();
+    tokio::task::spawn_blocking(move || store.load_dir_usage(&cwd))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn load_config(app_handle: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;

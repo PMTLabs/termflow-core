@@ -62,6 +62,9 @@ interface ElectronAPI {
   addCommandHistory: (command: string) => Promise<void>;
   loadCommandHistory: (limit?: number) => Promise<string[]>;
   deleteCommandHistory: (command: string) => Promise<void>;
+  // Stream 4: per-directory command usage for cwd-relevant suggestion ranking.
+  addCommandDirUsage: (command: string, dir: string) => Promise<void>;
+  loadCommandDirUsage: (cwd: string) => Promise<import('../types/electron').DirUsageRow[]>;
   getDefaultProfile: () => Promise<string>;
   setDefaultProfile: (profileId: string) => Promise<void>;
   getTheme: () => Promise<any>;
@@ -400,6 +403,25 @@ const tauriBridge: ElectronAPI = {
       await invoke('delete_command_history', { command });
     } catch (e) {
       console.error('Failed to delete command history entry:', e);
+    }
+  },
+
+  // Stream 4: per-directory command usage (errors non-fatal — ranking degrades to
+  // the global recency order, the terminal is never affected).
+  addCommandDirUsage: async (command, dir) => {
+    try {
+      await invoke('add_command_dir_usage', { command, dir });
+    } catch (e) {
+      console.error('Failed to persist command dir-usage:', e);
+    }
+  },
+
+  loadCommandDirUsage: async (cwd) => {
+    try {
+      return await invoke<import('../types/electron').DirUsageRow[]>('load_command_dir_usage', { cwd });
+    } catch (e) {
+      console.error('Failed to load command dir-usage:', e);
+      return [];
     }
   },
 

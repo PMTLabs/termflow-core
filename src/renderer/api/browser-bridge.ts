@@ -338,6 +338,11 @@ class BrowserBridge implements ElectronAPI {
         }
     }
 
+    // Stream 4: cwd-relevant ranking isn't backed in the browser bridge (no SQLite);
+    // suggestions fall back to the existing global recency order.
+    async addCommandDirUsage(_command: string, _dir: string): Promise<void> { /* no-op */ }
+    async loadCommandDirUsage(_cwd: string): Promise<import('../types/electron').DirUsageRow[]> { return []; }
+
     async getDefaultProfile(): Promise<string> {
         return (await this.getConfigValue('defaultProfile')) || 'default';
     }
