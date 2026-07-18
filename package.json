@@ -75,7 +75,7 @@
     "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1",
     "@reduxjs/toolkit": "^2.8.2",
     "@tauri-apps/api": "2.9.1",
-    "@tauri-apps/plugin-autostart": "^2",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "~2.6.0",
     "@types/react": "^19.1.8",

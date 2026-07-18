@@ -104,6 +104,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     type SettingsCategory = 'appearance' | 'terminal' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
+    // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
+    // another instance). A monotonic generation guards against stale async readbacks:
+    // any newer enable/disable/refresh bumps the gen, so an older isEnabled() response
+    // (e.g. a slow mount read racing a user toggle) is discarded instead of clobbering
+    // the newer state. `autostartBusy` disables the toggle while an op is in flight.
+    const autostartGenRef = useRef(0);
+    const [autostartBusy, setAutostartBusy] = useState(false);
+    const refreshLaunchAtLogin = useCallback(async () => {
+        const gen = ++autostartGenRef.current;
+        try {
+            const v = await isAutostartEnabled();
+            if (gen === autostartGenRef.current) dispatch(setLaunchAtLogin(v));
+        } catch {
+            /* plugin unavailable (browser host) → leave the current state */
+        }
+    }, [dispatch]);
+
     // ---- Dirty-check (Approach 1: apply-live + revert-on-discard) ----
     // Connections is excluded — it owns its own "Save & apply (restart)" flow.
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
@@ -192,13 +209,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         return () => window.removeEventListener('settings:goto-category', handler);
     }, [requestCategoryChange]);
 
-    // Hydrate the launch-at-login toggle from the actual OS registration (the plugin
-    // is the source of truth). Runs once on mount; a no-op / false in non-Tauri hosts.
+    // Hydrate the launch-at-login toggle from the actual OS registration (the plugin is
+    // the source of truth). Runs on mount AND every time the user enters the Startup
+    // category — the Settings tab is never unmounted (only hidden via CSS), so a single
+    // mount-only read would miss external changes made while the tab stayed open.
     useEffect(() => {
-        isAutostartEnabled()
-            .then((v) => dispatch(setLaunchAtLogin(v)))
-            .catch(() => { /* plugin unavailable (browser host) → leave default false */ });
-    }, [dispatch]);
+        if (activeCategory === 'startup') refreshLaunchAtLogin();
+    }, [activeCategory, refreshLaunchAtLogin]);
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
@@ -831,19 +848,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     // Toggle launch-at-login through the autostart plugin, then reflect the ACTUAL OS
     // state (never the requested value) so a failed enable/disable can't leave the
-    // toggle showing a lie.
+    // toggle showing a lie. Guarded by the generation counter so a stale readback can't
+    // clobber a newer operation; the checkbox is disabled while an op is in flight.
     const onToggleLaunchAtLogin = async (checked: boolean) => {
+        const gen = ++autostartGenRef.current;
+        setAutostartBusy(true);
         try {
-            if (checked) await enableAutostart();
-            else await disableAutostart();
-        } catch (err) {
-            console.error('launch-at-login toggle failed', err);
-            dispatch(addToast({ message: 'Could not update launch at login.', type: 'error' }));
-        }
-        try {
-            dispatch(setLaunchAtLogin(await isAutostartEnabled()));
-        } catch {
-            /* keep the prior reflected state if the query fails */
+            try {
+                if (checked) await enableAutostart();
+                else await disableAutostart();
+            } catch (err) {
+                console.error('launch-at-login toggle failed', err);
+                dispatch(addToast({ message: 'Could not update launch at login.', type: 'error' }));
+            }
+            try {
+                const v = await isAutostartEnabled();
+                if (gen === autostartGenRef.current) dispatch(setLaunchAtLogin(v));
+            } catch {
+                /* keep the prior reflected state if the query fails */
+            }
+        } finally {
+            setAutostartBusy(false);
         }
     };
 
@@ -859,6 +884,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     type="checkbox"
                     className="setting-checkbox"
                     checked={settings.launchAtLogin}
+                    disabled={autostartBusy}
                     onChange={(e) => onToggleLaunchAtLogin(e.target.checked)}
                 />
             </div>
@@ -867,6 +893,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 (Windows startup, macOS login items, or Linux autostart). This reflects the
                 setting currently registered with your operating system.
             </span>
+            {IS_DEV && (
+                <span className="help-text" style={{ color: 'var(--warning-color, #d98a00)' }}>
+                    Dev build: enabling this registers the <em>development</em> executable
+                    (target/debug), which later rebuilds will replace — leaving a stale login
+                    entry. Test launch-at-login from an installed build.
+                </span>
+            )}
         </div>
     );
 
