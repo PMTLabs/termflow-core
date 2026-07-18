@@ -136,6 +136,11 @@ interface Region {
 
 export interface EndedRegionOptions {
   maxRegions?: number;
+  /** Coalesce resize handling: a window drag fires dozens of resize events, each
+   *  rebuilding every region's per-row decorations. When > 0, the re-anchor + repaint
+   *  is deferred until this many ms after the last resize event. 0 (default) is
+   *  synchronous, which unit tests rely on. */
+  debounceMs?: number;
 }
 
 /**
@@ -181,13 +186,22 @@ export class EndedRegionTracker {
   private washColor: string | undefined;
   private railColor: string | undefined;
   private lastCols: number;
+  private lastRows: number;
   private readonly maxRegions: number;
+  private readonly debounceMs: number;
+  /** Pending debounced-resize timer, and whether any step of the current gesture was
+   *  a WIDEN (which corrupts markers — a later narrow adjusts from the corrupted
+   *  position, so once widened we must re-anchor at flush time). */
+  private resizeTimer: ReturnType<typeof setTimeout> | undefined;
+  private pendingWiden = false;
   private railLayer: HTMLElement | undefined;
   private readonly renderSub: IDisposable | undefined;
 
   constructor(private readonly term: Terminal, opts: EndedRegionOptions = {}) {
     this.maxRegions = opts.maxRegions ?? DEFAULT_MAX_REGIONS;
+    this.debounceMs = opts.debounceMs ?? 0;
     this.lastCols = term.cols;
+    this.lastRows = term.rows;
     // The rail mirrors the wash, so it must be re-placed whenever xterm re-renders
     // (scroll, output, reflow). onRender fires on every frame the grid changes.
     this.renderSub = this.term.onRender?.(() => {
@@ -302,15 +316,36 @@ export class EndedRegionTracker {
    * reanchorForWiden() re-derives each marker's row from its reflow-invariant
    * logical-line index and re-registers it (see that method). We never drop the marks.
    */
-  onResize(cols: number): void {
-    if (cols === this.lastCols) return;
-    const widened = cols > this.lastCols;
+  onResize(cols: number, rows?: number): void {
+    const colsChanged = cols !== this.lastCols;
+    const rowsChanged = rows !== undefined && rows !== this.lastRows;
+    if (!colsChanged && !rowsChanged) return;
+    // A WIDEN anywhere in the gesture corrupts markers (reflowLarger emits nothing,
+    // and a later narrow adjusts from the corrupted position), so latch it.
+    if (colsChanged && cols > this.lastCols) this.pendingWiden = true;
     this.lastCols = cols;
-    // NARROW is exact — xterm's _reflowSmaller fires onInsert so markers ride the
-    // reflow; repaintAll rebuilds coverage for the new row span. A column-WIDEN
-    // leaves markers stale (reflowLarger emits nothing), so re-anchor from the
-    // reflow-invariant logical indices before repainting.
-    if (widened) this.reanchorForWiden();
+    if (rows !== undefined) this.lastRows = rows;
+    // Coalesce the (expensive) re-anchor + full repaint to the end of the resize
+    // gesture: a window drag fires dozens of these, each rebuilding every region's
+    // per-row decorations. Debounced in production; synchronous (debounceMs 0) in tests.
+    if (this.debounceMs > 0) {
+      if (this.resizeTimer !== undefined) clearTimeout(this.resizeTimer);
+      this.resizeTimer = setTimeout(() => this.flushResize(), this.debounceMs);
+    } else {
+      this.flushResize();
+    }
+  }
+
+  /**
+   * Apply a settled resize: re-anchor from the reflow-invariant logical cache if any
+   * step of the gesture widened (markers are stale), then rebuild every region's
+   * coverage for the new width/height. A NARROW keeps markers exact (onInsert) and a
+   * ROW-only resize doesn't touch the buffer, so those just repaint.
+   */
+  private flushResize(): void {
+    this.resizeTimer = undefined;
+    if (this.pendingWiden) this.reanchorForWiden();
+    this.pendingWiden = false;
     this.repaintAll();
   }
 
@@ -378,6 +413,10 @@ export class EndedRegionTracker {
   }
 
   dispose(): void {
+    if (this.resizeTimer !== undefined) {
+      clearTimeout(this.resizeTimer);
+      this.resizeTimer = undefined;
+    }
     this.renderSub?.dispose();
     for (const r of this.regions) this.disposeRegion(r);
     this.regions = [];

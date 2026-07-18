@@ -497,12 +497,60 @@ describe('reflow', () => {
     for (const d of liveWash) expect(d.options.width).toBe(80);
   });
 
-  it('does not repaint when only the height (rows) changes — width stays', () => {
+  it('does not repaint when neither width nor height changes', () => {
     const { term, t } = withRegion(80, 2);
     const before = term.decorations.filter(d => !d.disposed).length;
-    t.onResize(80); // same cols
+    t.onResize(80, term.rows); // same cols AND same rows
     const after = term.decorations.filter(d => !d.disposed).length;
     expect(after).toBe(before); // nothing disposed/recreated
+  });
+
+  it('REPAINTS on a rows-only (vertical) resize so the wash re-anchors to the new viewport', () => {
+    // A vertical resize (rows change, cols same) used to be ignored, leaving the wash
+    // pinned to its old rows so it drifted above the live prompt when the window grew.
+    const { term, t } = withRegion(80, 2);
+    const before = term.decorations.filter(d => !d.disposed && d.options.layer === 'bottom');
+    expect(before.length).toBeGreaterThan(0);
+    term.resize(80, 40); // grow height only — cols unchanged
+    t.onResize(80, 40);
+    for (const d of before) expect(d.disposed).toBe(true); // old wash disposed
+    const after = term.decorations.filter(d => !d.disposed && d.options.layer === 'bottom');
+    expect(after.length).toBeGreaterThan(0); // fresh wash re-anchored to the new viewport
+  });
+
+  it('DEBOUNCES a resize gesture: a burst of resizes repaints once, after settling', () => {
+    jest.useFakeTimers();
+    try {
+      const term = newTerm(40);
+      const t = new EndedRegionTracker(term, { debounceMs: 100 });
+      t.setColors('#2a2a2a', '#7aa2f7');
+      term.__setLines([
+        { text: 'L0 a', isWrapped: false }, { text: 'L0 b', isWrapped: true },
+        { text: 'L1 a', isWrapped: false }, { text: 'L1 b', isWrapped: true },
+        { text: 'prompt$', isWrapped: false },
+      ]);
+      t.onPrompt(); t.markProgramActive(); term.__setCursorLine(4); t.onPrompt();
+      const before = term.decorations.filter(d => !d.disposed && d.options.layer === 'bottom');
+      expect(before.length).toBe(4);
+
+      // A drag: many resize events, no repaint yet (the original wash is still live).
+      term.resize(80, 24); t.onResize(80, 24);
+      term.resize(120, 24); t.onResize(120, 24);
+      term.__setLines([
+        { text: 'L0 a L0 b', isWrapped: false },
+        { text: 'L1 a L1 b', isWrapped: false },
+        { text: 'prompt$', isWrapped: false },
+      ]);
+      term.__setCursorLine(2); term.resize(120, 24); t.onResize(120, 24);
+      for (const d of before) expect(d.disposed).toBe(false); // nothing repainted mid-gesture
+
+      jest.advanceTimersByTime(100); // gesture settles → exactly one repaint
+      for (const d of before) expect(d.disposed).toBe(true);
+      const after = term.decorations.filter(d => !d.disposed && d.options.layer === 'bottom');
+      expect(after.map(d => (d.options.marker as { line: number }).line).sort((a, b) => a - b)).toEqual([0, 1]);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('RE-ANCHORS the OPEN span on a widen (a running program stays markable)', () => {

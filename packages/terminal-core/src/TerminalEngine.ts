@@ -859,7 +859,9 @@ export class TerminalEngine {
     // Marks the scrollback an ended program produced (per-mount, like the
     // subscriptions below). Constructed before the OSC handlers that feed it, and
     // registered so a scheme change can repaint it without a React re-render.
-    this.endedRegions = new EndedRegionTracker(boundTerm);
+    // Debounce resize handling: a window drag fires dozens of onResize events, each
+    // rebuilding every region's per-row decorations — coalesce to the gesture's end.
+    this.endedRegions = new EndedRegionTracker(boundTerm, { debounceMs: 100 });
     registerEndedRegionTracker(this.cacheKey, this.endedRegions);
 
     // Backlog 011: heuristic command capture (per-mount, like the subscriptions).
@@ -909,10 +911,11 @@ export class TerminalEngine {
     const resizeDisposable = boundTerm.onResize(({ cols, rows }) => {
       // Diagnostics (source TerminalDisplay.tsx:435): xterm-reported resize.
       this.opts.onDiag?.(() => `[TERM-DIAG] xterm.onResize -> ${cols}x${rows}`);
-      // Widening silently corrupts region markers (xterm adjusts them only via
-      // CircularList events, which reflow-larger never fires) — the tracker drops
-      // them rather than let them drift onto the wrong rows.
-      this.endedRegions?.onResize(cols);
+      // A COLUMN widen leaves region markers stale (reflow-larger fires no
+      // CircularList events) so the tracker re-anchors them from logical lines; a
+      // ROW-only (vertical) resize must still repaint so the wash tracks the new
+      // viewport height (without rows here it would drift above the live prompt).
+      this.endedRegions?.onResize(cols, rows);
       // Backlog 011: reflow shifts absolute buffer rows, making the capture mark
       // untranslatable. Drop the capture (clean miss) and close the popup rather
       // than risk recording a fragment or anchoring the popup to a stale cell.
