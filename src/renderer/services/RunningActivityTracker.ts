@@ -199,6 +199,10 @@ class RunningActivityTrackerClass {
       t?: number;
     };
     if (!processId) return;
+    // No ownership guard needed here (unlike handleData): pty:input is dispatched
+    // LOCALLY by the writing window's own bridge, so a window only ever receives
+    // input events for terminals it is actually driving. (pty:data, by contrast, is
+    // broadcast to every window by the backend, hence its ownership filter.)
     const dataStr = typeof data === 'string' ? data : '';
     this.lastInputAt.set(processId, isSubmitInput(dataStr) ? -Infinity : (t ?? Date.now()));
   }
@@ -220,6 +224,7 @@ class RunningActivityTrackerClass {
       this.buffers.delete(processId);
       this.unseenMark.delete(processId);
       this.lastOutputAt.delete(processId);
+      this.lastInputAt.delete(processId); // avoid a per-process leak across a long session
     }
     this.evaluate(); // recompute the running sweep without the dead PTY
   }

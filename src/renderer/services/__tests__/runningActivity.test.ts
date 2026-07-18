@@ -165,6 +165,10 @@ describe('isEchoChunk (typing echo detection)', () => {
   it('is not echo when the chunk is larger than the echo size', () => {
     expect(isEchoChunk(ECHO_MAX_BYTES + 1, 10)).toBe(false);
   });
+  it('includes both inclusive boundaries exactly (window and size are <=)', () => {
+    expect(isEchoChunk(ECHO_MAX_BYTES, ECHO_WINDOW_MS)).toBe(true); // exactly 48B @ exactly 250ms
+    expect(isEchoChunk(1, ECHO_WINDOW_MS)).toBe(true);
+  });
   it('is not echo when it arrives after the echo window', () => {
     expect(isEchoChunk(1, ECHO_WINDOW_MS + 1)).toBe(false);
   });

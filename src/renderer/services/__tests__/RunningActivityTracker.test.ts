@@ -379,4 +379,15 @@ describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
     jest.advanceTimersByTime(EVAL_INTERVAL_MS);
     expect(runningPayloads().some(p => p.includes('tb-2'))).toBe(true);
   });
+
+  it('clears lastInputAt on process exit so a reused process id is not wrongly echo-suppressed', () => {
+    emitInput('p1', 'a');        // records lastInputAt for p1 (recent, small)
+    emitExit('p1', 'tm-1');      // exit must clear lastInputAt for p1
+    // A new process reuses id p1 and immediately emits small output. If the exit had
+    // NOT cleared lastInputAt, these would fall inside the echo window and be dropped
+    // from the running buffer. With the fix, they count → the tab flips running.
+    emitData('p1', 1); emitData('p1', 1); emitData('p1', 1);
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
+  });
 });

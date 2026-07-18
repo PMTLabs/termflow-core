@@ -1,4 +1,5 @@
 import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { emitPtyInput } from '../utils/ptyInputSignal';
 
 // Configuration for connecting to the Rust backend. Default matches this build's
 // instance (dev backend = 42051, prod = 42031).
@@ -169,6 +170,9 @@ class BrowserBridge implements ElectronAPI {
     async pruneTerminalHistory(_keepIds: string[]): Promise<void> { /* no persistence in the browser bridge */ }
 
     async writeToTerminal(id: string, data: string): Promise<void> {
+        // Web monitor client: this is genuine LIVE user typing (not automation), so
+        // signal it like the Tauri bridge does, so the tab sweep echo-cancels it too.
+        emitPtyInput(id, data);
         try {
             await fetch(`${API_BASE_URL}/terminals/${id}/input`, {
                 method: 'POST',

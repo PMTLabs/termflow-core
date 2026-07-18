@@ -82,6 +82,15 @@ export function isRunningFromEvents(
  * `sinceInputMs` is `now - lastInputAt` for the chunk's terminal (Infinity when
  * there was no recent input, or -Infinity's negation after a submit — either way
  * a large gap, so not echo).
+ *
+ * Scope (accepted tradeoffs, by design — the reported bug is LIVE TYPING):
+ * - A large/multi-line PASTE whose echo exceeds ECHO_MAX_BYTES is NOT suppressed, so
+ *   pasting a command may briefly flip the sweep. A paste is a single discrete action
+ *   (unlike continuous typing) and self-corrects, so this is acceptable.
+ * - A chunk that COALESCES a final echo byte with a tiny immediate app response
+ *   (combined <= ECHO_MAX_BYTES within the window) is dropped wholesale from the
+ *   running rate; the 1s window generally absorbs this. Correlating echo bytes
+ *   precisely is out of scope. Neither case affects the unseen bell (lastOutputAt).
  */
 export function isEchoChunk(bytes: number, sinceInputMs: number): boolean {
   return sinceInputMs <= ECHO_WINDOW_MS && bytes <= ECHO_MAX_BYTES;
