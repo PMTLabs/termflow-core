@@ -7,6 +7,9 @@ export interface Toast {
     message: string;
     type: ToastType;
     duration?: number;
+    // Sticky toasts never auto-dismiss — they stay until the user clicks to close.
+    // Used for activity notifications the user asked to acknowledge explicitly.
+    sticky?: boolean;
 }
 
 interface DialogState {
@@ -46,13 +49,14 @@ const uiSlice = createSlice({
         hideDialog: (state) => {
             state.dialog.isOpen = false;
         },
-        addToast: (state, action: PayloadAction<{ message: string; type?: ToastType; duration?: number }>) => {
+        addToast: (state, action: PayloadAction<{ message: string; type?: ToastType; duration?: number; sticky?: boolean }>) => {
             const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
             state.toasts.push({
                 id,
                 message: action.payload.message,
                 type: action.payload.type || 'info',
                 duration: action.payload.duration || 3000,
+                sticky: action.payload.sticky,
             });
         },
         removeToast: (state, action: PayloadAction<string>) => {

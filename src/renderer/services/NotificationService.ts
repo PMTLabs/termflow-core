@@ -95,7 +95,9 @@ class NotificationService {
 
     if (s.notifySoundEnabled) this.playChime();
     if (s.notifyToastEnabled) {
-      store.dispatch(addToast({ message: `New activity in "${tabTitle}"`, type: 'info' }));
+      // Sticky: an activity toast stays until the user clicks to close it, so a
+      // notification that arrives while they're away isn't missed on return.
+      store.dispatch(addToast({ message: `New activity in "${tabTitle}"`, type: 'info', sticky: true }));
     }
     if (s.notifyOsEnabled && !isWindowFocused()) {
       this.showOsNotification(detail.tabId, tabTitle);

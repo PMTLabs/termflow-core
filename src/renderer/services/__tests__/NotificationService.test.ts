@@ -67,11 +67,13 @@ describe('NotificationService — in-app channels', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('fires an in-app toast naming the tab when enabled and settled', () => {
+  it('fires a sticky in-app toast naming the tab when enabled and settled', () => {
     mockState.settings.notifyToastEnabled = true;
     bell('tb-1', AFTER_SETTLE());
     const toast = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'ui/addToast');
     expect(toast?.payload.message).toContain('build');
+    // Activity toasts stay until the user clicks to close (sticky: no auto-dismiss).
+    expect(toast?.payload.sticky).toBe(true);
   });
 
   it('plays the chime when sound is enabled, throttling repeats', () => {

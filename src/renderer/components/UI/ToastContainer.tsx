@@ -8,12 +8,15 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
     const dispatch = useDispatch();
 
     useEffect(() => {
+        // Sticky toasts (e.g. activity notifications) never auto-dismiss — they stay
+        // until the user clicks to close (the onClick handler below removes them).
+        if (toast.sticky) return;
         const timer = setTimeout(() => {
             dispatch(removeToast(toast.id));
         }, toast.duration || 3000);
 
         return () => clearTimeout(timer);
-    }, [dispatch, toast.id, toast.duration]);
+    }, [dispatch, toast.id, toast.duration, toast.sticky]);
 
     const getIcon = () => {
         switch (toast.type) {
