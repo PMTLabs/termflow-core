@@ -20,6 +20,7 @@ import { store } from '../../store';
 import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
+import { blendEndedTint, endedRailColor } from '../../store/endedTint';
 import { setAgentColorScheme, removeAgentColorScheme } from '../../store/slices/settingsSlice';
 import { addToast } from '../../store/slices/uiSlice';
 import { listen } from '@tauri-apps/api/event';
@@ -271,10 +272,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // Scope this pane's slack/scrollbar background to its own effective scheme
     // right away (before the next schema-apply sweep), so a split pane with a
     // different scheme never briefly inherits a sibling's background.
-    setPaneBackgroundVar(
-      terminalId,
-      getSchemaTheme(resolveSchemaId(terminalId, store.getState(), (id) => agentSchemeTracker.getAgentForTerminal(id))).background,
-    );
+    const mountBackground = getSchemaTheme(
+      resolveSchemaId(terminalId, store.getState(), (id) => agentSchemeTracker.getAgentForTerminal(id)),
+    ).background;
+    setPaneBackgroundVar(terminalId, mountBackground);
+    // Seed the ended-program mark colours for THIS pane; later scheme changes are
+    // pushed by applyEffectiveThemes, which this component never re-renders for.
+    engine.setEndedRegionColors(blendEndedTint(mountBackground), endedRailColor(mountBackground));
     if (processId) {
       engine.attach(processId);
     }
@@ -295,6 +299,28 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       engineRef.current.attach(processId);
     }
   }, [processId]);
+
+  // Mark the current prompt-to-prompt span as "a program ran here", so the engine
+  // can tint that scrollback once the program exits and the shell returns.
+  //
+  // AgentSchemeTracker already polls for exactly this and detects ANY non-shell
+  // program, not a known-agent allowlist (pty_manager.rs detect_agent). Its
+  // subscribe() is a zero-arg "the detected map changed", so re-read our own
+  // terminal's entry. The poll is far too coarse to place a boundary (~2s), but a
+  // fine yes/no predicate over a span lasting seconds to minutes — the boundary
+  // comes from the shell's prompt OSC instead.
+  //
+  // No immediate check on subscribe: the map can hold a PREVIOUS span's program
+  // until the next poll rebuilds it, and reading it eagerly would mark a fresh
+  // `ls` span as a program run. Only a poll observed DURING this span may mark it.
+  useEffect(() => {
+    if (!terminalId) return undefined;
+    return agentSchemeTracker.subscribe(() => {
+      if (agentSchemeTracker.getDetectedAgentForTerminal(terminalId)) {
+        engineRef.current?.markProgramActive();
+      }
+    });
+  }, [terminalId]);
 
   // Backlog 011: a new process means a fresh prompt — stale suggestions must
   // not linger across a restart/reattach.

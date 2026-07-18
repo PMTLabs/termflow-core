@@ -32,3 +32,9 @@ export type {
   ContextMenuActions,
   PromptGate,
 } from './types';
+export {
+  EndedRegionTracker,
+  setEndedRegionColorsFor,
+  registerEndedRegionTracker,
+  unregisterEndedRegionTracker,
+} from './endedRegions';

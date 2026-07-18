@@ -8,6 +8,11 @@ import { KeyboardProtocolState, encodeKey } from './keyboardProtocol';
 import { Win32InputModeState, encodeWin32Key, scanWin32ModeSequences } from './win32InputMode';
 import { HeuristicCapture, decideSuggestKey } from './commandCapture';
 import type { SuggestPopupState } from './commandCapture';
+import {
+  EndedRegionTracker,
+  registerEndedRegionTracker,
+  unregisterEndedRegionTracker,
+} from './endedRegions';
 
 import type {
   TerminalBridge,
@@ -414,6 +419,9 @@ export class TerminalEngine {
   private term: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
   private searchAddon: SearchAddon | null = null;
+  /** Marks the scrollback an ended program produced. All region logic lives in
+   *  the tracker; this class only forwards events and owns its lifetime. */
+  private endedRegions: EndedRegionTracker | undefined;
   // Enhanced keyboard protocol state (Kitty + modifyOtherKeys); see keyboardProtocol.ts.
   private kbState = new KeyboardProtocolState();
   // Win32-Input-Mode (ConPTY-offered, Windows-only); see win32InputMode.ts.
@@ -848,6 +856,14 @@ export class TerminalEngine {
     // non-null at call time.
     const boundTerm = term;
 
+    // Marks the scrollback an ended program produced (per-mount, like the
+    // subscriptions below). Constructed before the OSC handlers that feed it, and
+    // registered so a scheme change can repaint it without a React re-render.
+    // Debounce resize handling: a window drag fires dozens of onResize events, each
+    // rebuilding every region's per-row decorations — coalesce to the gesture's end.
+    this.endedRegions = new EndedRegionTracker(boundTerm, { debounceMs: 100 });
+    registerEndedRegionTracker(this.cacheKey, this.endedRegions);
+
     // Backlog 011: heuristic command capture (per-mount, like the subscriptions).
     // Restore a mark saved by a previous unmount — the cached Terminal's buffer
     // survives tab switches, so mid-typed input keeps its prompt-start position.
@@ -895,6 +911,11 @@ export class TerminalEngine {
     const resizeDisposable = boundTerm.onResize(({ cols, rows }) => {
       // Diagnostics (source TerminalDisplay.tsx:435): xterm-reported resize.
       this.opts.onDiag?.(() => `[TERM-DIAG] xterm.onResize -> ${cols}x${rows}`);
+      // A COLUMN widen leaves region markers stale (reflow-larger fires no
+      // CircularList events) so the tracker re-anchors them from logical lines; a
+      // ROW-only (vertical) resize must still repaint so the wash tracks the new
+      // viewport height (without rows here it would drift above the live prompt).
+      this.endedRegions?.onResize(cols, rows);
       // Backlog 011: reflow shifts absolute buffer rows, making the capture mark
       // untranslatable. Drop the capture (clean miss) and close the popup rather
       // than risk recording a fragment or anchoring the popup to a stale cell.
@@ -1043,6 +1064,10 @@ export class TerminalEngine {
       // enhanced-key encoding and command suggestions return to plain-prompt
       // behavior. Observe-only: cwd parsing stays in the Rust pipeline.
       const promptOscHeal = (): boolean => {
+        // Every rendered prompt closes one command's span and opens the next —
+        // the boundary the ended-region marks are anchored to. Recorded first,
+        // so it is independent of whether the heal branches below fire.
+        this.endedRegions?.onPrompt();
         if (this.kbState.activeFlags() !== 0 || this.kbState.snapshot().modifyOtherKeys !== 0) {
           this.kbState.reset();
         }
@@ -2066,6 +2091,14 @@ export class TerminalEngine {
         if (entry) {
           entry.hydrating = false;
         }
+        // Anchor the first ended-program span HERE: hydration has just replayed
+        // the backend's SNAPSHOT (a rendered screen — OSC sequences are consumed
+        // by the backend's parser and are NOT in it), so the prompt already on
+        // screen never reached our OSC handler. Without an anchor, a program
+        // launched from that prompt is detected with no span to attach to and its
+        // output is never marked. Everything below this line is new output, which
+        // is the best boundary available when no prompt was observed.
+        this.endedRegions?.openSpanHere();
       }
     }
   }
@@ -2322,6 +2355,19 @@ export class TerminalEngine {
   // xterm emits the result via onData → bridge.write(attachedProcessId). Routing
   // raw clipboard text straight to the PTY (the previous behavior) skipped the
   // markers, so multi-line pastes were submitted line-by-line by CLIs.
+  /** The renderer's detection saw a non-shell program in this terminal. Tolerant
+   *  by design: the 2s poll is a good yes/no predicate over a span, even though
+   *  it is far too coarse to place a boundary. */
+  markProgramActive(): void {
+    this.endedRegions?.markProgramActive();
+  }
+
+  /** Colours for the ended-program marks, pre-blended by the renderer against the
+   *  pane's scheme background — xterm's decoration colours take no alpha. */
+  setEndedRegionColors(wash: string | undefined, rail: string | undefined): void {
+    this.endedRegions?.setColors(wash, rail);
+  }
+
   paste(text: string): void {
     this.term?.paste(text);
   }
@@ -2798,6 +2844,12 @@ export class TerminalEngine {
     // stranded on screen after a remount (tab switch back) — the bar reopens closed,
     // so nothing would clear them. clearSearch() nulls activeSearch + clearDecorations.
     this.clearSearch();
+    // Same reasoning as the search highlights above: the decorations live on the
+    // CACHED terminal, so they would stay stranded after a remount. Disposed HERE
+    // (in unmount), never inside clearSearch — a Ctrl+F clear must not wipe them.
+    this.endedRegions?.dispose();
+    this.endedRegions = undefined;
+    unregisterEndedRegionTracker(this.cacheKey);
     // Intentionally keep this.term / this.fitAddon references — the cache still
     // owns the live instance, and a later mount() reattaches it.
   }

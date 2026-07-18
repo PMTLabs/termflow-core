@@ -29,6 +29,30 @@
 /* Override xterm.js styles for better integration */
 .terminal-display .xterm {
   height: 100%;
+  /* Left-margin gutter: insets the text so the ended-region rail has a lane of its
+     own. FitAddon subtracts this padding when computing columns, so the grid fits. */
+  padding-left: 8px;
+}
+
+/* Ended-region RAIL (see packages/terminal-core/src/endedRegions.ts). The tracker
+   creates the layer + one bar per region inside .terminal-display-wrapper — a SIBLING
+   of xterm — so the bar sits at the pane's TRUE left edge, past both the
+   terminal-display and xterm padding, and can never overlap the text. It also escapes
+   the CSS the app applies to decoration elements (transform is suppressed there). The
+   tracker sets each bar's top/height/background inline by mirroring the wash. */
+.ended-rail-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 4;
+}
+.ended-rail {
+  position: absolute;
+  left: 0;
+  /* width is set inline by the tracker — it fills from the pane edge up to the wash
+     so the rail touches the tint (see endedRegions.ts positionRail). */
+  pointer-events: none;
 }
 
 /* Ensure xterm container hierarchy is visible */
