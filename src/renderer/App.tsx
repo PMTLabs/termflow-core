@@ -53,6 +53,7 @@ import { commandHistoryService } from './services/commandHistoryService';
 import { StateManager } from './services/StateManager';
 import { terminalService } from './services/TerminalService';
 import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
+import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
 
@@ -333,12 +334,15 @@ const App: React.FC = () => {
       }
     }
 
-    // A fresh "New Window" (File > New Window): don't restore the previous
-    // session — just open a single default terminal tab.
-    if (new URLSearchParams(window.location.search).has('newWindow')) {
+    // A fresh "New Window" (File > New Window, or an "Open in TermFlow" folder window):
+    // don't restore the previous session — just open a single default terminal tab,
+    // rooted at ?path= when the window was opened for a folder.
+    const bootParams = new URLSearchParams(window.location.search);
+    if (bootParams.has('newWindow')) {
+      const folderPath = bootParams.get('path') ?? undefined;
       setupIPCListeners();
       inputHandler.enable();
-      setTimeout(() => createDefaultTabIfNeeded(), 500);
+      setTimeout(() => createDefaultTabIfNeeded(folderPath), 500);
       return;
     }
 
@@ -354,6 +358,15 @@ const App: React.FC = () => {
       console.error('Failed to check restoreLastSession config:', error);
     }
 
+    // Cold "Open in TermFlow" launch (no instance was running): the backend stashed the
+    // requested folder as a pending path. Take it once so it opens on this main window.
+    let pendingOpenPath: string | undefined;
+    try {
+      pendingOpenPath = (await window.electronAPI?.takePendingOpenPath?.()) ?? undefined;
+    } catch (error) {
+      console.error('Failed to read pending open path:', error);
+    }
+
     // Try to restore state if enabled
     let restored = false;
     if (shouldRestore) {
@@ -361,11 +374,15 @@ const App: React.FC = () => {
     }
     console.log('State restored:', restored);
 
-    // If no state was restored, create default tab if needed
+    // If no state was restored, create default tab if needed (rooted at the pending
+    // folder when this was an "Open in TermFlow" cold launch).
     if (!restored) {
       console.log('No state restored, will create default tab in 500ms');
       // Increased delay to ensure shell profiles are properly loaded
-      setTimeout(() => createDefaultTabIfNeeded(), 500);
+      setTimeout(() => createDefaultTabIfNeeded(pendingOpenPath), 500);
+    } else if (pendingOpenPath) {
+      // Session restored AND a folder was requested → open it as an extra tab.
+      setTimeout(() => openFolderTab(pendingOpenPath!), 500);
     }
 
     // Set up IPC listeners
@@ -543,7 +560,7 @@ const App: React.FC = () => {
     }
   };
 
-  const createDefaultTabIfNeeded = () => {
+  const createDefaultTabIfNeeded = (folderPath?: string) => {
     console.log('Checking if default tab needed...');
     const currentTabs = (window as any).__REDUX_STORE__?.getState()?.tabs?.tabs || [];
     console.log('Current tabs:', currentTabs.length, 'Shell profiles:', shellProfiles.length);
@@ -574,9 +591,29 @@ const App: React.FC = () => {
         icon: '🖥️',
       };
 
+      // "Open in TermFlow": root this default terminal at the requested folder. The root
+      // pane's terminalId === the tab id (TerminalContainer seeds it that way), so set the
+      // initial cwd BEFORE dispatching addTab so the pane spawns in that directory.
+      if (folderPath) setInitialCwd(newTab.id, folderPath);
+
       console.log('Dispatching addTab with:', newTab);
       dispatch(addTab(newTab));
     }
+  };
+
+  // "Open in TermFlow" when a session was restored (cold launch with an existing session):
+  // add the requested folder as a NEW tab rather than replacing anything.
+  const openFolderTab = (folderPath: string) => {
+    const defaultShell = shellProfiles.find(p => p.id === defaultProfile) || shellProfiles[0];
+    if (!defaultShell) return;
+    const newTab = {
+      id: generateId('tb'),
+      title: defaultShell.name,
+      shellType: defaultShell.id,
+      icon: '🖥️',
+    };
+    setInitialCwd(newTab.id, folderPath);
+    dispatch(addTab(newTab));
   };
 
   const handleExternalActivity = (event: CustomEvent) => {

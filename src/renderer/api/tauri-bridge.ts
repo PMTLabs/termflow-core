@@ -65,6 +65,11 @@ interface ElectronAPI {
   // Stream 4: per-directory command usage for cwd-relevant suggestion ranking.
   addCommandDirUsage: (command: string, dir: string) => Promise<void>;
   loadCommandDirUsage: (cwd: string) => Promise<import('../types/electron').DirUsageRow[]>;
+  // Stream 5: "Open in TermFlow" folder context menu.
+  takePendingOpenPath: () => Promise<string | null>;
+  installFileManagerIntegration: () => Promise<void>;
+  uninstallFileManagerIntegration: () => Promise<void>;
+  isFileManagerIntegrationInstalled: () => Promise<boolean>;
   getDefaultProfile: () => Promise<string>;
   setDefaultProfile: (profileId: string) => Promise<void>;
   getTheme: () => Promise<any>;
@@ -422,6 +427,30 @@ const tauriBridge: ElectronAPI = {
     } catch (e) {
       console.error('Failed to load command dir-usage:', e);
       return [];
+    }
+  },
+
+  // Stream 5: "Open in TermFlow" folder context menu.
+  takePendingOpenPath: async () => {
+    try {
+      return await invoke<string | null>('take_pending_open_path');
+    } catch (e) {
+      console.error('Failed to take pending open path:', e);
+      return null;
+    }
+  },
+  installFileManagerIntegration: async () => {
+    await invoke('install_file_manager_integration');
+  },
+  uninstallFileManagerIntegration: async () => {
+    await invoke('uninstall_file_manager_integration');
+  },
+  isFileManagerIntegrationInstalled: async () => {
+    try {
+      return await invoke<boolean>('is_file_manager_integration_installed');
+    } catch (e) {
+      console.error('Failed to query file-manager integration:', e);
+      return false;
     }
   },
 

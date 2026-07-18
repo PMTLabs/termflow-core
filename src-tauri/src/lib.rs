@@ -19,6 +19,7 @@ pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
 mod native_notify;
+mod shell_integration;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 use tauri_plugin_shell::ShellExt;
@@ -233,6 +234,12 @@ struct Args {
    /// Override the MCP server port for THIS run. Runtime-only; not persisted.
    #[arg(long)]
    mcp_port: Option<u16>,
+   /// Open a new terminal rooted at this folder.
+   #[arg(long = "path")]
+   path: Option<String>,
+   /// Positional fallback used by file managers and command-line users.
+   #[arg(value_name = "PATH")]
+   positional_path: Option<String>,
 }
 
 #[cfg(test)]
@@ -755,7 +762,7 @@ fn show_or_focus_main_window(app: &tauri::AppHandle) {
         let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
-    } else if let Err(e) = commands::open_new_window(app) {
+    } else if let Err(e) = commands::open_new_window(app, None) {
         log::warn!("Tray show: failed to open a new window: {}", e);
     }
 }
@@ -769,8 +776,32 @@ pub fn run() {
   // the shared config.json.
   let cli_api_port = args.api_port;
   let cli_mcp_port = args.mcp_port;
+  let initial_open_path = args.path.or(args.positional_path);
 
-  tauri::Builder::default()
+  let mut builder = tauri::Builder::default();
+  #[cfg(desktop)]
+  {
+    if !args.headless && args.api_port.is_none() && args.mcp_port.is_none() {
+      builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        let path = Args::try_parse_from(argv)
+          .ok()
+          .and_then(|args| args.path.or(args.positional_path));
+        if let Some(path) = path {
+          if let Err(e) = commands::open_new_window(app, Some(path)) {
+            log::error!("Open in TermFlow failed: {}", e);
+          } else {
+            commands::refresh_menu(app);
+          }
+        } else if let Some(window) = app.get_webview_window("main") {
+          let _ = window.unminimize();
+          let _ = window.show();
+          let _ = window.set_focus();
+        }
+      }));
+    }
+  }
+
+  builder
     .plugin(
       tauri_plugin_log::Builder::default()
         .level(log::LevelFilter::Info)  // Only INFO and above
@@ -849,6 +880,13 @@ pub fn run() {
 
         // Initialize AppState with app handle + network config
         let state = AppState::new(tx, app.handle().clone(), network.clone());
+
+        if let Some(path) = initial_open_path.clone() {
+            match state.pending_open_path.lock() {
+                Ok(mut pending) => *pending = Some(path),
+                Err(e) => log::error!("Failed to store pending open path: {}", e),
+            }
+        }
 
         // Manage state in Tauri
         app.manage(state.clone());
@@ -1035,6 +1073,10 @@ pub fn run() {
         commands::hide_drag_preview,
         commands::resolve_tab_drop,
         commands::create_new_window,
+        commands::take_pending_open_path,
+        shell_integration::install_file_manager_integration,
+        shell_integration::uninstall_file_manager_integration,
+        shell_integration::is_file_manager_integration_installed,
         commands::get_executable_icon,
         commands::refresh_window_menu,
         commands::set_window_title,
@@ -1054,7 +1096,7 @@ pub fn run() {
     .on_menu_event(|app, event| {
         let id = event.id().as_ref();
         if id == "new_window" {
-            match commands::open_new_window(app) {
+            match commands::open_new_window(app, None) {
                 Ok(_) => commands::refresh_menu(app),
                 Err(e) => log::error!("New Window failed: {}", e),
             }

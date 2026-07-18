@@ -92,6 +92,10 @@ interface SettingsState {
   // OS/native notification when a background tab rings the bell AND no app window is
   // focused (the focus check is done app-wide in the backend).
   notifyOsEnabled: boolean;
+  // "Open in TermFlow" file-manager (Explorer/Nautilus/KDE) folder context-menu entry.
+  // OS-owned (registry / desktop files); this mirrors is_installed for the toggle UI,
+  // NOT persisted to config.json. macOS is bundle-provided.
+  fileManagerIntegration: boolean;
   // EULA acceptance: the EULA version the user last accepted (persisted to config.json).
   // `null` = never accepted → the first-run acceptance modal shows. When it differs from
   // CURRENT_EULA_VERSION (a material EULA change), the modal re-appears.
@@ -138,6 +142,7 @@ const initialState: SettingsState = {
   notifySoundEnabled: false,
   notifyToastEnabled: false,
   notifyOsEnabled: false,
+  fileManagerIntegration: false,
   eulaAcceptedVersion: null,
   eulaHydrated: false,
 };
@@ -389,6 +394,13 @@ const settingsSlice = createSlice({
       }
     },
 
+    // "Open in TermFlow" integration: mirror the OS registration state (registry /
+    // desktop files) into the store for the toggle. NOT persisted — install/uninstall
+    // commands own the actual state; this is the reflected value.
+    setFileManagerIntegration: (state, action: PayloadAction<boolean>) => {
+      state.fileManagerIntegration = action.payload;
+    },
+
     // Record EULA acceptance and persist it to config.json (survives restarts).
     setEulaAcceptedVersion: (state, action: PayloadAction<string>) => {
       state.eulaAcceptedVersion = action.payload;
@@ -433,6 +445,7 @@ export const {
   setNotifySoundEnabled,
   setNotifyToastEnabled,
   setNotifyOsEnabled,
+  setFileManagerIntegration,
   setEulaAcceptedVersion,
   hydrateEulaAcceptedVersion,
 } = settingsSlice.actions;

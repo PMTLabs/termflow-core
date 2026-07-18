@@ -850,14 +850,19 @@ pub async fn create_detached_window(
 /// Open a fresh, empty app window (File > New Window). Unlike a detached window,
 /// it carries no payload: it boots with `?newWindow=1`, which skips session
 /// restore and opens a single default terminal tab.
-pub fn open_new_window(app: &tauri::AppHandle) -> Result<String, String> {
+pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<String, String> {
     let label = format!("window-{}", uuid::Uuid::new_v4().simple());
+    let mut url = "index.html?newWindow=1".to_string();
+    if let Some(path) = path {
+        url.push_str("&path=");
+        url.push_str(&percent_encode_url_component(&path));
+    }
     // `mut` is only used by the macOS-only block below (Overlay title bar).
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         &label,
-        tauri::WebviewUrl::App("index.html?newWindow=1".into()),
+        tauri::WebviewUrl::App(url.into()),
     )
     .title("TermFlow")
     .inner_size(1280.0, 800.0)
@@ -884,9 +889,32 @@ pub fn open_new_window(app: &tauri::AppHandle) -> Result<String, String> {
 /// Command wrapper so a new window can also be opened from the renderer.
 #[tauri::command]
 pub async fn create_new_window(app_handle: tauri::AppHandle) -> Result<String, String> {
-    let label = open_new_window(&app_handle)?;
+    let label = open_new_window(&app_handle, None)?;
     refresh_menu(&app_handle);
     Ok(label)
+}
+
+fn percent_encode_url_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+/// Return the cold-launch folder once. Subsequent renderer calls receive `None`.
+#[tauri::command]
+pub fn take_pending_open_path(state: tauri::State<'_, AppState>) -> Option<String> {
+    state
+        .pending_open_path
+        .lock()
+        .ok()
+        .and_then(|mut path| path.take())
 }
 
 /// Destroy the calling window directly (no close-confirm). Used when a window is

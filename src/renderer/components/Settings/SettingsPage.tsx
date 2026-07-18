@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
@@ -121,6 +121,38 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         }
     }, [dispatch]);
 
+    // Same stale-readback guard for the "Open in TermFlow" file-manager integration.
+    const fmiGenRef = useRef(0);
+    const [fmiBusy, setFmiBusy] = useState(false);
+    const refreshFileManagerIntegration = useCallback(async () => {
+        const gen = ++fmiGenRef.current;
+        try {
+            const v = (await window.electronAPI?.isFileManagerIntegrationInstalled?.()) ?? false;
+            if (gen === fmiGenRef.current) dispatch(setFileManagerIntegration(v));
+        } catch {
+            /* command unavailable (browser host) → leave the current state */
+        }
+    }, [dispatch]);
+    const onToggleFileManagerIntegration = async (checked: boolean) => {
+        const gen = ++fmiGenRef.current;
+        setFmiBusy(true);
+        try {
+            try {
+                if (checked) await window.electronAPI?.installFileManagerIntegration?.();
+                else await window.electronAPI?.uninstallFileManagerIntegration?.();
+            } catch (err) {
+                console.error('file-manager integration toggle failed', err);
+                dispatch(addToast({ message: "Could not update the 'Open in TermFlow' menu entry.", type: 'error' }));
+            }
+            try {
+                const v = (await window.electronAPI?.isFileManagerIntegrationInstalled?.()) ?? checked;
+                if (gen === fmiGenRef.current) dispatch(setFileManagerIntegration(v));
+            } catch { /* keep prior */ }
+        } finally {
+            setFmiBusy(false);
+        }
+    };
+
     // ---- Dirty-check (Approach 1: apply-live + revert-on-discard) ----
     // Connections is excluded — it owns its own "Save & apply (restart)" flow.
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
@@ -214,8 +246,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // category — the Settings tab is never unmounted (only hidden via CSS), so a single
     // mount-only read would miss external changes made while the tab stayed open.
     useEffect(() => {
-        if (activeCategory === 'startup') refreshLaunchAtLogin();
-    }, [activeCategory, refreshLaunchAtLogin]);
+        if (activeCategory === 'startup') {
+            refreshLaunchAtLogin();
+            refreshFileManagerIntegration();
+        }
+    }, [activeCategory, refreshLaunchAtLogin, refreshFileManagerIntegration]);
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
@@ -962,6 +997,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     entry. Test launch-at-login from an installed build.
                 </span>
             )}
+
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="file-manager-integration">
+                    Add "Open in TermFlow" to the file-manager right-click menu
+                </label>
+                <input
+                    id="file-manager-integration"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.fileManagerIntegration}
+                    disabled={fmiBusy}
+                    onChange={(e) => onToggleFileManagerIntegration(e.target.checked)}
+                />
+            </div>
+            <span className="help-text">
+                Right-click a folder in Explorer (Windows), Nautilus/Files or Dolphin (Linux)
+                and choose "Open in TermFlow" to open a new window rooted at that folder. On
+                macOS this is provided by the app bundle.
+            </span>
         </div>
     );
 
