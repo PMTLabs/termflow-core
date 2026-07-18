@@ -60,6 +60,12 @@ function emitData(processId: string, bytes: number): void {
   );
 }
 
+function emitInput(processId: string, data: string): void {
+  window.dispatchEvent(
+    new CustomEvent('pty:input', { detail: { processId, data, t: Date.now() } }),
+  );
+}
+
 function emitExit(processId: string, terminalId?: string): void {
   // Real pty:exit events carry the resolved terminalId (TerminalService removes the
   // processId→terminalId mapping before dispatching), so the tracker resolves the
@@ -323,5 +329,65 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     switchActiveTab('tb-2'); // leave again
     jest.advanceTimersByTime(SETTLE_MS);
     expect(unseenTabIds()).not.toContain('tb-1');
+  });
+});
+
+describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    dispatch.mockClear();
+    mockTabsState.activeTabId = 'tb-1'; // user is typing in the active tab
+    mockTabsState.tabs = [];
+    mockPaneTree.ready = true;
+    runningActivityTracker.start(0); // no startup grace
+  });
+  afterEach(() => {
+    runningActivityTracker.stop();
+    jest.useRealTimers();
+  });
+
+  it('does NOT flag the tab running while the user types (echo suppressed)', () => {
+    // Simulate typing "ls -la": each keystroke, then the shell echoes it back (1 byte).
+    for (const ch of 'ls -la') {
+      emitInput('p1', ch);
+      emitData('p1', 1); // echo of that character, same instant → within echo window
+    }
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    // Typing echo must not animate the sweep even though it's >= MIN_CHUNKS chunks.
+    expect(runningPayloads().every(p => !p.includes('tb-1'))).toBe(true);
+  });
+
+  it('DOES flag the tab running for real command output after Enter (submit resets echo gate)', () => {
+    for (const ch of 'ls') { emitInput('p1', ch); emitData('p1', 1); } // typed + echoed
+    emitInput('p1', '\r'); // Enter submits → lastInputAt reset to -Infinity
+    // The command now produces real output (not echo). Even small chunks count.
+    emitData('p1', 4); emitData('p1', 4); emitData('p1', 4);
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
+  });
+
+  it('still flags running for a large chunk arriving right after a keystroke (not echo-sized)', () => {
+    emitInput('p1', 'x');
+    emitData('p1', 600); // > ECHO_MAX_BYTES → real output, not echo → running via MIN_BYTES
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
+  });
+
+  it('does not echo-suppress output on a background tab the user is not typing in', () => {
+    // p2/tb-2 gets output but no input events → never treated as echo.
+    emitData('p2', 4); emitData('p2', 4); emitData('p2', 4);
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads().some(p => p.includes('tb-2'))).toBe(true);
+  });
+
+  it('clears lastInputAt on process exit so a reused process id is not wrongly echo-suppressed', () => {
+    emitInput('p1', 'a');        // records lastInputAt for p1 (recent, small)
+    emitExit('p1', 'tm-1');      // exit must clear lastInputAt for p1
+    // A new process reuses id p1 and immediately emits small output. If the exit had
+    // NOT cleared lastInputAt, these would fall inside the echo window and be dropped
+    // from the running buffer. With the fix, they count → the tab flips running.
+    emitData('p1', 1); emitData('p1', 1); emitData('p1', 1);
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
   });
 });

@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { shouldHandleForWindow } from './windowRouting';
+import { emitPtyInput } from '../utils/ptyInputSignal';
 
 export interface NetworkConfig {
   apiPort: number;
@@ -246,6 +247,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   writeToTerminal: async (id, data) => {
+    emitPtyInput(id, data); // let the tracker echo-cancel typing (see ptyInputSignal)
     return invoke('write_terminal', { id, data });
   },
 
@@ -301,6 +303,7 @@ const tauriBridge: ElectronAPI = {
 
   // Aliases for PTY (same as above)
   sendToPty: async (id, data) => {
+    emitPtyInput(id, data); // keep echo-cancel working if a caller uses this alias
     return invoke('write_terminal', { id, data });
   },
 

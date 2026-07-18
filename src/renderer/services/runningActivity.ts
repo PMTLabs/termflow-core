@@ -32,6 +32,13 @@ export const UNSEEN_DEBOUNCE_MS = 2000; // an inactive tab's output must stay id
                                        // before it rings the unseen bell. Riding through
                                        // bursty/intermittent output prevents the bell from
                                        // flashing on/off while a process is mid-execution.
+export const ECHO_WINDOW_MS = 250;    // output arriving within this long after a user keystroke,
+                                       // AND no larger than ECHO_MAX_BYTES, is treated as the
+                                       // shell echoing what the user just typed — NOT program
+                                       // activity. Keeps live typing from flipping the tab sweep.
+export const ECHO_MAX_BYTES = 48;     // upper size of a keystroke echo chunk. Real command output
+                                       // bursts are larger (or arrive outside the echo window), so
+                                       // this lets genuine output through while catching per-key echo.
 
 export interface OutputEvent {
   t: number;     // timestamp (ms)
@@ -65,6 +72,48 @@ export function isRunningFromEvents(
     }
   }
   return chunks >= opts.minChunks || bytes >= opts.minBytes;
+}
+
+/**
+ * A PTY output chunk is shell ECHO of the user's own keystrokes when it is small
+ * AND arrives just after an input write. Typing "ls" makes the shell echo 'l' then
+ * 's' back as output; without this, fast typing trips the >= MIN_CHUNKS running
+ * heuristic and animates the tab sweep even though nothing is actually running.
+ * `sinceInputMs` is `now - lastInputAt` for the chunk's terminal (Infinity when
+ * there was no recent input, or -Infinity's negation after a submit — either way
+ * a large gap, so not echo).
+ *
+ * Scope (accepted tradeoffs, by design — the reported bug is LIVE TYPING):
+ * - A large/multi-line PASTE whose echo exceeds ECHO_MAX_BYTES is NOT suppressed, so
+ *   pasting a command may briefly flip the sweep. A paste is a single discrete action
+ *   (unlike continuous typing) and self-corrects, so this is acceptable.
+ * - A chunk that COALESCES a final echo byte with a tiny immediate app response
+ *   (combined <= ECHO_MAX_BYTES within the window) is dropped wholesale from the
+ *   running rate; the 1s window generally absorbs this. Correlating echo bytes
+ *   precisely is out of scope. Neither case affects the unseen bell (lastOutputAt).
+ */
+export function isEchoChunk(bytes: number, sinceInputMs: number): boolean {
+  return sinceInputMs <= ECHO_WINDOW_MS && bytes <= ECHO_MAX_BYTES;
+}
+
+/**
+ * A bare Enter keypress (submits the current command). The output the command then
+ * produces must NOT be echo-suppressed, so on submit the caller resets the
+ * terminal's lastInputAt to -Infinity. A multi-character paste (even one containing
+ * a newline) is deliberately NOT a submit — only a lone CR/LF is.
+ */
+export function isSubmitInput(data: string): boolean {
+  return data === '\r' || data === '\n' || data === '\r\n';
+}
+
+/**
+ * Whether an output chunk should count toward the "running" rate buffer (the tab
+ * sweep). Excludes keystroke echo. This ONLY gates the running sweep — the unseen
+ * bell's lastOutputAt timeline is intentionally left untouched by the caller so
+ * genuine background activity is never lost.
+ */
+export function shouldCountForRunning(bytes: number, now: number, lastInputAt: number): boolean {
+  return !isEchoChunk(bytes, now - lastInputAt);
 }
 
 /**
