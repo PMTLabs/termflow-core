@@ -35,17 +35,18 @@ export function useCommandSuggest(
     setState(CLOSED);
   }, [engineRef]);
 
+  const lastInputRef = useRef('');
+
   const onInputLineChanged = useCallback(
     (text: string) => {
       if (!text.trim()) {
+        lastInputRef.current = '';
         close();
         return;
       }
-      // Stream 4: rank suggestions by the terminal's current directory. Warm the
-      // affinity cache for this cwd (async, fire-and-forget) so subsequent keystrokes
-      // rank by relevance; the first match may use global order until it resolves.
+      lastInputRef.current = text;
+      // Stream 4: rank suggestions by the terminal's current directory.
       const cwd = getCwd?.();
-      if (cwd) void commandHistoryService.ensureDirLoaded(cwd);
       const items = commandHistoryService.match(text, { cwd });
       if (items.length === 0) {
         close();
@@ -55,6 +56,21 @@ export function useCommandSuggest(
       // Typing always returns the popup to passive (spec: focused + typing -> passive).
       engineRef.current?.setSuggestPopupState('passive');
       setState({ open: true, items, selectedIndex: 0, focused: false, anchor });
+
+      // The first render for a directory may use global order (affinity not loaded yet).
+      // Warm the cache, then re-rank the SAME text once it resolves — but only if the
+      // user hasn't typed further and the popup is still passively open (never yank the
+      // selection out from under an active focus/navigation).
+      if (cwd) {
+        void commandHistoryService.ensureDirLoaded(cwd).then(() => {
+          if (lastInputRef.current !== text) return;
+          const s = stateRef.current;
+          if (!s.open || s.focused) return;
+          const reItems = commandHistoryService.match(text, { cwd });
+          if (reItems.length === 0) return; // never surfaced new emptiness; keep showing
+          setState({ ...s, items: reItems, selectedIndex: 0 });
+        });
+      }
     },
     [close, engineRef, getCwd],
   );

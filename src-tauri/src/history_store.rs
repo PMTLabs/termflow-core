@@ -29,13 +29,17 @@ fn escape_like(s: &str) -> String {
 }
 
 /// All ancestor directories of a normalized (forward-slash) path, nearest first,
-/// excluding the path itself. `c:/proj/a` → [`c:/proj`, `c:`].
+/// excluding the path itself. `c:/proj/a` → [`c:/proj`, `c:`]; `/home/x` → [`/home`, `/`].
 fn ancestor_dirs(dir: &str) -> Vec<String> {
     let mut res = Vec::new();
     let mut cur = dir.trim_end_matches('/');
     while let Some(idx) = cur.rfind('/') {
         let parent = &cur[..idx];
         if parent.is_empty() {
+            // POSIX root: the parent of "/home" is "/" (idx 0). Include it once.
+            if dir.starts_with('/') {
+                res.push("/".to_string());
+            }
             break;
         }
         res.push(parent.to_string());
@@ -291,10 +295,14 @@ impl HistoryStore {
             .collect::<Vec<_>>()
             .join(",");
         let like_idx = in_list.len() + 1;
+        // Order EXACT-directory rows first (dir = ?1 = cwd) so the LIMIT can never drop
+        // an older exact match behind a flood of newer descendant rows — the exact dir
+        // is the strongest affinity signal. Then by recency. LIMIT is generous since
+        // descendants (weight 2) are the only potentially large bucket.
         let sql = format!(
             "SELECT command, dir, use_count, last_used_at FROM command_dir_usage
              WHERE dir IN ({}) OR dir LIKE ?{} ESCAPE '\\'
-             ORDER BY last_used_at DESC LIMIT 500",
+             ORDER BY CASE WHEN dir = ?1 THEN 0 ELSE 1 END, last_used_at DESC LIMIT 1000",
             placeholders, like_idx
         );
         let like_pattern = format!("{}/%", escape_like(cwd));
@@ -583,6 +591,30 @@ mod tests {
         assert!(store.load_dir_usage("c:/d").is_empty());
         store.delete_command_dir("x");
         store.prune_dir_usage(1);
+    }
+
+    #[test]
+    fn dir_usage_posix_root_is_an_ancestor() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        store.add_command_dir("rootcmd", "/", 10);     // filesystem root
+        store.add_command_dir("homecmd", "/home", 20); // ancestor of /home/x
+        let rows = store.load_dir_usage("/home/x");
+        let cmds: Vec<String> = rows.iter().map(|r| r.command.clone()).collect();
+        assert!(cmds.contains(&"rootcmd".to_string()), "'/' is an ancestor of /home/x");
+        assert!(cmds.contains(&"homecmd".to_string()));
+    }
+
+    #[test]
+    fn dir_usage_exact_dir_ordered_first() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        // A newer descendant row must NOT push the exact-dir row out of the front.
+        store.add_command_dir("exact", "c:/proj/a", 1);          // older, exact
+        store.add_command_dir("descendant", "c:/proj/a/sub", 99); // newer, descendant
+        let rows = store.load_dir_usage("c:/proj/a");
+        assert_eq!(rows.first().map(|r| r.command.as_str()), Some("exact"),
+            "exact-dir row must sort first regardless of recency");
     }
 
     /// Regression for the "empty terminal after restart" bug: we persist the vt100

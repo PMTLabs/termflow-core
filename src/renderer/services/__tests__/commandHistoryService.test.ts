@@ -136,4 +136,40 @@ describe('commandHistoryService cwd-relevant ranking (Stream 4)', () => {
     commandHistoryService.record('ls');
     expect(addCommandDirUsage).not.toHaveBeenCalled();
   });
+
+  it('ranks an exact-dir command even when it is far down the global order', async () => {
+    // 60 matching commands; the exact-dir one is the OLDEST (beyond any small cap).
+    const many = Array.from({ length: 60 }, (_, i) => `g${i}`);
+    loadCommandHistory.mockResolvedValue([...many, 'g-exact']);
+    await commandHistoryService.hydrate();
+    loadCommandDirUsage.mockResolvedValue([
+      { command: 'g-exact', dir: 'c:/proj/a', useCount: 1, lastUsedAt: 1 },
+    ]);
+    await commandHistoryService.ensureDirLoaded('c:/proj/a');
+    // Ranking happens over ALL matches before the display cutoff, so g-exact wins.
+    expect(commandHistoryService.match('g', { cwd: 'c:/proj/a' })[0]).toBe('g-exact');
+  });
+
+  it('treats POSIX root "/" as an ancestor for ranking', async () => {
+    loadCommandHistory.mockResolvedValue(['a-cmd', 'root-cmd']);
+    await commandHistoryService.hydrate();
+    loadCommandDirUsage.mockResolvedValue([
+      { command: 'root-cmd', dir: '/', useCount: 1, lastUsedAt: 1 },
+    ]);
+    await commandHistoryService.ensureDirLoaded('/home/user');
+    // 'root-cmd' ran at '/', an ancestor of /home/user → ranks above unrelated 'a-cmd'.
+    expect(commandHistoryService.match('cmd', { cwd: '/home/user' })[0]).toBe('root-cmd');
+  });
+
+  it('record invalidates the whole affinity cache (not just the recorded dir)', async () => {
+    await commandHistoryService.hydrate(); // global: curl x, cargo build, git status
+    loadCommandDirUsage.mockResolvedValue([
+      { command: 'cargo build', dir: 'c:/proj/a', useCount: 1, lastUsedAt: 1 },
+    ]);
+    await commandHistoryService.ensureDirLoaded('c:/proj/a');
+    expect(commandHistoryService.match('c', { cwd: 'c:/proj/a' })[0]).toBe('cargo build');
+    // Recording in a DIFFERENT dir still invalidates c:/proj/a's cached affinity.
+    commandHistoryService.record('newcmd', 'c:/other');
+    expect(commandHistoryService.match('c', { cwd: 'c:/proj/a' })[0]).toBe('curl x'); // global fallback
+  });
 });

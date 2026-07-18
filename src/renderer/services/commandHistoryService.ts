@@ -11,38 +11,49 @@
 
 const HYDRATE_LIMIT = 2000;
 const DEFAULT_MATCH_LIMIT = 8;
-// Gather this many candidates before affinity re-ranking so a high-affinity match
-// isn't cut by the display limit before it can be lifted to the front.
-const GATHER_CAP = 50;
 
 /** Normalize a directory for stable comparison/keying: backslashes → forward slashes,
- *  drop a trailing slash, and lowercase Windows paths (drive-letter prefix) since they
- *  are case-insensitive. POSIX paths keep their case. Empty/absent → ''. */
+ *  drop trailing slashes (but PRESERVE the POSIX root `/`), and lowercase Windows
+ *  paths (drive-letter or UNC `//server/share`) since they are case-insensitive. POSIX
+ *  paths keep their case. Empty/absent → ''. */
 function normalizeDir(dir?: string | null): string {
   if (!dir) return '';
-  let d = dir.trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  if (/^[a-zA-Z]:/.test(d)) d = d.toLowerCase();
+  const trimmed = dir.trim();
+  let d = trimmed.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (d === '') return trimmed.startsWith('/') ? '/' : ''; // preserve POSIX root
+  if (/^[a-zA-Z]:/.test(d) || d.startsWith('//')) d = d.toLowerCase(); // Windows drive / UNC
   return d;
 }
 
 /** Affinity of a command's recorded directory `dir` to the current `cwd`:
  *  3 = exact same directory, 2 = command ran in a descendant (subdir) of cwd,
  *  1 = command ran in an ancestor (parent) of cwd, 0 = unrelated. Both args must
- *  already be normalized. */
+ *  already be normalized. Root-aware: `/` is an ancestor of every absolute POSIX path. */
 function dirAffinity(cwd: string, dir: string): number {
   if (!cwd || !dir) return 0;
   if (dir === cwd) return 3;
-  if (dir.startsWith(cwd + '/')) return 2;
-  if (cwd.startsWith(dir + '/')) return 1;
+  const cwdPrefix = cwd === '/' ? '/' : cwd + '/';
+  const dirPrefix = dir === '/' ? '/' : dir + '/';
+  if (dir.startsWith(cwdPrefix)) return 2; // command ran in a subdir of cwd
+  if (cwd.startsWith(dirPrefix)) return 1; // command ran in a parent of cwd
   return 0;
 }
 
 class CommandHistoryService {
   private commands: string[] = []; // most-recent-first
   // normalized dir → (command → best affinity weight for that dir). Populated by
-  // ensureDirLoaded and read synchronously by match. Invalidated on record/remove.
+  // ensureDirLoaded and read synchronously by match. Any mutation (record/remove/
+  // hydrate) clears the whole cache and bumps `cacheGen`, so a slow in-flight load
+  // that started before the mutation is dropped instead of writing stale data, and a
+  // record in a subdir correctly invalidates a cached ancestor/descendant dir too.
   private affinityCache = new Map<string, Map<string, number>>();
   private loadingDirs = new Set<string>();
+  private cacheGen = 0;
+
+  private invalidateAffinity(): void {
+    this.affinityCache.clear();
+    this.cacheGen++;
+  }
 
   async hydrate(): Promise<void> {
     try {
@@ -51,6 +62,9 @@ class CommandHistoryService {
       console.error('commandHistoryService: hydrate failed', e);
       this.commands = [];
     }
+    // Another window may have recorded commands since our last load; drop any cached
+    // directory affinity so ranking reflects the freshly hydrated global list.
+    this.invalidateAffinity();
   }
 
   /** Record a submitted command. Always updates the global history; when `cwd` is
@@ -72,16 +86,19 @@ class CommandHistoryService {
       } catch (e) {
         console.error('commandHistoryService: persist dir-usage failed', e);
       }
-      this.affinityCache.delete(norm);
     }
+    // Recording in `norm` also changes the affinity of its ancestors/descendants (a
+    // command in c:/repo/sub affects ranking when cwd is c:/repo), so invalidate the
+    // whole cache — not just `norm`. Cheap: reloaded lazily per dir on the next open.
+    this.invalidateAffinity();
   }
 
   /** Remove one command everywhere (Shift+Delete on a suggestion): in-memory index +
    *  persisted store (which cascades to per-directory usage). Fire-and-forget like
-   *  record(). Clears the affinity cache so no stale weight lingers for the command. */
+   *  record(). Invalidates the affinity cache so no stale weight lingers. */
   remove(command: string): void {
     this.commands = this.commands.filter((c) => c !== command);
-    this.affinityCache.clear();
+    this.invalidateAffinity();
     try {
       void window.electronAPI?.deleteCommandHistory?.(command);
     } catch (e) {
@@ -96,6 +113,7 @@ class CommandHistoryService {
     const norm = normalizeDir(cwd);
     if (!norm || this.affinityCache.has(norm) || this.loadingDirs.has(norm)) return;
     this.loadingDirs.add(norm);
+    const gen = this.cacheGen; // drop this load if a mutation invalidates the cache meanwhile
     try {
       const rows = (await window.electronAPI?.loadCommandDirUsage?.(norm)) ?? [];
       const weights = new Map<string, number>();
@@ -103,10 +121,12 @@ class CommandHistoryService {
         const w = dirAffinity(norm, normalizeDir(r.dir));
         if (w > 0 && w > (weights.get(r.command) ?? 0)) weights.set(r.command, w);
       }
-      this.affinityCache.set(norm, weights);
+      // Only commit if no record/remove/hydrate happened since we started — otherwise
+      // this snapshot may be stale (e.g. missing a command just recorded in this dir).
+      if (gen === this.cacheGen) this.affinityCache.set(norm, weights);
     } catch (e) {
       console.error('commandHistoryService: dir-usage load failed', e);
-      this.affinityCache.set(norm, new Map()); // cache the miss so we don't retry every keystroke
+      if (gen === this.cacheGen) this.affinityCache.set(norm, new Map()); // cache the miss
     } finally {
       this.loadingDirs.delete(norm);
     }
@@ -125,6 +145,9 @@ class CommandHistoryService {
     const norm = normalizeDir(opts?.cwd);
     const weights = norm ? this.affinityCache.get(norm) : undefined;
 
+    // Gather ALL matches (the list is capped at HYDRATE_LIMIT, so this is bounded and
+    // cheap) BEFORE ranking — otherwise an exact-directory command that sits far down
+    // the global-recency order would be truncated away before affinity could promote it.
     type Cand = { cmd: string; bucket: number; order: number };
     const prefix: Cand[] = [];
     const substr: Cand[] = [];
@@ -134,7 +157,6 @@ class CommandHistoryService {
       const lc = c.toLowerCase();
       if (lc.startsWith(q)) prefix.push({ cmd: c, bucket: 0, order: i });
       else if (lc.includes(q)) substr.push({ cmd: c, bucket: 1, order: i });
-      if (prefix.length + substr.length >= GATHER_CAP) break;
     }
 
     let all = [...prefix, ...substr];
