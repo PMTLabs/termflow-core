@@ -372,15 +372,21 @@ const settingsSlice = createSlice({
     // Notification preferences (Stream 1) — persisted to config.json like other toggles.
     setNotifySoundEnabled: (state, action: PayloadAction<boolean>) => {
       state.notifySoundEnabled = action.payload;
-      window.electronAPI?.setConfigValue?.('notifySoundEnabled', state.notifySoundEnabled);
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('notifySoundEnabled', state.notifySoundEnabled);
+      }
     },
     setNotifyToastEnabled: (state, action: PayloadAction<boolean>) => {
       state.notifyToastEnabled = action.payload;
-      window.electronAPI?.setConfigValue?.('notifyToastEnabled', state.notifyToastEnabled);
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('notifyToastEnabled', state.notifyToastEnabled);
+      }
     },
     setNotifyOsEnabled: (state, action: PayloadAction<boolean>) => {
       state.notifyOsEnabled = action.payload;
-      window.electronAPI?.setConfigValue?.('notifyOsEnabled', state.notifyOsEnabled);
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('notifyOsEnabled', state.notifyOsEnabled);
+      }
     },
 
     // Record EULA acceptance and persist it to config.json (survives restarts).

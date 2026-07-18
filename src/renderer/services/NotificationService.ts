@@ -54,6 +54,13 @@ class NotificationService {
     document.addEventListener('visibilitychange', onVis);
     this.cleanups.push(() => document.removeEventListener('visibilitychange', onVis));
 
+    // A window resize sends SIGWINCH → every TUI repaints; the tracker suppresses that
+    // for the sweep/bell, so mirror it here too (a 1–2 tab repaint below the tracker's
+    // batch threshold could otherwise clear the gate and fire a spurious sound/toast).
+    const onResize = () => { this.burstUntil = Date.now() + BURST_MS; };
+    window.addEventListener('resize', onResize);
+    this.cleanups.push(() => window.removeEventListener('resize', onResize));
+
     this.cleanups.push(onWindowFocusChange((focused) => {
       if (focused) this.routePendingOnFocus();
     }));
@@ -65,6 +72,10 @@ class NotificationService {
     this.pendingOsTabs = [];
     this.lastSoundAt = -Infinity;
     this.burstUntil = 0;
+    if (this.audio) {
+      try { this.audio.pause(); } catch { /* ignore */ }
+      this.audio = null;
+    }
     this.started = false;
   }
 
@@ -108,18 +119,18 @@ class NotificationService {
   }
 
   private async showOsNotification(tabId: string, tabTitle: string): Promise<void> {
-    // Track for return-to-app routing regardless of whether the backend actually shows
-    // the toast (it does its own app-wide focus check): landing on the belled tab when
-    // the user returns is the right behavior either way.
-    this.pendingOsTabs = [...this.pendingOsTabs.filter((id) => id !== tabId), tabId];
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      await invoke('show_activity_notification', {
+      const shown = await invoke<boolean>('show_activity_notification', {
         windowLabel: getCurrentWindow().label,
         tabId,
         title: `Activity in "${tabTitle}"`,
       });
+      // Queue for return-to-app routing ONLY when a toast was actually shown (backend
+      // suppresses it if any window is focused). Otherwise a later, unrelated re-focus
+      // would force-switch to a tab the user was never notified about.
+      if (shown) this.pendingOsTabs = [...this.pendingOsTabs.filter((id) => id !== tabId), tabId];
     } catch (e) {
       console.error('NotificationService: OS notification failed', e);
     }

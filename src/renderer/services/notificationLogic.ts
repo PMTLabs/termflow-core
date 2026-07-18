@@ -10,10 +10,14 @@
 // on the transition would let a late restore burst slip through; gating on causal time
 // closes that hole.
 
-/** Default startup stabilization window (ms from app boot). Covers the tracker's 3s
- *  startup cooldown + its 2s unseen-debounce + margin, so restore-induced bells whose
- *  causal output landed during startup never notify. */
-export const NOTIF_SETTLE_MS = 6000;
+import { STARTUP_COOLDOWN_MS, UNSEEN_DEBOUNCE_MS } from './runningActivity';
+
+/** Startup stabilization window (ms from app boot). DERIVED from the tracker's own
+ *  suppression constants so it can't silently drift out of sync: it must cover the
+ *  startup cooldown PLUS the unseen debounce (the bell can flip that long after the
+ *  causal output) plus a margin, so restore-induced bells whose causal output landed
+ *  during startup never notify. */
+export const NOTIF_SETTLE_MS = STARTUP_COOLDOWN_MS + UNSEEN_DEBOUNCE_MS + 1000;
 
 /** Whether an activity bell (with causal output time `causalTime`) may fire a
  *  notification. Suppressed if the causal output predates the startup settle window or

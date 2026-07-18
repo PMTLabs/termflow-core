@@ -458,13 +458,17 @@ pub async fn load_command_dir_usage(
 /// + `tab_id` are accepted for forward-compatible click routing; desktop notification
 /// plugins expose no click callback today, so the renderer routes to the originating
 /// tab via return-to-app focus handling. Best-effort; failures are non-fatal.
+/// Returns `true` if a toast was actually shown, `false` if suppressed because a window
+/// was focused. The renderer enqueues the tab for return-to-app routing ONLY when a
+/// toast was shown, so merely re-focusing a window later never force-switches tabs for a
+/// notification the user never received.
 #[tauri::command]
 pub fn show_activity_notification(
     app: tauri::AppHandle,
     window_label: String,
     tab_id: String,
     title: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     use tauri::Manager;
     use tauri_plugin_notification::NotificationExt;
     let _ = (&window_label, &tab_id); // reserved for a future native click-through activator
@@ -474,7 +478,7 @@ pub fn show_activity_notification(
         .filter(|(label, _)| label.as_str() != "drag-preview")
         .any(|(_, w)| w.is_focused().unwrap_or(false));
     if any_focused {
-        return Ok(()); // app is focused → in-app channels cover it; don't double-notify
+        return Ok(false); // app is focused → in-app channels cover it; don't double-notify
     }
     let body = if title.trim().is_empty() {
         "New terminal activity".to_string()
@@ -486,7 +490,8 @@ pub fn show_activity_notification(
         .title("TermFlow")
         .body(body)
         .show()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]

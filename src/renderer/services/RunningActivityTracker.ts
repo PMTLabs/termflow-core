@@ -322,7 +322,7 @@ class RunningActivityTrackerClass {
     const alreadyUnseen = new Set(
       tabsState.tabs.filter(t => t.hasUnseenOutput).map(t => t.id),
     );
-    const { toFlag, marks } = computeUnseenUpdate(
+    const { toFlag, marks, causalByTab } = computeUnseenUpdate(
       outputs,
       resolveTab,
       tabsState.activeTabId,
@@ -346,14 +346,10 @@ class RunningActivityTrackerClass {
       );
       return;
     }
-    // Causal output time per flagged tab (newest output across its processes), carried
-    // on the bell event so the notification gate can compare against the OUTPUT time,
-    // not the (later) Redux transition time.
-    const causalByTab = new Map<string, number>();
-    for (const { processId, newest } of outputs) {
-      const tabId = resolveTab(processId);
-      if (tabId) causalByTab.set(tabId, Math.max(causalByTab.get(tabId) ?? 0, newest));
-    }
+    // causalByTab (from computeUnseenUpdate) holds the settled, eligible output time for
+    // EACH flagged tab — carried on the bell so the notification gate compares against
+    // the OUTPUT time, not the (later) Redux transition. Built only from contributing
+    // outputs, so an unsettled sibling process can't lend a newer timestamp.
     for (const tabId of toFlag) {
       store.dispatch(markUnseenOutput({ tabId }));
       this.emitBell(tabId, causalByTab.get(tabId) ?? now);

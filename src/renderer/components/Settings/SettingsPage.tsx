@@ -927,8 +927,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 />
             </div>
             <span className="help-text">
-                A native desktop notification when no TermFlow window is focused. Clicking it
-                brings TermFlow forward and switches to the tab that had activity.
+                A native desktop notification when no TermFlow window is focused. When you
+                return to TermFlow (by clicking the notification, the taskbar, or Alt-Tab),
+                it switches to the tab that had activity.
             </span>
         </div>
     );

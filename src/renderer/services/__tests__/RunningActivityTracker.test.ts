@@ -426,4 +426,14 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
     window.removeEventListener('activity:bell', h);
     expect(bells).toHaveLength(0); // active-tab output never rings the bell
   });
+
+  it('emits activity:bell on the exit path (one-shot command prints then exits)', () => {
+    const bells: Array<{ tabId: string; causalTime: number }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    emitData('p1', 4);       // output, then...
+    emitExit('p1', 'tm-1');  // ...exit settles it immediately → flagOnExit bells now
+    window.removeEventListener('activity:bell', h);
+    expect(bells.some((b) => b.tabId === 'tb-1' && typeof b.causalTime === 'number')).toBe(true);
+  });
 });
