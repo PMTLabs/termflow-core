@@ -32,13 +32,17 @@ export const UNSEEN_DEBOUNCE_MS = 2000; // an inactive tab's output must stay id
                                        // before it rings the unseen bell. Riding through
                                        // bursty/intermittent output prevents the bell from
                                        // flashing on/off while a process is mid-execution.
-export const ECHO_WINDOW_MS = 250;    // output arriving within this long after a user keystroke,
-                                       // AND no larger than ECHO_MAX_BYTES, is treated as the
-                                       // shell echoing what the user just typed — NOT program
-                                       // activity. Keeps live typing from flipping the tab sweep.
-export const ECHO_MAX_BYTES = 48;     // upper size of a keystroke echo chunk. Real command output
-                                       // bursts are larger (or arrive outside the echo window), so
-                                       // this lets genuine output through while catching per-key echo.
+export const ECHO_WINDOW_MS = 250;    // output arriving within this long after a user keystroke
+                                       // (and before the command is submitted) is treated as the
+                                       // shell echoing / re-rendering what the user just typed —
+                                       // NOT autonomous program activity. Keeps live typing from
+                                       // flipping the tab sweep. This is time-based ONLY, with no
+                                       // size cap: PowerShell/PSReadLine (the Windows default) redraws
+                                       // the WHOLE input line with syntax-highlight VT sequences on
+                                       // every keystroke (60-200+ bytes), so a byte cap would let those
+                                       // repaints through and sweep while the user types. Real command
+                                       // output only arrives AFTER Enter, which resets the gate (see
+                                       // isSubmitInput), so nothing genuine is lost by dropping the cap.
 
 export interface OutputEvent {
   t: number;     // timestamp (ms)
@@ -75,25 +79,30 @@ export function isRunningFromEvents(
 }
 
 /**
- * A PTY output chunk is shell ECHO of the user's own keystrokes when it is small
- * AND arrives just after an input write. Typing "ls" makes the shell echo 'l' then
- * 's' back as output; without this, fast typing trips the >= MIN_CHUNKS running
- * heuristic and animates the tab sweep even though nothing is actually running.
- * `sinceInputMs` is `now - lastInputAt` for the chunk's terminal (Infinity when
- * there was no recent input, or -Infinity's negation after a submit — either way
- * a large gap, so not echo).
+ * A PTY output chunk is shell ECHO/repaint of the user's own keystrokes when it
+ * arrives within ECHO_WINDOW_MS of an input write (and before submit). Typing into a
+ * shell makes it re-render the input line back as output; without excluding that, live
+ * typing trips the >= MIN_CHUNKS running heuristic and animates the tab sweep even
+ * though nothing is actually running. `sinceInputMs` is `now - lastInputAt` for the
+ * chunk's terminal (Infinity when there was no recent input, or Infinity after a submit
+ * resets lastInputAt to -Infinity — either way a large gap, so not echo).
  *
- * Scope (accepted tradeoffs, by design — the reported bug is LIVE TYPING):
- * - A large/multi-line PASTE whose echo exceeds ECHO_MAX_BYTES is NOT suppressed, so
- *   pasting a command may briefly flip the sweep. A paste is a single discrete action
- *   (unlike continuous typing) and self-corrects, so this is acceptable.
- * - A chunk that COALESCES a final echo byte with a tiny immediate app response
- *   (combined <= ECHO_MAX_BYTES within the window) is dropped wholesale from the
- *   running rate; the 1s window generally absorbs this. Correlating echo bytes
- *   precisely is out of scope. Neither case affects the unseen bell (lastOutputAt).
+ * Time-based ONLY, deliberately with NO size cap. An earlier version also required the
+ * chunk to be small (<= 48B), assuming echo is per-character. That is false for the
+ * Windows default shell: PowerShell/PSReadLine repaints the WHOLE input line with
+ * syntax-highlight VT sequences on every keystroke (60-200+ bytes), so the size cap let
+ * those big repaints through and the sweep animated while typing. Since genuine command
+ * output only arrives AFTER Enter (which resets the gate via isSubmitInput), keying purely
+ * on time is correct: any output landing in the window is a consequence of the keystroke.
+ *
+ * Scope (accepted tradeoffs): output a program emits within ECHO_WINDOW_MS of a keystroke
+ * — e.g. an interactive fuzzy-finder repainting as you type, or a streaming program you
+ * type into mid-stream — is also excluded from the running rate for that window. This
+ * matches the requirement ("typing must not trigger the sweep") and self-corrects once
+ * typing pauses. It never affects the unseen bell (lastOutputAt is updated regardless).
  */
-export function isEchoChunk(bytes: number, sinceInputMs: number): boolean {
-  return sinceInputMs <= ECHO_WINDOW_MS && bytes <= ECHO_MAX_BYTES;
+export function isEchoChunk(sinceInputMs: number): boolean {
+  return sinceInputMs <= ECHO_WINDOW_MS;
 }
 
 /**
@@ -108,12 +117,12 @@ export function isSubmitInput(data: string): boolean {
 
 /**
  * Whether an output chunk should count toward the "running" rate buffer (the tab
- * sweep). Excludes keystroke echo. This ONLY gates the running sweep — the unseen
- * bell's lastOutputAt timeline is intentionally left untouched by the caller so
- * genuine background activity is never lost.
+ * sweep). Excludes keystroke echo/line-repaints (time-based; see isEchoChunk). This
+ * ONLY gates the running sweep — the unseen bell's lastOutputAt timeline is intentionally
+ * left untouched by the caller so genuine background activity is never lost.
  */
-export function shouldCountForRunning(bytes: number, now: number, lastInputAt: number): boolean {
-  return !isEchoChunk(bytes, now - lastInputAt);
+export function shouldCountForRunning(now: number, lastInputAt: number): boolean {
+  return !isEchoChunk(now - lastInputAt);
 }
 
 /**

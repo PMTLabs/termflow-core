@@ -357,6 +357,19 @@ describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
     expect(runningPayloads().every(p => !p.includes('tb-1'))).toBe(true);
   });
 
+  it('does NOT flag running while typing in PowerShell/PSReadLine (large per-keystroke line-repaints)', () => {
+    // PSReadLine (the Windows default shell's line editor) re-renders the WHOLE input
+    // line with syntax-highlighting VT sequences on every keystroke — 60-200+ bytes per
+    // key, far above a 1-byte bash/cmd echo. Those repaints are still a consequence of
+    // typing (echo), NOT autonomous program output, so they must not animate the sweep.
+    for (const ch of 'git status') {
+      emitInput('p1', ch);
+      emitData('p1', 120); // PSReadLine line-repaint for this keystroke (>> old 48B cap)
+    }
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads().every(p => !p.includes('tb-1'))).toBe(true);
+  });
+
   it('DOES flag the tab running for real command output after Enter (submit resets echo gate)', () => {
     for (const ch of 'ls') { emitInput('p1', ch); emitData('p1', 1); } // typed + echoed
     emitInput('p1', '\r'); // Enter submits → lastInputAt reset to -Infinity
@@ -366,11 +379,14 @@ describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
     expect(runningPayloads()).toContainEqual(['tb-1']);
   });
 
-  it('still flags running for a large chunk arriving right after a keystroke (not echo-sized)', () => {
+  it('does NOT flag running for a large chunk right after a keystroke (line-repaint, pre-submit)', () => {
+    // Before Enter, even a large chunk is a consequence of typing (a PSReadLine line-
+    // repaint), NOT autonomous output — echo-cancel is time-based, so it is suppressed.
+    // The same output AFTER Enter counts (see the submit-resets-gate test above).
     emitInput('p1', 'x');
-    emitData('p1', 600); // > ECHO_MAX_BYTES → real output, not echo → running via MIN_BYTES
+    emitData('p1', 600); // large line-repaint within the echo window
     jest.advanceTimersByTime(EVAL_INTERVAL_MS);
-    expect(runningPayloads()).toContainEqual(['tb-1']);
+    expect(runningPayloads().every(p => !p.includes('tb-1'))).toBe(true);
   });
 
   it('does not echo-suppress output on a background tab the user is not typing in', () => {

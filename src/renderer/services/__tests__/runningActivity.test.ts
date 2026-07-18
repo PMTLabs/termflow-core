@@ -9,7 +9,6 @@ import {
   MIN_CHUNKS,
   MIN_BYTES,
   ECHO_WINDOW_MS,
-  ECHO_MAX_BYTES,
 } from '../runningActivity';
 
 const opts = { windowMs: WINDOW_MS, minChunks: MIN_CHUNKS, minBytes: MIN_BYTES };
@@ -157,23 +156,21 @@ describe('computeUnseenUpdate', () => {
   });
 });
 
-describe('isEchoChunk (typing echo detection)', () => {
-  it('treats a small chunk right after a keystroke as echo', () => {
-    expect(isEchoChunk(1, 10)).toBe(true);
-    expect(isEchoChunk(ECHO_MAX_BYTES, ECHO_WINDOW_MS - 1)).toBe(true);
+describe('isEchoChunk (typing echo / line-repaint detection)', () => {
+  it('treats output right after a keystroke as echo, regardless of size', () => {
+    expect(isEchoChunk(10)).toBe(true);
+    expect(isEchoChunk(ECHO_WINDOW_MS - 1)).toBe(true);
+    // A large PSReadLine line-repaint landing in the window is STILL echo (no size cap).
+    expect(isEchoChunk(0)).toBe(true);
   });
-  it('is not echo when the chunk is larger than the echo size', () => {
-    expect(isEchoChunk(ECHO_MAX_BYTES + 1, 10)).toBe(false);
-  });
-  it('includes both inclusive boundaries exactly (window and size are <=)', () => {
-    expect(isEchoChunk(ECHO_MAX_BYTES, ECHO_WINDOW_MS)).toBe(true); // exactly 48B @ exactly 250ms
-    expect(isEchoChunk(1, ECHO_WINDOW_MS)).toBe(true);
+  it('includes the window boundary exactly (<=)', () => {
+    expect(isEchoChunk(ECHO_WINDOW_MS)).toBe(true); // exactly 250ms after the keystroke
   });
   it('is not echo when it arrives after the echo window', () => {
-    expect(isEchoChunk(1, ECHO_WINDOW_MS + 1)).toBe(false);
+    expect(isEchoChunk(ECHO_WINDOW_MS + 1)).toBe(false);
   });
   it('is not echo when there was no recent input (Infinity gap)', () => {
-    expect(isEchoChunk(1, Infinity)).toBe(false);
+    expect(isEchoChunk(Infinity)).toBe(false);
   });
 });
 
@@ -190,17 +187,17 @@ describe('isSubmitInput (Enter detection)', () => {
   });
 });
 
-describe('shouldCountForRunning (echo excluded from the running-rate buffer)', () => {
-  it('excludes an echo-sized chunk arriving right after a keystroke', () => {
-    expect(shouldCountForRunning(1, 1000, 995)).toBe(false); // 5ms after input, tiny
+describe('shouldCountForRunning (echo/line-repaint excluded from the running-rate buffer)', () => {
+  it('excludes a chunk arriving right after a keystroke', () => {
+    expect(shouldCountForRunning(1000, 995)).toBe(false); // 5ms after input
+  });
+  it('excludes a LARGE chunk right after a keystroke (PSReadLine line-repaint, not real output)', () => {
+    expect(shouldCountForRunning(1000, 1000)).toBe(false); // 0ms after input, any size
   });
   it('counts real output that arrives long after the last keystroke', () => {
-    expect(shouldCountForRunning(4, 1000, 1000 - (ECHO_WINDOW_MS + 1))).toBe(true);
-  });
-  it('counts a large chunk even right after a keystroke (not echo-sized)', () => {
-    expect(shouldCountForRunning(ECHO_MAX_BYTES + 1, 1000, 1000)).toBe(true);
+    expect(shouldCountForRunning(1000, 1000 - (ECHO_WINDOW_MS + 1))).toBe(true);
   });
   it('counts output after a submit (lastInputAt reset to -Infinity)', () => {
-    expect(shouldCountForRunning(4, 1000, -Infinity)).toBe(true);
+    expect(shouldCountForRunning(1000, -Infinity)).toBe(true);
   });
 });

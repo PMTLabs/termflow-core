@@ -173,13 +173,14 @@ class RunningActivityTrackerClass {
     // neither the running buffers nor the unseen lastOutputAt timeline.
     if (now < this.suppressUntil) return;
     const bytes = typeof data === 'string' ? data.length : 0;
-    // Echo-cancel: the shell echoes each typed character back as output. Excluding
-    // that echo from the running-rate buffer stops live typing from animating the tab
-    // sweep. This gates ONLY the running buffer — lastOutputAt (the unseen bell) is
-    // always updated so genuine background activity is never lost. Keystrokes only
-    // reach the terminal the user is typing in, so background tabs (no recent input)
-    // are unaffected.
-    if (shouldCountForRunning(bytes, now, this.lastInputAt.get(processId) ?? -Infinity)) {
+    // Echo-cancel: while the user types, the shell echoes / re-renders the input line
+    // back as output (a per-key line-repaint in PowerShell/PSReadLine, not just 1-byte
+    // echo). Excluding output that lands within the echo window of a keystroke stops
+    // live typing from animating the tab sweep. This gates ONLY the running buffer —
+    // lastOutputAt (the unseen bell) is always updated so genuine background activity is
+    // never lost. Keystrokes only reach the terminal the user is typing in, so background
+    // tabs (no recent input) are unaffected.
+    if (shouldCountForRunning(now, this.lastInputAt.get(processId) ?? -Infinity)) {
       const buf = this.buffers.get(processId) ?? [];
       buf.push({ t: now, bytes });
       this.buffers.set(processId, buf);
