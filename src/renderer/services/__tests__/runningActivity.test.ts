@@ -2,9 +2,14 @@ import {
   isRunningFromEvents,
   computeRunningTabIds,
   computeUnseenUpdate,
+  isEchoChunk,
+  isSubmitInput,
+  shouldCountForRunning,
   WINDOW_MS,
   MIN_CHUNKS,
   MIN_BYTES,
+  ECHO_WINDOW_MS,
+  ECHO_MAX_BYTES,
 } from '../runningActivity';
 
 const opts = { windowMs: WINDOW_MS, minChunks: MIN_CHUNKS, minBytes: MIN_BYTES };
@@ -149,5 +154,49 @@ describe('computeUnseenUpdate', () => {
     const marks = new Map<string, number>();
     computeUnseenUpdate([out('p1', 100)], resolve, null, new Set(), marks, SETTLED_NOW, DEBOUNCE);
     expect(marks.size).toBe(0);
+  });
+});
+
+describe('isEchoChunk (typing echo detection)', () => {
+  it('treats a small chunk right after a keystroke as echo', () => {
+    expect(isEchoChunk(1, 10)).toBe(true);
+    expect(isEchoChunk(ECHO_MAX_BYTES, ECHO_WINDOW_MS - 1)).toBe(true);
+  });
+  it('is not echo when the chunk is larger than the echo size', () => {
+    expect(isEchoChunk(ECHO_MAX_BYTES + 1, 10)).toBe(false);
+  });
+  it('is not echo when it arrives after the echo window', () => {
+    expect(isEchoChunk(1, ECHO_WINDOW_MS + 1)).toBe(false);
+  });
+  it('is not echo when there was no recent input (Infinity gap)', () => {
+    expect(isEchoChunk(1, Infinity)).toBe(false);
+  });
+});
+
+describe('isSubmitInput (Enter detection)', () => {
+  it('recognizes bare Enter variants as a submit', () => {
+    ['\r', '\n', '\r\n'].forEach(d => expect(isSubmitInput(d)).toBe(true));
+  });
+  it('printable typed text is not a submit', () => {
+    expect(isSubmitInput('l')).toBe(false);
+    expect(isSubmitInput('ls')).toBe(false);
+  });
+  it('a multi-char paste (even containing a newline) is not a bare submit', () => {
+    expect(isSubmitInput('a\r\nb')).toBe(false);
+  });
+});
+
+describe('shouldCountForRunning (echo excluded from the running-rate buffer)', () => {
+  it('excludes an echo-sized chunk arriving right after a keystroke', () => {
+    expect(shouldCountForRunning(1, 1000, 995)).toBe(false); // 5ms after input, tiny
+  });
+  it('counts real output that arrives long after the last keystroke', () => {
+    expect(shouldCountForRunning(4, 1000, 1000 - (ECHO_WINDOW_MS + 1))).toBe(true);
+  });
+  it('counts a large chunk even right after a keystroke (not echo-sized)', () => {
+    expect(shouldCountForRunning(ECHO_MAX_BYTES + 1, 1000, 1000)).toBe(true);
+  });
+  it('counts output after a submit (lastInputAt reset to -Infinity)', () => {
+    expect(shouldCountForRunning(4, 1000, -Infinity)).toBe(true);
   });
 });
