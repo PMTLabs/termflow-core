@@ -167,6 +167,28 @@
      chrome is contained by .terminal-display instead (TerminalDisplay.css). */
 }
 
+/* Top-row startup status (P0): shown immediately in place of a blank/centered
+   placeholder while a new pane/tab's shell is starting, anchored to the
+   content area's top-left — where the prompt/cwd normally first appears —
+   instead of centered like .terminal-placeholder. Removed once processId is
+   set (see getPaneStartupStatus / TerminalPane.tsx). */
+.terminal-startup-status {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 4px 8px;
+  /* font-family and font-size are set inline in TerminalPane.tsx so the status
+     honours the terminal's own font settings (settings.fontFamily / fontSize)
+     rather than a hardcoded stack. */
+  color: var(--placeholder-color, #666666);
+  white-space: nowrap;
+}
+
+.terminal-startup-status.failed {
+  color: #e06c75;
+}
+
 /* Placeholder for Terminal Display */
 .terminal-placeholder {
   width: 100%;

@@ -14,6 +14,7 @@ import { TerminalPane } from './TerminalPane';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { terminalService } from '../../services/TerminalService';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
+import { closePaneNonBlocking } from '../../services/paneClose';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -82,7 +83,11 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
     return () => window.removeEventListener('ui:requestPaneClose', onRequest);
   }, [handleClose, paneTree]);
 
-  const performClose = useCallback(async (paneId: string) => {
+  // Non-blocking close (P0 — Faster Pane Close): the pane must disappear from
+  // the UI immediately on confirm, so the backend PTY teardown (a multi-second
+  // await) must never gate it. Ordering is encoded in the pure helper —
+  // performClose only resolves the terminalId and supplies real deps.
+  const performClose = useCallback((paneId: string) => {
     // Find the terminal ID for this pane
     const findTerminalId = (node: PaneNode): string | null => {
       if (node.id === paneId && node.type === 'terminal') {
@@ -96,23 +101,15 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       }
       return null;
     };
-    
-    if (paneTree) {
-      const terminalId = findTerminalId(paneTree);
-      if (terminalId) {
-        try {
-          await terminalService.closeTerminal(terminalId);
-          // Spec 045 §3.3: the pane is gone for good — drop its directory so the
-          // map cannot grow without bound and a recycled id can't inherit it.
-          clearCwdSnapshot(terminalId);
-          console.log(`PaneManager: Closed terminal ${terminalId} for pane ${paneId}`);
-        } catch (error) {
-          console.error(`Failed to close terminal for pane ${paneId}:`, error);
-        }
-      }
-    }
-    
-    dispatch(closePane(paneId));
+
+    const terminalId = paneTree ? findTerminalId(paneTree) : null;
+
+    closePaneNonBlocking({
+      terminalId,
+      removeFromUi: () => dispatch(closePane(paneId)),
+      closeTerminal: (id) => terminalService.closeTerminal(id),
+      clearCwdSnapshot,
+    });
   }, [dispatch, paneTree]);
 
   const handleResize = useCallback((paneId: string, size: number) => {

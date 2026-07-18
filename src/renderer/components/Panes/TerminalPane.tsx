@@ -15,6 +15,7 @@ import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
 import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
 import { usePaneDrag } from './dnd/usePaneDrag';
+import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -71,6 +72,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const dispatch = useDispatch();
   const paneRef = useRef<HTMLDivElement>(null);
   const [processId, setProcessId] = useState<string | undefined>();
+  // Set when the most recent create/restart attempt's promise rejected. Drives
+  // the top-row "Failed to start shell" status (P0: never leave a silent blank
+  // while startup is in flight or has failed).
+  const [startupFailed, setStartupFailed] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(name || 'Terminal');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -94,6 +99,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
   const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const fontSize = useSelector((state: RootState) => state.settings.fontSize);
+  // Terminal font family — the startup status must render in the same font as
+  // the terminal it stands in for (not a hardcoded stack), so it honours the
+  // user's font settings.
+  const fontFamily = useSelector((state: RootState) => state.settings.fontFamily);
   // Per-pane zoom multiplier (keyed by terminalId; defaults to 100%). Multiplied
   // into the font size we hand the engine, so zoom reflows this pane (more zoom =
   // larger text, fewer cols/rows) WITHOUT changing the shared font-size setting.
@@ -113,6 +122,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       console.log('TerminalPane: No terminalId, skipping terminal creation');
       return;
     }
+
+    // Clear any stale "Failed to start shell" status before (re)resolving this
+    // terminalId, so an early-return path (reuse / locked / tab-gone) can never
+    // surface a false failure left over from a prior id on this instance. The
+    // genuine-spawn path below relies on this having run first.
+    setStartupFailed(false);
 
     // If a process is already registered for this exact terminalId, reuse it.
     // This MUST come before the "tab no longer exists" guard below: a pane moved
@@ -219,6 +234,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         terminalInitMap.delete(terminalId);
         terminalInitPromises.delete(terminalId);
         terminalInitLock.delete(terminalId);
+        setStartupFailed(true);
       });
 
     return () => {
@@ -613,9 +629,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               }}
             />
           ) : terminalId && !processId ? (
-            <div className="terminal-placeholder">
-              Initializing terminal...
-            </div>
+            (() => {
+              const status = getPaneStartupStatus(processId, startupFailed);
+              // status is never null here (processId is falsy in this branch),
+              // but the check keeps the helper's contract honest.
+              return status ? (
+                <div
+                  className={`terminal-startup-status${status.failed ? ' failed' : ''}`}
+                  // Match the terminal's own font (family + effective, zoom-aware
+                  // size) so the status reads like the shell's first line.
+                  style={{ fontFamily, fontSize: effectiveFontSize }}
+                >
+                  {status.text}
+                </div>
+              ) : null;
+            })()
           ) : terminalId ? (
             <div className="terminal-placeholder">
               Waiting for shell process...
