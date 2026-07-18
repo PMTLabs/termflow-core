@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [ main, master, develop ]
 
+# The Playwright e2e/performance suites in this workflow are QUARANTINED: they target
+# the obsolete Electron build and give no signal on the current Tauri product (the
+# webServer cold-compiles the Rust backend past its timeout, and on a runner without a
+# Rust toolchain it fails immediately on `cargo metadata`). They stay here — documented
+# and ready to rewrite — but do not run. Flip this flag to 'true' once the suites are
+# rewritten for Tauri. The real signal in the e2e-tests job (the unit tests) always runs.
+env:
+  RUN_QUARANTINED_E2E: 'false'
+
 jobs:
   e2e-tests:
     timeout-minutes: 60
@@ -13,7 +22,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
@@ -28,12 +37,10 @@ jobs:
     - name: Build application
       run: npm run build
 
-    # Non-blocking: the browsers are only needed by the QUARANTINED e2e suite below
-    # (continue-on-error). `--with-deps` shells out to apt, which on the self-hosted
-    # runner can fail on a stuck apt lock and would otherwise fail the whole job —
-    # taking down the real signal (the unit tests, which need no browser). Keep this
-    # soft so a setup hiccup never blocks CI.
+    # Browsers are only needed by the QUARANTINED e2e suite below, which is gated off
+    # via RUN_QUARANTINED_E2E — so skip the install while the suite is dormant.
     - name: Install Playwright Browsers
+      if: env.RUN_QUARANTINED_E2E == 'true'
       run: npx playwright install
       continue-on-error: true
 
@@ -43,25 +50,28 @@ jobs:
     - name: Run unit tests
       run: npm test
 
-    # QUARANTINED (non-blocking): this Playwright suite targets the OBSOLETE Electron
-    # build (electron-launcher, webServer port 3000) — the product is now Tauri, so it
-    # gives no signal and cold-compiles the Rust backend past the webServer timeout.
-    # Kept running for visibility; must be rewritten for Tauri (tracked follow-up).
+    # QUARANTINED: targets the OBSOLETE Electron build (electron-launcher, webServer
+    # port 3000). On Tauri it gives no signal and cold-compiles the Rust backend past
+    # the webServer timeout; on a runner without a Rust toolchain it dies immediately
+    # on `cargo metadata`. Gated off via RUN_QUARANTINED_E2E — re-enable once the suite
+    # is rewritten for Tauri (tracked follow-up). continue-on-error is kept so that a
+    # re-enabled but still-flaky suite never blocks CI during the rewrite.
     - name: Run E2E tests
+      if: env.RUN_QUARANTINED_E2E == 'true'
       run: npm run test:e2e
       continue-on-error: true
 
     - name: Upload test results
       uses: actions/upload-artifact@v4
-      if: always()
+      if: always() && env.RUN_QUARANTINED_E2E == 'true'
       with:
         name: playwright-report
         path: playwright-report/
         retention-days: 30
-    
+
     - name: Upload test videos
       uses: actions/upload-artifact@v4
-      if: always()
+      if: always() && env.RUN_QUARANTINED_E2E == 'true'
       with:
         name: test-videos
         path: test-results/
@@ -70,11 +80,16 @@ jobs:
   performance-tests:
     timeout-minutes: 30
     runs-on: [self-hosted]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
+    # QUARANTINED job — same obsolete Electron Playwright harness, no signal on Tauri.
+    # Disabled until rewritten. Original trigger was:
+    #   github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # (the env context is not available in a job-level `if`, so this uses a literal
+    # false rather than the RUN_QUARANTINED_E2E flag the e2e steps use.)
+    if: false
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
@@ -100,7 +115,7 @@ jobs:
     - name: Run performance tests
       run: npx playwright test performance.spec.ts --reporter=json
       continue-on-error: true
-    
+
     - name: Process performance results
       run: |
         echo "Performance test completed"
