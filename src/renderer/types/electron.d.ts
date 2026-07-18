@@ -177,6 +177,11 @@ export interface ElectronAPI {
   // Stream 4: per-directory command usage for cwd-relevant suggestion ranking.
   addCommandDirUsage: (command: string, dir: string) => Promise<void>;
   loadCommandDirUsage: (cwd: string) => Promise<DirUsageRow[]>;
+  // Stream 5: "Open in TermFlow" folder context menu.
+  takePendingOpenPath: () => Promise<string | null>;
+  installFileManagerIntegration: () => Promise<void>;
+  uninstallFileManagerIntegration: () => Promise<void>;
+  isFileManagerIntegrationInstalled: () => Promise<boolean>;
   getDefaultProfile: () => Promise<string>;
   setDefaultProfile: (profileId: string) => Promise<boolean>;
   getTheme: () => Promise<any>;

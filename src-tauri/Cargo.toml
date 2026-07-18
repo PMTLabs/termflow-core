@@ -47,6 +47,7 @@ tauri-plugin-dialog = "2"
 # key, macOS LaunchAgent, Linux autostart .desktop). Desktop-only crate; the app only
 # builds for desktop, so it is a plain dependency (no cfg(desktop) target section).
 tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }

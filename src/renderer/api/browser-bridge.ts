@@ -343,6 +343,13 @@ class BrowserBridge implements ElectronAPI {
     async addCommandDirUsage(_command: string, _dir: string): Promise<void> { /* no-op */ }
     async loadCommandDirUsage(_cwd: string): Promise<import('../types/electron').DirUsageRow[]> { return []; }
 
+    // Stream 5: folder context-menu integration is a native/desktop feature — no-op in
+    // the browser host.
+    async takePendingOpenPath(): Promise<string | null> { return null; }
+    async installFileManagerIntegration(): Promise<void> { /* no-op */ }
+    async uninstallFileManagerIntegration(): Promise<void> { /* no-op */ }
+    async isFileManagerIntegrationInstalled(): Promise<boolean> { return false; }
+
     async getDefaultProfile(): Promise<string> {
         return (await this.getConfigValue('defaultProfile')) || 'default';
     }
