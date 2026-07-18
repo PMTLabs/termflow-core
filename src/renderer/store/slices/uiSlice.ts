@@ -10,6 +10,10 @@ export interface Toast {
     // Sticky toasts never auto-dismiss — they stay until the user clicks to close.
     // Used for activity notifications the user asked to acknowledge explicitly.
     sticky?: boolean;
+    // The tab this toast refers to (activity notifications). Lets us auto-dismiss it
+    // once the user opens that tab (e.g. by clicking the OS notification) — the toast
+    // is redundant once the activity has been seen. See dismissTabToasts.
+    tabId?: string;
 }
 
 interface DialogState {
@@ -49,7 +53,7 @@ const uiSlice = createSlice({
         hideDialog: (state) => {
             state.dialog.isOpen = false;
         },
-        addToast: (state, action: PayloadAction<{ message: string; type?: ToastType; duration?: number; sticky?: boolean }>) => {
+        addToast: (state, action: PayloadAction<{ message: string; type?: ToastType; duration?: number; sticky?: boolean; tabId?: string }>) => {
             const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
             state.toasts.push({
                 id,
@@ -57,13 +61,19 @@ const uiSlice = createSlice({
                 type: action.payload.type || 'info',
                 duration: action.payload.duration || 3000,
                 sticky: action.payload.sticky,
+                tabId: action.payload.tabId,
             });
         },
         removeToast: (state, action: PayloadAction<string>) => {
             state.toasts = state.toasts.filter(t => t.id !== action.payload);
         },
+        // Dismiss every toast tied to a tab — used when the user opens that tab (e.g. via
+        // clicking the OS notification), so the now-redundant in-app activity toast closes.
+        dismissTabToasts: (state, action: PayloadAction<{ tabId: string }>) => {
+            state.toasts = state.toasts.filter(t => t.tabId !== action.payload.tabId);
+        },
     },
 });
 
-export const { showDialog, hideDialog, addToast, removeToast } = uiSlice.actions;
+export const { showDialog, hideDialog, addToast, removeToast, dismissTabToasts } = uiSlice.actions;
 export default uiSlice.reducer;

@@ -12,7 +12,7 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
-import uiReducer, { addToast } from '../../../store/slices/uiSlice';
+import uiReducer, { addToast, dismissTabToasts } from '../../../store/slices/uiSlice';
 
 // Jest has no CSS transform; stub the stylesheet import pulled in by the component.
 jest.mock('../ToastContainer.css', () => ({}));
@@ -82,5 +82,19 @@ describe('ToastContainer — auto-dismiss vs sticky', () => {
         expect(item).toBeTruthy();
         act(() => { item.click(); });
         expect(store.getState().ui.toasts).toHaveLength(0);
+    });
+
+    it('dismissTabToasts removes only the matching tab\'s toasts', () => {
+        const store = makeStore();
+        mount(store);
+        act(() => {
+            store.dispatch(addToast({ message: 'A', sticky: true, tabId: 'tb-1' }));
+            store.dispatch(addToast({ message: 'B', sticky: true, tabId: 'tb-2' }));
+        });
+        expect(store.getState().ui.toasts).toHaveLength(2);
+        act(() => { store.dispatch(dismissTabToasts({ tabId: 'tb-1' })); });
+        const remaining = store.getState().ui.toasts;
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0].tabId).toBe('tb-2');
     });
 });

@@ -8,7 +8,7 @@
 // (see notificationLogic) keeps the service quiet until the app has settled after
 // startup and during repaint bursts.
 import { store } from '../store';
-import { addToast } from '../store/slices/uiSlice';
+import { addToast, dismissTabToasts } from '../store/slices/uiSlice';
 import { setActiveTab } from '../store/slices/tabsSlice';
 import { NOTIF_SETTLE_MS, shouldNotify } from './notificationLogic';
 import { ACTIVITY_CHIME_DATA_URI } from '../assets/activityChime';
@@ -28,6 +28,7 @@ class NotificationService {
   private burstUntil = 0;
   private audio: HTMLAudioElement | null = null;
   private lastSoundAt = -Infinity;
+  private lastActiveTabId: string | null = null; // to detect activeTab changes
   // Tabs we requested an OS notification for while this window was unfocused, still
   // unseen. On focus regain we switch to the most recent — the "return to the app and
   // land on the right tab" path (desktop notification plugins expose no click callback).
@@ -64,6 +65,22 @@ class NotificationService {
     this.cleanups.push(onWindowFocusChange((focused) => {
       if (focused) this.routePendingOnFocus();
     }));
+
+    // Once the user opens a tab (via the OS-notification click, return-to-app routing,
+    // or a plain tab click), its in-app activity toast is redundant — dismiss it so the
+    // sticky toast doesn't linger after the activity has been seen. The store fires on
+    // every change; we act only when activeTabId actually changes to a tab that still
+    // has a toast (avoids needless re-renders).
+    this.lastActiveTabId = store.getState().tabs.activeTabId;
+    const unsubActive = store.subscribe(() => {
+      const active = store.getState().tabs.activeTabId;
+      if (active === this.lastActiveTabId) return;
+      this.lastActiveTabId = active;
+      if (active && store.getState().ui.toasts.some((t) => t.tabId === active)) {
+        store.dispatch(dismissTabToasts({ tabId: active }));
+      }
+    });
+    this.cleanups.push(unsubActive);
   }
 
   stop(): void {
@@ -71,6 +88,7 @@ class NotificationService {
     this.cleanups = [];
     this.pendingOsTabs = [];
     this.lastSoundAt = -Infinity;
+    this.lastActiveTabId = null;
     this.burstUntil = 0;
     if (this.audio) {
       try { this.audio.pause(); } catch { /* ignore */ }
@@ -95,9 +113,15 @@ class NotificationService {
 
     if (s.notifySoundEnabled) this.playChime();
     if (s.notifyToastEnabled) {
-      // Sticky: an activity toast stays until the user clicks to close it, so a
-      // notification that arrives while they're away isn't missed on return.
-      store.dispatch(addToast({ message: `New activity in "${tabTitle}"`, type: 'info', sticky: true }));
+      // Sticky + tagged with the tab: it stays until the user clicks to close OR opens
+      // the tab (see the activeTab subscription in start()), so a notification that
+      // arrives while they're away isn't missed on return, yet doesn't linger once seen.
+      store.dispatch(addToast({
+        message: `New activity in "${tabTitle}"`,
+        type: 'info',
+        sticky: true,
+        tabId: detail.tabId,
+      }));
     }
     if (s.notifyOsEnabled) {
       // Do NOT pre-gate on this window's isWindowFocused(): that per-window cached flag

@@ -6,19 +6,30 @@ import { NOTIF_SETTLE_MS } from '../notificationLogic';
 const dispatch = jest.fn();
 const mockState: {
   settings: { notifySoundEnabled: boolean; notifyToastEnabled: boolean; notifyOsEnabled: boolean };
-  tabs: { tabs: Array<{ id: string; title: string; hasUnseenOutput?: boolean }> };
+  tabs: { activeTabId: string | null; tabs: Array<{ id: string; title: string; hasUnseenOutput?: boolean }> };
+  ui: { toasts: Array<{ id: string; tabId?: string; message?: string }> };
 } = {
   settings: { notifySoundEnabled: false, notifyToastEnabled: false, notifyOsEnabled: false },
-  tabs: { tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] },
+  tabs: { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] },
+  ui: { toasts: [] },
 };
 
 // Controllable window-focus mock so tests can drive the OS path and focus-regain routing.
 let mockFocused = true;
 let focusCb: ((f: boolean) => void) | null = null;
+// Holder so tests can fire the store-change callback the service subscribes with.
+const storeSub: { cb: (() => void) | null } = { cb: null };
 
-jest.mock('../../store', () => ({ store: { dispatch, getState: () => mockState } }));
+jest.mock('../../store', () => ({
+  store: {
+    dispatch,
+    getState: () => mockState,
+    subscribe: (cb: () => void) => { storeSub.cb = cb; return () => { storeSub.cb = null; }; },
+  },
+}));
 jest.mock('../../store/slices/uiSlice', () => ({
   addToast: (p: unknown) => ({ type: 'ui/addToast', payload: p }),
+  dismissTabToasts: (p: unknown) => ({ type: 'ui/dismissTabToasts', payload: p }),
 }));
 jest.mock('../../store/slices/tabsSlice', () => ({
   setActiveTab: (id: string) => ({ type: 'tabs/setActiveTab', payload: id }),
@@ -56,6 +67,8 @@ describe('NotificationService — in-app channels', () => {
     playMock.mockClear();
     mockFocused = true;
     mockState.settings = { notifySoundEnabled: false, notifyToastEnabled: false, notifyOsEnabled: false };
+    mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
+    mockState.ui = { toasts: [] };
     notificationService.stop();
     notificationService.start();
   });
@@ -67,13 +80,32 @@ describe('NotificationService — in-app channels', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('fires a sticky in-app toast naming the tab when enabled and settled', () => {
+  it('fires a sticky, tab-tagged in-app toast naming the tab when enabled and settled', () => {
     mockState.settings.notifyToastEnabled = true;
     bell('tb-1', AFTER_SETTLE());
     const toast = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'ui/addToast');
     expect(toast?.payload.message).toContain('build');
-    // Activity toasts stay until the user clicks to close (sticky: no auto-dismiss).
+    // Activity toasts stay until the user clicks to close (sticky: no auto-dismiss)...
     expect(toast?.payload.sticky).toBe(true);
+    // ...and are tagged with their tab so opening it auto-dismisses the toast.
+    expect(toast?.payload.tabId).toBe('tb-1');
+  });
+
+  it('dismisses a tab\'s in-app toast when that tab becomes active (e.g. OS-notification click)', () => {
+    // A toast exists for tb-1; the user opens tb-1 (activeTabId changes) → dismiss it.
+    mockState.ui.toasts = [{ id: 'x', tabId: 'tb-1', message: 'New activity in "build"' }];
+    mockState.tabs.activeTabId = 'tb-1';
+    storeSub.cb?.(); // simulate the store change reaching the service
+    const dismiss = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'ui/dismissTabToasts');
+    expect(dismiss?.payload.tabId).toBe('tb-1');
+  });
+
+  it('does NOT dismiss when the newly active tab has no toast (no needless dispatch)', () => {
+    mockState.ui.toasts = [{ id: 'x', tabId: 'tb-1' }];
+    mockState.tabs.activeTabId = 'tb-2'; // a different tab, no toast for it
+    storeSub.cb?.();
+    const dismiss = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'ui/dismissTabToasts');
+    expect(dismiss).toBeUndefined();
   });
 
   it('plays the chime when sound is enabled, throttling repeats', () => {
@@ -96,7 +128,8 @@ describe('NotificationService — OS notification + return-to-app routing', () =
     invokeMock.mockClear();
     invokeMock.mockResolvedValue(true);
     mockState.settings = { notifySoundEnabled: false, notifyToastEnabled: false, notifyOsEnabled: true };
-    mockState.tabs = { tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
+    mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
+    mockState.ui = { toasts: [] };
     mockFocused = false; // app not focused → OS path eligible
     notificationService.stop();
     notificationService.start();
@@ -139,7 +172,7 @@ describe('NotificationService — OS notification + return-to-app routing', () =
   it('only routes to a tab that is still unseen', async () => {
     bell('tb-1', AFTER_SETTLE());
     await flush();
-    mockState.tabs = { tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: false }] }; // user already saw it
+    mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: false }] }; // user already saw it
     dispatch.mockClear();
     focusCb?.(true);
     expect(dispatch).not.toHaveBeenCalled();
