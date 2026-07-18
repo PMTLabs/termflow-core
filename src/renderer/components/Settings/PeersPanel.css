@@ -37,6 +37,22 @@
   letter-spacing: 1px;
 }
 
+/* Firewall/port guidance: the port itself is the thing to spot, so it leads the row. */
+.peers-ports-card .ports-title {
+  margin: 0 0 6px;
+}
+
+.peers-ports-card .port-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.peers-ports-card .port-num {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .pairing-addresses {
   margin-top: 8px;
 }

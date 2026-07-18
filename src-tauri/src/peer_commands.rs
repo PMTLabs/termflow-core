@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::fabric_manager::FabricClient;
+use crate::fabric_manager::{FabricClient, FabricError, FABRIC_PEER_PORT};
 use crate::state::AppState;
 
 // --- Wire-contract DTOs (fabric ↔ renderer) --------------------------------
@@ -145,18 +145,22 @@ fn peers_from_fabric(raw: serde_json::Value) -> Result<Vec<PeerInfoDto>, serde_j
         .collect())
 }
 
-/// Turn a `reqwest` failure from a control-API call into a clear, user-facing
-/// `Err(String)`. Connection refused / timeout means the fabric isn't running
-/// (peering not installed / not up yet); a non-2xx surfaces the status; anything
-/// else falls through with the raw error. `op` names the failed command so the
-/// renderer can attribute it.
-fn control_err(op: &str, e: reqwest::Error) -> String {
+/// Turn a control-API failure into a clear, user-facing `Err(String)`. Connection
+/// refused / timeout means the fabric isn't running (peering not installed / not up
+/// yet); anything else surfaces the fabric's OWN explanation.
+///
+/// The non-2xx arm used to report only `fabric returned {status}`, which is why a
+/// pairing failure reached the user as an unactionable "502 Bad Gateway": the fabric
+/// always says why in its `{"error": ...}` body (e.g. "pairing not enabled" on the
+/// remote), and [`FabricError`] now carries that through. The renderer classifies the
+/// resulting message into guidance (see `classifyPairError` in `AddPeerModal.tsx`), so
+/// the fabric's wording must survive verbatim here. `op` names the failed command so
+/// the renderer can attribute it.
+fn control_err(op: &str, e: FabricError) -> String {
     if e.is_connect() {
         format!("{op}: peering fabric is not running (connection refused)")
     } else if e.is_timeout() {
         format!("{op}: peering fabric did not respond (timeout)")
-    } else if let Some(status) = e.status() {
-        format!("{op}: fabric returned {status}")
     } else {
         format!("{op}: {e}")
     }
@@ -174,8 +178,11 @@ fn health_owner_matches(health: &serde_json::Value, my_instance_id: &str) -> boo
 
 /// Report whether the peering fabric is reachable, and (if so) its `/health` body.
 ///
-/// - Reachable → `{ "installed": true, ...health }` (the fabric's health fields
-///   merged onto the `installed` flag).
+/// - Reachable → `{ "installed": true, "peerPort": …, ...health }` (the fabric's health
+///   fields merged onto the `installed` flag). `peerPort` is the inbound listener remote
+///   peers dial — the one port a user must open to pair across a router — and is sourced
+///   from [`FABRIC_PEER_PORT`], the same constant the core hands the fabric via
+///   `fabric_env`, so the Peers panel can never advertise a port the fabric isn't on.
 /// - Connection refused / unreachable / timeout → `Ok({ "installed": false })`
 ///   (NOT an `Err`), so the absent-fabric path is a normal, non-error UI state.
 /// - Any other failure (e.g. the fabric answered `/health` with a 5xx) → `Err`.
@@ -193,6 +200,7 @@ pub async fn fabric_status(state: State<'_, AppState>) -> Result<serde_json::Val
             }
             let mut obj = health.as_object().cloned().unwrap_or_default();
             obj.insert("installed".to_string(), serde_json::Value::Bool(true));
+            obj.insert("peerPort".to_string(), serde_json::json!(FABRIC_PEER_PORT));
             Ok(serde_json::Value::Object(obj))
         }
         // Nothing listening on the control port (fabric not installed / not yet up)

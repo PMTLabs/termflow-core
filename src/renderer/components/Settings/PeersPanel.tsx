@@ -66,6 +66,10 @@ export const PeersPanel: React.FC = () => {
     const [localTerminals, setLocalTerminals] = useState<{ id: string; title: string }[]>([]);
 
     const [statusChecked, setStatusChecked] = useState(false);
+    // The fabric's inbound peer port, reported by `fabricStatus`. Sourced from the core's
+    // FABRIC_PEER_PORT (the same value it hands the fabric), so the port shown here is
+    // always the one the listener is actually on.
+    const [peerPort, setPeerPort] = useState<number | undefined>(undefined);
     const [interfaces, setInterfaces] = useState<NetworkInterfaceInfo[]>([]);
     const [pairingCode, setPairingCode] = useState<PairingCode | null>(null);
     const [showAddPeer, setShowAddPeer] = useState(false);
@@ -111,6 +115,7 @@ export const PeersPanel: React.FC = () => {
                     const acc = (status as Record<string, unknown>)?.acceptPeers ??
                         (status as Record<string, unknown>)?.accept_peers;
                     if (typeof acc === 'boolean') dispatch(setAcceptPeersState(acc));
+                    if (typeof status?.peerPort === 'number') setPeerPort(status.peerPort);
                 }
             } catch (err) {
                 console.error('fabricStatus failed:', err);
@@ -244,6 +249,27 @@ export const PeersPanel: React.FC = () => {
                 <span>Keep running in background (hide to tray on close, so peering stays active)</span>
             </label>
 
+            <div className="connection-card peers-ports-card">
+                <p className="ports-title"><strong>Network port</strong></p>
+                <div className="port-row">
+                    <code className="port-num">{peerPort ?? 8790}/TCP</code>
+                    <span className="help-text">
+                        Inbound. Other machines connect here to pair and to reach the terminals
+                        you grant them. This is the only port peering needs — the rest of
+                        TermFlow stays bound to localhost.
+                    </span>
+                </div>
+                <p className="help-text">
+                    On the same LAN or over a VPN such as Tailscale this normally works with no
+                    setup. To pair across a router or the internet, allow{' '}
+                    <strong>{peerPort ?? 8790}/TCP inbound</strong> through the firewall on
+                    whichever machine accepts the connection — the machine that shows the pairing
+                    code. A VPN is the recommended route: peering identifies a peer by the address
+                    it connects from, so NAT between the two machines can leave them unable to
+                    reach each other back.
+                </p>
+            </div>
+
             <div className="peers-toolbar">
                 <button className="link-btn" onClick={() => { void showPairingCode(); }}>
                     Show pairing code
@@ -262,7 +288,9 @@ export const PeersPanel: React.FC = () => {
                     <p><code className="pairing-code">{pairingCode.code}</code></p>
                     {interfaces.length > 0 && (
                         <div className="pairing-addresses">
-                            <p className="help-text">This machine is reachable at:</p>
+                            <p className="help-text">
+                                This machine is reachable at (on port {peerPort ?? 8790}):
+                            </p>
                             {interfaces.map((iface) => (
                                 <div className="nic-row" key={`${iface.name}-${iface.ip}`}>
                                     <span className="nic-name">{iface.name}</span>
@@ -361,6 +389,7 @@ export const PeersPanel: React.FC = () => {
                 <AddPeerModal
                     onAdded={() => { void refreshPeers(); }}
                     onClose={() => setShowAddPeer(false)}
+                    peerPort={peerPort}
                 />
             )}
 
