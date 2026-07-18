@@ -18,6 +18,7 @@ pub mod layout_endpoints;
 pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
+mod native_notify;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 use tauri_plugin_shell::ShellExt;
@@ -800,6 +801,13 @@ pub fn run() {
         None,
     ))
     .setup(move |app| {
+        // Unpackaged Windows apps need an AUMID registered before WinRT can
+        // attribute and deliver native toast notifications. This is idempotent
+        // and deliberately non-fatal so a registry policy cannot prevent launch.
+        if let Err(e) = crate::native_notify::register_app_for_notifications() {
+            log::warn!("Failed to register native notification identity: {}", e);
+        }
+
         // Handle headless mode
         if is_headless {
             if let Some(window) = app.get_webview_window("main") {
@@ -1004,6 +1012,7 @@ pub fn run() {
         commands::delete_command_history,
         commands::add_command_dir_usage,
         commands::load_command_dir_usage,
+        commands::show_activity_notification,
         commands::check_connection_health,
         commands::generate_api_token,
         network_commands::get_network_config,

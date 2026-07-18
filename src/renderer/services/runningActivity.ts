@@ -170,9 +170,13 @@ export function computeUnseenUpdate(
   marks: Map<string, number>,
   now: number,
   debounceMs: number,
-): { toFlag: string[]; marks: Map<string, number> } {
+): { toFlag: string[]; marks: Map<string, number>; causalByTab: Map<string, number> } {
   const nextMarks = new Map(marks);
   const toFlag = new Set<string>();
+  // Causal output time per flagged tab — built ONLY from the settled, eligible outputs
+  // that actually cause the flag (not from all outputs), so the notification gate can't
+  // be defeated by an unsettled sibling process borrowing a newer timestamp.
+  const causalByTab = new Map<string, number>();
   for (const { processId, newest } of outputs) {
     if (newest <= (nextMarks.get(processId) ?? -Infinity)) continue; // nothing new
     if (now - newest < debounceMs) continue; // still streaming → wait for it to settle
@@ -181,6 +185,7 @@ export function computeUnseenUpdate(
     nextMarks.set(processId, newest); // resolved + settled → this output is now accounted for
     if (tabId === activeTabId || alreadyUnseen.has(tabId)) continue;
     toFlag.add(tabId);
+    causalByTab.set(tabId, Math.max(causalByTab.get(tabId) ?? 0, newest));
   }
-  return { toFlag: Array.from(toFlag), marks: nextMarks };
+  return { toFlag: Array.from(toFlag), marks: nextMarks, causalByTab };
 }

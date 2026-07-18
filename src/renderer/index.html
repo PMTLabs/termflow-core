@@ -11,7 +11,11 @@
          http://ipc.localhost / ipc://localhost are Tauri v2's invoke IPC origins
          (WebView2 routes invoke() through a fetch to that host on Windows) —
          without them every tauri command fetch is CSP-blocked. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* http://ipc.localhost ipc://localhost;">
+    <!-- media-src 'self' data: is REQUIRED for the activity-notification chime, which is
+         an inline data:audio/wav URI (src/renderer/assets/activityChime.ts). Without it,
+         default-src 'self' governs <audio> and CSP blocks the data: source — the sound
+         fails silently and the error is mis-attributed to autoplay policy. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* http://ipc.localhost ipc://localhost;">
     <title>Auto Terminal</title>
     <style>
         body {

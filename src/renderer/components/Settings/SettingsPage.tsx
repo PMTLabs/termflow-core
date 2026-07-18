@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled } from '../../store/slices/settingsSlice';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
@@ -101,7 +101,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
     // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
@@ -125,14 +125,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Connections is excluded — it owns its own "Save & apply (restart)" flow.
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
-        startup: 'Startup & Integration',
+        notifications: 'Notifications', startup: 'Startup & Integration',
         profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
         peers: 'Peers', about: 'About & Legal',
     };
     // Peers/Connections own their own live flow; About & Legal is read-only; Startup
-    // applies live and its state is OS-owned (autostart plugin) — none are dirty-tracked.
+    // and Notifications apply live (persisted on change) — none are dirty-tracked.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'startup';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'startup' && c !== 'notifications';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -193,8 +193,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // on mount; an already-open tab receives a DOM event. Ignore unknown ids.
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
-            c === 'appearance' || c === 'terminal' || c === 'startup' || c === 'profiles' ||
-            c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'about';
+            c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
+            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
             requestCategoryChange(pending);
@@ -663,6 +663,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             ),
         },
         {
+            id: 'notifications',
+            label: 'Notifications',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                </svg>
+            ),
+        },
+        {
             id: 'startup',
             label: 'Startup & Integration',
             icon: (
@@ -871,6 +880,59 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setAutostartBusy(false);
         }
     };
+
+    const renderNotifications = () => (
+        <div className="settings-section">
+            <h2>Notifications</h2>
+            <p className="help-text" style={{ marginTop: 0 }}>
+                Alerts fire only when a background tab shows the activity bell (unseen output),
+                never for the tab you're looking at, and only after TermFlow has settled on startup.
+            </p>
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="notify-sound">
+                    Play a sound
+                </label>
+                <input
+                    id="notify-sound"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.notifySoundEnabled}
+                    onChange={(e) => dispatch(setNotifySoundEnabled(e.target.checked))}
+                />
+            </div>
+            <span className="help-text">A short chime when a background tab has new activity.</span>
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="notify-toast">
+                    Show an in-app notification
+                </label>
+                <input
+                    id="notify-toast"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.notifyToastEnabled}
+                    onChange={(e) => dispatch(setNotifyToastEnabled(e.target.checked))}
+                />
+            </div>
+            <span className="help-text">A toast inside TermFlow naming the tab with new activity.</span>
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="notify-os">
+                    Show OS notifications when TermFlow isn't focused
+                </label>
+                <input
+                    id="notify-os"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.notifyOsEnabled}
+                    onChange={(e) => dispatch(setNotifyOsEnabled(e.target.checked))}
+                />
+            </div>
+            <span className="help-text">
+                A native desktop notification when no TermFlow window is focused. When you
+                return to TermFlow (by clicking the notification, the taskbar, or Alt-Tab),
+                it switches to the tab that had activity.
+            </span>
+        </div>
+    );
 
     const renderStartup = () => (
         <div className="settings-section">
@@ -1345,6 +1407,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         switch (activeCategory) {
             case 'appearance': return renderAppearance();
             case 'terminal': return renderTerminalBehavior();
+            case 'notifications': return renderNotifications();
             case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
             case 'shortcuts': return renderShortcuts();

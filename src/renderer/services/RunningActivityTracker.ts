@@ -243,7 +243,10 @@ class RunningActivityTrackerClass {
     // Skip a redundant dispatch if the tab is already flagged (mirrors computeUnseenUpdate);
     // markUnseenOutput is itself a no-op for the active/missing tab.
     const alreadyUnseen = tabsState.tabs.some(t => t.id === tabId && t.hasUnseenOutput);
-    if (!alreadyUnseen) store.dispatch(markUnseenOutput({ tabId }));
+    if (!alreadyUnseen) {
+      store.dispatch(markUnseenOutput({ tabId }));
+      this.emitBell(tabId, last); // exit-settled output is the causal time
+    }
   }
 
   private resolveTab(processId: string): string | null {
@@ -319,7 +322,7 @@ class RunningActivityTrackerClass {
     const alreadyUnseen = new Set(
       tabsState.tabs.filter(t => t.hasUnseenOutput).map(t => t.id),
     );
-    const { toFlag, marks } = computeUnseenUpdate(
+    const { toFlag, marks, causalByTab } = computeUnseenUpdate(
       outputs,
       resolveTab,
       tabsState.activeTabId,
@@ -343,7 +346,27 @@ class RunningActivityTrackerClass {
       );
       return;
     }
-    for (const tabId of toFlag) store.dispatch(markUnseenOutput({ tabId }));
+    // causalByTab (from computeUnseenUpdate) holds the settled, eligible output time for
+    // EACH flagged tab — carried on the bell so the notification gate compares against
+    // the OUTPUT time, not the (later) Redux transition. Built only from contributing
+    // outputs, so an unsettled sibling process can't lend a newer timestamp.
+    for (const tabId of toFlag) {
+      store.dispatch(markUnseenOutput({ tabId }));
+      this.emitBell(tabId, causalByTab.get(tabId) ?? now);
+    }
+  }
+
+  // Notify listeners (NotificationService) that a tab just rang the unseen bell — ONLY
+  // for bells that passed all of the tracker's suppression (startup/resize/reconnect/
+  // burst), carrying the causal output time. Fire-and-forget; must never break tracking.
+  private emitBell(tabId: string, causalTime: number): void {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('activity:bell', { detail: { tabId, causalTime } }),
+      );
+    } catch {
+      /* no-op */
+    }
   }
 }
 

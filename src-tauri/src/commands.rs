@@ -452,6 +452,71 @@ pub async fn load_command_dir_usage(
         .map_err(|e| e.to_string())
 }
 
+/// Stream 1: show an OS notification for background-tab activity, but ONLY when no
+/// TermFlow window is focused (app-wide check — a focused window already gets the
+/// in-app sound/toast, so notifying there too would be noisy/duplicate). `window_label`
+/// + `tab_id` identify the exact destination when a Windows toast is activated.
+/// Best-effort; failures are non-fatal.
+/// Returns `true` if a toast was actually shown, `false` if suppressed because a window
+/// was focused. The renderer enqueues the tab for return-to-app routing ONLY when a
+/// toast was shown, so merely re-focusing a window later never force-switches tabs for a
+/// notification the user never received.
+#[tauri::command]
+pub fn show_activity_notification(
+    app: tauri::AppHandle,
+    window_label: String,
+    tab_id: String,
+    title: String,
+) -> Result<bool, String> {
+    use tauri::Manager;
+    let any_focused = app
+        .webview_windows()
+        .iter()
+        .filter(|(label, _)| label.as_str() != "drag-preview")
+        .any(|(_, w)| w.is_focused().unwrap_or(false));
+    if any_focused {
+        return Ok(false); // app is focused → in-app channels cover it; don't double-notify
+    }
+    let body = if title.trim().is_empty() {
+        "New terminal activity".to_string()
+    } else {
+        title
+    };
+    #[cfg(windows)]
+    {
+        if let Err(native_error) = crate::native_notify::show_activity_notification(
+            &app,
+            &window_label,
+            &tab_id,
+            &body,
+        ) {
+            // Keep notifications best-effort even on machines where WinRT is
+            // disabled by policy. The plugin toast has no click callback, but is
+            // still preferable to silently dropping the activity notification.
+            log::warn!("Native activity notification failed: {}; using plugin fallback", native_error);
+            use tauri_plugin_notification::NotificationExt;
+            app.notification()
+                .builder()
+                .title("TermFlow")
+                .body(body)
+                .show()
+                .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = (&window_label, &tab_id);
+        app.notification()
+            .builder()
+            .title("TermFlow")
+            .body(body)
+            .show()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn load_config(app_handle: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;

@@ -32,16 +32,21 @@ import {
   setAgentColorSchemes,
   setCustomKeybindings,
   setKeepRunningInBackground,
+  setNotifySoundEnabled,
+  setNotifyToastEnabled,
+  setNotifyOsEnabled,
   hydrateEulaAcceptedVersion
 } from './store/slices/settingsSlice';
 import { openSettingsTab } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
-import { addTab, markTabExited, flagTabActivity } from './store/slices/tabsSlice';
+import { addTab, markTabExited, flagTabActivity, setActiveTab } from './store/slices/tabsSlice';
 import { RootState, store } from './store';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { findTabIdByTerminalId, getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { buildApiCreatedTab } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
+import { notificationService } from './services/NotificationService';
 import { agentSchemeTracker } from './services/AgentSchemeTracker';
 import { inputHandler } from './services/InputHandler';
 import { commandHistoryService } from './services/commandHistoryService';
@@ -241,8 +246,28 @@ const App: React.FC = () => {
     // visibility path uses.
     let sessionAlive = true;
     let unlistenSession: (() => void) | undefined;
-    listen('session:reconnect', () => runningActivityTracker.notifyReconnectBurst())
+    listen('session:reconnect', () => {
+      runningActivityTracker.notifyReconnectBurst();
+      notificationService.notifyReconnectBurst();
+    })
       .then(fn => { if (sessionAlive) unlistenSession = fn; else fn(); })
+      .catch(() => { /* not a tauri window / event API unavailable */ });
+
+    // True click routing: the Windows native toast activator (native_notify.rs) emits
+    // this on click, carrying the originating window label + tabId — focus that window
+    // and open that tab. Filtered by label so only the owning window reacts. On
+    // platforms without a native activator, NotificationService's return-to-app routing
+    // is the fallback.
+    let activatedAlive = true;
+    let unlistenActivated: (() => void) | undefined;
+    listen<{ windowLabel: string; tabId: string }>('notification:activated', (e) => {
+      try {
+        if (e.payload.windowLabel !== getCurrentWindow().label) return;
+      } catch { /* non-tauri */ }
+      getCurrentWindow().setFocus().catch(() => {});
+      store.dispatch(setActiveTab(e.payload.tabId));
+    })
+      .then(fn => { if (activatedAlive) unlistenActivated = fn; else fn(); })
       .catch(() => { /* not a tauri window / event API unavailable */ });
 
     // Stream 4: keep the per-terminal cwd snapshot fresh on every `cd` (backend emits
@@ -269,6 +294,8 @@ const App: React.FC = () => {
       if (unlistenSession) unlistenSession();
       cwdFeedAlive = false;
       if (unlistenCwd) unlistenCwd();
+      activatedAlive = false;
+      if (unlistenActivated) unlistenActivated();
       clearInterval(autoSaveInterval);
     };
   }, []);
@@ -445,6 +472,16 @@ const App: React.FC = () => {
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));
         }
+        // Notification preferences (Stream 1) — all opt-in, default off.
+        if (config.notifySoundEnabled !== undefined) {
+          dispatch(setNotifySoundEnabled(config.notifySoundEnabled));
+        }
+        if (config.notifyToastEnabled !== undefined) {
+          dispatch(setNotifyToastEnabled(config.notifyToastEnabled));
+        }
+        if (config.notifyOsEnabled !== undefined) {
+          dispatch(setNotifyOsEnabled(config.notifyOsEnabled));
+        }
         // Hydrate EULA acceptance (null when never accepted → the first-run modal shows).
         dispatch(hydrateEulaAcceptedVersion(
           typeof config.eulaAcceptedVersion === 'string' ? config.eulaAcceptedVersion : null,
@@ -571,6 +608,8 @@ const App: React.FC = () => {
     window.addEventListener('terminal:external-activity', handleExternalActivity as any);
     // Drive the per-tab "running" sweep from the live output stream.
     runningActivityTracker.start();
+    // Fire sound/toast/OS notifications off the tracker's activity:bell events.
+    notificationService.start();
     // Poll each pane's foreground agent and apply per-agent color schemes.
     agentSchemeTracker.start();
 
@@ -603,6 +642,7 @@ const App: React.FC = () => {
     window.removeEventListener('api:createTerminalTab', handleAPICreateTerminalTab as any);
     window.removeEventListener('terminal:external-activity', handleExternalActivity as any);
     runningActivityTracker.stop();
+    notificationService.stop();
     agentSchemeTracker.stop();
     window.removeEventListener('ui:requestTabsData', handleRequestTabsData);
     window.removeEventListener('pty:exit', handleTerminalProcessExit);

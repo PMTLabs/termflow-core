@@ -391,3 +391,49 @@ describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
     expect(runningPayloads()).toContainEqual(['tb-1']);
   });
 });
+
+describe('RunningActivityTracker activity:bell emission (notifications)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    dispatch.mockClear();
+    mockTabsState.activeTabId = null; // no active tab → an inactive tab can bell
+    mockTabsState.tabs = [];
+    mockPaneTree.ready = true;
+    runningActivityTracker.start(0);
+  });
+  afterEach(() => {
+    runningActivityTracker.stop();
+    jest.useRealTimers();
+  });
+
+  it('emits activity:bell with the tabId and a causal time when it flags a tab unseen', () => {
+    const bells: Array<{ tabId: string; causalTime: number }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    emitData('p1', 4);
+    jest.advanceTimersByTime(SETTLE_MS); // settle past the unseen debounce → flags tb-1
+    window.removeEventListener('activity:bell', h);
+    expect(bells.some((b) => b.tabId === 'tb-1' && typeof b.causalTime === 'number')).toBe(true);
+  });
+
+  it('does NOT emit activity:bell for output on the active tab', () => {
+    mockTabsState.activeTabId = 'tb-1';
+    const bells: unknown[] = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    emitData('p1', 4);
+    jest.advanceTimersByTime(SETTLE_MS);
+    window.removeEventListener('activity:bell', h);
+    expect(bells).toHaveLength(0); // active-tab output never rings the bell
+  });
+
+  it('emits activity:bell on the exit path (one-shot command prints then exits)', () => {
+    const bells: Array<{ tabId: string; causalTime: number }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    emitData('p1', 4);       // output, then...
+    emitExit('p1', 'tm-1');  // ...exit settles it immediately → flagOnExit bells now
+    window.removeEventListener('activity:bell', h);
+    expect(bells.some((b) => b.tabId === 'tb-1' && typeof b.causalTime === 'number')).toBe(true);
+  });
+});
