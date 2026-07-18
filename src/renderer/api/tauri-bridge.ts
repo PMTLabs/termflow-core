@@ -246,6 +246,16 @@ const tauriBridge: ElectronAPI = {
   },
 
   writeToTerminal: async (id, data) => {
+    // Notify the activity tracker of USER input (keyboard/paste). This is the single
+    // renderer-side write choke point — xterm onData→MainBridge.write, keyboard shims,
+    // and paste all funnel through here, while API/MCP writes hit the backend REST path
+    // and never call this. Lets the tracker echo-cancel typing so it doesn't trip the
+    // tab sweep. Fire-and-forget; never block the write on it.
+    try {
+      window.dispatchEvent(new CustomEvent('pty:input', { detail: { processId: id, data, t: Date.now() } }));
+    } catch {
+      /* no-op: activity signalling must never break input */
+    }
     return invoke('write_terminal', { id, data });
   },
 

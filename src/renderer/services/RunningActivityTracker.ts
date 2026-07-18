@@ -6,6 +6,8 @@ import {
   isRunningFromEvents,
   computeRunningTabIds,
   computeUnseenUpdate,
+  shouldCountForRunning,
+  isSubmitInput,
   WINDOW_MS,
   EVAL_INTERVAL_MS,
   MIN_CHUNKS,
@@ -43,11 +45,17 @@ class RunningActivityTrackerClass {
   // (> WINDOW_MS) for output to settle before flagging. Pruned once accounted+stale,
   // and on exit/resize/visibility-reset.
   private lastOutputAt = new Map<string, number>();
+  // processId → timestamp of the user's most recent keystroke to that terminal.
+  // Fed by the `pty:input` event (renderer user writes only; API/MCP writes bypass
+  // it). Used to echo-cancel typing so the tab sweep doesn't animate while the user
+  // types. A bare Enter resets it to -Infinity so the command's output still counts.
+  private lastInputAt = new Map<string, number>();
   private lastActiveTabId: string | null = null; // for focus-change detection
   private unsubscribe: (() => void) | null = null;
   private readonly opts = { windowMs: WINDOW_MS, minChunks: MIN_CHUNKS, minBytes: MIN_BYTES };
 
   private onData = (e: Event) => this.handleData(e as CustomEvent);
+  private onInput = (e: Event) => this.handleInput(e as CustomEvent);
   private onExit = (e: Event) => this.handleExit(e as CustomEvent);
   private onResize = () => this.handleResize();
   private onVisibility = () => this.handleVisibility();
@@ -61,6 +69,7 @@ class RunningActivityTrackerClass {
     // tab "running". Honored by handleData and evaluate via suppressUntil.
     if (startupGraceMs > 0) this.suppressUntil = Date.now() + startupGraceMs;
     window.addEventListener('pty:data', this.onData);
+    window.addEventListener('pty:input', this.onInput);
     window.addEventListener('pty:exit', this.onExit);
     window.addEventListener('resize', this.onResize);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -71,6 +80,7 @@ class RunningActivityTrackerClass {
 
   stop(): void {
     window.removeEventListener('pty:data', this.onData);
+    window.removeEventListener('pty:input', this.onInput);
     window.removeEventListener('pty:exit', this.onExit);
     window.removeEventListener('resize', this.onResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
@@ -84,6 +94,7 @@ class RunningActivityTrackerClass {
     this.lastRunning.clear();
     this.unseenMark.clear();
     this.lastOutputAt.clear();
+    this.lastInputAt.clear();
     this.lastActiveTabId = null;
     this.suppressUntil = 0;
   }
@@ -161,10 +172,35 @@ class RunningActivityTrackerClass {
     // Within a resize/reconnect cooldown: drop the burst entirely so it touches
     // neither the running buffers nor the unseen lastOutputAt timeline.
     if (now < this.suppressUntil) return;
-    const buf = this.buffers.get(processId) ?? [];
-    buf.push({ t: now, bytes: typeof data === 'string' ? data.length : 0 });
-    this.buffers.set(processId, buf);
+    const bytes = typeof data === 'string' ? data.length : 0;
+    // Echo-cancel: the shell echoes each typed character back as output. Excluding
+    // that echo from the running-rate buffer stops live typing from animating the tab
+    // sweep. This gates ONLY the running buffer — lastOutputAt (the unseen bell) is
+    // always updated so genuine background activity is never lost. Keystrokes only
+    // reach the terminal the user is typing in, so background tabs (no recent input)
+    // are unaffected.
+    if (shouldCountForRunning(bytes, now, this.lastInputAt.get(processId) ?? -Infinity)) {
+      const buf = this.buffers.get(processId) ?? [];
+      buf.push({ t: now, bytes });
+      this.buffers.set(processId, buf);
+    }
     this.lastOutputAt.set(processId, now);
+  }
+
+  // Record the time of a user keystroke/paste to a terminal so handleData can
+  // echo-cancel the shell's echo of it. A bare Enter (submit) resets the mark to
+  // -Infinity so the OUTPUT the command produces is counted normally rather than
+  // being mistaken for echo. Fed by the `pty:input` event emitted from the renderer
+  // write choke point (user input only; API/MCP writes never emit it).
+  private handleInput(e: CustomEvent): void {
+    const { processId, data, t } = (e.detail || {}) as {
+      processId?: string;
+      data?: string;
+      t?: number;
+    };
+    if (!processId) return;
+    const dataStr = typeof data === 'string' ? data : '';
+    this.lastInputAt.set(processId, isSubmitInput(dataStr) ? -Infinity : (t ?? Date.now()));
   }
 
   private handleExit(e: CustomEvent): void {
