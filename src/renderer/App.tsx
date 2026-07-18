@@ -253,11 +253,11 @@ const App: React.FC = () => {
       .then(fn => { if (sessionAlive) unlistenSession = fn; else fn(); })
       .catch(() => { /* not a tauri window / event API unavailable */ });
 
-    // Forward-compat: if a native OS-notification activator ever routes a click back
-    // (carrying the originating window label + tabId), focus this window and open that
-    // tab. Filtered by label so only the owning window reacts. (Today desktop toasts
-    // have no click callback, so the primary path is return-to-app routing in
-    // NotificationService; this listener is dormant until a native activator exists.)
+    // True click routing: the Windows native toast activator (native_notify.rs) emits
+    // this on click, carrying the originating window label + tabId — focus that window
+    // and open that tab. Filtered by label so only the owning window reacts. On
+    // platforms without a native activator, NotificationService's return-to-app routing
+    // is the fallback.
     let activatedAlive = true;
     let unlistenActivated: (() => void) | undefined;
     listen<{ windowLabel: string; tabId: string }>('notification:activated', (e) => {

@@ -455,9 +455,8 @@ pub async fn load_command_dir_usage(
 /// Stream 1: show an OS notification for background-tab activity, but ONLY when no
 /// TermFlow window is focused (app-wide check — a focused window already gets the
 /// in-app sound/toast, so notifying there too would be noisy/duplicate). `window_label`
-/// + `tab_id` are accepted for forward-compatible click routing; desktop notification
-/// plugins expose no click callback today, so the renderer routes to the originating
-/// tab via return-to-app focus handling. Best-effort; failures are non-fatal.
+/// + `tab_id` identify the exact destination when a Windows toast is activated.
+/// Best-effort; failures are non-fatal.
 /// Returns `true` if a toast was actually shown, `false` if suppressed because a window
 /// was focused. The renderer enqueues the tab for return-to-app routing ONLY when a
 /// toast was shown, so merely re-focusing a window later never force-switches tabs for a
@@ -470,8 +469,6 @@ pub fn show_activity_notification(
     title: String,
 ) -> Result<bool, String> {
     use tauri::Manager;
-    use tauri_plugin_notification::NotificationExt;
-    let _ = (&window_label, &tab_id); // reserved for a future native click-through activator
     let any_focused = app
         .webview_windows()
         .iter()
@@ -485,12 +482,38 @@ pub fn show_activity_notification(
     } else {
         title
     };
-    app.notification()
-        .builder()
-        .title("TermFlow")
-        .body(body)
-        .show()
-        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        if let Err(native_error) = crate::native_notify::show_activity_notification(
+            &app,
+            &window_label,
+            &tab_id,
+            &body,
+        ) {
+            // Keep notifications best-effort even on machines where WinRT is
+            // disabled by policy. The plugin toast has no click callback, but is
+            // still preferable to silently dropping the activity notification.
+            log::warn!("Native activity notification failed: {}; using plugin fallback", native_error);
+            use tauri_plugin_notification::NotificationExt;
+            app.notification()
+                .builder()
+                .title("TermFlow")
+                .body(body)
+                .show()
+                .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let _ = (&window_label, &tab_id);
+        app.notification()
+            .builder()
+            .title("TermFlow")
+            .body(body)
+            .show()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(true)
 }
 
