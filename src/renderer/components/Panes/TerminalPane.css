@@ -178,8 +178,9 @@
   left: 0;
   right: 0;
   padding: 4px 8px;
-  font-family: var(--mono-font, 'Cascadia Code', Consolas, monospace);
-  font-size: 13px;
+  /* font-family and font-size are set inline in TerminalPane.tsx so the status
+     honours the terminal's own font settings (settings.fontFamily / fontSize)
+     rather than a hardcoded stack. */
   color: var(--placeholder-color, #666666);
   white-space: nowrap;
 }
