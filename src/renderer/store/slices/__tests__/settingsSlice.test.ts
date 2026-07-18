@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -110,6 +110,27 @@ describe('settingsSlice activateTabOnApiCreate', () => {
   it('can be enabled', () => {
     const state = settingsReducer(undefined, setActivateTabOnApiCreate(true));
     expect(state.activateTabOnApiCreate).toBe(true);
+  });
+});
+
+describe('settingsSlice launchAtLogin', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it('defaults to false', () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.launchAtLogin).toBe(false);
+  });
+
+  it('reflects the OS state without persisting to config (no setConfigValue)', () => {
+    const setConfigValue = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue };
+    const state = settingsReducer(undefined, setLaunchAtLogin(true));
+    expect(state.launchAtLogin).toBe(true);
+    // OS/plugin is the source of truth — the reducer must NOT persist to config.json.
+    expect(setConfigValue).not.toHaveBeenCalled();
+    delete (global as any).window.electronAPI;
   });
 });
 

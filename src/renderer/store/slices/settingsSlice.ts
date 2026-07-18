@@ -79,6 +79,11 @@ interface SettingsState {
   // background; when false (default), closing the last window exits the app.
   // Persisted + mirrored into the Rust AppState via setKeepRunningInBackground.
   keepRunningInBackground: boolean;
+  // Launch TermFlow automatically at OS login (Windows Run key, macOS LaunchAgent,
+  // Linux autostart .desktop) via tauri-plugin-autostart. NOT persisted to config.json
+  // — the OS registration is the source of truth; this field mirrors isEnabled() for
+  // the toggle UI and is hydrated from the plugin on the Settings page.
+  launchAtLogin: boolean;
   // EULA acceptance: the EULA version the user last accepted (persisted to config.json).
   // `null` = never accepted → the first-run acceptance modal shows. When it differs from
   // CURRENT_EULA_VERSION (a material EULA change), the modal re-appears.
@@ -121,6 +126,7 @@ const initialState: SettingsState = {
   commandSuggestions: true,
   customKeybindings: {},
   keepRunningInBackground: false,
+  launchAtLogin: false,
   eulaAcceptedVersion: null,
   eulaHydrated: false,
 };
@@ -345,6 +351,13 @@ const settingsSlice = createSlice({
       window.electronAPI?.setKeepRunningInBackground?.(action.payload);
     },
 
+    // Launch-at-login: mirror the OS registration state into the store for the toggle
+    // UI. NOT persisted via setConfigValue — tauri-plugin-autostart's enable()/disable()
+    // owns the actual OS registration; this is only the reflected value.
+    setLaunchAtLogin: (state, action: PayloadAction<boolean>) => {
+      state.launchAtLogin = action.payload;
+    },
+
     // Record EULA acceptance and persist it to config.json (survives restarts).
     setEulaAcceptedVersion: (state, action: PayloadAction<string>) => {
       state.eulaAcceptedVersion = action.payload;
@@ -385,6 +398,7 @@ export const {
   setCustomKeybinding,
   resetCustomKeybinding,
   setKeepRunningInBackground,
+  setLaunchAtLogin,
   setEulaAcceptedVersion,
   hydrateEulaAcceptedVersion,
 } = settingsSlice.actions;

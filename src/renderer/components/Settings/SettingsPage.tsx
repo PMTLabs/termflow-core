@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin } from '../../store/slices/settingsSlice';
+import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
@@ -100,19 +101,38 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
+
+    // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
+    // another instance). A monotonic generation guards against stale async readbacks:
+    // any newer enable/disable/refresh bumps the gen, so an older isEnabled() response
+    // (e.g. a slow mount read racing a user toggle) is discarded instead of clobbering
+    // the newer state. `autostartBusy` disables the toggle while an op is in flight.
+    const autostartGenRef = useRef(0);
+    const [autostartBusy, setAutostartBusy] = useState(false);
+    const refreshLaunchAtLogin = useCallback(async () => {
+        const gen = ++autostartGenRef.current;
+        try {
+            const v = await isAutostartEnabled();
+            if (gen === autostartGenRef.current) dispatch(setLaunchAtLogin(v));
+        } catch {
+            /* plugin unavailable (browser host) → leave the current state */
+        }
+    }, [dispatch]);
 
     // ---- Dirty-check (Approach 1: apply-live + revert-on-discard) ----
     // Connections is excluded — it owns its own "Save & apply (restart)" flow.
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
+        startup: 'Startup & Integration',
         profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
         peers: 'Peers', about: 'About & Legal',
     };
-    // Peers/Connections own their own live flow; About & Legal is read-only — none are dirty-tracked.
+    // Peers/Connections own their own live flow; About & Legal is read-only; Startup
+    // applies live and its state is OS-owned (autostart plugin) — none are dirty-tracked.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'startup';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -173,7 +193,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // on mount; an already-open tab receives a DOM event. Ignore unknown ids.
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
-            c === 'appearance' || c === 'terminal' || c === 'profiles' ||
+            c === 'appearance' || c === 'terminal' || c === 'startup' || c === 'profiles' ||
             c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
@@ -188,6 +208,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         window.addEventListener('settings:goto-category', handler);
         return () => window.removeEventListener('settings:goto-category', handler);
     }, [requestCategoryChange]);
+
+    // Hydrate the launch-at-login toggle from the actual OS registration (the plugin is
+    // the source of truth). Runs on mount AND every time the user enters the Startup
+    // category — the Settings tab is never unmounted (only hidden via CSS), so a single
+    // mount-only read would miss external changes made while the tab stayed open.
+    useEffect(() => {
+        if (activeCategory === 'startup') refreshLaunchAtLogin();
+    }, [activeCategory, refreshLaunchAtLogin]);
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
@@ -635,6 +663,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             ),
         },
         {
+            id: 'startup',
+            label: 'Startup & Integration',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2v10" /><path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
+                </svg>
+            ),
+        },
+        {
             id: 'profiles',
             label: 'Shell Profiles',
             icon: (
@@ -806,6 +843,63 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     Overrides the tab and default schemes while that agent is running in a pane.
                 </span>
             </div>
+        </div>
+    );
+
+    // Toggle launch-at-login through the autostart plugin, then reflect the ACTUAL OS
+    // state (never the requested value) so a failed enable/disable can't leave the
+    // toggle showing a lie. Guarded by the generation counter so a stale readback can't
+    // clobber a newer operation; the checkbox is disabled while an op is in flight.
+    const onToggleLaunchAtLogin = async (checked: boolean) => {
+        const gen = ++autostartGenRef.current;
+        setAutostartBusy(true);
+        try {
+            try {
+                if (checked) await enableAutostart();
+                else await disableAutostart();
+            } catch (err) {
+                console.error('launch-at-login toggle failed', err);
+                dispatch(addToast({ message: 'Could not update launch at login.', type: 'error' }));
+            }
+            try {
+                const v = await isAutostartEnabled();
+                if (gen === autostartGenRef.current) dispatch(setLaunchAtLogin(v));
+            } catch {
+                /* keep the prior reflected state if the query fails */
+            }
+        } finally {
+            setAutostartBusy(false);
+        }
+    };
+
+    const renderStartup = () => (
+        <div className="settings-section">
+            <h2>Startup &amp; Integration</h2>
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="launch-at-login">
+                    Launch TermFlow at login
+                </label>
+                <input
+                    id="launch-at-login"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.launchAtLogin}
+                    disabled={autostartBusy}
+                    onChange={(e) => onToggleLaunchAtLogin(e.target.checked)}
+                />
+            </div>
+            <span className="help-text">
+                When on, TermFlow starts automatically when you sign in to your computer
+                (Windows startup, macOS login items, or Linux autostart). This reflects the
+                setting currently registered with your operating system.
+            </span>
+            {IS_DEV && (
+                <span className="help-text" style={{ color: 'var(--warning-color, #d98a00)' }}>
+                    Dev build: enabling this registers the <em>development</em> executable
+                    (target/debug), which later rebuilds will replace — leaving a stale login
+                    entry. Test launch-at-login from an installed build.
+                </span>
+            )}
         </div>
     );
 
@@ -1251,6 +1345,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         switch (activeCategory) {
             case 'appearance': return renderAppearance();
             case 'terminal': return renderTerminalBehavior();
+            case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
