@@ -43,6 +43,10 @@ tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 # Native "Browse…" file picker for the Settings "Default editor" field.
 tauri-plugin-dialog = "2"
+# Launch-at-login: registers the app in the OS login/startup mechanism (Windows Run
+# key, macOS LaunchAgent, Linux autostart .desktop). Desktop-only crate; the app only
+# builds for desktop, so it is a plain dependency (no cfg(desktop) target section).
+tauri-plugin-autostart = "2"
 portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }

@@ -779,6 +779,13 @@ pub fn run() {
     // OS notifications (Plan 010): a native toast when a pairing request arrives
     // while no window is focused (tray/background mode).
     .plugin(tauri_plugin_notification::init())
+    // Launch-at-login (Settings → Startup & Integration). LaunchAgent on macOS; Run
+    // key on Windows; autostart .desktop on Linux. No launch args — a login start is
+    // a normal GUI launch. Enable/disable/isEnabled are driven from the renderer.
+    .plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ))
     .setup(move |app| {
         // Handle headless mode
         if is_headless {

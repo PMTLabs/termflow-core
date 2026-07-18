@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin } from '../../store/slices/settingsSlice';
+import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
@@ -100,19 +101,21 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
     // ---- Dirty-check (Approach 1: apply-live + revert-on-discard) ----
     // Connections is excluded — it owns its own "Save & apply (restart)" flow.
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
+        startup: 'Startup & Integration',
         profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
         peers: 'Peers', about: 'About & Legal',
     };
-    // Peers/Connections own their own live flow; About & Legal is read-only — none are dirty-tracked.
+    // Peers/Connections own their own live flow; About & Legal is read-only; Startup
+    // applies live and its state is OS-owned (autostart plugin) — none are dirty-tracked.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'startup';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -173,7 +176,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // on mount; an already-open tab receives a DOM event. Ignore unknown ids.
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
-            c === 'appearance' || c === 'terminal' || c === 'profiles' ||
+            c === 'appearance' || c === 'terminal' || c === 'startup' || c === 'profiles' ||
             c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
@@ -188,6 +191,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         window.addEventListener('settings:goto-category', handler);
         return () => window.removeEventListener('settings:goto-category', handler);
     }, [requestCategoryChange]);
+
+    // Hydrate the launch-at-login toggle from the actual OS registration (the plugin
+    // is the source of truth). Runs once on mount; a no-op / false in non-Tauri hosts.
+    useEffect(() => {
+        isAutostartEnabled()
+            .then((v) => dispatch(setLaunchAtLogin(v)))
+            .catch(() => { /* plugin unavailable (browser host) → leave default false */ });
+    }, [dispatch]);
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
@@ -635,6 +646,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             ),
         },
         {
+            id: 'startup',
+            label: 'Startup & Integration',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 2v10" /><path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
+                </svg>
+            ),
+        },
+        {
             id: 'profiles',
             label: 'Shell Profiles',
             icon: (
@@ -806,6 +826,47 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     Overrides the tab and default schemes while that agent is running in a pane.
                 </span>
             </div>
+        </div>
+    );
+
+    // Toggle launch-at-login through the autostart plugin, then reflect the ACTUAL OS
+    // state (never the requested value) so a failed enable/disable can't leave the
+    // toggle showing a lie.
+    const onToggleLaunchAtLogin = async (checked: boolean) => {
+        try {
+            if (checked) await enableAutostart();
+            else await disableAutostart();
+        } catch (err) {
+            console.error('launch-at-login toggle failed', err);
+            dispatch(addToast({ message: 'Could not update launch at login.', type: 'error' }));
+        }
+        try {
+            dispatch(setLaunchAtLogin(await isAutostartEnabled()));
+        } catch {
+            /* keep the prior reflected state if the query fails */
+        }
+    };
+
+    const renderStartup = () => (
+        <div className="settings-section">
+            <h2>Startup &amp; Integration</h2>
+            <div className="setting-item setting-item-row">
+                <label className="setting-label" htmlFor="launch-at-login">
+                    Launch TermFlow at login
+                </label>
+                <input
+                    id="launch-at-login"
+                    type="checkbox"
+                    className="setting-checkbox"
+                    checked={settings.launchAtLogin}
+                    onChange={(e) => onToggleLaunchAtLogin(e.target.checked)}
+                />
+            </div>
+            <span className="help-text">
+                When on, TermFlow starts automatically when you sign in to your computer
+                (Windows startup, macOS login items, or Linux autostart). This reflects the
+                setting currently registered with your operating system.
+            </span>
         </div>
     );
 
@@ -1251,6 +1312,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         switch (activeCategory) {
             case 'appearance': return renderAppearance();
             case 'terminal': return renderTerminalBehavior();
+            case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
