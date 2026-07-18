@@ -1,6 +1,124 @@
 const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 
 #[cfg(windows)]
+fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{Interface, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::StructuredStorage::{
+        PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let app_data = std::env::var_os("APPDATA")
+        .ok_or_else(|| "APPDATA is not set; cannot create notification shortcut".to_string())?;
+    let shortcut_path = std::path::PathBuf::from(app_data)
+        .join(r"Microsoft\Windows\Start Menu\Programs\TermFlow.lnk");
+    if shortcut_path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = shortcut_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create Start Menu shortcut directory {}: {e}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("failed to resolve executable for notification shortcut: {e}"))?;
+    let exe_wide: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let description_wide: Vec<u16> = "TermFlow".encode_utf16().chain(Some(0)).collect();
+    let shortcut_wide: Vec<u16> = shortcut_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut aumid_wide: Vec<u16> = APP_USER_MODEL_ID.encode_utf16().chain(Some(0)).collect();
+
+    // CoInitializeEx returns S_FALSE when COM was already initialized in this
+    // apartment; that still requires a matching CoUninitialize. If another
+    // apartment model is already active (RPC_E_CHANGED_MODE), COM is usable and
+    // must not be uninitialized by us.
+    let init_result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let uninitialize = if init_result.is_ok() {
+        true
+    } else if init_result == RPC_E_CHANGED_MODE {
+        false
+    } else {
+        return Err(format!(
+            "failed to initialize COM for notification shortcut: {init_result:?}"
+        ));
+    };
+    struct ComGuard(bool);
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            if self.0 {
+                unsafe { CoUninitialize() };
+            }
+        }
+    }
+    let _com_guard = ComGuard(uninitialize);
+
+    // SAFETY: COM is initialized on this thread, all PCWSTR values point to
+    // NUL-terminated buffers that remain alive through the calls, and each cast
+    // targets an interface implemented by the ShellLink COM object.
+    unsafe {
+        let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("failed to create ShellLink: {e}"))?;
+        shell_link
+            .SetPath(PCWSTR(exe_wide.as_ptr()))
+            .map_err(|e| format!("failed to set notification shortcut target: {e}"))?;
+        shell_link
+            .SetDescription(PCWSTR(description_wide.as_ptr()))
+            .map_err(|e| format!("failed to set notification shortcut description: {e}"))?;
+
+        let property_store: IPropertyStore = shell_link
+            .cast()
+            .map_err(|e| format!("failed to open notification shortcut properties: {e}"))?;
+        // A scalar VT_LPWSTR is required here; the property store copies the
+        // pointed-to value during SetValue, so the backing Vec remains caller-owned.
+        let value = PROPVARIANT {
+            Anonymous: PROPVARIANT_0 {
+                Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                    vt: VT_LPWSTR,
+                    wReserved1: 0,
+                    wReserved2: 0,
+                    wReserved3: 0,
+                    Anonymous: PROPVARIANT_0_0_0 {
+                        pwszVal: PWSTR(aumid_wide.as_mut_ptr()),
+                    },
+                }),
+            },
+        };
+        property_store
+            .SetValue(&PKEY_AppUserModel_ID, &value)
+            .map_err(|e| format!("failed to set notification shortcut AUMID: {e}"))?;
+        property_store
+            .Commit()
+            .map_err(|e| format!("failed to commit notification shortcut AUMID: {e}"))?;
+
+        let persist_file: IPersistFile = shell_link
+            .cast()
+            .map_err(|e| format!("failed to access notification shortcut file: {e}"))?;
+        persist_file
+            .Save(PCWSTR(shortcut_wide.as_ptr()), true)
+            .map_err(|e| format!("failed to save {}: {e}", shortcut_path.display()))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn register_app_for_notifications() -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
@@ -17,14 +135,17 @@ pub fn register_app_for_notifications() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     if let Ok(exe) = std::env::current_exe() {
-        key.set_hstring("IconUri", &exe.as_path().into())
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = key.set_hstring("IconUri", &exe.as_path().into()) {
+            log::warn!("Failed to set notification IconUri: {}", e);
+        }
     }
 
     // SAFETY: the HSTRING supplies a valid, NUL-terminated immutable string for
     // the duration of the call. This sets process shell identity only.
     unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_USER_MODEL_ID)) }
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    create_start_menu_shortcut_if_missing()
 }
 
 #[cfg(not(windows))]
@@ -44,7 +165,7 @@ pub fn show_activity_notification(
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::Foundation::TypedEventHandler;
     use windows::UI::Notifications::{
-        ToastActivatedEventArgs, ToastNotification, ToastNotificationManager,
+        ToastActivatedEventArgs, ToastFailedEventArgs, ToastNotification, ToastNotificationManager,
     };
 
     let launch = serde_json::json!({
@@ -110,6 +231,20 @@ pub fn show_activity_notification(
         });
     toast.Activated(&activated).map_err(|e| e.to_string())?;
 
+    let failed =
+        TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(move |_, args| {
+            match args.as_ref().and_then(|args| args.ErrorCode().ok()) {
+                Some(error_code) => {
+                    log::error!("Windows toast delivery failed: {error_code:?}")
+                }
+                None => log::error!("Windows toast delivery failed without an error code"),
+            }
+            Ok(())
+        });
+    toast.Failed(&failed).map_err(|e| e.to_string())?;
+
+    // Show only queues delivery. The Failed handler observes asynchronous WinRT
+    // failures, but Windows can still suppress a toast without reporting one.
     let notifier =
         ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))
             .map_err(|e| e.to_string())?;
@@ -131,7 +266,21 @@ fn escape_xml_text(value: &str) -> String {
 #[cfg(windows)]
 fn escape_xml(value: &str) -> String {
     value
+        .chars()
+        .map(|c| {
+            if is_valid_xml_1_0_char(c) {
+                c
+            } else {
+                '\u{fffd}'
+            }
+        })
+        .collect::<String>()
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(windows)]
+fn is_valid_xml_1_0_char(c: char) -> bool {
+    matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
 }
