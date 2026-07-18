@@ -23,6 +23,7 @@
     "dev:pro": "bun run build:fabric-sidecar && tauri dev --config src-tauri/tauri.pro.conf.json",
     "build:tauri:pro": "bun run build:fabric-sidecar && tauri build --no-bundle --config src-tauri/tauri.pro.conf.json",
     "publish:tauri:pro": "bun run build:fabric-sidecar && tauri build --config src-tauri/tauri.pro.conf.json",
+    "publish:tauri:pro:alt": "bun run build:fabric-sidecar && cross-env CARGO_TARGET_DIR=target-pro-alt tauri build --config src-tauri/tauri.pro.conf.json",
     "test": "jest",
     "test:workspace": "bun --filter @termflow/terminal-core test",
     "test:e2e": "playwright test",

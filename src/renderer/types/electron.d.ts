@@ -53,9 +53,12 @@ export interface PeerRequestInfo {
 }
 
 /** Result of `fabricStatus`: `installed:false` when the fabric binary is absent
- *  (the whole peering feature degrades gracefully), plus any health fields. */
+ *  (the whole peering feature degrades gracefully), plus any health fields.
+ *  `peerPort` is the inbound listener remote peers dial (the port to open on a
+ *  firewall); present only when installed. */
 export interface FabricStatus {
   installed: boolean;
+  peerPort?: number;
   [key: string]: unknown;
 }
 

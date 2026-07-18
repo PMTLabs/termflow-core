@@ -439,6 +439,83 @@ pub struct FabricClient {
     http: reqwest::Client,
 }
 
+/// A failed control-API call.
+///
+/// Split by layer, because the two mean completely different things to a user:
+/// `Transport` is "the fabric isn't there / didn't answer", while `Status` is "the
+/// fabric answered and explained itself". `reqwest::Error` alone cannot express the
+/// latter: `error_for_status()` keeps only the status code and drops the response
+/// body, so the fabric's `{"error": "..."}` reason — the only actionable part — was
+/// discarded before it ever reached the UI. Pairing failures then all rendered as a
+/// bare "fabric returned 502 Bad Gateway" while the fabric had said precisely why
+/// (e.g. "pairing not enabled" on the remote).
+#[derive(Debug)]
+pub enum FabricError {
+    /// The request never produced an HTTP response (connection refused, timeout, …).
+    Transport(reqwest::Error),
+    /// The fabric answered with a non-2xx; `message` is its explanation.
+    Status {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+}
+
+impl FabricError {
+    /// Nothing listening on the control port — the "fabric not installed / not up yet"
+    /// signal `fabric_status` maps to `{ installed: false }`.
+    pub fn is_connect(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_connect())
+    }
+
+    /// The control port accepted but never answered (blackholed).
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Transport(e) if e.is_timeout())
+    }
+
+    /// The HTTP status, when the fabric actually answered.
+    pub fn status(&self) -> Option<reqwest::StatusCode> {
+        match self {
+            Self::Status { status, .. } => Some(*status),
+            Self::Transport(e) => e.status(),
+        }
+    }
+}
+
+impl std::fmt::Display for FabricError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(e) => write!(f, "{e}"),
+            // Lead with the fabric's own words; the status is the fallback when it
+            // answered a non-2xx with no usable body.
+            Self::Status { status, message } if message.is_empty() => {
+                write!(f, "fabric returned {status}")
+            }
+            Self::Status { message, .. } => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Pull the human-readable reason out of a non-2xx fabric body: the `{"error": "..."}`
+/// envelope every control-API handler returns, else the raw body text. Truncated so a
+/// stray HTML error page can't flood a toast or dialog.
+fn fabric_error_message(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 300;
+    let text = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
+    let text = text.trim();
+    if text.chars().count() > MAX_CHARS {
+        text.chars().take(MAX_CHARS).collect::<String>() + "…"
+    } else {
+        text.to_string()
+    }
+}
+
 impl FabricClient {
     /// Build a client targeting the fabric control API on `control_port`.
     /// Uses the shared bounded-timeout localhost client so a blackholed port can't
@@ -453,7 +530,7 @@ impl FabricClient {
     }
 
     /// GET `{base}{path}` and parse the JSON body.
-    pub async fn get(&self, path: &str) -> Result<serde_json::Value, reqwest::Error> {
+    pub async fn get(&self, path: &str) -> Result<serde_json::Value, FabricError> {
         self.send(self.http.get(self.url(path))).await
     }
 
@@ -462,12 +539,12 @@ impl FabricClient {
         &self,
         path: &str,
         body: serde_json::Value,
-    ) -> Result<serde_json::Value, reqwest::Error> {
+    ) -> Result<serde_json::Value, FabricError> {
         self.send(self.http.post(self.url(path)).json(&body)).await
     }
 
     /// DELETE `{base}{path}` and parse the JSON response (if any).
-    pub async fn delete(&self, path: &str) -> Result<serde_json::Value, reqwest::Error> {
+    pub async fn delete(&self, path: &str) -> Result<serde_json::Value, FabricError> {
         self.send(self.http.delete(self.url(path))).await
     }
 
@@ -475,15 +552,27 @@ impl FabricClient {
         format!("{}{}", self.base, path)
     }
 
-    /// Send a prepared request, surface a non-2xx as an error, and parse the body.
-    /// An empty body (204 / no content, e.g. approve/revoke) parses as `Null` rather
-    /// than erroring, and a non-JSON body degrades to `Null` instead of failing.
+    /// Send a prepared request, surface a non-2xx as a [`FabricError::Status`] CARRYING
+    /// the fabric's explanation, and parse the body otherwise.
+    ///
+    /// The body is read before the status is judged, deliberately: `error_for_status()`
+    /// consumes the response and keeps only the code, which is what stripped the fabric's
+    /// `{"error": ...}` reason out of every failure. An empty body (204 / no content, e.g.
+    /// approve/revoke) parses as `Null` rather than erroring, and a non-JSON success body
+    /// degrades to `Null` instead of failing.
     async fn send(
         &self,
         req: reqwest::RequestBuilder,
-    ) -> Result<serde_json::Value, reqwest::Error> {
-        let resp = req.send().await?.error_for_status()?;
-        let bytes = resp.bytes().await?;
+    ) -> Result<serde_json::Value, FabricError> {
+        let resp = req.send().await.map_err(FabricError::Transport)?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(FabricError::Transport)?;
+        if !status.is_success() {
+            return Err(FabricError::Status {
+                status,
+                message: fabric_error_message(&bytes),
+            });
+        }
         if bytes.is_empty() {
             Ok(serde_json::Value::Null)
         } else {
@@ -590,5 +679,90 @@ mod client_tests {
             err.is_connect(),
             "unreachable control port must surface as a connection error, got: {err}"
         );
+    }
+
+    /// The regression this whole error type exists for: when the fabric answers a non-2xx
+    /// it explains itself in an `{"error": ...}` body, and that explanation MUST reach the
+    /// caller. The old `error_for_status()` dropped it, so a user whose peer had "Accept
+    /// peers" switched off saw only "fabric returned 502 Bad Gateway" — nothing actionable
+    /// — while the fabric had said exactly what was wrong.
+    #[tokio::test]
+    async fn non_2xx_carries_the_fabric_error_body_not_just_the_status() {
+        use axum::http::StatusCode;
+        use axum::{routing::post, Json, Router};
+        use tokio::net::TcpListener;
+
+        // The real body `control_api::add_peer` returns when the remote refuses to pair.
+        let app = Router::new().route(
+            "/peers/add",
+            post(|| async {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "pairing rejected: 403 Forbidden: {\"error\":\"pairing not enabled\"}"
+                    })),
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client = FabricClient::new(port);
+        let err = client
+            .post("/peers/add", serde_json::json!({}))
+            .await
+            .expect_err("a 502 must be an error");
+
+        assert_eq!(err.status(), Some(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(!err.is_connect(), "a real HTTP answer is not a connect error");
+        // The point: the reason survives all the way to the string a user is shown.
+        assert!(
+            err.to_string().contains("pairing not enabled"),
+            "the fabric's reason must survive to the caller, got: {err}"
+        );
+    }
+
+    /// A non-2xx with no usable body still degrades to something meaningful rather than
+    /// an empty string.
+    #[tokio::test]
+    async fn non_2xx_without_a_body_falls_back_to_the_status() {
+        use axum::http::StatusCode;
+        use axum::{routing::get, Router};
+        use tokio::net::TcpListener;
+
+        let app = Router::new().route("/health", get(|| async { StatusCode::INTERNAL_SERVER_ERROR }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let err = FabricClient::new(port)
+            .get("/health")
+            .await
+            .expect_err("a 500 must be an error");
+        assert!(
+            err.to_string().contains("500"),
+            "an empty error body must fall back to the status, got: {err}"
+        );
+    }
+
+    /// A non-JSON error body (e.g. a proxy's HTML page) is passed through as text and
+    /// truncated, so it can neither vanish nor flood the UI.
+    #[test]
+    fn error_message_handles_plain_text_and_truncates() {
+        assert_eq!(
+            fabric_error_message(br#"{"error":"pairing not enabled"}"#),
+            "pairing not enabled"
+        );
+        assert_eq!(fabric_error_message(b"  plain text  "), "plain text");
+        assert_eq!(fabric_error_message(b""), "");
+        let long = "x".repeat(500);
+        let out = fabric_error_message(long.as_bytes());
+        assert_eq!(out.chars().count(), 301, "truncated to 300 chars + ellipsis");
+        assert!(out.ends_with('…'));
     }
 }

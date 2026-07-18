@@ -29,6 +29,7 @@ if (isTauri) {
 const { Provider } = require('react-redux');
 const { store } = require('./store');
 const { default: App } = require('./App');
+const { default: BuildBadge } = require('./components/BuildBadge/BuildBadge');
 const { terminalService } = require('./services/TerminalService');
 require('./styles/index.css');
 
@@ -57,6 +58,7 @@ const root = ReactDOM.createRoot(container);
 root.render(
   <Provider store={store}>
     <App />
+    <BuildBadge />
   </Provider>
 );
 }

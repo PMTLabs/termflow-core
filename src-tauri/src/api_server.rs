@@ -1243,10 +1243,17 @@ async fn local_fleet_run(
     Ok(val)
 }
 
-/// Map a `reqwest` failure from a fabric `/fleet/*` proxy call to an HTTP status +
-/// message. The fabric answers 403 for a denied grant and 502 for a peer-side error;
-/// preserve 403, fold everything else (incl. connect/timeout) to 502.
-fn map_fabric_fleet_error(op: &str, e: reqwest::Error) -> (StatusCode, serde_json::Value) {
+/// Map a fabric `/fleet/*` proxy failure to an HTTP status + message. The fabric answers
+/// 403 for a denied grant and 502 for a peer-side error; preserve 403, fold everything
+/// else (incl. connect/timeout) to 502.
+///
+/// `e`'s Display now carries the fabric's own `{"error": ...}` reason rather than a bare
+/// status line, so an MCP fleet caller learns WHY a remote op failed instead of reading
+/// "502 Bad Gateway" (same defect as the pairing path — see `FabricError`).
+fn map_fabric_fleet_error(
+    op: &str,
+    e: crate::fabric_manager::FabricError,
+) -> (StatusCode, serde_json::Value) {
     if e.status() == Some(StatusCode::FORBIDDEN) {
         (StatusCode::FORBIDDEN, json!({ "error": format!("{op}: denied by peer") }))
     } else {
@@ -1350,7 +1357,13 @@ async fn fleet_execute(
                         Json(json!({ "error": format!("fleet_execute: peer returned {code}") }))).into_response()
                 }
                 Err(e) => {
-                    let (code, msg) = map_fabric_fleet_error("fleet_execute", e);
+                    // This leg drives its own reqwest client (the 5s FabricClient cap would
+                    // abort a long FleetExec poll), so reaching here means no HTTP response
+                    // ever arrived — the non-2xx cases are the `Ok(resp)` arms above.
+                    let (code, msg) = map_fabric_fleet_error(
+                        "fleet_execute",
+                        crate::fabric_manager::FabricError::Transport(e),
+                    );
                     (code, Json(msg)).into_response()
                 }
             }
