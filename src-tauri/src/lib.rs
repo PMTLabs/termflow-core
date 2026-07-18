@@ -261,6 +261,26 @@ mod cli_args_tests {
         assert_eq!(a.mcp_port, None);
         assert!(!a.headless);
     }
+
+    #[test]
+    fn parses_path_flag_and_positional() {
+        // --path flag
+        let a = Args::try_parse_from(["app", "--path", "C:/proj"]).unwrap();
+        assert_eq!(a.path.as_deref(), Some("C:/proj"));
+        assert_eq!(a.positional_path, None);
+        // positional fallback (file managers pass the folder as a bare arg)
+        let b = Args::try_parse_from(["app", "/home/user/proj"]).unwrap();
+        assert_eq!(b.path, None);
+        assert_eq!(b.positional_path.as_deref(), Some("/home/user/proj"));
+        // `--path` wins when both are given (matches `args.path.or(positional_path)`)
+        let c = Args::try_parse_from(["app", "--path", "A", "B"]).unwrap();
+        assert_eq!(c.path.as_deref(), Some("A"));
+        assert_eq!(c.positional_path.as_deref(), Some("B"));
+        // absent
+        let d = Args::try_parse_from(["app"]).unwrap();
+        assert_eq!(d.path, None);
+        assert_eq!(d.positional_path, None);
+    }
 }
 
 /// Pure stall detector for the output-pipeline watchdog: returns the updated
@@ -792,10 +812,11 @@ pub fn run() {
           } else {
             commands::refresh_menu(app);
           }
-        } else if let Some(window) = app.get_webview_window("main") {
-          let _ = window.unminimize();
-          let _ = window.show();
-          let _ = window.set_focus();
+        } else {
+          // No path → a plain relaunch while already running: focus/raise (or recreate)
+          // a window. Reuse the robust helper, which falls back to any real window and
+          // creates one if none exist (e.g. tray-only or the main window was detached).
+          show_or_focus_main_window(app);
         }
       }));
     }

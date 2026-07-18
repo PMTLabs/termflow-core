@@ -94,7 +94,9 @@ pub struct GlobalDrag {
 pub struct AppState<R: Runtime = Wry> {
     // Folder passed to the first GUI instance. The boot window already exists, so
     // the renderer consumes this once instead of the backend creating a second one.
-    pub pending_open_path: std::sync::Mutex<Option<String>>,
+    // Arc-shared like every sibling field so `Clone` shares (not snapshots) it — the
+    // managed state and all task clones see the same value.
+    pub pending_open_path: Arc<std::sync::Mutex<Option<String>>>,
     pub terminals: Arc<DashMap<String, Terminal>>,
     // Values are Arc'd so PTY write paths clone the Arc and DROP the DashMap
     // shard guard before locking the inner Mutex. Holding a shard guard across
@@ -210,12 +212,7 @@ pub struct AppState<R: Runtime = Wry> {
 impl<R: Runtime> Clone for AppState<R> {
     fn clone(&self) -> Self {
         Self {
-            pending_open_path: std::sync::Mutex::new(
-                self.pending_open_path
-                    .lock()
-                    .map(|path| path.clone())
-                    .unwrap_or(None),
-            ),
+            pending_open_path: self.pending_open_path.clone(),
             terminals: self.terminals.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
             ptys: self.ptys.clone(),
@@ -274,7 +271,7 @@ impl<R: Runtime> AppState<R> {
             .unwrap_or_else(|_| "auto-terminal-default-secret-2025-fix".to_string());
 
         Self {
-            pending_open_path: std::sync::Mutex::new(None),
+            pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
             shell_writer_channels: Arc::new(DashMap::new()),
             ptys: Arc::new(DashMap::new()),

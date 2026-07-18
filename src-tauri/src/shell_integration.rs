@@ -77,8 +77,11 @@ mod platform {
     }
 
     pub fn is_installed() -> Result<bool, String> {
-        let command_path = format!(r"{DIRECTORY_KEY}\command");
-        Ok(CURRENT_USER.open(command_path).is_ok())
+        // install() creates BOTH the Directory and Background command keys — report
+        // installed only when both are present, so a partial/failed install reads false.
+        let directory = CURRENT_USER.open(format!(r"{DIRECTORY_KEY}\command")).is_ok();
+        let background = CURRENT_USER.open(format!(r"{BACKGROUND_KEY}\command")).is_ok();
+        Ok(directory && background)
     }
 }
 
@@ -114,8 +117,12 @@ mod platform {
         let quoted_exe = shell_double_quoted(&exe);
         let (nautilus_path, kio_path) = integration_paths()?;
 
+        // When something is selected, use the first selected path; when nothing is
+        // selected (right-click on empty space — the "background" case), fall back to the
+        // current folder ($PWD, which Nautilus sets to the viewed directory) so the
+        // window is still rooted correctly instead of opening path-less.
         let nautilus_script = format!(
-            "#!/bin/sh\ndir=$(printf '%s\\n' \"$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\" | head -n 1)\nexec \"{quoted_exe}\" --path \"$dir\"\n"
+            "#!/bin/sh\ndir=$(printf '%s\\n' \"$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS\" | head -n 1)\n[ -z \"$dir\" ] && dir=\"$PWD\"\nexec \"{quoted_exe}\" --path \"$dir\"\n"
         );
         write_file(&nautilus_path, &nautilus_script)?;
         fs::set_permissions(&nautilus_path, fs::Permissions::from_mode(0o755)).map_err(
@@ -166,12 +173,12 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::current_exe;
-
-    // TODO: NSServices Info.plist Quick Action
+    // A Finder folder action on macOS needs an NSServices/Quick Action declaration in the
+    // app bundle's Info.plist plus a service handler — not yet implemented. Report honestly
+    // as "not installed / unavailable" so the toggle doesn't claim a feature that isn't
+    // wired up. TODO: NSServices Info.plist Quick Action.
     pub fn install() -> Result<(), String> {
-        log::info!("macOS file manager integration is best-effort for app bundles");
-        Ok(())
+        Err("'Open in TermFlow' isn't available on macOS yet".to_string())
     }
 
     pub fn uninstall() -> Result<(), String> {
@@ -179,8 +186,7 @@ mod platform {
     }
 
     pub fn is_installed() -> Result<bool, String> {
-        let exe = current_exe()?;
-        Ok(exe.to_string_lossy().contains(".app/Contents/MacOS"))
+        Ok(false)
     }
 }
 

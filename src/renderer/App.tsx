@@ -562,11 +562,17 @@ const App: React.FC = () => {
 
   const createDefaultTabIfNeeded = (folderPath?: string) => {
     console.log('Checking if default tab needed...');
-    const currentTabs = (window as any).__REDUX_STORE__?.getState()?.tabs?.tabs || [];
-    console.log('Current tabs:', currentTabs.length, 'Shell profiles:', shellProfiles.length);
+    // Read tabs AND profiles FRESH from the store: this runs from the mount effect's
+    // first-render closure (deps []), where `shellProfiles` is still the initial [] —
+    // profiles are dispatched later during init, so the closure value is stale.
+    const freshState = store.getState();
+    const currentTabs = freshState.tabs.tabs || [];
+    const freshProfiles = freshState.settings.shellProfiles;
+    const freshDefaultProfile = freshState.settings.defaultProfile;
+    console.log('Current tabs:', currentTabs.length, 'Shell profiles:', freshProfiles.length);
 
-    if (currentTabs.length === 0 && shellProfiles.length > 0) {
-      const defaultShell = shellProfiles.find(p => p.id === defaultProfile) || shellProfiles[0];
+    if (currentTabs.length === 0 && freshProfiles.length > 0) {
+      const defaultShell = freshProfiles.find(p => p.id === freshDefaultProfile) || freshProfiles[0];
       console.log('Creating default tab with shell:', defaultShell);
 
       const generateUniqueTabName = (baseName: string): string => {
@@ -604,7 +610,10 @@ const App: React.FC = () => {
   // "Open in TermFlow" when a session was restored (cold launch with an existing session):
   // add the requested folder as a NEW tab rather than replacing anything.
   const openFolderTab = (folderPath: string) => {
-    const defaultShell = shellProfiles.find(p => p.id === defaultProfile) || shellProfiles[0];
+    // Fresh read (see createDefaultTabIfNeeded): the closure's shellProfiles is stale.
+    const freshState = store.getState();
+    const freshProfiles = freshState.settings.shellProfiles;
+    const defaultShell = freshProfiles.find(p => p.id === freshState.settings.defaultProfile) || freshProfiles[0];
     if (!defaultShell) return;
     const newTab = {
       id: generateId('tb'),

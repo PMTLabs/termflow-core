@@ -145,9 +145,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 dispatch(addToast({ message: "Could not update the 'Open in TermFlow' menu entry.", type: 'error' }));
             }
             try {
-                const v = (await window.electronAPI?.isFileManagerIntegrationInstalled?.()) ?? checked;
-                if (gen === fmiGenRef.current) dispatch(setFileManagerIntegration(v));
-            } catch { /* keep prior */ }
+                // Reflect the ACTUAL registered state, never the requested value — a failed
+                // install/uninstall must not leave the toggle showing a lie (mirrors
+                // onToggleLaunchAtLogin).
+                const v = await window.electronAPI?.isFileManagerIntegrationInstalled?.();
+                if (typeof v === 'boolean' && gen === fmiGenRef.current) {
+                    dispatch(setFileManagerIntegration(v));
+                }
+            } catch { /* keep the prior reflected state */ }
         } finally {
             setFmiBusy(false);
         }
@@ -1012,10 +1017,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 />
             </div>
             <span className="help-text">
-                Right-click a folder in Explorer (Windows), Nautilus/Files or Dolphin (Linux)
-                and choose "Open in TermFlow" to open a new window rooted at that folder. On
-                macOS this is provided by the app bundle.
+                Right-click a folder in Explorer (Windows), or Nautilus/Files or Dolphin
+                (Linux), and choose "Open in TermFlow" to open a new window rooted at that
+                folder. Not yet available on macOS.
             </span>
+            {IS_DEV && (
+                <span className="help-text" style={{ color: 'var(--warning-color, #d98a00)' }}>
+                    Dev build: the menu entry points at the <em>development</em> executable
+                    (target/debug); rebuilds/moves can leave it stale. Test from an installed build.
+                </span>
+            )}
         </div>
     );
 
