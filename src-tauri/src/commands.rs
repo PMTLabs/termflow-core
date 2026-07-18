@@ -452,6 +452,43 @@ pub async fn load_command_dir_usage(
         .map_err(|e| e.to_string())
 }
 
+/// Stream 1: show an OS notification for background-tab activity, but ONLY when no
+/// TermFlow window is focused (app-wide check — a focused window already gets the
+/// in-app sound/toast, so notifying there too would be noisy/duplicate). `window_label`
+/// + `tab_id` are accepted for forward-compatible click routing; desktop notification
+/// plugins expose no click callback today, so the renderer routes to the originating
+/// tab via return-to-app focus handling. Best-effort; failures are non-fatal.
+#[tauri::command]
+pub fn show_activity_notification(
+    app: tauri::AppHandle,
+    window_label: String,
+    tab_id: String,
+    title: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+    use tauri_plugin_notification::NotificationExt;
+    let _ = (&window_label, &tab_id); // reserved for a future native click-through activator
+    let any_focused = app
+        .webview_windows()
+        .iter()
+        .filter(|(label, _)| label.as_str() != "drag-preview")
+        .any(|(_, w)| w.is_focused().unwrap_or(false));
+    if any_focused {
+        return Ok(()); // app is focused → in-app channels cover it; don't double-notify
+    }
+    let body = if title.trim().is_empty() {
+        "New terminal activity".to_string()
+    } else {
+        title
+    };
+    app.notification()
+        .builder()
+        .title("TermFlow")
+        .body(body)
+        .show()
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn load_config(app_handle: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;

@@ -1004,6 +1004,7 @@ pub fn run() {
         commands::delete_command_history,
         commands::add_command_dir_usage,
         commands::load_command_dir_usage,
+        commands::show_activity_notification,
         commands::check_connection_health,
         commands::generate_api_token,
         network_commands::get_network_config,

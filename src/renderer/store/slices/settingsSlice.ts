@@ -84,6 +84,14 @@ interface SettingsState {
   // — the OS registration is the source of truth; this field mirrors isEnabled() for
   // the toggle UI and is hydrated from the plugin on the Settings page.
   launchAtLogin: boolean;
+  // Notifications (Stream 1) — all opt-in (default off), independently configurable.
+  // In-app SOUND chime when a background tab rings the unseen-activity bell.
+  notifySoundEnabled: boolean;
+  // In-app TOAST when a background tab rings the bell.
+  notifyToastEnabled: boolean;
+  // OS/native notification when a background tab rings the bell AND no app window is
+  // focused (the focus check is done app-wide in the backend).
+  notifyOsEnabled: boolean;
   // EULA acceptance: the EULA version the user last accepted (persisted to config.json).
   // `null` = never accepted → the first-run acceptance modal shows. When it differs from
   // CURRENT_EULA_VERSION (a material EULA change), the modal re-appears.
@@ -127,6 +135,9 @@ const initialState: SettingsState = {
   customKeybindings: {},
   keepRunningInBackground: false,
   launchAtLogin: false,
+  notifySoundEnabled: false,
+  notifyToastEnabled: false,
+  notifyOsEnabled: false,
   eulaAcceptedVersion: null,
   eulaHydrated: false,
 };
@@ -358,6 +369,20 @@ const settingsSlice = createSlice({
       state.launchAtLogin = action.payload;
     },
 
+    // Notification preferences (Stream 1) — persisted to config.json like other toggles.
+    setNotifySoundEnabled: (state, action: PayloadAction<boolean>) => {
+      state.notifySoundEnabled = action.payload;
+      window.electronAPI?.setConfigValue?.('notifySoundEnabled', state.notifySoundEnabled);
+    },
+    setNotifyToastEnabled: (state, action: PayloadAction<boolean>) => {
+      state.notifyToastEnabled = action.payload;
+      window.electronAPI?.setConfigValue?.('notifyToastEnabled', state.notifyToastEnabled);
+    },
+    setNotifyOsEnabled: (state, action: PayloadAction<boolean>) => {
+      state.notifyOsEnabled = action.payload;
+      window.electronAPI?.setConfigValue?.('notifyOsEnabled', state.notifyOsEnabled);
+    },
+
     // Record EULA acceptance and persist it to config.json (survives restarts).
     setEulaAcceptedVersion: (state, action: PayloadAction<string>) => {
       state.eulaAcceptedVersion = action.payload;
@@ -399,6 +424,9 @@ export const {
   resetCustomKeybinding,
   setKeepRunningInBackground,
   setLaunchAtLogin,
+  setNotifySoundEnabled,
+  setNotifyToastEnabled,
+  setNotifyOsEnabled,
   setEulaAcceptedVersion,
   hydrateEulaAcceptedVersion,
 } = settingsSlice.actions;
