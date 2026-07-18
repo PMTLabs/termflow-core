@@ -88,6 +88,14 @@ export interface ActiveProcess {
   isAlive: boolean;
 }
 
+/** Stream 4: one (command, directory) usage row for cwd-relevant suggestion ranking. */
+export interface DirUsageRow {
+  command: string;
+  dir: string;
+  useCount: number;
+  lastUsedAt: number;
+}
+
 export interface ElectronAPI {
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -166,6 +174,9 @@ export interface ElectronAPI {
   addCommandHistory: (command: string) => Promise<void>;
   loadCommandHistory: (limit?: number) => Promise<string[]>;
   deleteCommandHistory: (command: string) => Promise<void>;
+  // Stream 4: per-directory command usage for cwd-relevant suggestion ranking.
+  addCommandDirUsage: (command: string, dir: string) => Promise<void>;
+  loadCommandDirUsage: (cwd: string) => Promise<DirUsageRow[]>;
   getDefaultProfile: () => Promise<string>;
   setDefaultProfile: (profileId: string) => Promise<boolean>;
   getTheme: () => Promise<any>;

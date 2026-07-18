@@ -22,7 +22,10 @@ const CLOSED: SuggestViewState = {
 /** Owns the suggest popup's view state (backlog 011). The engine owns key
  *  interception and reports actions here; this hook owns what is shown and
  *  tells the engine the popup state back (closed/passive/focused). */
-export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | null>) {
+export function useCommandSuggest(
+  engineRef: MutableRefObject<TerminalEngine | null>,
+  getCwd?: () => string | undefined,
+) {
   const [state, setState] = useState<SuggestViewState>(CLOSED);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -38,7 +41,12 @@ export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | n
         close();
         return;
       }
-      const items = commandHistoryService.match(text);
+      // Stream 4: rank suggestions by the terminal's current directory. Warm the
+      // affinity cache for this cwd (async, fire-and-forget) so subsequent keystrokes
+      // rank by relevance; the first match may use global order until it resolves.
+      const cwd = getCwd?.();
+      if (cwd) void commandHistoryService.ensureDirLoaded(cwd);
+      const items = commandHistoryService.match(text, { cwd });
       if (items.length === 0) {
         close();
         return;
@@ -48,7 +56,7 @@ export function useCommandSuggest(engineRef: MutableRefObject<TerminalEngine | n
       engineRef.current?.setSuggestPopupState('passive');
       setState({ open: true, items, selectedIndex: 0, focused: false, anchor });
     },
-    [close, engineRef],
+    [close, engineRef, getCwd],
   );
 
   const onAction = useCallback(

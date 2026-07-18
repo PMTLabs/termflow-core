@@ -47,7 +47,7 @@ import { inputHandler } from './services/InputHandler';
 import { commandHistoryService } from './services/commandHistoryService';
 import { StateManager } from './services/StateManager';
 import { terminalService } from './services/TerminalService';
-import { refreshLiveCwds } from './services/cwdSnapshot';
+import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
 import './styles/App.css';
 import { generateId } from './utils/id';
 
@@ -245,6 +245,16 @@ const App: React.FC = () => {
       .then(fn => { if (sessionAlive) unlistenSession = fn; else fn(); })
       .catch(() => { /* not a tauri window / event API unavailable */ });
 
+    // Stream 4: keep the per-terminal cwd snapshot fresh on every `cd` (backend emits
+    // `terminal:cwd` from OSC 9;9/7) so command-history recording/ranking uses the
+    // current directory, not the last 30s-autosave value. Keyed by backend processId.
+    let cwdFeedAlive = true;
+    let unlistenCwd: (() => void) | undefined;
+    listen<{ id: string; cwd: string }>('terminal:cwd', (e) =>
+      setCwdSnapshotByProcessId(e.payload.id, e.payload.cwd))
+      .then(fn => { if (cwdFeedAlive) unlistenCwd = fn; else fn(); })
+      .catch(() => { /* not a tauri window / event API unavailable */ });
+
     return () => {
       // Save state before cleanup
       StateManager.saveState();
@@ -257,6 +267,8 @@ const App: React.FC = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       sessionAlive = false;
       if (unlistenSession) unlistenSession();
+      cwdFeedAlive = false;
+      if (unlistenCwd) unlistenCwd();
       clearInterval(autoSaveInterval);
     };
   }, []);

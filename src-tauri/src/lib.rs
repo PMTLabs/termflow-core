@@ -377,7 +377,20 @@ fn spawn_output_consumer(state: AppState, generation: u64) {
             // 004). Authoritative for shells whose process cwd isn't live (PowerShell).
             if let Some(cwd) = pty_manager::parse_osc_cwd(&payload.data) {
                 if state.terminals.contains_key(&payload.id) {
-                    state.terminal_cwds.insert(payload.id.clone(), cwd);
+                    // Only emit when the cwd actually changed, so the renderer's live
+                    // cwd map (Stream 4) updates on every `cd` without a per-prompt spam.
+                    let changed = state
+                        .terminal_cwds
+                        .get(&payload.id)
+                        .map(|v| *v != cwd)
+                        .unwrap_or(true);
+                    state.terminal_cwds.insert(payload.id.clone(), cwd.clone());
+                    if changed {
+                        let _ = state.app_handle.emit(
+                            "terminal:cwd",
+                            serde_json::json!({ "id": payload.id, "cwd": cwd }),
+                        );
+                    }
                 }
             }
 
@@ -958,6 +971,8 @@ pub fn run() {
             state.history_store.init(&db);
             // Backlog 011: cap the global command history at startup.
             state.history_store.prune_commands(5000);
+            // Stream 4: per-directory usage has higher (command,dir) cardinality; cap larger.
+            state.history_store.prune_dir_usage(20000);
         }
         spawn_history_flush_task(state.clone());
 
@@ -987,6 +1002,8 @@ pub fn run() {
         commands::add_command_history,
         commands::load_command_history,
         commands::delete_command_history,
+        commands::add_command_dir_usage,
+        commands::load_command_dir_usage,
         commands::check_connection_health,
         commands::generate_api_token,
         network_commands::get_network_config,

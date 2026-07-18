@@ -9,6 +9,7 @@ import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { useCommandSuggest } from './useCommandSuggest';
 import { commandHistoryService } from '../../services/commandHistoryService';
+import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
 import { terminalService } from '../../services/TerminalService';
 import { termDiag, isTermDiagEnabled, setTermDiag } from '../../utils/diag';
@@ -151,7 +152,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // Backlog 011: suggest popup state. Routed via a ref so the once-per-terminalId
   // engine options always call the live hook callbacks (same pattern as
   // onTitleChangeRef above).
-  const suggest = useCommandSuggest(engineRef);
+  const suggest = useCommandSuggest(engineRef, () => getCwdSnapshot(terminalId));
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
 
@@ -211,7 +212,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // for a normal (non-detach) mount.
       initialPromptGate: terminalService.takePromptGateHandoff(terminalId),
       onInputLineChanged: (text) => suggestRef.current.onInputLineChanged(text),
-      onCommandSubmitted: (cmd) => commandHistoryService.record(cmd),
+      onCommandSubmitted: (cmd) => commandHistoryService.record(cmd, getCwdSnapshot(terminalId)),
       onSuggestAction: (action) => suggestRef.current.onAction(action),
       onCopy: () => dispatch(addToast({ message: 'Copied', type: 'success', duration: 2000 })),
       // Backlog 003: open URLs via the OS browser; open file paths via the OS
