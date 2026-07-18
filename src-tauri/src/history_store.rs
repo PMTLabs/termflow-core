@@ -3,6 +3,47 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
+/// One (command, directory) usage row for cwd-relevant suggestion ranking (Stream 4).
+/// Serialized to the renderer, which computes affinity (exact vs ancestor vs
+/// descendant of the current cwd) from `dir`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirUsageRow {
+    pub command: String,
+    pub dir: String,
+    pub use_count: i64,
+    pub last_used_at: i64,
+}
+
+/// Escape SQLite LIKE metacharacters (`\`, `%`, `_`) so a directory path containing
+/// them (e.g. `my_proj`) is matched literally, not as a wildcard. Pair with `ESCAPE '\'`.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if c == '\\' || c == '%' || c == '_' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// All ancestor directories of a normalized (forward-slash) path, nearest first,
+/// excluding the path itself. `c:/proj/a` → [`c:/proj`, `c:`].
+fn ancestor_dirs(dir: &str) -> Vec<String> {
+    let mut res = Vec::new();
+    let mut cur = dir.trim_end_matches('/');
+    while let Some(idx) = cur.rfind('/') {
+        let parent = &cur[..idx];
+        if parent.is_empty() {
+            break;
+        }
+        res.push(parent.to_string());
+        cur = parent;
+    }
+    res
+}
+
 /// SQLite-backed per-terminal scrollback store, keyed by the STABLE renderer id
 /// (`tab_id` — `tb-`/`tm-`) which survives an app restart, unlike the processId.
 /// Degrades to a silent no-op if the DB can't be opened, so persistence failures
@@ -59,6 +100,22 @@ impl HistoryStore {
                 use_count    INTEGER NOT NULL DEFAULT 1,
                 last_used_at INTEGER NOT NULL
             )",
+            [],
+        )?;
+        // Stream 4: per-directory command usage for cwd-relevant suggestion ranking.
+        // Keyed by (command, dir); `command_history` above stays the global fallback.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS command_dir_usage (
+                command      TEXT NOT NULL,
+                dir          TEXT NOT NULL,
+                use_count    INTEGER NOT NULL DEFAULT 1,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (command, dir)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cdu_dir ON command_dir_usage(dir)",
             [],
         )?;
         Ok(conn)
@@ -177,7 +234,8 @@ impl HistoryStore {
     }
 
     /// Remove one command from the history (user pressed Shift+Delete on a
-    /// suggestion). Exact-text match; a miss is a no-op.
+    /// suggestion). Exact-text match; a miss is a no-op. Cascades to the per-directory
+    /// usage table so a deleted command can't linger as a cwd-affinity ghost.
     pub fn delete_command(&self, command: &str) {
         let guard = self.conn.lock().unwrap();
         let Some(conn) = guard.as_ref() else { return };
@@ -186,6 +244,113 @@ impl HistoryStore {
             rusqlite::params![command],
         ) {
             log::warn!("[HISTORY] delete_command failed: {}", e);
+        }
+        if let Err(e) = conn.execute(
+            "DELETE FROM command_dir_usage WHERE command = ?1",
+            rusqlite::params![command],
+        ) {
+            log::warn!("[HISTORY] delete_command dir-usage cascade failed: {}", e);
+        }
+    }
+
+    /// Record that `command` was run in `dir` (Stream 4). `dir` must be normalized by
+    /// the caller (forward-slash; lowercased on Windows). Upsert on (command, dir):
+    /// re-running bumps use_count + freshness. Silent no-op when disabled/on error.
+    pub fn add_command_dir(&self, command: &str, dir: &str, now_ms: i64) {
+        if dir.is_empty() {
+            return;
+        }
+        let guard = self.conn.lock().unwrap();
+        let Some(conn) = guard.as_ref() else { return };
+        if let Err(e) = conn.execute(
+            "INSERT INTO command_dir_usage (command, dir, use_count, last_used_at)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(command, dir) DO UPDATE SET use_count = use_count + 1, last_used_at = ?3",
+            rusqlite::params![command, dir, now_ms],
+        ) {
+            log::warn!("[HISTORY] add_command_dir failed: {}", e);
+        }
+    }
+
+    /// Load usage rows relevant to `cwd`: the exact directory, its ancestors, and its
+    /// descendants (so a command run in a parent or child dir can still rank above
+    /// unrelated global history). The renderer computes the final affinity weight from
+    /// each row's `dir`. Empty when disabled or cwd is empty.
+    pub fn load_dir_usage(&self, cwd: &str) -> Vec<DirUsageRow> {
+        if cwd.is_empty() {
+            return Vec::new();
+        }
+        let guard = self.conn.lock().unwrap();
+        let Some(conn) = guard.as_ref() else { return Vec::new() };
+        // Exact + ancestors as an exact IN list (no wildcard risk); descendants via an
+        // escaped LIKE `cwd/%` so path metacharacters (`_`) aren't treated as wildcards.
+        let mut in_list: Vec<String> = vec![cwd.to_string()];
+        in_list.extend(ancestor_dirs(cwd));
+        let placeholders: String = (1..=in_list.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let like_idx = in_list.len() + 1;
+        let sql = format!(
+            "SELECT command, dir, use_count, last_used_at FROM command_dir_usage
+             WHERE dir IN ({}) OR dir LIKE ?{} ESCAPE '\\'
+             ORDER BY last_used_at DESC LIMIT 500",
+            placeholders, like_idx
+        );
+        let like_pattern = format!("{}/%", escape_like(cwd));
+        let mut params: Vec<&dyn rusqlite::ToSql> =
+            in_list.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        params.push(&like_pattern);
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[HISTORY] load_dir_usage prepare failed: {}", e);
+                return Vec::new();
+            }
+        };
+        let rows = match stmt.query_map(params.as_slice(), |row| {
+            Ok(DirUsageRow {
+                command: row.get(0)?,
+                dir: row.get(1)?,
+                use_count: row.get(2)?,
+                last_used_at: row.get(3)?,
+            })
+        }) {
+            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::warn!("[HISTORY] load_dir_usage failed: {}", e);
+                Vec::new()
+            }
+        };
+        rows
+    }
+
+    /// Remove all per-directory usage rows for a command (used by the delete cascade;
+    /// exposed for completeness/testing).
+    pub fn delete_command_dir(&self, command: &str) {
+        let guard = self.conn.lock().unwrap();
+        let Some(conn) = guard.as_ref() else { return };
+        if let Err(e) = conn.execute(
+            "DELETE FROM command_dir_usage WHERE command = ?1",
+            rusqlite::params![command],
+        ) {
+            log::warn!("[HISTORY] delete_command_dir failed: {}", e);
+        }
+    }
+
+    /// Keep only the newest `keep` per-directory usage rows (startup cap). The
+    /// (command, dir) cardinality can far exceed the global command count, so this has
+    /// its own, larger cap.
+    pub fn prune_dir_usage(&self, keep: u32) {
+        let guard = self.conn.lock().unwrap();
+        let Some(conn) = guard.as_ref() else { return };
+        if let Err(e) = conn.execute(
+            "DELETE FROM command_dir_usage WHERE rowid NOT IN (
+                SELECT rowid FROM command_dir_usage ORDER BY last_used_at DESC LIMIT ?1
+             )",
+            rusqlite::params![keep as i64],
+        ) {
+            log::warn!("[HISTORY] prune_dir_usage failed: {}", e);
         }
     }
 
@@ -343,6 +508,81 @@ mod tests {
         store.add_command("x", 1);
         assert!(store.load_commands(10).is_empty()); // no panic
         store.prune_commands(1); // no panic
+    }
+
+    // --- Stream 4: command_dir_usage (cwd-relevant ranking) ---
+
+    #[test]
+    fn dir_usage_upsert_load_prefixes_and_delete() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        store.add_command_dir("cargo build", "c:/proj/a", 100);
+        store.add_command_dir("cargo build", "c:/proj/a", 200); // upsert → use_count 2
+        store.add_command_dir("ls", "c:/proj/a/sub", 150);      // descendant of cwd
+        store.add_command_dir("git log", "c:/proj", 120);       // ancestor of cwd
+        store.add_command_dir("who", "c:/other", 300);          // unrelated
+
+        let rows = store.load_dir_usage("c:/proj/a");
+        let cmds: Vec<String> = rows.iter().map(|r| r.command.clone()).collect();
+        assert!(cmds.contains(&"cargo build".to_string()), "exact-dir cmd present");
+        assert!(cmds.contains(&"ls".to_string()), "descendant-dir cmd present");
+        assert!(cmds.contains(&"git log".to_string()), "ancestor-dir cmd present");
+        assert!(!cmds.contains(&"who".to_string()), "unrelated dir excluded");
+
+        let cb = rows.iter().find(|r| r.command == "cargo build").unwrap();
+        assert_eq!(cb.use_count, 2, "upsert bumped use_count");
+        assert_eq!(cb.dir, "c:/proj/a");
+
+        store.delete_command_dir("cargo build");
+        let after = store.load_dir_usage("c:/proj/a");
+        assert!(!after.iter().any(|r| r.command == "cargo build"), "delete removed rows");
+    }
+
+    #[test]
+    fn dir_usage_like_underscore_not_treated_as_wildcard() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        // cwd contains '_'; a sibling dir differing only where the '_' is must NOT be
+        // matched as a descendant (an unescaped LIKE '_' wildcard would wrongly match).
+        store.add_command_dir("real", "c:/my_proj/sub", 10);  // true descendant
+        store.add_command_dir("bogus", "c:/myxproj/sub", 20); // NOT under c:/my_proj
+        let rows = store.load_dir_usage("c:/my_proj");
+        let cmds: Vec<String> = rows.iter().map(|r| r.command.clone()).collect();
+        assert!(cmds.contains(&"real".to_string()));
+        assert!(!cmds.contains(&"bogus".to_string()), "underscore must be escaped in LIKE");
+    }
+
+    #[test]
+    fn delete_command_cascades_to_dir_usage() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        store.add_command("cargo build", 1);
+        store.add_command_dir("cargo build", "c:/proj/a", 1);
+        store.delete_command("cargo build"); // must remove from BOTH tables
+        assert!(store.load_commands(10).is_empty());
+        assert!(store.load_dir_usage("c:/proj/a").is_empty());
+    }
+
+    #[test]
+    fn prune_dir_usage_keeps_newest() {
+        let store = HistoryStore::new();
+        store.init(&temp_db());
+        store.add_command_dir("a", "c:/d", 1);
+        store.add_command_dir("b", "c:/d", 2);
+        store.add_command_dir("c", "c:/d", 3);
+        store.prune_dir_usage(2);
+        let cmds: Vec<String> = store.load_dir_usage("c:/d").iter().map(|r| r.command.clone()).collect();
+        assert!(cmds.contains(&"c".to_string()) && cmds.contains(&"b".to_string()));
+        assert!(!cmds.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn disabled_store_dir_usage_is_noop() {
+        let store = HistoryStore::new(); // never init'd
+        store.add_command_dir("x", "c:/d", 1);
+        assert!(store.load_dir_usage("c:/d").is_empty());
+        store.delete_command_dir("x");
+        store.prune_dir_usage(1);
     }
 
     /// Regression for the "empty terminal after restart" bug: we persist the vt100
