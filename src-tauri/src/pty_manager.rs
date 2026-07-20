@@ -193,9 +193,14 @@ static SHELL_CACHE: std::sync::Mutex<ShellCacheState> =
 /// Called after any custom-profile mutation (reachable from the external HTTP
 /// API) so a list/create-terminal right after a write never sees stale data.
 fn invalidate_shell_cache() {
-    if let Ok(mut state) = SHELL_CACHE.lock() {
-        state.generation += 1;
-        state.entry = None;
+    match SHELL_CACHE.lock() {
+        Ok(mut state) => {
+            state.generation += 1;
+            state.entry = None;
+        }
+        Err(_) => log::warn!(
+            "SHELL_CACHE mutex poisoned; shell-profile cache disabled for the rest of this process"
+        ),
     }
 }
 
@@ -219,15 +224,21 @@ pub fn get_available_shells() -> Vec<ShellProfile> {
             }
             state.generation
         }
-        Err(_) => 0,
+        Err(_) => {
+            log::warn!("SHELL_CACHE mutex poisoned; falling back to an uncached lookup");
+            0
+        }
     };
 
     let profiles = compute_available_shells();
 
-    if let Ok(mut state) = SHELL_CACHE.lock() {
-        if state.generation == generation_at_start {
-            state.entry = Some((std::time::Instant::now(), profiles.clone()));
+    match SHELL_CACHE.lock() {
+        Ok(mut state) => {
+            if state.generation == generation_at_start {
+                state.entry = Some((std::time::Instant::now(), profiles.clone()));
+            }
         }
+        Err(_) => log::warn!("SHELL_CACHE mutex poisoned; skipping cache write-back"),
     }
 
     profiles
