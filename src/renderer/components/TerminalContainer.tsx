@@ -124,7 +124,7 @@ export const TerminalContainer: React.FC = () => {
     return (
       <div className="terminal-container empty">
         <div className="empty-state">
-          <h2>Welcome to Auto Terminal</h2>
+          <h2>Welcome to TermFlow</h2>
           <p>Click the + button to create a new terminal</p>
         </div>
       </div>
