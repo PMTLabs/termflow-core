@@ -29,6 +29,122 @@ use sysinfo::{System, Pid};
 ///   3. Invoke the user's captured prompt so it's preserved.
 const PS_CWD_INTEGRATION: &str = "$__atOrig = $function:prompt; function prompt { if ($PWD.Provider.Name -eq 'FileSystem') { try { [Environment]::CurrentDirectory = $PWD.ProviderPath } catch {}; [Console]::Write([string][char]27 + ']9;9;' + $PWD.ProviderPath + [string][char]27 + '\\') }; if ($__atOrig) { & $__atOrig } else { 'PS ' + $PWD.Path + '> ' } }";
 
+/// Foreign-terminal identity env vars scrubbed from every spawned child so a CLI
+/// can't detect (and mis-adapt to) whatever terminal the APP was launched from.
+/// Module-level so the in-process spawn path and `build_spawn_spec` (sidecar
+/// path) share ONE list — no drift.
+pub const FOREIGN_TERMINAL_ENV: &[&str] = &[
+    "WT_SESSION",                 // Windows Terminal
+    "WT_PROFILE_ID",
+    "WARP_TERMINAL_SESSION_UUID", // Warp
+    "WARP_IS_LOCAL_SHELL_SESSION",
+    "WARP_HONOR_PS1",
+    "KITTY_WINDOW_ID",            // kitty
+    "KITTY_PID",
+    "ALACRITTY_LOG",              // Alacritty
+    "ALACRITTY_WINDOW_ID",
+    "KONSOLE_VERSION",            // Konsole
+    "VTE_VERSION",                // GNOME/VTE family
+    "ZED_TERM",                   // Zed
+    "WEZTERM_PANE",               // WezTerm
+    "WEZTERM_EXECUTABLE",
+    "ITERM_SESSION_ID",           // iTerm2
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TERM_SESSION_ID",            // Apple Terminal
+    "TILIX_ID",                   // Tilix
+    "TERMINATOR_UUID",            // Terminator
+];
+
+/// Build a fully-resolved [`SpawnSpec`] for the PTY-host sidecar. Produces the
+/// exact env/args/cwd the in-process path uses (shared consts), including the
+/// `TERMFLOW_TERMINAL_ID` identity var and the PowerShell OSC 9;9 cwd
+/// integration. The GUI owns this profile logic; the sidecar only executes it.
+pub fn build_spawn_spec(
+    tab_id: &str,
+    shell_path: Option<&str>,
+    shell_name: &str,
+    shell_args: Option<&[String]>,
+    cwd: Option<&str>,
+    cols: u16,
+    rows: u16,
+) -> termflow_pty_protocol::SpawnSpec {
+    let is_powershell = shell_path
+        .map(|p| {
+            let p = p.to_ascii_lowercase();
+            p.contains("powershell") || p.contains("pwsh")
+        })
+        .unwrap_or(false)
+        || {
+            let n = shell_name.to_ascii_lowercase();
+            n.contains("powershell") || n.contains("pwsh")
+        };
+
+    let shell = match shell_path {
+        Some(p) => p.to_string(),
+        None if cfg!(target_os = "windows") => "cmd.exe".to_string(),
+        None => std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()),
+    };
+
+    let env = vec![
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".to_string(), "truecolor".to_string()),
+        ("TERMFLOW_TERMINAL_ID".to_string(), tab_id.to_string()),
+        ("TERM_PROGRAM".to_string(), "TermFlow".to_string()),
+        (
+            "TERM_PROGRAM_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+    ];
+    let env_remove: Vec<String> = FOREIGN_TERMINAL_ENV.iter().map(|s| s.to_string()).collect();
+
+    let mut args: Vec<String> = shell_args.map(|a| a.to_vec()).unwrap_or_default();
+    let has_command_flag = args.iter().any(|a| {
+        let a = a.to_ascii_lowercase();
+        a == "-command" || a == "-c" || a == "-encodedcommand" || a == "-file"
+    });
+    // Interactive PowerShell gets the cwd-sync + OSC 9;9 prompt integration.
+    if is_powershell && !has_command_flag {
+        args.push("-NoExit".to_string());
+        args.push("-Command".to_string());
+        args.push(PS_CWD_INTEGRATION.to_string());
+    }
+
+    // Honor a cwd only if it actually exists (mirrors the in-process path).
+    let resolved_cwd = cwd.and_then(|dir| {
+        if dir.is_empty() {
+            return None;
+        }
+        let expanded = if dir.starts_with("~/") || dir == "~" {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            if dir == "~" {
+                home
+            } else {
+                dir.replacen('~', &home, 1)
+            }
+        } else {
+            dir.to_string()
+        };
+        if Path::new(&expanded).is_dir() {
+            Some(expanded)
+        } else {
+            None
+        }
+    });
+
+    termflow_pty_protocol::SpawnSpec {
+        shell,
+        args,
+        env,
+        env_remove,
+        cwd: resolved_cwd,
+        cols,
+        rows,
+    }
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct ShellProfile {
     pub id: String,
@@ -600,28 +716,8 @@ pub fn spawn_terminal(
     // enough; scrub the known identity markers too.
     cmd_builder.env("TERM_PROGRAM", "TermFlow");
     cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    const FOREIGN_TERMINAL_ENV: &[&str] = &[
-        "WT_SESSION",                 // Windows Terminal
-        "WT_PROFILE_ID",
-        "WARP_TERMINAL_SESSION_UUID", // Warp
-        "WARP_IS_LOCAL_SHELL_SESSION",
-        "WARP_HONOR_PS1",
-        "KITTY_WINDOW_ID",            // kitty
-        "KITTY_PID",
-        "ALACRITTY_LOG",              // Alacritty
-        "ALACRITTY_WINDOW_ID",
-        "KONSOLE_VERSION",            // Konsole
-        "VTE_VERSION",                // GNOME/VTE family
-        "ZED_TERM",                   // Zed
-        "WEZTERM_PANE",               // WezTerm
-        "WEZTERM_EXECUTABLE",
-        "ITERM_SESSION_ID",           // iTerm2
-        "LC_TERMINAL",
-        "LC_TERMINAL_VERSION",
-        "TERM_SESSION_ID",            // Apple Terminal
-        "TILIX_ID",                   // Tilix
-        "TERMINATOR_UUID",            // Terminator
-    ];
+    // Scrub foreign-terminal identity markers (module const shared with
+    // build_spawn_spec so the two paths never drift).
     for key in FOREIGN_TERMINAL_ENV {
         cmd_builder.env_remove(key);
     }
@@ -1149,6 +1245,51 @@ mod cwd_tests {
             "prompt must still emit the OSC 9;9 cwd report"
         );
         assert!(PS_CWD_INTEGRATION.contains("$PWD.Provider.Name -eq 'FileSystem'"));
+    }
+
+    #[test]
+    fn build_spawn_spec_injects_identity_scrubs_foreign_and_wraps_ps() {
+        let spec = super::build_spawn_spec(
+            "pc-abc123",
+            Some("powershell.exe"),
+            "powershell",
+            None,
+            None,
+            120,
+            30,
+        );
+        // Identity env
+        assert!(spec
+            .env
+            .iter()
+            .any(|(k, v)| k == "TERMFLOW_TERMINAL_ID" && v == "pc-abc123"));
+        assert!(spec
+            .env
+            .iter()
+            .any(|(k, v)| k == "TERM_PROGRAM" && v == "TermFlow"));
+        // Foreign-terminal scrub shares the module const
+        assert!(spec.env_remove.iter().any(|k| k == "WT_SESSION"));
+        assert_eq!(spec.env_remove.len(), super::FOREIGN_TERMINAL_ENV.len());
+        // Interactive PowerShell gets the OSC 9;9 cwd integration
+        assert!(spec.args.iter().any(|a| a == "-NoExit"));
+        assert!(spec.args.iter().any(|a| a.contains("]9;9;")));
+        assert_eq!((spec.cols, spec.rows), (120, 30));
+    }
+
+    #[test]
+    fn build_spawn_spec_skips_ps_wrap_when_command_flag_present() {
+        // A profile that already drives -Command must NOT get the -NoExit wrap.
+        let args = vec!["-Command".to_string(), "echo hi".to_string()];
+        let spec = super::build_spawn_spec(
+            "pc-x",
+            Some("pwsh.exe"),
+            "pwsh",
+            Some(&args),
+            None,
+            80,
+            24,
+        );
+        assert!(!spec.args.iter().any(|a| a == "-NoExit"));
     }
 
     #[test]

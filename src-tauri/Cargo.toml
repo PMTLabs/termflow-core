@@ -68,6 +68,9 @@ vt100 = "0.16"
 # from source (via cc/MSVC, already used for Tauri) so no system SQLite is needed.
 rusqlite = { version = "0.31", features = ["bundled"] }
 if-addrs = "0.13"
+# Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
+# (not a workspace member) to avoid disturbing the existing single-package build.
+termflow-pty-protocol = { path = "pty-protocol" }
 
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.
