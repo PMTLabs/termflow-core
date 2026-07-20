@@ -26,12 +26,62 @@ use tokio::sync::oneshot;
 /// frame (bytes remain in the ring) and emits a Gap so the GUI resyncs.
 const CHAN_CAP: usize = 8192;
 
-/// Create a pipe server instance. Task 7 replaces the body with an owner-only
-/// DACL. Under the strictly-sequential lifecycle the previous instance is fully
-/// released before the next is created, so `first_pipe_instance(true)` is used
-/// every cycle as an ownership guard against a squatter.
+/// Create a pipe server instance with an owner-only DACL so no other user on
+/// the machine can connect. The SDDL `D:P(A;;GA;;;OW)` is a protected DACL that
+/// grants GENERIC_ALL only to the pipe's OWNER (the creating user) — every other
+/// principal has no ACE and is denied. `first_pipe_instance(true)` guards
+/// against a squatter pre-creating the name (the previous instance is fully
+/// released before the next is created in the sequential lifecycle).
 pub fn secured_server(name: &str) -> std::io::Result<NamedPipeServer> {
-    ServerOptions::new().first_pipe_instance(true).create(name)
+    match owner_only_security_descriptor() {
+        Some(psd) => {
+            let mut sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>()
+                    as u32,
+                lpSecurityDescriptor: psd,
+                bInheritHandle: 0,
+            };
+            // SAFETY: `sa` outlives the call; `psd` is a valid self-relative SD
+            // from ConvertStringSecurityDescriptor…; the pipe copies it, so we
+            // free `psd` immediately after.
+            let result = unsafe {
+                ServerOptions::new().first_pipe_instance(true).create_with_security_attributes_raw(
+                    name,
+                    &mut sa as *mut _ as *mut std::ffi::c_void,
+                )
+            };
+            unsafe {
+                windows_sys::Win32::Foundation::LocalFree(psd as _);
+            }
+            result
+        }
+        None => ServerOptions::new().first_pipe_instance(true).create(name),
+    }
+}
+
+/// Build a self-relative security descriptor restricting access to the owner.
+/// Returns a pointer that MUST be freed with `LocalFree`. None on failure (the
+/// caller falls back to the default pipe ACL).
+#[cfg(windows)]
+fn owner_only_security_descriptor() -> Option<*mut std::ffi::c_void> {
+    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+    // D: DACL, P: protected (no inheritance), one ACE: (Allow;;GenericAll;;;Owner)
+    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)\0".encode_utf16().collect();
+    let mut psd: *mut std::ffi::c_void = std::ptr::null_mut();
+    // SDDL_REVISION_1 == 1
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut psd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || psd.is_null() {
+        None
+    } else {
+        Some(psd)
+    }
 }
 
 /// Run the host until teardown.
