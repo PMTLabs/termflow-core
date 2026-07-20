@@ -24,3 +24,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_System_JobObjects",
 ] }
+
+# Embeds the app icon + version info into the .exe (see build.rs) so the sidecar
+# shows a proper icon in Task Manager. Windows-only; no effect on macOS/Linux.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

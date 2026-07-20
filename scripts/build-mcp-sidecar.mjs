@@ -53,6 +53,11 @@ function main() {
     `--target=${bunTarget}`,
     `--outfile=${outFile}`,
   ];
+  // Embed the TermFlow icon into the Windows executable so the MCP sidecar shows
+  // a proper icon in Explorer / Task Manager instead of the generic exe glyph.
+  if (bunTarget.startsWith('bun-windows')) {
+    bunArgs.push(`--windows-icon=${join(rootDir, 'src-tauri', 'icons', 'icon.ico')}`);
+  }
   // Workaround for a bun bug (seen on 1.3.14): bun's own download+extract of
   // its cross-compile base executable for some targets (e.g. bun-windows-arm64)
   // can fail with "Failed to extract executable ... download may be incomplete"
