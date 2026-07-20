@@ -305,8 +305,15 @@ const App: React.FC = () => {
   const initializeApp = async () => {
     console.log('Initializing app...');
 
-    // Load config from file first
-    await loadConfigSettings();
+    // Fetch config exactly once; every consumer below reads this same snapshot
+    // (config.json is unchanging during boot). Replaces three separate getConfig()
+    // round-trips (restoreLastSession check, loadConfigSettings, initializeShellProfiles).
+    let config: any = null;
+    try {
+      config = (await window.electronAPI?.getConfig?.()) ?? null;
+    } catch (error) {
+      console.error('Failed to load config:', error);
+    }
 
     // Backlog 011: warm the command-history index (non-blocking), and re-sync it
     // whenever this window regains focus — commands recorded in ANOTHER window
@@ -316,12 +323,14 @@ const App: React.FC = () => {
       void commandHistoryService.hydrate();
     });
 
-    // Always initialize shell profiles first (they need to be fresh from the system)
+    // loadConfigSettings and initializeShellProfiles are independent (neither reads
+    // Redux state the other writes), so run them concurrently. Both consume the
+    // single config snapshot fetched above.
     console.log('Initializing shell profiles...');
-    await initializeShellProfiles();
-
-    // Wait a bit for shell profiles to be properly set in state
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await Promise.all([
+      loadConfigSettings(config),
+      initializeShellProfiles(config),
+    ]);
 
     // Detached windows reconstruct a handed-off tab/pane (reattaching to the
     // existing live PTYs) instead of restoring the session or creating a default
@@ -343,21 +352,13 @@ const App: React.FC = () => {
       const folderPath = bootParams.get('path') ?? undefined;
       setupIPCListeners();
       inputHandler.enable();
-      setTimeout(() => createDefaultTabIfNeeded(folderPath), 500);
+      createDefaultTabIfNeeded(folderPath);
       return;
     }
 
-    // Check if we should restore last session
-    let shouldRestore = true;
-    try {
-      if (window.electronAPI) {
-        const config = await window.electronAPI.getConfig();
-        shouldRestore = config.restoreLastSession !== false; // Default to true
-        console.log('Restore last session:', shouldRestore);
-      }
-    } catch (error) {
-      console.error('Failed to check restoreLastSession config:', error);
-    }
+    // Check if we should restore last session (reuse the config fetched above)
+    const shouldRestore = config?.restoreLastSession !== false; // Default to true
+    console.log('Restore last session:', shouldRestore);
 
     // Cold "Open in TermFlow" launch (no instance was running): the backend stashed the
     // requested folder as a pending path. Take it once so it opens on this main window.
@@ -375,6 +376,12 @@ const App: React.FC = () => {
     }
     console.log('State restored:', restored);
 
+    // Set up IPC listeners and the input handler BEFORE the post-restore tab
+    // action, preserving the order these previously ran in (the tab action used
+    // to fire from a setTimeout, deferred past these two synchronous calls).
+    setupIPCListeners();
+    inputHandler.enable();
+
     // Decide what to do post-restore (see postRestoreAction.ts for the
     // decision table and its unit tests).
     const postRestoreAction = resolvePostRestoreAction({
@@ -384,25 +391,15 @@ const App: React.FC = () => {
     });
     console.log('Post-restore action:', postRestoreAction);
     if (postRestoreAction === 'createDefaultTab') {
-      // Increased delay to ensure shell profiles are properly loaded
-      setTimeout(() => createDefaultTabIfNeeded(pendingOpenPath), 500);
+      createDefaultTabIfNeeded(pendingOpenPath);
     } else if (postRestoreAction === 'openFolderTab') {
-      setTimeout(() => openFolderTab(pendingOpenPath!), 500);
+      openFolderTab(pendingOpenPath!);
     }
-
-    // Set up IPC listeners
-    setupIPCListeners();
-
-    // Initialize input handler (it sets up its own listeners)
-    inputHandler.enable();
   };
 
-  const loadConfigSettings = async () => {
+  const loadConfigSettings = async (config: any) => {
     try {
-      if (window.electronAPI) {
-        // Load config from file
-        const config = await window.electronAPI.getConfig();
-
+      if (config) {
         // Apply theme settings
         if (config.theme) {
           dispatch(updateTheme(config.theme));
@@ -516,16 +513,15 @@ const App: React.FC = () => {
     }
   };
 
-  const initializeShellProfiles = async () => {
+  const initializeShellProfiles = async (config: any) => {
     try {
       // Get actual shell profiles from the system
       if (window.electronAPI) {
         let profiles = await window.electronAPI.getShellProfiles();
 
-        // Load settings to check for saved profile overrides (like CWD)
+        // Check for saved profile overrides (like CWD) in the already-loaded config
         try {
-          const config = await window.electronAPI.getConfig();
-          const savedProfiles = config.shellProfiles as any[];
+          const savedProfiles = config?.shellProfiles as any[];
 
           if (savedProfiles && Array.isArray(savedProfiles)) {
             // Merge saved overrides into system profiles

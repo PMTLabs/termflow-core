@@ -170,7 +170,81 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
     Vec::new()
 }
 
+/// TTL for the get_available_shells() cache. Long enough to absorb the boot-time
+/// burst (profile list at boot + first tab spawn) and rapid new-tab creation;
+/// short enough that an out-of-band change to detected system shells (e.g. a WSL
+/// distro added/removed) is reflected on its own within a few seconds.
+const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Cache state: a generation counter plus the last computed entry, both behind
+/// ONE mutex so bumping the generation and clearing the entry (invalidation)
+/// is a single atomic step, and so is checking-then-writing a fresh computation
+/// back in — there's no separate un-guarded atomic for a write-back to race
+/// against. `std::sync::Mutex::new` is const, so this needs no OnceLock/once_cell.
+struct ShellCacheState {
+    generation: u64,
+    entry: Option<(std::time::Instant, Vec<ShellProfile>)>,
+}
+
+static SHELL_CACHE: std::sync::Mutex<ShellCacheState> =
+    std::sync::Mutex::new(ShellCacheState { generation: 0, entry: None });
+
+/// Drop the cached shell list so the next get_available_shells() recomputes.
+/// Called after any custom-profile mutation (reachable from the external HTTP
+/// API) so a list/create-terminal right after a write never sees stale data.
+fn invalidate_shell_cache() {
+    match SHELL_CACHE.lock() {
+        Ok(mut state) => {
+            state.generation += 1;
+            state.entry = None;
+        }
+        Err(_) => log::warn!(
+            "SHELL_CACHE mutex poisoned; shell-profile cache disabled for the rest of this process"
+        ),
+    }
+}
+
 pub fn get_available_shells() -> Vec<ShellProfile> {
+    // get_available_shells() never holds the cache lock across
+    // compute_available_shells() (which blocks on a subprocess spawn) — every
+    // caller here is an async Tauri/Axum handler calling this sync function
+    // directly, so holding a lock across the spawn would let one slow wsl.exe
+    // serialize every concurrent caller behind it instead of each only
+    // blocking its own worker, as happens today. Instead, snapshot the
+    // generation while checking for a cache hit, release the lock, compute,
+    // then only write back if the generation hasn't moved — an invalidation
+    // can only bump the generation under this same lock, so there's no window
+    // for one to land between the write-back's check and its write.
+    let generation_at_start = match SHELL_CACHE.lock() {
+        Ok(state) => {
+            if let Some((computed_at, profiles)) = state.entry.as_ref() {
+                if computed_at.elapsed() < SHELL_CACHE_TTL {
+                    return profiles.clone();
+                }
+            }
+            state.generation
+        }
+        Err(_) => {
+            log::warn!("SHELL_CACHE mutex poisoned; falling back to an uncached lookup");
+            0
+        }
+    };
+
+    let profiles = compute_available_shells();
+
+    match SHELL_CACHE.lock() {
+        Ok(mut state) => {
+            if state.generation == generation_at_start {
+                state.entry = Some((std::time::Instant::now(), profiles.clone()));
+            }
+        }
+        Err(_) => log::warn!("SHELL_CACHE mutex poisoned; skipping cache write-back"),
+    }
+
+    profiles
+}
+
+fn compute_available_shells() -> Vec<ShellProfile> {
     let mut profiles = Vec::new();
 
     if cfg!(target_os = "windows") {
@@ -354,7 +428,8 @@ pub fn add_custom_profile(mut profile: ShellProfile) -> Result<String, String> {
     let mut custom = load_custom_profiles();
     custom.push(profile.clone());
     save_custom_profiles(&custom)?;
-    
+    invalidate_shell_cache();
+
     Ok(profile.id)
 }
 
@@ -370,6 +445,7 @@ pub fn update_custom_profile(profile_id: &str, updates: ShellProfile) -> Result<
         existing.icon = updates.icon;
         existing.is_default = updates.is_default;
         save_custom_profiles(&custom)?;
+        invalidate_shell_cache();
         Ok(())
     } else {
         Err("Custom profile not found".to_string())
@@ -387,6 +463,7 @@ pub fn delete_custom_profile(profile_id: &str) -> Result<(), String> {
     }
     
     save_custom_profiles(&custom)?;
+    invalidate_shell_cache();
     Ok(())
 }
 

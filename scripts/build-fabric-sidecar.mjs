@@ -30,6 +30,15 @@ function getHostTriple() {
   return match[1];
 }
 
+// Resolution order: explicit override, then the triple Tauri CLI sets for
+// beforeBuildCommand hooks when cross-compiling. This script itself runs
+// *before* `tauri build` (chained via `&&` in package.json), outside any
+// Tauri hook, so TAURI_ENV_TARGET_TRIPLE is only present if the caller
+// already exported it manually.
+function getTargetTriple(hostTriple) {
+  return process.env.TERMFLOW_RUST_TARGET || process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple;
+}
+
 function resolveFabricDir(rootDir) {
   const override = process.env.TERMFLOW_FABRIC_DIR;
   if (override && override.trim() !== '') {
@@ -54,9 +63,20 @@ function main() {
     process.exit(0);
   }
 
-  console.log(`[build:fabric-sidecar] building fabric from ${fabricDir}`);
+  const hostTriple = getHostTriple();
+  const targetTriple = getTargetTriple(hostTriple);
+  const isCrossCompile = targetTriple !== hostTriple;
 
-  const build = spawnSync('cargo', ['build', '--release'], {
+  console.log(
+    `[build:fabric-sidecar] building fabric from ${fabricDir}` +
+      (isCrossCompile ? ` (cross-compiling for ${targetTriple})` : ''),
+  );
+
+  const cargoArgs = ['build', '--release'];
+  if (isCrossCompile) {
+    cargoArgs.push('--target', targetTriple);
+  }
+  const build = spawnSync('cargo', cargoArgs, {
     stdio: 'inherit',
     cwd: fabricDir,
   });
@@ -64,9 +84,11 @@ function main() {
     process.exit(build.status ?? 1);
   }
 
-  const hostTriple = getHostTriple();
-  const ext = process.platform === 'win32' ? '.exe' : '';
-  const builtBinary = join(fabricDir, 'target', 'release', `termflow-fabric${ext}`);
+  const ext = targetTriple.includes('-windows-') ? '.exe' : '';
+  const releaseDir = isCrossCompile
+    ? join(fabricDir, 'target', targetTriple, 'release')
+    : join(fabricDir, 'target', 'release');
+  const builtBinary = join(releaseDir, `termflow-fabric${ext}`);
   if (!existsSync(builtBinary)) {
     console.error(
       `[build:fabric-sidecar] expected build output missing: ${builtBinary}`,
@@ -75,7 +97,7 @@ function main() {
   }
 
   const outDir = join(rootDir, 'src-tauri', 'binaries');
-  const outFile = join(outDir, `termflow-fabric-${hostTriple}${ext}`);
+  const outFile = join(outDir, `termflow-fabric-${targetTriple}${ext}`);
   mkdirSync(outDir, { recursive: true });
   copyFileSync(builtBinary, outFile);
 

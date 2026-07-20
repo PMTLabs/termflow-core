@@ -134,19 +134,6 @@ class StateManagerClass {
 
       // Clear any existing state first
       this.clearCurrentState(dispatch);
-      
-      // Wait for clear to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Restore tab panes mapping BEFORE creating tabs. Mutate the existing global
-      // object IN PLACE (do NOT reassign window.__TAB_PANES__) — TerminalContainer
-      // holds a module-scoped reference to the same object, and replacing it stranded
-      // the restored trees so every restored terminal spawned under a fresh id,
-      // defeating scrollback restore. See services/tabPanesStore.ts.
-      if (appState.tabPanes) {
-        console.log('Restoring tab panes mapping for all tabs:', Object.keys(appState.tabPanes));
-        restoreTabPanesInPlace(appState.tabPanes);
-      }
 
       // Reattach to any PTYs that survived this reload BEFORE creating tabs/panes.
       // The backend (Rust) keeps PTYs alive across a renderer reload; without this,
@@ -155,6 +142,8 @@ class StateManagerClass {
       // process under its renderer id here makes TerminalPane's mount effect reuse
       // it (terminalService.getProcessId hit at TerminalPane.tsx:95) instead of
       // spawning. Best-effort: any failure falls through to the normal spawn path.
+      // Reads appState directly (not the global tabPanes map), so it doesn't need
+      // restoreTabPanesInPlace to have run yet.
       await this.reconcileExistingTerminals(appState);
 
       // Orphan sweep: drop persisted scrollback for any terminal no longer in the
@@ -190,12 +179,25 @@ class StateManagerClass {
           shellType: t.shellType,
           processId: t.processId
         })));
-        
+
+        // Restore tab panes mapping IMMEDIATELY before creating tabs (not right after
+        // clearCurrentState) — keeps the window where tabPanes has entries for tabIds
+        // not yet in Redux's `tabs` at zero, since the very next statement is the
+        // addTab loop below. Mutate the existing global object IN PLACE (do NOT
+        // reassign window.__TAB_PANES__) — TerminalContainer holds a module-scoped
+        // reference to the same object, and replacing it stranded the restored trees
+        // so every restored terminal spawned under a fresh id, defeating scrollback
+        // restore. See services/tabPanesStore.ts.
+        if (appState.tabPanes) {
+          console.log('Restoring tab panes mapping for all tabs:', Object.keys(appState.tabPanes));
+          restoreTabPanesInPlace(appState.tabPanes);
+        }
+
         // Add all tabs first without making them active
         for (let i = 0; i < appState.tabs.length; i++) {
           const tab = appState.tabs[i];
           console.log(`Restoring tab ${i + 1}/${appState.tabs.length}: ${tab.id} - ${tab.title}`);
-          
+
           // processId and transient live-status flags are already cleared by
           // sanitizeLayoutData; just ensure the tab isn't marked active here (the
           // active tab is set afterwards via setActiveTab).
@@ -205,21 +207,21 @@ class StateManagerClass {
             isActive: false
           }));
         }
-        
-        // Wait for tabs to be created and Redux state to update
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Set active tab after all tabs are added
+
+        // Set active tab after all tabs are added. TerminalContainer's pane-restoration
+        // effects are keyed reactively off [activeTabId, tabs, treesByTabId], so they
+        // fire correctly off this dispatch without needing to wait for React to "catch up".
         if (appState.activeTabId && appState.tabs.some(tab => tab.id === appState.activeTabId)) {
           console.log(`Setting active tab: ${appState.activeTabId}`);
           dispatch(setActiveTab(appState.activeTabId!));
-          
-          // Wait for tab activation and pane tree restoration
-          await new Promise(resolve => setTimeout(resolve, 200));
-          
           // The TerminalContainer will automatically restore the pane tree for the active tab
           // from the tabPanes mapping
         }
+      } else if (appState.tabPanes) {
+        // No tabs to restore, but still seed the tabPanes mapping in case other
+        // restore paths (e.g. a later openFolderTab) consult it.
+        console.log('Restoring tab panes mapping (no tabs):', Object.keys(appState.tabPanes));
+        restoreTabPanesInPlace(appState.tabPanes);
       }
 
       console.log('State restored successfully');
