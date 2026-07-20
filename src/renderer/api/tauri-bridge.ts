@@ -680,4 +680,14 @@ if (typeof window !== 'undefined') {
 // Expose to window
 (window as any).electronAPI = tauriBridge;
 
+// Dev-only console helpers for manual testing. `withGlobalTauri` is off, so
+// `window.__TAURI__` does NOT exist — use these instead of raw `invoke` from
+// DevTools. `restartForUpdate()` triggers the PTY-host hot-swap; `tauriInvoke`
+// is a generic escape hatch. Both return the invoke promise so `.catch` surfaces
+// a refusal reason.
+if (process.env.NODE_ENV === 'development') {
+  (window as any).tauriInvoke = (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args);
+  (window as any).restartForUpdate = () => invoke('restart_for_update');
+}
+
 export default tauriBridge;

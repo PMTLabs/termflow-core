@@ -14,6 +14,14 @@ rust-version = "1.88.0"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Name the raw cargo binary `termflow-app` (so the dev artifact is
+# `termflow-app.exe`, distinguishable in Task Manager/Explorer) instead of the
+# package-default `app.exe`. The release bundle is still renamed to
+# `termflow.exe` via `mainBinaryName` in tauri.conf.json.
+[[bin]]
+name = "termflow-app"
+path = "src/main.rs"
+
 [features]
 # Opt-in: enables tauri's `test` feature (tauri::test::mock_app) so the Rust
 # integration tests can build a real AppState<MockRuntime> and drive handlers that
