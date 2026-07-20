@@ -215,6 +215,10 @@ pub struct AppState<R: Runtime = Wry> {
     // `shell_writer_channels`. write/resize/close/repaint route to the client
     // for these; everything else is unchanged.
     pub host_terminals: Arc<DashMap<String, ()>>,
+    // Sessions the sidecar still held when we connected (survived a hot-swap).
+    // Populated once in `ensure_pty_host`; `create_host_terminal` reattaches to
+    // (instead of respawning) any tab_id present here.
+    pub host_reattach_pending: Arc<DashMap<String, ()>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -263,6 +267,7 @@ impl<R: Runtime> Clone for AppState<R> {
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            host_reattach_pending: self.host_reattach_pending.clone(),
         }
     }
 }
@@ -324,6 +329,7 @@ impl<R: Runtime> AppState<R> {
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            host_reattach_pending: Arc::new(DashMap::new()),
         }
     }
 
@@ -534,6 +540,7 @@ impl<R: Runtime> AppState<R> {
 
         let st_exit = self.clone();
         let st_gap = self.clone();
+        let st_disc = self.clone();
         let deps = crate::pty_host_client::PtyHostDeps {
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
@@ -553,11 +560,32 @@ impl<R: Runtime> AppState<R> {
             on_gap: Arc::new(move |tab_id: String| {
                 st_gap.host_repaint(&tab_id);
             }),
+            on_disconnect: Arc::new(move || {
+                use tauri::Emitter;
+                // Sidecar/pipe died: surface a closed-session banner on every
+                // live host-owned pane, and drop the dead client so a later
+                // create reconnects.
+                let ids: Vec<String> =
+                    st_disc.host_terminals.iter().map(|e| e.key().clone()).collect();
+                for id in ids {
+                    st_disc.host_terminals.remove(&id);
+                    let _ = st_disc.app_handle.emit(
+                        "terminal:exit",
+                        serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
+                    );
+                }
+                *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }),
         };
 
         let client = crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, deps)
             .await
             .map_err(|e| e.to_string())?;
+        // Record sessions that survived a hot-swap so create_host_terminal
+        // reattaches instead of respawning.
+        for meta in client.list_sessions().await {
+            self.host_reattach_pending.insert(meta.tab_id, ());
+        }
         *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
     }

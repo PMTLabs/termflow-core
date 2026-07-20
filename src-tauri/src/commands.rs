@@ -170,6 +170,36 @@ async fn create_host_terminal(
     shell_args: Option<Vec<String>>,
     cwd: Option<String>,
 ) -> Result<String, String> {
+    // Reattach path: if the sidecar already holds this session (survived a
+    // hot-swap), attach + replay instead of spawning a fresh shell.
+    if state.ensure_pty_host().await.is_ok() && state.host_reattach_pending.remove(&id).is_some() {
+        if let Some(client) = state.pty_host_clone() {
+            state.terminals.insert(
+                id.clone(),
+                crate::state::Terminal {
+                    id: id.clone(),
+                    pid: 0, // real pid not carried across reattach (milestone A)
+                    shell: shell_name.clone(),
+                    name: format!("Terminal-{}", shell_name),
+                    created_at: chrono::Local::now().to_rfc3339(),
+                    cols,
+                    rows,
+                    backend: crate::tmux_manager::TerminalBackend::PortablePty,
+                    tab_id: Some(id.clone()),
+                    last_input_source: None,
+                    last_input_at: None,
+                },
+            );
+            state.init_screen(&id, rows, cols);
+            state.host_terminals.insert(id.clone(), ());
+            // Register routing BEFORE attach releases replay bytes, then nudge a
+            // repaint so a live TUI redraws into the reconstructed screen.
+            client.attach(&id, 0);
+            client.nudge_repaint(&id, cols, rows);
+            return Ok(id);
+        }
+    }
+
     // Connect (or spawn) the sidecar, then spawn the session.
     let host_result = async {
         state.ensure_pty_host().await?;
@@ -245,6 +275,30 @@ async fn create_host_terminal(
     }
 
     Ok(id)
+}
+
+/// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
+/// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
+/// reattaches. Refuses if the sidecar isn't connected or couldn't break away
+/// from a kill-on-close job (survival not guaranteed).
+#[tauri::command]
+pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
+    let client = state
+        .pty_host_clone()
+        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    if !client.survives_hotswap() {
+        return Err(
+            "hot-swap unavailable: the sidecar could not break away from a kill-on-close job"
+                .to_string(),
+        );
+    }
+    let token = crate::pty_host_client::resolve_token();
+    // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
+    // exit and drop the pipe (10-minute safety window).
+    client.arm_detach(600, &token).await?;
+    log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
+    state.app_handle.exit(0);
+    Ok(())
 }
 
 /// The window label that API/MCP-created terminals currently route to (normalized to

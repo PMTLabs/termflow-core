@@ -32,6 +32,9 @@ pub struct PtyHostDeps {
     pub on_exit: Arc<dyn Fn(String, Option<String>) + Send + Sync>,
     /// Called on an output discontinuity: (tab_id). Wire to a repaint nudge.
     pub on_gap: Arc<dyn Fn(String) + Send + Sync>,
+    /// Called when the pipe closes unexpectedly (sidecar died / connection
+    /// lost). Wire to surface a SessionClosedBanner on every host-owned pane.
+    pub on_disconnect: Arc<dyn Fn() + Send + Sync>,
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
@@ -222,6 +225,8 @@ where
                 Ok(None) | Err(_) => break, // pipe closed
             }
         }
+        // Pipe closed: surface the loss so host-owned panes don't hang silently.
+        (deps.on_disconnect)();
     });
 
     PtyHostClient {
@@ -422,6 +427,7 @@ mod tests {
             output_produced: produced.clone(),
             on_exit: Arc::new(|_, _| {}),
             on_gap: Arc::new(|_| {}),
+            on_disconnect: Arc::new(|| {}),
         };
         (deps, rx, produced)
     }
