@@ -176,54 +176,57 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
 /// distro added/removed) is reflected on its own within a few seconds.
 const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Cache of the last computed shell list, tagged with the invalidation generation
-/// it was computed under: (computed_at, generation, profiles). `None` = empty or
-/// explicitly invalidated. `std::sync::Mutex::new` is const, so this needs no
-/// OnceLock / once_cell.
-static SHELL_CACHE: std::sync::Mutex<Option<(std::time::Instant, u64, Vec<ShellProfile>)>> =
-    std::sync::Mutex::new(None);
+/// Cache state: a generation counter plus the last computed entry, both behind
+/// ONE mutex so bumping the generation and clearing the entry (invalidation)
+/// is a single atomic step, and so is checking-then-writing a fresh computation
+/// back in — there's no separate un-guarded atomic for a write-back to race
+/// against. `std::sync::Mutex::new` is const, so this needs no OnceLock/once_cell.
+struct ShellCacheState {
+    generation: u64,
+    entry: Option<(std::time::Instant, Vec<ShellProfile>)>,
+}
 
-/// Bumped by invalidate_shell_cache(). get_available_shells() never holds the
-/// cache lock across compute_available_shells() (which blocks on a subprocess
-/// spawn) — every caller here is an async Tauri/Axum handler calling this sync
-/// function directly, so holding a lock across the spawn would let one slow
-/// wsl.exe serialize every concurrent caller behind it instead of each only
-/// blocking its own worker, as happens today. The generation counter instead
-/// lets a compute that started before a concurrent invalidation avoid
-/// repopulating the cache with a possibly-stale result.
-static SHELL_CACHE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SHELL_CACHE: std::sync::Mutex<ShellCacheState> =
+    std::sync::Mutex::new(ShellCacheState { generation: 0, entry: None });
 
 /// Drop the cached shell list so the next get_available_shells() recomputes.
 /// Called after any custom-profile mutation (reachable from the external HTTP
 /// API) so a list/create-terminal right after a write never sees stale data.
 fn invalidate_shell_cache() {
-    SHELL_CACHE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    if let Ok(mut cache) = SHELL_CACHE.lock() {
-        *cache = None;
+    if let Ok(mut state) = SHELL_CACHE.lock() {
+        state.generation += 1;
+        state.entry = None;
     }
 }
 
 pub fn get_available_shells() -> Vec<ShellProfile> {
-    let generation_at_start = SHELL_CACHE_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
-    if let Ok(cache) = SHELL_CACHE.lock() {
-        if let Some((computed_at, generation, profiles)) = cache.as_ref() {
-            if *generation == generation_at_start && computed_at.elapsed() < SHELL_CACHE_TTL {
-                return profiles.clone();
+    // get_available_shells() never holds the cache lock across
+    // compute_available_shells() (which blocks on a subprocess spawn) — every
+    // caller here is an async Tauri/Axum handler calling this sync function
+    // directly, so holding a lock across the spawn would let one slow wsl.exe
+    // serialize every concurrent caller behind it instead of each only
+    // blocking its own worker, as happens today. Instead, snapshot the
+    // generation while checking for a cache hit, release the lock, compute,
+    // then only write back if the generation hasn't moved — an invalidation
+    // can only bump the generation under this same lock, so there's no window
+    // for one to land between the write-back's check and its write.
+    let generation_at_start = match SHELL_CACHE.lock() {
+        Ok(state) => {
+            if let Some((computed_at, profiles)) = state.entry.as_ref() {
+                if computed_at.elapsed() < SHELL_CACHE_TTL {
+                    return profiles.clone();
+                }
             }
+            state.generation
         }
-    }
+        Err(_) => 0,
+    };
 
     let profiles = compute_available_shells();
 
-    // Check-and-write under the same lock acquisition: checking the generation
-    // before locking would leave a window where an invalidation lands between
-    // the check and the write, so a computation that crossed an invalidation
-    // could still be written into the cache (tagged with the stale generation —
-    // never served, since reads compare generations too, but a wasted write and
-    // an avoidable extra recomputation on the next call).
-    if let Ok(mut cache) = SHELL_CACHE.lock() {
-        if SHELL_CACHE_GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation_at_start {
-            *cache = Some((std::time::Instant::now(), generation_at_start, profiles.clone()));
+    if let Ok(mut state) = SHELL_CACHE.lock() {
+        if state.generation == generation_at_start {
+            state.entry = Some((std::time::Instant::now(), profiles.clone()));
         }
     }
 
