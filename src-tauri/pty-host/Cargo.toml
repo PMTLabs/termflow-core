@@ -1,0 +1,26 @@
+[package]
+name = "termflow-pty-host"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+
+[[bin]]
+name = "termflow-pty-host"
+path = "src/main.rs"
+
+[dependencies]
+termflow-pty-protocol = { path = "../pty-protocol" }
+portable-pty = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time", "sync"] }
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1"
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+] }
