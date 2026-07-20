@@ -14,6 +14,8 @@
     "dev": "tauri dev",
     "tauri": "tauri",
     "dev:tauri": "tauri dev",
+    "build:pty-host": "cargo build --manifest-path src-tauri/pty-host/Cargo.toml --release",
+    "dev:pty-host": "bun run build:pty-host && cross-env TERMFLOW_PTY_HOST=1 tauri dev",
     "build:mcp-sidecar": "bun scripts/build-mcp-sidecar.mjs",
     "build:fabric-sidecar": "bun scripts/build-fabric-sidecar.mjs",
     "gen:third-party-notices": "node scripts/gen-third-party-notices.mjs",

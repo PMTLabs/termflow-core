@@ -374,29 +374,61 @@ pub fn resolve_token() -> String {
     token
 }
 
-/// Locate the sidecar binary: `TERMFLOW_PTY_HOST_BIN` override (dev), else a
-/// `termflow-pty-host.exe` staged next to the app executable (release).
+/// Locate the sidecar binary, in priority order:
+/// 1. `TERMFLOW_PTY_HOST_BIN` explicit override.
+/// 2. Next to the app executable (release / staged).
+/// 3. Dev build locations under `pty-host/target/{release,debug}` resolved
+///    both relative to the exe (`src-tauri/target/debug/…`) and to the cwd —
+///    so `bun run dev` finds it with no env var once the sidecar is built.
 pub fn resolve_sidecar_path() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "termflow-pty-host.exe"
+    } else {
+        "termflow-pty-host"
+    };
+
+    // 1. Explicit override.
     if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
         let pb = std::path::PathBuf::from(p);
         if pb.exists() {
             return Some(pb);
         }
     }
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // 2. Next to the app exe (release / staged) and 3a. dev, relative to the exe
+    //    (exe is typically at src-tauri/target/{debug,release}/).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let name = if cfg!(windows) {
-                "termflow-pty-host.exe"
-            } else {
-                "termflow-pty-host"
-            };
-            let cand = dir.join(name);
-            if cand.exists() {
-                return Some(cand);
+            candidates.push(dir.join(name)); // staged next to app
+            // src-tauri/target/<profile>/ -> ../../pty-host/target/{release,debug}/
+            for profile in ["release", "debug"] {
+                candidates.push(
+                    dir.join("..")
+                        .join("..")
+                        .join("pty-host")
+                        .join("target")
+                        .join(profile)
+                        .join(name),
+                );
             }
         }
     }
-    None
+
+    // 3b. Dev, relative to the working directory (repo root or src-tauri).
+    if let Ok(cwd) = std::env::current_dir() {
+        for base in [
+            cwd.join("src-tauri").join("pty-host"),
+            cwd.join("pty-host"),
+        ] {
+            for profile in ["release", "debug"] {
+                candidates.push(base.join("target").join(profile).join(name));
+            }
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists())
 }
 
 fn resp_req(r: &Response) -> u64 {
