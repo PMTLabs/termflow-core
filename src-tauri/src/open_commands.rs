@@ -230,6 +230,32 @@ fn is_batch_shim(program: &str) -> bool {
     lower.ends_with(".cmd") || lower.ends_with(".bat")
 }
 
+/// GUI editors whose Windows CLI entry point is a real `.exe` compiled with the
+/// console (CUI) subsystem rather than a batch shim — e.g. Zed installs
+/// `Zed.exe` this way (confirmed via its PE header: Subsystem = WINDOWS_CUI).
+/// Spawned from this GUI-subsystem process without CREATE_NO_WINDOW, Windows
+/// pops the exact same flashing console as VS Code's `code.cmd`, but
+/// `is_batch_shim` (extension-based) never matches a `.exe`. This can't be
+/// solved by checking the PE subsystem at runtime instead: a genuinely
+/// interactive console editor the user points at directly (vim.exe, nano,
+/// emacs) is ALSO CUI-subsystem and must keep its window — subsystem alone
+/// can't distinguish "launcher stub that forwards to a running GUI app and
+/// exits" from "the editor's actual UI". So this is a name allowlist, matched
+/// the same way `is_vscode_family` matches — extend it as more GUI editors
+/// with a CUI-subsystem launcher stub are reported.
+/// Compiled on every platform so the Linux CI can unit-test it; only
+/// consulted on Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_known_gui_launcher_stub(program: &str) -> bool {
+    let base = program
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = base.strip_suffix(".exe").unwrap_or(&base);
+    matches!(stem, "zed")
+}
+
 fn is_executable_path(path: &str) -> bool {
     Path::new(path)
         .extension()
@@ -558,13 +584,16 @@ pub async fn open_in_editor(
     // still fires even though `program` may now be `…\code.cmd`.
     cmd.args(editor_args(&editor, &path, line, col));
     // Batch shims run through cmd.exe, which — spawned from a GUI process — pops a
-    // console window that flashes and closes. CREATE_NO_WINDOW suppresses it.
-    // Scoped to `.cmd`/`.bat` only: a console editor the user configured directly
-    // (e.g. vim.exe) still needs a real console window to appear in.
+    // console window that flashes and closes. Some GUI editors' own `.exe` CLI
+    // entry point does the same (console-subsystem launcher stub that forwards to
+    // the running app and exits — see is_known_gui_launcher_stub). CREATE_NO_WINDOW
+    // suppresses the flash in both cases. Deliberately NOT applied to every `.exe`:
+    // a console editor the user configured directly (e.g. vim.exe) still needs a
+    // real console window to appear in.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        if is_batch_shim(&program) {
+        if is_batch_shim(&program) || is_known_gui_launcher_stub(&program) {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
@@ -579,8 +608,9 @@ pub async fn open_in_editor(
 #[cfg(test)]
 mod tests {
     use super::{
-        editor_args, find_descendants, is_batch_shim, is_executable_path, is_vscode_family,
-        msys_or_wsl_drive, normalize_separators, resolve_blocking, resolve_in_path,
+        editor_args, find_descendants, is_batch_shim, is_executable_path,
+        is_known_gui_launcher_stub, is_vscode_family, msys_or_wsl_drive, normalize_separators,
+        resolve_blocking, resolve_in_path,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -772,6 +802,20 @@ mod tests {
         assert!(!is_batch_shim(r"C:\Program Files\Vim\vim.exe"));
         assert!(!is_batch_shim("code"));
         assert!(!is_batch_shim("/usr/bin/code"));
+    }
+
+    #[test]
+    fn detects_known_gui_launcher_stubs_for_console_suppression() {
+        // Zed's Windows CLI entry point is a real .exe but console-subsystem (CUI) —
+        // confirmed via its PE header — so it flashes a console like a .cmd shim.
+        assert!(is_known_gui_launcher_stub("zed"));
+        assert!(is_known_gui_launcher_stub("Zed.exe"));
+        assert!(is_known_gui_launcher_stub(r"C:\Users\me\AppData\Local\Programs\Zed\bin\Zed.exe"));
+        // A genuinely interactive console editor must NOT be suppressed here — its
+        // console window is the editor UI, not a launcher-stub artifact.
+        assert!(!is_known_gui_launcher_stub(r"C:\Program Files\Vim\vim.exe"));
+        assert!(!is_known_gui_launcher_stub("nano"));
+        assert!(!is_known_gui_launcher_stub("code.cmd"));
     }
 
     #[test]
