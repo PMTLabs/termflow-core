@@ -3,3 +3,10 @@
 /target/
 /gen/schemas
 /target-pro-alt/
+
+# PTY-host sidecar sub-crates: build dirs + standalone locks (they use the
+# workspace lock once wired). Never commit their target/ output.
+pty-host/target/
+pty-protocol/target/
+pty-host/Cargo.lock
+pty-protocol/Cargo.lock

@@ -62,6 +62,11 @@ pub enum Data {
     Stdin { tab_id: String, bytes: Vec<u8> },
     /// Sidecar → GUI output. `offset` is the byte offset of `bytes[0]`.
     Stdout { tab_id: String, offset: u64, bytes: Vec<u8> },
+    /// Sidecar → GUI: a discontinuity in the output stream (ring eviction on
+    /// reattach, or a dropped live frame under backpressure). Bytes before
+    /// `at_offset` may be missing; the GUI should resync from the ring / force a
+    /// repaint. This is how the bounded live path stays memory-safe.
+    Gap { tab_id: String, at_offset: u64 },
     /// Sidecar → GUI: child exited; `exit_cwd` is its last known directory.
     Exit { tab_id: String, exit_cwd: Option<String> },
 }

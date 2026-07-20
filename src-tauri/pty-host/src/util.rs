@@ -2,41 +2,24 @@
 //! `pty_manager.rs` so the sidecar splits chunks on the same character
 //! boundaries the in-process path always used.
 
-/// Return the length of the longest prefix of `data` that is complete, valid
-/// UTF-8 — i.e. the index at which an incomplete trailing multibyte sequence
-/// begins (or `data.len()` when the whole slice is valid).
+/// Return the split point: the length of the prefix safe to forward now, so
+/// that at most an *incomplete* trailing UTF-8 scalar is carried over. The
+/// carry (`data.len() - result`) is bounded to ≤3 bytes, so `pending` can never
+/// grow without bound (a malicious/garbled stream cannot balloon memory).
+///
+/// - Whole slice valid → `data.len()` (nothing carried).
+/// - Trailing bytes are an *incomplete* scalar → split before them (carry ≤3).
+/// - An *invalid* byte is present (not merely incomplete) → forward everything
+///   and let the GUI's `from_utf8_lossy` render replacement chars; nothing is
+///   carried, so no unbounded accumulation on garbage input.
 pub fn find_utf8_boundary(data: &[u8]) -> usize {
-    if data.is_empty() {
-        return 0;
+    match std::str::from_utf8(data) {
+        Ok(_) => data.len(),
+        Err(e) => match e.error_len() {
+            None => e.valid_up_to(), // incomplete trailing scalar → carry ≤3 bytes
+            Some(_) => data.len(),   // invalid byte present → pass through, no carry
+        },
     }
-    if std::str::from_utf8(data).is_ok() {
-        return data.len();
-    }
-    let len = data.len();
-    for i in 1..=4.min(len) {
-        let pos = len - i;
-        let byte = data[pos];
-        if byte < 0x80 || byte >= 0xC0 {
-            let expected_len = if byte < 0x80 {
-                1
-            } else if byte < 0xE0 {
-                2
-            } else if byte < 0xF0 {
-                3
-            } else {
-                4
-            };
-            let actual_len = len - pos;
-            if actual_len < expected_len {
-                return pos;
-            } else if std::str::from_utf8(&data[pos..]).is_ok() {
-                return len;
-            } else {
-                continue;
-            }
-        }
-    }
-    0
 }
 
 /// Kill a process tree by PID (taskkill /T /F on Windows; kill on Unix).

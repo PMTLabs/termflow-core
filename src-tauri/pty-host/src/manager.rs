@@ -1,19 +1,25 @@
 //! Owns all hosted sessions and the arm/disarm hold state machine.
 //!
-//! Key invariants (from the dual review):
-//! - The armed hold uses ONE absolute deadline captured at arm time. A
-//!   reconnect never restarts it, so a client that reconnects and drops before
-//!   disarming cannot extend the hold indefinitely.
-//! - On a GUI disconnect while NOT armed, all sessions are dropped and the
-//!   disposition is `TearDown` (identical to today's quit/crash behavior).
-//! - `Attach` replay is delegated to `Session::attach`, which snapshots and
-//!   enables streaming atomically (no duplicate / dropped bytes).
+//! Invariants (dual review):
+//! - The armed hold uses ONE absolute deadline captured at arm time; a
+//!   reconnect never restarts it, and `ArmAck` always reports that stored
+//!   deadline (never a value recomputed from a later, differing request).
+//! - `timeout_secs` is bounded and the deadline uses checked arithmetic, so a
+//!   token-bearing peer cannot overflow-panic the sidecar.
+//! - On a GUI disconnect while NOT armed, all sessions are dropped → TearDown.
+//! - `Attach` replay/live-enable/exit-reemit is fully delegated to
+//!   `Session::attach`, which does it atomically under the ring lock.
 
 use crate::session::Session;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termflow_pty_protocol::{Control, Data, Response, SessionMeta};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
+
+/// Upper bound on an armed hold (24h). Prevents overflow and unbounded holds.
+const MAX_ARM_SECS: u64 = 24 * 60 * 60;
+/// Per-session replay ring cap (see spec §9 / plan Global Constraints).
+const RING_CAP: usize = 256 * 1024;
 
 pub enum Disposition {
     TearDown,
@@ -22,40 +28,33 @@ pub enum Disposition {
 
 pub struct SessionManager {
     sessions: HashMap<String, Session>,
-    /// Some(deadline) once armed; None otherwise. Captured once at arm time.
+    /// Absolute monotonic deadline; `Some` once armed, captured exactly once.
     armed_deadline: Option<Instant>,
-    /// Launch token the GUI must present in `ArmDetach` to arm the hold.
+    /// Epoch-ms mirror of `armed_deadline` for honest `ArmAck` reporting.
+    armed_deadline_ms: Option<u64>,
     expected_token: Option<String>,
-    events: UnboundedSender<Data>,
-    responses: UnboundedSender<Response>,
+    events: Sender<Data>,
+    responses: Sender<Response>,
 }
 
 impl SessionManager {
     pub fn new(
-        events: UnboundedSender<Data>,
-        responses: UnboundedSender<Response>,
+        events: Sender<Data>,
+        responses: Sender<Response>,
         expected_token: Option<String>,
     ) -> Self {
         Self {
             sessions: HashMap::new(),
             armed_deadline: None,
+            armed_deadline_ms: None,
             expected_token,
             events,
             responses,
         }
     }
 
-    pub fn tab_ids(&self) -> Vec<String> {
-        self.sessions.keys().cloned().collect()
-    }
-
     pub fn is_armed(&self) -> bool {
         self.armed_deadline.is_some()
-    }
-
-    fn ring_cap() -> usize {
-        // Per-session replay cap; see spec §9 / plan Global Constraints.
-        256 * 1024
     }
 
     fn session_metas(&self) -> Vec<SessionMeta> {
@@ -73,18 +72,16 @@ impl SessionManager {
     pub fn handle_control(&mut self, ctrl: Control) {
         match ctrl {
             Control::Spawn { req, tab_id, spec } => {
-                match Session::spawn(tab_id.clone(), &spec, Self::ring_cap(), self.events.clone()) {
+                // Spawn only arrives while a GUI is connected → attach from
+                // byte 0 so early startup output is streamed, not lost.
+                match Session::spawn(tab_id.clone(), &spec, RING_CAP, self.events.clone(), true) {
                     Ok(s) => {
                         let pid = s.pid();
-                        // A freshly spawned session streams live immediately —
-                        // Spawn only arrives while a GUI is connected. (Detach
-                        // hold later flips this off via `detach_all`.)
-                        s.set_attached(true);
                         self.sessions.insert(tab_id.clone(), s);
-                        let _ = self.responses.send(Response::Spawned { req, tab_id, pid });
+                        let _ = self.responses.try_send(Response::Spawned { req, tab_id, pid });
                     }
                     Err(e) => {
-                        let _ = self.responses.send(Response::SpawnFailed {
+                        let _ = self.responses.try_send(Response::SpawnFailed {
                             req,
                             tab_id,
                             error: e.to_string(),
@@ -101,7 +98,7 @@ impl SessionManager {
                 self.sessions.remove(&tab_id);
             }
             Control::ListSessions { req } => {
-                let _ = self.responses.send(Response::SessionList {
+                let _ = self.responses.try_send(Response::SessionList {
                     req,
                     sessions: self.session_metas(),
                 });
@@ -111,15 +108,10 @@ impl SessionManager {
                 tab_id,
                 from_offset,
             } => {
+                // Fully delegated: session.attach emits Gap+replay+Exit and
+                // enables live streaming atomically under the ring lock.
                 if let Some(s) = self.sessions.get(&tab_id) {
-                    let (start_offset, bytes, _gap) = s.attach(from_offset);
-                    if !bytes.is_empty() {
-                        let _ = self.events.send(Data::Stdout {
-                            tab_id,
-                            offset: start_offset,
-                            bytes,
-                        });
-                    }
+                    s.attach(from_offset);
                 }
             }
             Control::ArmDetach {
@@ -127,22 +119,27 @@ impl SessionManager {
                 timeout_secs,
                 token,
             } => {
-                // Reject a mismatched token silently (no ack) so an
-                // unauthorized peer cannot arm the hold.
                 if self.expected_token.as_deref() != Some(token.as_str()) {
                     log::warn!("ArmDetach rejected: token mismatch");
                     return;
                 }
-                // Capture the absolute deadline ONCE.
+                let capped = timeout_secs.min(MAX_ARM_SECS);
+                // Capture the deadline ONCE (checked add against overflow).
                 if self.armed_deadline.is_none() {
-                    self.armed_deadline = Some(Instant::now() + Duration::from_secs(timeout_secs));
+                    let deadline = Instant::now()
+                        .checked_add(Duration::from_secs(capped))
+                        .unwrap_or_else(Instant::now);
+                    self.armed_deadline = Some(deadline);
+                    self.armed_deadline_ms = Some(now_ms().saturating_add(capped.saturating_mul(1000)));
                 }
-                let deadline_ms = now_ms() + timeout_secs * 1000;
-                let _ = self.responses.send(Response::ArmAck { req, deadline_ms });
+                // Always acknowledge the STORED deadline, never a recomputed one.
+                let deadline_ms = self.armed_deadline_ms.unwrap_or_else(now_ms);
+                let _ = self.responses.try_send(Response::ArmAck { req, deadline_ms });
             }
             Control::Disarm { req } => {
                 self.armed_deadline = None;
-                let _ = self.responses.send(Response::DisarmAck { req });
+                self.armed_deadline_ms = None;
+                let _ = self.responses.try_send(Response::DisarmAck { req });
             }
         }
     }
@@ -153,34 +150,13 @@ impl SessionManager {
         }
     }
 
-    /// Close every session whose tab_id is not in `keep` (orphan pruning on
-    /// reattach — spec §6 "kill by default").
-    pub fn close_absent(&mut self, keep: &HashSet<String>) {
-        let drop_ids: Vec<String> = self
-            .sessions
-            .keys()
-            .filter(|id| !keep.contains(*id))
-            .cloned()
-            .collect();
-        for id in drop_ids {
-            self.sessions.remove(&id);
-        }
-    }
-
-    /// Detach all sessions from live streaming (used when the GUI drops but the
-    /// hold is armed — the reader keeps filling rings, silently).
+    /// Detach all sessions from live streaming (GUI dropped but hold armed).
     pub fn detach_all(&self) {
         for s in self.sessions.values() {
             s.set_attached(false);
         }
     }
 
-    /// True once the armed hold's absolute deadline has passed.
-    pub fn deadline_expired(&self) -> bool {
-        matches!(self.armed_deadline, Some(d) if Instant::now() >= d)
-    }
-
-    /// Decide what to do when the GUI connection drops.
     pub fn on_gui_disconnect(&mut self) -> Disposition {
         match self.armed_deadline {
             Some(deadline) => {
@@ -205,20 +181,16 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc::channel;
 
     fn mgr() -> (
         SessionManager,
-        tokio::sync::mpsc::UnboundedReceiver<Data>,
-        tokio::sync::mpsc::UnboundedReceiver<Response>,
+        tokio::sync::mpsc::Receiver<Data>,
+        tokio::sync::mpsc::Receiver<Response>,
     ) {
-        let (etx, erx) = unbounded_channel();
-        let (rtx, rrx) = unbounded_channel();
-        (
-            SessionManager::new(etx, rtx, Some("tok".into())),
-            erx,
-            rrx,
-        )
+        let (etx, erx) = channel(1024);
+        let (rtx, rrx) = channel(1024);
+        (SessionManager::new(etx, rtx, Some("tok".into())), erx, rrx)
     }
 
     #[test]
@@ -273,12 +245,48 @@ mod tests {
             token: "tok".into(),
         });
         let first = m.armed_deadline.unwrap();
-        // A second arm (e.g. reconnect path) must NOT push the deadline out.
         m.handle_control(Control::ArmDetach {
             req: 2,
             timeout_secs: 9999,
             token: "tok".into(),
         });
         assert_eq!(m.armed_deadline.unwrap(), first, "deadline not restarted");
+    }
+
+    #[test]
+    fn arm_ack_reports_stored_deadline_not_recomputed() {
+        let (mut m, _e, mut r) = mgr();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 300,
+            token: "tok".into(),
+        });
+        let first_ack = match r.try_recv().unwrap() {
+            Response::ArmAck { deadline_ms, .. } => deadline_ms,
+            other => panic!("expected ArmAck, got {other:?}"),
+        };
+        // A second arm with a wildly different timeout must ack the SAME stored deadline.
+        m.handle_control(Control::ArmDetach {
+            req: 2,
+            timeout_secs: 99999,
+            token: "tok".into(),
+        });
+        let second_ack = match r.try_recv().unwrap() {
+            Response::ArmAck { deadline_ms, .. } => deadline_ms,
+            other => panic!("expected ArmAck, got {other:?}"),
+        };
+        assert_eq!(first_ack, second_ack, "ArmAck must report the stored deadline");
+    }
+
+    #[test]
+    fn huge_timeout_does_not_panic() {
+        let (mut m, _e, _r) = mgr();
+        // Would overflow Instant+Duration without the cap/checked add.
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: u64::MAX,
+            token: "tok".into(),
+        });
+        assert!(m.is_armed());
     }
 }

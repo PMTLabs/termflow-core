@@ -60,12 +60,15 @@ impl ReplayRing {
         self.tail
     }
 
-    /// Return retained bytes from `max(offset, head)` to `tail`. `gap` is true
-    /// when `offset < head` (requested bytes were already evicted).
+    /// Return retained bytes from `clamp(offset, head..=tail)` to `tail`. `gap`
+    /// is true when `offset < head` (requested bytes were already evicted).
+    /// A future `offset > tail` (should not happen) is clamped to `tail`,
+    /// yielding an empty snapshot rather than an out-of-range start or a
+    /// truncated `usize` index on 32-bit targets.
     pub fn snapshot_from(&self, offset: u64) -> Snapshot {
         let gap = offset < self.head;
-        let start = offset.max(self.head);
-        // Index into the deque for `start`.
+        let start = offset.clamp(self.head, self.tail);
+        // Index into the deque for `start` (bounded by buf.len()).
         let skip = (start - self.head) as usize;
         let bytes: Vec<u8> = self.buf.iter().copied().skip(skip).collect();
         Snapshot {
@@ -114,5 +117,15 @@ mod tests {
         assert!(!snap.gap);
         assert_eq!(snap.start_offset, 6);
         assert_eq!(snap.bytes, b"world".to_vec());
+    }
+
+    #[test]
+    fn snapshot_from_future_offset_clamps_to_tail() {
+        let mut r = ReplayRing::new(16);
+        r.push(b"abc"); // tail = 3
+        let snap = r.snapshot_from(99); // beyond tail
+        assert!(!snap.gap);
+        assert_eq!(snap.start_offset, 3);
+        assert!(snap.bytes.is_empty());
     }
 }
