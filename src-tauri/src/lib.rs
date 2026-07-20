@@ -5,6 +5,7 @@ pub mod app_config;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
+pub mod pty_host_client;
 pub mod commands;
 pub mod open_commands;
 pub mod api_server;
