@@ -802,7 +802,18 @@ pub fn run() {
   let mut builder = tauri::Builder::default();
   #[cfg(desktop)]
   {
-    if !args.headless && args.api_port.is_none() && args.mcp_port.is_none() {
+    // Single-instance is enforced for RELEASE only. The plugin keys its lock on
+    // the app identifier (shared by debug + release), so enforcing it in dev
+    // would block a debug build from running alongside the installed release
+    // used for production. Dev is fully isolated otherwise (config.dev.json,
+    // history.dev.db, layout.dev.json, dev ports, …), so a debug instance can
+    // safely coexist. Release keeps single-instance so a second production
+    // launch focuses the existing window instead of starting a duplicate.
+    if !crate::app_config::is_dev()
+      && !args.headless
+      && args.api_port.is_none()
+      && args.mcp_port.is_none()
+    {
       builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
         let path = Args::try_parse_from(argv)
           .ok()

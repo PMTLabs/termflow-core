@@ -82,7 +82,9 @@ impl RecordingService {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(&home).join(".auto-terminal").join("recordings");
+        let path = PathBuf::from(&home)
+            .join(".auto-terminal")
+            .join(crate::app_config::dev_file("recordings"));
         
         // Create directory if it doesn't exist
         let _ = fs::create_dir_all(&path);
