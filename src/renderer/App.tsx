@@ -51,6 +51,7 @@ import { agentSchemeTracker } from './services/AgentSchemeTracker';
 import { inputHandler } from './services/InputHandler';
 import { commandHistoryService } from './services/commandHistoryService';
 import { StateManager } from './services/StateManager';
+import { resolvePostRestoreAction } from './services/postRestoreAction';
 import { terminalService } from './services/TerminalService';
 import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
 import { setInitialCwd } from './services/initialCwd';
@@ -374,14 +375,18 @@ const App: React.FC = () => {
     }
     console.log('State restored:', restored);
 
-    // If no state was restored, create default tab if needed (rooted at the pending
-    // folder when this was an "Open in TermFlow" cold launch).
-    if (!restored) {
-      console.log('No state restored, will create default tab in 500ms');
+    // Decide what to do post-restore (see postRestoreAction.ts for the
+    // decision table and its unit tests).
+    const postRestoreAction = resolvePostRestoreAction({
+      restored,
+      pendingOpenPath,
+      tabCount: store.getState().tabs.tabs.length,
+    });
+    console.log('Post-restore action:', postRestoreAction);
+    if (postRestoreAction === 'createDefaultTab') {
       // Increased delay to ensure shell profiles are properly loaded
       setTimeout(() => createDefaultTabIfNeeded(pendingOpenPath), 500);
-    } else if (pendingOpenPath) {
-      // Session restored AND a folder was requested → open it as an extra tab.
+    } else if (postRestoreAction === 'openFolderTab') {
       setTimeout(() => openFolderTab(pendingOpenPath!), 500);
     }
 
