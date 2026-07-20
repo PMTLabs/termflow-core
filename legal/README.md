@@ -2,11 +2,11 @@
 
 These files are **bundled into the app** (`bundle.resources` in `src-tauri/tauri.conf.json` /
 `tauri.pro.conf.json`) and shown in-app via **Settings → About & Legal** and the first-run
-**EULA acceptance modal**. `EULA.rtf` is also the installer license page (`bundle.licenseFile`).
+**EULA acceptance modal**. `EULA-installer.txt` is the installer license page (`bundle.licenseFile`).
 
 | File | What it is | Status |
 |---|---|---|
-| `EULA.txt` / `EULA.rtf` | End-User License Agreement / Terms — what the user accepts at first run + install | **Official v1.0** (PMT Labs LLC; Texas law). `EULA.rtf` is generated from `EULA.txt` by `scripts/gen-eula-rtf.mjs` |
+| `EULA.txt` / `EULA-installer.txt` | End-User License Agreement / Terms — what the user accepts at first run + install | **Official v1.0** (PMT Labs LLC; Texas law). `EULA-installer.txt` is a reflowed (un-wrapped, one line per paragraph) copy generated from `EULA.txt` by `scripts/gen-eula-rtf.mjs` — the tauri-bundler wraps the license file as plain text into its own RTF template, so paragraphs must be single lines or the installer breaks sentences mid-line |
 | `PRIVACY.txt` | Privacy notice | **Official v1.0** (PMT Labs LLC) |
 | `LICENSE-apache-2.0.txt` | Apache-2.0 — the open-core license | Real (canonical Apache-2.0) |
 | `LICENSE-fabric-fsl.txt` | FSL-1.1-Apache-2.0 — the Pro peering fabric's license | Copied at build time from `termflow-fabric/LICENSE` by `scripts/build-fabric-sidecar.mjs` (Pro builds only) |

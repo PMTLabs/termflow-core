@@ -37,7 +37,7 @@
     "externalBin": [
       "binaries/termflow-mcp-server"
     ],
-    "licenseFile": "../legal/EULA.rtf",
+    "licenseFile": "../legal/EULA-installer.txt",
     "license": "Apache-2.0",
     "resources": {
       "../legal/EULA.txt": "legal/EULA.txt",

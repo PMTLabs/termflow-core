@@ -1,40 +1,37 @@
-// Generate legal/EULA.rtf (the installer license-agreement page) from legal/EULA.txt,
-// so the RTF never drifts from the canonical text. Run after editing EULA.txt:
-//   node scripts/gen-eula-rtf.mjs
+// Generate legal/EULA-installer.txt (the WiX/MSI license-agreement page) from the
+// canonical legal/EULA.txt, so it never drifts from the real terms. Run after editing
+// EULA.txt:  node scripts/gen-eula-rtf.mjs
+// (Kept this filename because package.json's `gen:eula-rtf` script points at it.)
 //
-// Why the reflow: EULA.txt is hard-wrapped at ~80 columns for readability as a text
-// file. Tauri's WiX bundler passes a `.rtf` license through VERBATIM (tauri-bundler
-// msi/mod.rs: `if license.ends_with(".rtf") { use it as-is }`), and WiX renders it in
-// a Win32 RichEdit control that does its OWN word-wrapping to the dialog width. So each
-// logical paragraph must be a SINGLE run of text ending in one `\par` — if we emitted
-// one `\par` per physical source line (the old behavior), every wrapped line became its
-// own paragraph and the dialog broke sentences mid-line. We therefore un-wrap the source
-// back into flowing paragraphs, then let RichEdit re-wrap it.
+// Why plain text and not RTF: the installed tauri-bundler (2.9.x) does NOT pass an
+// `.rtf` license through verbatim — it reads whatever `bundle.licenseFile` points at as
+// PLAIN TEXT, replaces every newline with `\par`, and wraps the result in its own fixed
+// RTF template before handing it to WiX's RichEdit control. So any RTF markup we author
+// is shown as literal garbage, and — crucially — because EULA.txt is hard-wrapped at ~80
+// columns, one `\par` per physical line makes RichEdit break sentences mid-line (the bug
+// this fixes). The fix is to feed the bundler UN-wrapped text: one line per logical
+// paragraph, so its newline→`\par` gives one paragraph per block and RichEdit re-wraps
+// each to the dialog width. We also fold the sole non-ASCII char (em-dash) to ASCII,
+// since the bundler's plain-text path emits raw bytes under \ansicpg1252 (no \uN escape),
+// which would otherwise render as mojibake.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const root = process.cwd();
 const txt = readFileSync(join(root, 'legal', 'EULA.txt'), 'utf8').replace(/\r\n/g, '\n');
 
-// RTF escaping: backslash and braces are control chars; non-ASCII (em-dash, curly
-// quotes, …) → `\uN?` so RichEdit renders them instead of mojibake.
-const escapeRtf = (s) =>
-  s
-    .replace(/[\\{}]/g, (m) => '\\' + m)
-    .replace(/[-￿]/g, (c) => `\\u${c.charCodeAt(0)}?`);
-
 // A physical source line is a wrapped continuation of the paragraph above it only when
-// that paragraph line was "full" (near the ~80-col wrap width). Meta lines (Version,
-// Effective date, Licensor, Contact) are short standalone lines that must NOT be joined;
-// the longest of them (Licensor, 57) sits well below any wrapped body line (>=72), so 65
-// separates them cleanly. Sub-item continuations are detected by indentation instead and
-// don't rely on this threshold.
+// that line was "full" (near the ~80-col wrap width). Meta lines (Version, Effective
+// date, Licensor, Contact) are short standalone lines that must NOT be joined; the
+// longest of them (Licensor, 57) sits well below any wrapped body line (>=72), so 65
+// separates them cleanly. Sub-item and section-body continuations are detected by
+// indentation instead and don't rely on this threshold.
 const JOIN_THRESHOLD = 65;
 
 const isHeader = (l) => /^\d+\.\s/.test(l); // "1. DEFINITIONS", "10. LIMITATION …"
 const isSubItem = (l) => /^\s+\d+\.\d+\s/.test(l); // "   1.1 …", "   12.1 …"
 
-/** @type {{type:'title'|'para'|'header'|'subitem', text:string}[]} */
+/** @type {{type:string, text:string}[]} */
 const blocks = [];
 let current = null;
 let prevLen = 0;
@@ -57,17 +54,15 @@ for (const raw of txt.split('\n')) {
     flush();
     current = { type: 'subitem', text: trimmed };
   } else if (/^\s/.test(raw) && current && current.type === 'header') {
-    // Indented body text directly under a section header (sections 3–11 have prose
-    // bodies with no "N.N" numbering) → start a new body paragraph, not part of the
-    // bold header.
+    // Indented body directly under a section header (sections 3–11 are prose, not "N.N"
+    // sub-items) → start a new body paragraph, not part of the header.
     flush();
     current = { type: 'para', text: trimmed };
   } else if (/^\s/.test(raw) && current) {
-    // Indented, non-sub-item line → wrapped continuation of the current sub-item or
-    // body paragraph.
+    // Indented continuation of the current sub-item or body paragraph.
     current.text += ' ' + trimmed;
   } else if (current && prevLen >= JOIN_THRESHOLD) {
-    // Col-0 line following a "full" line → wrapped continuation of a body paragraph.
+    // Col-0 wrapped continuation of a body paragraph.
     current.text += ' ' + trimmed;
   } else {
     flush();
@@ -77,24 +72,17 @@ for (const raw of txt.split('\n')) {
 }
 flush();
 
-// Paragraph shapes (twips: 1pt = 20 twips). Body 9pt (\fs18); title 13pt bold; section
-// headers bold with space above; sub-items use a hanging indent so wrapped lines align
-// past the "N.N" label.
-const emit = (b) => {
-  const t = escapeRtf(b.text);
-  switch (b.type) {
-    case 'title':
-      return `\\pard\\qc\\sa160 {\\b\\fs26 ${t}}\\par`;
-    case 'header':
-      return `\\pard\\sb160\\sa80 {\\b ${t}}\\par`;
-    case 'subitem':
-      return `\\pard\\sa100\\li360\\fi-360 ${t}\\par`;
-    default:
-      return `\\pard\\sa120 ${t}\\par`;
-  }
-};
+// The bundler's plain-text branch does not \uN-escape, and WiX reads the RTF as cp1252,
+// so keep the payload ASCII (only the title's em-dash is non-ASCII in this document).
+const toAscii = (s) =>
+  s
+    .replace(/[–—]/g, '-') // en/em dash
+    .replace(/[‘’]/g, "'") // curly single quotes
+    .replace(/[“”]/g, '"') // curly double quotes
+    .replace(/…/g, '...'); // ellipsis
 
-const body = blocks.map(emit).join('\n');
-const rtf = `{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0 Segoe UI;}}\n\\fs18\n${body}\n}\n`;
-writeFileSync(join(root, 'legal', 'EULA.rtf'), rtf);
-console.log(`[gen-eula-rtf] wrote legal/EULA.rtf (${blocks.length} paragraphs, ${rtf.length} bytes)`);
+// One line per paragraph, no blank lines — the bundler template already puts vertical
+// space (\sa200) after every paragraph, so blank lines would double the gaps.
+const out = blocks.map((b) => toAscii(b.text)).join('\n') + '\n';
+writeFileSync(join(root, 'legal', 'EULA-installer.txt'), out);
+console.log(`[gen-eula-rtf] wrote legal/EULA-installer.txt (${blocks.length} paragraphs, ${out.length} bytes)`);
