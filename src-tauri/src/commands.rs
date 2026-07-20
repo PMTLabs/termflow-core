@@ -104,13 +104,31 @@ pub async fn create_terminal(
     };
     
     let terminal_name = format!("Terminal-{}", shell_name);
-    
+
+    // Opt-in PTY-host sidecar path (Windows). Requires a stable tab_id as the
+    // reattach key; without one we fall through to the in-process path.
+    if crate::pty_host_client::enabled() {
+        if let Some(tid) = tab_id.clone() {
+            return create_host_terminal(
+                state.inner(),
+                tid,
+                cols,
+                rows,
+                shell_path,
+                shell_name,
+                shell_args,
+                shell_cwd,
+            )
+            .await;
+        }
+    }
+
     let id = pty_manager::spawn_terminal(
-        state.inner().clone(), 
-        cols, 
-        rows, 
-        shell_path, 
-        shell_args, 
+        state.inner().clone(),
+        cols,
+        rows,
+        shell_path,
+        shell_args,
         shell_cwd,
         shell_name,
         terminal_name
@@ -130,6 +148,99 @@ pub async fn create_terminal(
                 prefix.push_str(crate::state::REPLAY_SEPARATOR);
                 state.replay_prefix.insert(id.clone(), prefix);
             }
+        }
+    }
+
+    Ok(id)
+}
+
+/// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
+/// stable `tab_id` (the reattach key), so the sidecar session, the output
+/// broadcast id, and the vt100 screen key all align — live routing works with
+/// no change to the output pipeline, and reattach-by-tab_id after a hot-swap is
+/// consistent. On failure, falls back to the in-process spawn path.
+#[allow(clippy::too_many_arguments)]
+async fn create_host_terminal(
+    state: &AppState,
+    id: String,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_name: String,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    // Connect (or spawn) the sidecar, then spawn the session.
+    let host_result = async {
+        state.ensure_pty_host().await?;
+        let client = state
+            .pty_host_clone()
+            .ok_or_else(|| "pty-host not connected".to_string())?;
+        let spec = pty_manager::build_spawn_spec(
+            &id,
+            shell_path.as_deref(),
+            &shell_name,
+            shell_args.as_deref(),
+            cwd.as_deref(),
+            cols,
+            rows,
+        );
+        let pid = client.spawn_session(&id, &spec).await?;
+        Ok::<u32, String>(pid)
+    }
+    .await;
+
+    let pid = match host_result {
+        Ok(pid) => pid,
+        Err(e) => {
+            // Graceful fallback: a missing sidecar / connect failure must not
+            // break terminal creation — spawn in-process instead.
+            log::warn!("pty-host spawn failed ({e}); falling back to in-process");
+            let name = format!("Terminal-{}", shell_name);
+            let fallback_id = pty_manager::spawn_terminal(
+                state.clone(),
+                cols,
+                rows,
+                shell_path,
+                shell_args,
+                cwd,
+                shell_name,
+                name,
+            )?;
+            if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
+                entry.tab_id = Some(id);
+            }
+            return Ok(fallback_id);
+        }
+    };
+
+    // Register the host-owned terminal. Keyed by the stable id (== tab_id).
+    state.terminals.insert(
+        id.clone(),
+        crate::state::Terminal {
+            id: id.clone(),
+            pid,
+            shell: shell_name.clone(),
+            name: format!("Terminal-{}", shell_name),
+            created_at: chrono::Local::now().to_rfc3339(),
+            cols,
+            rows,
+            backend: crate::tmux_manager::TerminalBackend::PortablePty,
+            tab_id: Some(id.clone()),
+            last_input_source: None,
+            last_input_at: None,
+        },
+    );
+    state.init_screen(&id, rows, cols);
+    state.host_terminals.insert(id.clone(), ());
+
+    // Restore path: stage persisted scrollback as a one-shot prefix (same as the
+    // in-process path — the /snapshot endpoint prepends it on first hydration).
+    if let Some(chunks) = state.history_store.get(&id) {
+        if !chunks.is_empty() {
+            let mut prefix = chunks.concat();
+            prefix.push_str(crate::state::REPLAY_SEPARATOR);
+            state.replay_prefix.insert(id.clone(), prefix);
         }
     }
 
@@ -289,14 +400,18 @@ pub async fn write_terminal(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    // Clone the Arc, dropping the DashMap shard guard before locking.
-    let writer_mutex = match state.shell_writer_channels.get(&id) {
-        Some(r) => r.clone(),
-        None => return Err("Terminal not found".to_string()),
-    };
-    {
-        let mut writer = writer_mutex.lock().map_err(|_| "Failed to lock writer".to_string())?;
-        writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    // Host-owned terminals: forward keystrokes to the sidecar (still tag the
+    // user-input source below).
+    if !state.host_write(&id, data.as_bytes()) {
+        // Clone the Arc, dropping the DashMap shard guard before locking.
+        let writer_mutex = match state.shell_writer_channels.get(&id) {
+            Some(r) => r.clone(),
+            None => return Err("Terminal not found".to_string()),
+        };
+        {
+            let mut writer = writer_mutex.lock().map_err(|_| "Failed to lock writer".to_string())?;
+            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        }
     }
     // Tag this terminal's last-write as user-driven (keystrokes/paste flow through
     // this invoke command, never the REST API). Drives the agent color-scheme
@@ -316,6 +431,14 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    // Host-owned terminals: forward the resize to the sidecar and update dims.
+    if state.host_resize(&id, cols, rows) {
+        if let Some(mut terminal) = state.terminals.get_mut(&id) {
+            terminal.cols = cols;
+            terminal.rows = rows;
+        }
+        return Ok(());
+    }
     if let Some(master_mutex) = state.ptys.get(&id) {
         let master = master_mutex.lock().map_err(|_| "Failed to lock PTY master".to_string())?;
         master.resize(portable_pty::PtySize {
@@ -542,8 +665,12 @@ pub async fn close_terminal(
         return Err("Terminal not found".to_string());
     };
 
-    // Kill the process tree (parent and all children)
-    crate::pty_manager::kill_process_tree(pid);
+    // Host-owned: tell the sidecar to close the session (it kills the child);
+    // otherwise kill the local process tree.
+    if !state.host_close(&id) {
+        // Kill the process tree (parent and all children)
+        crate::pty_manager::kill_process_tree(pid);
+    }
 
     // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
     // the old inline cleanup leaked). Dropping the pty also EOFs the reader.

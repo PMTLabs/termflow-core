@@ -36,6 +36,12 @@ pub struct PtyHostDeps {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
+/// True when the opt-in PTY-host sidecar path is active (Windows-only).
+pub fn enabled() -> bool {
+    cfg!(windows) && std::env::var("TERMFLOW_PTY_HOST").as_deref() == Ok("1")
+}
+
+#[derive(Clone)]
 pub struct PtyHostClient {
     outbound: UnboundedSender<Frame>,
     pending: PendingMap,
@@ -327,6 +333,65 @@ pub async fn connect_or_spawn(
         std::io::ErrorKind::Unsupported,
         "pty-host sidecar is Windows-only in milestone A",
     ))
+}
+
+/// Per-user pipe name so two users on one machine never collide. `dev` vs
+/// `release` is distinguished by the debug_assertions flag.
+pub fn resolve_pipe() -> String {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".to_string());
+    let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
+    format!(r"\\.\pipe\termflow-pty-host.{user}.{chan}")
+}
+
+/// A launch token shared by all app instances (persisted to a per-user temp
+/// file) so a hot-swapped instance can still arm the SAME running sidecar.
+/// Created on first use. Same trust scope as the owner-only pipe.
+pub fn resolve_token() -> String {
+    if let Ok(t) = std::env::var("TERMFLOW_PTY_TOKEN") {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".to_string());
+    let path = std::env::temp_dir().join(format!("termflow-pty-host-{user}.token"));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let t = existing.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let token = uuid::Uuid::new_v4().to_string();
+    let _ = std::fs::write(&path, &token);
+    token
+}
+
+/// Locate the sidecar binary: `TERMFLOW_PTY_HOST_BIN` override (dev), else a
+/// `termflow-pty-host.exe` staged next to the app executable (release).
+pub fn resolve_sidecar_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.exists() {
+            return Some(pb);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let name = if cfg!(windows) {
+                "termflow-pty-host.exe"
+            } else {
+                "termflow-pty-host"
+            };
+            let cand = dir.join(name);
+            if cand.exists() {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 fn resp_req(r: &Response) -> u64 {
