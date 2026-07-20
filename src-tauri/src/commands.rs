@@ -170,111 +170,136 @@ async fn create_host_terminal(
     shell_args: Option<Vec<String>>,
     cwd: Option<String>,
 ) -> Result<String, String> {
-    // Reattach path: if the sidecar already holds this session (survived a
-    // hot-swap), attach + replay instead of spawning a fresh shell.
-    if state.ensure_pty_host().await.is_ok() && state.host_reattach_pending.remove(&id).is_some() {
-        if let Some(client) = state.pty_host_clone() {
-            state.terminals.insert(
-                id.clone(),
-                crate::state::Terminal {
-                    id: id.clone(),
-                    pid: 0, // real pid not carried across reattach (milestone A)
-                    shell: shell_name.clone(),
-                    name: format!("Terminal-{}", shell_name),
-                    created_at: chrono::Local::now().to_rfc3339(),
-                    cols,
-                    rows,
-                    backend: crate::tmux_manager::TerminalBackend::PortablePty,
-                    tab_id: Some(id.clone()),
-                    last_input_source: None,
-                    last_input_at: None,
-                },
-            );
-            state.init_screen(&id, rows, cols);
-            state.host_terminals.insert(id.clone(), ());
-            // Register routing BEFORE attach releases replay bytes, then nudge a
-            // repaint so a live TUI redraws into the reconstructed screen.
-            client.attach(&id, 0);
-            client.nudge_repaint(&id, cols, rows);
-            return Ok(id);
-        }
+    // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
+    // to the in-process path immediately — no host state is registered.
+    if let Err(e) = state.ensure_pty_host().await {
+        return host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e);
     }
-
-    // Connect (or spawn) the sidecar, then spawn the session.
-    let host_result = async {
-        state.ensure_pty_host().await?;
-        let client = state
-            .pty_host_clone()
-            .ok_or_else(|| "pty-host not connected".to_string())?;
-        let spec = pty_manager::build_spawn_spec(
-            &id,
-            shell_path.as_deref(),
-            &shell_name,
-            shell_args.as_deref(),
-            cwd.as_deref(),
-            cols,
-            rows,
-        );
-        let pid = client.spawn_session(&id, &spec).await?;
-        Ok::<u32, String>(pid)
-    }
-    .await;
-
-    let pid = match host_result {
-        Ok(pid) => pid,
-        Err(e) => {
-            // Graceful fallback: a missing sidecar / connect failure must not
-            // break terminal creation — spawn in-process instead.
-            log::warn!("pty-host spawn failed ({e}); falling back to in-process");
-            let name = format!("Terminal-{}", shell_name);
-            let fallback_id = pty_manager::spawn_terminal(
-                state.clone(),
-                cols,
-                rows,
-                shell_path,
-                shell_args,
-                cwd,
-                shell_name,
-                name,
-            )?;
-            if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
-                entry.tab_id = Some(id);
-            }
-            return Ok(fallback_id);
+    let client = match state.pty_host_clone() {
+        Some(c) => c,
+        None => {
+            return host_fallback(
+                state, &id, cols, rows, shell_path, shell_name, shell_args, cwd,
+                "pty-host not connected",
+            )
         }
     };
 
-    // Register the host-owned terminal. Keyed by the stable id (== tab_id).
+    // Reattach path: the sidecar still holds this session (survived a hot-swap).
+    // Restore the real pid, register routing BEFORE attach releases replay
+    // bytes, then nudge a repaint so a live TUI redraws.
+    if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
+        register_host_terminal(state, &id, pid, &shell_name, cols, rows);
+        client.attach(&id, 0);
+        client.nudge_repaint(&id, cols, rows);
+        stage_scrollback(state, &id, &id);
+        return Ok(id);
+    }
+
+    // Fresh spawn: register routing state (screen + terminal + host ownership)
+    // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
+    // has a registered screen to land in instead of being dropped by the
+    // consumer's "unknown id" gate.
+    register_host_terminal(state, &id, 0, &shell_name, cols, rows);
+    let spec = pty_manager::build_spawn_spec(
+        &id,
+        shell_path.as_deref(),
+        &shell_name,
+        shell_args.as_deref(),
+        cwd.as_deref(),
+        cols,
+        rows,
+    );
+    match client.spawn_session(&id, &spec).await {
+        Ok(pid) => {
+            if let Some(mut t) = state.terminals.get_mut(&id) {
+                t.pid = pid;
+            }
+            stage_scrollback(state, &id, &id);
+            Ok(id)
+        }
+        Err(e) => {
+            // Undo the provisional registration, then fall back in-process.
+            state.cleanup_terminal_state(&id);
+            host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e)
+        }
+    }
+}
+
+/// Register a host-owned terminal's routing state: authoritative screen, host
+/// ownership, and the Terminal record (keyed by the stable id == tab_id).
+fn register_host_terminal(
+    state: &AppState,
+    id: &str,
+    pid: u32,
+    shell_name: &str,
+    cols: u16,
+    rows: u16,
+) {
+    state.init_screen(id, rows, cols);
+    state.host_terminals.insert(id.to_string(), ());
     state.terminals.insert(
-        id.clone(),
+        id.to_string(),
         crate::state::Terminal {
-            id: id.clone(),
+            id: id.to_string(),
             pid,
-            shell: shell_name.clone(),
+            shell: shell_name.to_string(),
             name: format!("Terminal-{}", shell_name),
             created_at: chrono::Local::now().to_rfc3339(),
             cols,
             rows,
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
-            tab_id: Some(id.clone()),
+            tab_id: Some(id.to_string()),
             last_input_source: None,
             last_input_at: None,
         },
     );
-    state.init_screen(&id, rows, cols);
-    state.host_terminals.insert(id.clone(), ());
+}
 
-    // Restore path: stage persisted scrollback as a one-shot prefix (same as the
-    // in-process path — the /snapshot endpoint prepends it on first hydration).
-    if let Some(chunks) = state.history_store.get(&id) {
+/// Stage persisted scrollback (keyed by `history_key`) as a one-shot replay
+/// prefix for `target_id`, so the /snapshot endpoint prepends it on the first
+/// hydration (same as the in-process path).
+fn stage_scrollback(state: &AppState, history_key: &str, target_id: &str) {
+    if let Some(chunks) = state.history_store.get(history_key) {
         if !chunks.is_empty() {
             let mut prefix = chunks.concat();
             prefix.push_str(crate::state::REPLAY_SEPARATOR);
-            state.replay_prefix.insert(id.clone(), prefix);
+            state.replay_prefix.insert(target_id.to_string(), prefix);
         }
     }
+}
 
-    Ok(id)
+/// Spawn in-process when the sidecar is unavailable. Preserves the tab_id and
+/// stages scrollback (both of which the earlier fallback dropped).
+#[allow(clippy::too_many_arguments)]
+fn host_fallback(
+    state: &AppState,
+    tab_id: &str,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_name: String,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+    reason: &str,
+) -> Result<String, String> {
+    log::warn!("pty-host unavailable ({reason}); falling back to in-process");
+    let name = format!("Terminal-{}", shell_name);
+    let fallback_id = pty_manager::spawn_terminal(
+        state.clone(),
+        cols,
+        rows,
+        shell_path,
+        shell_args,
+        cwd,
+        shell_name,
+        name,
+    )?;
+    if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
+        entry.tab_id = Some(tab_id.to_string());
+    }
+    stage_scrollback(state, tab_id, &fallback_id);
+    Ok(fallback_id)
 }
 
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
@@ -289,6 +314,18 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     if !client.survives_hotswap() {
         return Err(
             "hot-swap unavailable: the sidecar could not break away from a kill-on-close job"
+                .to_string(),
+        );
+    }
+    // Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap
+    // would kill those shells. Only proceed when every terminal will survive.
+    let has_local = state
+        .terminals
+        .iter()
+        .any(|e| !state.host_terminals.contains_key(e.key()));
+    if has_local {
+        return Err(
+            "cannot hot-swap: some terminals are in-process (not sidecar-hosted) and would be lost"
                 .to_string(),
         );
     }
@@ -485,12 +522,15 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    // Host-owned terminals: forward the resize to the sidecar and update dims.
+    // Host-owned terminals: forward the resize to the sidecar, update dims, and
+    // keep the authoritative vt100 parser in sync (else /snapshot hydration
+    // reports new dims against an old-sized screen).
     if state.host_resize(&id, cols, rows) {
         if let Some(mut terminal) = state.terminals.get_mut(&id) {
             terminal.cols = cols;
             terminal.rows = rows;
         }
+        state.resize_screen(&id, rows, cols);
         return Ok(());
     }
     if let Some(master_mutex) = state.ptys.get(&id) {

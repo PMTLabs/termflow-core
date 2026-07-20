@@ -411,10 +411,11 @@ async fn delete_terminal(
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return Json(json!({ "error": "Terminal not found" }));
     };
-    // Parity with the UI close path: actually kill the shell, then clean up
-    // every map (the old handler leaked terminal_history and left the shell
-    // process running).
-    crate::pty_manager::kill_process_tree(pid);
+    // Parity with the UI close path: host-owned → tell the sidecar to close the
+    // session; otherwise kill the local shell tree. Then clean up every map.
+    if !state.host_close(&id) {
+        crate::pty_manager::kill_process_tree(pid);
+    }
     state.cleanup_terminal_state(&id);
     Json(json!({ "status": "ok" }))
 }
@@ -1475,7 +1476,10 @@ async fn fleet_close(
             let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
-            crate::pty_manager::kill_process_tree(pid);
+            // Host-owned → close via the sidecar; else kill the local tree.
+            if !state.host_close(&body.terminal_id) {
+                crate::pty_manager::kill_process_tree(pid);
+            }
             state.cleanup_terminal_state(&body.terminal_id);
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
@@ -2478,6 +2482,15 @@ async fn resize_with_reflow(
             }
         }
         TerminalBackend::PortablePty => {
+            // Host-owned terminals resize via the sidecar (no local master).
+            if state.host_resize(&id, payload.cols, payload.rows) {
+                if let Some(mut terminal) = state.terminals.get_mut(&id) {
+                    terminal.cols = payload.cols;
+                    terminal.rows = payload.rows;
+                }
+                state.resize_screen(&id, payload.rows, payload.cols);
+                return Json(json!({ "status": "ok", "cols": payload.cols, "rows": payload.rows })).into_response();
+            }
             // Portable-pty backend: standard resize without reflow
             if let Some(master_mutex) = state.ptys.get(&id) {
                 let master = match master_mutex.lock() {
@@ -2833,19 +2846,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 let data = value["payload"]["data"].as_str().unwrap_or("");
 
                                 use std::io::Write;
-                                // Clone the Arc, dropping the shard guard before locking.
-                                let writer_arc = state
-                                    .shell_writer_channels
-                                    .get(terminal_id)
-                                    .map(|r| r.clone());
-                                let write_result: Result<(), String> = match writer_arc {
-                                    Some(writer_mutex) => match writer_mutex.lock() {
-                                        Ok(mut writer) => writer
-                                            .write_all(data.as_bytes())
-                                            .map_err(|e| e.to_string()),
-                                        Err(_) => Err("writer mutex poisoned".to_string()),
-                                    },
-                                    None => Err("terminal not found".to_string()),
+                                // Host-owned terminals route to the sidecar; else
+                                // write to the local writer (parity with the REST/
+                                // Tauri input paths).
+                                let write_result: Result<(), String> = if state
+                                    .host_write(terminal_id, data.as_bytes())
+                                {
+                                    Ok(())
+                                } else {
+                                    // Clone the Arc, dropping the shard guard before locking.
+                                    let writer_arc = state
+                                        .shell_writer_channels
+                                        .get(terminal_id)
+                                        .map(|r| r.clone());
+                                    match writer_arc {
+                                        Some(writer_mutex) => match writer_mutex.lock() {
+                                            Ok(mut writer) => writer
+                                                .write_all(data.as_bytes())
+                                                .map_err(|e| e.to_string()),
+                                            Err(_) => Err("writer mutex poisoned".to_string()),
+                                        },
+                                        None => Err("terminal not found".to_string()),
+                                    }
                                 };
 
                                 // WS input is an external channel (like the REST paths) —

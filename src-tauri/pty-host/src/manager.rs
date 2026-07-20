@@ -62,6 +62,7 @@ impl SessionManager {
             .values()
             .map(|s| SessionMeta {
                 tab_id: s.tab_id.clone(),
+                pid: s.pid(),
                 head_offset: s.ring_head(),
                 tail_offset: s.ring_tail(),
                 alive: s.is_alive(),

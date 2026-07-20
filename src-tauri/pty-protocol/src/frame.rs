@@ -47,6 +47,9 @@ pub enum Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub tab_id: String,
+    /// Child PID, so a reattaching GUI can restore process-derived features
+    /// (cwd fallback, foreground-agent detection, metrics) instead of pid 0.
+    pub pid: u32,
     /// Oldest byte offset still in the ring (bytes before this were evicted).
     pub head_offset: u64,
     /// Next byte offset to be written (total bytes ever produced).

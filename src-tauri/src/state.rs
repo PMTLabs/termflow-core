@@ -215,10 +215,17 @@ pub struct AppState<R: Runtime = Wry> {
     // `shell_writer_channels`. write/resize/close/repaint route to the client
     // for these; everything else is unchanged.
     pub host_terminals: Arc<DashMap<String, ()>>,
-    // Sessions the sidecar still held when we connected (survived a hot-swap).
-    // Populated once in `ensure_pty_host`; `create_host_terminal` reattaches to
-    // (instead of respawning) any tab_id present here.
-    pub host_reattach_pending: Arc<DashMap<String, ()>>,
+    // Sessions the sidecar still held when we connected (survived a hot-swap),
+    // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
+    // `create_host_terminal` reattaches to (instead of respawning) any tab_id
+    // present here, restoring the real pid.
+    pub host_reattach_pending: Arc<DashMap<String, u32>>,
+    // Monotonic generation bumped on each successful sidecar connect. A client's
+    // on_disconnect only clears `pty_host` if its generation is still current,
+    // so a dying old client can't null a freshly reconnected one.
+    pub pty_host_gen: Arc<AtomicU64>,
+    // Single-flight guard so concurrent pane creation connects the sidecar once.
+    pub pty_host_connecting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -268,6 +275,8 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
             host_reattach_pending: self.host_reattach_pending.clone(),
+            pty_host_gen: self.pty_host_gen.clone(),
+            pty_host_connecting: self.pty_host_connecting.clone(),
         }
     }
 }
@@ -330,6 +339,8 @@ impl<R: Runtime> AppState<R> {
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
             host_reattach_pending: Arc::new(DashMap::new()),
+            pty_host_gen: Arc::new(AtomicU64::new(0)),
+            pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -532,11 +543,24 @@ impl<R: Runtime> AppState<R> {
                 return Ok(());
             }
         }
+        // Single-flight: serialize concurrent connect attempts (multi-pane
+        // startup) so the sidecar is connected exactly once.
+        let _connect_guard = self.pty_host_connecting.lock().await;
+        // Re-check under the guard — a prior holder may have connected already.
+        {
+            if self.pty_host_client().is_some() {
+                return Ok(());
+            }
+        }
         let sidecar = crate::pty_host_client::resolve_sidecar_path().ok_or_else(|| {
             "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
         })?;
         let pipe = crate::pty_host_client::resolve_pipe();
         let token = crate::pty_host_client::resolve_token();
+
+        // Generation for this connection: on_disconnect only nulls `pty_host` if
+        // its generation is still current (a dead old client can't clobber a new).
+        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
 
         let st_exit = self.clone();
         let st_gap = self.clone();
@@ -562,13 +586,19 @@ impl<R: Runtime> AppState<R> {
             }),
             on_disconnect: Arc::new(move || {
                 use tauri::Emitter;
-                // Sidecar/pipe died: surface a closed-session banner on every
-                // live host-owned pane, and drop the dead client so a later
-                // create reconnects.
+                // Only act if THIS connection is still the current one — a stale
+                // old client's disconnect must not clobber a reconnected client.
+                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                    return;
+                }
+                // Sidecar/pipe died: surface a closed-session banner on every live
+                // host-owned pane, fully clean up its state, and drop the dead
+                // client so a later create reconnects.
                 let ids: Vec<String> =
                     st_disc.host_terminals.iter().map(|e| e.key().clone()).collect();
                 for id in ids {
                     st_disc.host_terminals.remove(&id);
+                    st_disc.cleanup_terminal_state(&id);
                     let _ = st_disc.app_handle.emit(
                         "terminal:exit",
                         serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
@@ -581,10 +611,10 @@ impl<R: Runtime> AppState<R> {
         let client = crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, deps)
             .await
             .map_err(|e| e.to_string())?;
-        // Record sessions that survived a hot-swap so create_host_terminal
-        // reattaches instead of respawning.
+        // Record sessions that survived a hot-swap (tab_id -> pid) so
+        // create_host_terminal reattaches instead of respawning.
         for meta in client.list_sessions().await {
-            self.host_reattach_pending.insert(meta.tab_id, ());
+            self.host_reattach_pending.insert(meta.tab_id, meta.pid);
         }
         *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
@@ -602,30 +632,39 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// If `id` is host-owned, forward the write to the sidecar and return true.
+    /// If `id` is host-owned AND the client is connected, forward the write and
+    /// return true. Returns false when disconnected so the caller surfaces the
+    /// failure instead of reporting a false success for dropped input.
     pub fn host_write(&self, id: &str, bytes: &[u8]) -> bool {
         if !self.is_host_owned(id) {
             return false;
         }
-        if let Some(c) = self.pty_host_client().as_ref() {
-            c.write_stdin(id, bytes);
+        match self.pty_host_client().as_ref() {
+            Some(c) => {
+                c.write_stdin(id, bytes);
+                true
+            }
+            None => false,
         }
-        true
     }
 
-    /// If `id` is host-owned, forward the resize and return true.
+    /// If `id` is host-owned AND connected, forward the resize and return true.
     pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
         if !self.is_host_owned(id) {
             return false;
         }
-        if let Some(c) = self.pty_host_client().as_ref() {
-            c.resize(id, cols, rows);
+        match self.pty_host_client().as_ref() {
+            Some(c) => {
+                c.resize(id, cols, rows);
+                true
+            }
+            None => false,
         }
-        true
     }
 
-    /// If `id` is host-owned, forward a close (kills the sidecar session) and
-    /// forget it. Returns true if it was host-owned.
+    /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
+    /// close the session. Returns true if it was host-owned (so the caller skips
+    /// the local kill) even when the client is gone — there is no local process.
     pub fn host_close(&self, id: &str) -> bool {
         if !self.is_host_owned(id) {
             return false;
@@ -757,6 +796,9 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
+        // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
+        // in the routing set after its state is torn down.
+        self.host_terminals.remove(id);
     }
 }
 
