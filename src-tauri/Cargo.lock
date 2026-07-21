@@ -150,6 +150,7 @@ dependencies = [
  "futures",
  "if-addrs",
  "jsonwebtoken",
+ "libc",
  "log",
  "parking_lot",
  "portable-pty",

@@ -229,7 +229,7 @@ impl PtyHostClient {
 
 /// Build a client around already-connected pipe halves. Split out so tests can
 /// drive it over an in-memory duplex without a real named pipe.
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 pub fn wire_client<R, W>(rd: R, wr: W, deps: PtyHostDeps) -> PtyHostClient
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
