@@ -83,6 +83,10 @@ interface ElectronAPI {
   listNetworkInterfaces: () => Promise<NetworkInterfaceInfo[]>;
   stopServers: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
   startServers: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
+  /// Arm the PTY host to keep terminals alive, then close the app so the exe can
+  /// be rebuilt (hot-swap "offload"). Resolves never on success (the process
+  /// exits); rejects with the refusal reason if hot-swap isn't possible.
+  restartForUpdate: () => Promise<void>;
   getActiveTabAndPane: () => Promise<any>;
   createTerminalInTab: (tabId: string, paneId: string, profile: string, name: string) => Promise<any>;
   getTabs: () => Promise<any>;
@@ -497,6 +501,7 @@ const tauriBridge: ElectronAPI = {
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),
   stopServers: async (target = 'all') => { await invoke('stop_servers', { target }); },
   startServers: async (target = 'all') => { await invoke('start_servers', { target }); },
+  restartForUpdate: async () => { await invoke('restart_for_update'); },
 
   // UI Mocks
   getActiveTabAndPane: async () => ({}),

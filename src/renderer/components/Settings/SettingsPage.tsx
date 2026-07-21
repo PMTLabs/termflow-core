@@ -101,7 +101,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
     // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
@@ -164,12 +164,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         appearance: 'Appearance', terminal: 'Terminal Behavior',
         notifications: 'Notifications', startup: 'Startup & Integration',
         profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
-        peers: 'Peers', about: 'About & Legal',
+        peers: 'Peers', updates: 'Updates', about: 'About & Legal',
     };
-    // Peers/Connections own their own live flow; About & Legal is read-only; Startup
-    // and Notifications apply live (persisted on change) — none are dirty-tracked.
+    // Peers/Connections own their own live flow; About & Legal and Updates are
+    // action-only (no saved fields); Startup and Notifications apply live
+    // (persisted on change) — none are dirty-tracked.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'startup' && c !== 'notifications';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -178,6 +179,28 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     );
     const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
     const [showUnsaved, setShowUnsaved] = useState(false);
+
+    // Hot-swap "offload": arm the PTY host so terminals survive, then close the
+    // app so the exe can be rebuilt; the next launch reattaches every terminal.
+    const [offloadArmed, setOffloadArmed] = useState(false);
+    const [offloading, setOffloading] = useState(false);
+    const doOffloadRebuild = useCallback(async () => {
+        setOffloading(true);
+        try {
+            await window.electronAPI?.restartForUpdate?.();
+            // On success the app process exits during this call — control does
+            // not normally return here.
+        } catch (err) {
+            // Refused (e.g. terminals are in-process, or a kill-on-close job):
+            // the app stays open and nothing is lost. Surface the reason.
+            setOffloading(false);
+            setOffloadArmed(false);
+            dispatch(addToast({
+                message: `Couldn't keep terminals alive: ${String(err)}`,
+                type: 'error',
+            }));
+        }
+    }, [dispatch]);
 
     const isDirty = useCallback((): boolean => {
         if (!isTracked(activeCategory) || !baseline) return false;
@@ -231,7 +254,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
-            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'about';
+            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'updates' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
             requestCategoryChange(pending);
@@ -753,6 +776,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+            ),
+        },
+        {
+            id: 'updates',
+            label: 'Updates',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
                 </svg>
             ),
         },
@@ -1468,6 +1500,49 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         );
     };
 
+    const renderUpdates = () => (
+        <div className="settings-section">
+            <h2>Updates</h2>
+            <div className="setting-item">
+                <label className="setting-label">Offload &amp; rebuild (keep terminals running)</label>
+                <p className="help-text">
+                    Detaches your running shells and their CLIs (Claude, codex, …) into the
+                    background PTY host and closes TermFlow so the app can be rebuilt. Launch
+                    the new build and every terminal reattaches automatically — mid-screen,
+                    no retype.
+                </p>
+                <ol className="help-text" style={{ margin: '8px 0 12px 18px', padding: 0 }}>
+                    <li>Click <strong>Offload &amp; Close</strong> — TermFlow closes; your terminals keep running.</li>
+                    <li>Rebuild the app.</li>
+                    <li>Launch the new build — it reattaches every terminal.</li>
+                </ol>
+                {!offloadArmed ? (
+                    <button
+                        className="save-btn apply-btn"
+                        onClick={() => setOffloadArmed(true)}
+                        disabled={offloading}
+                    >
+                        Offload &amp; Close…
+                    </button>
+                ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <span className="help-text" style={{ margin: 0 }}>This closes TermFlow now. Continue?</span>
+                        <button className="save-btn apply-btn" onClick={doOffloadRebuild} disabled={offloading}>
+                            {offloading ? 'Offloading…' : 'Offload & Close'}
+                        </button>
+                        <button className="link-btn" onClick={() => setOffloadArmed(false)} disabled={offloading}>
+                            Cancel
+                        </button>
+                    </div>
+                )}
+                <p className="help-text" style={{ marginTop: 12 }}>
+                    Requires the PTY host to be active (terminals must be host-owned). If any
+                    terminal is running in-process, the action is refused so nothing is lost.
+                </p>
+            </div>
+        </div>
+    );
+
     const renderActiveCategory = () => {
         switch (activeCategory) {
             case 'appearance': return renderAppearance();
@@ -1478,6 +1553,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
+            case 'updates': return renderUpdates();
             case 'about': return <AboutLegalPanel />;
             default: return null;
         }

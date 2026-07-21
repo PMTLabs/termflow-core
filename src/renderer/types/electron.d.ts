@@ -217,6 +217,10 @@ export interface ElectronAPI {
   stopServers?: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
   /** (Re)start server(s). target: 'all' | 'api' | 'mcp' (default 'all'). */
   startServers?: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
+  /** Arm the PTY host to keep terminals alive, then close the app so the exe can
+   *  be rebuilt (hot-swap "offload"). Never resolves on success (the process
+   *  exits); rejects with the refusal reason if hot-swap isn't possible. */
+  restartForUpdate?: () => Promise<void>;
 
   // Quit the app after the user confirms the in-app close dialog (Tauri only)
   confirmCloseApp?: () => Promise<void>;
