@@ -4,9 +4,13 @@
 //! (`app`) so the two encode/decode identical frames. Keep this crate tiny and
 //! dependency-light — it is compiled into two binaries.
 
+pub mod bootstrap;
 pub mod frame;
 pub mod spec;
 
+pub use bootstrap::{
+    negotiate, read_hello, write_hello, Hello, HelloKind, CAP_DRAIN, PROTOCOL_MAX, PROTOCOL_MIN,
+};
 pub use frame::{
     decode, encode, read_frame, write_frame, Control, Data, DecodeError, Frame, Response,
     SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
