@@ -201,6 +201,34 @@ pub async fn read_hello<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<Hello> {
     Hello::decode(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.0))
 }
 
+/// Host side of the bootstrap: read the client's Hello first, then send ours.
+/// Returns the client Hello. The client ALWAYS speaks first, so the exchange is
+/// deterministic and neither side deadlocks on a single bidirectional stream.
+pub async fn serve_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    host_hello: &Hello,
+) -> io::Result<Hello> {
+    let client = read_hello(stream).await?;
+    write_hello(stream, host_hello).await?;
+    Ok(client)
+}
+
+/// Client side: send our Hello, then read the host's. Returns the host Hello
+/// plus the negotiated frame version (`None` ⇒ no common version ⇒ the caller
+/// must coexist without control, never force-kill sessions — §10.3/§10.4).
+pub async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    client_hello: &Hello,
+) -> io::Result<(Hello, Option<u16>)> {
+    write_hello(stream, client_hello).await?;
+    let host = read_hello(stream).await?;
+    let version = negotiate(
+        (client_hello.proto_min, client_hello.proto_max),
+        (host.proto_min, host.proto_max),
+    );
+    Ok((host, version))
+}
+
 /// Bootstrap decode error.
 #[derive(Debug)]
 pub struct BootstrapError(pub String);
@@ -313,6 +341,24 @@ mod tests {
         let mut cursor = std::io::Cursor::new(pipe);
         let back = read_hello(&mut cursor).await.unwrap();
         assert_eq!(back, h);
+    }
+
+    #[tokio::test]
+    async fn handshake_roundtrip_negotiates() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(1024);
+        let host_hello = Hello::host(0xABCD_1234, CAP_DRAIN, 2, "host-build");
+        let hh = host_hello.clone();
+        let server = tokio::spawn(async move { serve_handshake(&mut server_end, &hh).await });
+
+        let client_hello = Hello::client("client-build");
+        let (got_host, version) = client_handshake(&mut client_end, &client_hello)
+            .await
+            .unwrap();
+        let got_client = server.await.unwrap().unwrap();
+
+        assert_eq!(got_host, host_hello, "client received the host hello");
+        assert_eq!(got_client, client_hello, "host received the client hello");
+        assert_eq!(version, Some(1), "single-version peers negotiate v1");
     }
 
     #[tokio::test]
