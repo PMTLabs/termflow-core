@@ -193,13 +193,20 @@ pub async fn start_api_server(
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    // Carry this process's identity so a second instance probing this port can tell
-    // "this is mine" from "another instance owns it" (P0b conflict detection).
-    Json(json!({
+    Json(health_body(&state.instance_id))
+}
+
+/// The `/health` response body. Kept as a pure function (no runtime-typed
+/// `AppState`, no axum) so the exact contract the startup smoke test depends on
+/// — `status: "ok"` plus this process's identity — is directly unit-testable.
+/// The identity lets a second instance probing this port tell "this is mine"
+/// from "another instance owns it" (P0b conflict detection).
+fn health_body(instance_id: &str) -> serde_json::Value {
+    json!({
         "status": "ok",
         "app": "auto-terminal",
-        "instanceId": state.instance_id,
-    }))
+        "instanceId": instance_id,
+    })
 }
 
 async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
@@ -3211,6 +3218,23 @@ mod tests {
         // The in-flight send still owns its cloned Arc and completes successfully.
         let result = sender.await.unwrap();
         assert!(result.is_ok(), "send should still succeed after the concurrent remove");
+    }
+
+    // The `/health` contract the startup smoke test (scripts/smoke-test-release.mjs)
+    // depends on: it polls this endpoint and treats `status: "ok"` as "the build
+    // launched". Pin that body here so a rename (e.g. status → "healthy") can't
+    // silently make the smoke gate un-satisfiable. The router wiring + real HTTP
+    // binding are covered end-to-end by the smoke script against the built binary;
+    // this guards the payload the handler serialises.
+    #[test]
+    fn health_body_reports_ok_status_and_instance_id() {
+        let body = health_body("inst-abc123");
+        assert_eq!(body["status"], "ok", "smoke test keys off status == ok");
+        assert_eq!(body["app"], "auto-terminal");
+        assert_eq!(
+            body["instanceId"], "inst-abc123",
+            "health must echo this process's instanceId for P0b conflict detection"
+        );
     }
 
     #[test]

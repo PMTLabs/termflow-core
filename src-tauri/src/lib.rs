@@ -22,6 +22,7 @@ pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
 mod native_notify;
+mod panic_hook;
 mod shell_integration;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
@@ -792,6 +793,10 @@ fn show_or_focus_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // Install FIRST, before anything that could panic, so a startup panic is
+  // still written to the log (with a backtrace) instead of dying silently.
+  panic_hook::install();
+
   let args = Args::parse();
   let is_headless = args.headless;
   // Runtime-only port overrides (B5): applied to the loaded config before binding,

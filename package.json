@@ -36,6 +36,7 @@
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug",
     "test:all": "npm run test && npm run test:e2e",
+    "smoke:release": "bun scripts/smoke-test-release.mjs",
     "mcp": "node mcp-server/build/index.js",
     "mcp:dev": "cd mcp-server && npm run dev"
   },
