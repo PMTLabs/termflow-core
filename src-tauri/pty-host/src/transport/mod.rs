@@ -1,101 +1,62 @@
-//! Windows named-pipe server for the PTY host.
+//! OS-neutral transport for the PTY host.
 //!
-//! Correctness notes (dual review):
+//! A Windows named pipe (`pipe_windows`) or a Unix domain socket
+//! (`socket_unix`) is presented through a common surface so the serve loop is
+//! identical on every platform:
+//! - `Listener::bind` acquires the endpoint; `Listener::accept` yields one
+//!   connected `Stream` per GUI connection. Windows mints a fresh secured pipe
+//!   instance per accept; Unix reuses the bound socket and screens the peer's
+//!   credentials.
+//! - `Stream` is `AsyncRead + AsyncWrite + Unpin + Send + 'static`, so the
+//!   frame codec and the split-based reader/writer are unchanged across OSes.
+//!
+//! Correctness notes carried over from the original Windows `pipe.rs`:
 //! - The `SessionManager` is built ONCE and outlives every connection.
-//! - `server` entering the main loop is ALWAYS an already-connected instance
-//!   (first connected before the loop; a reconnect connected in the Hold branch
-//!   and carried straight in). The accepted connection is never dropped/re-made.
+//! - The loop always holds an already-connected stream (first connected before
+//!   the loop; a reconnect connected inside the Hold branch and carried in).
 //! - The armed hold uses ONE absolute deadline; a reconnect never restarts it.
-//! - A transient connect error during Hold does NOT terminate the sidecar — it
+//! - A transient accept error during Hold does NOT tear down the sidecar — it
 //!   retries until the deadline, so held sessions survive a flaky reconnect.
 //! - On disconnect the outbound backlog is PURGED: reattach replays from the
 //!   bounded ring, so Hold retains only the rings (no unbounded queue).
-//! - Outbound channels are BOUNDED; the reader drops + emits a Gap on overflow.
-
-#![cfg(windows)]
 
 use crate::manager::{Disposition, SessionManager};
 use std::time::{Duration, Instant};
 use termflow_pty_protocol::{read_frame, write_frame, Control, Data, Frame, Response};
-use tokio::io::AsyncWriteExt;
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
+
+#[cfg(windows)]
+mod pipe_windows;
+#[cfg(windows)]
+pub use pipe_windows::{connect, secured_server, ClientStream, Listener, Stream};
+
+#[cfg(unix)]
+mod socket_unix;
+#[cfg(unix)]
+pub use socket_unix::{connect, default_endpoint, ClientStream, Listener, Stream};
 
 /// Bounded outbound channel depth (frames). On overflow the reader drops the
 /// frame (bytes remain in the ring) and emits a Gap so the GUI resyncs.
 const CHAN_CAP: usize = 8192;
 
-/// Create a pipe server instance with an owner-only DACL so no other user on
-/// the machine can connect. The SDDL `D:P(A;;GA;;;OW)` is a protected DACL that
-/// grants GENERIC_ALL only to the pipe's OWNER (the creating user) — every other
-/// principal has no ACE and is denied. `first_pipe_instance(true)` guards
-/// against a squatter pre-creating the name (the previous instance is fully
-/// released before the next is created in the sequential lifecycle).
-pub fn secured_server(name: &str) -> std::io::Result<NamedPipeServer> {
-    match owner_only_security_descriptor() {
-        Some(psd) => {
-            let mut sa = windows_sys::Win32::Security::SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<windows_sys::Win32::Security::SECURITY_ATTRIBUTES>()
-                    as u32,
-                lpSecurityDescriptor: psd,
-                bInheritHandle: 0,
-            };
-            // SAFETY: `sa` outlives the call; `psd` is a valid self-relative SD
-            // from ConvertStringSecurityDescriptor…; the pipe copies it, so we
-            // free `psd` immediately after.
-            let result = unsafe {
-                ServerOptions::new().first_pipe_instance(true).create_with_security_attributes_raw(
-                    name,
-                    &mut sa as *mut _ as *mut std::ffi::c_void,
-                )
-            };
-            unsafe {
-                windows_sys::Win32::Foundation::LocalFree(psd as _);
-            }
-            result
-        }
-        None => ServerOptions::new().first_pipe_instance(true).create(name),
-    }
-}
-
-/// Build a self-relative security descriptor restricting access to the owner.
-/// Returns a pointer that MUST be freed with `LocalFree`. None on failure (the
-/// caller falls back to the default pipe ACL).
-#[cfg(windows)]
-fn owner_only_security_descriptor() -> Option<*mut std::ffi::c_void> {
-    use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-    // D: DACL, P: protected (no inheritance), one ACE: (Allow;;GenericAll;;;Owner)
-    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)\0".encode_utf16().collect();
-    let mut psd: *mut std::ffi::c_void = std::ptr::null_mut();
-    // SDDL_REVISION_1 == 1
-    let ok = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut psd,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 || psd.is_null() {
-        None
-    } else {
-        Some(psd)
-    }
-}
+/// Where the host listens: a pipe name on Windows, a socket path on Unix.
+#[derive(Clone, Debug)]
+pub struct Endpoint(pub String);
 
 /// Run the host until teardown.
-pub async fn serve(pipe_name: String, token: Option<String>) -> std::io::Result<()> {
+pub async fn serve(endpoint: Endpoint, token: Option<String>) -> std::io::Result<()> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
     let mut mgr = SessionManager::new(events_tx, resp_tx, token);
 
+    let mut listener = Listener::bind(&endpoint)?;
     // Accept the FIRST connection.
-    let mut server = secured_server(&pipe_name)?;
-    server.connect().await?;
+    let mut stream = listener.accept().await?;
 
     loop {
-        let (erx, rrx) = run_connection(&mut mgr, server, events_rx, resp_rx).await;
+        let (erx, rrx) = run_connection(&mut mgr, stream, events_rx, resp_rx).await;
         events_rx = erx;
         resp_rx = rrx;
 
@@ -106,8 +67,8 @@ pub async fn serve(pipe_name: String, token: Option<String>) -> std::io::Result<
                 // must not retain a pre-disconnect queue.
                 while events_rx.try_recv().is_ok() {}
                 while resp_rx.try_recv().is_ok() {}
-                match wait_for_reconnect(&pipe_name, deadline).await {
-                    Some(s) => server = s, // already connected → loop top
+                match wait_for_reconnect(&mut listener, deadline).await {
+                    Some(s) => stream = s, // already connected → loop top
                     None => return Ok(()), // safety-timeout teardown
                 }
             }
@@ -116,24 +77,17 @@ pub async fn serve(pipe_name: String, token: Option<String>) -> std::io::Result<
 }
 
 /// Wait for a GUI to reconnect, until the absolute `deadline`. Tolerates
-/// transient connect / listener-creation errors (retries) so a flaky reconnect
-/// during a hot-swap does not kill held sessions. Returns the connected server,
-/// or None if the deadline elapsed.
-async fn wait_for_reconnect(pipe_name: &str, deadline: Instant) -> Option<NamedPipeServer> {
+/// transient accept errors (retries) so a flaky reconnect during a hot-swap
+/// does not kill held sessions. Returns the connected stream, or None if the
+/// deadline elapsed.
+async fn wait_for_reconnect(listener: &mut Listener, deadline: Instant) -> Option<Stream> {
     loop {
         if Instant::now() >= deadline {
             return None;
         }
-        let next = match secured_server(pipe_name) {
-            Ok(s) => s,
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
         tokio::select! {
-            r = next.connect() => match r {
-                Ok(()) => return Some(next),
+            r = listener.accept() => match r {
+                Ok(s) => return Some(s),
                 Err(_) => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -147,14 +101,18 @@ async fn wait_for_reconnect(pipe_name: &str, deadline: Instant) -> Option<NamedP
 }
 
 /// Serve one connected client until it disconnects. Returns the event/response
-/// receivers so the next connection can reuse them.
-async fn run_connection(
+/// receivers so the next connection can reuse them. Generic over the concrete
+/// `Stream` so the exact same body runs over a named pipe or a Unix socket.
+async fn run_connection<S>(
     mgr: &mut SessionManager,
-    server: NamedPipeServer,
+    stream: S,
     events_rx: Receiver<Data>,
     resp_rx: Receiver<Response>,
-) -> (Receiver<Data>, Receiver<Response>) {
-    let (mut rd, mut wr) = tokio::io::split(server);
+) -> (Receiver<Data>, Receiver<Response>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut rd, mut wr) = tokio::io::split(stream);
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
 
     let writer = tokio::spawn(async move {
@@ -204,40 +162,102 @@ async fn run_connection(
 mod tests {
     use super::*;
     use termflow_pty_protocol::SpawnSpec;
-    use tokio::net::windows::named_pipe::ClientOptions;
 
-    fn echo_spec() -> SpawnSpec {
-        SpawnSpec {
-            shell: "cmd.exe".into(),
-            args: vec!["/c".into(), "echo persist".into()],
-            env: vec![],
-            env_remove: vec![],
-            cwd: None,
-            cols: 80,
-            rows: 24,
+    /// A per-OS endpoint under a directory we own, unique to this test process.
+    fn test_endpoint(tag: &str) -> Endpoint {
+        #[cfg(windows)]
+        {
+            Endpoint(format!(r"\\.\pipe\termflow-test-{}-{tag}", std::process::id()))
+        }
+        #[cfg(unix)]
+        {
+            // A private 0700 dir (created by Listener::bind's ensure_owner_dir).
+            Endpoint(format!(
+                "/tmp/termflow-test-{}/{tag}.sock",
+                std::process::id()
+            ))
+        }
+    }
+
+    /// A shell that prints "persist" and stays/exits, per OS.
+    fn persist_spec(stay: bool) -> SpawnSpec {
+        #[cfg(windows)]
+        {
+            let arg = if stay { "/k" } else { "/c" };
+            SpawnSpec {
+                shell: "cmd.exe".into(),
+                args: vec![arg.into(), "echo persist".into()],
+                env: vec![],
+                env_remove: vec![],
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            }
+        }
+        #[cfg(unix)]
+        {
+            let script = if stay {
+                "echo persist; sleep 30"
+            } else {
+                "echo persist"
+            };
+            SpawnSpec {
+                shell: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: vec![],
+                env_remove: vec![],
+                cwd: None,
+                cols: 80,
+                rows: 24,
+            }
         }
     }
 
     #[tokio::test]
-    async fn client_spawns_session_and_receives_output() {
-        let pipe = r"\\.\pipe\termflow-pty-host-test-spawn";
-        let srv = tokio::spawn(serve(pipe.to_string(), Some("tok".into())));
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    async fn transport_roundtrip() {
+        let ep = test_endpoint("roundtrip");
+        let mut listener = Listener::bind(&ep).unwrap();
+        let server = tokio::spawn(async move {
+            let mut s = listener.accept().await.unwrap();
+            // Echo exactly one frame back, then close.
+            if let Ok(Some(f)) = read_frame(&mut s).await {
+                let _ = write_frame(&mut s, &f).await;
+            }
+            let _ = s.shutdown().await;
+            // Keep the listener alive until the client has read the echo.
+            drop(listener);
+        });
 
-        let mut client = ClientOptions::new().open(pipe).unwrap();
+        let mut client = connect_with_retry(&ep).await;
+        let ping = Frame::Ctrl(Control::ListSessions { req: 42 });
+        write_frame(&mut client, &ping).await.unwrap();
+        let echoed = read_frame(&mut client).await.unwrap().unwrap();
+        assert!(
+            matches!(echoed, Frame::Ctrl(Control::ListSessions { req: 42 })),
+            "frame round-tripped over the transport"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_spawns_session_and_receives_output() {
+        let ep = test_endpoint("spawn");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into())));
+
+        let mut client = connect_with_retry(&ep).await;
         write_frame(
             &mut client,
             &Frame::Ctrl(Control::Spawn {
                 req: 1,
                 tab_id: "t1".into(),
-                spec: echo_spec(),
+                spec: persist_spec(false),
             }),
         )
         .await
         .unwrap();
 
         let mut got = String::new();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
             while let Ok(Some(f)) = read_frame(&mut client).await {
                 if let Frame::Data(Data::Stdout { bytes, .. }) = f {
                     got.push_str(&String::from_utf8_lossy(&bytes));
@@ -254,32 +274,22 @@ mod tests {
 
     #[tokio::test]
     async fn sessions_survive_arm_disconnect_reconnect() {
-        let pipe = r"\\.\pipe\termflow-pty-host-test-reattach";
-        let srv = tokio::spawn(serve(pipe.to_string(), Some("tok".into())));
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let ep = test_endpoint("reattach");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into())));
 
         {
-            let mut c1 = ClientOptions::new().open(pipe).unwrap();
-            let spec = SpawnSpec {
-                shell: "cmd.exe".into(),
-                args: vec!["/k".into(), "echo persist".into()],
-                env: vec![],
-                env_remove: vec![],
-                cwd: None,
-                cols: 80,
-                rows: 24,
-            };
+            let mut c1 = connect_with_retry(&ep).await;
             write_frame(
                 &mut c1,
                 &Frame::Ctrl(Control::Spawn {
                     req: 1,
                     tab_id: "t1".into(),
-                    spec,
+                    spec: persist_spec(true),
                 }),
             )
             .await
             .unwrap();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
                 while let Ok(Some(f)) = read_frame(&mut c1).await {
                     if matches!(f, Frame::Resp(Response::Spawned { .. })) {
                         break;
@@ -297,7 +307,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
                 while let Ok(Some(f)) = read_frame(&mut c1).await {
                     if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
                         break;
@@ -308,14 +318,14 @@ mod tests {
             // Drop c1 → GUI-exit simulation.
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let mut c2 = ClientOptions::new().open(pipe).unwrap();
+        let mut c2 = connect_with_retry(&ep).await;
         write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
             .await
             .unwrap();
         let mut has_t1 = false;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while let Ok(Some(f)) = read_frame(&mut c2).await {
                 if let Frame::Resp(Response::SessionList { sessions, .. }) = f {
                     has_t1 = sessions.iter().any(|s| s.tab_id == "t1");
@@ -337,7 +347,7 @@ mod tests {
         .await
         .unwrap();
         let mut replay = String::new();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while let Ok(Some(f)) = read_frame(&mut c2).await {
                 if let Frame::Data(Data::Stdout { bytes, .. }) = f {
                     replay.push_str(&String::from_utf8_lossy(&bytes));
@@ -350,5 +360,17 @@ mod tests {
         .await;
         assert!(replay.contains("persist"), "reattach replayed prior output");
         srv.abort();
+    }
+
+    /// Connect a client, retrying for a few seconds so the test tolerates the
+    /// server not having created/bound its endpoint yet.
+    async fn connect_with_retry(ep: &Endpoint) -> ClientStream {
+        for _ in 0..60 {
+            if let Ok(c) = connect(ep).await {
+                return c;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        connect(ep).await.expect("client failed to connect")
     }
 }

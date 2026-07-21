@@ -7,34 +7,40 @@
 mod manager;
 mod ring;
 mod session;
+mod transport;
 mod util;
 mod winjob;
 
-#[cfg(windows)]
-mod pipe;
-
 #[tokio::main]
 async fn main() {
-    // If we are trapped in a kill-on-close job (breakaway was not honored),
-    // survival across GUI exit cannot be guaranteed. Log loudly so the GUI's
-    // arm can fail rather than silently lose sessions.
+    // If we cannot outlive the GUI (Windows kill-on-close job / not a Unix
+    // session leader), survival across GUI exit is not guaranteed. Log loudly
+    // so the GUI's arm can fail rather than silently lose sessions.
     if let Err(e) = winjob::assert_not_kill_on_close_job() {
         eprintln!("termflow-pty-host: WARNING: {e}");
     }
 
-    let pipe_name = std::env::var("TERMFLOW_PTY_PIPE")
-        .unwrap_or_else(|_| r"\\.\pipe\termflow-pty-host".to_string());
+    let endpoint = resolve_endpoint();
     let token = std::env::var("TERMFLOW_PTY_TOKEN").ok();
 
+    if let Err(e) = transport::serve(endpoint, token).await {
+        eprintln!("termflow-pty-host: serve ended: {e}");
+    }
+}
+
+/// Resolve the transport endpoint. The GUI always passes `TERMFLOW_PTY_PIPE`
+/// (a pipe name on Windows, a socket path on Unix); the defaults only apply to
+/// standalone/manual runs of the sidecar.
+fn resolve_endpoint() -> transport::Endpoint {
+    if let Ok(v) = std::env::var("TERMFLOW_PTY_PIPE") {
+        return transport::Endpoint(v);
+    }
     #[cfg(windows)]
     {
-        if let Err(e) = pipe::serve(pipe_name, token).await {
-            eprintln!("termflow-pty-host: serve ended: {e}");
-        }
+        transport::Endpoint(r"\\.\pipe\termflow-pty-host".to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
     {
-        let _ = (pipe_name, token);
-        eprintln!("termflow-pty-host: Windows-only in milestone A");
+        transport::default_endpoint(cfg!(debug_assertions))
     }
 }
