@@ -342,6 +342,48 @@ pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
     hotswap_preflight(&state)
 }
 
+/// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
+/// means this build has no updater compiled in (store flavor / feature off).
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum UpdateStatus {
+    NotInstalled,
+    UpToDate,
+    Available { version: String },
+    Unavailable,
+}
+
+/// Check for a Velopack update (GitHub channel). Always registered; returns
+/// `Unavailable` when the `velopack-updates` feature is not compiled in.
+#[tauri::command]
+pub async fn check_for_updates() -> UpdateStatus {
+    #[cfg(feature = "velopack-updates")]
+    {
+        tokio::task::spawn_blocking(crate::updater::check_status)
+            .await
+            .unwrap_or(UpdateStatus::NotInstalled)
+    }
+    #[cfg(not(feature = "velopack-updates"))]
+    {
+        UpdateStatus::Unavailable
+    }
+}
+
+/// Download + arm + apply a Velopack update, keeping terminals alive. Always
+/// registered; a store/no-updater build returns a stable "not available" error.
+#[tauri::command]
+pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(feature = "velopack-updates")]
+    {
+        crate::updater::update_and_restart(&state).await
+    }
+    #[cfg(not(feature = "velopack-updates"))]
+    {
+        let _ = state;
+        Err("in-app updates aren't available in this build (managed by the store)".to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
     hotswap_preflight(&state)?;

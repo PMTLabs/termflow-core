@@ -32,10 +32,19 @@ path = "src/main.rs"
 # run it on Linux/macOS only:  cargo test --features integration-tests
 integration-tests = ["tauri/test"]
 
+# Velopack cross-platform auto-update (GitHub channel). OFF by default so the
+# normal/dev build and the store flavors are unaffected; the GitHub-distributed
+# release build enables it. All velopack code is `#[cfg(feature =
+# "velopack-updates")]`. The crate version is pinned EXACTLY and scoped to this
+# project's Cargo.lock — it never touches any globally-installed velopack/vpk.
+velopack-updates = ["dep:velopack"]
+
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
+# Auto-updater (behind the `velopack-updates` feature). Exact pin, project-scoped.
+velopack = { version = "=1.2.0", optional = true }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

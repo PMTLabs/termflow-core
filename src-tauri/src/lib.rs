@@ -7,6 +7,8 @@ pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
 pub mod commands;
+#[cfg(feature = "velopack-updates")]
+pub mod updater;
 pub mod open_commands;
 pub mod api_server;
 pub mod event_bus;
@@ -1061,6 +1063,8 @@ pub fn run() {
         commands::create_terminal,
         commands::restart_for_update,
         commands::hotswap_available,
+        commands::check_for_updates,
+        commands::update_and_restart,
         commands::get_active_window,
         commands::set_active_window,
         commands::get_terminal_cwd,
