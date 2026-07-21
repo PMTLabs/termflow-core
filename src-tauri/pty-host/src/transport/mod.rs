@@ -136,20 +136,25 @@ where
         let mut events_rx = events_rx;
         let mut resp_rx = resp_rx;
         loop {
-            tokio::select! {
+            // Pick the next frame (or stop / channel-closed).
+            let frame = tokio::select! {
+                biased;
                 _ = &mut stop_rx => break,
-                d = events_rx.recv() => match d {
-                    Some(d) => {
-                        if write_frame(&mut wr, &Frame::Data(d)).await.is_err() { break; }
-                    }
-                    None => break,
-                },
-                r = resp_rx.recv() => match r {
-                    Some(r) => {
-                        if write_frame(&mut wr, &Frame::Resp(r)).await.is_err() { break; }
-                    }
-                    None => break,
-                },
+                d = events_rx.recv() => match d { Some(d) => Frame::Data(d), None => break },
+                r = resp_rx.recv() => match r { Some(r) => Frame::Resp(r), None => break },
+            };
+            // Write it, but let `stop` interrupt a write that blocks on a full
+            // socket buffer (a half-open peer that stopped reading). Without this,
+            // a reader-side disconnect could never tear this task down and the
+            // serve loop would wedge (RP-2 review F; latent in the original
+            // Windows loop). A frame dropped here is fine: the backlog is purged
+            // on disconnect and reattach replays from the ring.
+            tokio::select! {
+                biased;
+                _ = &mut stop_rx => break,
+                res = write_frame(&mut wr, &frame) => {
+                    if res.is_err() { break; }
+                }
             }
         }
         let _ = wr.shutdown().await;
