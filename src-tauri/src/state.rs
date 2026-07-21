@@ -552,7 +552,9 @@ impl<R: Runtime> AppState<R> {
                 return Ok(());
             }
         }
-        let sidecar = crate::pty_host_client::resolve_sidecar_path().ok_or_else(|| {
+        // RP-1: install the host into the update-stable runtime dir and run it
+        // from there (outside the swapped app payload) so it survives an update.
+        let sidecar = crate::pty_host_client::resolve_host_path().ok_or_else(|| {
             "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
         })?;
         let pipe = crate::pty_host_client::resolve_pipe();

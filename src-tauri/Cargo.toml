@@ -63,6 +63,10 @@ tower-http = { version = "0.5", features = ["cors"] }
 jsonwebtoken = "9"
 dashmap = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
+# Integrity hash for the update-stable host binary install (RP-1): the host is
+# copied out of the swapped app payload into a per-user runtime dir keyed by its
+# SHA-256 so a Velopack update never kills the live sidecar (design 003 §10.1).
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 base64 = "0.22"

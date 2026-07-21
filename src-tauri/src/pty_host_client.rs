@@ -295,6 +295,10 @@ fn spawn_sidecar_detached(
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
+    // Run with CWD set to the host's own (update-stable) dir, never inheriting a
+    // CWD inside the app payload — Velopack treats a process whose CWD is inside
+    // the swapped `current\` tree as an update blocker it may kill (design §10.1).
+    let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
     let base = || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
@@ -302,6 +306,9 @@ fn spawn_sidecar_detached(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(ref wd) = workdir {
+            c.current_dir(wd);
+        }
         c
     };
 
@@ -374,13 +381,137 @@ pub fn resolve_token() -> String {
     token
 }
 
-/// Locate the sidecar binary, in priority order:
+/// Host binary filename for the current platform.
+fn host_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "termflow-pty-host.exe"
+    } else {
+        "termflow-pty-host"
+    }
+}
+
+/// The per-user, **update-stable** runtime dir the host is installed into and
+/// executed from — deliberately OUTSIDE the app payload that Velopack swaps
+/// (`current\` on Windows, the `.app` on macOS, the AppImage mount on Linux).
+/// Running the host from here is what lets a live sidecar survive an update
+/// (design 003 §10.1). Channel-qualified so dev and release never collide.
+pub fn runtime_host_dir() -> Option<std::path::PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join("Library").join("Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
+            })
+    }?;
+    let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
+    Some(base.join("TermFlow").join("host").join(chan))
+}
+
+/// SHA-256 of a file's bytes.
+fn sha256_file(path: &std::path::Path) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path)?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(h.finalize().into())
+}
+
+/// First 8 bytes of a digest as hex (16 chars) — enough to key the install dir.
+fn hex16(digest: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(16);
+    for b in &digest[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Install the host binary into `base/<hash>/<name>`, idempotently and
+/// atomically, verifying the copy's hash matches the source. Returns the
+/// installed path. Split out (base as a param) so it is unit-testable without
+/// touching the real per-user runtime dir.
+fn install_host_into(
+    src: &std::path::Path,
+    base: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    let digest = sha256_file(src)?;
+    let dir = base.join(hex16(&digest));
+    let name = host_binary_name();
+    let dest = dir.join(name);
+
+    // Idempotent: an intact prior copy (matching hash) is reused as-is.
+    if dest.exists() {
+        if let Ok(d) = sha256_file(&dest) {
+            if d == digest {
+                return Ok(dest);
+            }
+        }
+    }
+
+    std::fs::create_dir_all(&dir)?;
+    // Copy to a temp name in the SAME dir, then rename over — so a reader never
+    // sees a half-written binary, and a locked/running old copy doesn't block us.
+    let tmp = dir.join(format!(".{name}.tmp-{}", uuid::Uuid::new_v4()));
+    std::fs::copy(src, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o700); // owner rwx only
+        std::fs::set_permissions(&tmp, perms)?;
+    }
+    // Integrity: verify the copy before publishing it.
+    if sha256_file(&tmp)? != digest {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "pty-host: installed copy hash did not match source",
+        ));
+    }
+    // TODO(RP-9/signing): in release, Authenticode/codesign-verify `dest` here
+    // before it is ever executed. In dev the bundled host is unsigned.
+    std::fs::rename(&tmp, &dest)?;
+    Ok(dest)
+}
+
+/// Resolve the host path to run: locate the bundled/dev host, then install it
+/// into the update-stable runtime dir and return THAT path. On any install
+/// failure, fall back to the bundled path so terminals still work (they just
+/// won't survive an update that swaps the payload).
+pub fn resolve_host_path() -> Option<std::path::PathBuf> {
+    let src = resolve_bundled_host_path()?;
+    match runtime_host_dir() {
+        Some(base) => match install_host_into(&src, &base) {
+            Ok(dest) => Some(dest),
+            Err(e) => {
+                log::warn!(
+                    "pty-host: could not install host into runtime dir ({e}); \
+                     running from bundled path (won't survive a payload swap)"
+                );
+                Some(src)
+            }
+        },
+        None => {
+            log::warn!("pty-host: no per-user runtime dir; running from bundled path");
+            Some(src)
+        }
+    }
+}
+
+/// Locate the *bundled* sidecar binary (the source to install from), in
+/// priority order:
 /// 1. `TERMFLOW_PTY_HOST_BIN` explicit override.
 /// 2. Next to the app executable (release / staged).
 /// 3. Dev build locations under `pty-host/target/{release,debug}` resolved
 ///    both relative to the exe (`src-tauri/target/debug/…`) and to the cwd —
 ///    so `bun run dev` finds it with no env var once the sidecar is built.
-pub fn resolve_sidecar_path() -> Option<std::path::PathBuf> {
+pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) {
         "termflow-pty-host.exe"
     } else {
@@ -429,6 +560,56 @@ pub fn resolve_sidecar_path() -> Option<std::path::PathBuf> {
     }
 
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::{install_host_into, host_binary_name};
+
+    fn scratch() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tfhost-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn install_copies_verifies_and_is_idempotent() {
+        let root = scratch();
+        let src = root.join("bundled-host.bin");
+        std::fs::write(&src, b"host-bytes-v1").unwrap();
+        let base = root.join("runtime");
+
+        let a = install_host_into(&src, &base).unwrap();
+        assert!(a.exists(), "installed host should exist");
+        assert_eq!(a.file_name().unwrap().to_str().unwrap(), host_binary_name());
+        assert_eq!(std::fs::read(&a).unwrap(), b"host-bytes-v1", "content copied intact");
+
+        // Second call with identical source: same path, no re-copy, no error.
+        let b = install_host_into(&src, &base).unwrap();
+        assert_eq!(a, b, "install is idempotent for identical content");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn different_content_installs_to_a_different_hash_dir() {
+        let root = scratch();
+        let base = root.join("runtime");
+        let s1 = root.join("h1");
+        std::fs::write(&s1, b"version-one").unwrap();
+        let s2 = root.join("h2");
+        std::fs::write(&s2, b"version-two-different").unwrap();
+
+        let p1 = install_host_into(&s1, &base).unwrap();
+        let p2 = install_host_into(&s2, &base).unwrap();
+        assert_ne!(
+            p1.parent().unwrap(),
+            p2.parent().unwrap(),
+            "different content must install under a different hash dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 fn resp_req(r: &Response) -> u64 {
