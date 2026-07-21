@@ -33,6 +33,10 @@ pub struct SessionManager {
     /// Epoch-ms mirror of `armed_deadline` for honest `ArmAck` reporting.
     armed_deadline_ms: Option<u64>,
     expected_token: Option<String>,
+    /// Whether this host can actually outlive the GUI (Windows: broke away from
+    /// a kill-on-close job; Unix: is a session leader). If false, arming is a
+    /// lie — the OS would kill us with the GUI — so we refuse to ArmAck.
+    survivable: bool,
     events: Sender<Data>,
     responses: Sender<Response>,
 }
@@ -42,12 +46,14 @@ impl SessionManager {
         events: Sender<Data>,
         responses: Sender<Response>,
         expected_token: Option<String>,
+        survivable: bool,
     ) -> Self {
         Self {
             sessions: HashMap::new(),
             armed_deadline: None,
             armed_deadline_ms: None,
             expected_token,
+            survivable,
             events,
             responses,
         }
@@ -124,6 +130,16 @@ impl SessionManager {
                     log::warn!("ArmDetach rejected: token mismatch");
                     return;
                 }
+                // Defence in depth (dual-review H2): never acknowledge an arm we
+                // can't honor. If we can't outlive the GUI, sending ArmAck would
+                // let the GUI exit and lose every session. Withhold the ack so
+                // the GUI's arm times out and it refuses to proceed.
+                if !self.survivable {
+                    log::warn!(
+                        "ArmDetach rejected: host is not survivable (would die with the GUI)"
+                    );
+                    return;
+                }
                 let capped = timeout_secs.min(MAX_ARM_SECS);
                 // Capture the deadline ONCE (checked add against overflow).
                 if self.armed_deadline.is_none() {
@@ -191,7 +207,26 @@ mod tests {
     ) {
         let (etx, erx) = channel(1024);
         let (rtx, rrx) = channel(1024);
-        (SessionManager::new(etx, rtx, Some("tok".into())), erx, rrx)
+        (
+            SessionManager::new(etx, rtx, Some("tok".into()), true),
+            erx,
+            rrx,
+        )
+    }
+
+    /// Like `mgr()` but the host is NOT survivable (can't outlive the GUI).
+    fn mgr_unsurvivable() -> (
+        SessionManager,
+        tokio::sync::mpsc::Receiver<Data>,
+        tokio::sync::mpsc::Receiver<Response>,
+    ) {
+        let (etx, erx) = channel(1024);
+        let (rtx, rrx) = channel(1024);
+        (
+            SessionManager::new(etx, rtx, Some("tok".into()), false),
+            erx,
+            rrx,
+        )
     }
 
     #[test]
@@ -277,6 +312,23 @@ mod tests {
             other => panic!("expected ArmAck, got {other:?}"),
         };
         assert_eq!(first_ack, second_ack, "ArmAck must report the stored deadline");
+    }
+
+    #[test]
+    fn arm_rejected_when_not_survivable() {
+        let (mut m, _e, mut r) = mgr_unsurvivable();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 300,
+            token: "tok".into(),
+        });
+        assert!(!m.is_armed(), "must not arm when not survivable");
+        assert!(
+            r.try_recv().is_err(),
+            "must NOT send ArmAck when not survivable (GUI arm should time out)"
+        );
+        // And a disconnect tears down rather than falsely holding.
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
     }
 
     #[test]

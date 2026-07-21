@@ -43,22 +43,28 @@ pub fn kill_process_tree(pid: u32) {
             .stderr(std::process::Stdio::null())
             .status();
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(unix)]
     {
         // Kill the whole process GROUP, not just the shell pid, so descendants
         // (background jobs, subshells) are reaped instead of orphaned. The PTY
         // child is its own session/process-group leader (portable-pty calls
-        // setsid), so its pgid == its pid and is distinct from the host's own
-        // group. We signal via libc::killpg rather than shelling out to `kill`
-        // (whose negative-pgid arg parsing varies between implementations), and
-        // we refuse to signal our OWN group as a safety guard. Fall back to the
-        // single pid if the child isn't a distinct group leader.
+        // setsid), so its pgid == its pid. We signal via libc::killpg rather than
+        // shelling out to `kill` (whose negative-pgid arg parsing varies between
+        // implementations).
+        //
+        // Safety guard against a recycled PID: only group-kill when the pid is
+        // STILL the leader of its own group (`child_pgid == pid`) AND that group
+        // is not ours. A recycled non-leader pid fails `== pid` and drops to the
+        // narrower single-pid kill; this keeps a stale pid from ever taking out
+        // an unrelated process GROUP. (`Session::kill` already skips a session
+        // whose exit tombstone is set; the residual sub-reap window is a known
+        // pid-reuse limitation addressed by the RP-3 lease.)
         let pid_t = pid as libc::pid_t;
         // SAFETY: getpgid is a pure query; -1 on a vanished pid is handled below.
         let child_pgid = unsafe { libc::getpgid(pid_t) };
         let our_pgid = unsafe { libc::getpgid(0) };
-        let killed_group = if child_pgid > 0 && child_pgid != our_pgid {
-            // SAFETY: killpg signals the child's own group (verified != ours).
+        let killed_group = if child_pgid > 1 && child_pgid == pid_t && child_pgid != our_pgid {
+            // SAFETY: signals the child's OWN group (verified leader && != ours).
             unsafe { libc::killpg(child_pgid, libc::SIGKILL) == 0 }
         } else {
             false

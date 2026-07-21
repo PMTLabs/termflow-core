@@ -45,11 +45,17 @@ const CHAN_CAP: usize = 8192;
 #[derive(Clone, Debug)]
 pub struct Endpoint(pub String);
 
-/// Run the host until teardown.
-pub async fn serve(endpoint: Endpoint, token: Option<String>) -> std::io::Result<()> {
+/// Run the host until teardown. `survivable` is whether this process can outlive
+/// the GUI (see `detach::assert_survivable`); when false the manager refuses to
+/// acknowledge an arm so the GUI never exits expecting sessions to persist.
+pub async fn serve(
+    endpoint: Endpoint,
+    token: Option<String>,
+    survivable: bool,
+) -> std::io::Result<()> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
-    let mut mgr = SessionManager::new(events_tx, resp_tx, token);
+    let mut mgr = SessionManager::new(events_tx, resp_tx, token, survivable);
 
     let mut listener = Listener::bind(&endpoint)?;
     // Accept the FIRST connection.
@@ -242,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn client_spawns_session_and_receives_output() {
         let ep = test_endpoint("spawn");
-        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into())));
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
 
         let mut client = connect_with_retry(&ep).await;
         write_frame(
@@ -275,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn sessions_survive_arm_disconnect_reconnect() {
         let ep = test_endpoint("reattach");
-        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into())));
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
 
         {
             let mut c1 = connect_with_retry(&ep).await;

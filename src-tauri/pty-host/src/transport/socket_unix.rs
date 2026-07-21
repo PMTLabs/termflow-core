@@ -39,10 +39,20 @@ impl Listener {
         if let Some(dir) = path.parent() {
             ensure_owner_dir(dir)?;
         }
-        // Remove a stale socket from a previous run, but refuse to clobber a
-        // path that exists and is not a socket (never delete an unrelated file).
+        // Handle a pre-existing socket path. Refuse to clobber a path that is not
+        // a socket (never delete an unrelated file); and before removing a stale
+        // socket, probe it — if a live host still answers, fail closed with
+        // AddrInUse rather than orphaning the running instance (its GUI clients
+        // would silently hit us instead, and its Drop would later unlink OUR
+        // socket). Only a socket that refuses connection is treated as stale.
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_socket() => {
+                if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "another pty-host is already listening on this socket",
+                    ));
+                }
                 let _ = std::fs::remove_file(&path);
             }
             Ok(_) => {
@@ -122,10 +132,20 @@ fn runtime_dir() -> PathBuf {
 
 /// Create `dir` as a `0700` directory we own, or verify an existing one is a
 /// directory owned by our effective uid (tightening its mode if it is loose).
-/// Refuses a path owned by someone else — a squatter can't pre-create it.
+/// Uses `symlink_metadata` (does NOT follow symlinks) and REJECTS a symlink at
+/// the leaf, so an attacker cannot pre-create the path as a symlink pointing at
+/// a victim-owned dir to redirect our chmod / bind / unlink (the sticky-`/tmp`
+/// fallback TOCTOU). A new dir is created atomically at mode `0700` via
+/// `DirBuilder` (no post-create chmod window under the umask).
 fn ensure_owner_dir(dir: &Path) -> io::Result<()> {
-    match std::fs::metadata(dir) {
+    match std::fs::symlink_metadata(dir) {
         Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "runtime directory is a symlink",
+                ));
+            }
             if !meta.is_dir() {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
@@ -146,16 +166,19 @@ fn ensure_owner_dir(dir: &Path) -> io::Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(dir)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-            Ok(())
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
         }
         Err(e) => Err(e),
     }
 }
 
 /// True if the connected peer's uid equals our effective uid.
-#[cfg(target_os = "linux")]
+/// Linux & Android expose `SO_PEERCRED`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn peer_is_owner(stream: &UnixStream) -> io::Result<bool> {
     let fd = stream.as_raw_fd();
     let mut cred = libc::ucred {
@@ -182,7 +205,16 @@ fn peer_is_owner(stream: &UnixStream) -> io::Result<bool> {
 }
 
 /// macOS/BSD flavour: `getpeereid` reports the peer's effective uid/gid.
-#[cfg(not(target_os = "linux"))]
+/// (Named explicitly rather than `not(linux)` so Android — which uses
+/// `SO_PEERCRED` above and lacks `getpeereid` — doesn't select this arm.)
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 fn peer_is_owner(stream: &UnixStream) -> io::Result<bool> {
     let fd = stream.as_raw_fd();
     let mut uid: libc::uid_t = 0;
@@ -194,4 +226,51 @@ fn peer_is_owner(stream: &UnixStream) -> io::Result<bool> {
     }
     let _ = gid;
     Ok(uid == unsafe { libc::geteuid() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Fix B (dual-review): a second bind to a LIVE socket must be refused with
+    // AddrInUse, never silently clobber the running listener. After the live
+    // listener drops (socket unlinked), a fresh bind succeeds.
+    #[tokio::test]
+    async fn active_socket_bind_is_refused_then_reclaimed_after_drop() {
+        let ep = Endpoint(format!(
+            "/tmp/termflow-test-{}/active.sock",
+            std::process::id()
+        ));
+        let l1 = Listener::bind(&ep).expect("first bind ok");
+        let err = Listener::bind(&ep)
+            .map(|_| ())
+            .expect_err("second bind to live socket must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "live socket ⇒ AddrInUse");
+        drop(l1);
+        let _l2 = Listener::bind(&ep).expect("rebind after the live listener drops");
+    }
+
+    // Fix A (dual-review): a runtime-dir path that is a SYMLINK must be rejected
+    // (an attacker in sticky /tmp could point it at a victim dir to redirect our
+    // chmod/bind/unlink). ensure_owner_dir runs before any socket bind.
+    #[test]
+    fn symlink_runtime_dir_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let base = format!("/tmp/termflow-test-{}-symlink", std::process::id());
+        let real = format!("{base}-real");
+        let link = format!("{base}-link");
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_file(&link);
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, &link).unwrap(); // link -> a dir we own
+
+        let ep = Endpoint(format!("{link}/x.sock")); // parent is the symlink
+        let err = Listener::bind(&ep)
+            .map(|_| ())
+            .expect_err("symlink parent must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
+    }
 }

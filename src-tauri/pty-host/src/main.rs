@@ -15,15 +15,20 @@ mod util;
 async fn main() {
     // If we cannot outlive the GUI (Windows kill-on-close job / not a Unix
     // session leader), survival across GUI exit is not guaranteed. Log loudly
-    // so the GUI's arm can fail rather than silently lose sessions.
-    if let Err(e) = detach::assert_survivable() {
-        eprintln!("termflow-pty-host: WARNING: {e}");
-    }
+    // AND carry the verdict into the serve loop so an arm is REFUSED rather than
+    // acknowledged — the GUI must not exit believing sessions will persist.
+    let survivable = match detach::assert_survivable() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("termflow-pty-host: WARNING: {e}");
+            false
+        }
+    };
 
     let endpoint = resolve_endpoint();
     let token = std::env::var("TERMFLOW_PTY_TOKEN").ok();
 
-    if let Err(e) = transport::serve(endpoint, token).await {
+    if let Err(e) = transport::serve(endpoint, token, survivable).await {
         eprintln!("termflow-pty-host: serve ended: {e}");
     }
 }
