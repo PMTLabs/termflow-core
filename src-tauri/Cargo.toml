@@ -95,6 +95,10 @@ termflow-pty-protocol = { path = "pty-protocol" }
 
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.
+[target.'cfg(unix)'.dependencies]
+# setsid() for detaching the PTY-host sidecar into its own session on Unix.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"

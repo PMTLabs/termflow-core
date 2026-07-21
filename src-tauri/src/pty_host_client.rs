@@ -41,23 +41,33 @@ type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
 /// True when the PTY-host sidecar path is active.
 ///
-/// **Default-on in both dev and release** so shells are host-owned (and survive
-/// an app update / offload) out of the box. `TERMFLOW_PTY_HOST=0` is the
-/// kill-switch; `=1` also forces on. Windows-only until the Unix sidecar port
-/// lands; the automatic in-process fallback still covers a missing/failed
-/// sidecar, so a plain `bun run dev` without a built sidecar just falls back.
+/// **Windows: default-on** in dev and release so shells are host-owned (and
+/// survive an app update / offload) out of the box; `TERMFLOW_PTY_HOST=0` is the
+/// kill-switch, `=1` also forces on.
+///
+/// **Unix: opt-in** with `TERMFLOW_PTY_HOST=1`. The sidecar is ported and
+/// triple-OS tested, but shipping it on-by-default waits on the installed,
+/// signed, failure-injection smoke (plan 003 RP-8) and the packaged Unix
+/// sidecar binary. Until then it is off unless explicitly enabled for testing.
+///
+/// The automatic in-process fallback still covers a missing/failed sidecar, so
+/// enabling it without a built sidecar just falls back.
 pub fn enabled() -> bool {
     let env = std::env::var("TERMFLOW_PTY_HOST").ok();
-    host_enabled(cfg!(windows), env.as_deref())
+    host_enabled(cfg!(windows), cfg!(unix), env.as_deref())
 }
 
 /// Pure decision core for [`enabled`], split out so the matrix is testable.
-/// Default-ON everywhere; only an explicit `TERMFLOW_PTY_HOST=0` opts out.
-fn host_enabled(is_windows: bool, env: Option<&str>) -> bool {
-    if !is_windows {
-        return false; // Unix sidecar port not implemented yet (Phase 1-3).
+/// Windows is default-on (opt-out with `=0`); Unix is opt-in (`=1`); any other
+/// target is always off.
+fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
+    if is_windows {
+        return env != Some("0"); // default on; =0 kills, =1 forces on
     }
-    env != Some("0")
+    if is_unix {
+        return env == Some("1"); // opt-in until RP-8 ships it on by default
+    }
+    false
 }
 
 #[cfg(test)]
@@ -66,19 +76,26 @@ mod enabled_tests {
 
     #[test]
     fn default_on_in_dev_and_release_on_windows() {
-        assert!(host_enabled(true, None), "no override → on by default");
-        assert!(host_enabled(true, Some("1")), "=1 forces on");
+        assert!(host_enabled(true, false, None), "no override → on by default");
+        assert!(host_enabled(true, false, Some("1")), "=1 forces on");
     }
 
     #[test]
-    fn zero_is_the_kill_switch() {
-        assert!(!host_enabled(true, Some("0")), "=0 opts out");
+    fn zero_is_the_kill_switch_on_windows() {
+        assert!(!host_enabled(true, false, Some("0")), "=0 opts out");
     }
 
     #[test]
-    fn never_on_non_windows_yet() {
-        assert!(!host_enabled(false, Some("1")), "non-windows always off for now");
-        assert!(!host_enabled(false, None));
+    fn unix_is_opt_in() {
+        assert!(host_enabled(false, true, Some("1")), "unix on with =1");
+        assert!(!host_enabled(false, true, None), "unix off by default");
+        assert!(!host_enabled(false, true, Some("0")), "unix off with =0");
+    }
+
+    #[test]
+    fn unsupported_target_is_always_off() {
+        assert!(!host_enabled(false, false, Some("1")));
+        assert!(!host_enabled(false, false, None));
     }
 }
 
@@ -370,9 +387,97 @@ fn spawn_sidecar_detached(
     }
 }
 
-/// Non-Windows stub: the sidecar path is Windows-only in milestone A. The flag
-/// gate forces off elsewhere, so this is never reached at runtime.
-#[cfg(not(windows))]
+/// Connect to the sidecar's Unix socket, spawning it (detached into its own
+/// session via `setsid`) if it isn't already running. Mirrors the Windows path:
+/// try-connect → on failure spawn + retry-connect with backoff.
+#[cfg(unix)]
+pub async fn connect_or_spawn(
+    sidecar: &std::path::Path,
+    pipe: &str, // socket path on Unix
+    token: &str,
+    deps: PtyHostDeps,
+) -> std::io::Result<PtyHostClient> {
+    use std::time::Duration;
+    use tokio::net::UnixStream;
+
+    let mut survives = true;
+    let conn = match UnixStream::connect(pipe).await {
+        Ok(c) => c,
+        Err(_) => {
+            // No sidecar yet → spawn it, then retry-connect with backoff.
+            survives = spawn_sidecar_detached(sidecar, pipe, token)?;
+            let mut conn = None;
+            for _ in 0..40 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                if let Ok(c) = UnixStream::connect(pipe).await {
+                    conn = Some(c);
+                    break;
+                }
+            }
+            conn.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "pty-host sidecar did not open its socket",
+                )
+            })?
+        }
+    };
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    client
+        .survives_hotswap
+        .store(survives, std::sync::atomic::Ordering::Release);
+    Ok(client)
+}
+
+/// Spawn the sidecar detached into its own session so a GUI exit (or a `SIGHUP`
+/// to the GUI's process group) cannot reach it. Returns whether detachment is
+/// trusted for hot-swap. On Unix there is no job-object trap: a successful spawn
+/// implies a successful `setsid`, so survival is trusted (and the sidecar
+/// re-verifies via `assert_survivable` and refuses to arm if it somehow isn't a
+/// session leader).
+#[cfg(unix)]
+fn spawn_sidecar_detached(
+    sidecar: &std::path::Path,
+    pipe: &str,
+    token: &str,
+) -> std::io::Result<bool> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // Run with CWD set to the host's own (update-stable) dir, never inheriting a
+    // CWD inside the app payload — a Velopack swap of the payload must not
+    // disrupt the running host (design §10.1).
+    let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
+    let mut c = Command::new(sidecar);
+    c.env("TERMFLOW_PTY_PIPE", pipe)
+        .env("TERMFLOW_PTY_TOKEN", token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(ref wd) = workdir {
+        c.current_dir(wd);
+    }
+    // Only `setsid` runs in pre_exec — it is async-signal-safe (dual-review H2).
+    // We deliberately do NOT touch signal dispositions here; exec resets them,
+    // so the sidecar and its future PTY children start with defaults (no
+    // inherited SIGHUP-ignore). If setsid fails the child aborts before exec and
+    // `spawn()` returns the error, so the caller falls back to in-process.
+    unsafe {
+        c.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    c.spawn()?;
+    Ok(true)
+}
+
+/// Stub for exotic targets that are neither Windows nor Unix. `enabled()` is
+/// always false there, so this is never reached at runtime.
+#[cfg(not(any(windows, unix)))]
 pub async fn connect_or_spawn(
     _sidecar: &std::path::Path,
     _pipe: &str,
@@ -381,18 +486,50 @@ pub async fn connect_or_spawn(
 ) -> std::io::Result<PtyHostClient> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "pty-host sidecar is Windows-only in milestone A",
+        "pty-host sidecar is unsupported on this target",
     ))
 }
 
-/// Per-user pipe name so two users on one machine never collide. `dev` vs
-/// `release` is distinguished by the debug_assertions flag.
+/// Per-user endpoint so two users on one machine never collide. `dev` vs
+/// `release` is distinguished by the debug_assertions flag. On Windows this is a
+/// named-pipe name; on Unix a socket path in the user's runtime dir. The GUI
+/// passes this to the sidecar via `TERMFLOW_PTY_PIPE`, so both agree by
+/// construction (the sidecar creates the socket's parent dir on bind).
 pub fn resolve_pipe() -> String {
-    let user = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "user".to_string());
-    let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
-    format!(r"\\.\pipe\termflow-pty-host.{user}.{chan}")
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "user".to_string());
+        let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
+        format!(r"\\.\pipe\termflow-pty-host.{user}.{chan}")
+    }
+    #[cfg(unix)]
+    {
+        let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
+        format!("{}/termflow-pty-host.{chan}.sock", unix_runtime_dir())
+    }
+}
+
+/// Per-user runtime directory for the Unix socket, mirroring the sidecar's
+/// `socket_unix::runtime_dir`: `$XDG_RUNTIME_DIR/termflow` (Linux), else
+/// `$TMPDIR/termflow` (macOS), else `/tmp/termflow-<user>`. The sidecar creates
+/// and 0700-secures it on bind.
+#[cfg(unix)]
+fn unix_runtime_dir() -> String {
+    if let Some(d) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if !d.is_empty() {
+            return format!("{}/termflow", d.to_string_lossy().trim_end_matches('/'));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(d) = std::env::var_os("TMPDIR") {
+        if !d.is_empty() {
+            return format!("{}/termflow", d.to_string_lossy().trim_end_matches('/'));
+        }
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    format!("/tmp/termflow-{user}")
 }
 
 /// A launch token shared by all app instances (persisted to a per-user temp
