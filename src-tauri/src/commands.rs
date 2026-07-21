@@ -306,8 +306,11 @@ fn host_fallback(
 /// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
 /// reattaches. Refuses if the sidecar isn't connected or couldn't break away
 /// from a kill-on-close job (survival not guaranteed).
-#[tauri::command]
-pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
+/// Check whether an offload / hot-swap could currently keep every terminal
+/// alive, WITHOUT performing it. `Ok(())` ⇒ the offload would proceed; `Err`
+/// carries the reason it would be refused. Used by the Settings preflight so the
+/// UI only warns when the action is actually blocked.
+pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
     let client = state
         .pty_host_clone()
         .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
@@ -329,6 +332,22 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
                 .to_string(),
         );
     }
+    Ok(())
+}
+
+/// Preflight query for the Settings "Offload & Close" affordance. Returns Ok
+/// when the offload would keep all terminals alive; Err with the reason if not.
+#[tauri::command]
+pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
+    hotswap_preflight(&state)
+}
+
+#[tauri::command]
+pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
+    hotswap_preflight(&state)?;
+    let client = state
+        .pty_host_clone()
+        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
     let token = crate::pty_host_client::resolve_token();
     // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
     // exit and drop the pipe (10-minute safety window).

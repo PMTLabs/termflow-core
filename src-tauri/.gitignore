@@ -10,3 +10,6 @@ pty-host/target/
 pty-protocol/target/
 pty-host/Cargo.lock
 pty-protocol/Cargo.lock
+
+# Isolated build dir used to compile while the app exe is running-locked
+target-verify/

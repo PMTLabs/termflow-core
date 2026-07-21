@@ -87,6 +87,9 @@ interface ElectronAPI {
   /// be rebuilt (hot-swap "offload"). Resolves never on success (the process
   /// exits); rejects with the refusal reason if hot-swap isn't possible.
   restartForUpdate: () => Promise<void>;
+  /// Preflight for the offload/hot-swap: resolves if it would keep all terminals
+  /// alive, rejects with the reason if it would currently be refused.
+  hotswapAvailable: () => Promise<void>;
   getActiveTabAndPane: () => Promise<any>;
   createTerminalInTab: (tabId: string, paneId: string, profile: string, name: string) => Promise<any>;
   getTabs: () => Promise<any>;
@@ -502,6 +505,7 @@ const tauriBridge: ElectronAPI = {
   stopServers: async (target = 'all') => { await invoke('stop_servers', { target }); },
   startServers: async (target = 'all') => { await invoke('start_servers', { target }); },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
+  hotswapAvailable: async () => { await invoke('hotswap_available'); },
 
   // UI Mocks
   getActiveTabAndPane: async () => ({}),

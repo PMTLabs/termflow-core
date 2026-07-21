@@ -184,6 +184,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // app so the exe can be rebuilt; the next launch reattaches every terminal.
     const [offloadArmed, setOffloadArmed] = useState(false);
     const [offloading, setOffloading] = useState(false);
+    // Preflight: null = available (offload will keep terminals alive → hide the
+    // caveat); a string = the reason it's currently blocked (show it).
+    const [hotswapBlockedReason, setHotswapBlockedReason] = useState<string | null>(null);
+    const refreshHotswapPreflight = useCallback(async () => {
+        try {
+            await window.electronAPI?.hotswapAvailable?.();
+            setHotswapBlockedReason(null);
+        } catch (err) {
+            setHotswapBlockedReason(String(err));
+        }
+    }, []);
     const doOffloadRebuild = useCallback(async () => {
         setOffloading(true);
         try {
@@ -201,6 +212,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             }));
         }
     }, [dispatch]);
+    // Re-check the preflight whenever the Updates panel is opened (and reset the
+    // arm state), so the caveat reflects the current terminals.
+    useEffect(() => {
+        if (activeCategory === 'updates') {
+            setOffloadArmed(false);
+            void refreshHotswapPreflight();
+        }
+    }, [activeCategory, refreshHotswapPreflight]);
 
     const isDirty = useCallback((): boolean => {
         if (!isTracked(activeCategory) || !baseline) return false;
@@ -1535,10 +1554,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                         </button>
                     </div>
                 )}
-                <p className="help-text" style={{ marginTop: 12 }}>
-                    Requires the PTY host to be active (terminals must be host-owned). If any
-                    terminal is running in-process, the action is refused so nothing is lost.
-                </p>
+                {hotswapBlockedReason && (
+                    <p className="help-text" style={{ marginTop: 12, color: 'var(--warning, #d08770)' }}>
+                        ⚠ Offload isn’t available right now: {hotswapBlockedReason}. The action is
+                        refused so nothing is lost.
+                    </p>
+                )}
             </div>
         </div>
     );
