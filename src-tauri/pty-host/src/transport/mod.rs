@@ -21,7 +21,7 @@
 //!   bounded ring, so Hold retains only the rings (no unbounded queue).
 
 use crate::manager::{Disposition, SessionManager};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use termflow_pty_protocol::{read_frame, write_frame, Data, Frame, Response};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
@@ -72,27 +72,36 @@ pub async fn serve(
 
         match mgr.on_gui_disconnect() {
             Disposition::TearDown => return Ok(()),
-            Disposition::Hold { deadline } => {
+            Disposition::Hold { deadline: _ } => {
                 // Purge stale backlog: reattach replays from the ring, so Hold
                 // must not retain a pre-disconnect queue.
                 while events_rx.try_recv().is_ok() {}
                 while resp_rx.try_recv().is_ok() {}
-                match wait_for_reconnect(&mut listener, deadline).await {
+                // C3 (design §10.4): hold WHILE any child is live — never abandon
+                // a live session because the arm timer expired. Tear down only
+                // once nothing live remains to preserve. The arm deadline is still
+                // computed + reported in ArmAck for the GUI's UI, but it no longer
+                // destroys sessions here.
+                match wait_for_reconnect(&mut listener, &mgr).await {
                     Some(s) => stream = s, // already connected → loop top
-                    None => return Ok(()), // safety-timeout teardown
+                    None => return Ok(()), // all children exited → safe teardown
                 }
             }
         }
     }
 }
 
-/// Wait for a GUI to reconnect, until the absolute `deadline`. Tolerates
-/// transient accept errors (retries) so a flaky reconnect during a hot-swap
-/// does not kill held sessions. Returns the connected stream, or None if the
-/// deadline elapsed.
-async fn wait_for_reconnect(listener: &mut Listener, deadline: Instant) -> Option<Stream> {
+/// Wait for a GUI to reconnect while the host still owns at least one LIVE
+/// child. Unlike a destructive arm timeout, this never abandons live sessions on
+/// a timer (design §10.4): it returns `Some(stream)` on reconnect, or `None`
+/// ONLY once every hosted child has exited (nothing left to preserve → safe
+/// teardown). Liveness is re-checked on a short interval so a child that exits
+/// while detached eventually releases the host. Transient accept errors retry so
+/// a flaky reconnect does not drop held sessions.
+async fn wait_for_reconnect(listener: &mut Listener, mgr: &SessionManager) -> Option<Stream> {
+    const RECHECK: Duration = Duration::from_millis(500);
     loop {
-        if Instant::now() >= deadline {
+        if mgr.live_session_count() == 0 {
             return None;
         }
         tokio::select! {
@@ -103,9 +112,7 @@ async fn wait_for_reconnect(listener: &mut Listener, deadline: Instant) -> Optio
                     continue;
                 }
             },
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                return None;
-            }
+            _ = tokio::time::sleep(RECHECK) => continue, // re-check liveness
         }
     }
 }
@@ -369,6 +376,77 @@ mod tests {
         })
         .await;
         assert!(replay.contains("persist"), "reattach replayed prior output");
+        srv.abort();
+    }
+
+    /// C3 (design §10.4): a LIVE session must survive past an EXPIRED (short) arm
+    /// deadline — the host holds while children live and never kills on a timer.
+    /// The old destructive timeout would have torn down and killed the session.
+    #[tokio::test]
+    async fn live_session_survives_expired_arm() {
+        let ep = test_endpoint("c3-survive");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
+
+        {
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true), // stays alive (sleep 30 / cmd /k)
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Arm with a SHORT 1s timeout, then drop the client (GUI exit).
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::ArmDetach {
+                    req: 2,
+                    timeout_secs: 1,
+                    token: "tok".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+
+        // Wait well PAST the 1s arm deadline. The fix holds the session because
+        // its child is alive; the old code would have torn down + killed it.
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+
+        let mut c2 = connect_with_retry(&ep).await;
+        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+            .await
+            .unwrap();
+        let mut has_t1 = false;
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(f)) = read_frame(&mut c2).await {
+                if let Frame::Resp(Response::SessionList { sessions, .. }) = f {
+                    has_t1 = sessions.iter().any(|s| s.tab_id == "t1");
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(has_t1, "live session survived past the expired arm deadline");
         srv.abort();
     }
 

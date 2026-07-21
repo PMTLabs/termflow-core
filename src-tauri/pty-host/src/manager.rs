@@ -64,6 +64,13 @@ impl SessionManager {
         self.armed_deadline.is_some()
     }
 
+    /// Number of hosted sessions whose child is still running. Drives the
+    /// non-destructive hold (design §10.4): the host stays alive while this is
+    /// > 0 and only tears down once nothing live remains to preserve.
+    pub fn live_session_count(&self) -> usize {
+        self.sessions.values().filter(|s| s.is_alive()).count()
+    }
+
     fn session_metas(&self) -> Vec<SessionMeta> {
         self.sessions
             .values()
