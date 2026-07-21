@@ -97,10 +97,18 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     client.arm_detach(600, &token).await?;
 
     // Launch the updater (it waits for our exit), then quit gracefully so Tauri
-    // flushes tab/session state the relaunched app reattaches by `tab_id`.
-    tokio::task::spawn_blocking(move || apply(info))
+    // flushes tab/session state the relaunched app reattaches by `tab_id`. If the
+    // updater fails to launch AFTER we armed, DISARM synchronously — otherwise
+    // the host stays armed and a later normal quit would orphan sessions instead
+    // of tearing down (design §10.5 "updater-launch failure → synchronous Disarm").
+    if let Err(e) = tokio::task::spawn_blocking(move || apply(info))
         .await
-        .map_err(|e| e.to_string())??;
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+    {
+        client.disarm().await;
+        return Err(e);
+    }
     state.app_handle.exit(0);
     Ok(())
 }
