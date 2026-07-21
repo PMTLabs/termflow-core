@@ -77,6 +77,19 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The PTY-host sidecar crates (pty-host / pty-protocol) are separate
+      # manifests, NOT workspace members, so `cargo test` in src-tauri does not
+      # cover them. Test them explicitly — this is where the cross-platform
+      # transport/detach/session hardening lives (Unix socket perms + peer-cred +
+      # symlink rejection + process-group kill on Linux; named-pipe DACL on
+      # Windows). Pure Rust: no bun / webkit needed, so it runs before that setup
+      # and fails fast on a sidecar regression.
+      - name: Test PTY-host sidecar crates
+        working-directory: src-tauri
+        run: |
+          cargo test --manifest-path pty-protocol/Cargo.toml
+          cargo test --manifest-path pty-host/Cargo.toml
+
       # src-tauri/build.rs shells out to `bun scripts/build-mcp-sidecar.mjs`, so bun
       # must be present before cargo compiles the crate. On the self-hosted Windows
       # box bun is already installed; oven-sh/setup-bun fails there trying to
