@@ -31,8 +31,14 @@ pub fn kill_process_tree(pid: u32) {
     }
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: spawn taskkill without allocating a console, so the
+        // detached sidecar doesn't flash a command-line window on every tab
+        // close (mirrors the in-process path in `pty_manager.rs`).
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
