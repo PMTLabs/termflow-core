@@ -39,9 +39,47 @@ pub struct PtyHostDeps {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
-/// True when the opt-in PTY-host sidecar path is active (Windows-only).
+/// True when the PTY-host sidecar path is active.
+///
+/// **Default-on in both dev and release** so shells are host-owned (and survive
+/// an app update / offload) out of the box. `TERMFLOW_PTY_HOST=0` is the
+/// kill-switch; `=1` also forces on. Windows-only until the Unix sidecar port
+/// lands; the automatic in-process fallback still covers a missing/failed
+/// sidecar, so a plain `bun run dev` without a built sidecar just falls back.
 pub fn enabled() -> bool {
-    cfg!(windows) && std::env::var("TERMFLOW_PTY_HOST").as_deref() == Ok("1")
+    let env = std::env::var("TERMFLOW_PTY_HOST").ok();
+    host_enabled(cfg!(windows), env.as_deref())
+}
+
+/// Pure decision core for [`enabled`], split out so the matrix is testable.
+/// Default-ON everywhere; only an explicit `TERMFLOW_PTY_HOST=0` opts out.
+fn host_enabled(is_windows: bool, env: Option<&str>) -> bool {
+    if !is_windows {
+        return false; // Unix sidecar port not implemented yet (Phase 1-3).
+    }
+    env != Some("0")
+}
+
+#[cfg(test)]
+mod enabled_tests {
+    use super::host_enabled;
+
+    #[test]
+    fn default_on_in_dev_and_release_on_windows() {
+        assert!(host_enabled(true, None), "no override → on by default");
+        assert!(host_enabled(true, Some("1")), "=1 forces on");
+    }
+
+    #[test]
+    fn zero_is_the_kill_switch() {
+        assert!(!host_enabled(true, Some("0")), "=0 opts out");
+    }
+
+    #[test]
+    fn never_on_non_windows_yet() {
+        assert!(!host_enabled(false, Some("1")), "non-windows always off for now");
+        assert!(!host_enabled(false, None));
+    }
 }
 
 #[derive(Clone)]
