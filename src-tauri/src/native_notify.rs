@@ -2,7 +2,7 @@
 const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 
 #[cfg(windows)]
-fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
+fn ensure_start_menu_shortcut() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR, PWSTR};
     use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
@@ -22,9 +22,11 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
         .ok_or_else(|| "APPDATA is not set; cannot create notification shortcut".to_string())?;
     let shortcut_path = std::path::PathBuf::from(app_data)
         .join(r"Microsoft\Windows\Start Menu\Programs\TermFlow.lnk");
-    if shortcut_path.exists() {
-        return Ok(());
-    }
+    // Always (re)write the shortcut rather than skip-if-exists. The process sets
+    // an explicit AUMID, so the taskbar sources the window's icon from THIS
+    // shortcut — and a stale target (e.g. the exe was renamed) leaves that icon
+    // generic because it can no longer be resolved. Rewriting every launch keeps
+    // the target + icon pointed at the CURRENT exe.
 
     if let Some(parent) = shortcut_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -79,6 +81,12 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
         shell_link
             .SetPath(PCWSTR(exe_wide.as_ptr()))
             .map_err(|e| format!("failed to set notification shortcut target: {e}"))?;
+        // Explicit icon = the exe itself (resource index 0). This is the source
+        // of the AUMID-grouped taskbar icon; pinning it to the current exe keeps
+        // it valid even if the target were ever a launcher/renamed.
+        shell_link
+            .SetIconLocation(PCWSTR(exe_wide.as_ptr()), 0)
+            .map_err(|e| format!("failed to set notification shortcut icon: {e}"))?;
         shell_link
             .SetDescription(PCWSTR(description_wide.as_ptr()))
             .map_err(|e| format!("failed to set notification shortcut description: {e}"))?;
@@ -146,7 +154,7 @@ pub fn register_app_for_notifications() -> Result<(), String> {
     unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_USER_MODEL_ID)) }
         .map_err(|e| e.to_string())?;
 
-    create_start_menu_shortcut_if_missing()
+    ensure_start_menu_shortcut()
 }
 
 #[cfg(not(windows))]
