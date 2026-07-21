@@ -45,9 +45,30 @@ pub fn kill_process_tree(pid: u32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
+        // Kill the whole process GROUP, not just the shell pid, so descendants
+        // (background jobs, subshells) are reaped instead of orphaned. The PTY
+        // child is its own session/process-group leader (portable-pty calls
+        // setsid), so its pgid == its pid and is distinct from the host's own
+        // group. We signal via libc::killpg rather than shelling out to `kill`
+        // (whose negative-pgid arg parsing varies between implementations), and
+        // we refuse to signal our OWN group as a safety guard. Fall back to the
+        // single pid if the child isn't a distinct group leader.
+        let pid_t = pid as libc::pid_t;
+        // SAFETY: getpgid is a pure query; -1 on a vanished pid is handled below.
+        let child_pgid = unsafe { libc::getpgid(pid_t) };
+        let our_pgid = unsafe { libc::getpgid(0) };
+        let killed_group = if child_pgid > 0 && child_pgid != our_pgid {
+            // SAFETY: killpg signals the child's own group (verified != ours).
+            unsafe { libc::killpg(child_pgid, libc::SIGKILL) == 0 }
+        } else {
+            false
+        };
+        if !killed_group {
+            // SAFETY: last-resort single-process kill; no-op if already gone.
+            unsafe {
+                libc::kill(pid_t, libc::SIGKILL);
+            }
+        }
     }
 }
 

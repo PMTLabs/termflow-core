@@ -4,19 +4,19 @@
 //! per-session replay ring, and survives a GUI hot-swap so shells reattach.
 //! See docs/plan/002 for the full design.
 
+mod detach;
 mod manager;
 mod ring;
 mod session;
 mod transport;
 mod util;
-mod winjob;
 
 #[tokio::main]
 async fn main() {
     // If we cannot outlive the GUI (Windows kill-on-close job / not a Unix
     // session leader), survival across GUI exit is not guaranteed. Log loudly
     // so the GUI's arm can fail rather than silently lose sessions.
-    if let Err(e) = winjob::assert_not_kill_on_close_job() {
+    if let Err(e) = detach::assert_survivable() {
         eprintln!("termflow-pty-host: WARNING: {e}");
     }
 

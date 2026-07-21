@@ -385,6 +385,32 @@ mod tests {
         assert!(String::from_utf8_lossy(&bytes).contains("hi"));
     }
 
+    // Task 3.2: resize is OS-neutral (portable-pty ioctl); confirm the Unix
+    // path succeeds on a live child and is a benign no-op after it exits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_resize_succeeds_then_noop_after_exit() {
+        let (tx, _rx) = channel(1024);
+        let spec = SpawnSpec {
+            shell: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 5".into()],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        };
+        let sess = Session::spawn("tab-resize".into(), &spec, 4096, tx, true).unwrap();
+        sess.resize(120, 40).expect("resize a live pty succeeds");
+        sess.kill();
+        // After the child exits the master slot is cleared; resize is a no-op Ok.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while sess.is_alive() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(sess.resize(100, 30).is_ok(), "resize after exit is a no-op Ok");
+    }
+
     #[tokio::test]
     async fn detached_session_fills_ring_without_streaming() {
         let (tx, mut rx) = channel(1024);
@@ -430,5 +456,78 @@ mod tests {
         let (seen, got_exit) = drain_until_exit(&mut rx).await;
         assert!(String::from_utf8_lossy(&seen).contains("hi"), "replayed");
         assert!(got_exit, "Exit re-emitted after replay on reattach");
+    }
+
+    /// M3: killing a session must reap the child's whole process group, not
+    /// just the shell pid — otherwise background jobs / subshells are orphaned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn killing_session_reaps_background_descendant() {
+        let (tx, mut rx) = channel(1024);
+        // Shell starts a long background sleep, prints its pid, then stays alive.
+        let spec = SpawnSpec {
+            shell: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "sleep 300 & echo BGPID=$!; sleep 300".into(),
+            ],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        };
+        let sess = Session::spawn("tab-bg".into(), &spec, 8192, tx, true).unwrap();
+
+        // Read the background child's pid from the stream.
+        let mut buf = String::new();
+        let bg_pid: i32 = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Some(Data::Stdout { bytes, .. }) => {
+                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                        if let Some(rest) = buf.split("BGPID=").nth(1) {
+                            let digits: String =
+                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            if !digits.is_empty() {
+                                if let Ok(p) = digits.parse() {
+                                    return p;
+                                }
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => return 0,
+                }
+            }
+        })
+        .await
+        .expect("did not read BGPID in time");
+        assert!(bg_pid > 0, "captured background child pid");
+
+        // The background child is alive before the kill.
+        assert_eq!(
+            unsafe { libc::kill(bg_pid, 0) },
+            0,
+            "background child should be alive before kill"
+        );
+
+        // Kill the session; the process-group kill must reap the background child.
+        sess.kill();
+
+        let reaped = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                if unsafe { libc::kill(bg_pid, 0) } != 0 {
+                    return true; // ESRCH ⇒ gone
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            reaped,
+            "process-group kill must reap the background descendant (pid {bg_pid})"
+        );
     }
 }
