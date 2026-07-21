@@ -504,6 +504,51 @@ pub fn resolve_host_path() -> Option<std::path::PathBuf> {
     }
 }
 
+/// What to do with a (possibly running) host, decided from its discovery record
+/// BEFORE touching the wire — so a new app never speaks an incompatible protocol
+/// at a legacy host and never force-kills sessions it can't control (C3/C4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectPlan {
+    /// No record → a legacy (v1) host may be on the well-known endpoint, or none
+    /// is running. Speak v1 directly (no bootstrap); spawn a host if none.
+    LegacyOrNone,
+    /// Compatible new host: connect `endpoint`, do the bootstrap handshake, speak
+    /// the negotiated frame `version`.
+    Bootstrap {
+        endpoint: String,
+        version: u16,
+        instance_id: u128,
+        host_caps: u32,
+    },
+    /// A new host is running but shares NO protocol version with us. Do NOT
+    /// force-kill its sessions — coexist read-only / banner (design §10.3/§10.4).
+    Incompatible { instance_id: u128 },
+}
+
+/// Decide how to connect from an already-read discovery record.
+pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> ConnectPlan {
+    match record {
+        None => ConnectPlan::LegacyOrNone,
+        Some(rec) => match termflow_pty_protocol::negotiate(
+            (
+                termflow_pty_protocol::PROTOCOL_MIN,
+                termflow_pty_protocol::PROTOCOL_MAX,
+            ),
+            (rec.proto_min, rec.proto_max),
+        ) {
+            Some(version) => ConnectPlan::Bootstrap {
+                endpoint: rec.endpoint,
+                version,
+                instance_id: rec.instance_id,
+                host_caps: rec.capabilities,
+            },
+            None => ConnectPlan::Incompatible {
+                instance_id: rec.instance_id,
+            },
+        },
+    }
+}
+
 /// Locate the *bundled* sidecar binary (the source to install from), in
 /// priority order:
 /// 1. `TERMFLOW_PTY_HOST_BIN` explicit override.
@@ -560,6 +605,57 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     }
 
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::{plan_connection, ConnectPlan};
+    use termflow_pty_protocol::HostRecord;
+
+    fn record(proto_min: u16, proto_max: u16) -> HostRecord {
+        HostRecord {
+            format: 1,
+            instance_id: 99,
+            pid: 1,
+            proto_min,
+            proto_max,
+            endpoint: "ep-99".into(),
+            capabilities: termflow_pty_protocol::CAP_DRAIN,
+        }
+    }
+
+    #[test]
+    fn no_record_is_legacy_or_none() {
+        assert_eq!(plan_connection(None), ConnectPlan::LegacyOrNone);
+    }
+
+    #[test]
+    fn compatible_record_plans_bootstrap_at_negotiated_version() {
+        // We speak 1..=1; host advertises 1..=5 → common max is 1.
+        match plan_connection(Some(record(1, 5))) {
+            ConnectPlan::Bootstrap {
+                endpoint,
+                version,
+                instance_id,
+                host_caps,
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(endpoint, "ep-99");
+                assert_eq!(instance_id, 99);
+                assert_eq!(host_caps & termflow_pty_protocol::CAP_DRAIN, termflow_pty_protocol::CAP_DRAIN);
+            }
+            other => panic!("expected Bootstrap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disjoint_versions_are_incompatible_not_a_kill() {
+        // Host only speaks 2..=3; we speak 1..=1 → no common version.
+        assert_eq!(
+            plan_connection(Some(record(2, 3))),
+            ConnectPlan::Incompatible { instance_id: 99 }
+        );
+    }
 }
 
 #[cfg(test)]
