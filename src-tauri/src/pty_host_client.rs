@@ -545,6 +545,14 @@ pub fn resolve_token() -> String {
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "user".to_string());
     let path = std::env::temp_dir().join(format!("termflow-pty-host-{user}.token"));
+    // The token authorizes ArmDetach (control of the sidecar), so it must never
+    // be world-readable on a shared /tmp. Tighten an existing file to 0600 first
+    // (upgrade from a pre-hardening version); no-op if absent.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let t = existing.trim().to_string();
         if !t.is_empty() {
@@ -552,8 +560,37 @@ pub fn resolve_token() -> String {
         }
     }
     let token = uuid::Uuid::new_v4().to_string();
-    let _ = std::fs::write(&path, &token);
+    write_token_owner_only(&path, &token);
     token
+}
+
+/// Persist the launch token owner-only. On Unix create it `0600` so no other
+/// user can read the `ArmDetach` secret; on Windows `temp_dir()` is already a
+/// per-user location, so a plain write suffices.
+fn write_token_owner_only(path: &std::path::Path, token: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(token.as_bytes());
+            }
+            Err(_) => {
+                let _ = std::fs::write(path, token); // best-effort fallback
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = std::fs::write(path, token);
+    }
 }
 
 /// Host binary filename for the current platform.
