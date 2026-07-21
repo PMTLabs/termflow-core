@@ -94,9 +94,17 @@ fn ensure_start_menu_shortcut() -> Result<(), String> {
         let property_store: IPropertyStore = shell_link
             .cast()
             .map_err(|e| format!("failed to open notification shortcut properties: {e}"))?;
-        // A scalar VT_LPWSTR is required here; the property store copies the
-        // pointed-to value during SetValue, so the backing Vec remains caller-owned.
-        let value = PROPVARIANT {
+        // A scalar VT_LPWSTR whose pwszVal borrows our caller-owned `aumid_wide`
+        // buffer. SetValue *copies* the value into the store (the store owns and
+        // frees its copy), so the PROPVARIANT we hand it must NOT be cleared:
+        // windows-rs implements `Drop for PROPVARIANT` as `PropVariantClear`, which
+        // for VT_LPWSTR calls `CoTaskMemFree(pwszVal)` — that would free our Rust
+        // `Vec<u16>` allocation through the COM allocator and then double-free it
+        // when the Vec drops, corrupting the process heap. Wrapping the whole
+        // PROPVARIANT in ManuallyDrop suppresses that Drop; `aumid_wide` stays the
+        // sole owner and is freed exactly once, by Rust, at end of scope. (The inner
+        // ManuallyDrop is just the union field's required layout, not a Drop guard.)
+        let value = std::mem::ManuallyDrop::new(PROPVARIANT {
             Anonymous: PROPVARIANT_0 {
                 Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
                     vt: VT_LPWSTR,
@@ -108,9 +116,9 @@ fn ensure_start_menu_shortcut() -> Result<(), String> {
                     },
                 }),
             },
-        };
+        });
         property_store
-            .SetValue(&PKEY_AppUserModel_ID, &value)
+            .SetValue(&PKEY_AppUserModel_ID, &*value)
             .map_err(|e| format!("failed to set notification shortcut AUMID: {e}"))?;
         property_store
             .Commit()
