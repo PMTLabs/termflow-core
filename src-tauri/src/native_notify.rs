@@ -1,3 +1,4 @@
+#[cfg(windows)]
 const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 
 #[cfg(windows)]
