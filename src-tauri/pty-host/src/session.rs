@@ -260,6 +260,7 @@ impl Session {
         lock(&self.ring).tail()
     }
 
+    #[cfg(test)]
     pub fn replay_from(&self, offset: u64) -> (u64, Vec<u8>, bool) {
         let snap = lock(&self.ring).snapshot_from(offset);
         (snap.start_offset, snap.bytes, snap.gap)

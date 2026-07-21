@@ -24,7 +24,10 @@ use tokio::net::{UnixListener, UnixStream};
 pub type Stream = UnixStream;
 
 /// The client end (returned by `connect`). On Unix the same type serves both
-/// ends; the alias exists to mirror the Windows transport surface.
+/// ends; the alias exists to mirror the Windows transport surface. Test-only:
+/// the real GUI client (`app` crate) is a separate binary and dials
+/// `UnixStream::connect` itself rather than linking this crate.
+#[cfg(test)]
 pub type ClientStream = UnixStream;
 
 /// Owns the bound `UnixListener` and unlinks the socket file on drop.
@@ -97,7 +100,8 @@ impl Drop for Listener {
     }
 }
 
-/// Connect to the host as a client (used by tests and the GUI client shim).
+/// Connect to the host as a client. Test-only, see `ClientStream`.
+#[cfg(test)]
 pub async fn connect(endpoint: &Endpoint) -> io::Result<ClientStream> {
     UnixStream::connect(&endpoint.0).await
 }

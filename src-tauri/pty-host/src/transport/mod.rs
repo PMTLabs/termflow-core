@@ -22,7 +22,7 @@
 
 use crate::manager::{Disposition, SessionManager};
 use std::time::{Duration, Instant};
-use termflow_pty_protocol::{read_frame, write_frame, Control, Data, Frame, Response};
+use termflow_pty_protocol::{read_frame, write_frame, Data, Frame, Response};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
@@ -30,12 +30,16 @@ use tokio::sync::oneshot;
 #[cfg(windows)]
 mod pipe_windows;
 #[cfg(windows)]
-pub use pipe_windows::{connect, secured_server, ClientStream, Listener, Stream};
+pub use pipe_windows::{secured_server, Listener, Stream};
+#[cfg(all(windows, test))]
+pub use pipe_windows::{connect, ClientStream};
 
 #[cfg(unix)]
 mod socket_unix;
 #[cfg(unix)]
-pub use socket_unix::{connect, default_endpoint, ClientStream, Listener, Stream};
+pub use socket_unix::{default_endpoint, Listener, Stream};
+#[cfg(all(unix, test))]
+pub use socket_unix::{connect, ClientStream};
 
 /// Bounded outbound channel depth (frames). On overflow the reader drops the
 /// frame (bytes remain in the ring) and emits a Gap so the GUI resyncs.
@@ -167,7 +171,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termflow_pty_protocol::SpawnSpec;
+    use termflow_pty_protocol::{Control, SpawnSpec};
 
     /// A per-OS endpoint under a directory we own, unique to this test process.
     fn test_endpoint(tag: &str) -> Endpoint {

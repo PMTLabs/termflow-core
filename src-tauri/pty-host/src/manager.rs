@@ -59,6 +59,7 @@ impl SessionManager {
         }
     }
 
+    #[cfg(test)]
     pub fn is_armed(&self) -> bool {
         self.armed_deadline.is_some()
     }
