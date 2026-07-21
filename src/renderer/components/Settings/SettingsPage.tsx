@@ -195,6 +195,32 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setHotswapBlockedReason(String(err));
         }
     }, []);
+    // Velopack auto-update status. 'unavailable'/'notInstalled' ⇒ this build has
+    // no updater (or isn't a Velopack install) → the check-for-updates block hides.
+    const [updateStatus, setUpdateStatus] = useState<{ state: string; version?: string }>({ state: 'unavailable' });
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+    const [applyingUpdate, setApplyingUpdate] = useState(false);
+    const refreshUpdateStatus = useCallback(async () => {
+        if (!window.electronAPI?.checkForUpdates) return;
+        setCheckingUpdate(true);
+        try {
+            setUpdateStatus(await window.electronAPI.checkForUpdates());
+        } catch {
+            setUpdateStatus({ state: 'notInstalled' });
+        } finally {
+            setCheckingUpdate(false);
+        }
+    }, []);
+    const doUpdateAndRestart = useCallback(async () => {
+        setApplyingUpdate(true);
+        try {
+            await window.electronAPI?.updateAndRestart?.();
+            // Success exits the process during the call.
+        } catch (err) {
+            setApplyingUpdate(false);
+            dispatch(addToast({ message: `Update failed: ${String(err)}`, type: 'error' }));
+        }
+    }, [dispatch]);
     const doOffloadRebuild = useCallback(async () => {
         setOffloading(true);
         try {
@@ -218,8 +244,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         if (activeCategory === 'updates') {
             setOffloadArmed(false);
             void refreshHotswapPreflight();
+            void refreshUpdateStatus();
         }
-    }, [activeCategory, refreshHotswapPreflight]);
+    }, [activeCategory, refreshHotswapPreflight, refreshUpdateStatus]);
 
     const isDirty = useCallback((): boolean => {
         if (!isTracked(activeCategory) || !baseline) return false;
@@ -1522,6 +1549,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const renderUpdates = () => (
         <div className="settings-section">
             <h2>Updates</h2>
+            {(updateStatus.state === 'upToDate' || updateStatus.state === 'available') && (
+                <div className="setting-item">
+                    <label className="setting-label">Application updates</label>
+                    {updateStatus.state === 'available' ? (
+                        <>
+                            <p className="help-text">
+                                Version <strong>{updateStatus.version}</strong> is available. Updating keeps
+                                your terminals running — they reattach to the new version automatically.
+                            </p>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                                <button className="save-btn apply-btn" onClick={doUpdateAndRestart} disabled={applyingUpdate}>
+                                    {applyingUpdate ? 'Updating…' : `Update to ${updateStatus.version} & Restart`}
+                                </button>
+                                <button className="link-btn" onClick={() => void refreshUpdateStatus()} disabled={checkingUpdate || applyingUpdate}>
+                                    Re-check
+                                </button>
+                            </div>
+                        </>
+                    ) : (
+                        <p className="help-text">
+                            You’re on the latest version.{' '}
+                            <button className="link-btn inline" onClick={() => void refreshUpdateStatus()} disabled={checkingUpdate}>
+                                {checkingUpdate ? 'Checking…' : 'Check again'}
+                            </button>
+                        </p>
+                    )}
+                </div>
+            )}
             <div className="setting-item">
                 <label className="setting-label">Offload &amp; rebuild (keep terminals running)</label>
                 <p className="help-text">
