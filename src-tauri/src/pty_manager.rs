@@ -56,6 +56,20 @@ pub const FOREIGN_TERMINAL_ENV: &[&str] = &[
     "TERMINATOR_UUID",            // Terminator
 ];
 
+/// PTY-host CONTROL variables the GUI passes to the sidecar PROCESS (its
+/// connection secret + locator). They MUST be scrubbed from every PTY child:
+/// the sidecar's children inherit its environment, so without this a program in
+/// any host-owned shell could read `$TERMFLOW_PTY_TOKEN` — the auth for
+/// `ArmDetach`/control — and drive the host over its pipe/socket. Scrubbed on
+/// BOTH spawn paths so the two never drift. NOTE: `TERMFLOW_TERMINAL_ID` is
+/// deliberately NOT here — it is the per-tab identity the child is meant to see.
+pub const HOST_CONTROL_ENV: &[&str] = &[
+    "TERMFLOW_PTY_TOKEN",
+    "TERMFLOW_PTY_PIPE",
+    "TERMFLOW_PTY_INSTANCE",
+    "TERMFLOW_PTY_DISCOVERY",
+];
+
 /// Build a fully-resolved [`SpawnSpec`] for the PTY-host sidecar. Produces the
 /// exact env/args/cwd the in-process path uses (shared consts), including the
 /// `TERMFLOW_TERMINAL_ID` identity var and the PowerShell OSC 9;9 cwd
@@ -96,7 +110,11 @@ pub fn build_spawn_spec(
             env!("CARGO_PKG_VERSION").to_string(),
         ),
     ];
-    let env_remove: Vec<String> = FOREIGN_TERMINAL_ENV.iter().map(|s| s.to_string()).collect();
+    let env_remove: Vec<String> = FOREIGN_TERMINAL_ENV
+        .iter()
+        .chain(HOST_CONTROL_ENV.iter())
+        .map(|s| s.to_string())
+        .collect();
 
     let mut args: Vec<String> = shell_args.map(|a| a.to_vec()).unwrap_or_default();
     let has_command_flag = args.iter().any(|a| {
@@ -718,9 +736,9 @@ pub fn spawn_terminal(
     // enough; scrub the known identity markers too.
     cmd_builder.env("TERM_PROGRAM", "TermFlow");
     cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    // Scrub foreign-terminal identity markers (module const shared with
-    // build_spawn_spec so the two paths never drift).
-    for key in FOREIGN_TERMINAL_ENV {
+    // Scrub foreign-terminal identity markers AND the PTY-host control secrets
+    // (module consts shared with build_spawn_spec so the two paths never drift).
+    for key in FOREIGN_TERMINAL_ENV.iter().chain(HOST_CONTROL_ENV.iter()) {
         cmd_builder.env_remove(key);
     }
 
@@ -1271,7 +1289,12 @@ mod cwd_tests {
             .any(|(k, v)| k == "TERM_PROGRAM" && v == "TermFlow"));
         // Foreign-terminal scrub shares the module const
         assert!(spec.env_remove.iter().any(|k| k == "WT_SESSION"));
-        assert_eq!(spec.env_remove.len(), super::FOREIGN_TERMINAL_ENV.len());
+        // Host-control secrets are scrubbed too (never leak the arm token into a shell)
+        assert!(spec.env_remove.iter().any(|k| k == "TERMFLOW_PTY_TOKEN"));
+        assert_eq!(
+            spec.env_remove.len(),
+            super::FOREIGN_TERMINAL_ENV.len() + super::HOST_CONTROL_ENV.len()
+        );
         // Interactive PowerShell gets the OSC 9;9 cwd integration
         assert!(spec.args.iter().any(|a| a == "-NoExit"));
         assert!(spec.args.iter().any(|a| a.contains("]9;9;")));
