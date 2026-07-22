@@ -22,6 +22,7 @@ pub fn is_file_manager_integration_installed() -> Result<bool, String> {
     })
 }
 
+#[cfg(any(windows, target_os = "linux"))]
 fn current_exe() -> Result<std::path::PathBuf, String> {
     std::env::current_exe()
         .map_err(|error| format!("failed to resolve current executable: {error}"))

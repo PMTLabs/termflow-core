@@ -1,7 +1,8 @@
+#[cfg(windows)]
 const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 
 #[cfg(windows)]
-fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
+fn ensure_start_menu_shortcut() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR, PWSTR};
     use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
@@ -21,9 +22,11 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
         .ok_or_else(|| "APPDATA is not set; cannot create notification shortcut".to_string())?;
     let shortcut_path = std::path::PathBuf::from(app_data)
         .join(r"Microsoft\Windows\Start Menu\Programs\TermFlow.lnk");
-    if shortcut_path.exists() {
-        return Ok(());
-    }
+    // Always (re)write the shortcut rather than skip-if-exists. The process sets
+    // an explicit AUMID, so the taskbar sources the window's icon from THIS
+    // shortcut — and a stale target (e.g. the exe was renamed) leaves that icon
+    // generic because it can no longer be resolved. Rewriting every launch keeps
+    // the target + icon pointed at the CURRENT exe.
 
     if let Some(parent) = shortcut_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -78,6 +81,12 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
         shell_link
             .SetPath(PCWSTR(exe_wide.as_ptr()))
             .map_err(|e| format!("failed to set notification shortcut target: {e}"))?;
+        // Explicit icon = the exe itself (resource index 0). This is the source
+        // of the AUMID-grouped taskbar icon; pinning it to the current exe keeps
+        // it valid even if the target were ever a launcher/renamed.
+        shell_link
+            .SetIconLocation(PCWSTR(exe_wide.as_ptr()), 0)
+            .map_err(|e| format!("failed to set notification shortcut icon: {e}"))?;
         shell_link
             .SetDescription(PCWSTR(description_wide.as_ptr()))
             .map_err(|e| format!("failed to set notification shortcut description: {e}"))?;
@@ -85,9 +94,17 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
         let property_store: IPropertyStore = shell_link
             .cast()
             .map_err(|e| format!("failed to open notification shortcut properties: {e}"))?;
-        // A scalar VT_LPWSTR is required here; the property store copies the
-        // pointed-to value during SetValue, so the backing Vec remains caller-owned.
-        let value = PROPVARIANT {
+        // A scalar VT_LPWSTR whose pwszVal borrows our caller-owned `aumid_wide`
+        // buffer. SetValue *copies* the value into the store (the store owns and
+        // frees its copy), so the PROPVARIANT we hand it must NOT be cleared:
+        // windows-rs implements `Drop for PROPVARIANT` as `PropVariantClear`, which
+        // for VT_LPWSTR calls `CoTaskMemFree(pwszVal)` — that would free our Rust
+        // `Vec<u16>` allocation through the COM allocator and then double-free it
+        // when the Vec drops, corrupting the process heap. Wrapping the whole
+        // PROPVARIANT in ManuallyDrop suppresses that Drop; `aumid_wide` stays the
+        // sole owner and is freed exactly once, by Rust, at end of scope. (The inner
+        // ManuallyDrop is just the union field's required layout, not a Drop guard.)
+        let value = std::mem::ManuallyDrop::new(PROPVARIANT {
             Anonymous: PROPVARIANT_0 {
                 Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
                     vt: VT_LPWSTR,
@@ -99,9 +116,9 @@ fn create_start_menu_shortcut_if_missing() -> Result<(), String> {
                     },
                 }),
             },
-        };
+        });
         property_store
-            .SetValue(&PKEY_AppUserModel_ID, &value)
+            .SetValue(&PKEY_AppUserModel_ID, &*value)
             .map_err(|e| format!("failed to set notification shortcut AUMID: {e}"))?;
         property_store
             .Commit()
@@ -145,7 +162,7 @@ pub fn register_app_for_notifications() -> Result<(), String> {
     unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_USER_MODEL_ID)) }
         .map_err(|e| e.to_string())?;
 
-    create_start_menu_shortcut_if_missing()
+    ensure_start_menu_shortcut()
 }
 
 #[cfg(not(windows))]

@@ -18,6 +18,23 @@ pub fn instance_config_name() -> &'static str {
     }
 }
 
+/// Suffix a data file/dir name with `.dev` in debug builds so a debug instance
+/// never shares mutable state with an installed release running for production.
+/// Release names are unchanged. Mirrors the existing `config.dev.json` /
+/// `history.dev.db` convention.
+///
+/// - `dev_file("layout.json")` → `"layout.dev.json"` (dev) / `"layout.json"` (release)
+/// - `dev_file("recordings")`  → `"recordings.dev"`   (dev) / `"recordings"`   (release)
+pub fn dev_file(name: &str) -> String {
+    if !is_dev() {
+        return name.to_string();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => format!("{stem}.dev.{ext}"),
+        None => format!("{name}.dev"),
+    }
+}
+
 pub fn default_api_port() -> u16 {
     if is_dev() {
         42051

@@ -13,6 +13,13 @@ export interface NetworkConfig {
   authToken: string;
 }
 
+// Velopack update availability (mirrors the Rust UpdateStatus enum).
+export type UpdateStatus =
+  | { state: 'notInstalled' }
+  | { state: 'upToDate' }
+  | { state: 'available'; version: string }
+  | { state: 'unavailable' };
+
 export interface NetworkInterfaceInfo {
   name: string;
   label: string;
@@ -217,6 +224,17 @@ export interface ElectronAPI {
   stopServers?: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
   /** (Re)start server(s). target: 'all' | 'api' | 'mcp' (default 'all'). */
   startServers?: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
+  /** Arm the PTY host to keep terminals alive, then close the app so the exe can
+   *  be rebuilt (hot-swap "offload"). Never resolves on success (the process
+   *  exits); rejects with the refusal reason if hot-swap isn't possible. */
+  restartForUpdate?: () => Promise<void>;
+  /** Preflight: resolves if an offload would keep all terminals alive, rejects
+   *  with the reason if it would currently be refused. */
+  hotswapAvailable?: () => Promise<void>;
+  /** Check for a Velopack update. `unavailable` = no updater in this build. */
+  checkForUpdates?: () => Promise<UpdateStatus>;
+  /** Download + arm + apply a Velopack update, keeping terminals alive. */
+  updateAndRestart?: () => Promise<void>;
 
   // Quit the app after the user confirms the in-app close dialog (Tauri only)
   confirmCloseApp?: () => Promise<void>;

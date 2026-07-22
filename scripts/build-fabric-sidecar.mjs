@@ -1,6 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+
+function sha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
 
 /**
  * Build the private `termflow-fabric` peering sidecar and stage it as a Tauri
@@ -99,9 +104,18 @@ function main() {
   const outDir = join(rootDir, 'src-tauri', 'binaries');
   const outFile = join(outDir, `termflow-fabric-${targetTriple}${ext}`);
   mkdirSync(outDir, { recursive: true });
-  copyFileSync(builtBinary, outFile);
 
-  console.log(`[build:fabric-sidecar] staged fabric sidecar: ${outFile}`);
+  // Only copy if the content actually changed. copyFileSync always stamps a
+  // fresh mtime on outFile, and Tauri's build.rs watches this exact path via
+  // `cargo:rerun-if-changed` — an unconditional copy (even of byte-identical
+  // output from a cargo-cached no-op build) was forcing the `app` crate to
+  // recompile on every single build.
+  if (existsSync(outFile) && sha256(outFile) === sha256(builtBinary)) {
+    console.log(`[build:fabric-sidecar] unchanged: ${outFile}`);
+  } else {
+    copyFileSync(builtBinary, outFile);
+    console.log(`[build:fabric-sidecar] staged fabric sidecar: ${outFile}`);
+  }
 
   // Ship the fabric's actual FSL license text in the Pro bundle (FSL Redistribution
   // clause: include a copy of the Terms). `legal/LICENSE-fabric-fsl.txt` is bundled as a
@@ -110,8 +124,15 @@ function main() {
   if (existsSync(fabricLicense)) {
     const legalDir = join(rootDir, 'legal');
     mkdirSync(legalDir, { recursive: true });
-    copyFileSync(fabricLicense, join(legalDir, 'LICENSE-fabric-fsl.txt'));
-    console.log('[build:fabric-sidecar] copied fabric LICENSE -> legal/LICENSE-fabric-fsl.txt');
+    const licenseOutFile = join(legalDir, 'LICENSE-fabric-fsl.txt');
+    // Same mtime-churn concern as the binary above: this is also a bundled
+    // resource watched by tauri-build's `cargo:rerun-if-changed`.
+    if (existsSync(licenseOutFile) && sha256(licenseOutFile) === sha256(fabricLicense)) {
+      console.log('[build:fabric-sidecar] LICENSE unchanged');
+    } else {
+      copyFileSync(fabricLicense, licenseOutFile);
+      console.log('[build:fabric-sidecar] copied fabric LICENSE -> legal/LICENSE-fabric-fsl.txt');
+    }
   } else {
     console.warn(`[build:fabric-sidecar] fabric LICENSE not found at ${fabricLicense}; keeping placeholder`);
   }

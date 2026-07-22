@@ -193,13 +193,20 @@ pub async fn start_api_server(
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
-    // Carry this process's identity so a second instance probing this port can tell
-    // "this is mine" from "another instance owns it" (P0b conflict detection).
-    Json(json!({
+    Json(health_body(&state.instance_id))
+}
+
+/// The `/health` response body. Kept as a pure function (no runtime-typed
+/// `AppState`, no axum) so the exact contract the startup smoke test depends on
+/// — `status: "ok"` plus this process's identity — is directly unit-testable.
+/// The identity lets a second instance probing this port tell "this is mine"
+/// from "another instance owns it" (P0b conflict detection).
+fn health_body(instance_id: &str) -> serde_json::Value {
+    json!({
         "status": "ok",
         "app": "auto-terminal",
-        "instanceId": state.instance_id,
-    }))
+        "instanceId": instance_id,
+    })
 }
 
 async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
@@ -411,10 +418,11 @@ async fn delete_terminal(
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return Json(json!({ "error": "Terminal not found" }));
     };
-    // Parity with the UI close path: actually kill the shell, then clean up
-    // every map (the old handler leaked terminal_history and left the shell
-    // process running).
-    crate::pty_manager::kill_process_tree(pid);
+    // Parity with the UI close path: host-owned → tell the sidecar to close the
+    // session; otherwise kill the local shell tree. Then clean up every map.
+    if !state.host_close(&id) {
+        crate::pty_manager::kill_process_tree(pid);
+    }
     state.cleanup_terminal_state(&id);
     Json(json!({ "status": "ok" }))
 }
@@ -439,6 +447,16 @@ async fn resize_terminal(
     Json(payload): Json<ResizeReq>,
 ) -> impl IntoResponse {
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
+
+    // Host-owned terminals resize via the sidecar.
+    if state.host_resize(&id, payload.cols, payload.rows) {
+        if let Some(mut terminal) = state.terminals.get_mut(&id) {
+            terminal.cols = payload.cols;
+            terminal.rows = payload.rows;
+        }
+        state.resize_screen(&id, payload.rows, payload.cols);
+        return Json(json!({ "status": "ok", "cols": payload.cols, "rows": payload.rows })).into_response();
+    }
 
     if let Some(master_mutex) = state.ptys.get(&id) {
         let master = match master_mutex.lock() {
@@ -513,6 +531,11 @@ fn write_data_to_terminal(
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
     use std::io::Write;
+    // Host-owned terminals: forward to the sidecar.
+    if state.host_write(id, data.as_bytes()) {
+        emit_external_activity(state, id);
+        return Ok(());
+    }
     // Clone the writer Arc out of the map, dropping the DashMap shard guard
     // before locking the inner Mutex.
     let writer_mutex = match state.shell_writer_channels.get(id) {
@@ -1460,7 +1483,10 @@ async fn fleet_close(
             let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
-            crate::pty_manager::kill_process_tree(pid);
+            // Host-owned → close via the sidecar; else kill the local tree.
+            if !state.host_close(&body.terminal_id) {
+                crate::pty_manager::kill_process_tree(pid);
+            }
             state.cleanup_terminal_state(&body.terminal_id);
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
@@ -1510,10 +1536,12 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
     // send/probe sleeps below (up to ~48 s total). Holding the shard guard
     // across those `.await`s blocked a concurrent create/close of any terminal
     // whose id hashes to the same shard for the full sleep duration.
-    let writer_mutex = match state.shell_writer_channels.get(id) {
-        Some(r) => r.clone(),
-        None => return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string())),
-    };
+    // Optional local writer: host-owned terminals have no local writer and route
+    // their writes to the sidecar instead (see the write sites below).
+    let writer_mutex = state.shell_writer_channels.get(id).map(|r| r.clone());
+    if writer_mutex.is_none() && !state.is_host_owned(id) {
+        return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
+    }
     {
         // Determine pattern
         let (separator, end_indicator) = if let Some(signal) = &payload.submission_signal {
@@ -1545,27 +1573,31 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
         let inner = payload.prompt.replace("\r\n", "\r").replace('\n', "\r");
         let normalized_prompt = format!("\x1b[200~{}\x1b[201~", inner);
 
-        // Write prompt - in scope to drop lock
-        {
-            let mut writer = writer_mutex
+        // Write prompt - in scope to drop lock. Host-owned → sidecar.
+        if let Some(wm) = &writer_mutex {
+            let mut writer = wm
                 .lock()
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
             writer
                 .write_all(normalized_prompt.as_bytes())
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let _ = writer.flush();
+        } else {
+            state.host_write(id, normalized_prompt.as_bytes());
         }
 
         // Brief delay to allow the CLI tool to process the prompt text
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         // Send Focus In sequence just in case the CLI tool uses Focus Tracking (\x1b[?1004h)
         // and is ignoring input because it thinks it's blurred.
-        {
-            let mut writer = writer_mutex
+        if let Some(wm) = &writer_mutex {
+            let mut writer = wm
                 .lock()
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
             let _ = writer.write_all(b"\x1b[I");
             let _ = writer.flush();
+        } else {
+            state.host_write(id, b"\x1b[I");
         }
 
         // Handle Probing if requested (any cli_type ending in -probe)
@@ -1591,20 +1623,22 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
             ];
 
             for (seq, desc) in sequences {
-                {
-                    let mut writer = match writer_mutex.lock() {
+                log::debug!("  Attempting submission: {} (bytes: {:?})", desc, seq.as_bytes());
+                if let Some(wm) = &writer_mutex {
+                    let mut writer = match wm.lock() {
                         Ok(w) => w,
                         Err(_) => {
                             log::warn!("send_prompt_to_terminal probe: writer mutex poisoned, aborting probe");
                             break;
                         }
                     };
-                    log::debug!("  Attempting submission: {} (bytes: {:?})", desc, seq.as_bytes());
                     if let Err(e) = writer.write_all(seq.as_bytes()) {
                         log::warn!("    Failed to write sequence: {}", e);
                         break;
                     }
                     let _ = writer.flush();
+                } else {
+                    state.host_write(id, seq.as_bytes());
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
@@ -1619,15 +1653,17 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
 
         // Handle specific CLI logic if needed
         if payload.cli_type == "gemini" || payload.cli_type == "claude" || payload.cli_type == "copilot" {
-            // Write end indicator immediately
-            {
-                let mut writer = writer_mutex
+            // Write end indicator immediately. Host-owned → sidecar.
+            if let Some(wm) = &writer_mutex {
+                let mut writer = wm
                     .lock()
                     .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
                 writer
                     .write_all(end_indicator.as_bytes())
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 let _ = writer.flush();
+            } else {
+                state.host_write(id, end_indicator.as_bytes());
             }
 
             return Ok(json!({
@@ -1637,20 +1673,24 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
             }));
         }
 
-        // Standard execution for other CLI types - in scope to drop lock
-        {
-            let mut writer = writer_mutex
+        // Standard execution for other CLI types. Host-owned → sidecar.
+        if let Some(wm) = &writer_mutex {
+            let mut writer = wm
                 .lock()
                 .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
             if !separator.is_empty() {
                 let _ = writer.write_all(separator.as_bytes());
             }
-
             // Write end indicator
             writer
                 .write_all(end_indicator.as_bytes())
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             let _ = writer.flush();
+        } else {
+            if !separator.is_empty() {
+                state.host_write(id, separator.as_bytes());
+            }
+            state.host_write(id, end_indicator.as_bytes());
         }
 
         Ok(json!({
@@ -2449,6 +2489,15 @@ async fn resize_with_reflow(
             }
         }
         TerminalBackend::PortablePty => {
+            // Host-owned terminals resize via the sidecar (no local master).
+            if state.host_resize(&id, payload.cols, payload.rows) {
+                if let Some(mut terminal) = state.terminals.get_mut(&id) {
+                    terminal.cols = payload.cols;
+                    terminal.rows = payload.rows;
+                }
+                state.resize_screen(&id, payload.rows, payload.cols);
+                return Json(json!({ "status": "ok", "cols": payload.cols, "rows": payload.rows })).into_response();
+            }
             // Portable-pty backend: standard resize without reflow
             if let Some(master_mutex) = state.ptys.get(&id) {
                 let master = match master_mutex.lock() {
@@ -2804,19 +2853,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 let data = value["payload"]["data"].as_str().unwrap_or("");
 
                                 use std::io::Write;
-                                // Clone the Arc, dropping the shard guard before locking.
-                                let writer_arc = state
-                                    .shell_writer_channels
-                                    .get(terminal_id)
-                                    .map(|r| r.clone());
-                                let write_result: Result<(), String> = match writer_arc {
-                                    Some(writer_mutex) => match writer_mutex.lock() {
-                                        Ok(mut writer) => writer
-                                            .write_all(data.as_bytes())
-                                            .map_err(|e| e.to_string()),
-                                        Err(_) => Err("writer mutex poisoned".to_string()),
-                                    },
-                                    None => Err("terminal not found".to_string()),
+                                // Host-owned terminals route to the sidecar; else
+                                // write to the local writer (parity with the REST/
+                                // Tauri input paths).
+                                let write_result: Result<(), String> = if state
+                                    .host_write(terminal_id, data.as_bytes())
+                                {
+                                    Ok(())
+                                } else {
+                                    // Clone the Arc, dropping the shard guard before locking.
+                                    let writer_arc = state
+                                        .shell_writer_channels
+                                        .get(terminal_id)
+                                        .map(|r| r.clone());
+                                    match writer_arc {
+                                        Some(writer_mutex) => match writer_mutex.lock() {
+                                            Ok(mut writer) => writer
+                                                .write_all(data.as_bytes())
+                                                .map_err(|e| e.to_string()),
+                                            Err(_) => Err("writer mutex poisoned".to_string()),
+                                        },
+                                        None => Err("terminal not found".to_string()),
+                                    }
                                 };
 
                                 // WS input is an external channel (like the REST paths) —
@@ -3160,6 +3218,23 @@ mod tests {
         // The in-flight send still owns its cloned Arc and completes successfully.
         let result = sender.await.unwrap();
         assert!(result.is_ok(), "send should still succeed after the concurrent remove");
+    }
+
+    // The `/health` contract the startup smoke test (scripts/smoke-test-release.mjs)
+    // depends on: it polls this endpoint and treats `status: "ok"` as "the build
+    // launched". Pin that body here so a rename (e.g. status → "healthy") can't
+    // silently make the smoke gate un-satisfiable. The router wiring + real HTTP
+    // binding are covered end-to-end by the smoke script against the built binary;
+    // this guards the payload the handler serialises.
+    #[test]
+    fn health_body_reports_ok_status_and_instance_id() {
+        let body = health_body("inst-abc123");
+        assert_eq!(body["status"], "ok", "smoke test keys off status == ok");
+        assert_eq!(body["app"], "auto-terminal");
+        assert_eq!(
+            body["instanceId"], "inst-abc123",
+            "health must echo this process's instanceId for P0b conflict detection"
+        );
     }
 
     #[test]

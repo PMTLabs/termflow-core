@@ -14,6 +14,14 @@ rust-version = "1.88.0"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Name the raw cargo binary `termflow-app` (so the dev artifact is
+# `termflow-app.exe`, distinguishable in Task Manager/Explorer) instead of the
+# package-default `app.exe`. The release bundle is still renamed to
+# `termflow.exe` via `mainBinaryName` in tauri.conf.json.
+[[bin]]
+name = "termflow-app"
+path = "src/main.rs"
+
 [features]
 # Opt-in: enables tauri's `test` feature (tauri::test::mock_app) so the Rust
 # integration tests can build a real AppState<MockRuntime> and drive handlers that
@@ -24,10 +32,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # run it on Linux/macOS only:  cargo test --features integration-tests
 integration-tests = ["tauri/test"]
 
+# Velopack cross-platform auto-update (GitHub channel). OFF by default so the
+# normal/dev build and the store flavors are unaffected; the GitHub-distributed
+# release build enables it. All velopack code is `#[cfg(feature =
+# "velopack-updates")]`. The crate version is pinned EXACTLY and scoped to this
+# project's Cargo.lock — it never touches any globally-installed velopack/vpk.
+velopack-updates = ["dep:velopack"]
+
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
 
 [dependencies]
+# Auto-updater (behind the `velopack-updates` feature). Exact pin, project-scoped.
+velopack = { version = "=1.2.0", optional = true }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
@@ -55,6 +72,10 @@ tower-http = { version = "0.5", features = ["cors"] }
 jsonwebtoken = "9"
 dashmap = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
+# Integrity hash for the update-stable host binary install (RP-1): the host is
+# copied out of the swapped app payload into a per-user runtime dir keyed by its
+# SHA-256 so a Velopack update never kills the live sidecar (design 003 §10.1).
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 base64 = "0.22"
@@ -68,9 +89,16 @@ vt100 = "0.16"
 # from source (via cc/MSVC, already used for Tauri) so no system SQLite is needed.
 rusqlite = { version = "0.31", features = ["bundled"] }
 if-addrs = "0.13"
+# Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
+# (not a workspace member) to avoid disturbing the existing single-package build.
+termflow-pty-protocol = { path = "pty-protocol" }
 
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.
+[target.'cfg(unix)'.dependencies]
+# setsid() for detaching the PTY-host sidecar into its own session on Unix.
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"

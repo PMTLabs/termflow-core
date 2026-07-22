@@ -8,7 +8,7 @@
     "frontendDist": "../dist/renderer",
     "devUrl": "http://localhost:42010",
     "beforeDevCommand": "bun run build:terminal-core && npm run dev:renderer",
-    "beforeBuildCommand": "bun run build:terminal-core && bun run build:renderer && bun run build:mcp-sidecar"
+    "beforeBuildCommand": "bun run build:terminal-core && bun run build:renderer"
   },
   "app": {
     "windows": [

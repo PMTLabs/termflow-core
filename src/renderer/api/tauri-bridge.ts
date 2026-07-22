@@ -14,6 +14,13 @@ export interface NetworkConfig {
   authToken: string;
 }
 
+// Velopack update availability (mirrors the Rust UpdateStatus enum).
+export type UpdateStatus =
+  | { state: 'notInstalled' }
+  | { state: 'upToDate' }
+  | { state: 'available'; version: string }
+  | { state: 'unavailable' };
+
 export interface NetworkInterfaceInfo {
   name: string;
   label: string;
@@ -83,6 +90,17 @@ interface ElectronAPI {
   listNetworkInterfaces: () => Promise<NetworkInterfaceInfo[]>;
   stopServers: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
   startServers: (target?: 'all' | 'api' | 'mcp') => Promise<void>;
+  /// Arm the PTY host to keep terminals alive, then close the app so the exe can
+  /// be rebuilt (hot-swap "offload"). Resolves never on success (the process
+  /// exits); rejects with the refusal reason if hot-swap isn't possible.
+  restartForUpdate: () => Promise<void>;
+  /// Preflight for the offload/hot-swap: resolves if it would keep all terminals
+  /// alive, rejects with the reason if it would currently be refused.
+  hotswapAvailable: () => Promise<void>;
+  /// Check for a Velopack update. `unavailable` = no updater in this build.
+  checkForUpdates: () => Promise<UpdateStatus>;
+  /// Download + arm + apply a Velopack update, keeping terminals alive.
+  updateAndRestart: () => Promise<void>;
   getActiveTabAndPane: () => Promise<any>;
   createTerminalInTab: (tabId: string, paneId: string, profile: string, name: string) => Promise<any>;
   getTabs: () => Promise<any>;
@@ -497,6 +515,10 @@ const tauriBridge: ElectronAPI = {
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),
   stopServers: async (target = 'all') => { await invoke('stop_servers', { target }); },
   startServers: async (target = 'all') => { await invoke('start_servers', { target }); },
+  restartForUpdate: async () => { await invoke('restart_for_update'); },
+  hotswapAvailable: async () => { await invoke('hotswap_available'); },
+  checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
+  updateAndRestart: async () => { await invoke('update_and_restart'); },
 
   // UI Mocks
   getActiveTabAndPane: async () => ({}),
@@ -679,5 +701,15 @@ if (typeof window !== 'undefined') {
 
 // Expose to window
 (window as any).electronAPI = tauriBridge;
+
+// Dev-only console helpers for manual testing. `withGlobalTauri` is off, so
+// `window.__TAURI__` does NOT exist — use these instead of raw `invoke` from
+// DevTools. `restartForUpdate()` triggers the PTY-host hot-swap; `tauriInvoke`
+// is a generic escape hatch. Both return the invoke promise so `.catch` surfaces
+// a refusal reason.
+if (process.env.NODE_ENV === 'development') {
+  (window as any).tauriInvoke = (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args);
+  (window as any).restartForUpdate = () => invoke('restart_for_update');
+}
 
 export default tauriBridge;

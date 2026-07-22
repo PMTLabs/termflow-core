@@ -104,13 +104,31 @@ pub async fn create_terminal(
     };
     
     let terminal_name = format!("Terminal-{}", shell_name);
-    
+
+    // Opt-in PTY-host sidecar path (Windows). Requires a stable tab_id as the
+    // reattach key; without one we fall through to the in-process path.
+    if crate::pty_host_client::enabled() {
+        if let Some(tid) = tab_id.clone() {
+            return create_host_terminal(
+                state.inner(),
+                tid,
+                cols,
+                rows,
+                shell_path,
+                shell_name,
+                shell_args,
+                shell_cwd,
+            )
+            .await;
+        }
+    }
+
     let id = pty_manager::spawn_terminal(
-        state.inner().clone(), 
-        cols, 
-        rows, 
-        shell_path, 
-        shell_args, 
+        state.inner().clone(),
+        cols,
+        rows,
+        shell_path,
+        shell_args,
         shell_cwd,
         shell_name,
         terminal_name
@@ -134,6 +152,251 @@ pub async fn create_terminal(
     }
 
     Ok(id)
+}
+
+/// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
+/// stable `tab_id` (the reattach key), so the sidecar session, the output
+/// broadcast id, and the vt100 screen key all align — live routing works with
+/// no change to the output pipeline, and reattach-by-tab_id after a hot-swap is
+/// consistent. On failure, falls back to the in-process spawn path.
+#[allow(clippy::too_many_arguments)]
+async fn create_host_terminal(
+    state: &AppState,
+    id: String,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_name: String,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
+    // to the in-process path immediately — no host state is registered.
+    if let Err(e) = state.ensure_pty_host().await {
+        return host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e);
+    }
+    let client = match state.pty_host_clone() {
+        Some(c) => c,
+        None => {
+            return host_fallback(
+                state, &id, cols, rows, shell_path, shell_name, shell_args, cwd,
+                "pty-host not connected",
+            )
+        }
+    };
+
+    // Reattach path: the sidecar still holds this session (survived a hot-swap).
+    // Restore the real pid, register routing BEFORE attach releases replay
+    // bytes, then nudge a repaint so a live TUI redraws.
+    if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
+        register_host_terminal(state, &id, pid, &shell_name, cols, rows);
+        client.attach(&id, 0);
+        client.nudge_repaint(&id, cols, rows);
+        stage_scrollback(state, &id, &id);
+        return Ok(id);
+    }
+
+    // Fresh spawn: register routing state (screen + terminal + host ownership)
+    // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
+    // has a registered screen to land in instead of being dropped by the
+    // consumer's "unknown id" gate.
+    register_host_terminal(state, &id, 0, &shell_name, cols, rows);
+    let spec = pty_manager::build_spawn_spec(
+        &id,
+        shell_path.as_deref(),
+        &shell_name,
+        shell_args.as_deref(),
+        cwd.as_deref(),
+        cols,
+        rows,
+    );
+    match client.spawn_session(&id, &spec).await {
+        Ok(pid) => {
+            if let Some(mut t) = state.terminals.get_mut(&id) {
+                t.pid = pid;
+            }
+            stage_scrollback(state, &id, &id);
+            Ok(id)
+        }
+        Err(e) => {
+            // Undo the provisional registration, then fall back in-process.
+            state.cleanup_terminal_state(&id);
+            host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e)
+        }
+    }
+}
+
+/// Register a host-owned terminal's routing state: authoritative screen, host
+/// ownership, and the Terminal record (keyed by the stable id == tab_id).
+fn register_host_terminal(
+    state: &AppState,
+    id: &str,
+    pid: u32,
+    shell_name: &str,
+    cols: u16,
+    rows: u16,
+) {
+    state.init_screen(id, rows, cols);
+    state.host_terminals.insert(id.to_string(), ());
+    state.terminals.insert(
+        id.to_string(),
+        crate::state::Terminal {
+            id: id.to_string(),
+            pid,
+            shell: shell_name.to_string(),
+            name: format!("Terminal-{}", shell_name),
+            created_at: chrono::Local::now().to_rfc3339(),
+            cols,
+            rows,
+            backend: crate::tmux_manager::TerminalBackend::PortablePty,
+            tab_id: Some(id.to_string()),
+            last_input_source: None,
+            last_input_at: None,
+        },
+    );
+}
+
+/// Stage persisted scrollback (keyed by `history_key`) as a one-shot replay
+/// prefix for `target_id`, so the /snapshot endpoint prepends it on the first
+/// hydration (same as the in-process path).
+fn stage_scrollback(state: &AppState, history_key: &str, target_id: &str) {
+    if let Some(chunks) = state.history_store.get(history_key) {
+        if !chunks.is_empty() {
+            let mut prefix = chunks.concat();
+            prefix.push_str(crate::state::REPLAY_SEPARATOR);
+            state.replay_prefix.insert(target_id.to_string(), prefix);
+        }
+    }
+}
+
+/// Spawn in-process when the sidecar is unavailable. Preserves the tab_id and
+/// stages scrollback (both of which the earlier fallback dropped).
+#[allow(clippy::too_many_arguments)]
+fn host_fallback(
+    state: &AppState,
+    tab_id: &str,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_name: String,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+    reason: &str,
+) -> Result<String, String> {
+    log::warn!("pty-host unavailable ({reason}); falling back to in-process");
+    let name = format!("Terminal-{}", shell_name);
+    let fallback_id = pty_manager::spawn_terminal(
+        state.clone(),
+        cols,
+        rows,
+        shell_path,
+        shell_args,
+        cwd,
+        shell_name,
+        name,
+    )?;
+    if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
+        entry.tab_id = Some(tab_id.to_string());
+    }
+    stage_scrollback(state, tab_id, &fallback_id);
+    Ok(fallback_id)
+}
+
+/// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
+/// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
+/// reattaches. Refuses if the sidecar isn't connected or couldn't break away
+/// from a kill-on-close job (survival not guaranteed).
+/// Check whether an offload / hot-swap could currently keep every terminal
+/// alive, WITHOUT performing it. `Ok(())` ⇒ the offload would proceed; `Err`
+/// carries the reason it would be refused. Used by the Settings preflight so the
+/// UI only warns when the action is actually blocked.
+pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
+    let client = state
+        .pty_host_clone()
+        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    if !client.survives_hotswap() {
+        return Err(
+            "hot-swap unavailable: the sidecar could not break away from a kill-on-close job"
+                .to_string(),
+        );
+    }
+    // Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap
+    // would kill those shells. Only proceed when every terminal will survive.
+    let has_local = state
+        .terminals
+        .iter()
+        .any(|e| !state.host_terminals.contains_key(e.key()));
+    if has_local {
+        return Err(
+            "cannot hot-swap: some terminals are in-process (not sidecar-hosted) and would be lost"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Preflight query for the Settings "Offload & Close" affordance. Returns Ok
+/// when the offload would keep all terminals alive; Err with the reason if not.
+#[tauri::command]
+pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
+    hotswap_preflight(&state)
+}
+
+/// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
+/// means this build has no updater compiled in (store flavor / feature off).
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum UpdateStatus {
+    NotInstalled,
+    UpToDate,
+    Available { version: String },
+    Unavailable,
+}
+
+/// Check for a Velopack update (GitHub channel). Always registered; returns
+/// `Unavailable` when the `velopack-updates` feature is not compiled in.
+#[tauri::command]
+pub async fn check_for_updates() -> UpdateStatus {
+    #[cfg(feature = "velopack-updates")]
+    {
+        tokio::task::spawn_blocking(crate::updater::check_status)
+            .await
+            .unwrap_or(UpdateStatus::NotInstalled)
+    }
+    #[cfg(not(feature = "velopack-updates"))]
+    {
+        UpdateStatus::Unavailable
+    }
+}
+
+/// Download + arm + apply a Velopack update, keeping terminals alive. Always
+/// registered; a store/no-updater build returns a stable "not available" error.
+#[tauri::command]
+pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(feature = "velopack-updates")]
+    {
+        crate::updater::update_and_restart(&state).await
+    }
+    #[cfg(not(feature = "velopack-updates"))]
+    {
+        let _ = state;
+        Err("in-app updates aren't available in this build (managed by the store)".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
+    hotswap_preflight(&state)?;
+    let client = state
+        .pty_host_clone()
+        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    let token = crate::pty_host_client::resolve_token();
+    // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
+    // exit and drop the pipe (10-minute safety window).
+    client.arm_detach(600, &token).await?;
+    log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
+    state.app_handle.exit(0);
+    Ok(())
 }
 
 /// The window label that API/MCP-created terminals currently route to (normalized to
@@ -289,14 +552,18 @@ pub async fn write_terminal(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    // Clone the Arc, dropping the DashMap shard guard before locking.
-    let writer_mutex = match state.shell_writer_channels.get(&id) {
-        Some(r) => r.clone(),
-        None => return Err("Terminal not found".to_string()),
-    };
-    {
-        let mut writer = writer_mutex.lock().map_err(|_| "Failed to lock writer".to_string())?;
-        writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    // Host-owned terminals: forward keystrokes to the sidecar (still tag the
+    // user-input source below).
+    if !state.host_write(&id, data.as_bytes()) {
+        // Clone the Arc, dropping the DashMap shard guard before locking.
+        let writer_mutex = match state.shell_writer_channels.get(&id) {
+            Some(r) => r.clone(),
+            None => return Err("Terminal not found".to_string()),
+        };
+        {
+            let mut writer = writer_mutex.lock().map_err(|_| "Failed to lock writer".to_string())?;
+            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        }
     }
     // Tag this terminal's last-write as user-driven (keystrokes/paste flow through
     // this invoke command, never the REST API). Drives the agent color-scheme
@@ -316,6 +583,17 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    // Host-owned terminals: forward the resize to the sidecar, update dims, and
+    // keep the authoritative vt100 parser in sync (else /snapshot hydration
+    // reports new dims against an old-sized screen).
+    if state.host_resize(&id, cols, rows) {
+        if let Some(mut terminal) = state.terminals.get_mut(&id) {
+            terminal.cols = cols;
+            terminal.rows = rows;
+        }
+        state.resize_screen(&id, rows, cols);
+        return Ok(());
+    }
     if let Some(master_mutex) = state.ptys.get(&id) {
         let master = master_mutex.lock().map_err(|_| "Failed to lock PTY master".to_string())?;
         master.resize(portable_pty::PtySize {
@@ -542,8 +820,12 @@ pub async fn close_terminal(
         return Err("Terminal not found".to_string());
     };
 
-    // Kill the process tree (parent and all children)
-    crate::pty_manager::kill_process_tree(pid);
+    // Host-owned: tell the sidecar to close the session (it kills the child);
+    // otherwise kill the local process tree.
+    if !state.host_close(&id) {
+        // Kill the process tree (parent and all children)
+        crate::pty_manager::kill_process_tree(pid);
+    }
 
     // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
     // the old inline cleanup leaked). Dropping the pty also EOFs the reader.

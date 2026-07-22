@@ -46,7 +46,9 @@ impl SearchService {
         let home = std::env::var("USERPROFILE")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| ".".to_string());
-        let path = PathBuf::from(&home).join(".auto-terminal").join("search_index.json");
+        let path = PathBuf::from(&home)
+            .join(".auto-terminal")
+            .join(crate::app_config::dev_file("search_index.json"));
         
         let mut service = Self {
             index: Arc::new(RwLock::new(SearchIndexData::default())),

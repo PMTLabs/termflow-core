@@ -3,7 +3,8 @@
   "bundle": {
     "externalBin": [
       "binaries/termflow-mcp-server",
-      "binaries/termflow-fabric"
+      "binaries/termflow-fabric",
+      "binaries/termflow-pty-host"
     ],
     "resources": {
       "../legal/EULA.txt": "legal/EULA.txt",

@@ -5,7 +5,10 @@ pub mod app_config;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
+pub mod pty_host_client;
 pub mod commands;
+#[cfg(feature = "velopack-updates")]
+pub mod updater;
 pub mod open_commands;
 pub mod api_server;
 pub mod event_bus;
@@ -19,6 +22,7 @@ pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
 mod native_notify;
+mod panic_hook;
 mod shell_integration;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
@@ -789,6 +793,10 @@ fn show_or_focus_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // Install FIRST, before anything that could panic, so a startup panic is
+  // still written to the log (with a backtrace) instead of dying silently.
+  panic_hook::install();
+
   let args = Args::parse();
   let is_headless = args.headless;
   // Runtime-only port overrides (B5): applied to the loaded config before binding,
@@ -801,7 +809,18 @@ pub fn run() {
   let mut builder = tauri::Builder::default();
   #[cfg(desktop)]
   {
-    if !args.headless && args.api_port.is_none() && args.mcp_port.is_none() {
+    // Single-instance is enforced for RELEASE only. The plugin keys its lock on
+    // the app identifier (shared by debug + release), so enforcing it in dev
+    // would block a debug build from running alongside the installed release
+    // used for production. Dev is fully isolated otherwise (config.dev.json,
+    // history.dev.db, layout.dev.json, dev ports, …), so a debug instance can
+    // safely coexist. Release keeps single-instance so a second production
+    // launch focuses the existing window instead of starting a duplicate.
+    if !crate::app_config::is_dev()
+      && !args.headless
+      && args.api_port.is_none()
+      && args.mcp_port.is_none()
+    {
       builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
         let path = Args::try_parse_from(argv)
           .ok()
@@ -1047,6 +1066,10 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
+        commands::restart_for_update,
+        commands::hotswap_available,
+        commands::check_for_updates,
+        commands::update_and_restart,
         commands::get_active_window,
         commands::set_active_window,
         commands::get_terminal_cwd,

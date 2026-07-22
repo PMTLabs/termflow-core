@@ -1,6 +1,19 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+
+// Latest mtime (ms) among a file, or recursively within a directory.
+function latestMtimeMs(path) {
+  const st = statSync(path);
+  if (!st.isDirectory()) {
+    return st.mtimeMs;
+  }
+  let latest = st.mtimeMs;
+  for (const entry of readdirSync(path)) {
+    latest = Math.max(latest, latestMtimeMs(join(path, entry)));
+  }
+  return latest;
+}
 
 // Rust target triple -> bun's `--compile --target=` cross-compile string.
 // Only the triples this project actually ships need to be listed here.
@@ -47,12 +60,44 @@ function main() {
 
   mkdirSync(outDir, { recursive: true });
 
+  // Skip recompiling when nothing under mcp-server/src (or package.json /
+  // bun.lock / this script) is newer than the existing binary. bun --compile
+  // output isn't byte-deterministic (rebuilding identical sources yields a
+  // different hash each time), so comparing output content can't detect
+  // "unchanged" — an unconditional rebuild-and-overwrite bumps outFile's
+  // mtime every single build, which Tauri's build.rs watches via
+  // `cargo:rerun-if-changed`, forcing the `app` crate to recompile every
+  // build even with zero source changes. Checking staleness up front (like
+  // make) avoids that entirely.
+  const watchPaths = [
+    join(rootDir, 'mcp-server', 'src'),
+    join(rootDir, 'mcp-server', 'package.json'),
+    join(rootDir, 'scripts', 'build-mcp-sidecar.mjs'),
+  ];
+  const lockFile = join(rootDir, 'mcp-server', 'bun.lock');
+  if (existsSync(lockFile)) {
+    watchPaths.push(lockFile);
+  }
+  if (existsSync(outFile)) {
+    const outMtime = statSync(outFile).mtimeMs;
+    const newestSource = Math.max(...watchPaths.map(latestMtimeMs));
+    if (outMtime > newestSource) {
+      console.log(`MCP sidecar up to date: ${outFile}`);
+      return;
+    }
+  }
+
   const bunArgs = [
     'build',
     '--compile',
     `--target=${bunTarget}`,
     `--outfile=${outFile}`,
   ];
+  // Embed the TermFlow icon into the Windows executable so the MCP sidecar shows
+  // a proper icon in Explorer / Task Manager instead of the generic exe glyph.
+  if (bunTarget.startsWith('bun-windows')) {
+    bunArgs.push(`--windows-icon=${join(rootDir, 'src-tauri', 'icons', 'icon.ico')}`);
+  }
   // Workaround for a bun bug (seen on 1.3.14): bun's own download+extract of
   // its cross-compile base executable for some targets (e.g. bun-windows-arm64)
   // can fail with "Failed to extract executable ... download may be incomplete"

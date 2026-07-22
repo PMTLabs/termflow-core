@@ -207,6 +207,25 @@ pub struct AppState<R: Runtime = Wry> {
     // Stable per-process identity, returned on /health so a second instance can tell
     // "this port is mine" from "another instance owns it" (P0b conflict detection).
     pub instance_id: String,
+    // --- PTY-host sidecar (opt-in, Windows) ---
+    // The connected sidecar client, when the pty-host flag is enabled and a
+    // connection has been established. None otherwise (in-process spawn path).
+    pub pty_host: Arc<Mutex<Option<crate::pty_host_client::PtyHostClient>>>,
+    // Terminal ids (tab_id) whose PTY lives in the sidecar, not in `ptys`/
+    // `shell_writer_channels`. write/resize/close/repaint route to the client
+    // for these; everything else is unchanged.
+    pub host_terminals: Arc<DashMap<String, ()>>,
+    // Sessions the sidecar still held when we connected (survived a hot-swap),
+    // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
+    // `create_host_terminal` reattaches to (instead of respawning) any tab_id
+    // present here, restoring the real pid.
+    pub host_reattach_pending: Arc<DashMap<String, u32>>,
+    // Monotonic generation bumped on each successful sidecar connect. A client's
+    // on_disconnect only clears `pty_host` if its generation is still current,
+    // so a dying old client can't null a freshly reconnected one.
+    pub pty_host_gen: Arc<AtomicU64>,
+    // Single-flight guard so concurrent pane creation connects the sidecar once.
+    pub pty_host_connecting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -253,6 +272,11 @@ impl<R: Runtime> Clone for AppState<R> {
             replay_prefix: self.replay_prefix.clone(),
             active_window: self.active_window.clone(),
             instance_id: self.instance_id.clone(),
+            pty_host: self.pty_host.clone(),
+            host_terminals: self.host_terminals.clone(),
+            host_reattach_pending: self.host_reattach_pending.clone(),
+            pty_host_gen: self.pty_host_gen.clone(),
+            pty_host_connecting: self.pty_host_connecting.clone(),
         }
     }
 }
@@ -312,6 +336,11 @@ impl<R: Runtime> AppState<R> {
             replay_prefix: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
+            pty_host: Arc::new(Mutex::new(None)),
+            host_terminals: Arc::new(DashMap::new()),
+            host_reattach_pending: Arc::new(DashMap::new()),
+            pty_host_gen: Arc::new(AtomicU64::new(0)),
+            pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -500,6 +529,170 @@ impl<R: Runtime> AppState<R> {
         self.terminal_history.get(id).map(|entry| entry.value().clone())
     }
 
+    /// True if `id`'s PTY is hosted by the sidecar (not local `ptys`/writers).
+    pub fn is_host_owned(&self, id: &str) -> bool {
+        self.host_terminals.contains_key(id)
+    }
+
+    /// Lazily connect (spawning if needed) the PTY-host sidecar client, wiring
+    /// its inbound Stdout into the existing output broadcast and its Exit/Gap
+    /// into cleanup+emit / repaint. Idempotent.
+    pub async fn ensure_pty_host(&self) -> Result<(), String> {
+        {
+            if self.pty_host_client().is_some() {
+                return Ok(());
+            }
+        }
+        // Single-flight: serialize concurrent connect attempts (multi-pane
+        // startup) so the sidecar is connected exactly once.
+        let _connect_guard = self.pty_host_connecting.lock().await;
+        // Re-check under the guard — a prior holder may have connected already.
+        {
+            if self.pty_host_client().is_some() {
+                return Ok(());
+            }
+        }
+        // RP-1: install the host into the update-stable runtime dir and run it
+        // from there (outside the swapped app payload) so it survives an update.
+        let sidecar = crate::pty_host_client::resolve_host_path().ok_or_else(|| {
+            "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
+        })?;
+        let pipe = crate::pty_host_client::resolve_pipe();
+        let token = crate::pty_host_client::resolve_token();
+
+        // Generation for this connection: on_disconnect only nulls `pty_host` if
+        // its generation is still current (a dead old client can't clobber a new).
+        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+
+        let st_exit = self.clone();
+        let st_gap = self.clone();
+        let st_disc = self.clone();
+        let deps = crate::pty_host_client::PtyHostDeps {
+            output_tx: self.output_tx.clone(),
+            output_produced: self.output_produced.clone(),
+            on_exit: Arc::new(move |tab_id: String, exit_cwd: Option<String>| {
+                use tauri::Emitter;
+                // Mirror the in-process reader's exit path: capture cwd (from the
+                // sidecar or our own OSC tracking), clean up, notify the UI.
+                let cwd = exit_cwd
+                    .or_else(|| st_exit.terminal_cwds.get(&tab_id).map(|r| r.value().clone()));
+                st_exit.host_terminals.remove(&tab_id);
+                st_exit.cleanup_terminal_state(&tab_id);
+                let _ = st_exit.app_handle.emit(
+                    "terminal:exit",
+                    serde_json::json!({ "id": tab_id, "exitCode": 0, "cwd": cwd }),
+                );
+            }),
+            on_gap: Arc::new(move |tab_id: String| {
+                st_gap.host_repaint(&tab_id);
+            }),
+            on_disconnect: Arc::new(move || {
+                use tauri::Emitter;
+                // Only act if THIS connection is still the current one — a stale
+                // old client's disconnect must not clobber a reconnected client.
+                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
+                    return;
+                }
+                // Sidecar/pipe died: surface a closed-session banner on every live
+                // host-owned pane, fully clean up its state, and drop the dead
+                // client so a later create reconnects.
+                let ids: Vec<String> =
+                    st_disc.host_terminals.iter().map(|e| e.key().clone()).collect();
+                for id in ids {
+                    st_disc.host_terminals.remove(&id);
+                    st_disc.cleanup_terminal_state(&id);
+                    let _ = st_disc.app_handle.emit(
+                        "terminal:exit",
+                        serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
+                    );
+                }
+                *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }),
+        };
+
+        let client = crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, deps)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Record sessions that survived a hot-swap (tab_id -> pid) so
+        // create_host_terminal reattaches instead of respawning.
+        for meta in client.list_sessions().await {
+            self.host_reattach_pending.insert(meta.tab_id, meta.pid);
+        }
+        *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
+        Ok(())
+    }
+
+    /// Clone out the connected client (if any) so callers can `.await` on it
+    /// without holding the mutex across the await point.
+    pub fn pty_host_clone(&self) -> Option<crate::pty_host_client::PtyHostClient> {
+        self.pty_host_client().clone()
+    }
+
+    fn pty_host_client(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<crate::pty_host_client::PtyHostClient>> {
+        self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// If `id` is host-owned AND the client is connected, forward the write and
+    /// return true. Returns false when disconnected so the caller surfaces the
+    /// failure instead of reporting a false success for dropped input.
+    pub fn host_write(&self, id: &str, bytes: &[u8]) -> bool {
+        if !self.is_host_owned(id) {
+            return false;
+        }
+        match self.pty_host_client().as_ref() {
+            Some(c) => {
+                c.write_stdin(id, bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// If `id` is host-owned AND connected, forward the resize and return true.
+    pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
+        if !self.is_host_owned(id) {
+            return false;
+        }
+        match self.pty_host_client().as_ref() {
+            Some(c) => {
+                c.resize(id, cols, rows);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
+    /// close the session. Returns true if it was host-owned (so the caller skips
+    /// the local kill) even when the client is gone — there is no local process.
+    pub fn host_close(&self, id: &str) -> bool {
+        if !self.is_host_owned(id) {
+            return false;
+        }
+        if let Some(c) = self.pty_host_client().as_ref() {
+            c.close(id);
+        }
+        self.host_terminals.remove(id);
+        true
+    }
+
+    /// If `id` is host-owned, force a repaint via a sidecar resize-nudge (the
+    /// local jiggle can't — there is no local master). Returns true if handled.
+    pub fn host_repaint(&self, id: &str) -> bool {
+        if !self.is_host_owned(id) {
+            return false;
+        }
+        let dims = self.terminals.get(id).map(|t| (t.cols, t.rows));
+        if let Some((cols, rows)) = dims {
+            if let Some(c) = self.pty_host_client().as_ref() {
+                c.nudge_repaint(id, cols, rows);
+            }
+        }
+        true
+    }
+
     /// Force every live PTY to repaint by jiggling its size (rows+1, then back).
     /// ConPTY/apps repaint fully on resize, so this visibly recovers terminals
     /// after output chunks were dropped (broadcast Lagged) or after the output
@@ -510,6 +703,11 @@ impl<R: Runtime> AppState<R> {
         // PTY mutex acquisition.
         let targets: Vec<String> = self.terminals.iter().map(|e| e.key().clone()).collect();
         for id in targets {
+            // Host-owned terminals have no local master — nudge via the sidecar.
+            if self.is_host_owned(&id) {
+                self.host_repaint(&id);
+                continue;
+            }
             let Some(master_ref) = self.ptys.get(&id) else { continue };
             let Ok(master) = master_ref.try_lock() else {
                 log::warn!("[PIPELINE] repaint: PTY mutex busy for {}, skipping", id);
@@ -600,6 +798,9 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
+        // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
+        // in the routing set after its state is torn down.
+        self.host_terminals.remove(id);
     }
 }
 
