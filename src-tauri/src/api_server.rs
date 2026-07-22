@@ -346,7 +346,8 @@ async fn create_terminal(
         shell_args,
         shell_cwd,
         shell_name.clone(),
-        terminal_name.clone()
+        terminal_name.clone(),
+        None, // API-created terminal: fresh session, no restored scrollback
     ) {
         Ok(id) => {
             // Resolve or generate a proper tb- prefixed tab ID
@@ -1826,6 +1827,7 @@ async fn fleet_local_run(
                 shell_cwd,
                 shell_name.clone(),
                 terminal_name.clone(),
+                None, // fleet terminal: fresh session, no restored scrollback
             ) {
                 Ok(id) => id,
                 Err(e) => {

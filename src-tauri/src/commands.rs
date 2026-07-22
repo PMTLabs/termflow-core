@@ -123,6 +123,14 @@ pub async fn create_terminal(
         }
     }
 
+    // Restore path: if this renderer id has scrollback persisted from a prior
+    // session, seed it into the fresh parser (via spawn_terminal, before the
+    // reader thread starts — see the ratchet note on stage_scrollback) and stage
+    // it as a one-shot prefix. The /snapshot endpoint prepends it on this
+    // terminal's first hydration, so the engine's existing reset()+write replay
+    // shows "old scrollback → divider → fresh prompt" with no engine change.
+    let history_prefix = tab_id.as_ref().and_then(|t| restore_prefix(state.inner(), t));
+
     let id = pty_manager::spawn_terminal(
         state.inner().clone(),
         cols,
@@ -131,23 +139,16 @@ pub async fn create_terminal(
         shell_args,
         shell_cwd,
         shell_name,
-        terminal_name
+        terminal_name,
+        history_prefix.clone(),
     )?;
 
     if let Some(tab_id) = tab_id {
         if let Some(mut entry) = state.terminals.get_mut(&id) {
             entry.tab_id = Some(tab_id.clone());
         }
-        // Restore path: if this renderer id has scrollback persisted from a prior
-        // session, stage it as a one-shot prefix. The /snapshot endpoint prepends it
-        // on this terminal's first hydration, so the engine's existing reset()+write
-        // replay shows "old scrollback → divider → fresh prompt" with no engine change.
-        if let Some(chunks) = state.history_store.get(&tab_id) {
-            if !chunks.is_empty() {
-                let mut prefix = chunks.concat();
-                prefix.push_str(crate::state::REPLAY_SEPARATOR);
-                state.replay_prefix.insert(id.clone(), prefix);
-            }
+        if let Some(prefix) = history_prefix {
+            state.replay_prefix.insert(id.clone(), prefix);
         }
     }
 
@@ -190,6 +191,9 @@ async fn create_host_terminal(
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
         register_host_terminal(state, &id, pid, &shell_name, cols, rows);
+        // Seed + stage BEFORE attach releases the replay ring, so restored
+        // history precedes the ring bytes in the parser (see stage_scrollback).
+        stage_scrollback(state, &id, &id);
         // RP-3: transactional when the host supports it (AttachAck), silently
         // legacy otherwise. A confirmed-dead session still completes reattach —
         // the replayed ring + Exit tombstone render the final state honestly.
@@ -199,7 +203,6 @@ async fn create_host_terminal(
             None => log::info!("[HOTSWAP] reattached {id} (pid {pid}, legacy attach)"),
         }
         client.nudge_repaint(&id, cols, rows);
-        stage_scrollback(state, &id, &id);
         return Ok(id);
     }
 
@@ -208,6 +211,10 @@ async fn create_host_terminal(
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
     register_host_terminal(state, &id, 0, &shell_name, cols, rows);
+    // Seed + stage BEFORE the spawn so restored history precedes the shell's
+    // first output in the parser. On spawn failure, cleanup_terminal_state
+    // removes both the parser and the staged prefix; host_fallback restages.
+    stage_scrollback(state, &id, &id);
     let spec = pty_manager::build_spawn_spec(
         &id,
         shell_path.as_deref(),
@@ -222,7 +229,6 @@ async fn create_host_terminal(
             if let Some(mut t) = state.terminals.get_mut(&id) {
                 t.pid = pid;
             }
-            stage_scrollback(state, &id, &id);
             Ok(id)
         }
         Err(e) => {
@@ -263,17 +269,32 @@ fn register_host_terminal(
     );
 }
 
-/// Stage persisted scrollback (keyed by `history_key`) as a one-shot replay
-/// prefix for `target_id`, so the /snapshot endpoint prepends it on the first
-/// hydration (same as the in-process path).
-fn stage_scrollback(state: &AppState, history_key: &str, target_id: &str) {
-    if let Some(chunks) = state.history_store.get(history_key) {
-        if !chunks.is_empty() {
-            let mut prefix = chunks.concat();
-            prefix.push_str(crate::state::REPLAY_SEPARATOR);
-            state.replay_prefix.insert(target_id.to_string(), prefix);
-        }
+/// Persisted scrollback for `history_key` rendered as a replay prefix (blob +
+/// "session restored" divider), or None when nothing usable is stored.
+fn restore_prefix<R: tauri::Runtime>(state: &AppState<R>, history_key: &str) -> Option<String> {
+    let chunks = state.history_store.get(history_key)?;
+    if chunks.is_empty() {
+        return None;
     }
+    let mut prefix = chunks.concat();
+    prefix.push_str(crate::state::REPLAY_SEPARATOR);
+    Some(prefix)
+}
+
+/// Stage persisted scrollback (keyed by `history_key`) for `target_id`, twice:
+/// seed the freshly-initialized authoritative parser with it — so the next
+/// history flush preserves it instead of overwriting the stored row with only
+/// post-restart content (the scrollback-persistence "ratchet" bug) — and stage
+/// the same bytes as a one-shot replay prefix that the /snapshot endpoint
+/// prepends on the renderer's first hydration.
+///
+/// MUST run after init_screen and BEFORE any live output can reach the parser
+/// (host attach releases replay bytes; spawn starts the shell), or the seed
+/// would land after newer bytes and disorder the persisted history.
+fn stage_scrollback<R: tauri::Runtime>(state: &AppState<R>, history_key: &str, target_id: &str) {
+    let Some(prefix) = restore_prefix(state, history_key) else { return };
+    state.feed_screen(target_id, prefix.as_bytes());
+    state.replay_prefix.insert(target_id.to_string(), prefix);
 }
 
 /// Spawn in-process when the sidecar is unavailable. Preserves the tab_id and
@@ -292,6 +313,9 @@ fn host_fallback(
 ) -> Result<String, String> {
     log::warn!("pty-host unavailable ({reason}); falling back to in-process");
     let name = format!("Terminal-{}", shell_name);
+    // Seed via spawn_terminal (parser gets the blob before the reader thread
+    // starts), then stage the renderer's one-shot prefix under the new id.
+    let history_prefix = restore_prefix(state, tab_id);
     let fallback_id = pty_manager::spawn_terminal(
         state.clone(),
         cols,
@@ -301,11 +325,14 @@ fn host_fallback(
         cwd,
         shell_name,
         name,
+        history_prefix.clone(),
     )?;
     if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
         entry.tab_id = Some(tab_id.to_string());
     }
-    stage_scrollback(state, tab_id, &fallback_id);
+    if let Some(prefix) = history_prefix {
+        state.replay_prefix.insert(fallback_id.clone(), prefix);
+    }
     Ok(fallback_id)
 }
 
@@ -1857,6 +1884,115 @@ mod tests {
         assert!(!point_in_rect(150.0, 50.0, 0.0, 0.0, 100.0, 100.0));
         assert!(!point_in_rect(100.0, 50.0, 0.0, 0.0, 100.0, 100.0)); // right edge exclusive
         assert!(!point_in_rect(-1.0, 50.0, 0.0, 0.0, 100.0, 100.0));
+    }
+}
+
+// Scrollback-persistence ratchet regression tests (partial-scrollback bug):
+// restored history must be seeded into the fresh authoritative parser, and a
+// dying session's parser must be persisted before cleanup — otherwise every
+// restart's first flush overwrites the stored history with only post-restart
+// content. Gated: needs tauri's `test` feature (mock_app), which breaks the
+// Windows test binary at loader time, so these run on Linux/macOS CI only:
+//   cargo test --features integration-tests
+// (see api_server.rs for the precedent).
+#[cfg(all(test, feature = "integration-tests"))]
+mod scrollback_restore_tests {
+    use crate::state::AppState;
+
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("termflow_ratchet_{}_{}.db", std::process::id(), tag));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    fn mock_state() -> (tauri::App<tauri::test::MockRuntime>, AppState<tauri::test::MockRuntime>) {
+        let app = tauri::test::mock_app();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            tx,
+            app.handle().clone(),
+            crate::app_config::NetworkConfig::defaults(),
+        );
+        (app, state)
+    }
+
+    fn register_terminal(state: &AppState<tauri::test::MockRuntime>, id: &str) {
+        state.terminals.insert(
+            id.to_string(),
+            crate::state::Terminal {
+                id: id.to_string(),
+                pid: 0,
+                shell: "test".to_string(),
+                name: "Terminal-test".to_string(),
+                created_at: chrono::Local::now().to_rfc3339(),
+                cols: 80,
+                rows: 24,
+                backend: crate::tmux_manager::TerminalBackend::PortablePty,
+                tab_id: Some(id.to_string()),
+                last_input_source: None,
+                last_input_at: None,
+            },
+        );
+    }
+
+    /// The ratchet itself: stage_scrollback must seed the freshly-initialized
+    /// parser with the persisted blob, so the next persist writes old + new
+    /// content instead of clobbering the stored history with only new content.
+    #[test]
+    fn stage_scrollback_seeds_parser_so_flush_preserves_history() {
+        let (_app, state) = mock_state();
+        state.history_store.init(&temp_db("seed"));
+
+        // A previous session's persisted scrollback.
+        let mut p1 = vt100::Parser::new(24, 80, 5000);
+        for i in 0..100 {
+            p1.process(format!("old-line-{:04}\r\n", i).as_bytes());
+        }
+        let blob1 = String::from_utf8_lossy(
+            &crate::state::render_full_scrollback(p1.screen_mut()).expect("dump"),
+        )
+        .into_owned();
+        state.history_store.upsert("tb-hist", std::slice::from_ref(&blob1), 1);
+
+        // App restart: fresh parser for the same tab, restore staged, new output.
+        state.init_screen("tb-hist", 24, 80);
+        register_terminal(&state, "tb-hist");
+        super::stage_scrollback(&state, "tb-hist", "tb-hist");
+        state.feed_screen("tb-hist", b"new-session output\r\n");
+
+        // The next flush must preserve the restored history.
+        state.persist_terminal_history("tb-hist", 2);
+        let stored = state.history_store.get("tb-hist").expect("row").concat();
+        assert!(
+            stored.contains("old-line-0000"),
+            "restored history must survive the next flush (ratchet regression)"
+        );
+        assert!(stored.contains("session restored"), "divider must be persisted");
+        assert!(stored.contains("new-session output"), "new output must be persisted");
+        // The renderer's one-shot replay prefix must still be staged unchanged.
+        assert!(state.replay_prefix.get("tb-hist").is_some(), "renderer prefix must stay staged");
+    }
+
+    /// A dying session must persist its final parser state under its tab_id
+    /// (exit paths call this before cleanup_terminal_state, which would other-
+    /// wise discard the last <30s of output along with the parser).
+    #[test]
+    fn persist_terminal_history_writes_parser_dump_under_tab_id() {
+        let (_app, state) = mock_state();
+        state.history_store.init(&temp_db("exit"));
+        state.init_screen("tb-exit", 24, 80);
+        register_terminal(&state, "tb-exit");
+        state.feed_screen("tb-exit", b"final words before exit\r\n");
+
+        state.persist_terminal_history("tb-exit", 123);
+
+        let stored = state.history_store.get("tb-exit").expect("row").concat();
+        assert!(stored.contains("final words before exit"));
+
+        // After cleanup (the exit path's next step) the row must remain intact.
+        state.cleanup_terminal_state("tb-exit");
+        assert!(state.history_store.get("tb-exit").is_some());
     }
 }
 
