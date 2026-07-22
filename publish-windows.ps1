@@ -169,6 +169,12 @@ if ($Unsigned) {
 }
 
 # ─── Stage 5: vpk pack (project-local vpk 1.2.0) ─────────────────────────────
+# Produces the per-user Velopack installer TermFlow-win-Setup.exe (manifest
+# requestedExecutionLevel=asInvoker) — it installs to %LOCALAPPDATA%\TermFlow
+# with NO elevation / UAC prompt, which is also what makes the per-user hot-swap
+# work. We deliberately do NOT pass vpk's `--msi`: that MSI is machine-wide and
+# REQUIRES elevation, defeating the no-admin requirement. There is no non-elevated
+# MSI in Velopack — the per-user installer is the Setup.exe.
 Write-Host ""
 Write-Host "=== Stage 5: vpk pack ===" -ForegroundColor Yellow
 dotnet tool restore | Out-Null
