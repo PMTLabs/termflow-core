@@ -108,6 +108,10 @@ pub struct PtyHostClient {
     /// (a kill-on-close job denied breakaway) — hot-swap survival is then NOT
     /// guaranteed, so `restart_for_update` must refuse to arm.
     survives_hotswap: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the host's discovery record advertised `CAP_ATTACH_ACK`, so
+    /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
+    /// (no record) must only ever receive the fire-and-forget `Attach`.
+    attach_acks: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PtyHostClient {
@@ -118,6 +122,12 @@ impl PtyHostClient {
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
     pub fn survives_hotswap(&self) -> bool {
         self.survives_hotswap.load(Ordering::Acquire)
+    }
+
+    /// Mark that the connected host acks `AttachAcked` (set from its discovery
+    /// record's `CAP_ATTACH_ACK`; see field doc).
+    pub fn set_attach_acks(&self, v: bool) {
+        self.attach_acks.store(v, Ordering::Release);
     }
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
@@ -159,6 +169,40 @@ impl PtyHostClient {
             tab_id: tab_id.to_string(),
             from_offset,
         }));
+    }
+
+    /// RP-3 transactional reattach: `AttachAcked` + wait for the host's
+    /// `AttachAck` when the host advertised the capability; transparently fall
+    /// back to the legacy fire-and-forget `Attach` otherwise. Returns whether
+    /// the host confirmed the session as re-wired and alive (`None` = legacy
+    /// host / no confirmation possible — treated as attached, as before).
+    pub async fn attach_confirmed(&self, tab_id: &str, from_offset: u64) -> Option<bool> {
+        if !self.attach_acks.load(Ordering::Acquire) {
+            self.attach(tab_id, from_offset);
+            return None;
+        }
+        let tab = tab_id.to_string();
+        match self
+            .request(move |req| Control::AttachAcked {
+                req,
+                tab_id: tab,
+                from_offset,
+            })
+            .await
+        {
+            Some(Response::AttachAck { alive, tail_offset, .. }) => {
+                log::info!(
+                    "[HOTSWAP] AttachAck for {tab_id}: alive={alive} tail_offset={tail_offset}"
+                );
+                Some(alive)
+            }
+            _ => {
+                // Ack-capable host didn't answer in time — the attach itself may
+                // still have landed; log and treat like legacy.
+                log::warn!("[HOTSWAP] no AttachAck for {tab_id} (timeout); assuming attached");
+                None
+            }
+        }
     }
 
     // --- request/response (async) ---
@@ -217,12 +261,19 @@ impl PtyHostClient {
             })
             .await
         {
-            Some(Response::ArmAck { deadline_ms, .. }) => Ok(deadline_ms),
-            _ => Err("pty-host: no ArmAck".to_string()),
+            Some(Response::ArmAck { deadline_ms, .. }) => {
+                log::info!("[HOTSWAP] host armed for detach (ack deadline_ms={deadline_ms})");
+                Ok(deadline_ms)
+            }
+            _ => {
+                log::warn!("[HOTSWAP] arm_detach got NO ArmAck — refusing to proceed");
+                Err("pty-host: no ArmAck".to_string())
+            }
         }
     }
 
     pub async fn disarm(&self) {
+        log::info!("[HOTSWAP] disarming host (update aborted or normal quit)");
         let _ = self.request(|req| Control::Disarm { req }).await;
     }
 }
@@ -289,6 +340,7 @@ where
         pending,
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     }
 }
 
@@ -306,9 +358,15 @@ pub async fn connect_or_spawn(
 
     let mut survives = true;
     let conn = match ClientOptions::new().open(pipe) {
-        Ok(c) => c,
+        Ok(c) => {
+            // An already-running host (possibly spawned by a PREVIOUS app
+            // version — this is the update-survival adoption path).
+            log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
+            c
+        }
         Err(_) => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
+            log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             survives = spawn_sidecar_detached(sidecar, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
@@ -354,6 +412,7 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — Velopack treats a process whose CWD is inside
     // the swapped `current\` tree as an update blocker it may kill (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
+    let record = record_path();
     let base = || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
@@ -361,6 +420,10 @@ fn spawn_sidecar_detached(
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // RP-2: tell the host where to advertise itself (discovery record).
+        if let Some(ref rp) = record {
+            c.env("TERMFLOW_PTY_RECORD", rp);
+        }
         if let Some(ref wd) = workdir {
             c.current_dir(wd);
         }
@@ -374,7 +437,10 @@ fn spawn_sidecar_detached(
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
     {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            log::info!("[HOTSWAP] pty-host spawned WITH job breakaway (update-survivable)");
+            Ok(true)
+        }
         Err(_) => {
             base()
                 .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
@@ -402,9 +468,15 @@ pub async fn connect_or_spawn(
 
     let mut survives = true;
     let conn = match UnixStream::connect(pipe).await {
-        Ok(c) => c,
+        Ok(c) => {
+            // An already-running host (possibly spawned by a PREVIOUS app
+            // version — this is the update-survival adoption path).
+            log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
+            c
+        }
         Err(_) => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
+            log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             survives = spawn_sidecar_detached(sidecar, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
@@ -455,6 +527,10 @@ fn spawn_sidecar_detached(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // RP-2: tell the host where to advertise itself (discovery record).
+    if let Some(rp) = record_path() {
+        c.env("TERMFLOW_PTY_RECORD", rp);
+    }
     if let Some(ref wd) = workdir {
         c.current_dir(wd);
     }
@@ -603,10 +679,21 @@ fn host_binary_name() -> &'static str {
 }
 
 /// The per-user, **update-stable** runtime dir the host is installed into and
-/// executed from — deliberately OUTSIDE the app payload that Velopack swaps
-/// (`current\` on Windows, the `.app` on macOS, the AppImage mount on Linux).
-/// Running the host from here is what lets a live sidecar survive an update
-/// (design 003 §10.1). Channel-qualified so dev and release never collide.
+/// executed from — deliberately OUTSIDE anything an installer or updater ever
+/// touches. Keyed by the app identifier (`app.termflow.desktop`, the same dir
+/// Tauri uses for logs/app-data), NOT the Velopack install root:
+///
+/// C1 (design 003 §10.1, proven live in the 0.1.0→0.1.1 RP-0 run): Velopack's
+/// `Update.exe apply --root %LOCALAPPDATA%\TermFlow` kills every process running
+/// from under the install ROOT before swapping — not just `current\`. The
+/// previous `%LOCALAPPDATA%\TermFlow\host\…` location was inside that kill zone,
+/// so an armed host died with the update anyway. `Setup.exe` likewise renames
+/// the whole root (rollback), which a running host inside it blocks.
+///
+/// Old copies under the previous location are simply orphaned (the Windows
+/// uninstaller removes the root; dev/mac copies are a few MB) — the stable pipe
+/// name means a still-running old-dir host keeps working regardless.
+/// Channel-qualified so dev and release never collide.
 pub fn runtime_host_dir() -> Option<std::path::PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -622,7 +709,37 @@ pub fn runtime_host_dir() -> Option<std::path::PathBuf> {
             })
     }?;
     let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
-    Some(base.join("TermFlow").join("host").join(chan))
+    Some(base.join("app.termflow.desktop").join("host").join(chan))
+}
+
+#[cfg(test)]
+mod runtime_dir_tests {
+    use super::runtime_host_dir;
+
+    /// C1 regression guard: the host runtime dir must NEVER live under the
+    /// Velopack install root (`…\TermFlow\`), or Update.exe kills the armed
+    /// host during an update and Setup.exe can't rename the root.
+    #[test]
+    fn host_dir_is_outside_the_velopack_install_root() {
+        let dir = runtime_host_dir().expect("runtime dir resolves in test env");
+        let s = dir.to_string_lossy().replace('/', "\\");
+        assert!(
+            s.contains("app.termflow.desktop"),
+            "host dir should be keyed by app identifier: {s}"
+        );
+        assert!(
+            !s.contains("\\TermFlow\\host"),
+            "host dir must not be inside the Velopack root: {s}"
+        );
+    }
+}
+
+/// Where the running host advertises itself (RP-2 discovery). Lives in the
+/// update-stable runtime dir (per-user + per-channel, matching the pipe name's
+/// scope) so it survives updates alongside the host itself. Absent file ⇒
+/// legacy host or none running.
+pub fn record_path() -> Option<std::path::PathBuf> {
+    runtime_host_dir().map(|d| d.join("host-record.json"))
 }
 
 /// SHA-256 of a file's bytes.
@@ -926,7 +1043,8 @@ fn resp_req(r: &Response) -> u64 {
         | Response::SpawnFailed { req, .. }
         | Response::SessionList { req, .. }
         | Response::ArmAck { req, .. }
-        | Response::DisarmAck { req } => *req,
+        | Response::DisarmAck { req }
+        | Response::AttachAck { req, .. } => *req,
     }
 }
 
@@ -983,6 +1101,49 @@ mod tests {
         assert_eq!(payload.data, b"hello");
         assert!(produced.load(Ordering::Relaxed) >= 1);
         let _ = (&mut srd,); // keep server read half alive
+    }
+
+    #[tokio::test]
+    async fn attach_confirmed_uses_ack_when_capable_and_legacy_otherwise() {
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let (crd, cwr) = tokio::io::split(client_side);
+        let (mut srd, mut swr) = tokio::io::split(server_side);
+
+        let (deps, _rx, _p) = deps();
+        let client = wire_client(crd, cwr, deps);
+
+        // Legacy (acks off, the default): fire-and-forget Attach, returns None.
+        let legacy = client.attach_confirmed("t-legacy", 0).await;
+        assert_eq!(legacy, None, "no-cap host ⇒ legacy fire-and-forget");
+        match read_frame(&mut srd).await {
+            Ok(Some(Frame::Ctrl(Control::Attach { tab_id, .. }))) => {
+                assert_eq!(tab_id, "t-legacy");
+            }
+            other => panic!("expected legacy Attach on the wire, got {other:?}"),
+        }
+
+        // Capable host: AttachAcked goes out, AttachAck resolves the call.
+        client.set_attach_acks(true);
+        let server = tokio::spawn(async move {
+            if let Ok(Some(Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }))) =
+                read_frame(&mut srd).await
+            {
+                write_frame(
+                    &mut swr,
+                    &Frame::Resp(Response::AttachAck {
+                        req,
+                        tab_id,
+                        alive: true,
+                        tail_offset: 42,
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let confirmed = client.attach_confirmed("t-ack", 0).await;
+        assert_eq!(confirmed, Some(true), "capable host ⇒ confirmed alive");
+        server.await.unwrap();
     }
 
     #[tokio::test]

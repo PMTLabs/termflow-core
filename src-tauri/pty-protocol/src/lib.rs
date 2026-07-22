@@ -10,7 +10,8 @@ pub mod frame;
 pub mod spec;
 
 pub use bootstrap::{
-    negotiate, read_hello, write_hello, Hello, HelloKind, CAP_DRAIN, PROTOCOL_MAX, PROTOCOL_MIN,
+    negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN, PROTOCOL_MAX,
+    PROTOCOL_MIN,
 };
 pub use discovery::{
     read_record, remove_record_if_owned, write_record, HostRecord, HOST_RECORD_FORMAT,

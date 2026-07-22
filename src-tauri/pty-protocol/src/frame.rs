@@ -30,6 +30,13 @@ pub enum Control {
     /// Arm hot-swap hold. `token` must match the sidecar's launch token.
     ArmDetach { req: u64, timeout_secs: u64, token: String },
     Disarm { req: u64 },
+    /// RP-3: like [`Control::Attach`] but the host confirms with
+    /// [`Response::AttachAck`], so a reattaching GUI can verify each session was
+    /// actually re-wired instead of assuming. COMPATIBILITY: send ONLY to a host
+    /// whose discovery record advertises `CAP_ATTACH_ACK` — a legacy host fails
+    /// to decode this variant and drops the connection. (Kept as a trailing
+    /// additive variant so all shipped variant indices are unchanged.)
+    AttachAcked { req: u64, tab_id: String, from_offset: u64 },
 }
 
 /// Sidecar → GUI replies to a `req`-bearing [`Control`].
@@ -41,6 +48,11 @@ pub enum Response {
     /// `deadline_ms` is epoch-ms when the hold expires (informational).
     ArmAck { req: u64, deadline_ms: u64 },
     DisarmAck { req: u64 },
+    /// RP-3: reply to [`Control::AttachAcked`] ONLY (never to plain `Attach` —
+    /// a legacy client fails to decode this variant). `alive:false` means the
+    /// tab was unknown or its child already exited; `tail_offset` is the ring's
+    /// next-write offset at ack time.
+    AttachAck { req: u64, tab_id: String, alive: bool, tail_offset: u64 },
 }
 
 /// One surviving session as reported by `ListSessions`.
