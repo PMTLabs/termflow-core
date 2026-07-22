@@ -17,7 +17,7 @@
 use velopack::{sources::GithubSource, UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 
 /// The GitHub repository the Velopack release feed is published to.
-/// TODO(packaging): confirm the public releases repo before shipping.
+/// Confirmed: releases are published on the public open-core repo.
 const REPO_URL: &str = "https://github.com/PMTLabs/termflow-core";
 
 /// Velopack startup hook — MUST be the first thing `main()` runs. Startup

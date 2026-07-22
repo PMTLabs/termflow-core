@@ -1,110 +1,71 @@
-name: Release
+name: Release Gate
+
+# Validates a release tag. Releases themselves are built, signed, and uploaded
+# by the local publish scripts (publish-windows.ps1 / publish-macos.sh) because
+# signing needs Infisical-sourced Azure Trusted Signing creds (Windows) and the
+# Developer ID keychain + notary profile (macOS) — neither lives in CI.
+#
+# This gate runs the test suites in the SHIPPING configuration: the
+# `velopack-updates` cargo feature is enabled here exactly as the pro build
+# scripts enable it, which the per-push Rust Tests workflow does not cover.
 
 on:
   push:
     tags:
       - 'v*'
-
-permissions:
-  contents: write
+  workflow_dispatch:
 
 jobs:
-  release:
-    name: Create Release
+  release-gate:
+    name: Release Gate (tests, velopack-updates on)
     runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Auto Terminal ${{ github.ref }}
-        draft: false
-        prerelease: false
+      - uses: actions/checkout@v4
 
-  build-release:
-    name: Build Release
-    needs: release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact_name: auto-terminal-linux
-            asset_extension: .AppImage
-          - os: windows-latest
-            artifact_name: auto-terminal-windows
-            asset_extension: .exe
-          - os: macos-latest
-            artifact_name: auto-terminal-macos
-            asset_extension: .dmg
-    
-    steps:
-    - uses: actions/checkout@v3
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: 20.x
+      # Tauri 2 links webkit2gtk/gtk to compile on Linux (24.04 = 4.1 line).
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            build-essential \
+            pkg-config
 
-    - name: Setup Bun
-      uses: oven-sh/setup-bun@v2
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install dependencies
-      run: bun install --frozen-lockfile
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
-    - name: Build application
-      run: npm run build
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
-    - name: Build installer
-      run: npm run dist
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        CSC_LINK: ${{ secrets.MAC_CERTS }}
-        CSC_KEY_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
-        WIN_CSC_LINK: ${{ secrets.WIN_CERTS }}
-        WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTS_PASSWORD }}
-    
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ needs.release.outputs.upload_url }}
-        asset_path: ./dist/${{ matrix.artifact_name }}${{ matrix.asset_extension }}
-        asset_name: ${{ matrix.artifact_name }}${{ matrix.asset_extension }}
-        asset_content_type: application/octet-stream
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
 
-  publish-docs:
-    name: Publish Documentation
-    needs: release
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v3
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: 20.x
+      # build.rs compiles the MCP sidecar via bun; mcp-server is NOT a root
+      # workspace so its deps need a separate install (see rust-tests.yml).
+      - name: Install MCP sidecar dependencies
+        working-directory: mcp-server
+        run: bun install --frozen-lockfile
 
-    - name: Setup Bun
-      uses: oven-sh/setup-bun@v2
+      - name: Jest unit suite
+        run: bun run test
 
-    - name: Build docs
-      run: |
-        bun install --frozen-lockfile
-        npm run docs:build
-    
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./docs-dist
+      # PTY-host sidecar crates are separate manifests, not workspace members.
+      - name: Test PTY-host sidecar crates
+        working-directory: src-tauri
+        run: |
+          cargo test --manifest-path pty-protocol/Cargo.toml
+          cargo test --manifest-path pty-host/Cargo.toml
+
+      # The release configuration: velopack-updates ON, like build:tauri:pro.
+      - name: Run Rust tests (velopack-updates)
+        working-directory: src-tauri
+        run: cargo test --features velopack-updates
