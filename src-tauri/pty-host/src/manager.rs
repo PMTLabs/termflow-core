@@ -125,9 +125,32 @@ impl SessionManager {
             } => {
                 // Fully delegated: session.attach emits Gap+replay+Exit and
                 // enables live streaming atomically under the ring lock.
+                // NO ack here — a legacy client cannot decode AttachAck.
                 if let Some(s) = self.sessions.get(&tab_id) {
                     s.attach(from_offset);
                 }
+            }
+            Control::AttachAcked {
+                req,
+                tab_id,
+                from_offset,
+            } => {
+                // RP-3 transactional reattach: same wiring as Attach, but confirm
+                // so the GUI can verify each session was re-wired. Only a client
+                // that saw CAP_ATTACH_ACK in the discovery record sends this.
+                let (alive, tail_offset) = match self.sessions.get(&tab_id) {
+                    Some(s) => {
+                        s.attach(from_offset);
+                        (s.is_alive(), s.ring_tail())
+                    }
+                    None => (false, 0),
+                };
+                let _ = self.responses.try_send(Response::AttachAck {
+                    req,
+                    tab_id,
+                    alive,
+                    tail_offset,
+                });
             }
             Control::ArmDetach {
                 req,
@@ -241,6 +264,38 @@ mod tests {
     fn disconnect_without_arm_tears_down() {
         let (mut m, _e, _r) = mgr();
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+    }
+
+    /// RP-3: `AttachAcked` for an UNKNOWN tab must still ack (alive:false) so a
+    /// reattaching GUI is never left waiting on a session that isn't there.
+    #[test]
+    fn attach_acked_unknown_tab_acks_not_alive() {
+        let (mut m, _e, mut r) = mgr();
+        m.handle_control(Control::AttachAcked {
+            req: 7,
+            tab_id: "ghost".into(),
+            from_offset: 0,
+        });
+        match r.try_recv() {
+            Ok(Response::AttachAck { req, tab_id, alive, .. }) => {
+                assert_eq!(req, 7);
+                assert_eq!(tab_id, "ghost");
+                assert!(!alive, "unknown tab must ack alive=false");
+            }
+            other => panic!("expected AttachAck, got {other:?}"),
+        }
+    }
+
+    /// Legacy `Attach` must stay silent — an old client can't decode AttachAck.
+    #[test]
+    fn legacy_attach_never_acks() {
+        let (mut m, _e, mut r) = mgr();
+        m.handle_control(Control::Attach {
+            req: 9,
+            tab_id: "ghost".into(),
+            from_offset: 0,
+        });
+        assert!(r.try_recv().is_err(), "plain Attach must not produce a response");
     }
 
     #[test]

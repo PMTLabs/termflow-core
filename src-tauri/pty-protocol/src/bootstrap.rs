@@ -43,6 +43,11 @@ pub const MAX_HELLO_LEN: usize = 64 * 1024;
 /// Host implements the drain/takeover lifecycle (old host serves its sessions,
 /// rejects new spawns, exits when empty). Absent ⇒ legacy host with no drain.
 pub const CAP_DRAIN: u32 = 1 << 0;
+/// Host understands `Control::AttachAcked` and replies `Response::AttachAck`
+/// (RP-3 transactional reattach). A client must ONLY send `AttachAcked` after
+/// confirming this bit via the discovery record — a legacy host would fail to
+/// decode the unknown variant and drop the connection.
+pub const CAP_ATTACH_ACK: u32 = 1 << 1;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

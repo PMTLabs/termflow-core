@@ -560,6 +560,52 @@ impl<R: Runtime> AppState<R> {
         let pipe = crate::pty_host_client::resolve_pipe();
         let token = crate::pty_host_client::resolve_token();
 
+        // RP-2 discovery: read a running host's advertisement (if any) BEFORE
+        // touching the wire, so we never speak an incompatible protocol at it and
+        // never force-kill sessions we can't control (design 003 §10.3, C3).
+        // No record ⇒ legacy host (or none) on the well-known pipe — v1 as today.
+        let record = crate::pty_host_client::record_path()
+            .and_then(|p| match termflow_pty_protocol::read_record(&p) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[HOTSWAP] unreadable host discovery record ({e}); treating as legacy");
+                    None
+                }
+            });
+        let (pipe, attach_acks) = match crate::pty_host_client::plan_connection(record) {
+            crate::pty_host_client::ConnectPlan::LegacyOrNone => {
+                log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
+                (pipe, false)
+            }
+            crate::pty_host_client::ConnectPlan::Bootstrap {
+                endpoint,
+                version,
+                instance_id,
+                host_caps,
+            } => {
+                let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
+                log::info!(
+                    "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
+                     caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks})"
+                );
+                (endpoint, acks)
+            }
+            crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
+                // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
+                // sidecar path; panes fall back in-process and the running host
+                // keeps serving its (old-app) sessions untouched.
+                log::error!(
+                    "[HOTSWAP] running host instance={instance_id:x} shares no protocol \
+                     version with this app — leaving its sessions untouched"
+                );
+                return Err(
+                    "a PTY host from another TermFlow version owns your terminals; \
+                     close them there or wait for it to drain before new host-owned terminals"
+                        .to_string(),
+                );
+            }
+        };
+
         // Generation for this connection: on_disconnect only nulls `pty_host` if
         // its generation is still current (a dead old client can't clobber a new).
         let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
@@ -613,9 +659,24 @@ impl<R: Runtime> AppState<R> {
         let client = crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, deps)
             .await
             .map_err(|e| e.to_string())?;
+        client.set_attach_acks(attach_acks);
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning.
-        for meta in client.list_sessions().await {
+        let surviving = client.list_sessions().await;
+        if surviving.is_empty() {
+            log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
+        } else {
+            log::info!(
+                "[HOTSWAP] host holds {} surviving session(s): {}",
+                surviving.len(),
+                surviving
+                    .iter()
+                    .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        for meta in surviving {
             self.host_reattach_pending.insert(meta.tab_id, meta.pid);
         }
         *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);

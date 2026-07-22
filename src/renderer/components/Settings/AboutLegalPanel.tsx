@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { BUNDLED_DOCS, LEGAL_LINKS, isLive, BundledDoc } from '../../legal';
 
 /**
@@ -11,6 +11,11 @@ export const AboutLegalPanel: React.FC = () => {
     const [selected, setSelected] = useState<BundledDoc | null>(null);
     const [text, setText] = useState<string>('');
     const [error, setError] = useState<string | null>(null);
+    const [appVersion, setAppVersion] = useState<string | null>(null);
+
+    useEffect(() => {
+        void window.electronAPI?.getAppVersion?.().then((v) => setAppVersion(v)).catch(() => {});
+    }, []);
 
     const view = useCallback(async (doc: BundledDoc) => {
         setSelected(doc);
@@ -41,7 +46,8 @@ export const AboutLegalPanel: React.FC = () => {
         <div className="settings-section">
             <h2>About &amp; Legal</h2>
             <p className="section-description">
-                Agreements and open-source notices bundled with this build.
+                TermFlow{appVersion ? <strong> v{appVersion}</strong> : ''} — agreements and
+                open-source notices bundled with this build.
             </p>
 
             <div className="peers-toolbar">

@@ -198,6 +198,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Velopack auto-update status. 'unavailable'/'notInstalled' ⇒ this build has
     // no updater (or isn't a Velopack install) → the check-for-updates block hides.
     const [updateStatus, setUpdateStatus] = useState<{ state: string; version?: string }>({ state: 'unavailable' });
+    const [appVersion, setAppVersion] = useState<string | null>(null);
     const [checkingUpdate, setCheckingUpdate] = useState(false);
     const [applyingUpdate, setApplyingUpdate] = useState(false);
     const refreshUpdateStatus = useCallback(async () => {
@@ -245,6 +246,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setOffloadArmed(false);
             void refreshHotswapPreflight();
             void refreshUpdateStatus();
+            void window.electronAPI?.getAppVersion?.().then((v) => setAppVersion(v)).catch(() => {});
         }
     }, [activeCategory, refreshHotswapPreflight, refreshUpdateStatus]);
 
@@ -1549,6 +1551,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const renderUpdates = () => (
         <div className="settings-section">
             <h2>Updates</h2>
+            {appVersion && (
+                <p className="help-text" style={{ marginTop: 0 }}>
+                    Current version: <strong>v{appVersion}</strong>
+                </p>
+            )}
             {(updateStatus.state === 'upToDate' || updateStatus.state === 'available') && (
                 <div className="setting-item">
                     <label className="setting-label">Application updates</label>

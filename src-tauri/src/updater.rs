@@ -78,6 +78,7 @@ fn apply(info: UpdateInfo) -> Result<(), String> {
 pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), String> {
     // Fresh survivability preflight immediately before we commit (H1): if any
     // terminal is in-process / the sidecar can't survive, refuse now.
+    log::info!("[UPDATE] update_and_restart: running survivability preflight");
     crate::commands::hotswap_preflight(state)?;
 
     // Check + download off the async runtime.
@@ -88,6 +89,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         Some(i) => i,
         None => return Err("no update available".to_string()),
     };
+    log::info!(
+        "[UPDATE] downloaded {}; arming host before apply",
+        info.TargetFullRelease.Version
+    );
 
     // Arm the host so shells survive, and wait for the ack BEFORE applying.
     let client = state
@@ -106,9 +111,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         .map_err(|e| e.to_string())
         .and_then(|r| r)
     {
+        log::warn!("[UPDATE] updater failed to launch after arming ({e}); disarming");
         client.disarm().await;
         return Err(e);
     }
+    log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     state.app_handle.exit(0);
     Ok(())
 }

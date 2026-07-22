@@ -190,7 +190,14 @@ async fn create_host_terminal(
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
         register_host_terminal(state, &id, pid, &shell_name, cols, rows);
-        client.attach(&id, 0);
+        // RP-3: transactional when the host supports it (AttachAck), silently
+        // legacy otherwise. A confirmed-dead session still completes reattach —
+        // the replayed ring + Exit tombstone render the final state honestly.
+        match client.attach_confirmed(&id, 0).await {
+            Some(true) => log::info!("[HOTSWAP] reattached {id} (pid {pid}, host-confirmed alive)"),
+            Some(false) => log::warn!("[HOTSWAP] reattached {id} but host reports it not alive"),
+            None => log::info!("[HOTSWAP] reattached {id} (pid {pid}, legacy attach)"),
+        }
         client.nudge_repaint(&id, cols, rows);
         stage_scrollback(state, &id, &id);
         return Ok(id);
