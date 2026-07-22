@@ -149,3 +149,8 @@ scratch/
 
 # bun transient build artifacts
 *.bun-build
+signing
+
+# Velopack packaging outputs (publish-windows.ps1 / publish-macos.sh)
+/releases/
+/publish/
