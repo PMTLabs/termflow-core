@@ -51,10 +51,13 @@ export const AboutLegalPanel: React.FC = () => {
             </p>
 
             <div className="peers-toolbar">
-                {BUNDLED_DOCS.map((d) => (
-                    <button key={d.file} className="link-btn" onClick={() => { void view(d); }}>
-                        {d.title}
-                    </button>
+                {BUNDLED_DOCS.map((d, i) => (
+                    <React.Fragment key={d.file}>
+                        {i > 0 && <span className="legal-doc-separator" aria-hidden="true">|</span>}
+                        <button className="link-btn" onClick={() => { void view(d); }}>
+                            {d.title}
+                        </button>
+                    </React.Fragment>
                 ))}
             </div>
 

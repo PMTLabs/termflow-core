@@ -1040,6 +1040,12 @@ input.setting-input[type="number"] {
 }
 .link-btn.inline { display: inline; }
 
+/* Divider between the bundled legal-doc links in About & Legal */
+.legal-doc-separator {
+  color: #555;
+  user-select: none;
+}
+
 .apply-btn { margin-top: 1.25rem; }
 
 /* ---- MCP connect modal --------------------------------------------------- */
