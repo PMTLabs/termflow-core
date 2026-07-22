@@ -55,6 +55,11 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
+      # Jest resolves @termflow/terminal-core to the workspace package's built
+      # dist/ — build it first (locally it already exists; CI starts clean).
+      - name: Build terminal-core package
+        run: bun run build:terminal-core
+
       - name: Jest unit suite
         run: bun run test
 
