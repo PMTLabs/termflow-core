@@ -668,27 +668,9 @@ fn history_db_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     Some(dir.join(name))
 }
 
-/// Persist one terminal's RENDERED screen under its renderer id (tab_id).
-/// Skips terminals that are gone or have no renderer id (e.g. API-created PTYs).
-///
-/// We persist the authoritative vt100 parser's FULL buffer (scrollback + visible
-/// screen) rendered as styled lines — NOT the raw PTY byte stream. Raw replay is
-/// broken for full-screen TUIs (codex, vim, htop): they redraw in place with absolute
-/// cursor addressing + screen clears sized to the old terminal, so concatenating the
-/// raw chunks into a fresh, possibly resized xterm paints garbage. The parser has
-/// already resolved every chunk (fed unconditionally in the output consumer, before
-/// the history filter) into a flat grid plus scrollback; rendering each row as its own
-/// line (no screen-clear) reproduces the entire session history. 2J-cleared transient
-/// frames never enter scrollback, so this stays TUI-safe (see render_full_scrollback).
-fn persist_terminal_history(state: &AppState, id: &str, now_ms: i64) {
-    let Some(tab_id) = state.terminals.get(id).and_then(|t| t.tab_id.clone()) else { return };
-    // Skip when the parser is absent or the whole buffer is blank (brand-new or
-    // already-cleared terminal) so we never persist a blank blob that would replay as
-    // an empty "session restored" divider with nothing above it.
-    let Some(snapshot) = state.full_scrollback_snapshot(id) else { return };
-    let blob = String::from_utf8_lossy(&snapshot).into_owned();
-    state.history_store.upsert(&tab_id, std::slice::from_ref(&blob), now_ms);
-}
+// NOTE: the per-terminal persist logic lives in `AppState::persist_terminal_history`
+// (state.rs) so the session-exit paths there can flush a dying terminal's final
+// output before `cleanup_terminal_state` discards its parser.
 
 /// Drain the dirty set, writing each changed terminal once (called every 30s).
 fn flush_dirty_history(state: &AppState) {
@@ -696,7 +678,7 @@ fn flush_dirty_history(state: &AppState) {
     let ids: Vec<String> = state.history_dirty.iter().map(|e| e.key().clone()).collect();
     for id in ids {
         state.history_dirty.remove(&id);
-        persist_terminal_history(state, &id, now);
+        state.persist_terminal_history(&id, now);
     }
 }
 
@@ -706,7 +688,7 @@ fn flush_all_history(state: &AppState) {
     let now = chrono::Utc::now().timestamp_millis();
     let ids: Vec<String> = state.terminals.iter().map(|e| e.key().clone()).collect();
     for id in ids {
-        persist_terminal_history(state, &id, now);
+        state.persist_terminal_history(&id, now);
     }
 }
 

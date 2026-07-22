@@ -76,6 +76,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # NEVER cache ~/.cargo/bin: rust-cache's post step prunes that dir back
+          # to its cached snapshot. On the PERSISTENT self-hosted Windows runner
+          # that is the real user profile — every job ended by deleting the dev
+          # box's restored rustup.exe, which then failed the NEXT run's
+          # "Verify Rust toolchain" step (recurring since ~Jul 2).
+          cache-bin: "false"
 
       # The PTY-host sidecar crates (pty-host / pty-protocol) are separate
       # manifests, NOT workspace members, so `cargo test` in src-tauri does not

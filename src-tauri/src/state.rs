@@ -198,6 +198,12 @@ pub struct AppState<R: Runtime = Wry> {
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
     pub replay_prefix: Arc<DashMap<String, String>>,
+    // Per-terminal serialization for history persistence (review 062): held across
+    // snapshot→render→upsert so write order always matches snapshot order (a slow
+    // periodic-flush render can't overwrite a newer exit snapshot), and taken by
+    // close_terminal around cleanup+row-delete so an in-flight persist can't
+    // resurrect an explicitly-deleted row.
+    pub history_persist_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to
@@ -270,6 +276,7 @@ impl<R: Runtime> Clone for AppState<R> {
             history_store: self.history_store.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
+            history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
@@ -334,6 +341,7 @@ impl<R: Runtime> AppState<R> {
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
+            history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
@@ -522,6 +530,48 @@ impl<R: Runtime> AppState<R> {
         render_full_scrollback(&mut screen)
     }
 
+    /// Persist one terminal's RENDERED scrollback under its renderer id (tab_id).
+    /// Skips terminals that are gone or have no renderer id (e.g. API-created PTYs).
+    ///
+    /// We persist the authoritative vt100 parser's FULL buffer (scrollback + visible
+    /// screen) rendered as styled lines — NOT the raw PTY byte stream. Raw replay is
+    /// broken for full-screen TUIs (codex, vim, htop): they redraw in place with absolute
+    /// cursor addressing + screen clears sized to the old terminal, so concatenating the
+    /// raw chunks into a fresh, possibly resized xterm paints garbage. The parser has
+    /// already resolved every chunk (fed unconditionally in the output consumer, before
+    /// the history filter) into a flat grid plus scrollback; rendering each row as its own
+    /// line (no screen-clear) reproduces the entire session history. 2J-cleared transient
+    /// frames never enter scrollback, so this stays TUI-safe (see render_full_scrollback).
+    ///
+    /// Called from the periodic dirty flush (lib.rs) and from every session-exit
+    /// path BEFORE `cleanup_terminal_state`, so a dying session's final output
+    /// (since the last 30s flush) still reaches the store.
+    pub fn persist_terminal_history(&self, id: &str, now_ms: i64) {
+        // Serialize per-terminal across snapshot→render→upsert (review 062): without
+        // this, a slow periodic-flush render could finish AFTER a newer exit-path
+        // persist and overwrite the final row with older content — permanently,
+        // since a dead terminal is never persisted again.
+        let guard_arc = self.history_persist_guard(id);
+        let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tab_id) = self.terminals.get(id).and_then(|t| t.tab_id.clone()) else { return };
+        // Skip when the parser is absent or the whole buffer is blank (brand-new or
+        // already-cleared terminal) so we never persist a blank blob that would replay as
+        // an empty "session restored" divider with nothing above it.
+        let Some(snapshot) = self.full_scrollback_snapshot(id) else { return };
+        let blob = String::from_utf8_lossy(&snapshot).into_owned();
+        self.history_store.upsert(&tab_id, std::slice::from_ref(&blob), now_ms);
+    }
+
+    /// The per-terminal persistence lock (see `history_persist_locks`). The Arc is
+    /// cloned and the DashMap shard guard dropped BEFORE the caller locks the inner
+    /// mutex — never hold a shard guard across an inner lock (output-pipeline rule).
+    pub fn history_persist_guard(&self, id: &str) -> Arc<Mutex<()>> {
+        self.history_persist_locks
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
+
     /// Get a terminal's history buffer handle. Clones the Arc and DROPS the
     /// DashMap shard guard before returning, so callers can lock the inner
     /// Mutex without holding any shard lock (see terminal_history field note).
@@ -622,6 +672,10 @@ impl<R: Runtime> AppState<R> {
                 // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
                     .or_else(|| st_exit.terminal_cwds.get(&tab_id).map(|r| r.value().clone()));
+                // Persist the final parser state BEFORE cleanup discards it — the
+                // periodic flush only runs every 30s, so without this the session's
+                // last moments never reach the history store.
+                st_exit.persist_terminal_history(&tab_id, chrono::Utc::now().timestamp_millis());
                 st_exit.host_terminals.remove(&tab_id);
                 st_exit.cleanup_terminal_state(&tab_id);
                 let _ = st_exit.app_handle.emit(
@@ -645,6 +699,8 @@ impl<R: Runtime> AppState<R> {
                 let ids: Vec<String> =
                     st_disc.host_terminals.iter().map(|e| e.key().clone()).collect();
                 for id in ids {
+                    // Same as on_exit: capture the final parser state before cleanup.
+                    st_disc.persist_terminal_history(&id, chrono::Utc::now().timestamp_millis());
                     st_disc.host_terminals.remove(&id);
                     st_disc.cleanup_terminal_state(&id);
                     let _ = st_disc.app_handle.emit(
@@ -859,6 +915,9 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
+        // The persist guard entry too (a late persist may re-create it via
+        // or_default; that's harmless — it then no-ops on the missing terminal).
+        self.history_persist_locks.remove(id);
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
         // in the routing set after its state is torn down.
         self.host_terminals.remove(id);
@@ -1141,5 +1200,34 @@ mod scrollback_tests {
     fn blank_terminal_snapshot_is_none() {
         let mut p = vt100::Parser::new(24, 80, 1000);
         assert!(render_full_scrollback(p.screen_mut()).is_none());
+    }
+
+    /// The scrollback-persistence ratchet regression (docs: partial-scrollback bug):
+    /// a fresh parser seeded with the previous session's persisted dump plus the
+    /// replay separator — exactly what stage_scrollback feeds it — must re-dump
+    /// BOTH sessions, so the next flush preserves restored history instead of
+    /// overwriting it with only post-restart content. Also pins that the separator
+    /// itself never wipes the seed (e.g. if it ever grew a 2J).
+    #[test]
+    fn seeded_restore_prefix_survives_reflush() {
+        // Session 1: 100 lines scroll off a 24-row screen, then get dumped.
+        let mut p1 = vt100::Parser::new(24, 80, 5000);
+        for i in 0..100 {
+            p1.process(format!("old-line-{:04}\r\n", i).as_bytes());
+        }
+        let blob1 = render_full_scrollback(p1.screen_mut()).expect("session 1 dump");
+
+        // App restart: fresh parser, seeded with dump + separator, then new output.
+        let mut p2 = vt100::Parser::new(24, 80, 5000);
+        p2.process(&blob1);
+        p2.process(super::REPLAY_SEPARATOR.as_bytes());
+        p2.process(b"new-session output\r\n");
+
+        let blob2 = render_full_scrollback(p2.screen_mut()).expect("session 2 dump");
+        let text = String::from_utf8_lossy(&blob2);
+        assert!(text.contains("old-line-0000"), "oldest restored line must survive reflush:\n{text}");
+        assert!(text.contains("old-line-0099"), "newest restored line must survive reflush:\n{text}");
+        assert!(text.contains("session restored"), "divider must be part of the re-dump:\n{text}");
+        assert!(text.contains("new-session output"), "new session's output must follow:\n{text}");
     }
 }

@@ -662,15 +662,27 @@ fn find_utf8_boundary(data: &[u8]) -> usize {
     0
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_terminal(
-    app_state: AppState, 
-    cols: u16, 
-    rows: u16, 
-    shell_path: Option<String>, 
-    shell_args: Option<Vec<String>>, 
+    app_state: AppState,
+    cols: u16,
+    rows: u16,
+    shell_path: Option<String>,
+    shell_args: Option<Vec<String>>,
     cwd: Option<String>,
     shell_name: String,
-    terminal_name: String
+    terminal_name: String,
+    // Stable renderer id (tb-…) this terminal persists history under. Registered
+    // WITH the Terminal before the reader thread starts: a caller patching it in
+    // after spawn returns would race a fast-exiting shell's exit-path persist,
+    // which would then file the final scrollback under the ephemeral pc- id
+    // (review 062 agy F-01). None (API/fleet callers) keeps the pc- id default.
+    tab_id: Option<String>,
+    // Restored scrollback (blob + divider) to seed the fresh parser with, BEFORE
+    // the reader thread starts — so persisted history precedes live output and the
+    // next flush preserves it instead of overwriting the stored row with only this
+    // session's content (the scrollback-persistence "ratchet" bug).
+    history_seed: Option<String>,
 ) -> Result<String, String> {
     let pty_system = NativePtySystem::default();
     
@@ -801,6 +813,12 @@ pub fn spawn_terminal(
     // Initialize the authoritative screen parser (source of truth for hydration)
     app_state.init_screen(&id, rows, cols);
 
+    // Seed restored scrollback into the fresh parser now — after init_screen,
+    // before the reader thread below can deliver any live output.
+    if let Some(seed) = &history_seed {
+        app_state.feed_screen(&id, seed.as_bytes());
+    }
+
     // Register the terminal LAST: `terminals` is the existence gate for the
     // close/delete paths, so nothing may be observable until the writer, pty
     // master, and screen parser are all in place — otherwise a concurrent
@@ -815,7 +833,7 @@ pub fn spawn_terminal(
         cols,
         rows,
         backend: TerminalBackend::PortablePty,
-        tab_id: Some(id.clone()),
+        tab_id: Some(tab_id.unwrap_or_else(|| id.clone())),
         last_input_source: None,
         last_input_at: None,
     });
@@ -884,6 +902,13 @@ pub fn spawn_terminal(
         // shell's final directory is knowable. The renderer needs it to restart
         // the session in place (it cannot read it back afterwards).
         let exit_cwd = exit_cwd_for(&app_state.terminal_cwds, &thread_id);
+
+        // Persist the final parser state BEFORE cleanup discards it — the periodic
+        // flush only runs every 30s, so without this the session's last moments
+        // never reach the history store. Harmless for explicit closes: close_terminal
+        // deletes the row afterwards (a sub-ms interleave could leave an orphan row,
+        // which the startup prune sweeps).
+        app_state.persist_terminal_history(&thread_id, chrono::Utc::now().timestamp_millis());
 
         // Cleanup on exit
         log::info!("Terminal {} process exited, cleaning up state", thread_id);
