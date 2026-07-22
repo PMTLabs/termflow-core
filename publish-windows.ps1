@@ -55,6 +55,7 @@ param(
     [string]$InfisicalProjectId = $env:INFISICAL_PROJECT_ID,
     [string]$InfisicalEnv       = $(if ($env:INFISICAL_ENV) { $env:INFISICAL_ENV } else { "dev" }),
     [string]$InfisicalPath      = $(if ($env:INFISICAL_PATH) { $env:INFISICAL_PATH } else { "/machine" }),
+    [switch]$Msi,
     [switch]$Unsigned,
     [switch]$SkipSmoke
 )
@@ -177,17 +178,19 @@ if ($Unsigned) {
 }
 
 # ─── Stage 5: vpk pack (project-local vpk 1.2.0) ─────────────────────────────
-# Produces the per-user Velopack installer TermFlow-win-Setup.exe (manifest
-# requestedExecutionLevel=asInvoker) — it installs to %LOCALAPPDATA%\TermFlow
-# with NO elevation / UAC prompt, which is also what makes the per-user hot-swap
-# work. We deliberately do NOT pass vpk's `--msi`: that MSI is machine-wide and
-# REQUIRES elevation, defeating the no-admin requirement. There is no non-elevated
-# MSI in Velopack — the per-user installer is the Setup.exe.
+# Always produces the per-user installer TermFlow-win-Setup.exe (manifest
+# requestedExecutionLevel=asInvoker) — installs to %LOCALAPPDATA%\TermFlow with NO
+# elevation / UAC, which is also what makes the per-user hot-swap work.
+# -Msi additionally emits a machine-wide .msi bootstrap package. That MSI installs
+# for all users and DOES require elevation (there is no per-user MSI in Velopack);
+# it is opt-in so the no-admin Setup.exe stays the default. Both artifacts are
+# signed by the same Azure Trusted Signing pass.
 Write-Host ""
-Write-Host "=== Stage 5: vpk pack ===" -ForegroundColor Yellow
+Write-Host "=== Stage 5: vpk pack$(if ($Msi) { ' (+ machine-wide MSI)' }) ===" -ForegroundColor Yellow
 dotnet tool restore | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleasesDir | Out-Null
 
+$MsiArgs = if ($Msi) { @("--msi") } else { @() }
 $VpkArgs = @(
     "vpk", "pack",
     "--packId",      $PackId,
@@ -197,7 +200,7 @@ $VpkArgs = @(
     "--mainExe",     $MainExe,
     "--icon",        $Icon,
     "--outputDir",   $ReleasesDir
-) + $SignArgs
+) + $MsiArgs + $SignArgs
 
 & dotnet @VpkArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "vpk pack failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
