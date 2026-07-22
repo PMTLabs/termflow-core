@@ -1,6 +1,58 @@
 #[cfg(windows)]
 const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 
+/// True when this process runs from a Velopack install (`<root>\current\
+/// termflow.exe` with the updater stub at `<root>\Update.exe`). Dev builds run
+/// from the repo target dir and portable unzips lack Update.exe → false.
+#[cfg(windows)]
+fn is_velopack_install() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent()
+                .and_then(|cur| cur.parent())
+                .map(|root| root.join("Update.exe").exists())
+        })
+        .unwrap_or(false)
+}
+
+/// Shell identity for THIS instance: (AUMID, Start-menu .lnk name, display
+/// name). The INSTALLED app owns the canonical identity; a dev/portable build
+/// gets a separate ".dev" identity so its always-rewritten toast shortcut can
+/// never hijack the installed app's Start-menu entry (which once left "TermFlow"
+/// launching a repo `target\release` exe).
+#[cfg(windows)]
+fn shell_identity(installed: bool) -> (&'static str, &'static str, &'static str) {
+    if installed {
+        (APP_USER_MODEL_ID, "TermFlow.lnk", "TermFlow")
+    } else {
+        ("app.termflow.desktop.dev", "TermFlow Dev.lnk", "TermFlow Dev")
+    }
+}
+
+#[cfg(all(test, windows))]
+mod shell_identity_tests {
+    use super::shell_identity;
+
+    #[test]
+    fn installed_owns_canonical_identity() {
+        let (aumid, lnk, name) = shell_identity(true);
+        assert_eq!(aumid, "app.termflow.desktop");
+        assert_eq!(lnk, "TermFlow.lnk");
+        assert_eq!(name, "TermFlow");
+    }
+
+    /// The hijack regression: a non-installed build must NEVER write the
+    /// installed app's shortcut or share its AUMID.
+    #[test]
+    fn dev_identity_is_fully_separate() {
+        let (aumid, lnk, name) = shell_identity(false);
+        assert_ne!(aumid, "app.termflow.desktop");
+        assert_ne!(lnk, "TermFlow.lnk");
+        assert_ne!(name, "TermFlow");
+    }
+}
+
 #[cfg(windows)]
 fn ensure_start_menu_shortcut() -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -18,15 +70,18 @@ fn ensure_start_menu_shortcut() -> Result<(), String> {
     use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
+    let (aumid, lnk_name, description) = shell_identity(is_velopack_install());
     let app_data = std::env::var_os("APPDATA")
         .ok_or_else(|| "APPDATA is not set; cannot create notification shortcut".to_string())?;
     let shortcut_path = std::path::PathBuf::from(app_data)
-        .join(r"Microsoft\Windows\Start Menu\Programs\TermFlow.lnk");
-    // Always (re)write the shortcut rather than skip-if-exists. The process sets
-    // an explicit AUMID, so the taskbar sources the window's icon from THIS
+        .join(r"Microsoft\Windows\Start Menu\Programs")
+        .join(lnk_name);
+    // Always (re)write OUR OWN shortcut rather than skip-if-exists. The process
+    // sets an explicit AUMID, so the taskbar sources the window's icon from THIS
     // shortcut — and a stale target (e.g. the exe was renamed) leaves that icon
     // generic because it can no longer be resolved. Rewriting every launch keeps
-    // the target + icon pointed at the CURRENT exe.
+    // the target + icon pointed at the CURRENT exe. `shell_identity` guarantees a
+    // dev/portable build rewrites "TermFlow Dev.lnk", never the installed app's.
 
     if let Some(parent) = shortcut_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -40,13 +95,13 @@ fn ensure_start_menu_shortcut() -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("failed to resolve executable for notification shortcut: {e}"))?;
     let exe_wide: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
-    let description_wide: Vec<u16> = "TermFlow".encode_utf16().chain(Some(0)).collect();
+    let description_wide: Vec<u16> = description.encode_utf16().chain(Some(0)).collect();
     let shortcut_wide: Vec<u16> = shortcut_path
         .as_os_str()
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let mut aumid_wide: Vec<u16> = APP_USER_MODEL_ID.encode_utf16().chain(Some(0)).collect();
+    let mut aumid_wide: Vec<u16> = aumid.encode_utf16().chain(Some(0)).collect();
 
     // CoInitializeEx returns S_FALSE when COM was already initialized in this
     // apartment; that still requires a matching CoUninitialize. If another
@@ -141,12 +196,11 @@ pub fn register_app_for_notifications() -> Result<(), String> {
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows_registry::CURRENT_USER;
 
+    let (aumid, _lnk, display_name) = shell_identity(is_velopack_install());
     let key = CURRENT_USER
-        .create(format!(
-            r"SOFTWARE\Classes\AppUserModelId\{APP_USER_MODEL_ID}"
-        ))
+        .create(format!(r"SOFTWARE\Classes\AppUserModelId\{aumid}"))
         .map_err(|e| e.to_string())?;
-    key.set_string("DisplayName", "TermFlow")
+    key.set_string("DisplayName", display_name)
         .map_err(|e| e.to_string())?;
     key.set_string("IconBackgroundColor", "0")
         .map_err(|e| e.to_string())?;
@@ -159,7 +213,7 @@ pub fn register_app_for_notifications() -> Result<(), String> {
 
     // SAFETY: the HSTRING supplies a valid, NUL-terminated immutable string for
     // the duration of the call. This sets process shell identity only.
-    unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_USER_MODEL_ID)) }
+    unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(aumid)) }
         .map_err(|e| e.to_string())?;
 
     ensure_start_menu_shortcut()
@@ -262,9 +316,10 @@ pub fn show_activity_notification(
 
     // Show only queues delivery. The Failed handler observes asynchronous WinRT
     // failures, but Windows can still suppress a toast without reporting one.
-    let notifier =
-        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_USER_MODEL_ID))
-            .map_err(|e| e.to_string())?;
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+        shell_identity(is_velopack_install()).0,
+    ))
+    .map_err(|e| e.to_string())?;
     notifier.Show(&toast).map_err(|e| e.to_string())
 }
 
