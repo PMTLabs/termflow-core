@@ -25,6 +25,15 @@
 .PARAMETER Version
     Semantic version (default 1.0.0). Must increase for auto-update to apply.
 
+.PARAMETER Arch
+    Target CPU: x64 (default) or arm64. arm64 cross-compiles to
+    aarch64-pc-windows-msvc (needs the MSVC ARM64 build tools installed) and packs
+    under the win-arm64 Velopack channel so its feed never collides with x64.
+
+.PARAMETER Msi
+    Also emit a machine-wide TermFlow-win.msi (elevated) alongside the per-user
+    Setup.exe. Both are signed. Off by default (the no-admin Setup.exe is primary).
+
 .PARAMETER InfisicalProjectId
     Infisical project id to read the Azure secrets from. Defaults to
     $env:INFISICAL_PROJECT_ID. Not needed if the repo has an .infisical.json
@@ -55,6 +64,8 @@ param(
     [string]$InfisicalProjectId = $env:INFISICAL_PROJECT_ID,
     [string]$InfisicalEnv       = $(if ($env:INFISICAL_ENV) { $env:INFISICAL_ENV } else { "dev" }),
     [string]$InfisicalPath      = $(if ($env:INFISICAL_PATH) { $env:INFISICAL_PATH } else { "/machine" }),
+    [ValidateSet("x64", "arm64")]
+    [string]$Arch = "x64",
     [switch]$Msi,
     [switch]$Unsigned,
     [switch]$SkipSmoke
@@ -66,8 +77,19 @@ $ErrorActionPreference = "Stop"
 $env:DOTNET_ROLL_FORWARD = "LatestMajor"
 
 $ScriptDir   = $PSScriptRoot
-$RelDir      = Join-Path $ScriptDir "src-tauri\target\release"
-$StageDir    = Join-Path $ScriptDir "publish\win-x64"
+# Arch mapping. x64 builds native to target\release. arm64 cross-compiles to
+# target\aarch64-pc-windows-msvc\release — which requires BOTH the Rust target
+# (`rustup target add aarch64-pc-windows-msvc`, already present) AND the MSVC
+# ARM64 build tools (VS component Microsoft.VisualStudio.Component.VC.Tools.ARM64);
+# without the ARM64 linker the cross-compile fails at link time. arm64 also packs
+# under a distinct Velopack channel so its feed never collides with x64.
+$ArchMap = @{
+    x64   = @{ BuildScript = "build:tauri:pro";      RelSub = "src-tauri\target\release";                         Channel = $null;       HostArch = "AMD64" }
+    arm64 = @{ BuildScript = "build:tauri:pro:arm64"; RelSub = "src-tauri\target\aarch64-pc-windows-msvc\release"; Channel = "win-arm64"; HostArch = "ARM64" }
+}
+$A = $ArchMap[$Arch]
+$RelDir      = Join-Path $ScriptDir $A.RelSub
+$StageDir    = Join-Path $ScriptDir "publish\win-$Arch"
 $ReleasesDir = Join-Path $ScriptDir "releases"
 $Metadata    = Join-Path $ScriptDir "signing\metadata.json"
 $Icon        = Join-Path $ScriptDir "src-tauri\icons\icon.ico"
@@ -98,27 +120,31 @@ $AzureSecretMap = [ordered]@{
     "AZURE_ARTIFACT_SIGNING_TENANT_ID" = "AZURE_TENANT_ID"
 }
 
-Write-Host "=== TermFlow Windows Publish ===" -ForegroundColor Cyan
+Write-Host "=== TermFlow Windows Publish ($Arch) ===" -ForegroundColor Cyan
 Write-Host "    Version : $Version"
 Write-Host "    Output  : $ReleasesDir\"
 Write-Host ""
 
 # ─── Stage 1: Tauri release build (+ all sidecars) ────────────────────────────
-Write-Host "=== Stage 1: bun run build:tauri:pro ===" -ForegroundColor Yellow
-bun run build:tauri:pro
-if ($LASTEXITCODE -ne 0) { Write-Error "build:tauri:pro failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
+Write-Host "=== Stage 1: bun run $($A.BuildScript) ===" -ForegroundColor Yellow
+bun run $($A.BuildScript)
+if ($LASTEXITCODE -ne 0) { Write-Error "$($A.BuildScript) failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
 
 # ─── Stage 2: startup smoke test (gate) ──────────────────────────────────────
-if (-not $SkipSmoke) {
+# Only meaningful when the built binary can actually run on this host — an arm64
+# binary won't launch on an x64 machine, so smoke is auto-skipped there.
+$CanSmoke = ($env:PROCESSOR_ARCHITECTURE -eq $A.HostArch)
+if ($SkipSmoke -or -not $CanSmoke) {
+    $why = if (-not $CanSmoke) { " (can't run $Arch on $($env:PROCESSOR_ARCHITECTURE) host)" } else { " (-SkipSmoke)" }
+    Write-Host "=== Stage 2: smoke test SKIPPED$why ===" -ForegroundColor DarkYellow
+} else {
     Write-Host ""
     Write-Host "=== Stage 2: startup smoke test ===" -ForegroundColor Yellow
-    bun run smoke:release
+    bun scripts/smoke-test-release.mjs (Join-Path $RelDir "termflow.exe")
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Smoke test failed — the built app did not launch cleanly. Refusing to package."
         exit $LASTEXITCODE
     }
-} else {
-    Write-Host "=== Stage 2: smoke test SKIPPED (-SkipSmoke) ===" -ForegroundColor DarkYellow
 }
 
 # ─── Stage 3: assemble a clean payload dir ───────────────────────────────────
@@ -190,7 +216,8 @@ Write-Host "=== Stage 5: vpk pack$(if ($Msi) { ' (+ machine-wide MSI)' }) ===" -
 dotnet tool restore | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleasesDir | Out-Null
 
-$MsiArgs = if ($Msi) { @("--msi") } else { @() }
+$MsiArgs     = if ($Msi) { @("--msi") } else { @() }
+$ChannelArgs = if ($A.Channel) { @("--channel", $A.Channel) } else { @() }
 $VpkArgs = @(
     "vpk", "pack",
     "--packId",      $PackId,
@@ -200,7 +227,7 @@ $VpkArgs = @(
     "--mainExe",     $MainExe,
     "--icon",        $Icon,
     "--outputDir",   $ReleasesDir
-) + $MsiArgs + $SignArgs
+) + $ChannelArgs + $MsiArgs + $SignArgs
 
 & dotnet @VpkArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "vpk pack failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
