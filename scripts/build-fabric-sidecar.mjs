@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
 function sha256(path) {
@@ -120,18 +120,27 @@ function main() {
   // Ship the fabric's actual FSL license text in the Pro bundle (FSL Redistribution
   // clause: include a copy of the Terms). `legal/LICENSE-fabric-fsl.txt` is bundled as a
   // resource by tauri.pro.conf.json; overwrite the committed placeholder with the real one.
+  // The fabric LICENSE is the canonical FSL *Markdown*; the About & Legal panel renders
+  // plain <pre> text, so strip the heading markers when staging (`##` sections uppercased
+  // to keep the hierarchy readable, matching the other legal .txt docs).
   const fabricLicense = join(fabricDir, 'LICENSE');
   if (existsSync(fabricLicense)) {
     const legalDir = join(rootDir, 'legal');
     mkdirSync(legalDir, { recursive: true });
     const licenseOutFile = join(legalDir, 'LICENSE-fabric-fsl.txt');
-    // Same mtime-churn concern as the binary above: this is also a bundled
-    // resource watched by tauri-build's `cargo:rerun-if-changed`.
-    if (existsSync(licenseOutFile) && sha256(licenseOutFile) === sha256(fabricLicense)) {
+    const plainText = readFileSync(fabricLicense, 'utf8').replace(
+      /^(#{1,3}) (.+)$/gm,
+      (_m, hashes, title) => (hashes.length === 2 ? title.toUpperCase() : title),
+    );
+    // Same mtime-churn concern as the binary above: this is also a bundled resource
+    // watched by tauri-build's `cargo:rerun-if-changed`. Compare with line endings
+    // normalized so a CRLF checkout of the committed file doesn't force a rewrite.
+    const normalize = (s) => s.replace(/\r\n/g, '\n');
+    if (existsSync(licenseOutFile) && normalize(readFileSync(licenseOutFile, 'utf8')) === normalize(plainText)) {
       console.log('[build:fabric-sidecar] LICENSE unchanged');
     } else {
-      copyFileSync(fabricLicense, licenseOutFile);
-      console.log('[build:fabric-sidecar] copied fabric LICENSE -> legal/LICENSE-fabric-fsl.txt');
+      writeFileSync(licenseOutFile, plainText);
+      console.log('[build:fabric-sidecar] staged plain-text fabric LICENSE -> legal/LICENSE-fabric-fsl.txt');
     }
   } else {
     console.warn(`[build:fabric-sidecar] fabric LICENSE not found at ${fabricLicense}; keeping placeholder`);
