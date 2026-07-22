@@ -1,105 +1,100 @@
 #!/bin/bash
 set -e
 # ─────────────────────────────────────────────────────────────────────────────
-# publish-macos.sh — Build, smoke-test, and package TermFlow for macOS via
-# Velopack (vpk), Developer-ID signed + notarized.
+# publish-macos.sh — Build, Developer-ID sign, and notarize TermFlow for macOS
+# via Velopack. Validated end-to-end on the PMT Labs Mac (2026-07-21):
+# TermFlow-osx-Setup.pkg came out signed + notarized + stapled + spctl-accepted.
 #
-# Modeled on rephlo-desktop/publish-macos.sh, adapted for Tauri. Unlike Windows
-# (Azure Trusted Signing, creds from Infisical), macOS signs with Apple
-# Developer-ID certs already in the login keychain + a notarytool keychain
-# profile — so there are NO Infisical/Azure secrets here.
+# Unlike Windows (Azure Trusted Signing, creds from Infisical), macOS signs with
+# Apple Developer-ID certs in the login keychain + a notarytool keychain profile.
 #
-# Usage:
-#   ./publish-macos.sh [VERSION]
+# Prereqs (all present on the PMT Labs Mac):
+#   - Developer ID Application + Developer ID Installer identities in the login
+#     keychain (team 68M75D67LJ).
+#   - notarytool profile "termflow-notary" (App Store Connect .p8). Create once:
+#       xcrun notarytool store-credentials termflow-notary \
+#         --key ~/key/AuthKey_33Y825QZ7R.p8 --key-id 33Y825QZ7R \
+#         --issuer d0e5f0c0-fac5-4f41-98ce-aeb6abe4b609
+#   - The login keychain UNLOCKED (codesign needs it non-interactively). Either
+#     run this from a GUI console session, or export MAC_PWD (the login-keychain
+#     password) before running — e.g. the orchestrator pipes it in from Infisical
+#     (env dev, /machine). MAC_PWD is used only to unlock; never echoed.
 #
-# Production signing env vars (all three ⇒ sign + notarize; PMT Labs team 68M75D67LJ):
-#   SIGN_APP_IDENTITY        e.g. "Developer ID Application: PMT Labs LLC (68M75D67LJ)"
-#   SIGN_INSTALLER_IDENTITY  e.g. "Developer ID Installer: PMT Labs LLC (68M75D67LJ)"
-#   NOTARY_PROFILE           xcrun notarytool keychain profile name
-#
-# ⚠️ VERIFY-ON-MAC: the Tauri→Velopack packaging path differs from rephlo's
-# `dotnet publish`. The two Tauri-specific spots flagged below (where the .app is
-# produced, and what --packDir vpk consumes) must be confirmed on the Mac; the
-# rest mirrors the proven rephlo flow.
+# Usage:  ./publish-macos.sh [VERSION]
+#         MAC_PWD=... ./publish-macos.sh 1.2.0
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERSION="${1:-1.0.0}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Tools are not on a non-interactive shell's PATH (bun in ~/.bun, dotnet in
+# /usr/local/share/dotnet, cargo in ~/.cargo, brew node in /opt/homebrew) — add
+# them explicitly so this works over SSH as well as from a terminal.
+export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/share/dotnet:$PATH"
+export DOTNET_ROLL_FORWARD="LatestMajor"
+
+APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/release/bundle/macos/TermFlow.app"
 RELEASES_DIR="$SCRIPT_DIR/releases"
 ICON="$SCRIPT_DIR/src-tauri/icons/icon.icns"
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 PACK_ID="TermFlow"
 PACK_TITLE="TermFlow"
 MAIN_EXE="termflow"
-
-export DOTNET_ROLL_FORWARD="LatestMajor"
+SIGN_APP_IDENTITY="${SIGN_APP_IDENTITY:-Developer ID Application: PMT Labs LLC (68M75D67LJ)}"
+SIGN_INSTALLER_IDENTITY="${SIGN_INSTALLER_IDENTITY:-Developer ID Installer: PMT Labs LLC (68M75D67LJ)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-termflow-notary}"
 
 echo "=== TermFlow macOS Publish ==="
 echo "    Version : $VERSION"
-echo "    Output  : $RELEASES_DIR/"
 echo ""
 
-# ─── Stage 1: Tauri release build (produces TermFlow.app + sidecars) ──────────
-# publish:tauri:pro runs a FULL `tauri build` (no --no-bundle) so Tauri emits the
-# .app bundle under target/release/bundle/macos/. build:sidecars:pro stages the
-# mac fabric + pty-host sidecars first (mcp is built by build.rs).
+# ─── Stage 1: Tauri release build → TermFlow.app (+ sidecars) ─────────────────
+# Full `tauri build` (via publish:tauri:pro) so Tauri emits the .app bundle;
+# build:sidecars:pro stages the mac fabric + pty-host sidecars first.
 echo "=== Stage 1: bun run publish:tauri:pro ==="
 bun run publish:tauri:pro
+[ -d "$APP_BUNDLE" ] || { echo "❌ app bundle not found: $APP_BUNDLE" >&2; exit 1; }
+# The pty-host sidecar MUST be inside the bundle or the installed app can't hot-swap.
+[ -f "$APP_BUNDLE/Contents/MacOS/termflow-pty-host" ] \
+  || { echo "❌ termflow-pty-host missing from the .app — hot-swap would break." >&2; exit 1; }
+echo "    Built + pty-host present."
 
-# ⚠️ VERIFY-ON-MAC (spot 1): confirm the produced bundle path.
-APP_BUNDLE="$SCRIPT_DIR/src-tauri/target/release/bundle/macos/TermFlow.app"
-if [ ! -d "$APP_BUNDLE" ]; then
-  echo "❌ Expected app bundle not found: $APP_BUNDLE" >&2
-  echo "   Check tauri's macOS bundle output dir/name and update APP_BUNDLE." >&2
-  exit 1
-fi
-# The pty-host sidecar must be inside the bundle for hot-swap to work once installed.
-if [ ! -f "$APP_BUNDLE/Contents/MacOS/termflow-pty-host" ]; then
-  echo "❌ termflow-pty-host missing from the .app — hot-swap would break." >&2
-  echo "   Ensure it is in tauri.pro.conf.json externalBin (it is on Windows)." >&2
-  exit 1
-fi
+# NOTE: no startup smoke test here — it launches a GUI (WebView) window that needs
+# an Aqua session, which an SSH build host does not have. Smoke the x64/arm64
+# Windows builds (publish-windows.ps1) or run the .app manually from a console.
 
-# ─── Stage 2: startup smoke test (gate) ──────────────────────────────────────
-# Run the built binary headless and require it to answer /health before packing.
-echo ""
-echo "=== Stage 2: startup smoke test ==="
-bun scripts/smoke-test-release.mjs "$APP_BUNDLE/Contents/MacOS/termflow"
-
-# ─── Stage 3: vpk pack (project-local vpk 1.2.0, matches the velopack crate) ──
-echo ""
-echo "=== Stage 3: vpk pack ==="
-dotnet tool restore >/dev/null
-mkdir -p "$RELEASES_DIR"
-
-# ⚠️ VERIFY-ON-MAC (spot 2): Velopack consumes the .app for macOS packaging.
-# Confirm vpk's expected --packDir for a prebuilt .app (pack the bundle's parent
-# dir vs the .app itself) against `vpk pack --help` on the Mac.
-VPK_ARGS=(
-  vpk pack
-  --packId      "$PACK_ID"
-  --packTitle   "$PACK_TITLE"
-  --packVersion "$VERSION"
-  --packDir     "$APP_BUNDLE"
-  --mainExe     "$MAIN_EXE"
-  --icon        "$ICON"
-  --outputDir   "$RELEASES_DIR"
-)
-
-if [[ -n "${SIGN_APP_IDENTITY}" && -n "${SIGN_INSTALLER_IDENTITY}" && -n "${NOTARY_PROFILE}" ]]; then
-  echo "    Signing mode : Production (Developer ID + notarization)"
-  VPK_ARGS+=(
-    --signAppIdentity     "$SIGN_APP_IDENTITY"
-    --signInstallIdentity "$SIGN_INSTALLER_IDENTITY"
-    --notaryProfile       "$NOTARY_PROFILE"
-  )
+# ─── Stage 2: unlock the login keychain (needed for non-interactive codesign) ─
+if [ -n "$MAC_PWD" ]; then
+  echo "=== Stage 2: unlock login keychain ==="
+  security unlock-keychain -p "$MAC_PWD" "$KEYCHAIN"
+  # Grant codesign/productsign non-interactive access to the Developer ID key,
+  # and stop the keychain auto-relocking mid-build.
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$MAC_PWD" "$KEYCHAIN" >/dev/null 2>&1 || true
+  security set-keychain-settings "$KEYCHAIN"
 else
-  echo "    Signing mode : UNSIGNED (set SIGN_APP_IDENTITY, SIGN_INSTALLER_IDENTITY, NOTARY_PROFILE for a shippable build)"
+  echo "=== Stage 2: MAC_PWD not set — assuming the login keychain is already unlocked ==="
 fi
 
-dotnet "${VPK_ARGS[@]}"
+# ─── Stage 3: vpk pack — sign (.app, --deep) + notarize + staple, build .pkg ──
+# Velopack accepts the prebuilt Tauri .app directly as --packDir (validated).
+echo "=== Stage 3: vpk pack (sign + notarize) ==="
+dotnet tool restore >/dev/null
+rm -rf "$RELEASES_DIR"
+dotnet vpk pack \
+  --packId      "$PACK_ID" \
+  --packTitle   "$PACK_TITLE" \
+  --packVersion "$VERSION" \
+  --packDir     "$APP_BUNDLE" \
+  --mainExe     "$MAIN_EXE" \
+  --icon        "$ICON" \
+  --outputDir   "$RELEASES_DIR" \
+  --signAppIdentity     "$SIGN_APP_IDENTITY" \
+  --signInstallIdentity "$SIGN_INSTALLER_IDENTITY" \
+  --notaryProfile       "$NOTARY_PROFILE"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Done! ==="
-echo "Release artifacts in: $RELEASES_DIR/"
-ls -lh "$RELEASES_DIR/" 2>/dev/null || true
+ls -lh "$RELEASES_DIR" 2>/dev/null || true
+echo ""
+pkgutil --check-signature "$RELEASES_DIR/TermFlow-osx-Setup.pkg" 2>&1 | head -4 || true
