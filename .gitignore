@@ -154,3 +154,6 @@ signing
 # Velopack packaging outputs (publish-windows.ps1 / publish-macos.sh)
 /releases/
 /publish/
+
+# Infisical project link (public repo - keep the project id out)
+.infisical.json

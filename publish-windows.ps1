@@ -53,8 +53,8 @@
 param(
     [string]$Version            = "1.0.0",
     [string]$InfisicalProjectId = $env:INFISICAL_PROJECT_ID,
-    [string]$InfisicalEnv       = $(if ($env:INFISICAL_ENV) { $env:INFISICAL_ENV } else { "prod" }),
-    [string]$InfisicalPath      = "/",
+    [string]$InfisicalEnv       = $(if ($env:INFISICAL_ENV) { $env:INFISICAL_ENV } else { "dev" }),
+    [string]$InfisicalPath      = $(if ($env:INFISICAL_PATH) { $env:INFISICAL_PATH } else { "/machine" }),
     [switch]$Unsigned,
     [switch]$SkipSmoke
 )
@@ -86,8 +86,16 @@ $PayloadFiles = @(
 # Resource dirs Tauri stages next to the exe (EULA/privacy/licences, etc.).
 $PayloadDirs  = @("legal", "resources")
 
-# The three Azure Trusted Signing credentials, resolved from Infisical.
-$AzureSecretNames = @("AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID")
+# Azure Trusted Signing credentials, resolved from Infisical. They live under
+# AZURE_ARTIFACT_SIGNING_* names in Infisical (env 'dev', path '/machine'); map
+# each to the env var vpk / the Azure SDK actually reads for Trusted Signing
+# (AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID). Note the secret name
+# is AZURE_ARTIFACT_SIGNING_SECRET, not ..._CLIENT_SECRET.
+$AzureSecretMap = [ordered]@{
+    "AZURE_ARTIFACT_SIGNING_CLIENT_ID" = "AZURE_CLIENT_ID"
+    "AZURE_ARTIFACT_SIGNING_SECRET"    = "AZURE_CLIENT_SECRET"
+    "AZURE_ARTIFACT_SIGNING_TENANT_ID" = "AZURE_TENANT_ID"
+}
 
 Write-Host "=== TermFlow Windows Publish ===" -ForegroundColor Cyan
 Write-Host "    Version : $Version"
@@ -160,10 +168,10 @@ if ($Unsigned) {
         return (($val | Select-Object -First 1)).Trim()
     }
 
-    foreach ($name in $AzureSecretNames) {
-        [System.Environment]::SetEnvironmentVariable($name, (Get-InfisicalSecret $name), "Process")
+    foreach ($src in $AzureSecretMap.Keys) {
+        [System.Environment]::SetEnvironmentVariable($AzureSecretMap[$src], (Get-InfisicalSecret $src), "Process")
     }
-    Write-Host "    Loaded AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID (values not shown)"
+    Write-Host "    Loaded AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_TENANT_ID from Infisical (values not shown)"
     Write-Host "    Signing mode : Azure Trusted Signing"
     $SignArgs = @("--azureTrustedSignFile", $Metadata)
 }
