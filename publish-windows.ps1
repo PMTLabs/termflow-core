@@ -125,6 +125,29 @@ Write-Host "    Version : $Version"
 Write-Host "    Output  : $ReleasesDir\"
 Write-Host ""
 
+# arm64 cross-builds compile C dependencies (e.g. `ring` in the fabric sidecar)
+# with clang targeting aarch64-pc-windows-msvc, and clang locates the CRT/SDK
+# headers via the MSVC INCLUDE/LIB environment — without it the build dies with
+# "fatal error: 'assert.h' file not found". Load the x64→arm64 VS developer
+# environment so cc-rs/clang (and link.exe) see the arm64 cross toolchain.
+if ($Arch -eq "arm64") {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vsBase = & $vswhere -latest -property installationPath
+    if (-not $vsBase) { Write-Error "Visual Studio not found via vswhere — needed for the arm64 cross toolchain."; exit 1 }
+    # Enter-VsDevShell rebuilds PATH and drops the standalone LLVM dir — but
+    # `ring` compiles its aarch64 C sources with clang, so remember where clang
+    # is now and put it back afterwards.
+    $clangCmd = Get-Command clang -ErrorAction SilentlyContinue
+    $clangDir = if ($clangCmd) { Split-Path $clangCmd.Source -Parent } else { "C:\Program Files\LLVM\bin" }
+    Import-Module "$vsBase\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+    Enter-VsDevShell -VsInstallPath $vsBase -SkipAutomaticLocation -DevCmdArguments "-arch=arm64 -host_arch=amd64" | Out-Null
+    if (-not $env:INCLUDE) { Write-Error "VS dev shell did not set INCLUDE — is Microsoft.VisualStudio.Component.VC.Tools.ARM64 installed?"; exit 1 }
+    if (-not (Get-Command clang -ErrorAction SilentlyContinue)) { $env:PATH = "$env:PATH;$clangDir" }
+    if (-not (Get-Command clang -ErrorAction SilentlyContinue)) { Write-Error "clang not found — `ring` needs clang for aarch64-pc-windows-msvc. Install LLVM."; exit 1 }
+    Write-Host "    Loaded VS x64->arm64 dev environment (INCLUDE/LIB set, clang restored)"
+    Write-Host ""
+}
+
 # ─── Stage 1: Tauri release build (+ all sidecars) ────────────────────────────
 Write-Host "=== Stage 1: bun run $($A.BuildScript) ===" -ForegroundColor Yellow
 bun run $($A.BuildScript)
