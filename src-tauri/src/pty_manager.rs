@@ -672,6 +672,12 @@ pub fn spawn_terminal(
     cwd: Option<String>,
     shell_name: String,
     terminal_name: String,
+    // Stable renderer id (tb-…) this terminal persists history under. Registered
+    // WITH the Terminal before the reader thread starts: a caller patching it in
+    // after spawn returns would race a fast-exiting shell's exit-path persist,
+    // which would then file the final scrollback under the ephemeral pc- id
+    // (review 062 agy F-01). None (API/fleet callers) keeps the pc- id default.
+    tab_id: Option<String>,
     // Restored scrollback (blob + divider) to seed the fresh parser with, BEFORE
     // the reader thread starts — so persisted history precedes live output and the
     // next flush preserves it instead of overwriting the stored row with only this
@@ -827,7 +833,7 @@ pub fn spawn_terminal(
         cols,
         rows,
         backend: TerminalBackend::PortablePty,
-        tab_id: Some(id.clone()),
+        tab_id: Some(tab_id.unwrap_or_else(|| id.clone())),
         last_input_source: None,
         last_input_at: None,
     });

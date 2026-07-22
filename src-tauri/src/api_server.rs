@@ -338,6 +338,24 @@ async fn create_terminal(
     let rows = payload.rows.unwrap_or(24);
     log::info!("Creating terminal with size {}x{}, profile: {}", cols, rows, shell_name);
 
+    // Resolve or generate a proper tb- prefixed tab ID. Computed BEFORE the spawn
+    // so the Terminal registers with it up front (review 062 F-01: patching
+    // tab_id in after spawn races a fast-exiting shell's exit-path persist).
+    let tab_id = match payload.tab_id.as_ref() {
+        Some(tid) if !tid.is_empty() => {
+            if tid.starts_with("tb-") {
+                tid.clone()
+            } else {
+                let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
+                format!("tb-{}", &raw_uuid[..9])
+            }
+        }
+        _ => {
+            let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
+            format!("tb-{}", &raw_uuid[..9])
+        }
+    };
+
     match crate::pty_manager::spawn_terminal(
         state.clone(),
         cols,
@@ -347,25 +365,10 @@ async fn create_terminal(
         shell_cwd,
         shell_name.clone(),
         terminal_name.clone(),
+        Some(tab_id.clone()),
         None, // API-created terminal: fresh session, no restored scrollback
     ) {
         Ok(id) => {
-            // Resolve or generate a proper tb- prefixed tab ID
-            let tab_id = match payload.tab_id.as_ref() {
-                Some(tid) if !tid.is_empty() => {
-                    if tid.starts_with("tb-") {
-                        tid.clone()
-                    } else {
-                        let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-                        format!("tb-{}", &raw_uuid[..9])
-                    }
-                }
-                _ => {
-                    let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-                    format!("tb-{}", &raw_uuid[..9])
-                }
-            };
-
             // Notify the UI to create a tab for this new terminal. We BROADCAST (a
             // bare emit_to is documented as not reaching the JS listener here — see
             // commands.rs resolve_tab_drop) and carry the routing target in the
@@ -382,10 +385,6 @@ async fn create_terminal(
                 "targetWindow": target_window
             })) {
                 log::warn!("Failed to emit api:createTerminalTab: {}", e);
-            }
-
-            if let Some(mut entry) = state.terminals.get_mut(&id) {
-                entry.tab_id = Some(tab_id);
             }
 
             if let Some(t) = state.terminals.get(&id) {
@@ -1827,6 +1826,7 @@ async fn fleet_local_run(
                 shell_cwd,
                 shell_name.clone(),
                 terminal_name.clone(),
+                None, // tab_id: keep the pc- id default (tb- alias is cosmetic)
                 None, // fleet terminal: fresh session, no restored scrollback
             ) {
                 Ok(id) => id,

@@ -140,16 +140,15 @@ pub async fn create_terminal(
         shell_cwd,
         shell_name,
         terminal_name,
+        // Registered with the Terminal BEFORE the reader thread starts — patching
+        // it in after spawn returned raced a fast-exiting shell's exit persist,
+        // which then filed history under the ephemeral pc- id (review 062 F-01).
+        tab_id,
         history_prefix.clone(),
     )?;
 
-    if let Some(tab_id) = tab_id {
-        if let Some(mut entry) = state.terminals.get_mut(&id) {
-            entry.tab_id = Some(tab_id.clone());
-        }
-        if let Some(prefix) = history_prefix {
-            state.replay_prefix.insert(id.clone(), prefix);
-        }
+    if let Some(prefix) = history_prefix {
+        state.replay_prefix.insert(id.clone(), prefix);
     }
 
     Ok(id)
@@ -313,8 +312,8 @@ fn host_fallback(
 ) -> Result<String, String> {
     log::warn!("pty-host unavailable ({reason}); falling back to in-process");
     let name = format!("Terminal-{}", shell_name);
-    // Seed via spawn_terminal (parser gets the blob before the reader thread
-    // starts), then stage the renderer's one-shot prefix under the new id.
+    // Seed + register the tab_id via spawn_terminal (both land before the reader
+    // thread starts), then stage the renderer's one-shot prefix under the new id.
     let history_prefix = restore_prefix(state, tab_id);
     let fallback_id = pty_manager::spawn_terminal(
         state.clone(),
@@ -325,11 +324,9 @@ fn host_fallback(
         cwd,
         shell_name,
         name,
+        Some(tab_id.to_string()),
         history_prefix.clone(),
     )?;
-    if let Some(mut entry) = state.terminals.get_mut(&fallback_id) {
-        entry.tab_id = Some(tab_id.to_string());
-    }
     if let Some(prefix) = history_prefix {
         state.replay_prefix.insert(fallback_id.clone(), prefix);
     }
@@ -863,13 +860,22 @@ pub async fn close_terminal(
 
     // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
     // the old inline cleanup leaked). Dropping the pty also EOFs the reader.
-    state.cleanup_terminal_state(&id);
-
+    //
     // Explicit user close: drop this terminal's persisted scrollback so a closed
     // tab never reappears on the next restart (shell-exit keeps it — see
-    // cleanup_terminal_state).
-    if let Some(tab_id) = tab_id {
-        state.history_store.delete(&tab_id);
+    // cleanup_terminal_state). Both run under the per-terminal persist guard
+    // (review 062): the kill above EOFs the reader, whose exit-path persist could
+    // otherwise clone the screen, render for milliseconds, and re-upsert the row
+    // AFTER this delete. With the guard, either the persist finishes first (row
+    // recreated, then deleted here) or it starts after cleanup and no-ops on the
+    // missing terminal — delete semantics hold in both orders.
+    {
+        let guard_arc = state.history_persist_guard(&id);
+        let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
+        state.cleanup_terminal_state(&id);
+        if let Some(tab_id) = tab_id {
+            state.history_store.delete(&tab_id);
+        }
     }
 
     log::info!("Closed terminal {} with PID {}", id, pid);

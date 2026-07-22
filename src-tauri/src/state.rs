@@ -198,6 +198,12 @@ pub struct AppState<R: Runtime = Wry> {
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
     pub replay_prefix: Arc<DashMap<String, String>>,
+    // Per-terminal serialization for history persistence (review 062): held across
+    // snapshot→render→upsert so write order always matches snapshot order (a slow
+    // periodic-flush render can't overwrite a newer exit snapshot), and taken by
+    // close_terminal around cleanup+row-delete so an in-flight persist can't
+    // resurrect an explicitly-deleted row.
+    pub history_persist_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to
@@ -270,6 +276,7 @@ impl<R: Runtime> Clone for AppState<R> {
             history_store: self.history_store.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
+            history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
@@ -334,6 +341,7 @@ impl<R: Runtime> AppState<R> {
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
+            history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
@@ -539,6 +547,12 @@ impl<R: Runtime> AppState<R> {
     /// path BEFORE `cleanup_terminal_state`, so a dying session's final output
     /// (since the last 30s flush) still reaches the store.
     pub fn persist_terminal_history(&self, id: &str, now_ms: i64) {
+        // Serialize per-terminal across snapshot→render→upsert (review 062): without
+        // this, a slow periodic-flush render could finish AFTER a newer exit-path
+        // persist and overwrite the final row with older content — permanently,
+        // since a dead terminal is never persisted again.
+        let guard_arc = self.history_persist_guard(id);
+        let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
         let Some(tab_id) = self.terminals.get(id).and_then(|t| t.tab_id.clone()) else { return };
         // Skip when the parser is absent or the whole buffer is blank (brand-new or
         // already-cleared terminal) so we never persist a blank blob that would replay as
@@ -546,6 +560,16 @@ impl<R: Runtime> AppState<R> {
         let Some(snapshot) = self.full_scrollback_snapshot(id) else { return };
         let blob = String::from_utf8_lossy(&snapshot).into_owned();
         self.history_store.upsert(&tab_id, std::slice::from_ref(&blob), now_ms);
+    }
+
+    /// The per-terminal persistence lock (see `history_persist_locks`). The Arc is
+    /// cloned and the DashMap shard guard dropped BEFORE the caller locks the inner
+    /// mutex — never hold a shard guard across an inner lock (output-pipeline rule).
+    pub fn history_persist_guard(&self, id: &str) -> Arc<Mutex<()>> {
+        self.history_persist_locks
+            .entry(id.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Get a terminal's history buffer handle. Clones the Arc and DROPS the
@@ -891,6 +915,9 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
+        // The persist guard entry too (a late persist may re-create it via
+        // or_default; that's harmless — it then no-ops on the missing terminal).
+        self.history_persist_locks.remove(id);
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
         // in the routing set after its state is torn down.
         self.host_terminals.remove(id);
