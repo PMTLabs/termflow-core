@@ -235,6 +235,8 @@ export interface ElectronAPI {
   checkForUpdates?: () => Promise<UpdateStatus>;
   /** Download + arm + apply a Velopack update, keeping terminals alive. */
   updateAndRestart?: () => Promise<void>;
+  /** The running app's version (from the Tauri config at build time). */
+  getAppVersion?: () => Promise<string>;
 
   // Quit the app after the user confirms the in-app close dialog (Tauri only)
   confirmCloseApp?: () => Promise<void>;

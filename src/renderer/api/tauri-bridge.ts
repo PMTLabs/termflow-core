@@ -99,6 +99,8 @@ interface ElectronAPI {
   hotswapAvailable: () => Promise<void>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
+  /// The running app's version (from the Tauri config at build time).
+  getAppVersion: () => Promise<string>;
   /// Download + arm + apply a Velopack update, keeping terminals alive.
   updateAndRestart: () => Promise<void>;
   getActiveTabAndPane: () => Promise<any>;
@@ -519,6 +521,10 @@ const tauriBridge: ElectronAPI = {
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
   updateAndRestart: async () => { await invoke('update_and_restart'); },
+  // `@tauri-apps/api/app`'s getVersion() is exactly this invoke; calling it
+  // directly avoids importing the app module (whose image.cjs can't load in
+  // the jsdom test environment).
+  getAppVersion: async () => invoke<string>('plugin:app|version'),
 
   // UI Mocks
   getActiveTabAndPane: async () => ({}),

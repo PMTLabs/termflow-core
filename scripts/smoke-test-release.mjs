@@ -97,6 +97,16 @@ async function main() {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       detached: process.platform !== 'win32',
+      env: {
+        ...process.env,
+        // The smoke check never creates terminals, and an INSTALLED TermFlow may
+        // be running on this machine: without the kill-switch this headless app
+        // would find the production pty-host pipe busy and spawn a COMPETING
+        // host on the same pipe name (plus leak its ConPTY conhost, which once
+        // blocked the installer with an Access-denied rename). Keep the sidecar
+        // fully out of the smoke.
+        TERMFLOW_PTY_HOST: '0',
+      },
     }
   );
 
