@@ -157,3 +157,4 @@ signing
 
 # Infisical project link (public repo - keep the project id out)
 .infisical.json
+releases-osx/*
