@@ -545,6 +545,16 @@ export class TerminalEngine {
   // unmount so a fit can't fire against a torn-down or re-created mount.
   private fitTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Host-reported pane visibility (setActive). Background tabs hide via
+  // `visibility:hidden`, so layout/observers keep running — this flag is the
+  // only reliable "hidden" signal. While false, observer/font refits and the
+  // dimension heal are DEFERRED (no xterm resize, no backend SIGWINCH): ratatui
+  // CLIs (codex) answer any SIGWINCH with ESC[2J ESC[3J + a capped transcript
+  // re-emit, which silently wipes a hidden tab's accumulated scrollback. The
+  // setActive(true) 50ms fit is the single flush point. Defaults true so hosts
+  // that never call setActive (mirror/grid) keep today's behavior.
+  private paneActive = true;
+
   // Debounce for backend PTY resizes (see BACKEND_RESIZE_DEBOUNCE_MS). xterm's
   // own resize is immediate; only the bridge.resize() call is coalesced. Cleared
   // on unmount so it can't fire against a torn-down mount.
@@ -1764,6 +1774,10 @@ export class TerminalEngine {
         const resizeObserver = new ResizeObserver(() => {
           if (typeof requestAnimationFrame !== 'function') return;
           requestAnimationFrame(() => {
+            // Hidden pane (background tab): don't follow layout changes — no
+            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
+            // setActive(true) fit flushes the final geometry on activation.
+            if (!this.paneActive) return;
             const el = this.container;
             if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
               try {
@@ -2198,7 +2212,20 @@ export class TerminalEngine {
   // lifecycle
   // ---------------------------------------------------------------------------
   setActive(active: boolean): void {
-    // Re-fit on activation with a 50ms settle (source 228-240 / R7).
+    this.paneActive = active;
+    // Deactivation: cancel any armed fit so it can't resize a now-hidden pane
+    // (e.g. an activation fit scheduled 50ms before a quick tab switch away).
+    if (!active) {
+      if (this.fitTimer) {
+        clearTimeout(this.fitTimer);
+        this.fitTimer = null;
+      }
+      return;
+    }
+    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Also the
+    // FLUSH point for geometry changes deferred while hidden (paneActive above):
+    // fit() re-measures the container, and an actual size change flows through
+    // xterm onResize -> scheduleBackendResize (deduped when nothing changed).
     if (active && this.fitAddon) {
       if (this.fitTimer) clearTimeout(this.fitTimer);
       this.fitTimer = setTimeout(() => {
@@ -2220,6 +2247,9 @@ export class TerminalEngine {
   setFontSize(px: number): void {
     if (!this.term) return;
     this.term.options.fontSize = px;
+    // Hidden pane: apply the render option but defer the geometry refit to the
+    // setActive(true) fit — a refit here would SIGWINCH a background PTY.
+    if (!this.paneActive) return;
     // Re-fit after font size change with a 50ms settle (source 217-225 / R7).
     if (this.fitAddon) {
       if (this.fitTimer) clearTimeout(this.fitTimer);
@@ -2332,6 +2362,11 @@ export class TerminalEngine {
     if (!entry || entry.terminal !== term) return;           // own the cache entry
     if (entry.hydrating || this.healing || this.pendingResize || this.resizeInFlight) return;
     if (typeof document !== 'undefined' && document.hidden) return;
+    // Doc 035's "pane visible" intent, actually enforced: background tabs hide
+    // via `visibility:hidden` (offsetParent stays non-null), so the offsetParent
+    // check below never catches them — the host's setActive signal does. A heal
+    // resize against a hidden codex pane wipes its scrollback (ED3 re-emit).
+    if (!this.paneActive) return;
     const c = this.container;
     if (!c || c.offsetParent === null || c.offsetWidth <= 50) return; // pane visible
     if (Date.now() < TerminalEngine.suppressHealUntil) return;        // post-jiggle
