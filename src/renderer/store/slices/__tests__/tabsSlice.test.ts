@@ -1,4 +1,4 @@
-import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
+import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
 
 const stateWithTwoTabs = () => {
   let state = tabsReducer(undefined, { type: '@@INIT' } as any);
@@ -191,6 +191,33 @@ describe('tabsSlice setTabTitleColor', () => {
   it('is a no-op for an unknown tab id', () => {
     const next = tabsReducer(stateWithTwoTabs(), setTabTitleColor({ id: 'tb-missing', titleColor: '#ff5555' }));
     expect(next.tabs.every(t => !t.titleColor)).toBe(true);
+  });
+});
+
+describe('tabsSlice setTabMuted', () => {
+  it('mutes the matching tab only', () => {
+    const next = tabsReducer(stateWithTwoTabs(), setTabMuted({ id: 'tb-1', muted: true }));
+    expect(next.tabs.find(t => t.id === 'tb-1')?.notifyMuted).toBe(true);
+    expect(next.tabs.find(t => t.id === 'tb-2')?.notifyMuted).toBeUndefined();
+  });
+
+  it('unmute deletes the flag (back to inherit-default)', () => {
+    let state = tabsReducer(stateWithTwoTabs(), setTabMuted({ id: 'tb-1', muted: true }));
+    state = tabsReducer(state, setTabMuted({ id: 'tb-1', muted: false }));
+    expect(state.tabs.find(t => t.id === 'tb-1')?.notifyMuted).toBeUndefined();
+  });
+
+  it('muting clears any pending unseen-output bell on that tab', () => {
+    // tb-1 is inactive; flag it unseen, then mute → the stale bell is cleared.
+    let state = tabsReducer(stateWithTwoTabs(), markUnseenOutput({ tabId: 'tb-1' }));
+    expect(state.tabs.find(t => t.id === 'tb-1')?.hasUnseenOutput).toBe(true);
+    state = tabsReducer(state, setTabMuted({ id: 'tb-1', muted: true }));
+    expect(state.tabs.find(t => t.id === 'tb-1')?.hasUnseenOutput).toBe(false);
+  });
+
+  it('is a no-op for an unknown tab id', () => {
+    const next = tabsReducer(stateWithTwoTabs(), setTabMuted({ id: 'tb-missing', muted: true }));
+    expect(next.tabs.every(t => !t.notifyMuted)).toBe(true);
   });
 });
 

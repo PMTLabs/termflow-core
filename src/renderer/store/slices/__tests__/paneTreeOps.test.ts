@@ -7,12 +7,41 @@ import {
   findTabIdByTerminalId,
   getAllTerminalIds,
   getSelectedPaneId,
+  isTerminalMuted,
   resolveExitedTabId,
 } from '../paneTreeOps';
 
 const leaf = (id: string, tid: string): PaneNode => ({ id, type: 'terminal', terminalId: tid });
 const hsplit = (id: string, a: PaneNode, b: PaneNode): PaneNode =>
   ({ id, type: 'split', direction: 'horizontal', size: 50, children: [a, b] });
+
+describe('isTerminalMuted', () => {
+  const mutedLeaf = (id: string, tid: string): PaneNode => ({ ...leaf(id, tid), notifyMuted: true });
+
+  it('returns true for a muted terminal leaf, false for an unmuted sibling', () => {
+    const trees = { 'tb-1': hsplit('s1', mutedLeaf('p1', 't1'), leaf('p2', 't2')) };
+    expect(isTerminalMuted(trees, 't1')).toBe(true);
+    expect(isTerminalMuted(trees, 't2')).toBe(false);
+  });
+
+  it('finds the leaf across multiple tabs', () => {
+    const trees = {
+      'tb-1': leaf('p1', 't1'),
+      'tb-2': mutedLeaf('p2', 't2'),
+    };
+    expect(isTerminalMuted(trees, 't2')).toBe(true);
+    expect(isTerminalMuted(trees, 't1')).toBe(false);
+  });
+
+  it('returns false (fail-open) for a terminalId not present in any tree', () => {
+    const trees = { 'tb-1': leaf('p1', 't1') };
+    expect(isTerminalMuted(trees, 't-missing')).toBe(false);
+  });
+
+  it('returns false for empty trees', () => {
+    expect(isTerminalMuted({}, 't1')).toBe(false);
+  });
+});
 
 describe('removeLeaf', () => {
   it('removes a leaf and collapses the parent split into the sibling', () => {

@@ -10,6 +10,7 @@ import { TabRenamePopup } from './TabRenamePopup';
 import { terminalService } from '../../services/TerminalService';
 import { StateManager } from '../../services/StateManager';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
+import { BellIcon } from '../UI/BellIcon';
 import { CloseSummary } from './CloseSummary';
 import { computeAffectedTabs, filterMeaningfulProcesses } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
@@ -195,6 +196,7 @@ interface TabItemProps {
     isRunning?: boolean;
     hasUnseenOutput?: boolean;
     titleColor?: string;
+    notifyMuted?: boolean;
   };
   requestReorder: (draggedId: string, targetId: string) => void;
   /** Whether the context-menu "Move to New Window" is offered (only with >1 tab;
@@ -323,6 +325,11 @@ const TabItem: React.FC<TabItemProps> = ({
         )}
         {tab.hasUnseenOutput && !tab.isActive && (
           <span className="tab-unseen-bell" title="New output you haven't seen yet">🔔</span>
+        )}
+        {tab.notifyMuted && (
+          <span className="tab-muted-icon" title="Notifications muted for this tab">
+            <BellIcon muted />
+          </span>
         )}
         {tab.isDirty && <span className="tab-dirty">●</span>}
         <button

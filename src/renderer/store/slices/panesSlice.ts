@@ -12,6 +12,13 @@ export interface PaneNode {
   terminalId?: string;
   name?: string; // Custom name for the pane
   shellType?: string; // Shell type for terminal panes
+  // Per-pane notification mute. undefined/false = notifications behave normally;
+  // true = this pane's terminal activity never rings the bell / toast / OS
+  // notification (see RunningActivityTracker). Lives ON the node so it survives
+  // tree serialization (persist across restart) and is dropped automatically
+  // when the pane is closed — no orphaned side-state. A tab-level mute
+  // (tabsSlice) overrides this and suppresses every pane regardless.
+  notifyMuted?: boolean;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -222,6 +229,29 @@ const panesSlice = createSlice({
         delete state.maximizedPaneByTabId[tabId];
       } else {
         state.maximizedPaneByTabId[tabId] = paneId;
+      }
+    },
+
+    /**
+     * Toggle (set/clear) a single pane's notification mute. Finds the leaf by
+     * `paneId` across all tabs' trees and sets/deletes its `notifyMuted` flag.
+     * Mutating the node in `treesByTabId` also updates the active tab's
+     * `paneTree` mirror (they share the same object graph). Only affects THIS
+     * pane — tab-level mute is handled separately in tabsSlice.
+     */
+    setPaneMuted: (state, action: PayloadAction<{ paneId: string; muted: boolean }>) => {
+      const { paneId, muted } = action.payload;
+      for (const tabId of Object.keys(state.treesByTabId)) {
+        const node = findLeaf(state.treesByTabId[tabId], paneId);
+        if (node) {
+          if (muted) node.notifyMuted = true;
+          else delete node.notifyMuted;
+          // Refresh the active-tab paneTree mirror. Under Immer, paneTree and
+          // treesByTabId[tabId] are distinct draft paths, so mutating one does
+          // NOT reflect into the other — reassign so active-tab readers see it.
+          if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+          return;
+        }
       }
     },
 
@@ -602,6 +632,7 @@ export const {
   splitPane,
   splitPaneInTab,
   toggleMaximizePane,
+  setPaneMuted,
   closePane,
   resizePane,
   resizeFocusedPane,

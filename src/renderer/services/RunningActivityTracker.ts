@@ -1,6 +1,6 @@
 import { store } from '../store';
 import { setRunningTabs, markUnseenOutput } from '../store/slices/tabsSlice';
-import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, isTerminalMuted } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
 import {
   isRunningFromEvents,
@@ -241,6 +241,14 @@ class RunningActivityTrackerClass {
     if (!tabId) return;
     const tabsState = store.getState().tabs;
     if (tabId === tabsState.activeTabId) return;
+    // Mute gate: suppress this exit-settled bell if the tab is muted, or the
+    // exiting pane itself is muted (an unmuted sibling in the same tab is
+    // unaffected). Mirrors the source-mute check in computeUnseenUpdate.
+    const tabMuted = tabsState.tabs.some(t => t.id === tabId && t.notifyMuted);
+    const paneMuted = terminalId
+      ? isTerminalMuted(store.getState().panes.treesByTabId, terminalId)
+      : false;
+    if (tabMuted || paneMuted) return;
     // Skip a redundant dispatch if the tab is already flagged (mirrors computeUnseenUpdate);
     // markUnseenOutput is itself a no-op for the active/missing tab.
     const alreadyUnseen = tabsState.tabs.some(t => t.id === tabId && t.hasUnseenOutput);
@@ -323,6 +331,17 @@ class RunningActivityTrackerClass {
     const alreadyUnseen = new Set(
       tabsState.tabs.filter(t => t.hasUnseenOutput).map(t => t.id),
     );
+    // Mute predicate: a source is muted when its tab is muted, or its own pane
+    // (the leaf carrying its terminalId) is muted. Read the current trees/tabs
+    // once per tick. computeUnseenUpdate still advances the mark for muted
+    // sources, so unmuting later doesn't ring a backlog of old output.
+    const mutedTabIds = new Set(tabsState.tabs.filter(t => t.notifyMuted).map(t => t.id));
+    const treesByTabId = store.getState().panes.treesByTabId;
+    const isSourceMuted = (processId: string, tabId: string): boolean => {
+      if (mutedTabIds.has(tabId)) return true;
+      const terminalId = terminalService.getTerminalIdForProcess(processId);
+      return terminalId ? isTerminalMuted(treesByTabId, terminalId) : false;
+    };
     const { toFlag, marks, causalByTab } = computeUnseenUpdate(
       outputs,
       resolveTab,
@@ -331,6 +350,7 @@ class RunningActivityTrackerClass {
       this.unseenMark,
       now,
       UNSEEN_DEBOUNCE_MS,
+      isSourceMuted,
     );
     this.unseenMark = marks;
     // Synchronized repaint burst (window resize / RDP↔console reattach / un-minimize):

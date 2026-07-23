@@ -8,8 +8,9 @@ import { Mnemonic } from '../UI/Mnemonic';
 import { isTypingTarget } from '../UI/useDialogA11y';
 import { computeAffectedTabs } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
-import { setTabColorSchema, setTabTitleColor } from '../../store/slices/tabsSlice';
+import { setTabColorSchema, setTabTitleColor, setTabMuted } from '../../store/slices/tabsSlice';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
+import { BellIcon } from '../UI/BellIcon';
 import './TabContextMenu.css';
 
 // Fixed quick-pick colors for the tab name. NOT derived from the active color
@@ -228,6 +229,13 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
           </button>
         </div>
       )}
+      <button
+        className="context-menu-item"
+        onClick={() => runAndClose(() => dispatch(setTabMuted({ id: tabId, muted: !tab?.notifyMuted })))}
+      >
+        <span className="menu-icon"><BellIcon muted={!!tab?.notifyMuted} /></span>
+        {tab?.notifyMuted ? 'Unmute Notifications' : 'Mute Notifications'}
+      </button>
       <div className="context-menu-divider" />
       <button className="context-menu-item" onClick={() => runAndClose(() => openNewTabWithDefaultProfile(tabId))}>
         <span className="menu-icon">➕</span>

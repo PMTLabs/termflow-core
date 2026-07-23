@@ -146,6 +146,12 @@
   color: var(--pane-active-border, #007acc);
 }
 
+/* Notifications-muted bell: full opacity so the slashed bell stays legible, but
+   NEUTRAL (no accent color) so it doesn't read like an active/highlighted control. */
+.pane-control-button.muted {
+  opacity: 1;
+}
+
 .pane-control-button.close {
   font-size: 18px;
 }
