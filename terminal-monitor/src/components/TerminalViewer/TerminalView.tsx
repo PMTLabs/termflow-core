@@ -1,5 +1,6 @@
-import React, { useEffect, useRef } from 'react';
-import { Box } from '@mui/material';
+import React, { useEffect, useRef, useState } from 'react';
+import { Box, IconButton } from '@mui/material';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import { TerminalEngine, DEFAULT_THEME } from '@termflow/terminal-core';
 import { useSelector } from 'react-redux';
 import '@xterm/xterm/css/xterm.css';
@@ -21,6 +22,11 @@ interface TerminalViewProps {
 
 const TerminalView: React.FC<TerminalViewProps> = ({ terminalId }) => {
   const ref = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<TerminalEngine | null>(null);
+  // Scroll-to-bottom button: true while the viewport is pinned to the live
+  // tail. Seeded from the engine right after mount (a cached reattach may
+  // already be scrolled up), then kept live via onScrollPosition.
+  const [atBottom, setAtBottom] = useState(true);
   const selectedTerminalId = useSelector(
     (s: RootState) => s.terminals.selectedTerminalId
   );
@@ -47,8 +53,11 @@ const TerminalView: React.FC<TerminalViewProps> = ({ terminalId }) => {
       // grid panes rely on the engine's click-to-focus.
       autoFocus: terminalId === selectedTerminalId,
     });
+    engineRef.current = engine;
     engine.mount(ref.current);
     engine.attach(terminalId); // monitor: terminalId === backend processId
+    setAtBottom(engine.isScrolledToBottom());
+    const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);
 
     // Mirror drift-correction: live deltas alone can't undo a flattened-snapshot
     // view when the backend switches screens (copilot/vim exit, `clear`). Poll the
@@ -63,8 +72,10 @@ const TerminalView: React.FC<TerminalViewProps> = ({ terminalId }) => {
     // grid/layout remounts. Full teardown happens via cleanupTerminalCache on
     // terminal removal.
     return () => {
+      scrollPositionDisposable.dispose();
       clearInterval(resyncInterval);
       engine.unmount();
+      engineRef.current = null;
     };
     // selectedTerminalId is intentionally excluded: autoFocus only needs to be
     // correct at mount; re-running the effect on selection change would rebuild
@@ -73,21 +84,47 @@ const TerminalView: React.FC<TerminalViewProps> = ({ terminalId }) => {
   }, [terminalId]);
 
   return (
-    <Box
-      ref={ref}
-      sx={{
-        width: '100%',
-        height: '100%',
-        backgroundColor: '#1e1e1e',
-        // Default (fit) sizes the grid to the pane so nothing scrolls; when the
-        // user zooms in past fit (Ctrl +), the grid exceeds the pane and these
-        // scrollbars reveal the rest.
-        overflow: 'auto',
-        // Let .xterm size to its (backend) grid — the engine font-fits it to the
-        // pane (mirror mode) — so the scrollable area matches the visual size.
-        '& .xterm': { padding: '4px 8px' },
-      }}
-    />
+    <Box sx={{ position: 'relative', width: '100%', height: '100%' }}>
+      <Box
+        ref={ref}
+        sx={{
+          width: '100%',
+          height: '100%',
+          backgroundColor: '#1e1e1e',
+          // Default (fit) sizes the grid to the pane so nothing scrolls; when the
+          // user zooms in past fit (Ctrl +), the grid exceeds the pane and these
+          // scrollbars reveal the rest.
+          overflow: 'auto',
+          // Let .xterm size to its (backend) grid — the engine font-fits it to the
+          // pane (mirror mode) — so the scrollable area matches the visual size.
+          '& .xterm': { padding: '4px 8px' },
+        }}
+      />
+      {!atBottom && (
+        <IconButton
+          size="small"
+          onClick={() => {
+            engineRef.current?.scrollToBottom();
+            engineRef.current?.focus();
+          }}
+          title="Scroll to bottom"
+          aria-label="Scroll to bottom"
+          sx={{
+            position: 'absolute',
+            bottom: 12,
+            right: 16,
+            width: 28,
+            height: 28,
+            color: 'rgba(255, 255, 255, 0.92)',
+            backgroundColor: 'rgba(0, 0, 0, 0.55)',
+            border: '1px solid rgba(255, 255, 255, 0.14)',
+            '&:hover': { backgroundColor: 'rgba(0, 0, 0, 0.75)' },
+          }}
+        >
+          <KeyboardArrowDownIcon fontSize="small" />
+        </IconButton>
+      )}
+    </Box>
   );
 };
 
