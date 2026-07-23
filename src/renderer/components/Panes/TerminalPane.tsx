@@ -111,6 +111,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     terminalId ? state.zoom.levels[terminalId] ?? ZOOM_DEFAULT : ZOOM_DEFAULT
   );
   const effectiveFontSize = Math.max(8, Math.min(128, Math.round(fontSize * zoom)));
+  // Mirrors the shellType fallback the create/reattach effects below use (shellType
+  // prop > tab's stored shellType > defaultProfile > 'default') — passed down so the
+  // engine can gate the Ctrl+Backspace/Ctrl+Delete word-delete shim off the real
+  // shell (decideWordDeleteShim in terminal-core). A separate computation rather
+  // than reusing the effects' local consts, which aren't in scope at render time.
+  const isSplitPaneId = !!terminalId && (terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-'));
+  const finalShellTypeForDisplay =
+    shellType || (isSplitPaneId ? (defaultProfile || 'default') : (tab?.shellType || defaultProfile || 'default'));
 
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
@@ -603,6 +611,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               paneId={paneId}
               fontSize={effectiveFontSize}
               isActive={isTabActive}
+              shellType={finalShellTypeForDisplay}
               // Focus this terminal only when it's the active pane of the active
               // tab — restores the cursor on tab switch / pane select.
               shouldFocus={isActive && isTabActive}

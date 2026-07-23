@@ -78,6 +78,15 @@ export interface TerminalEngineOptions {
   // the engine sniffs navigator.platform. Affects the Ctrl/Cmd +/-/0 keys and
   // Ctrl/Cmd+wheel zoom gestures only.
   isMac?: boolean;
+  // Live getter for the tab's shell profile id (e.g. 'cmd', 'powershell', 'bash',
+  // 'git-bash', 'wsl-ubuntu'). Read on every keypress (like smartCopy/
+  // enhancedKeyboard below) rather than captured once — the engine mounts once per
+  // terminalId and never remounts on a shellType change alone, but the resolved
+  // value CAN change after mount: a settings-driven fallback resolves once shell
+  // profiles finish loading, and a restart-in-place can carry a different profile.
+  // Used only to decide whether Ctrl+Backspace/Ctrl+Delete's word-delete shim
+  // should fire (see decideWordDeleteShim/isPosixShell in TerminalEngine.ts).
+  shellType?(): string | undefined;
   // Per-surface zoom hook. When provided, Ctrl/Cmd +/-/0 and Ctrl/Cmd+wheel route
   // here (the host owns the zoom level — e.g. the desktop app's per-pane zoom)
   // INSTEAD of mutating the font size via onFontSizeChange. Omit it (the web

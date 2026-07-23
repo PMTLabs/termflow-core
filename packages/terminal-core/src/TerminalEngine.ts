@@ -240,6 +240,63 @@ export function isCtrlCBurst(
   return timestamps.filter((t) => now - t < windowMs).length >= count;
 }
 
+// Known POSIX/readline-style shell profile ids (see compute_available_shells in
+// src-tauri/src/pty_manager.rs): 'bash', 'zsh', 'fish', 'cygwin', 'git-bash', and
+// any 'wsl'/'wsl-<distro>' id. A WHITELIST, not "everything except cmd/powershell/
+// pwsh" — this app also uses ambiguous placeholder shellType values ('default',
+// set e.g. by StateManager.resetToDefaultLayout and TerminalPane's fallback chain
+// before shell profiles finish loading; 'settings') that do NOT mean "an
+// unrecognized POSIX shell". 'default' in particular very often resolves to a
+// real PowerShell session (PowerShell 7 is pushed first with is_default:true in
+// compute_available_shells), so defaulting unknown ids to POSIX would misfire the
+// shim into PowerShell. Unrecognized/ambiguous ids simply don't get the shim,
+// same as before this feature existed.
+const POSIX_SHELL_RE = /^(bash|zsh|fish|sh|cygwin|git-bash|wsl(-.*)?)$/i;
+
+/**
+ * True for shells that read raw VT bytes via their own readline-style line editor
+ * (bash, zsh, Git Bash, WSL) — the shells the word-delete shim below targets.
+ * False for native Windows console apps (cmd.exe, PowerShell/pwsh), which already
+ * get correct word-delete via Win32-Input-Mode + their own native keybindings
+ * (PSReadLine's BackwardKillWord/KillWord) and must NOT be shimmed — sending raw
+ * ESC-prefixed bytes there would be read as literal Escape + character keystrokes
+ * instead of a chord — and false for anything unrecognized (safer default: an
+ * unresolved/ambiguous shellType is far more likely to be a disguised Windows
+ * console shell in this app than a genuine unlisted POSIX one). Pure so it is
+ * unit-testable.
+ */
+export function isPosixShell(shellType: string | undefined): boolean {
+  return !!shellType && POSIX_SHELL_RE.test(shellType);
+}
+
+/**
+ * Decide the byte sequence for Ctrl+Backspace/Ctrl+Delete word-delete on a plain
+ * POSIX/readline shell prompt. A VT-byte shell (bash, zsh) can't distinguish
+ * Ctrl+Backspace from a literal Ctrl+H — both encode to the same byte (0x08), a
+ * documented ConPTY/terminal limitation — so without this shim it just backspaces
+ * one character instead of a word. Win32-Input-Mode and the Kitty protocol already
+ * relay these chords with full modifier fidelity to shells that read them natively
+ * (PSReadLine, Kitty-protocol TUIs), so this only fires when neither applies.
+ * Sequences match readline's own defaults (`M-DEL`/`M-d`) and the same word-boundary
+ * semantics as the existing Alt+Arrow word-nav shim (`M-b`/`M-f`) — not unix-word-
+ * rubout's whitespace-only boundary. Pure so it is unit-testable without an xterm
+ * instance.
+ */
+export function decideWordDeleteShim(
+  key: string,
+  mods: { ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean },
+  isNormalBuffer: boolean,
+  protocolActive: boolean,
+  shellType: string | undefined,
+): string | null {
+  if (!isNormalBuffer || protocolActive) return null;
+  if (!mods.ctrlKey || mods.altKey || mods.shiftKey || mods.metaKey) return null;
+  if (!isPosixShell(shellType)) return null;
+  if (key === 'Backspace') return '\x1b\x7f'; // Meta+Backspace -> readline backward-kill-word
+  if (key === 'Delete') return '\x1bd'; // Meta+d -> readline kill-word
+  return null;
+}
+
 export interface PathLinkMatch {
   /** 0-based start index within the line string. */
   start: number;
@@ -1411,6 +1468,40 @@ export class TerminalEngine {
           });
         }
         return false;
+      }
+
+      // Ctrl+Backspace / Ctrl+Delete word-delete, at a plain POSIX/readline shell
+      // prompt (bash, zsh, Git Bash, WSL). A VT-byte shell can't distinguish
+      // Ctrl+Backspace from a literal Ctrl+H (both are 0x08) — a documented ConPTY/
+      // terminal limitation — so without this it just backspaces one character.
+      // Win32-Input-Mode (PowerShell/cmd) and the Kitty protocol (TUIs) already
+      // relay these chords with full modifier fidelity to shells that read them
+      // natively, so decideWordDeleteShim only returns non-null for the shells
+      // that can't use either path.
+      if (event.type === 'keydown') {
+        const shimSeq = decideWordDeleteShim(
+          event.key,
+          { ctrlKey: event.ctrlKey, altKey: event.altKey, shiftKey: event.shiftKey, metaKey: event.metaKey },
+          boundTerm.buffer.active.type === 'normal',
+          this.protocolActive(),
+          this.opts.shellType?.(),
+        );
+        if (shimSeq !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          // Win32-Input-Mode stays active for the whole Windows session regardless
+          // of shellType (ConPTY announces it once, session-wide) — without this
+          // claim, the matching keyup would fall through to that encoder below and
+          // leak a stray Kd=0 release record to a shell that never asked for one.
+          this.uiClaimedKeydownKeys.add(event.key);
+          this.routeCaptureData(shimSeq);
+          if (this.attachedProcessId) {
+            Promise.resolve(this.bridge.write(this.attachedProcessId, shimSeq)).catch((e: unknown) => {
+              this.opts.onDiag?.(() => `[TERM-DIAG] word-delete shim write ignored: ${e}`);
+            });
+          }
+          return false;
+        }
       }
 
       // Enhanced keyboard protocols: encode the key ourselves when an app has

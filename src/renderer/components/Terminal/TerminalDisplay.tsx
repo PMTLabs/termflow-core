@@ -62,6 +62,10 @@ interface TerminalDisplayProps {
   // True when this terminal is the active pane of the active tab. Drives focus:
   // autofocus-on-mount and refocus when the tab/pane is (re)activated.
   shouldFocus?: boolean;
+  // The tab's shell profile id (e.g. 'cmd', 'powershell', 'bash'), passed straight
+  // through to the engine so it can gate the Ctrl+Backspace/Ctrl+Delete word-delete
+  // shim (see TerminalEngineOptions.shellType).
+  shellType?: string;
 }
 
 export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
@@ -76,6 +80,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   fontSize = 14,
   isActive = true,
   shouldFocus = true,
+  shellType,
 }) => {
   const dispatch = useDispatch();
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
@@ -154,6 +159,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const processIdRef = useRef(processId);
   processIdRef.current = processId;
 
+  // Keep the latest shellType in a ref (same pattern as onTitleChangeRef above) so
+  // the engine's live shellType getter sees the current value even though the
+  // engine itself is constructed once per terminalId — shellType can change after
+  // mount (e.g. the fallback chain resolving once shell profiles finish loading).
+  const shellTypeRef = useRef(shellType);
+  shellTypeRef.current = shellType;
+
   // Backlog 011: suggest popup state. Routed via a ref so the once-per-terminalId
   // engine options always call the live hook callbacks (same pattern as
   // onTitleChangeRef above).
@@ -187,6 +199,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // by the shouldFocus effect below. (Captured at mount; deps stay [terminalId].)
       autoFocus: shouldFocus,
       isWindows: typeof navigator !== 'undefined' && !!navigator.platform?.includes('Win'),
+      shellType: () => shellTypeRef.current,
       // Real Windows OS build number so xterm's windowsPty heuristics match the ConPTY
       // backend (disables the wrapping heuristic that corrupts codex/ratatui on >= 21376).
       // 0 until the startup fetch resolves → engine assumes a modern build.
