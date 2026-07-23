@@ -95,6 +95,9 @@ describe('encodeWin32Key — printable + named keys', () => {
   test('Ctrl+Backspace -> Uc=127 (DEL)', () => {
     expect(encodeWin32Key(key({ key: 'Backspace', keyCode: 8, ctrlKey: true }), true)).toBe('\x1b[8;14;127;1;8;1_');
   });
+  test('Ctrl+Delete -> Vk=46 (VK_DELETE), Uc=0, Cs=ctrl bit (no override needed)', () => {
+    expect(encodeWin32Key(key({ key: 'Delete', keyCode: 46, ctrlKey: true }), true)).toBe('\x1b[46;83;0;1;8;1_');
+  });
   test('Ctrl+Space -> Uc=0', () => {
     expect(encodeWin32Key(key({ key: ' ', keyCode: 32, ctrlKey: true }), true)).toBe('\x1b[32;57;0;1;8;1_');
   });
