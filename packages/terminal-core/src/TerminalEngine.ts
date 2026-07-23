@@ -1457,6 +1457,35 @@ export class TerminalEngine {
         return false;
       }
 
+      // Ctrl+Backspace / Ctrl+Delete word-delete, at a plain POSIX/readline shell
+      // prompt (bash, zsh, Git Bash, WSL). A VT-byte shell can't distinguish
+      // Ctrl+Backspace from a literal Ctrl+H (both are 0x08) — a documented ConPTY/
+      // terminal limitation — so without this it just backspaces one character.
+      // Win32-Input-Mode (PowerShell/cmd) and the Kitty protocol (TUIs) already
+      // relay these chords with full modifier fidelity to shells that read them
+      // natively, so decideWordDeleteShim only returns non-null for the shells
+      // that can't use either path.
+      if (event.type === 'keydown') {
+        const shimSeq = decideWordDeleteShim(
+          event.key,
+          { ctrlKey: event.ctrlKey, altKey: event.altKey, shiftKey: event.shiftKey, metaKey: event.metaKey },
+          boundTerm.buffer.active.type === 'normal',
+          this.protocolActive(),
+          this.opts.shellType,
+        );
+        if (shimSeq !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.routeCaptureData(shimSeq);
+          if (this.attachedProcessId) {
+            Promise.resolve(this.bridge.write(this.attachedProcessId, shimSeq)).catch((e: unknown) => {
+              this.opts.onDiag?.(() => `[TERM-DIAG] word-delete shim write ignored: ${e}`);
+            });
+          }
+          return false;
+        }
+      }
+
       // Enhanced keyboard protocols: encode the key ourselves when an app has
       // enabled Kitty/modifyOtherKeys and suppress xterm's legacy emission.
       // encodeKey returns null for plain text / IME / unhandled keys -> xterm path.
