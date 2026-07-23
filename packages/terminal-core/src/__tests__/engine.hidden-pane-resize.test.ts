@@ -216,3 +216,130 @@ test('healOnce heals again once the pane is active', async () => {
   expect(spy).toHaveBeenCalledWith(140, 37);
   spy.mockRestore();
 });
+
+// ---------------------------------------------------------------------------
+// Major 1 (review): the engine must be hidden-aware from CONSTRUCTION, because
+// the host mounts+attaches+hydrates a background tab BEFORE its setActive(false)
+// effect runs. An `active: false` option establishes paneActive before mount().
+// ---------------------------------------------------------------------------
+
+test('constructed with active:false, healOnce is gated before any setActive call', async () => {
+  const spy = jest.spyOn(TerminalEngine.prototype as any, 'scheduleBackendResize');
+
+  const cacheKey = `born-hidden-heal-${Math.random()}`;
+  const bridge = makeFakeBridge({ getSize: async () => ({ cols: 133, rows: 37 }) });
+  const engine = new TerminalEngine(bridge, { cacheKey, active: false });
+  engine.mount(makeContainer());
+  const entry = terminalCache.get(cacheKey)!;
+  (entry.terminal as any).resize(140, 37);
+  (engine as any).attachedProcessId = 'pid-1';
+  Object.assign(entry, { lastDataAt: Date.now() - 1000 }); // settled
+
+  await (engine as any).healOnce();
+
+  expect(spy).not.toHaveBeenCalled(); // never active — no SIGWINCH
+  spy.mockRestore();
+});
+
+test('constructed with active:false, a fit-driven resize is parked until activation', async () => {
+  jest.useFakeTimers();
+  const resizeCalls: Array<[number, number]> = [];
+  const bridge = makeFakeBridge({ resize: (_p, c, r) => { resizeCalls.push([c, r]); } });
+  const cacheKey = `born-hidden-park-${Math.random()}`;
+  const engine = new TerminalEngine(bridge, { cacheKey, active: false });
+  engine.mount(makeContainer());
+  engine.attach('pid-1');
+  await jest.runAllTimersAsync();
+
+  const entry = terminalCache.get(cacheKey)!;
+  const term = entry.terminal as any;
+  resizeCalls.length = 0;
+
+  // Simulate a mount-owned settle/font fit that isn't individually gated: it
+  // resizes xterm and schedules a backend resize while the pane is still hidden.
+  term.resize(160, 24);
+  term.emitResize(160, 24);
+  await jest.runAllTimersAsync();
+  expect(resizeCalls).toEqual([]); // parked — no SIGWINCH to the hidden PTY
+
+  engine.setActive(true);
+  await jest.runAllTimersAsync();
+  expect(resizeCalls).toEqual([[160, 24]]); // flushed exactly once on activation
+});
+
+// ---------------------------------------------------------------------------
+// Major 2 (review): a backend resize armed while VISIBLE, then the tab is
+// switched away within the 120ms debounce, must NOT fire while hidden — it is
+// parked and flushed on the next activation.
+// ---------------------------------------------------------------------------
+
+test('a resize pending at deactivation is parked, not sent, and flushes on activation', async () => {
+  jest.useFakeTimers();
+  const { engine, term, fit, resizeCalls } = await mountAttached(`pending-park-${Math.random()}`);
+
+  // Visible: a window resize arms the 120ms backend debounce.
+  fit.setNextFit(150, 30);
+  fireResizeObserver();
+  jest.advanceTimersByTime(20); // fire the observer's rAF fit, NOT the 120ms debounce
+  expect(term.cols).toBe(150);
+
+  engine.setActive(false); // user switches tabs mid-debounce
+  await jest.runAllTimersAsync(); // the 120ms timer fires while hidden
+  expect(resizeCalls).toEqual([]); // parked, not sent
+
+  engine.setActive(true);
+  await jest.runAllTimersAsync();
+  expect(resizeCalls).toEqual([[150, 30]]); // flushed once on activation
+});
+
+// ---------------------------------------------------------------------------
+// Major 3 (review): if the pane is deactivated WHILE healOnce is awaiting
+// getBackendSize, the completed heal must re-check paneActive and NOT schedule.
+// ---------------------------------------------------------------------------
+
+test('healOnce deactivated during the getSize await does not schedule a resize', async () => {
+  const spy = jest.spyOn(TerminalEngine.prototype as any, 'scheduleBackendResize');
+
+  const cacheKey = `heal-deactivate-mid-await-${Math.random()}`;
+  let engineRef: TerminalEngine;
+  const bridge = makeFakeBridge({
+    getSize: async () => {
+      // The user switches away while the size round-trip is in flight.
+      engineRef.setActive(false);
+      return { cols: 133, rows: 37 };
+    },
+  });
+  const engine = new TerminalEngine(bridge, { cacheKey });
+  engineRef = engine;
+  engine.mount(makeContainer());
+  const entry = terminalCache.get(cacheKey)!;
+  (entry.terminal as any).resize(140, 37);
+  (engine as any).attachedProcessId = 'pid-1';
+  Object.assign(entry, { lastDataAt: Date.now() - 1000 });
+
+  await (engine as any).healOnce();
+
+  expect(spy).not.toHaveBeenCalled();
+  spy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Regression guard: unmount must STILL flush a pending resize even while hidden
+// (the pane-collapse fix relies on teardown leaving the PTY at the right size).
+// ---------------------------------------------------------------------------
+
+test('unmount force-flushes a pending resize even when the pane is hidden', async () => {
+  jest.useFakeTimers();
+  const { engine, term, fit, resizeCalls } = await mountAttached(`unmount-force-${Math.random()}`);
+
+  fit.setNextFit(170, 40);
+  fireResizeObserver(); // arms the 120ms backend debounce (visible)
+  jest.advanceTimersByTime(20); // fire the observer's rAF fit, NOT the 120ms debounce
+  expect(term.cols).toBe(170);
+
+  engine.setActive(false); // hidden
+  engine.unmount(); // teardown must still deliver the final size
+  await jest.runAllTimersAsync();
+
+  expect(resizeCalls).toEqual([[170, 40]]);
+});
