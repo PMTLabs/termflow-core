@@ -2737,6 +2737,22 @@ export class TerminalEngine {
     this.term?.clear();
   }
 
+  // True when the viewport is pinned to the live tail — same check the End-key
+  // handler and refreshSearch use internally. true (not false) before mount, so
+  // a host UI's "scroll to bottom" button defaults to hidden rather than shown.
+  isScrolledToBottom(): boolean {
+    if (!this.term) return true;
+    const buf = this.term.buffer.active;
+    return buf.viewportY >= buf.baseY;
+  }
+
+  // Jumps the viewport back to the live tail. Deliberately does not also focus
+  // the terminal — callers (a mouse-clicked button) compose that explicitly,
+  // e.g. `engine.scrollToBottom(); engine.focus();`.
+  scrollToBottom(): void {
+    this.term?.scrollToBottom();
+  }
+
   getSelection(): string {
     return this.term?.getSelection() ?? '';
   }
@@ -3024,6 +3040,19 @@ export class TerminalEngine {
     return this.searchAddon.onDidChangeResults((e) =>
       cb({ resultIndex: e.resultIndex, resultCount: e.resultCount }),
     );
+  }
+
+  // Subscribe to at-bottom/scrolled-away-from-bottom transitions, for a host UI's
+  // "scroll to bottom" button. Forwards xterm's own onScroll directly (same
+  // delegation pattern as onSearchResults above) rather than maintaining a
+  // separate callback registry. Safe to call after mount(); a no-op disposable
+  // before mount (no term to subscribe to).
+  onScrollPosition(cb: (atBottom: boolean) => void): { dispose(): void } {
+    if (!this.term) return { dispose() {} };
+    return this.term.onScroll(() => {
+      const buf = this.term!.buffer.active;
+      cb(buf.viewportY >= buf.baseY);
+    });
   }
 
   // ---------------------------------------------------------------------------
