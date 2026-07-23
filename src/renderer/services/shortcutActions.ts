@@ -1,5 +1,5 @@
 /**
- * Single source of truth for the 11 user-customizable keyboard shortcuts.
+ * Single source of truth for the 13 user-customizable keyboard shortcuts.
  * Consumed by InputHandler (registration/rebinding) and the Settings >
  * Shortcuts UI (rendering + reset-to-default). Kept free of React/Redux so
  * findConflict can be tested in isolation.
@@ -23,6 +23,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'splitHorizontal', label: 'Split Pane', defaultCombo: 'Ctrl+Shift+D' },
   { id: 'closePane', label: 'Close Pane', defaultCombo: 'Ctrl+Shift+W' },
   { id: 'toggleMaximizePane', label: 'Maximize Pane', defaultCombo: 'Ctrl+Shift+Enter' },
+  { id: 'focusNextPane', label: 'Focus Next Pane', defaultCombo: 'Alt+]' },
+  { id: 'focusPrevPane', label: 'Focus Previous Pane', defaultCombo: 'Alt+[' },
   { id: 'paste', label: 'Paste', defaultCombo: 'Ctrl+V' },
   { id: 'clearTerminal', label: 'Clear Terminal', defaultCombo: 'Ctrl+Shift+X' },
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },

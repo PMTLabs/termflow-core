@@ -13,6 +13,9 @@
      stay sharp. box-shadow doesn't have this rounding failure mode. */
   box-shadow: inset 0 0 0 1px var(--pane-border, #3e3e42);
   position: relative;
+  /* Non-focused pane dimming (Settings > Appearance) fades via the `opacity`
+     inline style TerminalPane.tsx sets from state.settings.nonFocusedPaneOpacity. */
+  transition: opacity 120ms ease;
 }
 
 .terminal-pane.active {

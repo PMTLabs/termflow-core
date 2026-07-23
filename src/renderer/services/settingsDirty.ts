@@ -12,6 +12,7 @@ export interface TrackedSettings {
   tabSizingMode: string;
   fixedTabWidth: number;
   colorSchemaId: string;
+  nonFocusedPaneOpacity: number;
   agentColorSchemes: Record<string, string>;
   closeTabOnProcessExit: boolean;
   smartCtrlC: boolean;
@@ -31,6 +32,7 @@ export type CategorySnapshot =
       tabSizingMode: string;
       fixedTabWidth: number;
       colorSchemaId: string;
+      nonFocusedPaneOpacity: number;
       // Stored as a key-sorted [agent, schemaId][] so JSON.stringify comparison is
       // order-independent (the map's insertion order must not affect dirtiness).
       agentColorSchemes: Array<[string, string]>;
@@ -56,6 +58,7 @@ export function snapshotCategory(category: TrackedCategory, s: TrackedSettings):
         tabSizingMode: s.tabSizingMode,
         fixedTabWidth: s.fixedTabWidth,
         colorSchemaId: s.colorSchemaId,
+        nonFocusedPaneOpacity: s.nonFocusedPaneOpacity,
         agentColorSchemes: Object.entries(s.agentColorSchemes).sort((a, b) => a[0].localeCompare(b[0])),
       };
     case 'terminal':

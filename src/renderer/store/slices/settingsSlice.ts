@@ -62,6 +62,10 @@ interface SettingsState {
   // Selected terminal ANSI color schema id (see store/colorSchemas.ts). Applied
   // live to every open terminal and to new tabs.
   colorSchemaId: string;
+  // Opacity (0-100%) applied to a tab's non-focused panes so the focused pane
+  // stands out. 100 = no dimming. Only visible when a tab has more than one
+  // pane (a solo pane is always the focused one, so it's never dimmed).
+  nonFocusedPaneOpacity: number;
   // Per-coding-agent color schema overrides: agent label (codex/claude/…) →
   // colorSchemaId. Highest-priority override — while a mapped agent runs in a
   // pane, that pane adopts this scheme over its tab/global schema. Global and
@@ -134,6 +138,7 @@ const initialState: SettingsState = {
   fixedTabWidth: 150,
   activateTabOnApiCreate: false,
   colorSchemaId: DEFAULT_COLOR_SCHEMA_ID,
+  nonFocusedPaneOpacity: 50,
   agentColorSchemes: {},
   commandSuggestions: true,
   customKeybindings: {},
@@ -290,6 +295,14 @@ const settingsSlice = createSlice({
       }
     },
 
+    setNonFocusedPaneOpacity: (state, action: PayloadAction<number>) => {
+      state.nonFocusedPaneOpacity = Math.max(0, Math.min(100, action.payload));
+      // Save to config file
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('nonFocusedPaneOpacity', state.nonFocusedPaneOpacity);
+      }
+    },
+
     setCommandSuggestions: (state, action: PayloadAction<boolean>) => {
       state.commandSuggestions = action.payload;
       // Save to config file
@@ -433,6 +446,7 @@ export const {
   setFixedTabWidth,
   setActivateTabOnApiCreate,
   setColorSchema,
+  setNonFocusedPaneOpacity,
   setCommandSuggestions,
   setAgentColorSchemes,
   setAgentColorScheme,

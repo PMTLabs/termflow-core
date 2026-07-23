@@ -1,6 +1,7 @@
 import { store } from '../store';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
-import { splitPane, toggleMaximizePane, resizeFocusedPane } from '../store/slices/panesSlice';
+import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
+import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
 import { pasteToTerminal } from '@termflow/terminal-core';
 import { readClipboardText } from '../utils/clipboard';
@@ -48,6 +49,8 @@ export class InputHandler {
     this.registerShortcut(this.defaultComboFor('splitHorizontal'), this.handleSplitHorizontal);
     this.registerShortcut(this.defaultComboFor('closePane'), this.handleClosePane);
     this.registerShortcut(this.defaultComboFor('toggleMaximizePane'), this.handleToggleMaximizePane);
+    this.registerShortcut(this.defaultComboFor('focusNextPane'), this.handleFocusNextPane);
+    this.registerShortcut(this.defaultComboFor('focusPrevPane'), this.handleFocusPrevPane);
 
     // Note: plain Alt+Arrow is intentionally NOT bound. It must pass through to
     // the terminal so xterm emits \x1b[1;3D / \x1b[1;3C etc. — shells map those
@@ -142,6 +145,8 @@ export class InputHandler {
       splitHorizontal: this.handleSplitHorizontal,
       closePane: this.handleClosePane,
       toggleMaximizePane: this.handleToggleMaximizePane,
+      focusNextPane: this.handleFocusNextPane,
+      focusPrevPane: this.handleFocusPrevPane,
       paste: this.handlePaste,
       clearTerminal: this.handleClearTerminal,
       openSettings: openSettingsTab,
@@ -395,6 +400,36 @@ export class InputHandler {
 
   private handleResizePane = (direction: 'left' | 'right' | 'up' | 'down'): void => {
     store.dispatch(resizeFocusedPane({ direction }));
+  };
+
+  /** Focus the next/previous pane in the active tab's visual order (wraps). No-op on a solo pane. */
+  private cycleFocusedPane = (step: 1 | -1): void => {
+    const state = store.getState();
+    const tabId = state.panes.activeTabId;
+    const activePaneId = state.panes.activePaneId;
+    if (!tabId || !activePaneId) return;
+    // While a pane is maximized its siblings are hidden (but still mounted) —
+    // cycling onto one would move keyboard focus into a pane the user can't
+    // see. Same guard resizeFocusedPane uses for the same reason.
+    if (state.panes.maximizedPaneByTabId[tabId]) return;
+
+    const tree = state.panes.treesByTabId[tabId] ?? null;
+    const leafIds = getAllLeafIds(tree);
+    if (leafIds.length <= 1) return;
+
+    const currentIndex = leafIds.indexOf(activePaneId);
+    if (currentIndex === -1) return;
+
+    const nextIndex = (currentIndex + step + leafIds.length) % leafIds.length;
+    store.dispatch(focusPane(leafIds[nextIndex]));
+  };
+
+  private handleFocusNextPane = (): void => {
+    this.cycleFocusedPane(1);
+  };
+
+  private handleFocusPrevPane = (): void => {
+    this.cycleFocusedPane(-1);
   };
 
   private handlePaste = async (): Promise<void> => {

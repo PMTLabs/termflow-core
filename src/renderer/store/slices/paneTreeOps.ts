@@ -191,6 +191,18 @@ export function getAllTerminalIds(node: PaneNode | null): string[] {
 }
 
 /**
+ * Collect every terminal-leaf pane id in a tree, depth-first (left-to-right,
+ * top-to-bottom) — i.e. the tab's visual pane order. Used by the pane
+ * focus-cycle shortcuts (Alt+]/Alt+[) to compute "next"/"previous".
+ */
+export function getAllLeafIds(node: PaneNode | null): string[] {
+  if (!node) return [];
+  if (node.type === 'terminal') return [node.id];
+  if (node.children) return node.children.flatMap((c) => getAllLeafIds(c));
+  return [];
+}
+
+/**
  * Resolve the tab that should be treated as fully exited when a single pane's
  * process exits, or null if the exit shouldn't affect the tab yet. A tab only
  * counts as exited once EVERY terminal in its tree has no live process — a

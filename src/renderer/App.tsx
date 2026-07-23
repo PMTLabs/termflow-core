@@ -29,6 +29,7 @@ import {
   setEnhancedKeyboard,
   setCommandSuggestions,
   setColorSchema,
+  setNonFocusedPaneOpacity,
   setAgentColorSchemes,
   setCustomKeybindings,
   setKeepRunningInBackground,
@@ -432,6 +433,9 @@ const App: React.FC = () => {
         }
         if (typeof config.colorSchemaId === 'string') {
           dispatch(setColorSchema(config.colorSchemaId));
+        }
+        if (typeof config.nonFocusedPaneOpacity === 'number') {
+          dispatch(setNonFocusedPaneOpacity(config.nonFocusedPaneOpacity));
         }
         if (config.agentColorSchemes && typeof config.agentColorSchemes === 'object') {
           dispatch(setAgentColorSchemes(config.agentColorSchemes));

@@ -99,6 +99,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
   const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const fontSize = useSelector((state: RootState) => state.settings.fontSize);
+  const nonFocusedPaneOpacity = useSelector((state: RootState) => state.settings.nonFocusedPaneOpacity);
   // Terminal font family — the startup status must render in the same font as
   // the terminal it stands in for (not a hardcoded stack), so it honours the
   // user's font settings.
@@ -524,6 +525,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         className={paneClassName({ isActive, solo, closedInfo })}
         data-pane-id={paneId}
         onContextMenu={handleContextMenu}
+        style={isActive ? undefined : { opacity: nonFocusedPaneOpacity / 100 }}
       >
         <div
           className="terminal-pane-header"

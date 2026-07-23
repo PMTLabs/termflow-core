@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
@@ -263,6 +263,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setTabSizingMode(baseline.tabSizingMode as 'shrink' | 'scroll' | 'fixed'));
             dispatch(setFixedTabWidth(baseline.fixedTabWidth));
             dispatch(setColorSchema(baseline.colorSchemaId));
+            dispatch(setNonFocusedPaneOpacity(baseline.nonFocusedPaneOpacity));
             dispatch(setAgentColorSchemes(Object.fromEntries(baseline.agentColorSchemes)));
         } else if (baseline.kind === 'terminal') {
             dispatch(setCloseTabOnProcessExit(baseline.closeTabOnProcessExit));
@@ -931,6 +932,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 </div>
                 <span className="help-text">
                     Applies live to every open terminal and to new tabs.
+                </span>
+            </div>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="non-focused-pane-opacity">
+                    Non-focused Pane Opacity ({settings.nonFocusedPaneOpacity}%)
+                </label>
+                <input
+                    id="non-focused-pane-opacity"
+                    type="range"
+                    className="setting-input"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={settings.nonFocusedPaneOpacity}
+                    onChange={(e) => dispatch(setNonFocusedPaneOpacity(Number(e.target.value)))}
+                />
+                <span className="help-text">
+                    Dims panes that aren't focused when a tab is split into more than one
+                    pane, so the focused pane stands out. 100% = no dimming.
                 </span>
             </div>
             <div className="setting-item">

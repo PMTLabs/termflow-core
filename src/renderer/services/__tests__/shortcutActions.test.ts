@@ -1,8 +1,8 @@
 import { SHORTCUT_ACTIONS, findConflict, canonicalizeCombo } from '../shortcutActions';
 
 describe('SHORTCUT_ACTIONS', () => {
-  it('has 11 unique action ids with unique default combos', () => {
-    expect(SHORTCUT_ACTIONS).toHaveLength(11);
+  it('has 13 unique action ids with unique default combos', () => {
+    expect(SHORTCUT_ACTIONS).toHaveLength(13);
     const ids = SHORTCUT_ACTIONS.map(a => a.id);
     const combos = SHORTCUT_ACTIONS.map(a => a.defaultCombo);
     expect(new Set(ids).size).toBe(ids.length);
