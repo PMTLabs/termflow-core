@@ -235,9 +235,15 @@ class RunningActivityTrackerClass {
   private flagOnExit(processId: string, terminalId: string | undefined): void {
     const last = this.lastOutputAt.get(processId);
     if (last === undefined || last <= (this.unseenMark.get(processId) ?? -Infinity)) return;
-    const tabId = terminalId
-      ? findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId)
-      : this.resolveTab(processId);
+    // Prefer the terminalId carried on the exit event; fall back to resolving it
+    // from the processId. Use this ONE resolved id for BOTH the tab lookup and the
+    // pane-mute check so the two can never disagree — using the bare param for the
+    // mute check while resolving the tab another way would let a muted pane's
+    // exit-settled output leak a bell whenever the event omits terminalId.
+    const effectiveTerminalId = terminalId ?? terminalService.getTerminalIdForProcess(processId);
+    const tabId = effectiveTerminalId
+      ? findTabIdByTerminalId(store.getState().panes.treesByTabId, effectiveTerminalId)
+      : null;
     if (!tabId) return;
     const tabsState = store.getState().tabs;
     if (tabId === tabsState.activeTabId) return;
@@ -245,8 +251,8 @@ class RunningActivityTrackerClass {
     // exiting pane itself is muted (an unmuted sibling in the same tab is
     // unaffected). Mirrors the source-mute check in computeUnseenUpdate.
     const tabMuted = tabsState.tabs.some(t => t.id === tabId && t.notifyMuted);
-    const paneMuted = terminalId
-      ? isTerminalMuted(store.getState().panes.treesByTabId, terminalId)
+    const paneMuted = effectiveTerminalId
+      ? isTerminalMuted(store.getState().panes.treesByTabId, effectiveTerminalId)
       : false;
     if (tabMuted || paneMuted) return;
     // Skip a redundant dispatch if the tab is already flagged (mirrors computeUnseenUpdate);

@@ -515,5 +515,17 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
       done();
       expect(bells).toHaveLength(0);
     });
+
+    it('does NOT bell (exit path) for a muted pane even when the exit event omits terminalId', () => {
+      // Regression (external review, agy finding 1): the exit gate must resolve the
+      // terminalId from the processId and use THAT for the pane-mute check — using
+      // the (undefined) event param would let a muted pane leak an exit bell.
+      mockMutedTerminals.add('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', undefined); // event carried no terminalId
+      done();
+      expect(bells).toHaveLength(0);
+    });
   });
 });

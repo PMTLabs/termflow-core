@@ -95,6 +95,9 @@ function splitLeafInTree(
         terminalId: node.terminalId,
         name: node.name || `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`,
         shellType: node.shellType,
+        // Carry the pane-level mute onto the leaf that KEEPS this terminal, so a
+        // muted pane stays muted when split. The new sibling starts unmuted.
+        notifyMuted: node.notifyMuted,
       };
       node.type = 'split';
       node.direction = direction;
@@ -102,6 +105,9 @@ function splitLeafInTree(
       node.children = [originalPane, newPane];
       delete node.terminalId;
       delete node.shellType;
+      // The node is now a split container, not a terminal leaf — drop the flag so
+      // it isn't stranded where no tracker/UI lookup would ever read it.
+      delete node.notifyMuted;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -594,14 +600,17 @@ const panesSlice = createSlice({
             type: 'terminal',
             terminalId: node.terminalId,
             name: node.name || uniqueOriginalTitle,
+            // Keep the pane-level mute with the terminal it belongs to.
+            notifyMuted: node.notifyMuted,
           };
-          
+
           node.type = 'split';
           node.direction = direction;
           node.size = 50;
           // 'before' puts the new pane on the top/left of the original.
           node.children = position === 'before' ? [newPane, originalPane] : [originalPane, newPane];
           delete node.terminalId;
+          delete node.notifyMuted; // node is a split container now, not a leaf
 
           // Set the new pane as active
           state.activePaneId = newPaneId;

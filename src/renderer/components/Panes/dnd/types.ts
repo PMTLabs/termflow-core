@@ -69,4 +69,8 @@ export interface DetachPayload {
   titleIsCustom?: boolean;
   titleColor?: string;
   colorSchemaId?: string;
+  // Tab-level notification mute — a persistent user setting, so it must survive a
+  // whole-tab move like the fields above. (Pane-level mute already rides along on
+  // the PaneNode tree.) Only set for kind: 'tab'.
+  notifyMuted?: boolean;
 }

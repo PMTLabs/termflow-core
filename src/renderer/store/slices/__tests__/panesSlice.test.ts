@@ -14,6 +14,7 @@ import reducer, {
   movePaneToTab,
   toggleMaximizePane,
   setPaneMuted,
+  splitPaneWithTab,
   PaneNode,
 } from '../panesSlice';
 import { findLeaf } from '../paneTreeOps';
@@ -524,5 +525,51 @@ describe('panesSlice setPaneMuted', () => {
     const before = JSON.stringify(s.treesByTabId);
     s = reducer(s, setPaneMuted({ paneId: 'pn-missing', muted: true }));
     expect(JSON.stringify(s.treesByTabId)).toEqual(before);
+  });
+
+  // Regression (external review, codex finding 1): splitting a muted pane must
+  // carry the mute onto the leaf that keeps the original terminal, start the new
+  // sibling unmuted, and never strand the flag on the converted split node.
+  it('splitPane carries pane mute to the original terminal, new sibling unmuted, split node clean', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    const rootId = s.paneTree!.id;
+    s = reducer(s, setPaneMuted({ paneId: rootId, muted: true }));
+    s = reducer(s, splitPane({ paneId: rootId, direction: 'vertical', terminalId: 'tm-2' }));
+
+    const root = s.paneTree!;
+    expect(root.type).toBe('split');
+    expect(root.notifyMuted).toBeUndefined(); // not stranded on the split container
+    const original = root.children!.find(c => c.terminalId === 'tb-1');
+    const created = root.children!.find(c => c.terminalId === 'tm-2');
+    expect(original?.notifyMuted).toBe(true);
+    expect(created?.notifyMuted).toBeUndefined();
+  });
+
+  it('splitPaneWithTab (thunk fulfilled) also carries pane mute to the original terminal', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    const rootId = s.paneTree!.id;
+    s = reducer(s, setPaneMuted({ paneId: rootId, muted: true }));
+    s = reducer(s, {
+      type: splitPaneWithTab.fulfilled.type,
+      payload: {
+        paneId: rootId,
+        direction: 'vertical',
+        position: 'after',
+        shellType: 'default',
+        newTerminalId: 'tm-2',
+        uniqueTitle: 'Right',
+        uniqueOriginalTitle: 'Left',
+      },
+    });
+
+    const root = s.paneTree!;
+    expect(root.type).toBe('split');
+    expect(root.notifyMuted).toBeUndefined();
+    const original = root.children!.find(c => c.terminalId === 'tb-1');
+    const created = root.children!.find(c => c.terminalId === 'tm-2');
+    expect(original?.notifyMuted).toBe(true);
+    expect(created?.notifyMuted).toBeUndefined();
   });
 });

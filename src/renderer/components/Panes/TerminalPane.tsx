@@ -117,17 +117,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // flag; `tabMuted` is its owning tab's flag. The bell shows slashed when
   // EITHER is set (effective state — no notification actually fires), but the
   // toggle only ever flips this pane's own flag (tab mute is managed from the
-  // tab context menu). Booleans, so the selectors stay reference-stable.
-  const owningTabId = useSelector((state: RootState) =>
-    terminalId ? findTabIdByTerminalId(state.panes.treesByTabId, terminalId) : null,
-  );
+  // tab context menu). Each selector returns a plain boolean and resolves the
+  // pane/tab itself (self-contained — no cross-selector closure that could read a
+  // stale owningTabId during an intermediate store-notification pass).
   const paneMuted = useSelector((state: RootState) => {
-    const tree = owningTabId ? state.panes.treesByTabId[owningTabId] : null;
-    return !!(tree && findLeaf(tree, paneId)?.notifyMuted);
+    for (const tid of Object.keys(state.panes.treesByTabId)) {
+      const leaf = findLeaf(state.panes.treesByTabId[tid], paneId);
+      if (leaf) return !!leaf.notifyMuted;
+    }
+    return false;
   });
-  const tabMuted = useSelector((state: RootState) =>
-    !!(owningTabId && state.tabs.tabs.find(t => t.id === owningTabId)?.notifyMuted),
-  );
+  const tabMuted = useSelector((state: RootState) => {
+    if (!terminalId) return false;
+    const tid = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
+    return !!(tid && state.tabs.tabs.find(t => t.id === tid)?.notifyMuted);
+  });
   const effectiveMuted = tabMuted || paneMuted;
   const handleToggleMute = () => {
     dispatch(setPaneMuted({ paneId, muted: !paneMuted }));
@@ -592,8 +596,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                     ? 'Notifications muted — click to unmute this pane'
                     : 'Mute notifications for this pane'
               }
-              aria-label={effectiveMuted ? 'Unmute pane notifications' : 'Mute pane notifications'}
-              aria-pressed={effectiveMuted}
+              aria-label={paneMuted ? 'Unmute pane notifications' : 'Mute pane notifications'}
+              aria-pressed={paneMuted}
             >
               <BellIcon muted={effectiveMuted} />
             </button>

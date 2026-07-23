@@ -138,6 +138,7 @@ export function buildTabDetachPayload(
     titleIsCustom: sourceTab?.titleIsCustom,
     titleColor: sourceTab?.titleColor,
     colorSchemaId: sourceTab?.colorSchemaId,
+    notifyMuted: sourceTab?.notifyMuted,
   };
 }
 
@@ -257,6 +258,7 @@ export function applyDetachPayload(payload: DetachPayload): void {
     titleIsCustom: payload.titleIsCustom,
     titleColor: payload.titleColor,
     colorSchemaId: payload.colorSchemaId,
+    notifyMuted: payload.notifyMuted,
   }));
   store.dispatch(addTabTree({ tabId: payload.tabId, tree: payload.paneTree }));
   store.dispatch(setActiveTab(payload.tabId));

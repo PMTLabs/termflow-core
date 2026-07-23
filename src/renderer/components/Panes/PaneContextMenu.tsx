@@ -42,17 +42,21 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   const isMaximized = Object.values(maximizedPaneByTabId).includes(paneId);
   // Mute state: this pane's own flag, plus its owning tab's flag (which
   // overrides). The item toggles the pane flag; the icon shows the effective
-  // (tab-or-pane) muted state so it matches the header bell.
-  const owningTabId = useSelector((s: RootState) =>
-    terminalId ? findTabIdByTerminalId(s.panes.treesByTabId, terminalId) : null,
-  );
+  // (tab-or-pane) muted state so it matches the header bell. Each selector is
+  // self-contained (resolves the pane/tab itself) so it can't read a stale
+  // owningTabId during an intermediate store-notification pass.
   const paneMuted = useSelector((s: RootState) => {
-    const tree = owningTabId ? s.panes.treesByTabId[owningTabId] : null;
-    return !!(tree && findLeaf(tree, paneId)?.notifyMuted);
+    for (const tid of Object.keys(s.panes.treesByTabId)) {
+      const leaf = findLeaf(s.panes.treesByTabId[tid], paneId);
+      if (leaf) return !!leaf.notifyMuted;
+    }
+    return false;
   });
-  const tabMuted = useSelector((s: RootState) =>
-    !!(owningTabId && s.tabs.tabs.find(t => t.id === owningTabId)?.notifyMuted),
-  );
+  const tabMuted = useSelector((s: RootState) => {
+    if (!terminalId) return false;
+    const tid = findTabIdByTerminalId(s.panes.treesByTabId, terminalId);
+    return !!(tid && s.tabs.tabs.find(t => t.id === tid)?.notifyMuted);
+  });
   const [schemaExpanded, setSchemaExpanded] = useState(false);
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
