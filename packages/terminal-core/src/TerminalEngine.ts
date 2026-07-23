@@ -240,6 +240,50 @@ export function isCtrlCBurst(
   return timestamps.filter((t) => now - t < windowMs).length >= count;
 }
 
+const WINDOWS_NATIVE_SHELL_RE = /^(cmd|powershell|pwsh)$/i;
+
+/**
+ * True for shells that read raw VT bytes via their own readline-style line editor
+ * (bash, zsh, Git Bash, WSL, unknown/custom profiles) — the shells the word-delete
+ * shim below targets. False only for shell ids that are native Windows console
+ * apps (cmd.exe, PowerShell/pwsh), which already get correct word-delete via
+ * Win32-Input-Mode + their own native keybindings (PSReadLine's BackwardKillWord/
+ * KillWord) and must NOT be shimmed — sending raw ESC-prefixed bytes there would
+ * be read as literal Escape + character keystrokes instead of a chord. Pure so it
+ * is unit-testable.
+ */
+export function isPosixShell(shellType: string | undefined): boolean {
+  return !shellType || !WINDOWS_NATIVE_SHELL_RE.test(shellType);
+}
+
+/**
+ * Decide the byte sequence for Ctrl+Backspace/Ctrl+Delete word-delete on a plain
+ * POSIX/readline shell prompt. A VT-byte shell (bash, zsh) can't distinguish
+ * Ctrl+Backspace from a literal Ctrl+H — both encode to the same byte (0x08), a
+ * documented ConPTY/terminal limitation — so without this shim it just backspaces
+ * one character instead of a word. Win32-Input-Mode and the Kitty protocol already
+ * relay these chords with full modifier fidelity to shells that read them natively
+ * (PSReadLine, Kitty-protocol TUIs), so this only fires when neither applies.
+ * Sequences match readline's own defaults (`M-DEL`/`M-d`) and the same word-boundary
+ * semantics as the existing Alt+Arrow word-nav shim (`M-b`/`M-f`) — not unix-word-
+ * rubout's whitespace-only boundary. Pure so it is unit-testable without an xterm
+ * instance.
+ */
+export function decideWordDeleteShim(
+  key: string,
+  mods: { ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean },
+  isNormalBuffer: boolean,
+  protocolActive: boolean,
+  shellType: string | undefined,
+): string | null {
+  if (!isNormalBuffer || protocolActive) return null;
+  if (!mods.ctrlKey || mods.altKey || mods.shiftKey || mods.metaKey) return null;
+  if (!isPosixShell(shellType)) return null;
+  if (key === 'Backspace') return '\x1b\x7f'; // Meta+Backspace -> readline backward-kill-word
+  if (key === 'Delete') return '\x1bd'; // Meta+d -> readline kill-word
+  return null;
+}
+
 export interface PathLinkMatch {
   /** 0-based start index within the line string. */
   start: number;
