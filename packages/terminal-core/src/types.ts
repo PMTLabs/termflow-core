@@ -54,6 +54,12 @@ export interface TerminalEngineOptions {
   // omitted/0 the engine assumes a modern ConPTY (see FALLBACK_WINDOWS_BUILD).
   windowsBuildNumber?: number;
   cacheKey?: string;       // terminalId — cross-mount reuse
+  // Initial pane visibility, mirroring setActive(). Default true. The host MUST
+  // pass the tab's active state here (not rely on a post-mount setActive call):
+  // it mounts+attaches+hydrates a background tab BEFORE its setActive effect runs,
+  // so without this the engine would fit/heal/SIGWINCH a CSS-hidden pane during
+  // that window — wiping a ratatui CLI's (codex) scrollback via its ESC[3J redraw.
+  active?: boolean;        // default true
   // When false, mount() does NOT focus the terminal (click-to-focus still works).
   // Default true preserves the main app's focus-on-mount. Set false for grid
   // panes that aren't the selected one, so they don't steal focus from each other.

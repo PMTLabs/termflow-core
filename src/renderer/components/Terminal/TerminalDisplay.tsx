@@ -198,6 +198,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // panes must not steal it from each other. Refocus on activation is handled
       // by the shouldFocus effect below. (Captured at mount; deps stay [terminalId].)
       autoFocus: shouldFocus,
+      // Initial pane visibility (tab active state) — captured at mount, deps stay
+      // [terminalId]. REQUIRED so a background tab is hidden-aware BEFORE mount()/
+      // attach()/hydrate() run: the setActive effect below fires only AFTER this
+      // effect, so without this the engine would SIGWINCH a CSS-hidden pane during
+      // that window and wipe a ratatui CLI's (codex) scrollback. The [isActive]
+      // effect handles every subsequent change.
+      active: isActive,
       isWindows: typeof navigator !== 'undefined' && !!navigator.platform?.includes('Win'),
       shellType: () => shellTypeRef.current,
       // Real Windows OS build number so xterm's windowsPty heuristics match the ConPTY

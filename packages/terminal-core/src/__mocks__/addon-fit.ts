@@ -35,7 +35,10 @@ export class FitAddon {
   }
 
   proposeDimensions(): { cols: number; rows: number } | undefined {
-    return undefined;
+    // Report the armed next-fit size (without consuming it) so the engine's
+    // ResizeObserver path — which gates fit() on proposeDimensions() — can be
+    // exercised. Undefined when nothing is armed, matching the old behavior.
+    return this._nextFit ?? undefined;
   }
 
   /**

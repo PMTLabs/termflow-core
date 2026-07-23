@@ -545,6 +545,16 @@ export class TerminalEngine {
   // unmount so a fit can't fire against a torn-down or re-created mount.
   private fitTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Host-reported pane visibility (setActive). Background tabs hide via
+  // `visibility:hidden`, so layout/observers keep running — this flag is the
+  // only reliable "hidden" signal. While false, observer/font refits and the
+  // dimension heal are DEFERRED (no xterm resize, no backend SIGWINCH): ratatui
+  // CLIs (codex) answer any SIGWINCH with ESC[2J ESC[3J + a capped transcript
+  // re-emit, which silently wipes a hidden tab's accumulated scrollback. The
+  // setActive(true) 50ms fit is the single flush point. Defaults true so hosts
+  // that never call setActive (mirror/grid) keep today's behavior.
+  private paneActive = true;
+
   // Debounce for backend PTY resizes (see BACKEND_RESIZE_DEBOUNCE_MS). xterm's
   // own resize is immediate; only the bridge.resize() call is coalesced. Cleared
   // on unmount so it can't fire against a torn-down mount.
@@ -661,6 +671,9 @@ export class TerminalEngine {
     // Without a cacheKey there is no cross-mount reuse; key off a deterministic
     // sequence so the cache map still works (every mount creates a fresh entry).
     this.cacheKey = opts.cacheKey ?? `__anon_${++anonCacheKeySeq}`;
+    // Establish visibility BEFORE mount()/attach() — the host mounts a background
+    // tab before its setActive effect fires (see the `active` option / paneActive).
+    this.paneActive = opts.active ?? true;
   }
 
   // ---------------------------------------------------------------------------
@@ -1764,6 +1777,10 @@ export class TerminalEngine {
         const resizeObserver = new ResizeObserver(() => {
           if (typeof requestAnimationFrame !== 'function') return;
           requestAnimationFrame(() => {
+            // Hidden pane (background tab): don't follow layout changes — no
+            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
+            // setActive(true) fit flushes the final geometry on activation.
+            if (!this.paneActive) return;
             const el = this.container;
             if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
               try {
@@ -2198,7 +2215,20 @@ export class TerminalEngine {
   // lifecycle
   // ---------------------------------------------------------------------------
   setActive(active: boolean): void {
-    // Re-fit on activation with a 50ms settle (source 228-240 / R7).
+    this.paneActive = active;
+    // Deactivation: cancel any armed fit so it can't resize a now-hidden pane
+    // (e.g. an activation fit scheduled 50ms before a quick tab switch away).
+    if (!active) {
+      if (this.fitTimer) {
+        clearTimeout(this.fitTimer);
+        this.fitTimer = null;
+      }
+      return;
+    }
+    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Also the
+    // FLUSH point for geometry changes deferred while hidden (paneActive above):
+    // fit() re-measures the container, and an actual size change flows through
+    // xterm onResize -> scheduleBackendResize (deduped when nothing changed).
     if (active && this.fitAddon) {
       if (this.fitTimer) clearTimeout(this.fitTimer);
       this.fitTimer = setTimeout(() => {
@@ -2208,7 +2238,34 @@ export class TerminalEngine {
         } catch (error) {
           console.warn('terminal-core/engine: Failed to fit terminal on activation:', error);
         }
+        // Deliver geometry deferred while hidden (parked pending, or a stale
+        // backend size the no-op fit above didn't correct). MUST run after fit().
+        this.flushDeferredResizeOnActivation();
       }, 50);
+    }
+  }
+
+  // Called by the setActive(true) settle fit. The fit() above re-measures the
+  // container; if it changed, xterm.onResize already armed a fresh backend resize.
+  // If it did NOT change (fit no-op) the backend can still be stale — because a
+  // resize was PARKED by flushBackendResize while hidden, or a hidden hydration
+  // deferred its size — so reconcile the PTY to xterm's real size exactly once.
+  private flushDeferredResizeOnActivation(): void {
+    if (this.opts.mirror || !this.paneActive) return;
+    const term = this.term;
+    if (!term || term.cols <= 0 || term.rows <= 0 || this.resizeInFlight) return;
+    if (this.pendingResize) {
+      // A size is pending (freshly armed by the fit's onResize, or parked at
+      // deactivation with its timer cleared) — ensure the debounce is running so
+      // it actually flushes now that we're active.
+      if (!this.resizeTimer) {
+        this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
+      }
+      return;
+    }
+    const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
+    if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
+      this.scheduleBackendResize(term.cols, term.rows);
     }
   }
 
@@ -2220,6 +2277,9 @@ export class TerminalEngine {
   setFontSize(px: number): void {
     if (!this.term) return;
     this.term.options.fontSize = px;
+    // Hidden pane: apply the render option but defer the geometry refit to the
+    // setActive(true) fit — a refit here would SIGWINCH a background PTY.
+    if (!this.paneActive) return;
     // Re-fit after font size change with a 50ms settle (source 217-225 / R7).
     if (this.fitAddon) {
       if (this.fitTimer) clearTimeout(this.fitTimer);
@@ -2287,11 +2347,19 @@ export class TerminalEngine {
   // at a stale size (remount won't re-fit when xterm is already the right size, so
   // the PTY would wrap output at the old width). Reads attachedProcessId at call
   // time so a resize scheduled before attach lands on the right (current) process.
-  private flushBackendResize(): void {
+  //
+  // Backend-resize CHOKE POINT for hidden panes: a SIGWINCH to a hidden ratatui CLI
+  // (codex) triggers its ESC[2J ESC[3J redraw, wiping the tab's scrollback. While the
+  // pane is inactive we PARK the pending geometry here instead of sending it — the
+  // setActive(true) activation reconcile flushes it. `force` (unmount teardown)
+  // bypasses the park so the PTY still ends at the correct final size.
+  private flushBackendResize(force = false): void {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
+    // Park: keep pendingResize (do NOT null it) so activation can deliver it.
+    if (!this.paneActive && !force) return;
     const pending = this.pendingResize;
     this.pendingResize = null;
     if (!pending || !this.attachedProcessId) return;
@@ -2332,6 +2400,11 @@ export class TerminalEngine {
     if (!entry || entry.terminal !== term) return;           // own the cache entry
     if (entry.hydrating || this.healing || this.pendingResize || this.resizeInFlight) return;
     if (typeof document !== 'undefined' && document.hidden) return;
+    // Doc 035's "pane visible" intent, actually enforced: background tabs hide
+    // via `visibility:hidden` (offsetParent stays non-null), so the offsetParent
+    // check below never catches them — the host's setActive signal does. A heal
+    // resize against a hidden codex pane wipes its scrollback (ED3 re-emit).
+    if (!this.paneActive) return;
     const c = this.container;
     if (!c || c.offsetParent === null || c.offsetWidth <= 50) return; // pane visible
     if (Date.now() < TerminalEngine.suppressHealUntil) return;        // post-jiggle
@@ -2344,6 +2417,7 @@ export class TerminalEngine {
       const size = await this.getBackendSize(pid);
       if (!size || size.cols <= 0 || size.rows <= 0) return;
       // Re-validate after the await.
+      if (!this.paneActive) return; // pane hidden while getSize was in flight
       if (this.attachedProcessId !== pid) return;
       const e2 = terminalCache.get(this.cacheKey);
       if (!e2 || e2.terminal !== term || e2.hydrating) return;
@@ -2937,7 +3011,9 @@ export class TerminalEngine {
     }
     // Flush (don't drop) any pending backend resize so the PTY isn't left at a
     // stale size when a drag is interrupted by this unmount (tab switch / pane move).
-    this.flushBackendResize();
+    // force=true bypasses the hidden-pane park: teardown must deliver the final size
+    // even for a background tab (the next mount reattaches to that PTY).
+    this.flushBackendResize(true);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
