@@ -19,17 +19,32 @@ describe('isPosixShell', () => {
   test('zsh -> true', () => {
     expect(isPosixShell('zsh')).toBe(true);
   });
-  test('gitbash -> true', () => {
-    expect(isPosixShell('gitbash')).toBe(true);
+  test('git-bash (real profile id from pty_manager.rs) -> true', () => {
+    expect(isPosixShell('git-bash')).toBe(true);
+  });
+  test('fish -> true', () => {
+    expect(isPosixShell('fish')).toBe(true);
+  });
+  test('cygwin -> true', () => {
+    expect(isPosixShell('cygwin')).toBe(true);
   });
   test('wsl -> true', () => {
     expect(isPosixShell('wsl')).toBe(true);
   });
-  test('default -> true', () => {
-    expect(isPosixShell('default')).toBe(true);
+  test('wsl-ubuntu (real WSL profile id format: wsl-<distro>) -> true', () => {
+    expect(isPosixShell('wsl-ubuntu')).toBe(true);
   });
-  test('undefined -> true (safer default)', () => {
-    expect(isPosixShell(undefined)).toBe(true);
+  test('default -> false (ambiguous placeholder, e.g. StateManager.resetToDefaultLayout, often resolves to PowerShell — must NOT default to POSIX)', () => {
+    expect(isPosixShell('default')).toBe(false);
+  });
+  test('settings (the Settings pseudo-tab) -> false', () => {
+    expect(isPosixShell('settings')).toBe(false);
+  });
+  test('unrecognized custom profile id -> false (safer default)', () => {
+    expect(isPosixShell('custom-my-shell')).toBe(false);
+  });
+  test('undefined -> false (safer default)', () => {
+    expect(isPosixShell(undefined)).toBe(false);
   });
 });
 
@@ -66,6 +81,12 @@ describe('decideWordDeleteShim', () => {
   test('powershell shellType -> null (defers to Win32-Input-Mode)', () => {
     const ctx = bashCtx({ shellType: 'powershell' });
     expect(decideWordDeleteShim('Delete', ctrlOnly, ctx.isNormalBuffer, ctx.protocolActive, ctx.shellType))
+      .toBeNull();
+  });
+
+  test("'default' shellType -> null (ambiguous placeholder must not be shimmed, even though it often IS a real PowerShell session)", () => {
+    const ctx = bashCtx({ shellType: 'default' });
+    expect(decideWordDeleteShim('Backspace', ctrlOnly, ctx.isNormalBuffer, ctx.protocolActive, ctx.shellType))
       .toBeNull();
   });
 

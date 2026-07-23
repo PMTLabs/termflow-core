@@ -159,6 +159,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const processIdRef = useRef(processId);
   processIdRef.current = processId;
 
+  // Keep the latest shellType in a ref (same pattern as onTitleChangeRef above) so
+  // the engine's live shellType getter sees the current value even though the
+  // engine itself is constructed once per terminalId — shellType can change after
+  // mount (e.g. the fallback chain resolving once shell profiles finish loading).
+  const shellTypeRef = useRef(shellType);
+  shellTypeRef.current = shellType;
+
   // Backlog 011: suggest popup state. Routed via a ref so the once-per-terminalId
   // engine options always call the live hook callbacks (same pattern as
   // onTitleChangeRef above).
@@ -192,7 +199,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // by the shouldFocus effect below. (Captured at mount; deps stay [terminalId].)
       autoFocus: shouldFocus,
       isWindows: typeof navigator !== 'undefined' && !!navigator.platform?.includes('Win'),
-      shellType,
+      shellType: () => shellTypeRef.current,
       // Real Windows OS build number so xterm's windowsPty heuristics match the ConPTY
       // backend (disables the wrapping heuristic that corrupts codex/ratatui on >= 21376).
       // 0 until the startup fetch resolves → engine assumes a modern build.
