@@ -62,6 +62,10 @@ interface TerminalDisplayProps {
   // True when this terminal is the active pane of the active tab. Drives focus:
   // autofocus-on-mount and refocus when the tab/pane is (re)activated.
   shouldFocus?: boolean;
+  // The tab's shell profile id (e.g. 'cmd', 'powershell', 'bash'), passed straight
+  // through to the engine so it can gate the Ctrl+Backspace/Ctrl+Delete word-delete
+  // shim (see TerminalEngineOptions.shellType).
+  shellType?: string;
 }
 
 export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
@@ -76,6 +80,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   fontSize = 14,
   isActive = true,
   shouldFocus = true,
+  shellType,
 }) => {
   const dispatch = useDispatch();
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
@@ -187,6 +192,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // by the shouldFocus effect below. (Captured at mount; deps stay [terminalId].)
       autoFocus: shouldFocus,
       isWindows: typeof navigator !== 'undefined' && !!navigator.platform?.includes('Win'),
+      shellType,
       // Real Windows OS build number so xterm's windowsPty heuristics match the ConPTY
       // backend (disables the wrapping heuristic that corrupts codex/ratatui on >= 21376).
       // 0 until the startup fetch resolves → engine assumes a modern build.
