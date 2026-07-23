@@ -23,7 +23,7 @@ const RING_CAP: usize = 256 * 1024;
 
 pub enum Disposition {
     TearDown,
-    Hold { deadline: Instant },
+    Hold,
 }
 
 pub struct SessionManager {
@@ -207,9 +207,9 @@ impl SessionManager {
 
     pub fn on_gui_disconnect(&mut self) -> Disposition {
         match self.armed_deadline {
-            Some(deadline) => {
+            Some(_) => {
                 self.detach_all();
-                Disposition::Hold { deadline }
+                Disposition::Hold
             }
             None => {
                 self.sessions.clear();
@@ -307,7 +307,7 @@ mod tests {
             token: "tok".into(),
         });
         assert!(m.is_armed());
-        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold { .. }));
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
 
     #[test]

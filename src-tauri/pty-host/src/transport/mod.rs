@@ -30,7 +30,7 @@ use tokio::sync::oneshot;
 #[cfg(windows)]
 mod pipe_windows;
 #[cfg(windows)]
-pub use pipe_windows::{secured_server, Listener, Stream};
+pub use pipe_windows::{Listener, Stream};
 #[cfg(all(windows, test))]
 pub use pipe_windows::{connect, ClientStream};
 
@@ -72,7 +72,7 @@ pub async fn serve(
 
         match mgr.on_gui_disconnect() {
             Disposition::TearDown => return Ok(()),
-            Disposition::Hold { deadline: _ } => {
+            Disposition::Hold => {
                 // Purge stale backlog: reattach replays from the ring, so Hold
                 // must not retain a pre-disconnect queue.
                 while events_rx.try_recv().is_ok() {}
