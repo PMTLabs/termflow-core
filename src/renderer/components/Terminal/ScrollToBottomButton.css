@@ -1,0 +1,32 @@
+/* Floating "scroll to end" button, bottom-right of the pane. Shown only while
+   the viewport is scrolled away from the live tail (TerminalDisplay.tsx).
+   Unlike AgentChip (purely informational, pointer-events:none), this must be
+   clickable, so it stays a normal interactive element. z-index 6 sits above
+   the ended-region rail (4) and agent chip (5), below the search bar (10),
+   suggest popup (30) and context menu (1000) — see TerminalPane.css. */
+.scroll-to-bottom-button {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.scroll-to-bottom-button:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.75);
+}

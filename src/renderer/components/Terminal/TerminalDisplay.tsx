@@ -7,6 +7,7 @@ import type { TerminalSearchOptions, TerminalSearchResult } from '@termflow/term
 import { ContextMenu } from './ContextMenu';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
+import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { useCommandSuggest } from './useCommandSuggest';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
@@ -82,6 +83,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const terminalRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<TerminalEngine | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  // Scroll-to-bottom button: true while the viewport is pinned to the live tail.
+  // Seeded from the engine right after mount (a cached reattach may already be
+  // scrolled up), then kept live via onScrollPosition.
+  const [atBottom, setAtBottom] = useState(true);
   // Bumped on every Ctrl+F so the bar refocuses its input each press — even when
   // it's already open and focus has moved back into the terminal (setSearchOpen
   // alone is a no-op then, so it would never refocus). See onOpenSearch below.
@@ -270,6 +275,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     engineRef.current = engine;
 
     engine.mount(terminalRef.current);
+    setAtBottom(engine.isScrolledToBottom());
+    const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);
     // Scope this pane's slack/scrollbar background to its own effective scheme
     // right away (before the next schema-apply sweep), so a split pane with a
     // different scheme never briefly inherits a sibling's background.
@@ -286,6 +293,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     onReady?.(engine.terminal);
 
     return () => {
+      scrollPositionDisposable.dispose();
       engine.unmount();
       engineRef.current = null;
     };
@@ -512,6 +520,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         className="terminal-display"
         onContextMenu={handleContextMenu}
         data-terminal-id={terminalId}
+      />
+      <ScrollToBottomButton
+        visible={!atBottom}
+        onClick={() => {
+          engineRef.current?.scrollToBottom();
+          engineRef.current?.focus();
+        }}
       />
       {searchOpen && (
         <TerminalSearchBar
