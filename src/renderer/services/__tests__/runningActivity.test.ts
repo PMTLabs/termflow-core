@@ -154,6 +154,52 @@ describe('computeUnseenUpdate', () => {
     computeUnseenUpdate([out('p1', 100)], resolve, null, new Set(), marks, SETTLED_NOW, DEBOUNCE);
     expect(marks.size).toBe(0);
   });
+
+  describe('mute (isSourceMuted)', () => {
+    it('does NOT flag a muted source but STILL advances its mark (no backlog ring on unmute)', () => {
+      const mutedTab = (_pid: string, tabId: string) => tabId === 'tb-1';
+      const { toFlag, marks } = computeUnseenUpdate(
+        [out('p1', 100)], resolve, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, mutedTab);
+      expect(toFlag).toEqual([]);
+      // Mark advanced so this same output can never ring once the tab is unmuted.
+      expect(marks.get('p1')).toBe(100);
+    });
+
+    it('suppresses only the muted source; an unmuted sibling tab still flags', () => {
+      const mutedTab = (_pid: string, tabId: string) => tabId === 'tb-1';
+      const { toFlag } = computeUnseenUpdate(
+        [out('p1', 100), out('p2', 200)], resolve, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, mutedTab);
+      // p1 → tb-1 (muted) suppressed; p2 → tb-2 (unmuted) still flags.
+      expect(toFlag).toEqual(['tb-2']);
+    });
+
+    it('pane-level: two processes of the SAME tab, only the muted pane is suppressed', () => {
+      // p1 and p2 both resolve to tb-1; the predicate mutes only p1 (per-pane).
+      const sameTab = (_pid: string) => 'tb-1';
+      const mutedPane = (pid: string, _tabId: string) => pid === 'p1';
+      const { toFlag } = computeUnseenUpdate(
+        [out('p1', 100), out('p2', 200)], sameTab, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, mutedPane);
+      // p1 (muted pane) suppressed, but p2 (unmuted sibling) still flags the tab.
+      expect(toFlag).toEqual(['tb-1']);
+    });
+
+    it('when ALL of a tab\'s sources are muted, the tab is silent', () => {
+      const sameTab = (_pid: string) => 'tb-1';
+      const allMuted = () => true;
+      const { toFlag, marks } = computeUnseenUpdate(
+        [out('p1', 100), out('p2', 200)], sameTab, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, allMuted);
+      expect(toFlag).toEqual([]);
+      // marks still advance for both so nothing rings on unmute.
+      expect(marks.get('p1')).toBe(100);
+      expect(marks.get('p2')).toBe(200);
+    });
+
+    it('defaults to un-muted when no predicate is supplied (back-compat)', () => {
+      const { toFlag } = computeUnseenUpdate(
+        [out('p1', 100)], resolve, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE);
+      expect(toFlag).toEqual(['tb-1']);
+    });
+  });
 });
 
 describe('isEchoChunk (typing echo / line-repaint detection)', () => {

@@ -249,6 +249,18 @@
   flex-shrink: 0;
 }
 
+/* Notifications-muted indicator — a dim, deliberately COLORLESS slashed bell so
+   it reads as a passive status ("muted"), never as a notification the way the
+   colored unseen 🔔 does. */
+.tab-muted-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  color: var(--tab-muted-icon, #8a8a8a);
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
 /* Tab "running" sweep — a process inside the tab is actively producing output. */
 .tab-item.tab-running::after {
   content: '';

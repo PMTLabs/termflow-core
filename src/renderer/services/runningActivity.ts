@@ -169,6 +169,13 @@ export interface UnseenInput {
  * process (its pane tree not seeded yet) is left un-marked so a later tick
  * retries it — preserving the late-seeding catch.
  *
+ * MUTE: `isSourceMuted(processId, tabId)` reports whether notifications are
+ * muted for this output source (its tab is muted, or its own pane is muted). A
+ * muted source is excluded from `toFlag` (no bell / toast / OS notification /
+ * chime — everything downstream hangs off the flag) but its mark STILL advances,
+ * exactly like the active-tab case, so unmuting later never rings a backlog of
+ * old output. Defaults to "never muted" for callers/tests that don't pass it.
+ *
  * Pure: takes the current marks, returns a NEW marks map (no mutation).
  */
 export function computeUnseenUpdate(
@@ -179,6 +186,7 @@ export function computeUnseenUpdate(
   marks: Map<string, number>,
   now: number,
   debounceMs: number,
+  isSourceMuted: (processId: string, tabId: string) => boolean = () => false,
 ): { toFlag: string[]; marks: Map<string, number>; causalByTab: Map<string, number> } {
   const nextMarks = new Map(marks);
   const toFlag = new Set<string>();
@@ -193,6 +201,9 @@ export function computeUnseenUpdate(
     if (!tabId) continue; // unresolved → retry next tick, do NOT advance the mark
     nextMarks.set(processId, newest); // resolved + settled → this output is now accounted for
     if (tabId === activeTabId || alreadyUnseen.has(tabId)) continue;
+    // Muted source: mark already advanced above (so no backlog ring on unmute),
+    // but suppress every notification surface by never flagging the tab.
+    if (isSourceMuted(processId, tabId)) continue;
     toFlag.add(tabId);
     causalByTab.set(tabId, Math.max(causalByTab.get(tabId) ?? 0, newest));
   }

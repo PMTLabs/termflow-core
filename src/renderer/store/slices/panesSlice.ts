@@ -12,6 +12,13 @@ export interface PaneNode {
   terminalId?: string;
   name?: string; // Custom name for the pane
   shellType?: string; // Shell type for terminal panes
+  // Per-pane notification mute. undefined/false = notifications behave normally;
+  // true = this pane's terminal activity never rings the bell / toast / OS
+  // notification (see RunningActivityTracker). Lives ON the node so it survives
+  // tree serialization (persist across restart) and is dropped automatically
+  // when the pane is closed — no orphaned side-state. A tab-level mute
+  // (tabsSlice) overrides this and suppresses every pane regardless.
+  notifyMuted?: boolean;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -88,6 +95,9 @@ function splitLeafInTree(
         terminalId: node.terminalId,
         name: node.name || `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`,
         shellType: node.shellType,
+        // Carry the pane-level mute onto the leaf that KEEPS this terminal, so a
+        // muted pane stays muted when split. The new sibling starts unmuted.
+        notifyMuted: node.notifyMuted,
       };
       node.type = 'split';
       node.direction = direction;
@@ -95,6 +105,9 @@ function splitLeafInTree(
       node.children = [originalPane, newPane];
       delete node.terminalId;
       delete node.shellType;
+      // The node is now a split container, not a terminal leaf — drop the flag so
+      // it isn't stranded where no tracker/UI lookup would ever read it.
+      delete node.notifyMuted;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -222,6 +235,29 @@ const panesSlice = createSlice({
         delete state.maximizedPaneByTabId[tabId];
       } else {
         state.maximizedPaneByTabId[tabId] = paneId;
+      }
+    },
+
+    /**
+     * Toggle (set/clear) a single pane's notification mute. Finds the leaf by
+     * `paneId` across all tabs' trees and sets/deletes its `notifyMuted` flag.
+     * Mutating the node in `treesByTabId` also updates the active tab's
+     * `paneTree` mirror (they share the same object graph). Only affects THIS
+     * pane — tab-level mute is handled separately in tabsSlice.
+     */
+    setPaneMuted: (state, action: PayloadAction<{ paneId: string; muted: boolean }>) => {
+      const { paneId, muted } = action.payload;
+      for (const tabId of Object.keys(state.treesByTabId)) {
+        const node = findLeaf(state.treesByTabId[tabId], paneId);
+        if (node) {
+          if (muted) node.notifyMuted = true;
+          else delete node.notifyMuted;
+          // Refresh the active-tab paneTree mirror. Under Immer, paneTree and
+          // treesByTabId[tabId] are distinct draft paths, so mutating one does
+          // NOT reflect into the other — reassign so active-tab readers see it.
+          if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+          return;
+        }
       }
     },
 
@@ -564,14 +600,17 @@ const panesSlice = createSlice({
             type: 'terminal',
             terminalId: node.terminalId,
             name: node.name || uniqueOriginalTitle,
+            // Keep the pane-level mute with the terminal it belongs to.
+            notifyMuted: node.notifyMuted,
           };
-          
+
           node.type = 'split';
           node.direction = direction;
           node.size = 50;
           // 'before' puts the new pane on the top/left of the original.
           node.children = position === 'before' ? [newPane, originalPane] : [originalPane, newPane];
           delete node.terminalId;
+          delete node.notifyMuted; // node is a split container now, not a leaf
 
           // Set the new pane as active
           state.activePaneId = newPaneId;
@@ -602,6 +641,7 @@ export const {
   splitPane,
   splitPaneInTab,
   toggleMaximizePane,
+  setPaneMuted,
   closePane,
   resizePane,
   resizeFocusedPane,

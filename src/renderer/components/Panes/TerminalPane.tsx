@@ -4,9 +4,10 @@ import { TerminalDisplay } from '../Terminal/TerminalDisplay';
 import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
-import { renamePanes } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, getSelectedPaneId } from '../../store/slices/paneTreeOps';
+import { renamePanes, setPaneMuted } from '../../store/slices/panesSlice';
+import { findTabIdByTerminalId, findLeaf, getSelectedPaneId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
+import { BellIcon } from '../UI/BellIcon';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
 import { EndedOverlay, paneClassName } from './EndedOverlay';
 import { PaneContextMenu } from './PaneContextMenu';
@@ -111,6 +112,30 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     terminalId ? state.zoom.levels[terminalId] ?? ZOOM_DEFAULT : ZOOM_DEFAULT
   );
   const effectiveFontSize = Math.max(8, Math.min(128, Math.round(fontSize * zoom)));
+
+  // Notification-mute state for the header bell. `paneMuted` is this pane's own
+  // flag; `tabMuted` is its owning tab's flag. The bell shows slashed when
+  // EITHER is set (effective state — no notification actually fires), but the
+  // toggle only ever flips this pane's own flag (tab mute is managed from the
+  // tab context menu). Each selector returns a plain boolean and resolves the
+  // pane/tab itself (self-contained — no cross-selector closure that could read a
+  // stale owningTabId during an intermediate store-notification pass).
+  const paneMuted = useSelector((state: RootState) => {
+    for (const tid of Object.keys(state.panes.treesByTabId)) {
+      const leaf = findLeaf(state.panes.treesByTabId[tid], paneId);
+      if (leaf) return !!leaf.notifyMuted;
+    }
+    return false;
+  });
+  const tabMuted = useSelector((state: RootState) => {
+    if (!terminalId) return false;
+    const tid = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
+    return !!(tid && state.tabs.tabs.find(t => t.id === tid)?.notifyMuted);
+  });
+  const effectiveMuted = tabMuted || paneMuted;
+  const handleToggleMute = () => {
+    dispatch(setPaneMuted({ paneId, muted: !paneMuted }));
+  };
   // Mirrors the shellType fallback the create/reattach effects below use (shellType
   // prop > tab's stored shellType > defaultProfile > 'default') — passed down so the
   // engine can gate the Ctrl+Backspace/Ctrl+Delete word-delete shim off the real
@@ -561,6 +586,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             )}
           </div>
           <div className="terminal-pane-controls">
+            <button
+              className={`pane-control-button${effectiveMuted ? ' muted' : ''}`}
+              onClick={handleToggleMute}
+              title={
+                tabMuted
+                  ? 'Notifications muted for the whole tab'
+                  : paneMuted
+                    ? 'Notifications muted — click to unmute this pane'
+                    : 'Mute notifications for this pane'
+              }
+              aria-label={paneMuted ? 'Unmute pane notifications' : 'Mute pane notifications'}
+              aria-pressed={paneMuted}
+            >
+              <BellIcon muted={effectiveMuted} />
+            </button>
             <button
               className="pane-control-button"
               onClick={handleSplitHorizontal}

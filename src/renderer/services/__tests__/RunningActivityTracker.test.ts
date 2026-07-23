@@ -12,7 +12,7 @@ import {
 const dispatch = jest.fn();
 // Mutable store state so unseen tests can vary activeTabId / already-unseen tabs.
 // (Prefixed `mock*` so jest's hoisted factory may reference it.)
-const mockTabsState: { activeTabId: string | null; tabs: Array<{ id: string; hasUnseenOutput?: boolean }> } = {
+const mockTabsState: { activeTabId: string | null; tabs: Array<{ id: string; hasUnseenOutput?: boolean; notifyMuted?: boolean }> } = {
   activeTabId: null,
   tabs: [],
 };
@@ -42,6 +42,8 @@ jest.mock('../TerminalService', () => ({
 // terminalId → tabId: tm-1→tb-1, tm-2→tb-2, tm-3→tb-3. Gated by mockPaneTree.ready so
 // tests can simulate a pane tree that seeds late (resolves to null, then to a tabId).
 const mockPaneTree = { ready: true };
+// Per-terminal pane-level mute the tracker consults (isTerminalMuted). Tests toggle it.
+const mockMutedTerminals = new Set<string>();
 jest.mock('../../store/slices/paneTreeOps', () => ({
   findTabIdByTerminalId: (_trees: unknown, terminalId: string) => {
     if (!mockPaneTree.ready) return null;
@@ -50,6 +52,7 @@ jest.mock('../../store/slices/paneTreeOps', () => ({
       : terminalId === 'tm-3' ? 'tb-3'
       : null;
   },
+  isTerminalMuted: (_trees: unknown, terminalId: string) => mockMutedTerminals.has(terminalId),
 }));
 
 import { runningActivityTracker } from '../RunningActivityTracker';
@@ -115,6 +118,7 @@ describe('RunningActivityTracker resize handling', () => {
     mockTabsState.activeTabId = null;
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
     runningActivityTracker.start(0); // no startup grace — steady-state behavior
   });
 
@@ -158,6 +162,7 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     mockTabsState.activeTabId = null;
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
     runningActivityTracker.start(0); // no startup grace — steady-state behavior
   });
 
@@ -339,6 +344,7 @@ describe('RunningActivityTracker typing echo-cancel (sweep)', () => {
     mockTabsState.activeTabId = 'tb-1'; // user is typing in the active tab
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
     runningActivityTracker.start(0); // no startup grace
   });
   afterEach(() => {
@@ -415,6 +421,7 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
     mockTabsState.activeTabId = null; // no active tab → an inactive tab can bell
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
     runningActivityTracker.start(0);
   });
   afterEach(() => {
@@ -451,5 +458,74 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
     emitExit('p1', 'tm-1');  // ...exit settles it immediately → flagOnExit bells now
     window.removeEventListener('activity:bell', h);
     expect(bells.some((b) => b.tabId === 'tb-1' && typeof b.causalTime === 'number')).toBe(true);
+  });
+
+  describe('mute suppression', () => {
+    const collect = () => {
+      const bells: Array<{ tabId: string }> = [];
+      const h = (e: Event) => bells.push((e as CustomEvent).detail);
+      window.addEventListener('activity:bell', h);
+      return { bells, done: () => window.removeEventListener('activity:bell', h) };
+    };
+
+    it('does NOT bell (settle path) when the tab is muted', () => {
+      mockTabsState.tabs = [{ id: 'tb-1', notifyMuted: true }];
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells).toHaveLength(0);
+      // No Redux unseen flag either.
+      expect(dispatch).not.toHaveBeenCalledWith({ type: 'tabs/markUnseenOutput', payload: { tabId: 'tb-1' } });
+    });
+
+    it('does NOT bell (settle path) when the pane/terminal is muted', () => {
+      mockMutedTerminals.add('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    it('bells the UNMUTED terminal while the muted one stays silent', () => {
+      mockMutedTerminals.add('tm-1'); // p1/tm-1/tb-1 muted; p2/tm-2/tb-2 not
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitData('p2', 4);
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-2']);
+    });
+
+    it('does NOT bell (exit path) when the tab is muted', () => {
+      mockTabsState.tabs = [{ id: 'tb-1', notifyMuted: true }];
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', 'tm-1');
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    it('does NOT bell (exit path) when the pane/terminal is muted', () => {
+      mockMutedTerminals.add('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', 'tm-1');
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    it('does NOT bell (exit path) for a muted pane even when the exit event omits terminalId', () => {
+      // Regression (external review, agy finding 1): the exit gate must resolve the
+      // terminalId from the processId and use THAT for the pane-mute check — using
+      // the (undefined) event param would let a muted pane leak an exit bell.
+      mockMutedTerminals.add('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', undefined); // event carried no terminalId
+      done();
+      expect(bells).toHaveLength(0);
+    });
   });
 });

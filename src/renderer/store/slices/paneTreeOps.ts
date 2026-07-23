@@ -161,6 +161,36 @@ export function findTabIdByTerminalId(
 }
 
 /**
+ * Whether the terminal leaf with `terminalId` is muted for notifications
+ * (its own pane-level mute, independent of any tab-level mute). Walks all tabs'
+ * trees for the leaf carrying that terminalId and returns its `notifyMuted`
+ * flag. Used by RunningActivityTracker to suppress a single muted pane's
+ * notifications while its unmuted siblings still ring. False if the terminal is
+ * not found (fail-open: never silently drop a real notification).
+ */
+export function isTerminalMuted(
+  treesByTabId: Record<string, PaneNode>,
+  terminalId: string,
+): boolean {
+  const find = (node: PaneNode | null): PaneNode | null => {
+    if (!node) return null;
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node;
+    if (node.type === 'split' && node.children) {
+      for (const c of node.children) {
+        const found = find(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  for (const tabId of Object.keys(treesByTabId)) {
+    const leaf = find(treesByTabId[tabId]);
+    if (leaf) return !!leaf.notifyMuted;
+  }
+  return false;
+}
+
+/**
  * The pane id a tab currently has focused: its remembered active pane if that
  * pane still exists in the tree, else the tree's first terminal leaf. Mirrors
  * the same fallback rule panesSlice's setActiveTabId uses when restoring focus

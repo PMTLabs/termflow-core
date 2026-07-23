@@ -39,6 +39,11 @@ export interface Tab {
   // Pins the title — auto-title updates (setAutoTabTitle, driven by the
   // selected pane's OSC title changes) are suppressed once this is set.
   titleIsCustom?: boolean;
+  // Tab-level notification mute. undefined/false = normal; true = NO pane in
+  // this tab rings the unseen bell / toast / OS notification (RunningActivityTracker
+  // suppresses at the source). Overrides any per-pane mute and covers panes added
+  // later. Persisted across restart (an intentional user setting, like colorSchemaId).
+  notifyMuted?: boolean;
 }
 
 interface TabsState {
@@ -223,8 +228,22 @@ const tabsSlice = createSlice({
       if (action.payload.titleColor) tab.titleColor = action.payload.titleColor;
       else delete tab.titleColor;
     },
+
+    // Toggle (set/clear) tab-level notification mute. Muting also clears any
+    // pending unseen-output bell so a muted tab never keeps showing a
+    // notification indicator that it can no longer earn.
+    setTabMuted: (state, action: PayloadAction<{ id: string; muted: boolean }>) => {
+      const tab = state.tabs.find(t => t.id === action.payload.id);
+      if (!tab) return;
+      if (action.payload.muted) {
+        tab.notifyMuted = true;
+        tab.hasUnseenOutput = false;
+      } else {
+        delete tab.notifyMuted;
+      }
+    },
   },
 });
 
-export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor } = tabsSlice.actions;
+export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
 export default tabsSlice.reducer;

@@ -120,6 +120,11 @@
   text-align: center;
 }
 
+/* Inline SVG glyphs (e.g. the mute bell) vertically center against the label text. */
+.menu-icon svg {
+  vertical-align: middle;
+}
+
 .context-menu-expand-arrow {
   margin-left: auto;
   padding-left: 8px;

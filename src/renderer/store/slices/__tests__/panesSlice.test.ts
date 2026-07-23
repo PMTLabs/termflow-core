@@ -13,8 +13,11 @@ import reducer, {
   movePaneWithinTab,
   movePaneToTab,
   toggleMaximizePane,
+  setPaneMuted,
+  splitPaneWithTab,
   PaneNode,
 } from '../panesSlice';
+import { findLeaf } from '../paneTreeOps';
 
 const init = () => reducer(undefined, { type: '@@INIT' } as any);
 const withActive = (tabId: string) => reducer(init(), setActiveTabId(tabId));
@@ -467,5 +470,106 @@ describe('panesSlice resizeFocusedPane (Alt+Shift+Arrow)', () => {
     s = reducer(s, focusPane(aId));
     s = reducer(s, resizeFocusedPane({ direction: 'right' }));
     expect(s.treesByTabId['tb-1'].size).toBe(55);
+  });
+});
+
+describe('panesSlice setPaneMuted', () => {
+  // A split tab: pn-a/tm-1 and pn-b/tm-2 side by side.
+  const sideBySide = () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    s = reducer(s, splitPane({ paneId: s.paneTree!.id, direction: 'vertical', terminalId: 'tm-2' }));
+    const [a, b] = s.paneTree!.children!;
+    return { s, aId: a.id, bId: b.id };
+  };
+
+  it('mutes only the targeted pane leaf', () => {
+    let { s, aId, bId } = sideBySide();
+    s = reducer(s, setPaneMuted({ paneId: aId, muted: true }));
+    expect(findLeaf(s.treesByTabId['tb-1'], aId)?.notifyMuted).toBe(true);
+    expect(findLeaf(s.treesByTabId['tb-1'], bId)?.notifyMuted).toBeUndefined();
+  });
+
+  it('keeps the active-tab paneTree mirror in sync (shared object graph)', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, setPaneMuted({ paneId: aId, muted: true }));
+    expect(findLeaf(s.paneTree, aId)?.notifyMuted).toBe(true);
+  });
+
+  it('unmute deletes the flag', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, setPaneMuted({ paneId: aId, muted: true }));
+    s = reducer(s, setPaneMuted({ paneId: aId, muted: false }));
+    expect(findLeaf(s.treesByTabId['tb-1'], aId)?.notifyMuted).toBeUndefined();
+  });
+
+  it('mutes a pane in a BACKGROUND tab (not the active one)', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    // Seed a background tab tree directly.
+    s = reducer(s, addTabTree({ tabId: 'tb-2', tree: { id: 'pn-bg', type: 'terminal', terminalId: 'tm-bg' } }));
+    s = reducer(s, setPaneMuted({ paneId: 'pn-bg', muted: true }));
+    expect(findLeaf(s.treesByTabId['tb-2'], 'pn-bg')?.notifyMuted).toBe(true);
+  });
+
+  it('closing a muted pane removes its mute state (no orphan)', () => {
+    let { s, aId } = sideBySide();
+    s = reducer(s, setPaneMuted({ paneId: aId, muted: true }));
+    s = reducer(s, closePane(aId));
+    // aId is gone from the tree entirely; nothing muted lingers.
+    expect(findLeaf(s.treesByTabId['tb-1'], aId)).toBeNull();
+  });
+
+  it('is a no-op for an unknown pane id', () => {
+    let { s } = sideBySide();
+    const before = JSON.stringify(s.treesByTabId);
+    s = reducer(s, setPaneMuted({ paneId: 'pn-missing', muted: true }));
+    expect(JSON.stringify(s.treesByTabId)).toEqual(before);
+  });
+
+  // Regression (external review, codex finding 1): splitting a muted pane must
+  // carry the mute onto the leaf that keeps the original terminal, start the new
+  // sibling unmuted, and never strand the flag on the converted split node.
+  it('splitPane carries pane mute to the original terminal, new sibling unmuted, split node clean', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    const rootId = s.paneTree!.id;
+    s = reducer(s, setPaneMuted({ paneId: rootId, muted: true }));
+    s = reducer(s, splitPane({ paneId: rootId, direction: 'vertical', terminalId: 'tm-2' }));
+
+    const root = s.paneTree!;
+    expect(root.type).toBe('split');
+    expect(root.notifyMuted).toBeUndefined(); // not stranded on the split container
+    const original = root.children!.find(c => c.terminalId === 'tb-1');
+    const created = root.children!.find(c => c.terminalId === 'tm-2');
+    expect(original?.notifyMuted).toBe(true);
+    expect(created?.notifyMuted).toBeUndefined();
+  });
+
+  it('splitPaneWithTab (thunk fulfilled) also carries pane mute to the original terminal', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    const rootId = s.paneTree!.id;
+    s = reducer(s, setPaneMuted({ paneId: rootId, muted: true }));
+    s = reducer(s, {
+      type: splitPaneWithTab.fulfilled.type,
+      payload: {
+        paneId: rootId,
+        direction: 'vertical',
+        position: 'after',
+        shellType: 'default',
+        newTerminalId: 'tm-2',
+        uniqueTitle: 'Right',
+        uniqueOriginalTitle: 'Left',
+      },
+    });
+
+    const root = s.paneTree!;
+    expect(root.type).toBe('split');
+    expect(root.notifyMuted).toBeUndefined();
+    const original = root.children!.find(c => c.terminalId === 'tb-1');
+    const created = root.children!.find(c => c.terminalId === 'tm-2');
+    expect(original?.notifyMuted).toBe(true);
+    expect(created?.notifyMuted).toBeUndefined();
   });
 });

@@ -40,7 +40,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
 
   const leaf = (id: string, terminalId: string): PaneNode => ({ id, type: 'terminal', terminalId });
 
-  it('carries the source tab icon, titleIsCustom, titleColor and colorSchemaId into the payload', () => {
+  it('carries the source tab icon, titleIsCustom, titleColor, colorSchemaId and notifyMuted into the payload', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
@@ -49,6 +49,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleIsCustom: true,
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
+      notifyMuted: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -59,16 +60,18 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleIsCustom: true,
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
+      notifyMuted: true,
     });
   });
 
-  it('reconstructs the tab in the destination window with those fields intact', () => {
+  it('reconstructs the tab in the destination window with those fields intact (incl. mute)', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
       shellType: 'default',
       icon: '🖥️',
       titleIsCustom: true,
+      notifyMuted: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -82,6 +85,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
     expect(addTabCall?.[0].payload).toMatchObject({
       icon: '🖥️',
       titleIsCustom: true,
+      notifyMuted: true,
     });
   });
 });
