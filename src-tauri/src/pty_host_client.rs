@@ -1212,9 +1212,12 @@ mod grace_tests {
     use std::time::Duration;
 
     // Millisecond-scale windows so the tests run on real time (no tokio
-    // test-util); the production constants only change the scale.
-    const SHORT: Duration = Duration::from_millis(40);
-    const LONG: Duration = Duration::from_millis(200);
+    // test-util); the production constants only change the scale. SHORT is a
+    // generous multiple of STEP: under parallel-test scheduler load a 10ms
+    // sleep can overshoot, and a too-tight window flips Connected→NoHost
+    // (observed flake).
+    const SHORT: Duration = Duration::from_millis(250);
+    const LONG: Duration = Duration::from_millis(1000);
     const STEP: Duration = Duration::from_millis(10);
 
     fn not_found() -> std::io::Error {
