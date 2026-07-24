@@ -9,7 +9,7 @@ import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
 import { getAllCwdSnapshots } from './cwdSnapshot';
-import { reattachPromptGate } from './reattachGate';
+import { reattachPromptGate, markArmProbePending } from './reattachGate';
 
 export interface AppState {
   tabs: any[];
@@ -313,11 +313,15 @@ class StateManagerClass {
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
         // seed re-arms command-suggest suppression the in-memory cache lost on
         // this reload — otherwise the popup leaks into a still-running agent CLI.
+        // Seed the safe DISARMED baseline here; the ARMED decision is sampled
+        // by the pane's pre-mount probe (review 008 M-1) — a fetch-time answer
+        // would be stale by the time the engine mounts.
         terminalService.attachExistingTerminal(
           rendererId,
           keep.processId,
-          reattachPromptGate(keep.promptHook),
+          reattachPromptGate(keep.promptHook, false),
         );
+        if (keep.promptHook === true) markArmProbePending(rendererId);
         for (const dup of stale) orphansToClose.push(dup.processId);
       }
 

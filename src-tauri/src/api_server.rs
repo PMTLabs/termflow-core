@@ -225,7 +225,10 @@ async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
             "createdAt": t.created_at,
             "mode": "ui",
             "tabId": t.tab_id,
-            // Command-suggest reads this on reload-reattach to re-arm its prompt gate.
+            // Command-suggest reads this on reload-reattach to re-seed its prompt
+            // gate DISARMED; the ARMED decision is sampled pre-mount via the
+            // probe_reattach_prompt_gate command, NOT here — a fetch-time sample
+            // would be stale by the time the engine mounts (review 008 M-1).
             "promptHook": t.prompt_hook
         })
     }).collect();

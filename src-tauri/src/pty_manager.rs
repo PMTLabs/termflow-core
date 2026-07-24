@@ -1160,6 +1160,41 @@ pub fn get_foreground_agent_with_exe(
     }
 }
 
+/// True iff any process in `procs` names `pid` as its parent. Pure core of
+/// [`session_at_bare_prompt`], split out so the strict at-prompt policy is
+/// testable without a live process table.
+fn has_live_children(pid: u32, mut procs: impl Iterator<Item = (u32, Option<u32>)>) -> bool {
+    procs.any(|(_, parent)| parent == Some(pid))
+}
+
+/// Strict "reattached session is sitting at a bare shell prompt" signal for the
+/// command-suggest gate seed (design 006): true ONLY when the shell process
+/// exists and has ZERO live children. Nested shells, agent CLIs, REPLs,
+/// background jobs, a dead/unknown pid, or a transient prompt-hook child all
+/// return false — the safe direction (a false `armed:true` would recreate the
+/// popup-leak-into-agent bug; a false `armed:false` self-heals at next prompt).
+pub fn session_at_bare_prompt(shell_pid: u32, sys: &System) -> bool {
+    if shell_pid == 0 {
+        return false;
+    }
+    let Some(process) = sys.process(Pid::from(shell_pid as usize)) else {
+        return false;
+    };
+    // Identity guard: the prompt hook only ever targets interactive PowerShell,
+    // so a pid that no longer names a pwsh/powershell process is a recycled or
+    // stale pid (review 008 m-2) — uncertainty, never an armed seed.
+    let name = process.name().to_string_lossy().to_ascii_lowercase();
+    if !(name.starts_with("pwsh") || name.starts_with("powershell")) {
+        return false;
+    }
+    !has_live_children(
+        shell_pid,
+        sys.processes()
+            .values()
+            .map(|p| (p.pid().as_u32(), p.parent().map(|pp| pp.as_u32()))),
+    )
+}
+
 /// Read a single process's current working directory (cross-platform via sysinfo).
 fn cwd_of(sys: &System, pid: u32) -> Option<String> {
     sys.process(Pid::from(pid as usize))
@@ -1290,6 +1325,54 @@ pub fn parse_osc_cwd(data: &[u8]) -> Option<String> {
 /// under the Linux/macOS-only `integration-tests` feature — see `api_server.rs`).
 fn exit_cwd_for(terminal_cwds: &DashMap<String, String>, id: &str) -> Option<String> {
     terminal_cwds.get(id).map(|cwd| cwd.value().clone())
+}
+
+#[cfg(test)]
+mod bare_prompt_tests {
+    use super::{has_live_children, session_at_bare_prompt};
+
+    #[test]
+    fn no_children_means_bare() {
+        // (pid, parent) pairs — nothing claims 42 as parent.
+        let procs = vec![(42, None), (7, Some(1)), (9, Some(7))];
+        assert!(!has_live_children(42, procs.into_iter()));
+    }
+
+    #[test]
+    fn direct_child_means_not_bare() {
+        let procs = vec![(42, None), (100, Some(42))];
+        assert!(has_live_children(42, procs.into_iter()));
+    }
+
+    #[test]
+    fn any_child_counts_even_a_shell() {
+        // Strict mode: a nested shell (cmd/wsl under pwsh) is still a child —
+        // deliberately NOT at-prompt (design 006: leak-safe direction).
+        let procs = vec![(42, None), (100, Some(42)), (101, Some(100))];
+        assert!(has_live_children(42, procs.into_iter()));
+    }
+
+    #[test]
+    fn dead_or_zero_pid_is_never_bare_prompt() {
+        let sys = sysinfo::System::new(); // empty snapshot: every pid is "dead"
+        assert!(!session_at_bare_prompt(0, &sys), "pid 0 sentinel is uncertainty");
+        assert!(!session_at_bare_prompt(4_000_000, &sys), "unknown pid is uncertainty");
+    }
+
+    /// Review 008 m-2: a live pid whose process is NOT pwsh/powershell is a
+    /// recycled/stale identity (the hook only targets interactive PowerShell)
+    /// and must never arm. The test binary's own pid is live but not pwsh.
+    #[test]
+    fn wrong_process_identity_is_never_bare_prompt() {
+        let mut sys = sysinfo::System::new();
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
+        assert!(
+            sys.process(me).is_some(),
+            "own process must be in the snapshot for this test to bite"
+        );
+        assert!(!session_at_bare_prompt(std::process::id(), &sys));
+    }
 }
 
 #[cfg(test)]

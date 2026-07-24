@@ -140,11 +140,16 @@ export interface ElectronAPI {
   /** Batched `getTerminalCwd`, keyed by process id. One process scan for all of
    *  them — see the `get_terminal_cwds` command for why that matters. */
   getTerminalCwds?: (processIds: string[]) => Promise<Record<string, string | null>>;
-  /** Backlog 011: drain the reattach prompt-gate hook for a terminal id — `true`/
-   *  `false` once if it was reattached after a core-restart hot-swap, else `null`.
-   *  Lets the renderer re-seed the command-suggest gate the hot-swap reattach
-   *  path (not reconcile) is responsible for. */
-  takeReattachPromptHook?: (id: string) => Promise<boolean | null>;
+  /** Backlog 011 + design 006: drain the reattach prompt-gate seed for a terminal
+   *  id — `{promptHook, atPrompt}` once if it was reattached after a core-restart
+   *  hot-swap, else `null`. Lets the renderer re-seed the command-suggest gate the
+   *  hot-swap reattach path (not reconcile) is responsible for; `atPrompt` arms it
+   *  when the shell sits at a bare prompt (zero children, sampled at drain). */
+  takeReattachPromptHook?: (id: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
+  /** Design 006 pre-mount probe (non-consuming, by backend process id): would the
+   *  command-suggest gate arm right now? Sampled by the pane immediately before
+   *  the engine mounts on the reconcile path (a fetch-time answer would be stale). */
+  probeReattachPromptGate?: (processId: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
 
   // Backlog 003 follow-up: resolve a relative path the terminal printed to actual
   // file(s) on disk — direct join (shell cwd, then foreground-process cwd), else a
