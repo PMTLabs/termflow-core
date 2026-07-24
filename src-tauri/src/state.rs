@@ -252,6 +252,11 @@ pub struct AppState<R: Runtime = Wry> {
     // offset and the host ring replays exactly the bytes missed while the pipe
     // was down — no duplicate scrollback, no gap.
     pub host_stream_offsets: Arc<DashMap<String, u64>>,
+    // Single-flight for reconnect_after_pipe_drop: two quick pipe flaps must not
+    // interleave two recovery passes that snapshot the SAME offsets and attach
+    // every session twice (duplicate replay into live parsers). A queued pass
+    // re-snapshots after the first finishes, so its replay is ~empty.
+    pub host_recovering: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -306,6 +311,7 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
+            host_recovering: self.host_recovering.clone(),
         }
     }
 }
@@ -373,6 +379,7 @@ impl<R: Runtime> AppState<R> {
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
             host_stream_offsets: Arc::new(DashMap::new()),
+            host_recovering: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -771,7 +778,14 @@ impl<R: Runtime> AppState<R> {
             );
         }
         for meta in surviving {
-            self.host_reattach_pending.insert(meta.tab_id, meta.pid);
+            // Only sessions the GUI does NOT already own belong in the adoption
+            // queue. During an in-place pipe-drop recovery the live tabs are
+            // still registered; queueing them would let a concurrent create
+            // re-adopt one at offset 0 straight into its live parser (review
+            // 007 F-1: duplicate replay + double attach).
+            if !self.host_terminals.contains_key(&meta.tab_id) {
+                self.host_reattach_pending.insert(meta.tab_id, meta.pid);
+            }
         }
         *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
@@ -801,6 +815,9 @@ impl<R: Runtime> AppState<R> {
     /// ensure_pty_host is single-flight and a duplicate pass replays ~nothing
     /// (offsets have advanced past what the first pass consumed).
     pub async fn reconnect_after_pipe_drop(&self) {
+        // Single-flight (see host_recovering): a second flap queues here and
+        // re-snapshots offsets once the first pass is done.
+        let _recover_guard = self.host_recovering.lock().await;
         let tabs: Vec<String> =
             self.host_terminals.iter().map(|e| e.key().clone()).collect();
         if tabs.is_empty() {

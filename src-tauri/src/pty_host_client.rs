@@ -379,21 +379,23 @@ const OPEN_GRACE_STEP: std::time::Duration = std::time::Duration::from_millis(20
 /// `record_pid_alive()` reports a live advertised host the LONG window applies
 /// and expiry means `HostAliveUnreachable` (never spawn); otherwise the SHORT
 /// window applies and expiry means `NoHost` (spawning is safe). Injected
-/// closures keep this testable without a real pipe.
-async fn open_with_grace<T, TryOpen, PidAlive>(
+/// closures keep this testable without a real pipe; `try_open` is async so the
+/// Unix socket connect never blocks a worker thread.
+async fn open_with_grace<T, TryOpen, Fut, PidAlive>(
     mut try_open: TryOpen,
-    record_pid_alive: PidAlive,
+    mut record_pid_alive: PidAlive,
     short_window: std::time::Duration,
     long_window: std::time::Duration,
     step: std::time::Duration,
 ) -> OpenOutcome<T>
 where
-    TryOpen: FnMut() -> std::io::Result<T>,
-    PidAlive: Fn() -> bool,
+    TryOpen: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+    PidAlive: FnMut() -> bool,
 {
     let start = tokio::time::Instant::now();
     loop {
-        if let Ok(c) = try_open() {
+        if let Ok(c) = try_open().await {
             return OpenOutcome::Connected(c);
         }
         let elapsed = start.elapsed();
@@ -408,19 +410,32 @@ where
     }
 }
 
-/// True when `pid` is a live process that looks like our PTY host (name check
-/// guards against pid reuse by an unrelated process).
-fn pid_is_live_host(pid: u32) -> bool {
+/// Probe for "the advertised host pid is a live `termflow-pty-host` process"
+/// (name check guards against pid reuse). Throttled to one real OS query per
+/// second — the grace loop ticks every 200ms and a per-tick sysinfo refresh
+/// would be wasted work on an async worker thread (review 007 F-4). The
+/// `System` is reused across probes.
+fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
     use sysinfo::{Pid, ProcessesToUpdate, System};
     let mut sys = System::new();
-    let target = Pid::from_u32(pid);
-    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
-    match sys.process(target) {
-        Some(p) => p
-            .name()
-            .to_string_lossy()
-            .starts_with("termflow-pty-host"),
-        None => false,
+    let mut last_check: Option<std::time::Instant> = None;
+    let mut last_alive = false;
+    move || {
+        let Some(pid) = record_pid else { return false };
+        let now = std::time::Instant::now();
+        let stale = last_check
+            .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+            .unwrap_or(true);
+        if stale {
+            last_check = Some(now);
+            let target = Pid::from_u32(pid);
+            sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+            last_alive = sys
+                .process(target)
+                .map(|p| p.name().to_string_lossy().starts_with("termflow-pty-host"))
+                .unwrap_or(false);
+        }
+        last_alive
     }
 }
 
@@ -442,8 +457,8 @@ pub async fn connect_or_spawn(
 
     let mut survives = true;
     let outcome = open_with_grace(
-        || ClientOptions::new().open(pipe),
-        || record_pid.is_some_and(pid_is_live_host),
+        || std::future::ready(ClientOptions::new().open(pipe)),
+        live_host_probe(record_pid),
         OPEN_GRACE_SHORT,
         OPEN_GRACE_LONG,
         OPEN_GRACE_STEP,
@@ -572,11 +587,9 @@ pub async fn connect_or_spawn(
     use tokio::net::UnixStream;
 
     let mut survives = true;
-    // UnixStream::connect is async; poll it non-blockingly per grace step via
-    // the std blocking connect (local socket connects resolve immediately).
     let outcome = open_with_grace(
-        || std::os::unix::net::UnixStream::connect(pipe),
-        || record_pid.is_some_and(pid_is_live_host),
+        || UnixStream::connect(pipe),
+        live_host_probe(record_pid),
         OPEN_GRACE_SHORT,
         OPEN_GRACE_LONG,
         OPEN_GRACE_STEP,
@@ -587,8 +600,7 @@ pub async fn connect_or_spawn(
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
-            c.set_nonblocking(true)?;
-            UnixStream::from_std(c)?
+            c
         }
         OpenOutcome::HostAliveUnreachable => {
             log::warn!(
@@ -1183,7 +1195,14 @@ mod grace_tests {
 
     #[tokio::test]
     async fn first_try_success_connects_immediately() {
-        let out = open_with_grace(|| Ok::<_, std::io::Error>(7u32), || false, SHORT, LONG, STEP).await;
+        let out = open_with_grace(
+            || std::future::ready(Ok::<_, std::io::Error>(7u32)),
+            || false,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
         assert!(matches!(out, OpenOutcome::Connected(7)));
     }
 
@@ -1194,11 +1213,8 @@ mod grace_tests {
         let tries = AtomicU32::new(0);
         let out = open_with_grace(
             || {
-                if tries.fetch_add(1, Ordering::Relaxed) < 3 {
-                    Err(not_found())
-                } else {
-                    Ok(1u32)
-                }
+                let n = tries.fetch_add(1, Ordering::Relaxed);
+                std::future::ready(if n < 3 { Err(not_found()) } else { Ok(1u32) })
             },
             || false,
             SHORT,
@@ -1211,7 +1227,14 @@ mod grace_tests {
 
     #[tokio::test]
     async fn no_advertised_host_expires_to_no_host_after_short_window() {
-        let out = open_with_grace(|| Err::<u32, _>(not_found()), || false, SHORT, LONG, STEP).await;
+        let out = open_with_grace(
+            || std::future::ready(Err::<u32, _>(not_found())),
+            || false,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
         assert!(matches!(out, OpenOutcome::NoHost), "spawn is allowed only here");
     }
 
@@ -1219,7 +1242,14 @@ mod grace_tests {
     /// an unreachable endpoint must NEVER resolve to NoHost (= spawn).
     #[tokio::test]
     async fn advertised_live_host_never_expires_into_a_spawn() {
-        let out = open_with_grace(|| Err::<u32, _>(not_found()), || true, SHORT, LONG, STEP).await;
+        let out = open_with_grace(
+            || std::future::ready(Err::<u32, _>(not_found())),
+            || true,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
         assert!(matches!(out, OpenOutcome::HostAliveUnreachable));
     }
 
@@ -1228,7 +1258,7 @@ mod grace_tests {
     async fn host_dying_mid_grace_downgrades_to_no_host() {
         let checks = AtomicU32::new(0);
         let out = open_with_grace(
-            || Err::<u32, _>(not_found()),
+            || std::future::ready(Err::<u32, _>(not_found())),
             || checks.fetch_add(1, Ordering::Relaxed) < 5,
             SHORT,
             LONG,
