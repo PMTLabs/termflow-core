@@ -35,6 +35,11 @@ pub struct PtyHostDeps {
     /// Called when the pipe closes unexpectedly (sidecar died / connection
     /// lost). Wire to surface a SessionClosedBanner on every host-owned pane.
     pub on_disconnect: Arc<dyn Fn() + Send + Sync>,
+    /// tab_id → next expected stdout ring offset (last `Stdout.offset + len`).
+    /// Owned by `AppState` so it survives a client generation: after a pipe
+    /// drop, the in-place reconnect reattaches each session from this offset
+    /// and the ring replays exactly the bytes missed while disconnected.
+    pub stream_offsets: Arc<dashmap::DashMap<String, u64>>,
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
@@ -112,6 +117,11 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// Cleared by the reader task the moment the pipe closes (just before
+    /// on_disconnect fires). Lets `ensure_pty_host` refuse to PUBLISH a client
+    /// whose disconnect already ran — otherwise a drop during connection setup
+    /// leaves a permanently-dead client installed that nothing will ever null.
+    alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PtyHostClient {
@@ -128,6 +138,11 @@ impl PtyHostClient {
     /// record's `CAP_ATTACH_ACK`; see field doc).
     pub fn set_attach_acks(&self, v: bool) {
         self.attach_acks.store(v, Ordering::Release);
+    }
+
+    /// False once the pipe closed (reader task ended). See `alive` field doc.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
@@ -243,10 +258,13 @@ impl PtyHostClient {
         }
     }
 
-    pub async fn list_sessions(&self) -> Vec<SessionMeta> {
+    /// `None` means the host did NOT answer (timeout / dead pipe) — callers
+    /// must never treat that like an authoritative empty list, or a stale
+    /// recovery pass would tear down live panes on a transport failure.
+    pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
         match self.request(|req| Control::ListSessions { req }).await {
-            Some(Response::SessionList { sessions, .. }) => sessions,
-            _ => Vec::new(),
+            Some(Response::SessionList { sessions, .. }) => Some(sessions),
+            _ => None,
         }
     }
 
@@ -291,6 +309,8 @@ where
     let (outbound, mut out_rx) = unbounded_channel::<Frame>();
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let req_ctr = Arc::new(AtomicU64::new(1));
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let alive_r = alive.clone();
 
     // Writer task.
     tokio::spawn(async move {
@@ -308,7 +328,9 @@ where
         let mut rd = rd;
         loop {
             match read_frame(&mut rd).await {
-                Ok(Some(Frame::Data(Data::Stdout { tab_id, bytes, .. }))) => {
+                Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
+                    deps.stream_offsets
+                        .insert(tab_id.clone(), offset + bytes.len() as u64);
                     let _ = deps.output_tx.send(ChannelPayload {
                         id: tab_id,
                         data: bytes,
@@ -331,7 +353,9 @@ where
                 Ok(None) | Err(_) => break, // pipe closed
             }
         }
-        // Pipe closed: surface the loss so host-owned panes don't hang silently.
+        // Pipe closed: mark the client dead FIRST (so a concurrent
+        // ensure_pty_host can refuse to publish it), then surface the loss.
+        alive_r.store(false, Ordering::Release);
         (deps.on_disconnect)();
     });
 
@@ -341,30 +365,152 @@ where
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alive,
+    }
+}
+
+/// Outcome of trying to reach an already-running host BEFORE ever spawning one.
+#[derive(Debug)]
+enum OpenOutcome<T> {
+    /// Connected to an existing host.
+    Connected(T),
+    /// No live host reachable and none advertised alive — spawning is safe.
+    NoHost,
+    /// A discovery record advertises a live host pid, but its endpoint never
+    /// opened within the long grace window. Spawning now would mint a DUPLICATE
+    /// host and race it for the pipe name (the sleep/wake duplicate-host bug),
+    /// so the caller must surface an error instead.
+    HostAliveUnreachable,
+}
+
+/// Grace window covering the host's disconnect→re-accept cycle (a fresh pipe
+/// instance only exists once the host notices the old connection died and
+/// accepts again). Retrying open for a moment prevents spawning a duplicate
+/// during that window.
+const OPEN_GRACE_SHORT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Longer window used while a discovery record says the host pid is ALIVE:
+/// never give up into a spawn while the survivor exists.
+const OPEN_GRACE_LONG: std::time::Duration = std::time::Duration::from_secs(10);
+const OPEN_GRACE_STEP: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Retry `try_open` until it succeeds or a grace window elapses. While
+/// `record_pid_alive()` reports a live advertised host the LONG window applies
+/// and expiry means `HostAliveUnreachable` (never spawn); otherwise the SHORT
+/// window applies and expiry means `NoHost` (spawning is safe). Injected
+/// closures keep this testable without a real pipe; `try_open` is async so the
+/// Unix socket connect never blocks a worker thread.
+async fn open_with_grace<T, TryOpen, Fut, PidAlive>(
+    mut try_open: TryOpen,
+    mut record_pid_alive: PidAlive,
+    short_window: std::time::Duration,
+    long_window: std::time::Duration,
+    step: std::time::Duration,
+) -> OpenOutcome<T>
+where
+    TryOpen: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+    PidAlive: FnMut() -> bool,
+{
+    let start = tokio::time::Instant::now();
+    loop {
+        if let Ok(c) = try_open().await {
+            return OpenOutcome::Connected(c);
+        }
+        let elapsed = start.elapsed();
+        if record_pid_alive() {
+            if elapsed >= long_window {
+                return OpenOutcome::HostAliveUnreachable;
+            }
+        } else if elapsed >= short_window {
+            return OpenOutcome::NoHost;
+        }
+        tokio::time::sleep(step).await;
+    }
+}
+
+/// Probe for "the advertised host pid is a live `termflow-pty-host` process"
+/// (name check guards against pid reuse). Throttled to one real OS query per
+/// second — the grace loop ticks every 200ms and a per-tick sysinfo refresh
+/// would be wasted work on an async worker thread (review 007 F-4). The
+/// `System` is reused across probes.
+fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    let mut last_check: Option<std::time::Instant> = None;
+    let mut last_alive = false;
+    move || {
+        let Some(pid) = record_pid else { return false };
+        let now = std::time::Instant::now();
+        let stale = last_check
+            .map(|t| now.duration_since(t) >= std::time::Duration::from_secs(1))
+            .unwrap_or(true);
+        if stale {
+            last_check = Some(now);
+            let target = Pid::from_u32(pid);
+            sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+            // Linux truncates comm names to 15 chars (TASK_COMM_LEN), so the
+            // full "termflow-pty-host" literal would false-negative there and
+            // silently disable the duplicate-spawn guard — match the truncated
+            // prefix, and accept a full exe-path basename match as well.
+            last_alive = sys
+                .process(target)
+                .map(|p| {
+                    p.name().to_string_lossy().starts_with("termflow-pty-ho")
+                        || p.exe()
+                            .and_then(|e| e.file_name())
+                            .map(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false);
+        }
+        last_alive
     }
 }
 
 /// Connect to the sidecar's pipe, spawning it (detached, breaking away from any
-/// kill-on-close job) if it isn't already running.
+/// kill-on-close job) if it isn't already running. `record_pid` is the pid a
+/// discovery record advertised (None = no record): while that pid is alive a
+/// failed open retries instead of spawning, so a surviving host's re-accept
+/// window can never race us into a duplicate host.
 #[cfg(windows)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
     pipe: &str,
     token: &str,
+    record_pid: Option<u32>,
     deps: PtyHostDeps,
 ) -> std::io::Result<PtyHostClient> {
     use std::time::Duration;
     use tokio::net::windows::named_pipe::ClientOptions;
 
     let mut survives = true;
-    let conn = match ClientOptions::new().open(pipe) {
-        Ok(c) => {
+    let outcome = open_with_grace(
+        || std::future::ready(ClientOptions::new().open(pipe)),
+        live_host_probe(record_pid),
+        OPEN_GRACE_SHORT,
+        OPEN_GRACE_LONG,
+        OPEN_GRACE_STEP,
+    )
+    .await;
+    let conn = match outcome {
+        OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
             c
         }
-        Err(_) => {
+        OpenOutcome::HostAliveUnreachable => {
+            log::warn!(
+                "[HOTSWAP] pty-host pid {:?} is alive but {pipe} never opened; \
+                 REFUSING to spawn a duplicate host",
+                record_pid
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "a running pty-host is unreachable; not spawning a duplicate",
+            ));
+        }
+        OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             survives = spawn_sidecar_detached(sidecar, pipe, token)?;
@@ -455,26 +601,47 @@ fn spawn_sidecar_detached(
 
 /// Connect to the sidecar's Unix socket, spawning it (detached into its own
 /// session via `setsid`) if it isn't already running. Mirrors the Windows path:
-/// try-connect → on failure spawn + retry-connect with backoff.
+/// grace-window try-connect (never duplicating a live advertised host) → spawn
+/// + retry-connect with backoff.
 #[cfg(unix)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
     pipe: &str, // socket path on Unix
     token: &str,
+    record_pid: Option<u32>,
     deps: PtyHostDeps,
 ) -> std::io::Result<PtyHostClient> {
     use std::time::Duration;
     use tokio::net::UnixStream;
 
     let mut survives = true;
-    let conn = match UnixStream::connect(pipe).await {
-        Ok(c) => {
+    let outcome = open_with_grace(
+        || UnixStream::connect(pipe),
+        live_host_probe(record_pid),
+        OPEN_GRACE_SHORT,
+        OPEN_GRACE_LONG,
+        OPEN_GRACE_STEP,
+    )
+    .await;
+    let conn = match outcome {
+        OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
             c
         }
-        Err(_) => {
+        OpenOutcome::HostAliveUnreachable => {
+            log::warn!(
+                "[HOTSWAP] pty-host pid {:?} is alive but {pipe} never opened; \
+                 REFUSING to spawn a duplicate host",
+                record_pid
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "a running pty-host is unreachable; not spawning a duplicate",
+            ));
+        }
+        OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             survives = spawn_sidecar_detached(sidecar, pipe, token)?;
@@ -558,6 +725,7 @@ pub async fn connect_or_spawn(
     _sidecar: &std::path::Path,
     _pipe: &str,
     _token: &str,
+    _record_pid: Option<u32>,
     _deps: PtyHostDeps,
 ) -> std::io::Result<PtyHostClient> {
     Err(std::io::Error::new(
@@ -1037,6 +1205,98 @@ mod install_tests {
     }
 }
 
+#[cfg(test)]
+mod grace_tests {
+    use super::{open_with_grace, OpenOutcome};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    // Millisecond-scale windows so the tests run on real time (no tokio
+    // test-util); the production constants only change the scale.
+    const SHORT: Duration = Duration::from_millis(40);
+    const LONG: Duration = Duration::from_millis(200);
+    const STEP: Duration = Duration::from_millis(10);
+
+    fn not_found() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no pipe instance")
+    }
+
+    #[tokio::test]
+    async fn first_try_success_connects_immediately() {
+        let out = open_with_grace(
+            || std::future::ready(Ok::<_, std::io::Error>(7u32)),
+            || false,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
+        assert!(matches!(out, OpenOutcome::Connected(7)));
+    }
+
+    /// The host's disconnect→re-accept cycle leaves a short window with no pipe
+    /// instance. A failed first open must RETRY (and adopt), not spawn.
+    #[tokio::test]
+    async fn transient_failure_within_grace_still_connects() {
+        let tries = AtomicU32::new(0);
+        let out = open_with_grace(
+            || {
+                let n = tries.fetch_add(1, Ordering::Relaxed);
+                std::future::ready(if n < 3 { Err(not_found()) } else { Ok(1u32) })
+            },
+            || false,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
+        assert!(matches!(out, OpenOutcome::Connected(1)));
+    }
+
+    #[tokio::test]
+    async fn no_advertised_host_expires_to_no_host_after_short_window() {
+        let out = open_with_grace(
+            || std::future::ready(Err::<u32, _>(not_found())),
+            || false,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
+        assert!(matches!(out, OpenOutcome::NoHost), "spawn is allowed only here");
+    }
+
+    /// The core duplicate-host guard: while a discovery record's pid is alive,
+    /// an unreachable endpoint must NEVER resolve to NoHost (= spawn).
+    #[tokio::test]
+    async fn advertised_live_host_never_expires_into_a_spawn() {
+        let out = open_with_grace(
+            || std::future::ready(Err::<u32, _>(not_found())),
+            || true,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
+        assert!(matches!(out, OpenOutcome::HostAliveUnreachable));
+    }
+
+    /// A host that dies mid-grace releases the guard so a fresh spawn can heal.
+    #[tokio::test]
+    async fn host_dying_mid_grace_downgrades_to_no_host() {
+        let checks = AtomicU32::new(0);
+        let out = open_with_grace(
+            || std::future::ready(Err::<u32, _>(not_found())),
+            || checks.fetch_add(1, Ordering::Relaxed) < 5,
+            SHORT,
+            LONG,
+            STEP,
+        )
+        .await;
+        assert!(matches!(out, OpenOutcome::NoHost));
+    }
+}
+
 fn resp_req(r: &Response) -> u64 {
     match r {
         Response::Spawned { req, .. }
@@ -1067,6 +1327,7 @@ mod tests {
             on_exit: Arc::new(|_, _| {}),
             on_gap: Arc::new(|_| {}),
             on_disconnect: Arc::new(|| {}),
+            stream_offsets: Arc::new(dashmap::DashMap::new()),
         };
         (deps, rx, produced)
     }
@@ -1079,6 +1340,7 @@ mod tests {
         let (mut srd, mut swr) = tokio::io::split(server_side);
 
         let (deps, mut rx, produced) = deps();
+        let offsets = deps.stream_offsets.clone();
         let _client = wire_client(crd, cwr, deps);
 
         // Server pushes a Stdout frame to the client.
@@ -1086,7 +1348,7 @@ mod tests {
             &mut swr,
             &Frame::Data(Data::Stdout {
                 tab_id: "t1".into(),
-                offset: 0,
+                offset: 100,
                 bytes: b"hello".to_vec(),
             }),
         )
@@ -1100,6 +1362,9 @@ mod tests {
         assert_eq!(payload.id, "t1");
         assert_eq!(payload.data, b"hello");
         assert!(produced.load(Ordering::Relaxed) >= 1);
+        // The reader must record the NEXT expected ring offset (offset + len) so
+        // an in-place reconnect can reattach without replaying or losing bytes.
+        assert_eq!(offsets.get("t1").map(|v| *v), Some(105));
         let _ = (&mut srd,); // keep server read half alive
     }
 

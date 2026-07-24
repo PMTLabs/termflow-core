@@ -48,17 +48,17 @@ async fn main() {
         if let Err(e) = termflow_pty_protocol::write_record(&path, &rec) {
             eprintln!("termflow-pty-host: could not write discovery record: {e}");
         }
-        (path, rec.instance_id)
+        (path, rec)
     });
 
-    if let Err(e) = transport::serve(endpoint, token, survivable).await {
+    if let Err(e) = transport::serve(endpoint, token, survivable, record.clone()).await {
         eprintln!("termflow-pty-host: serve ended: {e}");
     }
 
     // Clean shutdown: retract our advertisement (only if still ours — never
     // delete a newer host's record).
-    if let Some((path, instance_id)) = record {
-        let _ = termflow_pty_protocol::remove_record_if_owned(&path, instance_id);
+    if let Some((path, rec)) = record {
+        let _ = termflow_pty_protocol::remove_record_if_owned(&path, rec.instance_id);
     }
 }
 
