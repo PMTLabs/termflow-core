@@ -4,6 +4,7 @@ import { splitPaneWithTab } from '../store/slices/panesSlice';
 import { findLeaf, firstLeafId } from '../store/slices/paneTreeOps';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
+import { getCwdSnapshot } from './cwdSnapshot';
 
 /**
  * Shared "new tab / new window / split pane" actions used by the tab, pane and
@@ -73,8 +74,22 @@ export async function splitPaneById(
     const srcTerminalId = node?.terminalId;
     const processId = srcTerminalId ? terminalService.getProcessId(srcTerminalId) : undefined;
     if (processId) {
-      cwd = (await window.electronAPI.getTerminalCwd?.(processId)) ?? undefined;
+      try {
+        cwd = (await window.electronAPI.getTerminalCwd?.(processId)) ?? undefined;
+      } catch (e) {
+        // A REJECTED live query (IPC down, process gone, timeout) must still fall
+        // through to the snapshot below — sharing one try/catch meant a throw
+        // jumped past the fallback and the pane spawned at C:\Windows anyway.
+        console.warn('paneActions: live getTerminalCwd failed; falling back to snapshot', e);
+      }
     }
+    // Fallback (spec 045 §3.3): after a reload / PTY-host hot-swap reattach the
+    // backend's live cwd map is empty until the shell renders its next prompt
+    // (OSC 9;9), and on Windows the process-scan fallback can't read a cwd — so
+    // the live query yields nothing and the new pane would spawn at the app's
+    // launch dir (C:\Windows). The renderer's persisted snapshot (seeded on
+    // restore) still holds the last-known folder, so inherit that instead.
+    if (!cwd && srcTerminalId) cwd = getCwdSnapshot(srcTerminalId);
   } catch (err) {
     console.warn('paneActions: could not read source pane cwd; using default', err);
   }
