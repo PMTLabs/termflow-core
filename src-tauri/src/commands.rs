@@ -387,16 +387,49 @@ pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
     hotswap_preflight(&state)
 }
 
-/// Backlog 011: drain the reattach prompt-gate hook for `id`. Returns `Some(hook)`
-/// exactly once when this terminal was REATTACHED after a core-restart hot-swap
-/// (whose empty terminal list reconcile couldn't seed from), else `None` for a
-/// fresh spawn or an already-drained id. The renderer calls this right after
-/// `createTerminal` resolves and, on `Some`, re-seeds the command-suggest prompt
-/// gate `{seen: hook, armed: false}` so the history popup can't leak into an agent
-/// CLI that survived the update. Idempotent: a second call returns `None`.
+/// What the core-restart hot-swap drain hands the renderer to re-seed the
+/// command-suggest prompt gate (backlog 011 + design 006): whether the shell
+/// has the injected prompt hook, and whether it is sitting at a BARE prompt
+/// right now (zero live children — sampled fresh at drain time, when the
+/// renderer has just mounted, so staleness is minimal).
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReattachPromptGateSeed {
+    pub prompt_hook: bool,
+    pub at_prompt: bool,
+}
+
+/// Backlog 011: drain the reattach prompt-gate seed for `id`. `Some` exactly
+/// once when this terminal was REATTACHED after a core-restart hot-swap (whose
+/// empty terminal list reconcile couldn't seed from), else `None` for a fresh
+/// spawn or an already-drained id. The renderer calls this right after
+/// `createTerminal` resolves and, on `Some`, re-seeds the command-suggest gate
+/// `{seen: promptHook, armed: promptHook && atPrompt}` (design 006), so the
+/// history popup can't leak into an agent CLI that survived the update but a
+/// session idle at a bare prompt keeps suggestions for its FIRST command.
+/// Idempotent: a second call returns `None`.
 #[tauri::command]
-pub fn take_reattach_prompt_hook(state: State<'_, AppState>, id: String) -> Option<bool> {
-    state.reattach_prompt_hooks.remove(&id).map(|(_, hook)| hook)
+pub async fn take_reattach_prompt_hook(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<ReattachPromptGateSeed>, String> {
+    let Some((_, hook)) = state.reattach_prompt_hooks.remove(&id) else {
+        return Ok(None);
+    };
+    let pid = state.terminals.get(&id).map(|t| t.pid).unwrap_or(0);
+    // Strict at-prompt (design 006): only a hooked shell with a live, childless
+    // process arms; pid 0 / dead pid / any child ⇒ false (safe direction).
+    let at_prompt = if hook && pid != 0 {
+        tokio::task::spawn_blocking(move || {
+            let sys = sysinfo::System::new_all();
+            crate::pty_manager::session_at_bare_prompt(pid, &sys)
+        })
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
+    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
 }
 
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
