@@ -52,10 +52,13 @@ pub struct Endpoint(pub String);
 /// Run the host until teardown. `survivable` is whether this process can outlive
 /// the GUI (see `detach::assert_survivable`); when false the manager refuses to
 /// acknowledge an arm so the GUI never exits expecting sessions to persist.
+/// `record` is this host's discovery advertisement (path + content), re-written
+/// before each served connection if the file went missing.
 pub async fn serve(
     endpoint: Endpoint,
     token: Option<String>,
     survivable: bool,
+    record: Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
 ) -> std::io::Result<()> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
@@ -66,6 +69,18 @@ pub async fn serve(
     let mut stream = listener.accept().await?;
 
     loop {
+        // Self-heal the discovery record: a duplicate host that lost the pipe
+        // race may have clobbered-then-deleted it on exit, leaving this SURVIVOR
+        // unadvertised (clients then downgrade to legacy attach and can't apply
+        // the duplicate-spawn guard). Restore it when the file is gone; never
+        // overwrite a PRESENT record — it could belong to a live newer host.
+        if let Some((path, rec)) = &record {
+            if !matches!(termflow_pty_protocol::read_record(path), Ok(Some(_))) {
+                if let Err(e) = termflow_pty_protocol::write_record(path, rec) {
+                    eprintln!("termflow-pty-host: could not re-write discovery record: {e}");
+                }
+            }
+        }
         let (erx, rrx) = run_connection(&mut mgr, stream, events_rx, resp_rx).await;
         events_rx = erx;
         resp_rx = rrx;
@@ -264,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn client_spawns_session_and_receives_output() {
         let ep = test_endpoint("spawn");
-        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
 
         let mut client = connect_with_retry(&ep).await;
         write_frame(
@@ -297,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn sessions_survive_arm_disconnect_reconnect() {
         let ep = test_endpoint("reattach");
-        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
 
         {
             let mut c1 = connect_with_retry(&ep).await;
@@ -390,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn live_session_survives_expired_arm() {
         let ep = test_endpoint("c3-survive");
-        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true));
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
 
         {
             let mut c1 = connect_with_retry(&ep).await;
@@ -453,6 +468,92 @@ mod tests {
         .await;
         assert!(has_t1, "live session survived past the expired arm deadline");
         srv.abort();
+    }
+
+    /// A missing discovery record must be re-written before the next served
+    /// connection (self-heal after a duplicate host clobbered-then-deleted it),
+    /// so the surviving host stays advertised (caps, duplicate-spawn guard).
+    #[tokio::test]
+    async fn missing_discovery_record_is_rehealed_on_reconnect() {
+        use termflow_pty_protocol::{HostRecord, HOST_RECORD_FORMAT, PROTOCOL_MAX, PROTOCOL_MIN};
+        let ep = test_endpoint("heal-record");
+        let dir = std::env::temp_dir().join(format!("tf-heal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("host-record.json");
+        let rec = HostRecord {
+            format: HOST_RECORD_FORMAT,
+            instance_id: 7,
+            pid: std::process::id(),
+            proto_min: PROTOCOL_MIN,
+            proto_max: PROTOCOL_MAX,
+            endpoint: ep.0.clone(),
+            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK,
+        };
+        termflow_pty_protocol::write_record(&path, &rec).unwrap();
+        let srv = tokio::spawn(serve(
+            ep.clone(),
+            Some("tok".into()),
+            true,
+            Some((path.clone(), rec)),
+        ));
+
+        {
+            // Spawn a live child and arm, so the disconnect Holds (host survives).
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::ArmDetach {
+                    req: 2,
+                    timeout_secs: 300,
+                    token: "tok".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+
+        // Simulate the duplicate-host aftermath: the record vanishes.
+        std::fs::remove_file(&path).unwrap();
+
+        // Reconnect and complete one round-trip: the serve loop heals the
+        // record at the top of the new connection, before serving it.
+        let mut c2 = connect_with_retry(&ep).await;
+        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            read_frame(&mut c2).await
+        })
+        .await;
+        assert!(path.exists(), "surviving host must re-advertise itself");
+        srv.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Connect a client, retrying for a few seconds so the test tolerates the

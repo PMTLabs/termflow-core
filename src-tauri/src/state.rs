@@ -246,6 +246,12 @@ pub struct AppState<R: Runtime = Wry> {
     pub pty_host_gen: Arc<AtomicU64>,
     // Single-flight guard so concurrent pane creation connects the sidecar once.
     pub pty_host_connecting: Arc<tokio::sync::Mutex<()>>,
+    // tab_id → next expected sidecar ring offset (last Stdout.offset + len).
+    // Owned here (not by the client) so it survives a client generation: after
+    // a pipe drop, reconnect_after_pipe_drop reattaches each session from this
+    // offset and the host ring replays exactly the bytes missed while the pipe
+    // was down — no duplicate scrollback, no gap.
+    pub host_stream_offsets: Arc<DashMap<String, u64>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -299,6 +305,7 @@ impl<R: Runtime> Clone for AppState<R> {
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),
+            host_stream_offsets: self.host_stream_offsets.clone(),
         }
     }
 }
@@ -365,6 +372,7 @@ impl<R: Runtime> AppState<R> {
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
+            host_stream_offsets: Arc::new(DashMap::new()),
         }
     }
 
@@ -603,7 +611,19 @@ impl<R: Runtime> AppState<R> {
     /// Lazily connect (spawning if needed) the PTY-host sidecar client, wiring
     /// its inbound Stdout into the existing output broadcast and its Exit/Gap
     /// into cleanup+emit / repaint. Idempotent.
-    pub async fn ensure_pty_host(&self) -> Result<(), String> {
+    ///
+    /// Boxed: the on_disconnect closure built inside spawns a task that
+    /// re-enters this function (reconnect_after_pipe_drop), which with an
+    /// opaque `async fn` future is an infinite type cycle the compiler cannot
+    /// prove `Send`. The erased (nominal) future breaks the cycle.
+    pub fn ensure_pty_host(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(self.ensure_pty_host_inner())
+    }
+
+    async fn ensure_pty_host_inner(&self) -> Result<(), String> {
         {
             if self.pty_host_client().is_some() {
                 return Ok(());
@@ -638,6 +658,9 @@ impl<R: Runtime> AppState<R> {
                     None
                 }
             });
+        // Advertised host pid (if any): connect_or_spawn refuses to spawn a
+        // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
+        let record_pid = record.as_ref().map(|r| r.pid);
         let (pipe, attach_acks) = match crate::pty_host_client::plan_connection(record) {
             crate::pty_host_client::ConnectPlan::LegacyOrNone => {
                 log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
@@ -693,6 +716,7 @@ impl<R: Runtime> AppState<R> {
                 // last moments never reach the history store.
                 st_exit.persist_terminal_history(&tab_id, chrono::Utc::now().timestamp_millis());
                 st_exit.host_terminals.remove(&tab_id);
+                st_exit.host_stream_offsets.remove(&tab_id);
                 st_exit.cleanup_terminal_state(&tab_id);
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
@@ -703,34 +727,32 @@ impl<R: Runtime> AppState<R> {
                 st_gap.host_repaint(&tab_id);
             }),
             on_disconnect: Arc::new(move || {
-                use tauri::Emitter;
                 // Only act if THIS connection is still the current one — a stale
                 // old client's disconnect must not clobber a reconnected client.
                 if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
                     return;
                 }
-                // Sidecar/pipe died: surface a closed-session banner on every live
-                // host-owned pane, fully clean up its state, and drop the dead
-                // client so a later create reconnects.
-                let ids: Vec<String> =
-                    st_disc.host_terminals.iter().map(|e| e.key().clone()).collect();
-                for id in ids {
-                    // Same as on_exit: capture the final parser state before cleanup.
-                    st_disc.persist_terminal_history(&id, chrono::Utc::now().timestamp_millis());
-                    st_disc.host_terminals.remove(&id);
-                    st_disc.cleanup_terminal_state(&id);
-                    let _ = st_disc.app_handle.emit(
-                        "terminal:exit",
-                        serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
-                    );
-                }
+                // Pipe died (sleep/wake, sidecar crash, …). Do NOT tear the
+                // sessions down here: the host may be alive and holding every
+                // shell (it Holds while armed / children live). Drop the dead
+                // client, then reconnect-first; only sessions the host no longer
+                // has — or a failed reconnect — are torn down.
+                log::warn!(
+                    "[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect"
+                );
                 *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                let st = st_disc.clone();
+                tauri::async_runtime::spawn(async move {
+                    st.reconnect_after_pipe_drop().await;
+                });
             }),
+            stream_offsets: self.host_stream_offsets.clone(),
         };
 
-        let client = crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, deps)
-            .await
-            .map_err(|e| e.to_string())?;
+        let client =
+            crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, record_pid, deps)
+                .await
+                .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning.
@@ -753,6 +775,119 @@ impl<R: Runtime> AppState<R> {
         }
         *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
         Ok(())
+    }
+
+    /// Tear down one previously host-owned terminal that did NOT survive a pipe
+    /// drop: persist its final parser state, clean up, and surface the closed-
+    /// session banner. (Split out of the formerly-destructive on_disconnect.)
+    pub fn teardown_host_terminal(&self, id: &str) {
+        use tauri::Emitter;
+        self.persist_terminal_history(id, chrono::Utc::now().timestamp_millis());
+        self.host_terminals.remove(id);
+        self.host_stream_offsets.remove(id);
+        self.cleanup_terminal_state(id);
+        let _ = self.app_handle.emit(
+            "terminal:exit",
+            serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
+        );
+    }
+
+    /// Reconnect-first recovery after a pty-host pipe drop (sleep/wake resume,
+    /// transient I/O error): bounded-backoff reconnect to the SURVIVING host,
+    /// then reattach every still-held session in place from its saved ring
+    /// offset (the ring replays exactly the bytes missed while disconnected).
+    /// Only sessions the reconnected host no longer holds — or a fully failed
+    /// reconnect — get the old destructive teardown. Safe to run concurrently:
+    /// ensure_pty_host is single-flight and a duplicate pass replays ~nothing
+    /// (offsets have advanced past what the first pass consumed).
+    pub async fn reconnect_after_pipe_drop(&self) {
+        let tabs: Vec<String> =
+            self.host_terminals.iter().map(|e| e.key().clone()).collect();
+        if tabs.is_empty() {
+            return;
+        }
+        const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
+        let mut connected = false;
+        for (i, ms) in BACKOFF_MS.iter().enumerate() {
+            // A concurrent terminal-create may already have reconnected
+            // (ensure_pty_host is single-flight); otherwise try ourselves.
+            if self.pty_host_clone().is_some() || self.ensure_pty_host().await.is_ok() {
+                connected = true;
+                break;
+            }
+            log::warn!(
+                "[HOTSWAP] reconnect attempt {}/{} failed; retrying in {ms}ms",
+                i + 1,
+                BACKOFF_MS.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+        }
+        let client = if connected { self.pty_host_clone() } else { None };
+        let Some(client) = client else {
+            log::error!(
+                "[HOTSWAP] could not reconnect to any pty-host; closing {} host pane(s)",
+                tabs.len()
+            );
+            for t in &tabs {
+                self.teardown_host_terminal(t);
+            }
+            return;
+        };
+        // An empty list can also be a request timeout — retry briefly before
+        // declaring every session lost.
+        let mut sessions = client.list_sessions().await;
+        for _ in 0..2 {
+            if !sessions.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            sessions = client.list_sessions().await;
+        }
+        let saved: std::collections::HashMap<String, u64> = self
+            .host_stream_offsets
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect();
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        log::info!(
+            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost",
+            reattach.len(),
+            teardown.len()
+        );
+        for a in reattach {
+            match client.attach_confirmed(&a.tab_id, a.from_offset).await {
+                Some(true) => log::info!(
+                    "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",
+                    a.tab_id,
+                    a.from_offset
+                ),
+                Some(false) => log::warn!(
+                    "[HOTSWAP] reattached {} but host reports it not alive",
+                    a.tab_id
+                ),
+                None => log::info!(
+                    "[HOTSWAP] reattached {} in place from offset {} (legacy attach)",
+                    a.tab_id,
+                    a.from_offset
+                ),
+            }
+            let (cols, rows) = self
+                .terminals
+                .get(&a.tab_id)
+                .map(|t| (t.cols, t.rows))
+                .unwrap_or((80, 24));
+            client.nudge_repaint(&a.tab_id, cols, rows);
+            // ensure_pty_host re-listed this session into host_reattach_pending;
+            // it is attached in place now, so a later createTerminal for the same
+            // id must not re-adopt it.
+            self.host_reattach_pending.remove(&a.tab_id);
+        }
+        for t in teardown {
+            log::warn!(
+                "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
+            );
+            self.teardown_host_terminal(&t);
+        }
     }
 
     /// Clone out the connected client (if any) so callers can `.await` on it
@@ -1245,5 +1380,111 @@ mod scrollback_tests {
         assert!(text.contains("old-line-0099"), "newest restored line must survive reflush:\n{text}");
         assert!(text.contains("session restored"), "divider must be part of the re-dump:\n{text}");
         assert!(text.contains("new-session output"), "new session's output must follow:\n{text}");
+    }
+}
+
+/// One in-place reattach decision produced by [`plan_reattach`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReattachAction {
+    pub tab_id: String,
+    pub from_offset: u64,
+}
+
+/// Decide, per previously host-owned tab, whether to reattach in place (session
+/// still held by the reconnected host) and from which ring offset, or tear down
+/// (session gone). Pure so the sleep/wake recovery policy is unit-testable.
+pub fn plan_reattach(
+    tabs: &[String],
+    sessions: &[termflow_pty_protocol::SessionMeta],
+    saved_offsets: &std::collections::HashMap<String, u64>,
+) -> (Vec<ReattachAction>, Vec<String>) {
+    let mut reattach = Vec::new();
+    let mut teardown = Vec::new();
+    for tab in tabs {
+        match sessions.iter().find(|m| &m.tab_id == tab) {
+            Some(meta) => {
+                // No saved offset (never saw a byte this app-lifetime) ⇒ replay
+                // the whole ring. Clamp to the tail as paranoia — a same-session
+                // ring offset can only grow.
+                let from = saved_offsets
+                    .get(tab)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(meta.tail_offset);
+                reattach.push(ReattachAction {
+                    tab_id: tab.clone(),
+                    from_offset: from,
+                });
+            }
+            None => teardown.push(tab.clone()),
+        }
+    }
+    (reattach, teardown)
+}
+
+#[cfg(test)]
+mod reattach_plan_tests {
+    use super::{plan_reattach, ReattachAction};
+    use std::collections::HashMap;
+    use termflow_pty_protocol::SessionMeta;
+
+    fn meta(tab: &str, head: u64, tail: u64) -> SessionMeta {
+        SessionMeta {
+            tab_id: tab.into(),
+            pid: 1234,
+            head_offset: head,
+            tail_offset: tail,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn held_session_reattaches_from_saved_offset() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 500)];
+        let saved = HashMap::from([("t1".to_string(), 320u64)]);
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(
+            reattach,
+            vec![ReattachAction { tab_id: "t1".into(), from_offset: 320 }]
+        );
+        assert!(teardown.is_empty());
+    }
+
+    #[test]
+    fn missing_session_is_torn_down() {
+        let tabs = vec!["t1".to_string(), "t2".to_string()];
+        let sessions = vec![meta("t2", 0, 10)];
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach.len(), 1, "t2 survives");
+        assert_eq!(teardown, vec!["t1".to_string()], "t1 is gone from the host");
+    }
+
+    #[test]
+    fn no_saved_offset_replays_whole_ring() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 100, 900)];
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach[0].from_offset, 0, "full replay (host gaps if evicted)");
+    }
+
+    #[test]
+    fn saved_offset_is_clamped_to_ring_tail() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 50)];
+        let saved = HashMap::from([("t1".to_string(), 5000u64)]);
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(reattach[0].from_offset, 50);
+    }
+
+    #[test]
+    fn zombie_sessions_unknown_to_the_gui_are_left_untouched() {
+        // Sessions the host holds but no tab owns must appear in NEITHER list —
+        // adoption/pending handles them, not the pipe-drop recovery.
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 10), meta("zombie", 0, 10)];
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach.len(), 1);
+        assert!(teardown.is_empty());
     }
 }
