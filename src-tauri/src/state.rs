@@ -48,6 +48,12 @@ pub struct Terminal {
     /// Epoch ms of the most recent PTY write.
     #[serde(default)]
     pub last_input_at: Option<i64>,
+    /// Whether this shell got the injected OSC 9;9 prompt-render hook (interactive
+    /// PowerShell — see pty_manager::shell_emits_prompt_osc). Exposed to the
+    /// renderer as `promptHook` so a reload-reattach can re-seed command-suggest's
+    /// prompt gate and stop the history popup leaking into an agent CLI's input.
+    #[serde(default)]
+    pub prompt_hook: bool,
 }
 
 fn default_terminal_cols() -> u16 {

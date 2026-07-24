@@ -185,11 +185,19 @@ async fn create_host_terminal(
         }
     };
 
+    // The injected-hook decision (interactive PowerShell). Command-suggest's
+    // renderer-side prompt gate reads this back over the API to re-arm on reload.
+    let prompt_hook = pty_manager::shell_emits_prompt_osc(
+        shell_path.as_deref(),
+        &shell_name,
+        shell_args.as_deref(),
+    );
+
     // Reattach path: the sidecar still holds this session (survived a hot-swap).
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
-        register_host_terminal(state, &id, pid, &shell_name, cols, rows);
+        register_host_terminal(state, &id, pid, &shell_name, cols, rows, prompt_hook);
         // Seed + stage BEFORE attach releases the replay ring, so restored
         // history precedes the ring bytes in the parser (see stage_scrollback).
         stage_scrollback(state, &id, &id);
@@ -209,7 +217,7 @@ async fn create_host_terminal(
     // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
-    register_host_terminal(state, &id, 0, &shell_name, cols, rows);
+    register_host_terminal(state, &id, 0, &shell_name, cols, rows, prompt_hook);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -247,6 +255,7 @@ fn register_host_terminal(
     shell_name: &str,
     cols: u16,
     rows: u16,
+    prompt_hook: bool,
 ) {
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), ());
@@ -264,6 +273,7 @@ fn register_host_terminal(
             tab_id: Some(id.to_string()),
             last_input_source: None,
             last_input_at: None,
+            prompt_hook,
         },
     );
 }
@@ -1938,6 +1948,7 @@ mod scrollback_restore_tests {
                 tab_id: Some(id.to_string()),
                 last_input_source: None,
                 last_input_at: None,
+                prompt_hook: false,
             },
         );
     }

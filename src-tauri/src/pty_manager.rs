@@ -74,15 +74,27 @@ pub const HOST_CONTROL_ENV: &[&str] = &[
 /// exact env/args/cwd the in-process path uses (shared consts), including the
 /// `TERMFLOW_TERMINAL_ID` identity var and the PowerShell OSC 9;9 cwd
 /// integration. The GUI owns this profile logic; the sidecar only executes it.
-pub fn build_spawn_spec(
-    tab_id: &str,
+/// Whether this shell receives the injected OSC 9;9 prompt-render hook (see
+/// `PS_CWD_INTEGRATION` / `build_spawn_spec`) — i.e. interactive PowerShell with
+/// no `-Command`/`-File` invocation. This is the single source of truth for the
+/// injection decision AND for the `Terminal.prompt_hook` flag the renderer reads
+/// on reattach.
+///
+/// Why the flag matters: command-suggest's Windows suppression is the "prompt
+/// gate" — while a hooked shell has rendered no prompt since the last submit
+/// (an agent CLI like agy/codex owns the pty), typed input is never captured.
+/// That gate lives only in the renderer's in-memory cache, so a full renderer
+/// reload that reattaches to a still-alive PTY host session (PTY-host hot-swap /
+/// app auto-update) forgets it and the history popup leaks keystrokes into the
+/// CLI. Reporting this flag lets the renderer re-seed the gate as
+/// `{seen:true, armed:false}` on reattach. A hookless shell (cmd, remote ssh)
+/// reports false and keeps the ungated heuristic — seeding it would gate it
+/// forever (no OSC ever re-arms it).
+pub fn shell_emits_prompt_osc(
     shell_path: Option<&str>,
     shell_name: &str,
     shell_args: Option<&[String]>,
-    cwd: Option<&str>,
-    cols: u16,
-    rows: u16,
-) -> termflow_pty_protocol::SpawnSpec {
+) -> bool {
     let is_powershell = shell_path
         .map(|p| {
             let p = p.to_ascii_lowercase();
@@ -93,6 +105,27 @@ pub fn build_spawn_spec(
             let n = shell_name.to_ascii_lowercase();
             n.contains("powershell") || n.contains("pwsh")
         };
+    let has_command_flag = shell_args
+        .map(|args| {
+            args.iter().any(|a| {
+                let a = a.to_ascii_lowercase();
+                a == "-command" || a == "-c" || a == "-encodedcommand" || a == "-file"
+            })
+        })
+        .unwrap_or(false);
+    is_powershell && !has_command_flag
+}
+
+pub fn build_spawn_spec(
+    tab_id: &str,
+    shell_path: Option<&str>,
+    shell_name: &str,
+    shell_args: Option<&[String]>,
+    cwd: Option<&str>,
+    cols: u16,
+    rows: u16,
+) -> termflow_pty_protocol::SpawnSpec {
+    let inject_prompt_hook = shell_emits_prompt_osc(shell_path, shell_name, shell_args);
 
     let shell = match shell_path {
         Some(p) => p.to_string(),
@@ -117,12 +150,8 @@ pub fn build_spawn_spec(
         .collect();
 
     let mut args: Vec<String> = shell_args.map(|a| a.to_vec()).unwrap_or_default();
-    let has_command_flag = args.iter().any(|a| {
-        let a = a.to_ascii_lowercase();
-        a == "-command" || a == "-c" || a == "-encodedcommand" || a == "-file"
-    });
     // Interactive PowerShell gets the cwd-sync + OSC 9;9 prompt integration.
-    if is_powershell && !has_command_flag {
+    if inject_prompt_hook {
         args.push("-NoExit".to_string());
         args.push("-Command".to_string());
         args.push(PS_CWD_INTEGRATION.to_string());
@@ -836,6 +865,9 @@ pub fn spawn_terminal(
         tab_id: Some(tab_id.unwrap_or_else(|| id.clone())),
         last_input_source: None,
         last_input_at: None,
+        // Mirrors the injected-hook decision above, so reattach can re-arm the
+        // command-suggest prompt gate (see shell_emits_prompt_osc).
+        prompt_hook: is_powershell && !has_command_flag,
     });
 
     // Spawn thread to read output
@@ -1340,6 +1372,29 @@ mod cwd_tests {
             24,
         );
         assert!(!spec.args.iter().any(|a| a == "-NoExit"));
+    }
+
+    #[test]
+    fn shell_emits_prompt_osc_only_for_interactive_powershell() {
+        use super::shell_emits_prompt_osc;
+        // Interactive PowerShell (by path or by profile name) is hooked.
+        assert!(shell_emits_prompt_osc(Some("C:\\...\\powershell.exe"), "windows-powershell", None));
+        assert!(shell_emits_prompt_osc(Some("pwsh"), "pwsh", None));
+        assert!(shell_emits_prompt_osc(None, "PowerShell", None));
+        // A -Command/-File invocation renders no interactive prompt -> not hooked.
+        let cmd = vec!["-Command".to_string(), "echo hi".to_string()];
+        assert!(!shell_emits_prompt_osc(Some("pwsh.exe"), "pwsh", Some(&cmd)));
+        let file = vec!["-File".to_string(), "script.ps1".to_string()];
+        assert!(!shell_emits_prompt_osc(Some("powershell.exe"), "powershell", Some(&file)));
+        // Non-PowerShell shells are never hooked (no OSC ever re-arms the gate).
+        assert!(!shell_emits_prompt_osc(Some("C:\\Windows\\System32\\cmd.exe"), "cmd", None));
+        assert!(!shell_emits_prompt_osc(Some("/bin/bash"), "bash", None));
+        // Decision must match build_spawn_spec's actual injection.
+        let spec = super::build_spawn_spec("t", Some("powershell.exe"), "powershell", None, None, 80, 24);
+        assert_eq!(
+            spec.args.iter().any(|a| a.contains("]9;9;")),
+            shell_emits_prompt_osc(Some("powershell.exe"), "powershell", None),
+        );
     }
 
     #[test]

@@ -224,7 +224,9 @@ async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
             "pid": t.pid,
             "createdAt": t.created_at,
             "mode": "ui",
-            "tabId": t.tab_id
+            "tabId": t.tab_id,
+            // Command-suggest reads this on reload-reattach to re-arm its prompt gate.
+            "promptHook": t.prompt_hook
         })
     }).collect();
     Json(json!({ "terminals": terminals }))
@@ -400,7 +402,8 @@ async fn create_terminal(
                     "pid": t.pid,
                     "createdAt": t.created_at,
                     "mode": "ui",
-                    "tabId": t.tab_id
+                    "tabId": t.tab_id,
+                    "promptHook": t.prompt_hook
                 }))).into_response()
             } else {
                 (StatusCode::OK, Json(json!({ "id": id, "status": "running" }))).into_response()
