@@ -855,6 +855,17 @@ impl<R: Runtime> AppState<R> {
             teardown.len()
         );
         for a in reattach {
+            // The pane may have been closed while the pipe was down (host_close
+            // couldn't deliver Close then). Finish the close now instead of
+            // reattaching a session nobody owns — else it lingers as a zombie.
+            if !self.host_terminals.contains_key(&a.tab_id) {
+                log::info!(
+                    "[HOTSWAP] {} was closed while disconnected; closing its host session",
+                    a.tab_id
+                );
+                client.close(&a.tab_id);
+                continue;
+            }
             match client.attach_confirmed(&a.tab_id, a.from_offset).await {
                 Some(true) => log::info!(
                     "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",
@@ -883,6 +894,9 @@ impl<R: Runtime> AppState<R> {
             self.host_reattach_pending.remove(&a.tab_id);
         }
         for t in teardown {
+            if !self.host_terminals.contains_key(&t) {
+                continue; // pane already closed while disconnected — nothing to tear down
+            }
             log::warn!(
                 "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
             );
