@@ -1174,7 +1174,17 @@ fn has_live_children(pid: u32, mut procs: impl Iterator<Item = (u32, Option<u32>
 /// return false — the safe direction (a false `armed:true` would recreate the
 /// popup-leak-into-agent bug; a false `armed:false` self-heals at next prompt).
 pub fn session_at_bare_prompt(shell_pid: u32, sys: &System) -> bool {
-    if shell_pid == 0 || sys.process(Pid::from(shell_pid as usize)).is_none() {
+    if shell_pid == 0 {
+        return false;
+    }
+    let Some(process) = sys.process(Pid::from(shell_pid as usize)) else {
+        return false;
+    };
+    // Identity guard: the prompt hook only ever targets interactive PowerShell,
+    // so a pid that no longer names a pwsh/powershell process is a recycled or
+    // stale pid (review 008 m-2) — uncertainty, never an armed seed.
+    let name = process.name().to_string_lossy().to_ascii_lowercase();
+    if !(name.starts_with("pwsh") || name.starts_with("powershell")) {
         return false;
     }
     !has_live_children(
@@ -1347,6 +1357,21 @@ mod bare_prompt_tests {
         let sys = sysinfo::System::new(); // empty snapshot: every pid is "dead"
         assert!(!session_at_bare_prompt(0, &sys), "pid 0 sentinel is uncertainty");
         assert!(!session_at_bare_prompt(4_000_000, &sys), "unknown pid is uncertainty");
+    }
+
+    /// Review 008 m-2: a live pid whose process is NOT pwsh/powershell is a
+    /// recycled/stale identity (the hook only targets interactive PowerShell)
+    /// and must never arm. The test binary's own pid is live but not pwsh.
+    #[test]
+    fn wrong_process_identity_is_never_bare_prompt() {
+        let mut sys = sysinfo::System::new();
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[me]), true);
+        assert!(
+            sys.process(me).is_some(),
+            "own process must be in the snapshot for this test to bite"
+        );
+        assert!(!session_at_bare_prompt(std::process::id(), &sys));
     }
 }
 

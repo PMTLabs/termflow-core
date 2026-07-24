@@ -29,3 +29,22 @@ export function reattachPromptGate(promptHook: unknown, atPrompt?: unknown): Pro
   if (promptHook !== true) return null;
   return { seen: true, armed: atPrompt === true };
 }
+
+/**
+ * Reconcile-path pre-mount probe markers (review 008 M-1): reconcile seeds the
+ * safe DISARMED baseline at fetch time and marks the terminal here; the pane
+ * then samples the bare-prompt answer via `probeReattachPromptGate` immediately
+ * before the engine mounts (a fetch-time armed answer would be stale by then —
+ * buffered input could have started a child in between). Single-use per id so
+ * ordinary same-session remounts never pay for a probe.
+ */
+const armProbePending = new Set<string>();
+
+export function markArmProbePending(terminalId: string): void {
+  armProbePending.add(terminalId);
+}
+
+/** Consume the marker; true exactly once after a mark. */
+export function takeArmProbePending(terminalId: string): boolean {
+  return armProbePending.delete(terminalId);
+}

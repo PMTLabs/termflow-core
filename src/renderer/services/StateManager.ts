@@ -9,7 +9,7 @@ import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
 import { getAllCwdSnapshots } from './cwdSnapshot';
-import { reattachPromptGate } from './reattachGate';
+import { reattachPromptGate, markArmProbePending } from './reattachGate';
 
 export interface AppState {
   tabs: any[];
@@ -286,7 +286,7 @@ class StateManagerClass {
       // windows' terminals are never touched.
       const byRenderer = new Map<
         string,
-        Array<{ processId: string; createdAt: number; promptHook: unknown; atPrompt: unknown }>
+        Array<{ processId: string; createdAt: number; promptHook: unknown }>
       >();
       for (const term of list) {
         const rendererId: string | undefined = term?.tabId; // id that spawned it
@@ -297,9 +297,7 @@ class StateManagerClass {
         // promptHook re-arms command-suggest's prompt gate on reattach (see
         // reattachPromptGate) — a reload wipes the in-memory gate, so without it
         // an agent CLI running across the reload leaks input into the popup.
-        // atPrompt (design 006) additionally seeds ARMED when the shell is idle
-        // at a bare prompt, so the first command keeps suggestions.
-        arr.push({ processId, createdAt, promptHook: term?.promptHook, atPrompt: term?.atPrompt });
+        arr.push({ processId, createdAt, promptHook: term?.promptHook });
         byRenderer.set(rendererId, arr);
       }
 
@@ -315,11 +313,15 @@ class StateManagerClass {
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
         // seed re-arms command-suggest suppression the in-memory cache lost on
         // this reload — otherwise the popup leaks into a still-running agent CLI.
+        // Seed the safe DISARMED baseline here; the ARMED decision is sampled
+        // by the pane's pre-mount probe (review 008 M-1) — a fetch-time answer
+        // would be stale by the time the engine mounts.
         terminalService.attachExistingTerminal(
           rendererId,
           keep.processId,
-          reattachPromptGate(keep.promptHook, keep.atPrompt),
+          reattachPromptGate(keep.promptHook, false),
         );
+        if (keep.promptHook === true) markArmProbePending(rendererId);
         for (const dup of stale) orphansToClose.push(dup.processId);
       }
 

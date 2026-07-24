@@ -15,7 +15,7 @@ import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
 import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
-import { reattachPromptGate } from '../../services/reattachGate';
+import { reattachPromptGate, takeArmProbePending } from '../../services/reattachGate';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import './TerminalPane.css';
@@ -174,7 +174,30 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const existingProcessId = terminalService.getProcessId(terminalId);
     if (existingProcessId) {
       console.log(`TerminalPane: Terminal ${terminalId} already has process ${existingProcessId}, reusing`);
-      setProcessId(existingProcessId);
+      // Design 006 (review 008 M-1): a reconcile-reattached hooked shell got the
+      // safe DISARMED baseline at fetch time; sample the bare-prompt answer NOW,
+      // immediately before the engine mounts, and refresh the gate handoff — a
+      // child that appeared since the reconcile fetch stays disarmed. Marker is
+      // single-use, so ordinary same-session remounts skip the probe entirely.
+      if (takeArmProbePending(terminalId)) {
+        void (async () => {
+          try {
+            const seed = await window.electronAPI.probeReattachPromptGate?.(existingProcessId);
+            if (seed) {
+              terminalService.stashPromptGate(
+                terminalId,
+                reattachPromptGate(seed.promptHook, seed.atPrompt),
+              );
+            }
+          } catch (e) {
+            console.warn('TerminalPane: pre-mount arm probe skipped (baseline stays disarmed):', e);
+          } finally {
+            setProcessId(existingProcessId);
+          }
+        })();
+      } else {
+        setProcessId(existingProcessId);
+      }
       return;
     }
 

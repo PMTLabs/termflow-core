@@ -6,7 +6,7 @@
  * across the reload can't leak keystrokes into the history popup). A hookless
  * shell must NOT be seeded (would gate it forever).
  */
-import { reattachPromptGate } from '../reattachGate';
+import { reattachPromptGate, markArmProbePending, takeArmProbePending } from '../reattachGate';
 
 describe('reattachPromptGate', () => {
   it('seeds ARMED for a hooked shell sitting at a bare prompt (design 006)', () => {
@@ -32,5 +32,17 @@ describe('reattachPromptGate', () => {
     expect(reattachPromptGate(undefined, true)).toBeNull();
     expect(reattachPromptGate('true', true)).toBeNull();
     expect(reattachPromptGate(1, true)).toBeNull();
+  });
+});
+
+describe('arm-probe pending markers (review 008 M-1)', () => {
+  it('is single-use: consumed exactly once after a mark', () => {
+    markArmProbePending('t-probe');
+    expect(takeArmProbePending('t-probe')).toBe(true);
+    expect(takeArmProbePending('t-probe')).toBe(false);
+  });
+
+  it('is false for a terminal that was never marked (ordinary remounts skip the probe)', () => {
+    expect(takeArmProbePending('t-never-marked')).toBe(false);
   });
 });

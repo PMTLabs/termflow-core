@@ -417,19 +417,43 @@ pub async fn take_reattach_prompt_hook(
         return Ok(None);
     };
     let pid = state.terminals.get(&id).map(|t| t.pid).unwrap_or(0);
-    // Strict at-prompt (design 006): only a hooked shell with a live, childless
-    // process arms; pid 0 / dead pid / any child ⇒ false (safe direction).
-    let at_prompt = if hook && pid != 0 {
-        tokio::task::spawn_blocking(move || {
-            let sys = sysinfo::System::new_all();
-            crate::pty_manager::session_at_bare_prompt(pid, &sys)
-        })
-        .await
-        .unwrap_or(false)
-    } else {
-        false
-    };
+    let at_prompt = sample_at_prompt(hook, pid).await;
     Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+}
+
+/// Design 006 pre-mount probe: NON-consuming "would the gate arm right now?"
+/// answer for a terminal, by backend process id. The reconcile (renderer
+/// reload) path seeds `{seen, armed:false}` as the safe baseline and calls
+/// this immediately before the engine mounts — sampling at fetch time raced
+/// buffered input that could start a child between the reconcile fetch and the
+/// mount (review 008 M-1); the pre-mount sample closes that window to the same
+/// shape the hot-swap drain already has. Unknown id ⇒ `None` (no seed change).
+#[tauri::command]
+pub async fn probe_reattach_prompt_gate(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<ReattachPromptGateSeed>, String> {
+    let Some((hook, pid)) = state.terminals.get(&id).map(|t| (t.prompt_hook, t.pid)) else {
+        return Ok(None);
+    };
+    let at_prompt = sample_at_prompt(hook, pid).await;
+    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+}
+
+/// Strict at-prompt sample shared by the drain and the pre-mount probe
+/// (design 006): only a hooked shell with a live, childless pwsh process arms;
+/// pid 0 / dead pid / wrong identity / any child ⇒ false (safe direction).
+/// The process-table snapshot is blocking — taken off the async executor.
+async fn sample_at_prompt(hook: bool, pid: u32) -> bool {
+    if !hook || pid == 0 {
+        return false;
+    }
+    tokio::task::spawn_blocking(move || {
+        let sys = sysinfo::System::new_all();
+        crate::pty_manager::session_at_bare_prompt(pid, &sys)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`

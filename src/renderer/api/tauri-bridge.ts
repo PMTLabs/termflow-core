@@ -51,6 +51,8 @@ interface ElectronAPI {
   /// when it was reattached after a core-restart hot-swap; null otherwise). Used to
   /// re-seed the command-suggest prompt gate after createTerminal resolves.
   takeReattachPromptHook: (id: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
+  /// Design 006 pre-mount probe (non-consuming): would the gate arm right now?
+  probeReattachPromptGate: (processId: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
   openPath: (path: string) => Promise<void>;
@@ -303,7 +305,16 @@ const tauriBridge: ElectronAPI = {
     return invoke('get_terminal_cwds', { ids: processIds });
   },
 
-  takeReattachPromptHook: async (id) => invoke('take_reattach_prompt_hook', { id }),
+  takeReattachPromptHook: async (id) => {
+    const r = await invoke<unknown>('take_reattach_prompt_hook', { id });
+    // Version-skew safety (e.g. dev hot-reload against an older core): an old
+    // backend returns a bare boolean — normalize to the object shape, DISARMED.
+    if (typeof r === 'boolean') return { promptHook: r, atPrompt: false };
+    return r as { promptHook: boolean; atPrompt: boolean } | null;
+  },
+
+  probeReattachPromptGate: async (processId) =>
+    invoke('probe_reattach_prompt_gate', { id: processId }),
 
   resolveTerminalPath: async (processId, rel) => {
     return invoke('resolve_terminal_path', { id: processId, rel });

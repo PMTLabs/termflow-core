@@ -146,6 +146,10 @@ export interface ElectronAPI {
    *  hot-swap reattach path (not reconcile) is responsible for; `atPrompt` arms it
    *  when the shell sits at a bare prompt (zero children, sampled at drain). */
   takeReattachPromptHook?: (id: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
+  /** Design 006 pre-mount probe (non-consuming, by backend process id): would the
+   *  command-suggest gate arm right now? Sampled by the pane immediately before
+   *  the engine mounts on the reconcile path (a fetch-time answer would be stale). */
+  probeReattachPromptGate?: (processId: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
 
   // Backlog 003 follow-up: resolve a relative path the terminal printed to actual
   // file(s) on disk — direct join (shell cwd, then foreground-process cwd), else a
