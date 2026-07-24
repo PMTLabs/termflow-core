@@ -19,8 +19,14 @@ jest.mock('../../store/slices/tabsSlice', () => ({ addTab: (p: unknown) => ({ ty
 
 const getTerminalCwd = jest.fn();
 jest.mock('../TerminalService', () => ({
-  terminalService: { getProcessId: (id: string) => (id === 'tm-bg' ? 'proc-bg' : undefined) },
+  terminalService: {
+    getProcessId: (id: string) =>
+      id === 'tm-bg' ? 'proc-bg' : id === 'tm-active' ? 'proc-active' : undefined,
+  },
 }));
+
+const getCwdSnapshot = jest.fn();
+jest.mock('../cwdSnapshot', () => ({ getCwdSnapshot: (id: string) => getCwdSnapshot(id) }));
 
 import { splitTabPane } from '../paneActions';
 
@@ -31,6 +37,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   (window as any).electronAPI = { getTerminalCwd };
   getTerminalCwd.mockResolvedValue('D:\\from-background-tab');
+  getCwdSnapshot.mockReturnValue(undefined);
   mockState.settings = { defaultProfile: 'pwsh', shellProfiles: [{ id: 'pwsh', name: 'PowerShell' }] };
   mockState.tabs = { tabs: [] };
   // 'tb-bg' is a BACKGROUND tab: panes.paneTree mirrors the ACTIVE tab only.
@@ -92,5 +99,42 @@ describe('splitTabPane background-tab cwd (spec 045 §3.6)', () => {
     // finds nothing for a background pane, so cwd silently came back undefined.
     expect(getTerminalCwd).toHaveBeenCalledWith('proc-bg');
     expect(payload.cwd).toBe('D:\\from-background-tab');
+  });
+});
+
+describe('splitTabPane reload/hot-swap reattach cwd fallback', () => {
+  it('inherits the last-known snapshot cwd when the backend live query is blind', async () => {
+    // After a reattach the backend has no OSC cwd yet and (on Windows) the
+    // process scan can't read one, so the live query returns null. The new pane
+    // must fall back to the persisted snapshot, not spawn at C:\Windows.
+    getTerminalCwd.mockResolvedValue(null);
+    getCwdSnapshot.mockImplementation((id: string) =>
+      id === 'tm-active' ? 'D:\\sources\\work' : undefined,
+    );
+    splitTabPane('tb-active', 'vertical', 'after');
+    const payload = await dispatchedSplit();
+    expect(getTerminalCwd).toHaveBeenCalledWith('proc-active');
+    expect(getCwdSnapshot).toHaveBeenCalledWith('tm-active');
+    expect(payload.cwd).toBe('D:\\sources\\work');
+  });
+
+  it('prefers the fresh live cwd over the snapshot when the backend has one', async () => {
+    getTerminalCwd.mockResolvedValue('D:\\live\\fresh');
+    getCwdSnapshot.mockReturnValue('D:\\stale\\snapshot');
+    splitTabPane('tb-active', 'vertical', 'after');
+    const payload = await dispatchedSplit();
+    expect(payload.cwd).toBe('D:\\live\\fresh');
+  });
+
+  it('falls back to the snapshot when the live cwd query THROWS (not just returns null)', async () => {
+    // IPC down / process gone right after a reattach: the rejection must not skip
+    // the snapshot fallback (that left the pane spawning at C:\Windows).
+    getTerminalCwd.mockRejectedValue(new Error('IPC disconnected'));
+    getCwdSnapshot.mockImplementation((id: string) =>
+      id === 'tm-active' ? 'D:\\sources\\work' : undefined,
+    );
+    splitTabPane('tb-active', 'vertical', 'after');
+    const payload = await dispatchedSplit();
+    expect(payload.cwd).toBe('D:\\sources\\work');
   });
 });
