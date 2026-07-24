@@ -117,6 +117,11 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// Cleared by the reader task the moment the pipe closes (just before
+    /// on_disconnect fires). Lets `ensure_pty_host` refuse to PUBLISH a client
+    /// whose disconnect already ran — otherwise a drop during connection setup
+    /// leaves a permanently-dead client installed that nothing will ever null.
+    alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PtyHostClient {
@@ -133,6 +138,11 @@ impl PtyHostClient {
     /// record's `CAP_ATTACH_ACK`; see field doc).
     pub fn set_attach_acks(&self, v: bool) {
         self.attach_acks.store(v, Ordering::Release);
+    }
+
+    /// False once the pipe closed (reader task ended). See `alive` field doc.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
@@ -248,10 +258,13 @@ impl PtyHostClient {
         }
     }
 
-    pub async fn list_sessions(&self) -> Vec<SessionMeta> {
+    /// `None` means the host did NOT answer (timeout / dead pipe) — callers
+    /// must never treat that like an authoritative empty list, or a stale
+    /// recovery pass would tear down live panes on a transport failure.
+    pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
         match self.request(|req| Control::ListSessions { req }).await {
-            Some(Response::SessionList { sessions, .. }) => sessions,
-            _ => Vec::new(),
+            Some(Response::SessionList { sessions, .. }) => Some(sessions),
+            _ => None,
         }
     }
 
@@ -296,6 +309,8 @@ where
     let (outbound, mut out_rx) = unbounded_channel::<Frame>();
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let req_ctr = Arc::new(AtomicU64::new(1));
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let alive_r = alive.clone();
 
     // Writer task.
     tokio::spawn(async move {
@@ -338,7 +353,9 @@ where
                 Ok(None) | Err(_) => break, // pipe closed
             }
         }
-        // Pipe closed: surface the loss so host-owned panes don't hang silently.
+        // Pipe closed: mark the client dead FIRST (so a concurrent
+        // ensure_pty_host can refuse to publish it), then surface the loss.
+        alive_r.store(false, Ordering::Release);
         (deps.on_disconnect)();
     });
 
@@ -348,6 +365,7 @@ where
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        alive,
     }
 }
 
@@ -430,9 +448,19 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
             last_check = Some(now);
             let target = Pid::from_u32(pid);
             sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+            // Linux truncates comm names to 15 chars (TASK_COMM_LEN), so the
+            // full "termflow-pty-host" literal would false-negative there and
+            // silently disable the duplicate-spawn guard — match the truncated
+            // prefix, and accept a full exe-path basename match as well.
             last_alive = sys
                 .process(target)
-                .map(|p| p.name().to_string_lossy().starts_with("termflow-pty-host"))
+                .map(|p| {
+                    p.name().to_string_lossy().starts_with("termflow-pty-ho")
+                        || p.exe()
+                            .and_then(|e| e.file_name())
+                            .map(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
+                            .unwrap_or(false)
+                })
                 .unwrap_or(false);
         }
         last_alive

@@ -65,22 +65,13 @@ pub async fn serve(
     let mut mgr = SessionManager::new(events_tx, resp_tx, token, survivable);
 
     let mut listener = Listener::bind(&endpoint)?;
-    // Accept the FIRST connection.
+    // Advertise before the FIRST accept too — a client deciding whether it may
+    // spawn must see us during the whole window in which we are acceptable.
+    heal_record(&record);
     let mut stream = listener.accept().await?;
 
     loop {
-        // Self-heal the discovery record: a duplicate host that lost the pipe
-        // race may have clobbered-then-deleted it on exit, leaving this SURVIVOR
-        // unadvertised (clients then downgrade to legacy attach and can't apply
-        // the duplicate-spawn guard). Restore it when the file is gone; never
-        // overwrite a PRESENT record — it could belong to a live newer host.
-        if let Some((path, rec)) = &record {
-            if !matches!(termflow_pty_protocol::read_record(path), Ok(Some(_))) {
-                if let Err(e) = termflow_pty_protocol::write_record(path, rec) {
-                    eprintln!("termflow-pty-host: could not re-write discovery record: {e}");
-                }
-            }
-        }
+        heal_record(&record);
         let (erx, rrx) = run_connection(&mut mgr, stream, events_rx, resp_rx).await;
         events_rx = erx;
         resp_rx = rrx;
@@ -97,7 +88,7 @@ pub async fn serve(
                 // once nothing live remains to preserve. The arm deadline is still
                 // computed + reported in ArmAck for the GUI's UI, but it no longer
                 // destroys sessions here.
-                match wait_for_reconnect(&mut listener, &mgr).await {
+                match wait_for_reconnect(&mut listener, &mgr, &record).await {
                     Some(s) => stream = s, // already connected → loop top
                     None => return Ok(()), // all children exited → safe teardown
                 }
@@ -113,12 +104,20 @@ pub async fn serve(
 /// teardown). Liveness is re-checked on a short interval so a child that exits
 /// while detached eventually releases the host. Transient accept errors retry so
 /// a flaky reconnect does not drop held sessions.
-async fn wait_for_reconnect(listener: &mut Listener, mgr: &SessionManager) -> Option<Stream> {
+async fn wait_for_reconnect(
+    listener: &mut Listener,
+    mgr: &SessionManager,
+    record: &Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
+) -> Option<Stream> {
     const RECHECK: Duration = Duration::from_millis(500);
     loop {
         if mgr.live_session_count() == 0 {
             return None;
         }
+        // Keep the advertisement alive THROUGHOUT the re-accept window: a
+        // client that cannot see this host's pid gets only the short grace
+        // window and would be allowed to spawn a duplicate (review 007 C-5).
+        heal_record(record);
         tokio::select! {
             r = listener.accept() => match r {
                 Ok(s) => return Some(s),
@@ -130,6 +129,33 @@ async fn wait_for_reconnect(listener: &mut Listener, mgr: &SessionManager) -> Op
             _ = tokio::time::sleep(RECHECK) => continue, // re-check liveness
         }
     }
+}
+
+/// Self-heal the discovery record: a duplicate host that lost the pipe race may
+/// have clobbered-then-deleted it on exit, leaving this SURVIVOR unadvertised
+/// (clients downgrade to legacy attach and lose the duplicate-spawn guard).
+///
+/// Repairs ONLY a confirmed-absent file (`Ok(None)`): a read error is not
+/// evidence of absence, and a present record may belong to a live newer host.
+/// The write is an atomic create-if-absent — temp file + `hard_link`, which
+/// fails with `AlreadyExists` instead of replacing — so even a racing writer
+/// between our read and publish can never be clobbered (review 007 C-4).
+fn heal_record(record: &Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>) {
+    let Some((path, rec)) = record else { return };
+    if !matches!(termflow_pty_protocol::read_record(path), Ok(None)) {
+        return;
+    }
+    let tmp = path.with_extension(format!("heal-{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, rec.to_json()) {
+        eprintln!("termflow-pty-host: could not stage discovery record heal: {e}");
+        return;
+    }
+    match std::fs::hard_link(&tmp, path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {} // raced writer wins
+        Err(e) => eprintln!("termflow-pty-host: could not re-publish discovery record: {e}"),
+    }
+    let _ = std::fs::remove_file(&tmp);
 }
 
 /// Serve one connected client until it disconnects. Returns the event/response
@@ -541,8 +567,23 @@ mod tests {
         // Simulate the duplicate-host aftermath: the record vanishes.
         std::fs::remove_file(&path).unwrap();
 
-        // Reconnect and complete one round-trip: the serve loop heals the
-        // record at the top of the new connection, before serving it.
+        // The heal must happen DURING the re-accept wait (review 007 C-5) —
+        // BEFORE any client reconnects — or a reconnecting client can't see
+        // the survivor's pid and may be allowed to spawn a duplicate.
+        let mut healed_while_waiting = false;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if path.exists() {
+                healed_while_waiting = true;
+                break;
+            }
+        }
+        assert!(
+            healed_while_waiting,
+            "record must be re-advertised while waiting for reconnect, not only after"
+        );
+
+        // And a reconnect still works normally afterwards.
         let mut c2 = connect_with_retry(&ep).await;
         write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
             .await
@@ -551,7 +592,7 @@ mod tests {
             read_frame(&mut c2).await
         })
         .await;
-        assert!(path.exists(), "surviving host must re-advertise itself");
+        assert!(path.exists(), "record still present after reconnect");
         srv.abort();
         let _ = std::fs::remove_dir_all(&dir);
     }

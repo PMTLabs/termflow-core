@@ -257,6 +257,11 @@ pub struct AppState<R: Runtime = Wry> {
     // every session twice (duplicate replay into live parsers). A queued pass
     // re-snapshots after the first finishes, so its replay is ~empty.
     pub host_recovering: Arc<tokio::sync::Mutex<()>>,
+    // Closes that could not reach the host (pipe was down): host_close records
+    // the tab here and the next successful connect delivers the deferred Close
+    // — otherwise the session lingers alive in the host as an adoptable zombie
+    // the user explicitly closed (review 007 C-2).
+    pub host_close_pending: Arc<DashMap<String, ()>>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -312,6 +317,7 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
+            host_close_pending: self.host_close_pending.clone(),
         }
     }
 }
@@ -380,6 +386,7 @@ impl<R: Runtime> AppState<R> {
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
+            host_close_pending: Arc::new(DashMap::new()),
         }
     }
 
@@ -762,32 +769,63 @@ impl<R: Runtime> AppState<R> {
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
         // Record sessions that survived a hot-swap (tab_id -> pid) so
-        // create_host_terminal reattaches instead of respawning.
-        let surviving = client.list_sessions().await;
-        if surviving.is_empty() {
-            log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
-        } else {
-            log::info!(
-                "[HOTSWAP] host holds {} surviving session(s): {}",
-                surviving.len(),
-                surviving
-                    .iter()
-                    .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-        for meta in surviving {
-            // Only sessions the GUI does NOT already own belong in the adoption
-            // queue. During an in-place pipe-drop recovery the live tabs are
-            // still registered; queueing them would let a concurrent create
-            // re-adopt one at offset 0 straight into its live parser (review
-            // 007 F-1: duplicate replay + double attach).
-            if !self.host_terminals.contains_key(&meta.tab_id) {
-                self.host_reattach_pending.insert(meta.tab_id, meta.pid);
+        // create_host_terminal reattaches instead of respawning. `None` means
+        // the host did not answer — treat as unknown, never as empty.
+        match client.list_sessions().await {
+            None => log::warn!(
+                "[HOTSWAP] host did not answer ListSessions during connect; \
+                 adoption queue left unchanged"
+            ),
+            Some(surviving) if surviving.is_empty() => {
+                log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
+                self.host_close_pending.clear(); // authoritative: nothing left to close
+            }
+            Some(surviving) => {
+                log::info!(
+                    "[HOTSWAP] host holds {} surviving session(s): {}",
+                    surviving.len(),
+                    surviving
+                        .iter()
+                        .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                for meta in &surviving {
+                    // A close that couldn't reach the host while the pipe was
+                    // down: deliver it now instead of re-adopting the session.
+                    if self.host_close_pending.remove(&meta.tab_id).is_some() {
+                        log::info!(
+                            "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
+                            meta.tab_id
+                        );
+                        client.close(&meta.tab_id);
+                        continue;
+                    }
+                    // Only sessions the GUI does NOT already own belong in the
+                    // adoption queue. During an in-place pipe-drop recovery the
+                    // live tabs are still registered; queueing them would let a
+                    // concurrent create re-adopt one at offset 0 straight into
+                    // its live parser (review 007 F-1).
+                    if !self.host_terminals.contains_key(&meta.tab_id) {
+                        self.host_reattach_pending.insert(meta.tab_id.clone(), meta.pid);
+                    }
+                }
+                // Any remaining tombstone names a session this (authoritative)
+                // list doesn't have — moot, drop them.
+                self.host_close_pending.clear();
             }
         }
-        *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
+        // Never leave a client published whose pipe dropped during setup — its
+        // on_disconnect fired while `pty_host` was still None, so nothing else
+        // would ever null it and every caller would hold a dead client forever
+        // (review 007 C-1b). Publish FIRST, then re-check: if the drop raced
+        // in between, we null our own publication; if it fires later, the
+        // normal generation-guarded on_disconnect nulls it.
+        *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
+        if !client.is_alive() {
+            *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            return Err("pty-host connection lost during setup".to_string());
+        }
         Ok(())
     }
 
@@ -850,15 +888,38 @@ impl<R: Runtime> AppState<R> {
             }
             return;
         };
-        // An empty list can also be a request timeout — retry briefly before
-        // declaring every session lost.
-        let mut sessions = client.list_sessions().await;
-        for _ in 0..2 {
-            if !sessions.is_empty() {
+        // The generation this pass is allowed to act on. If the pipe drops (or
+        // a newer connection lands) mid-pass, a NEWER recovery owns the state —
+        // this pass must stop before any attach/teardown (review 007 C-1).
+        let my_gen = self.pty_host_gen.load(std::sync::atomic::Ordering::Acquire);
+        let still_current = || {
+            self.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) == my_gen
+                && self.pty_host_clone().is_some()
+        };
+        // Only an ANSWERED ListSessions is authority. A timeout/dead pipe must
+        // never read as "the host has no sessions" — that would tear down every
+        // live pane on a transport failure (review 007 C-1).
+        let mut sessions: Option<Vec<termflow_pty_protocol::SessionMeta>> = None;
+        for i in 0..3 {
+            if let Some(s) = client.list_sessions().await {
+                sessions = Some(s);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            sessions = client.list_sessions().await;
+            if i < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+        let Some(sessions) = sessions else {
+            log::error!(
+                "[HOTSWAP] host never answered ListSessions during recovery; \
+                 leaving {} pane(s) untouched (a later drop or create retries)",
+                tabs.len()
+            );
+            return;
+        };
+        if !still_current() {
+            log::warn!("[HOTSWAP] recovery superseded (gen {my_gen} stale); aborting pass");
+            return;
         }
         let saved: std::collections::HashMap<String, u64> = self
             .host_stream_offsets
@@ -872,6 +933,10 @@ impl<R: Runtime> AppState<R> {
             teardown.len()
         );
         for a in reattach {
+            if !still_current() {
+                log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
+                return;
+            }
             // The pane may have been closed while the pipe was down (host_close
             // couldn't deliver Close then). Finish the close now instead of
             // reattaching a session nobody owns — else it lingers as a zombie.
@@ -911,6 +976,10 @@ impl<R: Runtime> AppState<R> {
             self.host_reattach_pending.remove(&a.tab_id);
         }
         for t in teardown {
+            if !still_current() {
+                log::warn!("[HOTSWAP] recovery superseded mid-teardown; aborting pass");
+                return;
+            }
             if !self.host_terminals.contains_key(&t) {
                 continue; // pane already closed while disconnected — nothing to tear down
             }
@@ -966,14 +1035,21 @@ impl<R: Runtime> AppState<R> {
     /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
     /// close the session. Returns true if it was host-owned (so the caller skips
     /// the local kill) even when the client is gone — there is no local process.
+    /// A close that cannot reach the host (pipe down / dead client) is recorded
+    /// in `host_close_pending` and delivered on the next successful connect, so
+    /// the session can't linger in the host as an adoptable zombie.
     pub fn host_close(&self, id: &str) -> bool {
         if !self.is_host_owned(id) {
             return false;
         }
-        if let Some(c) = self.pty_host_client().as_ref() {
-            c.close(id);
+        match self.pty_host_client().as_ref() {
+            Some(c) if c.is_alive() => c.close(id),
+            _ => {
+                self.host_close_pending.insert(id.to_string(), ());
+            }
         }
         self.host_terminals.remove(id);
+        self.host_stream_offsets.remove(id);
         true
     }
 
@@ -1435,13 +1511,13 @@ pub fn plan_reattach(
         match sessions.iter().find(|m| &m.tab_id == tab) {
             Some(meta) => {
                 // No saved offset (never saw a byte this app-lifetime) ⇒ replay
-                // the whole ring. Clamp to the tail as paranoia — a same-session
-                // ring offset can only grow.
-                let from = saved_offsets
-                    .get(tab)
-                    .copied()
-                    .unwrap_or(0)
-                    .min(meta.tail_offset);
+                // the whole ring. A saved offset PAST the ring tail can only
+                // mean the saved value belongs to a different session identity
+                // (stale entry for a reused id) — resuming from the tail would
+                // silently skip everything the real session produced, so treat
+                // it as a discontinuity and replay from zero instead.
+                let saved = saved_offsets.get(tab).copied().unwrap_or(0);
+                let from = if saved > meta.tail_offset { 0 } else { saved };
                 reattach.push(ReattachAction {
                     tab_id: tab.clone(),
                     from_offset: from,
@@ -1499,13 +1575,25 @@ mod reattach_plan_tests {
         assert_eq!(reattach[0].from_offset, 0, "full replay (host gaps if evicted)");
     }
 
+    /// A saved offset beyond the ring tail is a stale-identity signal (reused
+    /// id), NOT a resume point — clamping to tail would silently drop all of
+    /// the real session's output, so it must replay from zero.
     #[test]
-    fn saved_offset_is_clamped_to_ring_tail() {
+    fn future_offset_is_a_discontinuity_and_replays_from_zero() {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 0, 50)];
         let saved = HashMap::from([("t1".to_string(), 5000u64)]);
         let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
-        assert_eq!(reattach[0].from_offset, 50);
+        assert_eq!(reattach[0].from_offset, 0);
+    }
+
+    #[test]
+    fn saved_offset_at_or_below_tail_is_used_as_is() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 50)];
+        let saved = HashMap::from([("t1".to_string(), 50u64)]);
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(reattach[0].from_offset, 50, "exactly-at-tail resumes with no replay");
     }
 
     #[test]
