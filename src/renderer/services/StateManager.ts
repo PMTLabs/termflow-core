@@ -286,7 +286,7 @@ class StateManagerClass {
       // windows' terminals are never touched.
       const byRenderer = new Map<
         string,
-        Array<{ processId: string; createdAt: number; promptHook: unknown }>
+        Array<{ processId: string; createdAt: number; promptHook: unknown; atPrompt: unknown }>
       >();
       for (const term of list) {
         const rendererId: string | undefined = term?.tabId; // id that spawned it
@@ -297,7 +297,9 @@ class StateManagerClass {
         // promptHook re-arms command-suggest's prompt gate on reattach (see
         // reattachPromptGate) — a reload wipes the in-memory gate, so without it
         // an agent CLI running across the reload leaks input into the popup.
-        arr.push({ processId, createdAt, promptHook: term?.promptHook });
+        // atPrompt (design 006) additionally seeds ARMED when the shell is idle
+        // at a bare prompt, so the first command keeps suggestions.
+        arr.push({ processId, createdAt, promptHook: term?.promptHook, atPrompt: term?.atPrompt });
         byRenderer.set(rendererId, arr);
       }
 
@@ -316,7 +318,7 @@ class StateManagerClass {
         terminalService.attachExistingTerminal(
           rendererId,
           keep.processId,
-          reattachPromptGate(keep.promptHook),
+          reattachPromptGate(keep.promptHook, keep.atPrompt),
         );
         for (const dup of stale) orphansToClose.push(dup.processId);
       }

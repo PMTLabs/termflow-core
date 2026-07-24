@@ -252,9 +252,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // handoff on mount) — otherwise the popup leaks keystrokes into an agent CLI
         // that survived the update. Best-effort; never block terminal init.
         try {
-          const hook = await window.electronAPI.takeReattachPromptHook?.(terminalId);
-          if (hook !== undefined && hook !== null) {
-            terminalService.stashPromptGate(terminalId, reattachPromptGate(hook));
+          const seed = await window.electronAPI.takeReattachPromptHook?.(terminalId);
+          if (seed) {
+            terminalService.stashPromptGate(
+              terminalId,
+              reattachPromptGate(seed.promptHook, seed.atPrompt),
+            );
           }
         } catch (e) {
           console.warn('TerminalPane: reattach prompt-gate seed skipped:', e);

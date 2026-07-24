@@ -50,7 +50,7 @@ interface ElectronAPI {
   /// Backlog 011: drain the reattach prompt-gate hook for a terminal id (Some only
   /// when it was reattached after a core-restart hot-swap; null otherwise). Used to
   /// re-seed the command-suggest prompt gate after createTerminal resolves.
-  takeReattachPromptHook: (id: string) => Promise<boolean | null>;
+  takeReattachPromptHook: (id: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
   openPath: (path: string) => Promise<void>;
