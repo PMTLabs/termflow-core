@@ -210,8 +210,23 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 }
 
 async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
+    // One process-table snapshot per request, taken only when some terminal
+    // needs the at-prompt answer (prompt-hooked pwsh). Blocking — keep it off
+    // the async executor (same as get_process_metrics).
+    let needs_sys = state.terminals.iter().any(|e| e.value().prompt_hook);
+    let sys = if needs_sys {
+        tokio::task::spawn_blocking(sysinfo::System::new_all).await.ok()
+    } else {
+        None
+    };
     let terminals: Vec<_> = state.terminals.iter().map(|entry| {
         let t = entry.value();
+        // Strict at-prompt (design 006): snapshot unavailable ⇒ false (safe).
+        let at_prompt = t.prompt_hook
+            && sys
+                .as_ref()
+                .map(|s| crate::pty_manager::session_at_bare_prompt(t.pid, s))
+                .unwrap_or(false);
         json!({
             "id": t.id,
             "processId": t.id,
@@ -225,8 +240,10 @@ async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
             "createdAt": t.created_at,
             "mode": "ui",
             "tabId": t.tab_id,
-            // Command-suggest reads this on reload-reattach to re-arm its prompt gate.
-            "promptHook": t.prompt_hook
+            // Command-suggest reads these on reload-reattach to re-seed its
+            // prompt gate: hook ⇒ seed, atPrompt ⇒ seed ARMED (design 006).
+            "promptHook": t.prompt_hook,
+            "atPrompt": at_prompt
         })
     }).collect();
     Json(json!({ "terminals": terminals }))
