@@ -9,6 +9,7 @@ import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
 import { getAllCwdSnapshots } from './cwdSnapshot';
+import { reattachPromptGate } from './reattachGate';
 
 export interface AppState {
   tabs: any[];
@@ -283,14 +284,20 @@ class StateManagerClass {
       // restricted to ids the restore is about to recreate. We only consider these
       // "wanted" ids so API-created terminals (mode "api", no UI tab) and other
       // windows' terminals are never touched.
-      const byRenderer = new Map<string, Array<{ processId: string; createdAt: number }>>();
+      const byRenderer = new Map<
+        string,
+        Array<{ processId: string; createdAt: number; promptHook: unknown }>
+      >();
       for (const term of list) {
         const rendererId: string | undefined = term?.tabId; // id that spawned it
         const processId: string | undefined = term?.id ?? term?.processId;
         if (!rendererId || !processId || !wanted.has(rendererId)) continue;
         const createdAt = Date.parse(term?.createdAt ?? '') || 0;
         const arr = byRenderer.get(rendererId) ?? [];
-        arr.push({ processId, createdAt });
+        // promptHook re-arms command-suggest's prompt gate on reattach (see
+        // reattachPromptGate) — a reload wipes the in-memory gate, so without it
+        // an agent CLI running across the reload leaks input into the popup.
+        arr.push({ processId, createdAt, promptHook: term?.promptHook });
         byRenderer.set(rendererId, arr);
       }
 
@@ -303,8 +310,14 @@ class StateManagerClass {
         candidates.sort((a, b) => b.createdAt - a.createdAt); // newest first
         const [keep, ...stale] = candidates;
         // Registers id→process AND seeds the init guards so the mount effect
-        // reuses the live PTY (covers tab-root and split panes).
-        terminalService.attachExistingTerminal(rendererId, keep.processId);
+        // reuses the live PTY (covers tab-root and split panes). The prompt-gate
+        // seed re-arms command-suggest suppression the in-memory cache lost on
+        // this reload — otherwise the popup leaks into a still-running agent CLI.
+        terminalService.attachExistingTerminal(
+          rendererId,
+          keep.processId,
+          reattachPromptGate(keep.promptHook),
+        );
         for (const dup of stale) orphansToClose.push(dup.processId);
       }
 

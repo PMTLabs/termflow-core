@@ -15,6 +15,7 @@ import { SessionClosedBanner } from './SessionClosedBanner';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
 import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
+import { reattachPromptGate } from '../../services/reattachGate';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import './TerminalPane.css';
@@ -242,6 +243,23 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     initPromise
       .then(async pid => {
         console.log(`TerminalPane: Created terminal ${terminalId} with process ${pid}`);
+
+        // Backlog 011: if the backend REATTACHED this terminal after a core-restart
+        // hot-swap, reconcile could not seed the command-suggest prompt gate (the
+        // terminal list was empty then), so the backend stashed the shell's
+        // prompt-hook. Drain it and re-seed the gate BEFORE setProcessId mounts the
+        // engine (TerminalDisplay renders only once processId is set, and reads the
+        // handoff on mount) — otherwise the popup leaks keystrokes into an agent CLI
+        // that survived the update. Best-effort; never block terminal init.
+        try {
+          const hook = await window.electronAPI.takeReattachPromptHook?.(terminalId);
+          if (hook !== undefined && hook !== null) {
+            terminalService.stashPromptGate(terminalId, reattachPromptGate(hook));
+          }
+        } catch (e) {
+          console.warn('TerminalPane: reattach prompt-gate seed skipped:', e);
+        }
+
         setProcessId(pid);
 
         // Creation is done: release the in-flight lock/promise. The reuse path

@@ -140,6 +140,11 @@ export interface ElectronAPI {
   /** Batched `getTerminalCwd`, keyed by process id. One process scan for all of
    *  them — see the `get_terminal_cwds` command for why that matters. */
   getTerminalCwds?: (processIds: string[]) => Promise<Record<string, string | null>>;
+  /** Backlog 011: drain the reattach prompt-gate hook for a terminal id — `true`/
+   *  `false` once if it was reattached after a core-restart hot-swap, else `null`.
+   *  Lets the renderer re-seed the command-suggest gate the hot-swap reattach
+   *  path (not reconcile) is responsible for. */
+  takeReattachPromptHook?: (id: string) => Promise<boolean | null>;
 
   // Backlog 003 follow-up: resolve a relative path the terminal printed to actual
   // file(s) on disk — direct join (shell cwd, then foreground-process cwd), else a

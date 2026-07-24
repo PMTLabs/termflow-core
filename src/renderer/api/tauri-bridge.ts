@@ -47,6 +47,10 @@ interface ElectronAPI {
   updateTerminalName: (id: string, name: string) => Promise<boolean>;
   getTerminalCwd: (processId: string) => Promise<string | null>;
   getTerminalCwds: (processIds: string[]) => Promise<Record<string, string | null>>;
+  /// Backlog 011: drain the reattach prompt-gate hook for a terminal id (Some only
+  /// when it was reattached after a core-restart hot-swap; null otherwise). Used to
+  /// re-seed the command-suggest prompt gate after createTerminal resolves.
+  takeReattachPromptHook: (id: string) => Promise<boolean | null>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
   openPath: (path: string) => Promise<void>;
@@ -298,6 +302,8 @@ const tauriBridge: ElectronAPI = {
   getTerminalCwds: async (processIds) => {
     return invoke('get_terminal_cwds', { ids: processIds });
   },
+
+  takeReattachPromptHook: async (id) => invoke('take_reattach_prompt_hook', { id }),
 
   resolveTerminalPath: async (processId, rel) => {
     return invoke('resolve_terminal_path', { id: processId, rel });
