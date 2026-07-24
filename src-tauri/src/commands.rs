@@ -198,6 +198,10 @@ async fn create_host_terminal(
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
         register_host_terminal(state, &id, pid, &shell_name, cols, rows, prompt_hook);
+        // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
+        // (empty terminal list) could not seed. Stash the hook so the renderer can
+        // re-arm the command-suggest prompt gate once createTerminal resolves.
+        state.reattach_prompt_hooks.insert(id.clone(), prompt_hook);
         // Seed + stage BEFORE attach releases the replay ring, so restored
         // history precedes the ring bytes in the parser (see stage_scrollback).
         stage_scrollback(state, &id, &id);
@@ -381,6 +385,18 @@ pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
     hotswap_preflight(&state)
+}
+
+/// Backlog 011: drain the reattach prompt-gate hook for `id`. Returns `Some(hook)`
+/// exactly once when this terminal was REATTACHED after a core-restart hot-swap
+/// (whose empty terminal list reconcile couldn't seed from), else `None` for a
+/// fresh spawn or an already-drained id. The renderer calls this right after
+/// `createTerminal` resolves and, on `Some`, re-seeds the command-suggest prompt
+/// gate `{seen: hook, armed: false}` so the history popup can't leak into an agent
+/// CLI that survived the update. Idempotent: a second call returns `None`.
+#[tauri::command]
+pub fn take_reattach_prompt_hook(state: State<'_, AppState>, id: String) -> Option<bool> {
+    state.reattach_prompt_hooks.remove(&id).map(|(_, hook)| hook)
 }
 
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`

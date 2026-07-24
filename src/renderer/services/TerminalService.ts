@@ -204,6 +204,19 @@ class TerminalServiceClass {
   }
 
   /**
+   * Stash a prompt-gate for `terminalId`'s next engine mount WITHOUT touching the
+   * process registration (unlike attachExistingTerminal, which also seeds the
+   * reuse guards). Used by the core-restart hot-swap path: the pane spawns via
+   * createTerminal (so the process is already registered), then this seeds the
+   * gate the backend reattach reported, to be consumed by takePromptGateHandoff
+   * when the engine mounts. Null clears any pending stash.
+   */
+  stashPromptGate(terminalId: string, gate: PromptGate | null): void {
+    if (gate) this.promptGateHandoff.set(terminalId, gate);
+    else this.promptGateHandoff.delete(terminalId);
+  }
+
+  /**
    * Single-use: returns the prompt-gate carried by a cross-window attach for
    * `terminalId` (if any) and clears it, so it's applied only to that pane's
    * first-ever mount in this window.

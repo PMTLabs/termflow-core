@@ -232,6 +232,14 @@ pub struct AppState<R: Runtime = Wry> {
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
     // present here, restoring the real pid.
     pub host_reattach_pending: Arc<DashMap<String, u32>>,
+    // Backlog 011: tab_id -> prompt_hook for sessions REATTACHED after a hot-swap
+    // (core restart). Set by create_host_terminal's reattach branch, drained once
+    // by the renderer (take_reattach_prompt_hook) after createTerminal resolves,
+    // so it can re-seed the command-suggest prompt gate that its wiped in-memory
+    // cache lost. Absent for a fresh spawn — a new shell starts armed at a prompt
+    // and must NOT be gated. (Renderer reloads with a live core seed via reconcile
+    // instead; the empty terminal list on a core restart is why this path exists.)
+    pub reattach_prompt_hooks: Arc<DashMap<String, bool>>,
     // Monotonic generation bumped on each successful sidecar connect. A client's
     // on_disconnect only clears `pty_host` if its generation is still current,
     // so a dying old client can't null a freshly reconnected one.
@@ -288,6 +296,7 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
             host_reattach_pending: self.host_reattach_pending.clone(),
+            reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),
         }
@@ -353,6 +362,7 @@ impl<R: Runtime> AppState<R> {
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
             host_reattach_pending: Arc::new(DashMap::new()),
+            reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
         }

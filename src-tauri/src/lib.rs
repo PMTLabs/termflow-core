@@ -1050,6 +1050,7 @@ pub fn run() {
         commands::create_terminal,
         commands::restart_for_update,
         commands::hotswap_available,
+        commands::take_reattach_prompt_hook,
         commands::check_for_updates,
         commands::update_and_restart,
         commands::get_active_window,
