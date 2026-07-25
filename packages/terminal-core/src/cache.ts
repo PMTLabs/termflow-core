@@ -93,6 +93,15 @@ export interface TerminalCacheEntry {
   // TerminalEngine.mount(), disposed ONLY here — never in unmount() — so a one-shot
   // handshake that arrives while the pane is backgrounded is still observed.
   protocolDisposables?: Array<() => void>;
+  // ED3 resize-wipe repair: epoch ms of the last background-reactivation
+  // convergence resize (flushDeferredResizeOnActivation actually sending a new
+  // size). A CSI-3J arriving within ED3_EXPECT_WINDOW_MS of this is treated as
+  // codex's resize-triggered wipe, not a user/app-initiated clear.
+  convergenceResizeAt?: number;
+  // Monotonic generation for the repair coroutine, mirroring hydrationGeneration —
+  // a second detected wipe before the first repair's fetch resolves cancels the
+  // stale one's commit.
+  edRepairGeneration: number;
 }
 
 export const terminalCache = new Map<string, TerminalCacheEntry>();

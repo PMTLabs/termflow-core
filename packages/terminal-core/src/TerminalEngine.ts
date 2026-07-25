@@ -155,6 +155,13 @@ const SEARCH_REFRESH_DEBOUNCE_MS = 150;
 const LIVE_WRITE_IDLE_MS = 24;
 const LIVE_WRITE_MAX_MS = 64;
 
+// ED3 resize-wipe repair: how long after OUR OWN background-reactivation
+// convergence resize a CSI-3J is treated as codex's resize-triggered wipe (vs. an
+// unrelated user/app clear). Generous enough to cover the resize round-trip +
+// codex noticing SIGWINCH and repainting; narrow enough that an unrelated `clear`
+// run seconds later is never misattributed.
+const ED3_EXPECT_WINDOW_MS = 1500;
+
 // Backlog 011: window after a suggestion accept during which Enter keydowns are
 // swallowed. Covers OS key auto-repeat (~30ms interval after a ~500ms delay)
 // without noticeably delaying a deliberate follow-up Enter.
@@ -989,6 +996,7 @@ export class TerminalEngine {
         disposables: [],
         hydrationGeneration: 0,
         protocolDisposables,
+        edRepairGeneration: 0,
       });
 
       // Additional delayed settle-fit (R7 timing: 100ms after open). Skipped in
@@ -1231,6 +1239,31 @@ export class TerminalEngine {
         );
         this.disposables.push(() => colorGuard.dispose());
       }
+
+      // ED3 resize-wipe repair: detect codex's resize-triggered ESC[3J (erase
+      // scrollback) and repair the live view from the backend's authoritative
+      // (2J/3J-immune, for already-scrolled history) scrollback. Per-mount is
+      // fine here — this is a repeating detector, not one-shot state: a wipe on
+      // a pane nobody is looking at doesn't need repairing until that pane is
+      // viewed again, at which point flushDeferredResizeOnActivation will have
+      // just re-stamped convergenceResizeAt and the freshly-mounted handler
+      // observes the corresponding ED3. See docs/superpowers/specs/
+      // 2026-07-24-protocol-state-and-resize-wipe-fixes-design.md.
+      const ed3 = boundTerm.parser.registerCsiHandler({ final: 'J' }, (params) => {
+        const isED3 = (params as (number | number[])[]).some(
+          (v) => (Array.isArray(v) ? v[0] : v) === 3,
+        );
+        if (!isED3) return false;
+        const entry = terminalCache.get(this.cacheKey);
+        if (!entry) return false;
+        const withinWindow =
+          entry.convergenceResizeAt != null &&
+          Date.now() - entry.convergenceResizeAt < ED3_EXPECT_WINDOW_MS;
+        if (!withinWindow) return false;
+        void this.scheduleEd3Repair();
+        return false; // observe only — never block xterm's own erase handling
+      });
+      this.disposables.push(() => ed3.dispose());
     }
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
@@ -1710,6 +1743,11 @@ export class TerminalEngine {
       // at Terminal creation — never re-created on remount, so carry the same
       // array reference forward every time this entry gets replaced.
       protocolDisposables: existingCache?.protocolDisposables,
+      // ED3 resize-wipe repair: survives the entry swap like hydrationGeneration —
+      // a stale in-flight repair from before a remount must still see its
+      // generation invalidated, not silently commit against a swapped entry.
+      convergenceResizeAt: existingCache?.convergenceResizeAt,
+      edRepairGeneration: existingCache?.edRepairGeneration ?? 0,
     });
     enforceCacheCap();
 
@@ -2288,6 +2326,16 @@ export class TerminalEngine {
       if (this.fitTimer) clearTimeout(this.fitTimer);
       this.fitTimer = setTimeout(() => {
         this.fitTimer = null;
+        // ED3 resize-wipe repair: this is the one place a background pane's PTY
+        // size genuinely converges after being hidden — stamp it BEFORE fit()
+        // runs (fit() can synchronously arm a backend resize via xterm's own
+        // onResize handler, bypassing flushDeferredResizeOnActivation below) so
+        // a CSI-3J arriving shortly after can be attributed to OUR resize, not
+        // an unrelated clear. Stamping unconditionally on every activation is
+        // harmless when nothing actually resizes — no SIGWINCH follows, so no
+        // ED3 arrives to (mis)attribute.
+        const e = terminalCache.get(this.cacheKey);
+        if (e) e.convergenceResizeAt = Date.now();
         try {
           this.fitAddon?.fit();
         } catch (error) {
@@ -2322,6 +2370,43 @@ export class TerminalEngine {
     if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
       this.scheduleBackendResize(term.cols, term.rows);
     }
+  }
+
+  // ED3 resize-wipe repair: debounce on output idle (so codex's post-ED3 re-emit
+  // burst finishes) before repainting from the backend's authoritative full
+  // scrollback. Full reset+rewrite, not a splice — no alignment/duplication risk,
+  // mirrors hydrate()'s reattach mechanism.
+  private ed3RepairTimer: ReturnType<typeof setTimeout> | null = null;
+  private async scheduleEd3Repair(): Promise<void> {
+    const entry = terminalCache.get(this.cacheKey);
+    if (!entry) return;
+    const myGeneration = ++entry.edRepairGeneration;
+    if (this.ed3RepairTimer) clearTimeout(this.ed3RepairTimer);
+    this.ed3RepairTimer = setTimeout(() => {
+      this.ed3RepairTimer = null;
+      void this.runEd3Repair(myGeneration);
+    }, RESYNC_SETTLE_MS);
+  }
+
+  private async runEd3Repair(myGeneration: number): Promise<void> {
+    const entry = terminalCache.get(this.cacheKey);
+    if (!entry || entry.edRepairGeneration !== myGeneration) return;
+    if (typeof this.bridge.getFullScrollback !== 'function' || !this.attachedProcessId) return;
+    let result: { blob: string; rows: number; cols: number };
+    try {
+      result = await this.bridge.getFullScrollback(this.attachedProcessId);
+    } catch (e) {
+      this.opts.onDiag?.(() => `[TERM-DIAG] ED3 repair fetch failed: ${e}`);
+      return;
+    }
+    const current = terminalCache.get(this.cacheKey);
+    if (!current || current.edRepairGeneration !== myGeneration) return;
+    if (!result?.blob) return;
+    current.terminal.reset();
+    current.terminal.write(result.blob);
+    this.opts.onDiag?.(
+      () => `[TERM-DIAG] ED3 repair repainted ${result.blob.length}b from backend snapshot`,
+    );
   }
 
   setTheme(theme: Record<string, string>): void {
