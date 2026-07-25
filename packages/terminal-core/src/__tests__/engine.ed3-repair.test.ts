@@ -183,3 +183,58 @@ test('a bridge without getFullScrollback is skipped silently (no crash)', async 
 
   expect(term.resetCount).toBe(0);
 });
+
+test('a reactivation that resizes nothing does not stamp convergence (narrower than "every activation")', async () => {
+  jest.useFakeTimers();
+  const getFullScrollback = jest.fn().mockResolvedValue({ blob: 'x', rows: 24, cols: 80 });
+  const cacheKey = `ed3-noresize-${Math.random()}`;
+  const { engine, term } = await mountAttached(cacheKey, { getFullScrollback });
+
+  // Deactivate/reactivate WITHOUT any size change in between (fit is a no-op).
+  engine.setActive(false);
+  engine.setActive(true);
+  await jest.runAllTimersAsync();
+
+  expect(terminalCache.get(cacheKey)?.convergenceResizeAt).toBeUndefined();
+
+  term.csiHandlers['J']?.([3]); // e.g. an unrelated `clear` shortly after
+  await jest.runAllTimersAsync();
+
+  expect(getFullScrollback).not.toHaveBeenCalled();
+});
+
+test('unmount() cancels a scheduled repair so it never fires against an abandoned engine', async () => {
+  jest.useFakeTimers();
+  const getFullScrollback = jest.fn().mockResolvedValue({ blob: 'x', rows: 24, cols: 80 });
+  const cacheKey = `ed3-unmount-${Math.random()}`;
+  const { engine, term, fit } = await mountAttached(cacheKey, { getFullScrollback });
+
+  await converge(engine, fit);
+  term.csiHandlers['J']?.([3]); // detected — repair scheduled RESYNC_SETTLE_MS out
+  engine.unmount(); // pane backgrounded again before the debounce fires
+  await jest.runAllTimersAsync();
+
+  expect(getFullScrollback).not.toHaveBeenCalled();
+  expect(term.resetCount).toBe(0);
+});
+
+test('repair defers while output is still live, then commits once it settles', async () => {
+  jest.useFakeTimers();
+  const getFullScrollback = jest.fn().mockResolvedValue({ blob: 'SETTLED', rows: 24, cols: 80 });
+  const cacheKey = `ed3-unsettled-${Math.random()}`;
+  const { engine, term, fit } = await mountAttached(cacheKey, { getFullScrollback });
+
+  await converge(engine, fit);
+  term.csiHandlers['J']?.([3]); // schedules the repair check for +700ms
+  jest.advanceTimersByTime(600); // not yet fired
+  const entry = terminalCache.get(cacheKey)!;
+  entry.lastDataAt = Date.now(); // codex's re-emit is still streaming right now
+  jest.advanceTimersByTime(150); // crosses the original debounce -> finds it unsettled, re-arms
+  expect(getFullScrollback).not.toHaveBeenCalled(); // deferred, not dropped
+
+  // Output goes quiet; the re-armed check settles on its next pass.
+  await jest.runAllTimersAsync();
+
+  expect(getFullScrollback).toHaveBeenCalledWith('pid-1');
+  expect(term.written).toContain('SETTLED');
+});

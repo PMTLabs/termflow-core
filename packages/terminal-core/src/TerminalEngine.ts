@@ -22,6 +22,7 @@ import type {
   ContextMenuActions,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
+import type { TerminalCacheEntry } from './cache';
 import { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 import {
   cleanupTerminalCache,
@@ -1743,9 +1744,10 @@ export class TerminalEngine {
       // at Terminal creation — never re-created on remount, so carry the same
       // array reference forward every time this entry gets replaced.
       protocolDisposables: existingCache?.protocolDisposables,
-      // ED3 resize-wipe repair: survives the entry swap like hydrationGeneration —
-      // a stale in-flight repair from before a remount must still see its
-      // generation invalidated, not silently commit against a swapped entry.
+      // ED3 resize-wipe repair: carried forward like hydrationGeneration — a plain
+      // reattach must not reset an in-progress repair's generation out from under
+      // it. The actual "was this repair invalidated" guarantee comes from
+      // unmount() cancelling ed3RepairTimer, not from this number changing here.
       convergenceResizeAt: existingCache?.convergenceResizeAt,
       edRepairGeneration: existingCache?.edRepairGeneration ?? 0,
     });
@@ -2326,16 +2328,6 @@ export class TerminalEngine {
       if (this.fitTimer) clearTimeout(this.fitTimer);
       this.fitTimer = setTimeout(() => {
         this.fitTimer = null;
-        // ED3 resize-wipe repair: this is the one place a background pane's PTY
-        // size genuinely converges after being hidden — stamp it BEFORE fit()
-        // runs (fit() can synchronously arm a backend resize via xterm's own
-        // onResize handler, bypassing flushDeferredResizeOnActivation below) so
-        // a CSI-3J arriving shortly after can be attributed to OUR resize, not
-        // an unrelated clear. Stamping unconditionally on every activation is
-        // harmless when nothing actually resizes — no SIGWINCH follows, so no
-        // ED3 arrives to (mis)attribute.
-        const e = terminalCache.get(this.cacheKey);
-        if (e) e.convergenceResizeAt = Date.now();
         try {
           this.fitAddon?.fit();
         } catch (error) {
@@ -2357,10 +2349,25 @@ export class TerminalEngine {
     if (this.opts.mirror || !this.paneActive) return;
     const term = this.term;
     if (!term || term.cols <= 0 || term.rows <= 0 || this.resizeInFlight) return;
+    // ED3 resize-wipe repair: this function only ever runs as part of the
+    // setActive(true) activation flow (single call site above), so entering
+    // either branch below means a background pane's PTY size is genuinely
+    // converging right now — stamp it so a CSI-3J arriving shortly after can be
+    // attributed to OUR resize, not an unrelated clear (e.g. a plain `clear`).
+    // Narrower than stamping unconditionally on every activation: a reactivation
+    // that resizes nothing never stamps, so it can't misattribute an unrelated
+    // wipe days later.
+    const stampConvergenceResize = () => {
+      const e = terminalCache.get(this.cacheKey);
+      if (e) e.convergenceResizeAt = Date.now();
+    };
     if (this.pendingResize) {
-      // A size is pending (freshly armed by the fit's onResize, or parked at
-      // deactivation with its timer cleared) — ensure the debounce is running so
-      // it actually flushes now that we're active.
+      // A size is pending (freshly armed by the fit's onResize just above — it
+      // synchronously calls scheduleBackendResize on a real dimension change —
+      // or parked at deactivation with its timer cleared). Either way this IS
+      // the convergence resize; stamp regardless of whether the debounce timer
+      // still needs (re)arming.
+      stampConvergenceResize();
       if (!this.resizeTimer) {
         this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
       }
@@ -2368,6 +2375,7 @@ export class TerminalEngine {
     }
     const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
     if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
+      stampConvergenceResize();
       this.scheduleBackendResize(term.cols, term.rows);
     }
   }
@@ -2391,6 +2399,18 @@ export class TerminalEngine {
   private async runEd3Repair(myGeneration: number): Promise<void> {
     const entry = terminalCache.get(this.cacheKey);
     if (!entry || entry.edRepairGeneration !== myGeneration) return;
+    // Output must be quiet before committing — mirrors reconcileSnapshot's own
+    // settle-gate (the sibling "repaint from an authoritative snapshot" path,
+    // reused here to avoid clobbering codex's still-streaming post-ED3 re-emit
+    // with an older fetch). Re-arm on the SAME generation rather than dropping
+    // the repair, so a long re-emit burst still gets healed once it quiets.
+    if (this.isEd3OutputUnsettled(entry)) {
+      this.ed3RepairTimer = setTimeout(() => {
+        this.ed3RepairTimer = null;
+        void this.runEd3Repair(myGeneration);
+      }, RESYNC_SETTLE_MS);
+      return;
+    }
     if (typeof this.bridge.getFullScrollback !== 'function' || !this.attachedProcessId) return;
     let result: { blob: string; rows: number; cols: number };
     try {
@@ -2401,12 +2421,25 @@ export class TerminalEngine {
     }
     const current = terminalCache.get(this.cacheKey);
     if (!current || current.edRepairGeneration !== myGeneration) return;
+    // Re-validate after the await: no live chunk arrived during the fetch (else
+    // defer so we don't clobber it) — same re-check reconcileSnapshot does.
+    if (this.isEd3OutputUnsettled(current)) {
+      this.ed3RepairTimer = setTimeout(() => {
+        this.ed3RepairTimer = null;
+        void this.runEd3Repair(myGeneration);
+      }, RESYNC_SETTLE_MS);
+      return;
+    }
     if (!result?.blob) return;
     current.terminal.reset();
     current.terminal.write(result.blob);
     this.opts.onDiag?.(
       () => `[TERM-DIAG] ED3 repair repainted ${result.blob.length}b from backend snapshot`,
     );
+  }
+
+  private isEd3OutputUnsettled(entry: TerminalCacheEntry): boolean {
+    return !!entry.lastDataAt && Date.now() - entry.lastDataAt < RESYNC_SETTLE_MS;
   }
 
   setTheme(theme: Record<string, string>): void {
@@ -3148,6 +3181,17 @@ export class TerminalEngine {
     if (this.fitTimer) {
       clearTimeout(this.fitTimer);
       this.fitTimer = null;
+    }
+    // ED3 resize-wipe repair: a new TerminalEngine is a fresh JS object per React
+    // mount (see the mount() adoption comment), so a scheduled-but-not-fired
+    // repair from THIS instance would otherwise keep running via its own timer
+    // after this instance is abandoned — repainting the cache-shared Terminal
+    // using a stale this.attachedProcessId while a NEW mount may be actively
+    // displaying it. Cancel it here, matching fitTimer's teardown just above; if
+    // the pane is reactivated with a real size change, a fresh detection fires.
+    if (this.ed3RepairTimer) {
+      clearTimeout(this.ed3RepairTimer);
+      this.ed3RepairTimer = null;
     }
     // Flush (don't drop) any pending backend resize so the PTY isn't left at a
     // stale size when a drag is interrupted by this unmount (tab switch / pane move).
