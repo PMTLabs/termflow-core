@@ -374,16 +374,45 @@ fn editor_args(editor: &str, path: &str, line: Option<u32>, col: Option<u32>) ->
 fn os_open(target: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // Use explorer.exe (a native binary launched via CreateProcessW), NOT
-        // `cmd /C start`: cmd would expand `%VAR%` even inside quotes and treat
-        // `&`/newlines as command separators, which a crafted target could abuse.
-        // explorer opens URLs and files with their default handler and receives the
-        // target as a single argv arg (Rust quotes spaces) — no shell parsing.
-        std::process::Command::new("explorer.exe")
-            .arg(target)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        // ShellExecuteW (verb "open"), NOT `explorer.exe <target>` spawned as a
+        // plain child process via CreateProcessW: launching explorer.exe directly
+        // creates a genuinely new shell process rather than routing the open
+        // request through the already-running shell's URL/protocol-handler
+        // resolution, so it silently falls back to opening a default Explorer
+        // window instead of the target's real handler — reproduced live (browser
+        // via ShellExecute-backed `Start-Process`, but a wrong default Explorer
+        // window via raw CreateProcess spawn, for the exact same URL argument,
+        // quoted or not). ShellExecuteW is also immune to the `cmd /C start`
+        // shell-parsing risk this comment used to warn about (`%VAR%` expansion,
+        // `&`/newline command separators): operation/file/parameters/directory are
+        // passed as separate fields, never joined into a shell command line.
+        use windows::core::HSTRING;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        // SAFETY: hwnd is None (no owner window needed for a fire-and-forget
+        // open); operation/file are valid NUL-terminated HSTRINGs kept alive for
+        // the duration of the call; parameters/directory are intentionally null.
+        let hinstance = unsafe {
+            ShellExecuteW(
+                None,
+                &HSTRING::from("open"),
+                &HSTRING::from(target),
+                windows::core::PCWSTR::null(),
+                windows::core::PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW keeps the legacy convention of returning a value > 32 on
+        // success (it is not a real HINSTANCE); anything <= 32 is an error code.
+        if hinstance.0 as isize > 32 {
+            Ok(())
+        } else {
+            Err(format!(
+                "ShellExecuteW failed to open '{}': code {}",
+                target, hinstance.0 as isize
+            ))
+        }
     }
     #[cfg(target_os = "macos")]
     {

@@ -780,6 +780,21 @@ export class TerminalEngine {
         // macOS Option-as-Meta (e.g. Option+P -> ESC p). Host opts in; no-op elsewhere.
         macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
         scrollback: this.opts.scrollback ?? 10000,
+        // Native OSC 8 hyperlinks (as opposed to WebLinksAddon's plain-text URL
+        // regex matches below) bypass addon link providers entirely and go
+        // through xterm's own built-in OscLinkProvider. Without a linkHandler,
+        // its default fallback calls the browser `confirm()` API, which Tauri's
+        // dialog permissions block — the link then silently does nothing on
+        // click (console: "dialog.confirm not allowed"). Route it through the
+        // same modifier-gated openExternal path as WebLinksAddon (below) so a
+        // real OSC 8 link and a regex-detected one behave identically.
+        // allowNonHttpProtocols left unset (falsy): only http(s) URIs activate,
+        // matching the Rust-side open_external guard (belt and suspenders).
+        linkHandler: {
+          activate: (event, uri) => {
+            if (this.hasOpenModifier(event)) this.opts.openExternal?.(uri);
+          },
+        },
         // LOAD-BEARING: required for unicode.activeVersion='11' (wide-char/emoji).
         allowProposedApi: true,
         // convertEol MUST be false for a real PTY (see source comment 327-332).
