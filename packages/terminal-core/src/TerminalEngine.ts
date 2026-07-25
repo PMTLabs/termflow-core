@@ -858,6 +858,93 @@ export class TerminalEngine {
         return;
       }
 
+      // Backlog 003 (protocol-state-lost-while-unmounted): register the
+      // STATE-MUTATING Kitty/Win32-Input-Mode CSI/OSC handlers ONCE per cache
+      // entry (Terminal creation), not per mount. These observe one-shot
+      // handshakes (ConPTY's ?9001h, an app's Kitty flag push) that fire exactly
+      // once per PTY session — if delivered while this pane is a
+      // cached-but-unmounted background tab, a per-mount registration (torn down
+      // in unmount()) would miss them forever. See
+      // docs/superpowers/specs/2026-07-24-protocol-state-and-resize-wipe-fixes-design.md.
+      //
+      // Handlers close directly over `this.kbState`/`this.win32State` — the SAME
+      // object references every later mount adopts via `this.kbState =
+      // cached.kbState` (below) and writes back via `kbState: this.kbState`
+      // (mount-end entry replace). Those objects are mutated in place
+      // (enable/disable/pushFlags/reset — never replaced), so capturing the
+      // reference once here is permanently correct; no per-call cache lookup
+      // is needed.
+      const protocolDisposables: Array<() => void> = [];
+      if (term.parser) {
+        const protocolCsiParam = (params: (number | number[])[], i: number, dflt: number): number => {
+          const v = params[i];
+          const n = Array.isArray(v) ? v[0] : v;
+          return typeof n === 'number' && n >= 0 ? n : dflt;
+        };
+        const registerProtocolCsi = (
+          id: { prefix?: string; final: string },
+          fn: (params: (number | number[])[]) => boolean,
+        ) => {
+          const d = term!.parser.registerCsiHandler(id, (params) => {
+            if (!this.enhancedKbEnabled()) return false; // legacy: ignore (xterm ignores too)
+            return fn(params as (number | number[])[]);
+          });
+          protocolDisposables.push(() => d.dispose());
+        };
+        registerProtocolCsi({ prefix: '>', final: 'u' }, (p) => { this.kbState.pushFlags(protocolCsiParam(p, 0, 0)); return true; });
+        registerProtocolCsi({ prefix: '<', final: 'u' }, (p) => { this.kbState.popFlags(protocolCsiParam(p, 0, 1)); return true; });
+        registerProtocolCsi({ prefix: '=', final: 'u' }, (p) => { this.kbState.setFlags(protocolCsiParam(p, 0, 0), protocolCsiParam(p, 1, 1)); return true; });
+        registerProtocolCsi({ prefix: '>', final: 'm' }, (p) => {
+          if (protocolCsiParam(p, 0, -1) === 4) { this.kbState.setModifyOtherKeys(protocolCsiParam(p, 1, 0)); return true; }
+          // Param-less `CSI > m` resets ALL XTMODKEYS resources incl. modifyOtherKeys
+          // (a common TUI exit path) — without this the level would stay stuck after
+          // the app is gone, suppressing command suggestions forever.
+          if (p.length === 0) { this.kbState.setModifyOtherKeys(0); return false; }
+          return false; // not modifyOtherKeys -> let xterm handle
+        });
+        // DECSTR soft reset (`CSI ! p`): full keyboard-protocol reset. Some TUIs exit
+        // via soft reset instead of popping their Kitty flags.
+        const decstr = term.parser.registerCsiHandler(
+          { intermediates: '!', final: 'p' },
+          () => {
+            this.kbState.reset();
+            if (this.isWindowsPlatform()) this.win32State.disable();
+            return false; // observe only — xterm performs its own soft reset
+          },
+        );
+        protocolDisposables.push(() => decstr.dispose());
+        // Kitty spec: the alt screen's flag stack is empty on entry and does not
+        // survive exit. Observe DECSET/DECRST 1049/1047/47 (alt-screen switches)
+        // and clear the alt stack so a crashed TUI can't leak flags.
+        const isAltScreenParam = (params: (number | number[])[]): boolean =>
+          params.some((v) => {
+            const n = Array.isArray(v) ? v[0] : v;
+            return n === 1049 || n === 1047 || n === 47;
+          });
+        // Win32-Input-Mode (Windows-only): ConPTY sends CSI ?9001h unconditionally at
+        // the start of every session (confirmed live on a plain pwsh tab) — folded
+        // into the same ?h/?l handler as the alt-screen check above, gated on
+        // isWindowsPlatform() so win32State can never flip on off-Windows even if a
+        // stray ?9001h somehow appeared in a byte stream. See design 043 / plan 044.
+        const isWin32InputModeParam = (params: (number | number[])[]): boolean =>
+          params.some((v) => (Array.isArray(v) ? v[0] : v) === 9001);
+        const altEnter = term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
+          if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+          if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+            this.win32State.enable();
+          }
+          return false; // observe only — xterm handles the actual mode switch
+        });
+        const altExit = term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
+          if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+          if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+            this.win32State.disable();
+          }
+          return false;
+        });
+        protocolDisposables.push(() => altEnter.dispose(), () => altExit.dispose());
+      }
+
       // CRITICAL: fit IMMEDIATELY after open to get the correct size BEFORE data.
       // NOTE: backend resize is DEFERRED to attach() — here we only size xterm
       // locally; the term.onResize handler (wired below) forwards to
@@ -901,6 +988,7 @@ export class TerminalEngine {
         pendingOutputBytes: 0,
         disposables: [],
         hydrationGeneration: 0,
+        protocolDisposables,
       });
 
       // Additional delayed settle-fit (R7 timing: 100ms after open). Skipped in
@@ -1075,14 +1163,12 @@ export class TerminalEngine {
       });
       this.disposables.push(() => d.dispose());
     };
-    const csiParam = (params: (number | number[])[], i: number, dflt: number): number => {
-      const v = params[i];
-      const n = Array.isArray(v) ? v[0] : v;
-      return typeof n === 'number' && n >= 0 ? n : dflt;
-    };
-    registerCsi({ prefix: '>', final: 'u' }, (p) => { this.kbState.pushFlags(csiParam(p, 0, 0)); return true; });
-    registerCsi({ prefix: '<', final: 'u' }, (p) => { this.kbState.popFlags(csiParam(p, 0, 1)); return true; });
-    registerCsi({ prefix: '=', final: 'u' }, (p) => { this.kbState.setFlags(csiParam(p, 0, 0), csiParam(p, 1, 1)); return true; });
+    // Kitty >u/<u/=u (push/pop/set flags), >m (modifyOtherKeys), DECSTR, and the
+    // Win32-Input-Mode 9001 check on ?h/?l all moved to cache-lifetime (backlog
+    // 003) — registered once at Terminal creation in the mount() create-branch
+    // above, not here. Only the query-response handler (needs a live
+    // bridge/attachedProcessId, and a missed query is recoverable, not a
+    // permanently-stuck state) stays per-mount.
     registerCsi({ prefix: '?', final: 'u' }, () => {
       if (this.attachedProcessId) {
         Promise.resolve(this.bridge.write(this.attachedProcessId, this.kbState.queryResponse()))
@@ -1090,57 +1176,7 @@ export class TerminalEngine {
       }
       return true;
     });
-    registerCsi({ prefix: '>', final: 'm' }, (p) => {
-      if (csiParam(p, 0, -1) === 4) { this.kbState.setModifyOtherKeys(csiParam(p, 1, 0)); return true; }
-      // Param-less `CSI > m` resets ALL XTMODKEYS resources incl. modifyOtherKeys
-      // (a common TUI exit path) — without this the level would stay stuck after
-      // the app is gone, suppressing command suggestions forever.
-      if (p.length === 0) { this.kbState.setModifyOtherKeys(0); return false; }
-      return false; // not modifyOtherKeys -> let xterm handle
-    });
-    // DECSTR soft reset (`CSI ! p`): full keyboard-protocol reset. Some TUIs exit
-    // via soft reset instead of popping their Kitty flags.
     if (boundTerm.parser) {
-      const decstr = boundTerm.parser.registerCsiHandler(
-        { intermediates: '!', final: 'p' },
-        () => {
-          this.kbState.reset();
-          if (this.isWindowsPlatform()) this.win32State.disable();
-          return false; // observe only — xterm performs its own soft reset
-        },
-      );
-      this.disposables.push(() => decstr.dispose());
-      // Kitty spec: the alt screen's flag stack is empty on entry and does not
-      // survive exit. Observe DECSET/DECRST 1049/1047/47 (alt-screen switches)
-      // and clear the alt stack so a crashed TUI can't leak flags.
-      const isAltScreenParam = (params: (number | number[])[]): boolean =>
-        params.some((v) => {
-          const n = Array.isArray(v) ? v[0] : v;
-          return n === 1049 || n === 1047 || n === 47;
-        });
-      // Win32-Input-Mode (Windows-only): ConPTY sends CSI ?9001h unconditionally at
-      // the start of every session (confirmed live on a plain pwsh tab) — folded
-      // into the same ?h/?l handler as the alt-screen check above, gated on
-      // isWindowsPlatform() so win32State can never flip on off-Windows even if a
-      // stray ?9001h somehow appeared in a byte stream. See design 043 / plan 044.
-      const isWin32InputModeParam = (params: (number | number[])[]): boolean =>
-        params.some((v) => (Array.isArray(v) ? v[0] : v) === 9001);
-      const altEnter = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
-        if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
-        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
-          this.win32State.enable();
-        }
-        return false; // observe only — xterm handles the actual mode switch
-      });
-      const altExit = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
-        if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
-        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
-          this.win32State.disable();
-        }
-        return false;
-      });
-      this.disposables.push(() => altEnter.dispose(), () => altExit.dispose());
-
       // Prompt-render heal (backlog 011): the shell emits OSC 9;9 (PowerShell —
       // injected by pty_manager for cwd tracking) or OSC 7 (unix shells) every
       // time it renders a prompt; a TUI never renders the shell prompt. If
@@ -1670,6 +1706,10 @@ export class TerminalEngine {
       // a genuinely fresh terminal, it seeds the cache with the fresh instance.
       kbState: this.kbState,
       win32State: this.win32State,
+      // Backlog 003: the cache-lifetime protocol handler disposers, created once
+      // at Terminal creation — never re-created on remount, so carry the same
+      // array reference forward every time this entry gets replaced.
+      protocolDisposables: existingCache?.protocolDisposables,
     });
     enforceCacheCap();
 

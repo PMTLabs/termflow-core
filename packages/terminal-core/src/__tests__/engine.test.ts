@@ -488,6 +488,74 @@ test('DECSTR soft reset disables win32State on Windows (only the Kitty-flags var
 });
 
 // ---------------------------------------------------------------------------
+// Backlog 003: protocol handshake arriving while UNMOUNTED (background tab) is
+// still observed — previously the CSI handlers were per-mount (torn down in
+// unmount()), so a one-shot handshake delivered while backgrounded was lost
+// forever. These differ from the "review 046/047" tests above: those deliver the
+// handshake WHILE MOUNTED then unmount/remount (adoption); these deliver it
+// AFTER unmount(), before the next mount() — the actual gap backlog 003 describes.
+// ---------------------------------------------------------------------------
+
+test('Win32-Input-Mode CSI ?9001h delivered AFTER unmount() is still observed on remount (backlog 003)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'bg-win32', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('bg-win32');
+
+  engine.unmount();
+  // Simulate ConPTY's one-shot handshake arriving while this pane is a
+  // cached-but-unmounted background tab — no engine is currently mounted to
+  // observe it via the OLD per-mount registration.
+  const handled = term.csiHandlers['?h']?.([9001]);
+  expect(handled).toBe(false); // observe-only, same contract as the mounted case
+
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const keyHandled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(keyHandled).toBe(false); // encoded via Win32-Input-Mode -> handshake was NOT missed
+  expect(calls.write).toEqual([['p1', '\x1b[65;30;97;1;0;1_']]);
+});
+
+test('Kitty CSI >u (push flags) delivered AFTER unmount() is still observed on remount (backlog 003)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'bg-kitty' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('bg-kitty');
+
+  engine.unmount();
+  term.csiHandlers['>u']?.([1]); // app pushes Kitty flag 1 while backgrounded
+
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(false); // real Kitty encoding -> the flag push was NOT missed
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u']]);
+});
+
+test('DECSTR delivered AFTER unmount() resets win32State observed on remount (backlog 003)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'bg-decstr', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('bg-decstr');
+  term.csiHandlers['?h']?.([9001]); // enable win32 first, while mounted
+
+  engine.unmount();
+  term.csiHandlers['p']?.([]); // DECSTR while backgrounded
+
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const handled = term.keyHandler!(withKey({ key: 'a', keyCode: 65 }));
+
+  expect(handled).toBe(true); // back to legacy passthrough -> the reset was NOT missed
+  expect(calls.write).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
 // macOS: Cmd+Left/Right = jump to start/end of line (no physical Home/End key)
 // ---------------------------------------------------------------------------
 
