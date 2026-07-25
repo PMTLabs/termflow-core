@@ -77,6 +77,7 @@ pub async fn start_api_server(
         .route("/api/terminals/:id/input", post(write_terminal))
         .route("/api/terminals/:id/output", get(get_terminal_output))
         .route("/api/terminals/:id/snapshot", get(get_terminal_snapshot))
+        .route("/api/terminals/:id/full-scrollback", get(get_terminal_full_scrollback))
         .route("/api/terminals/:id/reset", post(reset_terminal))
         // Profile management routes
         .route("/api/profiles", get(list_profiles))
@@ -717,6 +718,29 @@ async fn get_terminal_snapshot(
             log::warn!("Snapshot requested for {} but no screen parser exists", id);
             Json(json!({ "snapshot": "", "rows": 0, "cols": 0 }))
         }
+    }
+}
+
+/// Returns the FULL rendered scrollback (not just the current visible screen)
+/// from the backend's authoritative vt100 parser. Unlike `get_terminal_snapshot`
+/// (current screen only, for reattach hydration), this reproduces the entire
+/// session history — the parser's scrollback survives `2J`/`3J` clears for
+/// content that already scrolled into history (see
+/// `state.rs::full_scrollback_survives_2j_3j_for_already_scrolled_history`), so
+/// this is also correct to call after a client-side wipe (e.g. codex's
+/// resize-triggered ED3 erasing xterm's OWN accumulated scrollback) even though
+/// the LIVE xterm view lost that content.
+async fn get_terminal_full_scrollback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.full_scrollback_snapshot(&id) {
+        Some(bytes) => {
+            let blob = String::from_utf8_lossy(&bytes).to_string();
+            let (rows, cols) = terminal_size_for_output(&state, &id);
+            Json(json!({ "blob": blob, "rows": rows, "cols": cols }))
+        }
+        None => Json(json!({ "blob": "", "rows": 0, "cols": 0 })),
     }
 }
 
