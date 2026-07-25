@@ -97,6 +97,51 @@ test('cleanupTerminalCache: a throwing webglAddon.dispose() still tears down the
   expect(terminalCache.has('t3')).toBe(false);
 });
 
+test('cleanupTerminalCache disposes protocolDisposables (backlog 003)', () => {
+  const disposed: string[] = [];
+  const entry = {
+    terminal: { dispose: () => disposed.push('term') },
+    fitAddon: {},
+    webglAddon: null,
+    useWebGL: false,
+    hydrating: false,
+    pendingOutput: [],
+    disposables: [() => disposed.push('d1')],
+    protocolDisposables: [() => disposed.push('proto1'), () => disposed.push('proto2')],
+  } as unknown as TerminalCacheEntry;
+  terminalCache.set('t-proto', entry);
+
+  cleanupTerminalCache('t-proto');
+
+  expect(disposed).toEqual(['d1', 'proto1', 'proto2', 'term']);
+  expect(terminalCache.has('t-proto')).toBe(false);
+});
+
+test('cleanupTerminalCache: a throwing protocolDisposable still lets the rest tear down', () => {
+  const disposed: string[] = [];
+  const entry = {
+    terminal: { dispose: () => disposed.push('term') },
+    fitAddon: {},
+    webglAddon: null,
+    useWebGL: false,
+    hydrating: false,
+    pendingOutput: [],
+    disposables: [],
+    protocolDisposables: [
+      () => {
+        throw new Error('boom');
+      },
+      () => disposed.push('proto2'),
+    ],
+  } as unknown as TerminalCacheEntry;
+  terminalCache.set('t-proto-throw', entry);
+
+  expect(() => cleanupTerminalCache('t-proto-throw')).not.toThrow();
+
+  expect(disposed).toEqual(['proto2', 'term']);
+  expect(terminalCache.has('t-proto-throw')).toBe(false);
+});
+
 test('cleanupTerminalCache: a throwing local disposable still lets data/exit subs + terminal dispose and removes the entry', () => {
   const disposed: string[] = [];
   const entry = {
