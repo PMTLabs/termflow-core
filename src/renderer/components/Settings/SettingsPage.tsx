@@ -15,6 +15,7 @@ import { UnsavedChangesDialog } from '../UI/UnsavedChangesDialog';
 import { snapshotCategory, isCategoryDirty, TrackedCategory, CategorySnapshot } from '../../services/settingsDirty';
 import { registerSettingsGuard, clearSettingsGuard } from '../../services/settingsNavGuard';
 import { consumePendingSettingsCategory } from '../../services/openSettings';
+import { getBuildInfo } from '../../services/buildInfo';
 import { SplitButton } from '../UI/SplitButton';
 import { connectionStatus } from './connectionStatus';
 import { PeersPanel } from './PeersPanel';
@@ -22,6 +23,15 @@ import { AboutLegalPanel } from './AboutLegalPanel';
 import './SettingsPage.css';
 
 const IS_DEV = process.env.NODE_ENV === 'development';
+
+// Git tip this renderer bundle was built from — shown under "Current version" in the
+// Updates panel so a running install can be traced back to an exact commit.
+const BUILD = getBuildInfo();
+const buildTime = (() => {
+    if (!BUILD.time) return null;
+    const d = new Date(BUILD.time);
+    return Number.isNaN(d.getTime()) ? BUILD.time : d.toLocaleString();
+})();
 
 interface ConnectionInfo {
     name: string;
@@ -1574,6 +1584,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             {appVersion && (
                 <p className="help-text" style={{ marginTop: 0 }}>
                     Current version: <strong>v{appVersion}</strong>
+                </p>
+            )}
+            {BUILD.sha && (
+                <p
+                    className="help-text"
+                    style={{ marginTop: 0 }}
+                    title={BUILD.subject ?? undefined}
+                >
+                    Build: <strong style={{ fontFamily: 'ui-monospace, Menlo, Consolas, monospace' }}>{BUILD.sha}</strong>
+                    {BUILD.branch && <> on <strong>{BUILD.branch}</strong></>}
+                    {BUILD.dirty && <> · uncommitted changes</>}
+                    {buildTime && <> · built {buildTime}</>}
                 </p>
             )}
             {(updateStatus.state === 'upToDate' || updateStatus.state === 'available') && (
