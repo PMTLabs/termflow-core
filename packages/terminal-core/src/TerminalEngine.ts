@@ -2399,6 +2399,12 @@ export class TerminalEngine {
   private async runEd3Repair(myGeneration: number): Promise<void> {
     const entry = terminalCache.get(this.cacheKey);
     if (!entry || entry.edRepairGeneration !== myGeneration) return;
+    // this.container is nulled by unmount() (review 27/agy): unmount() only
+    // clears ed3RepairTimer if it's still armed at that moment, but a re-arm
+    // BELOW creates a brand-new timer that unmount() — having already run —
+    // can never see or cancel. Bail whenever this engine instance is no longer
+    // mounted, at every checkpoint, so a re-arm can't outlive it.
+    if (!this.container) return;
     // Output must be quiet before committing — mirrors reconcileSnapshot's own
     // settle-gate (the sibling "repaint from an authoritative snapshot" path,
     // reused here to avoid clobbering codex's still-streaming post-ED3 re-emit
@@ -2421,8 +2427,10 @@ export class TerminalEngine {
     }
     const current = terminalCache.get(this.cacheKey);
     if (!current || current.edRepairGeneration !== myGeneration) return;
-    // Re-validate after the await: no live chunk arrived during the fetch (else
-    // defer so we don't clobber it) — same re-check reconcileSnapshot does.
+    // Re-validate after the await: still mounted (unmount() may have run during
+    // the fetch) and no live chunk arrived during the fetch (else defer so we
+    // don't clobber it) — same re-checks reconcileSnapshot does.
+    if (!this.container) return;
     if (this.isEd3OutputUnsettled(current)) {
       this.ed3RepairTimer = setTimeout(() => {
         this.ed3RepairTimer = null;

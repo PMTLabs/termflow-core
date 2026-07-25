@@ -218,6 +218,39 @@ test('unmount() cancels a scheduled repair so it never fires against an abandone
   expect(term.resetCount).toBe(0);
 });
 
+test('unmount() DURING an in-flight getFullScrollback fetch prevents a stale re-arm/commit (review 27/agy)', async () => {
+  jest.useFakeTimers();
+  let resolveFetch: ((v: { blob: string; rows: number; cols: number }) => void) | undefined;
+  const getFullScrollback = jest.fn(
+    () =>
+      new Promise<{ blob: string; rows: number; cols: number }>((resolve) => {
+        resolveFetch = resolve;
+      }),
+  );
+  const cacheKey = `ed3-unmount-inflight-${Math.random()}`;
+  const { engine, term, fit } = await mountAttached(cacheKey, { getFullScrollback });
+
+  await converge(engine, fit);
+  term.csiHandlers['J']?.([3]);
+  await jest.advanceTimersByTimeAsync(700); // debounce fires; fetch is now in flight
+  expect(getFullScrollback).toHaveBeenCalledTimes(1);
+
+  engine.unmount(); // pane backgrounded again mid-fetch — this.container is now null
+  // Simulate live output arriving after unmount, so the post-await path would
+  // otherwise take the "unsettled -> re-arm" branch if the container guard were missing.
+  const entry = terminalCache.get(cacheKey)!;
+  entry.lastDataAt = Date.now();
+  resolveFetch!({ blob: 'STALE', rows: 24, cols: 80 });
+  await jest.runAllTimersAsync();
+
+  // Neither a commit (view unchanged) nor a stale re-armed timer that nothing
+  // could ever cancel again.
+  expect(term.resetCount).toBe(0);
+  expect(term.written).not.toContain('STALE');
+  await jest.advanceTimersByTime(10_000); // would surface a leaked re-arm loop
+  expect(getFullScrollback).toHaveBeenCalledTimes(1); // never called again
+});
+
 test('repair defers while output is still live, then commits once it settles', async () => {
   jest.useFakeTimers();
   const getFullScrollback = jest.fn().mockResolvedValue({ blob: 'SETTLED', rows: 24, cols: 80 });
