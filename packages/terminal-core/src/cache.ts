@@ -87,6 +87,21 @@ export interface TerminalCacheEntry {
   // though the underlying cached Terminal/PTY session never re-sent the handshake.
   kbState?: import('./keyboardProtocol').KeyboardProtocolState;
   win32State?: import('./win32InputMode').Win32InputModeState;
+  // Backlog 003 (protocol-state-lost-while-unmounted): cache-lifetime disposers for
+  // the CSI/OSC handlers that mutate kbState/win32State (Kitty >u/<u/=u/>m, Win32
+  // 9001 on ?h/?l, DECSTR). Registered once at Terminal creation in
+  // TerminalEngine.mount(), disposed ONLY here — never in unmount() — so a one-shot
+  // handshake that arrives while the pane is backgrounded is still observed.
+  protocolDisposables?: Array<() => void>;
+  // ED3 resize-wipe repair: epoch ms of the last background-reactivation
+  // convergence resize (flushDeferredResizeOnActivation actually sending a new
+  // size). A CSI-3J arriving within ED3_EXPECT_WINDOW_MS of this is treated as
+  // codex's resize-triggered wipe, not a user/app-initiated clear.
+  convergenceResizeAt?: number;
+  // Monotonic generation for the repair coroutine, mirroring hydrationGeneration —
+  // a second detected wipe before the first repair's fetch resolves cancels the
+  // stale one's commit.
+  edRepairGeneration: number;
 }
 
 export const terminalCache = new Map<string, TerminalCacheEntry>();
@@ -174,6 +189,17 @@ export const cleanupTerminalCache = (terminalId: string) => {
       } catch (e) {
         console.warn(`terminal-core/cache: Error disposing exit subscription for ${terminalId}:`, e);
       }
+    }
+
+    // Backlog 003: dispose the cache-lifetime protocol-state handlers.
+    if (cached.protocolDisposables) {
+      cached.protocolDisposables.forEach(dispose => {
+        try {
+          dispose();
+        } catch (e) {
+          console.warn(`terminal-core/cache: Error disposing protocol handler for ${terminalId}:`, e);
+        }
+      });
     }
 
     cached.terminal.dispose();

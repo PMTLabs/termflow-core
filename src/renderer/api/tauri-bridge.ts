@@ -35,6 +35,7 @@ interface ElectronAPI {
     raw: string;
   }>;
   getTerminalSnapshot: (terminalId: string, cols?: number, rows?: number) => Promise<TerminalSnapshot>;
+  getTerminalFullScrollback: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
   createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number) => Promise<string>;
   getActiveWindow: () => Promise<string>;
@@ -241,6 +242,19 @@ const tauriBridge: ElectronAPI = {
 
     if (!response.ok) {
       throw new Error(`Failed to fetch terminal snapshot: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  },
+
+  getTerminalFullScrollback: async (terminalId) => {
+    const response = await fetch(
+      `${API_BASE_URL}/terminals/${terminalId}/full-scrollback`,
+      { headers: { ...buildAuthHeaders() } }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch terminal full scrollback: ${response.status} ${response.statusText}`);
     }
 
     return response.json();

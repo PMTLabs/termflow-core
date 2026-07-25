@@ -565,7 +565,19 @@ impl<R: Runtime> AppState<R> {
             };
             parser.screen().clone()
         };
-        render_full_scrollback(&mut screen)
+        let mut blob = render_full_scrollback(&mut screen)?;
+        // render_full_scrollback replays plain rows with no position tracking, so a
+        // client that resets and writes this blob (the ED3 resize-wipe repair path)
+        // would otherwise leave the cursor wherever the last line's newline landed —
+        // not the program's actual cursor position. Append the crate's own
+        // purpose-built cursor-restore sequence (see its doc: "useful in the case of
+        // drawing additional things on top of a terminal output ... without the
+        // terminal contents necessarily being the same" — exactly this case), plus
+        // an attribute reset since restoring cursor position can itself redraw cells
+        // and alter the active drawing attributes (same doc note).
+        blob.extend_from_slice(&screen.cursor_state_formatted());
+        blob.extend_from_slice(&screen.attributes_formatted());
+        Some(blob)
     }
 
     /// Persist one terminal's RENDERED scrollback under its renderer id (tab_id).
@@ -1451,6 +1463,47 @@ mod scrollback_tests {
         assert!(
             row0.contains(&long),
             "soft-wrapped line must reflow onto one row when wider, got: {row0:?}"
+        );
+    }
+
+    /// Load-bearing for the ED3 resize-wipe repair fix (docs/superpowers/specs/
+    /// 2026-07-24-protocol-state-and-resize-wipe-fixes-design.md): codex answers a
+    /// resize with `ESC[2J ESC[3J` then re-emits its own retained transcript
+    /// (capped at ~1000 lines). xterm.js treats `3J` as "erase scrollback buffer"
+    /// and wipes everything the client accumulated beyond that cap. This proves
+    /// the Rust-side vt100 parser does NOT: content that already scrolled into
+    /// genuine history before the clear survives `2J`/`3J` (standard ED2
+    /// semantics — erase only touches the currently visible grid); only the last
+    /// visible page at the moment of the clear is lost, identically on both
+    /// sides, which is expected/unavoidable and not part of this bug.
+    #[test]
+    fn full_scrollback_survives_2j_3j_for_already_scrolled_history() {
+        let mut p = vt100::Parser::new(24, 80, 1000);
+        for i in 0..100 {
+            p.process(format!("line-{:04}\r\n", i).as_bytes());
+        }
+        // codex's exact resize-response sequence, then a short re-emit.
+        p.process(b"\x1b[2J\x1b[3J");
+        p.process(b"codex reprint\r\n");
+
+        let blob = render_full_scrollback(p.screen_mut()).expect("nonblank");
+        let text = String::from_utf8_lossy(&blob);
+
+        assert!(
+            text.contains("line-0001"),
+            "already-scrolled-off history must survive codex's 2J/3J, got:\n{text}"
+        );
+        assert!(
+            text.contains("codex reprint"),
+            "codex's post-clear re-emit must be present, got:\n{text}"
+        );
+        // line-0099 was still on the visible screen at the moment of the 2J — its
+        // loss is the standard, unavoidable "clear the current page" behavior,
+        // not the bug this fix targets. Pinned here so a future vt100 upgrade
+        // that changed this wouldn't silently invalidate the assumption above.
+        assert!(
+            !text.contains("line-0099"),
+            "the last visible page at clear-time is expected to be lost, got:\n{text}"
         );
     }
 

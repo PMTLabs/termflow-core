@@ -28,6 +28,11 @@ export interface TerminalBridge {
   write(processId: string, data: string): void | Promise<void>;
   resize(processId: string, cols: number, rows: number): void | Promise<void>;
   getSnapshot?(processId: string, cols: number, rows: number): Promise<TerminalSnapshot>;
+  // Fix (ED3 resize-wipe repair): full rendered scrollback from the backend's
+  // authoritative vt100 parser (survives 2J/3J for already-scrolled history,
+  // unlike the live xterm view). Optional: engines skip repair silently when a
+  // bridge doesn't implement it.
+  getFullScrollback?(processId: string): Promise<{ blob: string; rows: number; cols: number }>;
   getHistory?(processId: string, lines: number, offset: number): Promise<{ raw: string }>;
   // Lightweight backend-size fetch for the dimension auto-heal. Reads the stored
   // PTY size only (no snapshot render). Optional: engines fall back to getSnapshot

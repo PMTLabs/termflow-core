@@ -2084,6 +2084,37 @@ mod scrollback_restore_tests {
         state.cleanup_terminal_state("tb-exit");
         assert!(state.history_store.get("tb-exit").is_some());
     }
+
+    /// ED3 resize-wipe repair (review 27/codex): the repair path does
+    /// `reset()` + `write(blob)` on the client, which is a raw content replay
+    /// with no position tracking of its own. Without restoring the program's
+    /// actual cursor position, a repaired pane's cursor would sit wherever the
+    /// last replayed line's `\r\n` happened to land — not where the still-
+    /// running program (and the backend's own live parser) believes it is.
+    #[test]
+    fn full_scrollback_snapshot_restores_cursor_position() {
+        let (_app, state) = mock_state();
+        state.init_screen("tb-cursor", 24, 80);
+        register_terminal(&state, "tb-cursor");
+        // Cursor ends up at row 1 (0-indexed), right after "second" — NOT at a
+        // fresh line start, which is what a naive "just replay the rows" blob
+        // would otherwise leave it at.
+        state.feed_screen("tb-cursor", b"first line\r\nsecond");
+
+        let blob = state.full_scrollback_snapshot("tb-cursor").expect("nonblank");
+        let text = String::from_utf8_lossy(&blob);
+
+        assert!(text.contains("second"), "content must still be present, got:\n{text}");
+        // 1-indexed CUP targeting row 2, col 7 (0-indexed row 1, col 6 — right
+        // after "second"). Confirmed against vt100 0.16.2's grid.rs: with no
+        // prior position to diff against, write_cursor_position_formatted's
+        // non-overflow branch always emits MoveTo (never MoveFromTo), and
+        // MoveTo's BufWrite impl always uses the CUP `H` final, never `f`.
+        assert!(
+            text.contains("\x1b[2;7H"),
+            "cursor position must be restored to match the live parser, got:\n{text:?}"
+        );
+    }
 }
 
 // Linux/other-unix freedesktop icon-theme lookup. Gated to unix (mirrors the

@@ -22,6 +22,7 @@ import type {
   ContextMenuActions,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
+import type { TerminalCacheEntry } from './cache';
 import { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 import {
   cleanupTerminalCache,
@@ -154,6 +155,13 @@ const SEARCH_REFRESH_DEBOUNCE_MS = 150;
 // separate and each flushes on its own trailing reposition). 24ms hits that band.
 const LIVE_WRITE_IDLE_MS = 24;
 const LIVE_WRITE_MAX_MS = 64;
+
+// ED3 resize-wipe repair: how long after OUR OWN background-reactivation
+// convergence resize a CSI-3J is treated as codex's resize-triggered wipe (vs. an
+// unrelated user/app clear). Generous enough to cover the resize round-trip +
+// codex noticing SIGWINCH and repainting; narrow enough that an unrelated `clear`
+// run seconds later is never misattributed.
+const ED3_EXPECT_WINDOW_MS = 1500;
 
 // Backlog 011: window after a suggestion accept during which Enter keydowns are
 // swallowed. Covers OS key auto-repeat (~30ms interval after a ~500ms delay)
@@ -858,6 +866,93 @@ export class TerminalEngine {
         return;
       }
 
+      // Backlog 003 (protocol-state-lost-while-unmounted): register the
+      // STATE-MUTATING Kitty/Win32-Input-Mode CSI/OSC handlers ONCE per cache
+      // entry (Terminal creation), not per mount. These observe one-shot
+      // handshakes (ConPTY's ?9001h, an app's Kitty flag push) that fire exactly
+      // once per PTY session — if delivered while this pane is a
+      // cached-but-unmounted background tab, a per-mount registration (torn down
+      // in unmount()) would miss them forever. See
+      // docs/superpowers/specs/2026-07-24-protocol-state-and-resize-wipe-fixes-design.md.
+      //
+      // Handlers close directly over `this.kbState`/`this.win32State` — the SAME
+      // object references every later mount adopts via `this.kbState =
+      // cached.kbState` (below) and writes back via `kbState: this.kbState`
+      // (mount-end entry replace). Those objects are mutated in place
+      // (enable/disable/pushFlags/reset — never replaced), so capturing the
+      // reference once here is permanently correct; no per-call cache lookup
+      // is needed.
+      const protocolDisposables: Array<() => void> = [];
+      if (term.parser) {
+        const protocolCsiParam = (params: (number | number[])[], i: number, dflt: number): number => {
+          const v = params[i];
+          const n = Array.isArray(v) ? v[0] : v;
+          return typeof n === 'number' && n >= 0 ? n : dflt;
+        };
+        const registerProtocolCsi = (
+          id: { prefix?: string; final: string },
+          fn: (params: (number | number[])[]) => boolean,
+        ) => {
+          const d = term!.parser.registerCsiHandler(id, (params) => {
+            if (!this.enhancedKbEnabled()) return false; // legacy: ignore (xterm ignores too)
+            return fn(params as (number | number[])[]);
+          });
+          protocolDisposables.push(() => d.dispose());
+        };
+        registerProtocolCsi({ prefix: '>', final: 'u' }, (p) => { this.kbState.pushFlags(protocolCsiParam(p, 0, 0)); return true; });
+        registerProtocolCsi({ prefix: '<', final: 'u' }, (p) => { this.kbState.popFlags(protocolCsiParam(p, 0, 1)); return true; });
+        registerProtocolCsi({ prefix: '=', final: 'u' }, (p) => { this.kbState.setFlags(protocolCsiParam(p, 0, 0), protocolCsiParam(p, 1, 1)); return true; });
+        registerProtocolCsi({ prefix: '>', final: 'm' }, (p) => {
+          if (protocolCsiParam(p, 0, -1) === 4) { this.kbState.setModifyOtherKeys(protocolCsiParam(p, 1, 0)); return true; }
+          // Param-less `CSI > m` resets ALL XTMODKEYS resources incl. modifyOtherKeys
+          // (a common TUI exit path) — without this the level would stay stuck after
+          // the app is gone, suppressing command suggestions forever.
+          if (p.length === 0) { this.kbState.setModifyOtherKeys(0); return false; }
+          return false; // not modifyOtherKeys -> let xterm handle
+        });
+        // DECSTR soft reset (`CSI ! p`): full keyboard-protocol reset. Some TUIs exit
+        // via soft reset instead of popping their Kitty flags.
+        const decstr = term.parser.registerCsiHandler(
+          { intermediates: '!', final: 'p' },
+          () => {
+            this.kbState.reset();
+            if (this.isWindowsPlatform()) this.win32State.disable();
+            return false; // observe only — xterm performs its own soft reset
+          },
+        );
+        protocolDisposables.push(() => decstr.dispose());
+        // Kitty spec: the alt screen's flag stack is empty on entry and does not
+        // survive exit. Observe DECSET/DECRST 1049/1047/47 (alt-screen switches)
+        // and clear the alt stack so a crashed TUI can't leak flags.
+        const isAltScreenParam = (params: (number | number[])[]): boolean =>
+          params.some((v) => {
+            const n = Array.isArray(v) ? v[0] : v;
+            return n === 1049 || n === 1047 || n === 47;
+          });
+        // Win32-Input-Mode (Windows-only): ConPTY sends CSI ?9001h unconditionally at
+        // the start of every session (confirmed live on a plain pwsh tab) — folded
+        // into the same ?h/?l handler as the alt-screen check above, gated on
+        // isWindowsPlatform() so win32State can never flip on off-Windows even if a
+        // stray ?9001h somehow appeared in a byte stream. See design 043 / plan 044.
+        const isWin32InputModeParam = (params: (number | number[])[]): boolean =>
+          params.some((v) => (Array.isArray(v) ? v[0] : v) === 9001);
+        const altEnter = term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
+          if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+          if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+            this.win32State.enable();
+          }
+          return false; // observe only — xterm handles the actual mode switch
+        });
+        const altExit = term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
+          if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
+          if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
+            this.win32State.disable();
+          }
+          return false;
+        });
+        protocolDisposables.push(() => altEnter.dispose(), () => altExit.dispose());
+      }
+
       // CRITICAL: fit IMMEDIATELY after open to get the correct size BEFORE data.
       // NOTE: backend resize is DEFERRED to attach() — here we only size xterm
       // locally; the term.onResize handler (wired below) forwards to
@@ -901,6 +996,8 @@ export class TerminalEngine {
         pendingOutputBytes: 0,
         disposables: [],
         hydrationGeneration: 0,
+        protocolDisposables,
+        edRepairGeneration: 0,
       });
 
       // Additional delayed settle-fit (R7 timing: 100ms after open). Skipped in
@@ -1075,14 +1172,12 @@ export class TerminalEngine {
       });
       this.disposables.push(() => d.dispose());
     };
-    const csiParam = (params: (number | number[])[], i: number, dflt: number): number => {
-      const v = params[i];
-      const n = Array.isArray(v) ? v[0] : v;
-      return typeof n === 'number' && n >= 0 ? n : dflt;
-    };
-    registerCsi({ prefix: '>', final: 'u' }, (p) => { this.kbState.pushFlags(csiParam(p, 0, 0)); return true; });
-    registerCsi({ prefix: '<', final: 'u' }, (p) => { this.kbState.popFlags(csiParam(p, 0, 1)); return true; });
-    registerCsi({ prefix: '=', final: 'u' }, (p) => { this.kbState.setFlags(csiParam(p, 0, 0), csiParam(p, 1, 1)); return true; });
+    // Kitty >u/<u/=u (push/pop/set flags), >m (modifyOtherKeys), DECSTR, and the
+    // Win32-Input-Mode 9001 check on ?h/?l all moved to cache-lifetime (backlog
+    // 003) — registered once at Terminal creation in the mount() create-branch
+    // above, not here. Only the query-response handler (needs a live
+    // bridge/attachedProcessId, and a missed query is recoverable, not a
+    // permanently-stuck state) stays per-mount.
     registerCsi({ prefix: '?', final: 'u' }, () => {
       if (this.attachedProcessId) {
         Promise.resolve(this.bridge.write(this.attachedProcessId, this.kbState.queryResponse()))
@@ -1090,57 +1185,7 @@ export class TerminalEngine {
       }
       return true;
     });
-    registerCsi({ prefix: '>', final: 'm' }, (p) => {
-      if (csiParam(p, 0, -1) === 4) { this.kbState.setModifyOtherKeys(csiParam(p, 1, 0)); return true; }
-      // Param-less `CSI > m` resets ALL XTMODKEYS resources incl. modifyOtherKeys
-      // (a common TUI exit path) — without this the level would stay stuck after
-      // the app is gone, suppressing command suggestions forever.
-      if (p.length === 0) { this.kbState.setModifyOtherKeys(0); return false; }
-      return false; // not modifyOtherKeys -> let xterm handle
-    });
-    // DECSTR soft reset (`CSI ! p`): full keyboard-protocol reset. Some TUIs exit
-    // via soft reset instead of popping their Kitty flags.
     if (boundTerm.parser) {
-      const decstr = boundTerm.parser.registerCsiHandler(
-        { intermediates: '!', final: 'p' },
-        () => {
-          this.kbState.reset();
-          if (this.isWindowsPlatform()) this.win32State.disable();
-          return false; // observe only — xterm performs its own soft reset
-        },
-      );
-      this.disposables.push(() => decstr.dispose());
-      // Kitty spec: the alt screen's flag stack is empty on entry and does not
-      // survive exit. Observe DECSET/DECRST 1049/1047/47 (alt-screen switches)
-      // and clear the alt stack so a crashed TUI can't leak flags.
-      const isAltScreenParam = (params: (number | number[])[]): boolean =>
-        params.some((v) => {
-          const n = Array.isArray(v) ? v[0] : v;
-          return n === 1049 || n === 1047 || n === 47;
-        });
-      // Win32-Input-Mode (Windows-only): ConPTY sends CSI ?9001h unconditionally at
-      // the start of every session (confirmed live on a plain pwsh tab) — folded
-      // into the same ?h/?l handler as the alt-screen check above, gated on
-      // isWindowsPlatform() so win32State can never flip on off-Windows even if a
-      // stray ?9001h somehow appeared in a byte stream. See design 043 / plan 044.
-      const isWin32InputModeParam = (params: (number | number[])[]): boolean =>
-        params.some((v) => (Array.isArray(v) ? v[0] : v) === 9001);
-      const altEnter = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
-        if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
-        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
-          this.win32State.enable();
-        }
-        return false; // observe only — xterm handles the actual mode switch
-      });
-      const altExit = boundTerm.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
-        if (isAltScreenParam(params as (number | number[])[])) this.kbState.clearAltStack();
-        if (this.isWindowsPlatform() && isWin32InputModeParam(params as (number | number[])[])) {
-          this.win32State.disable();
-        }
-        return false;
-      });
-      this.disposables.push(() => altEnter.dispose(), () => altExit.dispose());
-
       // Prompt-render heal (backlog 011): the shell emits OSC 9;9 (PowerShell —
       // injected by pty_manager for cwd tracking) or OSC 7 (unix shells) every
       // time it renders a prompt; a TUI never renders the shell prompt. If
@@ -1195,6 +1240,31 @@ export class TerminalEngine {
         );
         this.disposables.push(() => colorGuard.dispose());
       }
+
+      // ED3 resize-wipe repair: detect codex's resize-triggered ESC[3J (erase
+      // scrollback) and repair the live view from the backend's authoritative
+      // (2J/3J-immune, for already-scrolled history) scrollback. Per-mount is
+      // fine here — this is a repeating detector, not one-shot state: a wipe on
+      // a pane nobody is looking at doesn't need repairing until that pane is
+      // viewed again, at which point flushDeferredResizeOnActivation will have
+      // just re-stamped convergenceResizeAt and the freshly-mounted handler
+      // observes the corresponding ED3. See docs/superpowers/specs/
+      // 2026-07-24-protocol-state-and-resize-wipe-fixes-design.md.
+      const ed3 = boundTerm.parser.registerCsiHandler({ final: 'J' }, (params) => {
+        const isED3 = (params as (number | number[])[]).some(
+          (v) => (Array.isArray(v) ? v[0] : v) === 3,
+        );
+        if (!isED3) return false;
+        const entry = terminalCache.get(this.cacheKey);
+        if (!entry) return false;
+        const withinWindow =
+          entry.convergenceResizeAt != null &&
+          Date.now() - entry.convergenceResizeAt < ED3_EXPECT_WINDOW_MS;
+        if (!withinWindow) return false;
+        void this.scheduleEd3Repair();
+        return false; // observe only — never block xterm's own erase handling
+      });
+      this.disposables.push(() => ed3.dispose());
     }
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
@@ -1670,6 +1740,16 @@ export class TerminalEngine {
       // a genuinely fresh terminal, it seeds the cache with the fresh instance.
       kbState: this.kbState,
       win32State: this.win32State,
+      // Backlog 003: the cache-lifetime protocol handler disposers, created once
+      // at Terminal creation — never re-created on remount, so carry the same
+      // array reference forward every time this entry gets replaced.
+      protocolDisposables: existingCache?.protocolDisposables,
+      // ED3 resize-wipe repair: carried forward like hydrationGeneration — a plain
+      // reattach must not reset an in-progress repair's generation out from under
+      // it. The actual "was this repair invalidated" guarantee comes from
+      // unmount() cancelling ed3RepairTimer, not from this number changing here.
+      convergenceResizeAt: existingCache?.convergenceResizeAt,
+      edRepairGeneration: existingCache?.edRepairGeneration ?? 0,
     });
     enforceCacheCap();
 
@@ -2269,10 +2349,25 @@ export class TerminalEngine {
     if (this.opts.mirror || !this.paneActive) return;
     const term = this.term;
     if (!term || term.cols <= 0 || term.rows <= 0 || this.resizeInFlight) return;
+    // ED3 resize-wipe repair: this function only ever runs as part of the
+    // setActive(true) activation flow (single call site above), so entering
+    // either branch below means a background pane's PTY size is genuinely
+    // converging right now — stamp it so a CSI-3J arriving shortly after can be
+    // attributed to OUR resize, not an unrelated clear (e.g. a plain `clear`).
+    // Narrower than stamping unconditionally on every activation: a reactivation
+    // that resizes nothing never stamps, so it can't misattribute an unrelated
+    // wipe days later.
+    const stampConvergenceResize = () => {
+      const e = terminalCache.get(this.cacheKey);
+      if (e) e.convergenceResizeAt = Date.now();
+    };
     if (this.pendingResize) {
-      // A size is pending (freshly armed by the fit's onResize, or parked at
-      // deactivation with its timer cleared) — ensure the debounce is running so
-      // it actually flushes now that we're active.
+      // A size is pending (freshly armed by the fit's onResize just above — it
+      // synchronously calls scheduleBackendResize on a real dimension change —
+      // or parked at deactivation with its timer cleared). Either way this IS
+      // the convergence resize; stamp regardless of whether the debounce timer
+      // still needs (re)arming.
+      stampConvergenceResize();
       if (!this.resizeTimer) {
         this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
       }
@@ -2280,8 +2375,96 @@ export class TerminalEngine {
     }
     const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
     if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
+      stampConvergenceResize();
       this.scheduleBackendResize(term.cols, term.rows);
     }
+  }
+
+  // ED3 resize-wipe repair: debounce on output idle (so codex's post-ED3 re-emit
+  // burst finishes) before repainting from the backend's authoritative full
+  // scrollback. Full reset+rewrite, not a splice — no alignment/duplication risk,
+  // mirrors hydrate()'s reattach mechanism.
+  private ed3RepairTimer: ReturnType<typeof setTimeout> | null = null;
+  private async scheduleEd3Repair(): Promise<void> {
+    const entry = terminalCache.get(this.cacheKey);
+    if (!entry) return;
+    const myGeneration = ++entry.edRepairGeneration;
+    if (this.ed3RepairTimer) clearTimeout(this.ed3RepairTimer);
+    this.ed3RepairTimer = setTimeout(() => {
+      this.ed3RepairTimer = null;
+      void this.runEd3Repair(myGeneration);
+    }, RESYNC_SETTLE_MS);
+  }
+
+  private async runEd3Repair(myGeneration: number): Promise<void> {
+    const entry = terminalCache.get(this.cacheKey);
+    if (!entry || entry.edRepairGeneration !== myGeneration) return;
+    // this.container is nulled by unmount() (review 27/agy): unmount() only
+    // clears ed3RepairTimer if it's still armed at that moment, but a re-arm
+    // BELOW creates a brand-new timer that unmount() — having already run —
+    // can never see or cancel. Bail whenever this engine instance is no longer
+    // mounted, at every checkpoint, so a re-arm can't outlive it.
+    if (!this.container) return;
+    // Output must be quiet before committing — mirrors reconcileSnapshot's own
+    // settle-gate (the sibling "repaint from an authoritative snapshot" path,
+    // reused here to avoid clobbering codex's still-streaming post-ED3 re-emit
+    // with an older fetch). Re-arm on the SAME generation rather than dropping
+    // the repair, so a long re-emit burst still gets healed once it quiets.
+    if (this.isEd3OutputUnsettled(entry)) {
+      this.ed3RepairTimer = setTimeout(() => {
+        this.ed3RepairTimer = null;
+        void this.runEd3Repair(myGeneration);
+      }, RESYNC_SETTLE_MS);
+      return;
+    }
+    if (typeof this.bridge.getFullScrollback !== 'function' || !this.attachedProcessId) return;
+    // Capture BOTH before the fetch starts (review 27/codex): the fetch reads a
+    // clone of the backend's live parser taken at request time, then renders
+    // off the lock — output that lands in that render/network window may not
+    // be reflected in the response. Re-validate both are UNCHANGED after the
+    // await, not just "recent enough": a fetch slower than RESYNC_SETTLE_MS
+    // could otherwise let output that arrived mid-fetch look "settled" purely
+    // because enough wall-clock time passed since it landed by the time we
+    // check again.
+    const processId = this.attachedProcessId;
+    const preFetchLastDataAt = entry.lastDataAt;
+    let result: { blob: string; rows: number; cols: number };
+    try {
+      result = await this.bridge.getFullScrollback(processId);
+    } catch (e) {
+      this.opts.onDiag?.(() => `[TERM-DIAG] ED3 repair fetch failed: ${e}`);
+      return;
+    }
+    const current = terminalCache.get(this.cacheKey);
+    if (!current || current.edRepairGeneration !== myGeneration) return;
+    // Re-validate after the await: still mounted (unmount() may have run during
+    // the fetch — review 27/agy), still attached to the SAME process (attach()
+    // may have retargeted to a new PTY session mid-fetch — the fetched blob
+    // would belong to a session that no longer exists in this pane; same
+    // re-check reconcileSnapshot does for its own snapshot fetch), and no live
+    // chunk arrived during the fetch (else defer so we don't clobber it) —
+    // checked both as "unchanged since we started" (closes the gap above) and
+    // "recent enough" (also catches output landing just after the fetch
+    // resolved but before we get here).
+    if (!this.container) return;
+    if (this.attachedProcessId !== processId) return;
+    if (current.lastDataAt !== preFetchLastDataAt || this.isEd3OutputUnsettled(current)) {
+      this.ed3RepairTimer = setTimeout(() => {
+        this.ed3RepairTimer = null;
+        void this.runEd3Repair(myGeneration);
+      }, RESYNC_SETTLE_MS);
+      return;
+    }
+    if (!result?.blob) return;
+    current.terminal.reset();
+    current.terminal.write(result.blob);
+    this.opts.onDiag?.(
+      () => `[TERM-DIAG] ED3 repair repainted ${result.blob.length}b from backend snapshot`,
+    );
+  }
+
+  private isEd3OutputUnsettled(entry: TerminalCacheEntry): boolean {
+    return !!entry.lastDataAt && Date.now() - entry.lastDataAt < RESYNC_SETTLE_MS;
   }
 
   setTheme(theme: Record<string, string>): void {
@@ -3023,6 +3206,17 @@ export class TerminalEngine {
     if (this.fitTimer) {
       clearTimeout(this.fitTimer);
       this.fitTimer = null;
+    }
+    // ED3 resize-wipe repair: a new TerminalEngine is a fresh JS object per React
+    // mount (see the mount() adoption comment), so a scheduled-but-not-fired
+    // repair from THIS instance would otherwise keep running via its own timer
+    // after this instance is abandoned — repainting the cache-shared Terminal
+    // using a stale this.attachedProcessId while a NEW mount may be actively
+    // displaying it. Cancel it here, matching fitTimer's teardown just above; if
+    // the pane is reactivated with a real size change, a fresh detection fires.
+    if (this.ed3RepairTimer) {
+      clearTimeout(this.ed3RepairTimer);
+      this.ed3RepairTimer = null;
     }
     // Flush (don't drop) any pending backend resize so the PTY isn't left at a
     // stale size when a drag is interrupted by this unmount (tab switch / pane move).
