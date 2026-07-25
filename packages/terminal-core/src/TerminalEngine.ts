@@ -2418,9 +2418,19 @@ export class TerminalEngine {
       return;
     }
     if (typeof this.bridge.getFullScrollback !== 'function' || !this.attachedProcessId) return;
+    // Capture BOTH before the fetch starts (review 27/codex): the fetch reads a
+    // clone of the backend's live parser taken at request time, then renders
+    // off the lock — output that lands in that render/network window may not
+    // be reflected in the response. Re-validate both are UNCHANGED after the
+    // await, not just "recent enough": a fetch slower than RESYNC_SETTLE_MS
+    // could otherwise let output that arrived mid-fetch look "settled" purely
+    // because enough wall-clock time passed since it landed by the time we
+    // check again.
+    const processId = this.attachedProcessId;
+    const preFetchLastDataAt = entry.lastDataAt;
     let result: { blob: string; rows: number; cols: number };
     try {
-      result = await this.bridge.getFullScrollback(this.attachedProcessId);
+      result = await this.bridge.getFullScrollback(processId);
     } catch (e) {
       this.opts.onDiag?.(() => `[TERM-DIAG] ED3 repair fetch failed: ${e}`);
       return;
@@ -2428,10 +2438,17 @@ export class TerminalEngine {
     const current = terminalCache.get(this.cacheKey);
     if (!current || current.edRepairGeneration !== myGeneration) return;
     // Re-validate after the await: still mounted (unmount() may have run during
-    // the fetch) and no live chunk arrived during the fetch (else defer so we
-    // don't clobber it) — same re-checks reconcileSnapshot does.
+    // the fetch — review 27/agy), still attached to the SAME process (attach()
+    // may have retargeted to a new PTY session mid-fetch — the fetched blob
+    // would belong to a session that no longer exists in this pane; same
+    // re-check reconcileSnapshot does for its own snapshot fetch), and no live
+    // chunk arrived during the fetch (else defer so we don't clobber it) —
+    // checked both as "unchanged since we started" (closes the gap above) and
+    // "recent enough" (also catches output landing just after the fetch
+    // resolved but before we get here).
     if (!this.container) return;
-    if (this.isEd3OutputUnsettled(current)) {
+    if (this.attachedProcessId !== processId) return;
+    if (current.lastDataAt !== preFetchLastDataAt || this.isEd3OutputUnsettled(current)) {
       this.ed3RepairTimer = setTimeout(() => {
         this.ed3RepairTimer = null;
         void this.runEd3Repair(myGeneration);

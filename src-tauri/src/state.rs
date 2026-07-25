@@ -565,7 +565,19 @@ impl<R: Runtime> AppState<R> {
             };
             parser.screen().clone()
         };
-        render_full_scrollback(&mut screen)
+        let mut blob = render_full_scrollback(&mut screen)?;
+        // render_full_scrollback replays plain rows with no position tracking, so a
+        // client that resets and writes this blob (the ED3 resize-wipe repair path)
+        // would otherwise leave the cursor wherever the last line's newline landed —
+        // not the program's actual cursor position. Append the crate's own
+        // purpose-built cursor-restore sequence (see its doc: "useful in the case of
+        // drawing additional things on top of a terminal output ... without the
+        // terminal contents necessarily being the same" — exactly this case), plus
+        // an attribute reset since restoring cursor position can itself redraw cells
+        // and alter the active drawing attributes (same doc note).
+        blob.extend_from_slice(&screen.cursor_state_formatted());
+        blob.extend_from_slice(&screen.attributes_formatted());
+        Some(blob)
     }
 
     /// Persist one terminal's RENDERED scrollback under its renderer id (tab_id).

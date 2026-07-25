@@ -735,7 +735,13 @@ async fn get_terminal_full_scrollback(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.full_scrollback_snapshot(&id) {
-        Some(bytes) => {
+        Some(mut bytes) => {
+            // Re-assert live input modes (mouse tracking, bracketed paste, focus
+            // reporting, application cursor/keypad) after the content, same as
+            // get_terminal_snapshot above: full_scrollback_snapshot's replay is a
+            // reset()+write() on the client, which drops whatever modes the still-
+            // running program already asserted (it won't re-send them mid-session).
+            bytes.extend_from_slice(&state.input_modes_snapshot(&id));
             let blob = String::from_utf8_lossy(&bytes).to_string();
             let (rows, cols) = terminal_size_for_output(&state, &id);
             Json(json!({ "blob": blob, "rows": rows, "cols": cols }))

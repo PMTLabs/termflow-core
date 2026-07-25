@@ -271,3 +271,60 @@ test('repair defers while output is still live, then commits once it settles', a
   expect(getFullScrollback).toHaveBeenCalledWith('pid-1');
   expect(term.written).toContain('SETTLED');
 });
+
+test('repair bails if attach() retargets to a new process mid-fetch (review 27/codex)', async () => {
+  jest.useFakeTimers();
+  let resolveFetch: ((v: { blob: string; rows: number; cols: number }) => void) | undefined;
+  const getFullScrollback = jest.fn(
+    () =>
+      new Promise<{ blob: string; rows: number; cols: number }>((resolve) => {
+        resolveFetch = resolve;
+      }),
+  );
+  const cacheKey = `ed3-retarget-${Math.random()}`;
+  const { engine, term, fit } = await mountAttached(cacheKey, { getFullScrollback });
+
+  await converge(engine, fit);
+  term.csiHandlers['J']?.([3]);
+  await jest.advanceTimersByTimeAsync(700); // debounce fires; fetch (for pid-1) is now in flight
+  expect(getFullScrollback).toHaveBeenCalledWith('pid-1');
+
+  engine.attach('pid-2'); // a new shell started in this same pane mid-fetch
+  resolveFetch!({ blob: 'STALE-PROCESS', rows: 24, cols: 80 }); // pid-1's scrollback, now irrelevant
+  await jest.runAllTimersAsync();
+
+  expect(term.resetCount).toBe(0);
+  expect(term.written).not.toContain('STALE-PROCESS');
+});
+
+test('repair bails if output changed during the fetch even though recency alone would look settled (review 27/codex)', async () => {
+  jest.useFakeTimers();
+  let resolveFetch: ((v: { blob: string; rows: number; cols: number }) => void) | undefined;
+  const getFullScrollback = jest.fn(
+    () =>
+      new Promise<{ blob: string; rows: number; cols: number }>((resolve) => {
+        resolveFetch = resolve;
+      }),
+  );
+  const cacheKey = `ed3-fetch-race-${Math.random()}`;
+  const { engine, term, fit } = await mountAttached(cacheKey, { getFullScrollback });
+
+  await converge(engine, fit);
+  term.csiHandlers['J']?.([3]);
+  await jest.advanceTimersByTimeAsync(700); // debounce fires; fetch starts (preFetchLastDataAt = undefined)
+  expect(getFullScrollback).toHaveBeenCalledTimes(1);
+
+  const entry = terminalCache.get(cacheKey)!;
+  entry.lastDataAt = Date.now(); // codex's live re-emit arrives WHILE the fetch is in flight
+  // The backend's response was already committed to a state before this arrived
+  // (full_scrollback_snapshot clones the parser under lock, then renders off
+  // the lock), but enough wall-clock time now passes that a recency-only check
+  // would call it "settled" — the exact-value check must catch it anyway.
+  jest.advanceTimersByTime(800);
+
+  resolveFetch!({ blob: 'STALE', rows: 24, cols: 80 });
+  await jest.runAllTimersAsync();
+
+  expect(term.resetCount).toBe(0);
+  expect(term.written).not.toContain('STALE');
+});
