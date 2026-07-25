@@ -130,4 +130,24 @@ describe('createMainBridge', () => {
       expect(getTerminalSnapshot).toHaveBeenCalledWith('proc-S', 80, 24);
     });
   });
+
+  describe('getFullScrollback', () => {
+    it('is undefined when electronAPI.getTerminalFullScrollback is absent', () => {
+      (window as any).electronAPI = mockElectronAPI();
+
+      expect(createMainBridge().getFullScrollback).toBeUndefined();
+    });
+
+    it('is a function delegating to electronAPI.getTerminalFullScrollback with (processId) when present', async () => {
+      const fullScrollback = { blob: 'RESTORED', rows: 24, cols: 80 };
+      const getTerminalFullScrollback = jest.fn(() => Promise.resolve(fullScrollback));
+      (window as any).electronAPI = mockElectronAPI({ getTerminalFullScrollback });
+
+      const bridge = createMainBridge();
+
+      expect(typeof bridge.getFullScrollback).toBe('function');
+      await expect(bridge.getFullScrollback!('proc-F')).resolves.toEqual(fullScrollback);
+      expect(getTerminalFullScrollback).toHaveBeenCalledWith('proc-F');
+    });
+  });
 });

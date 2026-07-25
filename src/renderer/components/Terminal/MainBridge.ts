@@ -11,6 +11,7 @@ import type { TerminalBridge, Disposable, TerminalSnapshot } from '@termflow/ter
 // `cacheKey: terminalId` for cross-mount reuse.
 export function createMainBridge(): TerminalBridge {
   const hasSnapshot = typeof window !== 'undefined' && !!window.electronAPI?.getTerminalSnapshot;
+  const hasFullScrollback = typeof window !== 'undefined' && !!window.electronAPI?.getTerminalFullScrollback;
   const hasSize = typeof window !== 'undefined' && !!window.electronAPI?.getTerminalSize;
   return {
     onData(processId, cb): Disposable {
@@ -39,6 +40,9 @@ export function createMainBridge(): TerminalBridge {
     getSnapshot: hasSnapshot
       ? (processId, cols, rows): Promise<TerminalSnapshot> =>
           window.electronAPI.getTerminalSnapshot!(processId, cols, rows)
+      : undefined,
+    getFullScrollback: hasFullScrollback
+      ? (processId: string) => window.electronAPI.getTerminalFullScrollback!(processId)
       : undefined,
     getHistory(processId, lines, offset) {
       return window.electronAPI.getTerminalOutput(processId, lines, offset);

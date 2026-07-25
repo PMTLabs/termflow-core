@@ -123,6 +123,23 @@ class BrowserBridge implements ElectronAPI {
         }
     }
 
+    async getTerminalFullScrollback(terminalId: string): Promise<{ blob: string; rows: number; cols: number }> {
+        try {
+            const response = await fetch(`${API_BASE_URL}/terminals/${terminalId}/full-scrollback`, {
+                headers: { ...this.buildAuthHeaders() },
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch terminal full scrollback: ${response.status} ${response.statusText}`);
+            }
+
+            return await response.json();
+        } catch (e) {
+            console.error('BrowserBridge: getTerminalFullScrollback failed', e);
+            throw e;
+        }
+    }
+
     async getTerminalSize(terminalId: string): Promise<{ cols: number; rows: number }> {
         const response = await fetch(`${API_BASE_URL}/terminals/${terminalId}/size`, {
             headers: { ...this.buildAuthHeaders() },

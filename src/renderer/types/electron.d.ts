@@ -114,6 +114,11 @@ export interface ElectronAPI {
   // Faithful styled snapshot of the current visible screen, for reconnect/hydration
   getTerminalSnapshot?: (terminalId: string, cols?: number, rows?: number) => Promise<TerminalSnapshot>;
 
+  // Full rendered scrollback (not just the current visible screen) from the
+  // backend's authoritative vt100 parser — used to repair a live view clipped by
+  // a client-side ED3 scrollback wipe (e.g. codex on a resize).
+  getTerminalFullScrollback?: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
+
   // Lightweight PTY-size fetch for dimension auto-heal (no snapshot render).
   getTerminalSize?: (id: string) => Promise<{ cols: number; rows: number }>;
 
