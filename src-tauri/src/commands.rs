@@ -876,35 +876,24 @@ pub fn show_activity_notification(
     } else {
         title
     };
-    #[cfg(windows)]
-    {
-        match crate::native_notify::show_activity_notification(&app, &window_label, &tab_id, &body) {
-            Ok(()) => log::info!("show_activity_notification: native WinRT toast shown for tab {tab_id}"),
-            Err(native_error) => {
-                // Keep notifications best-effort even on machines where WinRT is
-                // disabled by policy. The plugin toast has no click callback, but is
-                // still preferable to silently dropping the activity notification.
-                log::warn!("Native activity notification failed: {native_error}; using plugin fallback");
-                use tauri_plugin_notification::NotificationExt;
-                app.notification()
-                    .builder()
-                    .title("TermFlow")
-                    .body(body)
-                    .show()
-                    .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
-            }
+    // One seam, three platform implementations (native_notify.rs). Each delivers the
+    // notification AND wires up click activation; only the mechanism differs.
+    match crate::native_notify::show_activity_notification(&app, &window_label, &tab_id, &body) {
+        Ok(()) => log::info!("[NOTIFY] native notification shown for tab {tab_id}"),
+        Err(native_error) => {
+            // Keep notifications best-effort even where the native path is unavailable
+            // (WinRT disabled by policy, no D-Bus session, etc). The plugin toast has no
+            // click callback, but is still preferable to silently dropping the activity
+            // notification.
+            log::warn!("[NOTIFY] native notification failed: {native_error}; using plugin fallback");
+            use tauri_plugin_notification::NotificationExt;
+            app.notification()
+                .builder()
+                .title("TermFlow")
+                .body(body)
+                .show()
+                .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
         }
-    }
-    #[cfg(not(windows))]
-    {
-        use tauri_plugin_notification::NotificationExt;
-        let _ = (&window_label, &tab_id);
-        app.notification()
-            .builder()
-            .title("TermFlow")
-            .body(body)
-            .show()
-            .map_err(|e| e.to_string())?;
     }
     Ok(true)
 }

@@ -224,6 +224,40 @@ pub fn register_app_for_notifications() -> Result<(), String> {
     Ok(())
 }
 
+/// Focus the window that owns a notification and tell the renderer to open the tab the
+/// notification came from.
+///
+/// This is the ONLY signal permitted to change the active tab. Returning to the app by
+/// any other route — clicking the window, alt-tab, restoring from the taskbar — must
+/// leave the user on whatever tab they were working in. A focus-regain heuristic once
+/// stood in for this and was removed precisely because focus is not consent; do not
+/// reintroduce one.
+///
+/// Shared by every platform's activation path so the three can never drift on what a
+/// click means. Best-effort throughout: a missing window still emits, since another
+/// window in the same process may be able to serve the route.
+pub(crate) fn emit_activation(app: &tauri::AppHandle, window_label: &str, tab_id: &str) {
+    use tauri::{Emitter, Manager};
+
+    log::info!("[NOTIFY] click received: window={window_label} tab={tab_id}");
+    match app.get_webview_window(window_label) {
+        Some(window) => {
+            if let Err(e) = window.set_focus() {
+                log::warn!("[NOTIFY] failed to focus window {window_label}: {e}");
+            }
+        }
+        None => log::warn!("[NOTIFY] activation for missing window label: {window_label}"),
+    }
+
+    match app.emit(
+        "notification:activated",
+        serde_json::json!({ "windowLabel": window_label, "tabId": tab_id }),
+    ) {
+        Ok(()) => log::info!("[NOTIFY] activation emitted for tab {tab_id}"),
+        Err(e) => log::warn!("[NOTIFY] failed to emit activation: {e}"),
+    }
+}
+
 #[cfg(windows)]
 pub fn show_activity_notification(
     app: &tauri::AppHandle,
@@ -231,7 +265,6 @@ pub fn show_activity_notification(
     tab_id: &str,
     body: &str,
 ) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
     use windows::core::{IInspectable, Interface, HSTRING};
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::Foundation::TypedEventHandler;
@@ -278,26 +311,7 @@ pub fn show_activity_notification(
                 .and_then(|value| value.as_str())
                 .unwrap_or(&fallback_tab_id);
 
-            if let Some(window) = app.get_webview_window(activated_window_label) {
-                if let Err(e) = window.set_focus() {
-                    log::warn!("Failed to focus notification window: {}", e);
-                }
-            } else {
-                log::warn!(
-                    "Notification activated for missing window label: {}",
-                    activated_window_label
-                );
-            }
-
-            if let Err(e) = app.emit(
-                "notification:activated",
-                serde_json::json!({
-                    "windowLabel": activated_window_label,
-                    "tabId": activated_tab_id,
-                }),
-            ) {
-                log::warn!("Failed to emit notification activation: {}", e);
-            }
+            emit_activation(&app, activated_window_label, activated_tab_id);
             Ok(())
         });
     toast.Activated(&activated).map_err(|e| e.to_string())?;
@@ -321,6 +335,18 @@ pub fn show_activity_notification(
     ))
     .map_err(|e| e.to_string())?;
     notifier.Show(&toast).map_err(|e| e.to_string())
+}
+
+// TODO(T4/T5): replaced by the macOS and Linux implementations. Until then non-Windows
+// builds fall through to the plugin toast in commands.rs, exactly as before.
+#[cfg(not(windows))]
+pub fn show_activity_notification(
+    _app: &tauri::AppHandle,
+    _window_label: &str,
+    _tab_id: &str,
+    _body: &str,
+) -> Result<(), String> {
+    Err("no native notification implementation for this platform".to_string())
 }
 
 #[cfg(windows)]
