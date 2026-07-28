@@ -258,9 +258,12 @@ const App: React.FC = () => {
 
     // True click routing: the Windows native toast activator (native_notify.rs) emits
     // this on click, carrying the originating window label + tabId — focus that window
-    // and open that tab. Filtered by label so only the owning window reacts. On
-    // platforms without a native activator, NotificationService's return-to-app routing
-    // is the fallback.
+    // and open that tab. Filtered by label so only the owning window reacts. This is the
+    // ONLY path allowed to switch tabs for a notification: an explicit click on the toast
+    // is the user asking to go there. Merely returning to the app (clicking the window,
+    // alt-tab) must never move them off the tab they are working in, so there is
+    // deliberately no focus-regain fallback. Platforms without a native activator
+    // therefore only raise the window; the in-app toast names the tab.
     let activatedAlive = true;
     let unlistenActivated: (() => void) | undefined;
     listen<{ windowLabel: string; tabId: string }>('notification:activated', (e) => {

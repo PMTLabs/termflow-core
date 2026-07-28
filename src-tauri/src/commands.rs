@@ -850,9 +850,8 @@ pub async fn load_command_dir_usage(
 /// + `tab_id` identify the exact destination when a Windows toast is activated.
 /// Best-effort; failures are non-fatal.
 /// Returns `true` if a toast was actually shown, `false` if suppressed because a window
-/// was focused. The renderer enqueues the tab for return-to-app routing ONLY when a
-/// toast was shown, so merely re-focusing a window later never force-switches tabs for a
-/// notification the user never received.
+/// was focused. Only a real click on the toast navigates (it emits `notification:activated`
+/// with this `tab_id`); re-focusing a window never switches tabs.
 #[tauri::command]
 pub fn show_activity_notification(
     app: tauri::AppHandle,

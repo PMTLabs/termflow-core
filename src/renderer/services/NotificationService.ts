@@ -9,10 +9,9 @@
 // startup and during repaint bursts.
 import { store } from '../store';
 import { addToast, dismissTabToasts } from '../store/slices/uiSlice';
-import { setActiveTab } from '../store/slices/tabsSlice';
 import { NOTIF_SETTLE_MS, shouldNotify } from './notificationLogic';
 import { ACTIVITY_CHIME_DATA_URI } from '../assets/activityChime';
-import { onWindowFocusChange, startWindowFocusTracking } from './windowFocus';
+import { startWindowFocusTracking } from './windowFocus';
 
 const SOUND_THROTTLE_MS = 1500; // min gap between chimes so a flurry doesn't machine-gun
 const BURST_MS = 1500; // suppress notifications this long after a visibility/session burst
@@ -29,10 +28,11 @@ class NotificationService {
   private audio: HTMLAudioElement | null = null;
   private lastSoundAt = -Infinity;
   private lastActiveTabId: string | null = null; // to detect activeTab changes
-  // Tabs we requested an OS notification for while this window was unfocused, still
-  // unseen. On focus regain we switch to the most recent — the "return to the app and
-  // land on the right tab" path (desktop notification plugins expose no click callback).
-  private pendingOsTabs: string[] = [];
+  // NOTE: this service never changes the active tab. Navigating to the belled tab is
+  // reserved for an explicit click on the OS notification, which the backend reports as
+  // `notification:activated` (handled in App.tsx). Returning to the app by any other
+  // means — clicking the window, alt-tab, restoring from the taskbar — must leave the
+  // user exactly where they were working.
   private cleanups: Array<() => void> = [];
 
   start(): void {
@@ -62,12 +62,8 @@ class NotificationService {
     window.addEventListener('resize', onResize);
     this.cleanups.push(() => window.removeEventListener('resize', onResize));
 
-    this.cleanups.push(onWindowFocusChange((focused) => {
-      if (focused) this.routePendingOnFocus();
-    }));
-
-    // Once the user opens a tab (via the OS-notification click, return-to-app routing,
-    // or a plain tab click), its in-app activity toast is redundant — dismiss it so the
+    // Once the user opens a tab (via the OS-notification click or a plain tab click),
+    // its in-app activity toast is redundant — dismiss it so the
     // sticky toast doesn't linger after the activity has been seen. The store fires on
     // every change; we act only when activeTabId actually changes to a tab that still
     // has a toast (avoids needless re-renders).
@@ -86,7 +82,6 @@ class NotificationService {
   stop(): void {
     this.cleanups.forEach((fn) => fn());
     this.cleanups = [];
-    this.pendingOsTabs = [];
     this.lastSoundAt = -Infinity;
     this.lastActiveTabId = null;
     this.burstUntil = 0;
@@ -155,31 +150,17 @@ class NotificationService {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      const shown = await invoke<boolean>('show_activity_notification', {
+      // The backend returns whether a toast was actually shown (it suppresses one when
+      // any window is focused). Nothing to route on: the destination travels with the
+      // toast itself, so only a real click on it can move the user.
+      await invoke<boolean>('show_activity_notification', {
         windowLabel: getCurrentWindow().label,
         tabId,
         title: `Activity in "${tabTitle}"`,
       });
-      // Queue for return-to-app routing ONLY when a toast was actually shown (backend
-      // suppresses it if any window is focused). Otherwise a later, unrelated re-focus
-      // would force-switch to a tab the user was never notified about.
-      if (shown) this.pendingOsTabs = [...this.pendingOsTabs.filter((id) => id !== tabId), tabId];
     } catch (e) {
       console.error('NotificationService: OS notification failed', e);
     }
-  }
-
-  private routePendingOnFocus(): void {
-    if (this.pendingOsTabs.length === 0) return;
-    const tabs = store.getState().tabs.tabs;
-    // Only tabs that are still unseen (user hasn't already opened them another way),
-    // most-recent last.
-    const stillUnseen = this.pendingOsTabs.filter((id) =>
-      tabs.some((t) => t.id === id && t.hasUnseenOutput),
-    );
-    this.pendingOsTabs = [];
-    const target = stillUnseen[stillUnseen.length - 1];
-    if (target) store.dispatch(setActiveTab(target));
   }
 }
 

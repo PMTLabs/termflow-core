@@ -122,7 +122,7 @@ describe('NotificationService — in-app channels', () => {
   });
 });
 
-describe('NotificationService — OS notification + return-to-app routing', () => {
+describe('NotificationService — OS notification (never steals the active tab)', () => {
   beforeEach(() => {
     dispatch.mockClear();
     invokeMock.mockClear();
@@ -151,28 +151,32 @@ describe('NotificationService — OS notification + return-to-app routing', () =
     expect(invokeMock).toHaveBeenCalledWith('show_activity_notification', expect.objectContaining({ tabId: 'tb-1' }));
   });
 
-  it('routes to the belled tab on focus regain when a toast was shown', async () => {
+  // Returning to the app is NOT consent to be moved. Clicking the window (or
+  // alt-tabbing back) must leave the user on whatever tab they were working in;
+  // only an explicit click on the OS notification navigates, and that arrives as
+  // the backend's `notification:activated` event (handled in App.tsx), never here.
+  it('does NOT switch tabs when the window regains focus after a toast was shown', async () => {
     bell('tb-1', AFTER_SETTLE());
-    await flush(); // let showOsNotification resolve (shown=true → tab queued)
+    await flush(); // let showOsNotification resolve
     dispatch.mockClear();
-    focusCb?.(true); // window regains focus
+    focusCb?.(true); // user clicks the app window itself, not the toast
     const nav = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'tabs/setActiveTab');
-    expect(nav?.payload).toBe('tb-1');
+    expect(nav).toBeUndefined();
   });
 
-  it('does NOT queue a tab for routing when the backend suppressed the toast', async () => {
+  it('does NOT switch tabs on focus regain when the backend suppressed the toast', async () => {
     invokeMock.mockResolvedValue(false); // backend suppressed (another window focused)
     bell('tb-1', AFTER_SETTLE());
     await flush();
     dispatch.mockClear();
     focusCb?.(true);
-    expect(dispatch).not.toHaveBeenCalled(); // nothing queued → no forced tab switch
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('only routes to a tab that is still unseen', async () => {
+  it('does NOT switch tabs on focus regain even while the belled tab is still unseen', async () => {
     bell('tb-1', AFTER_SETTLE());
     await flush();
-    mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: false }] }; // user already saw it
+    // tb-1 still has hasUnseenOutput: true — previously the trigger for a forced switch.
     dispatch.mockClear();
     focusCb?.(true);
     expect(dispatch).not.toHaveBeenCalled();
