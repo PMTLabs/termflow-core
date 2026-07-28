@@ -516,58 +516,86 @@ pub fn show_activity_notification(
     tab_id: &str,
     body: &str,
 ) -> Result<(), String> {
-    // `show()` is synchronous, so a missing D-Bus session or a dead daemon surfaces HERE
-    // and reaches the plugin fallback in commands.rs. Registering the action id "default"
-    // asks for the freedesktop body-click activation; spec-compliant servers do not draw
-    // it as a button, though presentation is ultimately the server's choice.
-    let handle = notify_rust::Notification::new()
-        .summary("TermFlow")
-        .body(body)
-        .action("default", "Open")
-        .show()
-        .map_err(|e| format!("failed to show notification: {e}"))?;
-
-    log::info!("[NOTIFY] delivery accepted by the notification daemon for tab {tab_id}");
-
-    let Some(slot) = waiter::acquire() else {
-        log::warn!(
-            "[NOTIFY] waiter cap ({}) reached; tab {tab_id} delivered without click routing",
-            waiter::MAX_WAITERS
-        );
-        return Ok(());
-    };
-
     let app = app.clone();
     let window_label = window_label.to_owned();
-    let tab_id_for_thread = tab_id.to_owned();
+    let tab_id = tab_id.to_owned();
+    let body = body.to_owned();
 
+    let slot = waiter::acquire();
+    let wants_click = slot.is_some();
+    if !wants_click {
+        log::warn!(
+            "[NOTIFY] waiter cap ({}) reached; delivering tab {tab_id} without click routing",
+            waiter::MAX_WAITERS
+        );
+    }
+
+    // Delivery runs off-thread, INCLUDING `show()`. `show()` is a blocking D-Bus
+    // round-trip to the notification daemon, and this is a synchronous #[tauri::command],
+    // which wry dispatches on the GTK main loop — so calling it here would block the GUI
+    // thread and freeze the whole UI for as long as the daemon takes to answer (a wedged
+    // or restarting dunst/mako can mean the ~25s D-Bus timeout). The macOS sibling moves
+    // delivery off-thread for the same reason.
+    //
+    // Consequence: a delivery error can no longer be returned to commands.rs, so this
+    // path owns its own plugin fallback. Only a failure to spawn returns Err, and that
+    // happens before anything is shown, so commands.rs cannot produce a duplicate.
+    //
     // Two known limits, neither of which can lose a notification:
     //
     // 1. The zbus backend only installs its signal match rules inside `wait_for_action`,
-    //    so an action or close arriving in the gap between `show()` above and the thread
-    //    starting can be missed. The cost is a lost click.
+    //    so an action or close arriving in the gap after `show()` can be missed. The cost
+    //    is a lost click.
     // 2. On Wayland this does NOT guarantee the window is raised. The spec lets a server
     //    send an `ActivationToken` (an xdg-activation token) just before `ActionInvoked`;
     //    notify-rust never subscribes to it and hands us only the action string, so our
     //    `set_focus()` is an unsolicited request the compositor may refuse. Tab routing
     //    is reliable; surfacing the window is best-effort. Fixing it properly needs a
     //    lower-level D-Bus subscription than this API exposes.
-    let spawned = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("termflow-notify-linux".into())
         .spawn(move || {
             let _slot = slot; // released on every path, including a panic
-            handle.wait_for_action(|action: &str| {
-                if action == "default" {
-                    emit_activation(&app, &window_label, &tab_id_for_thread);
-                }
-            });
-        });
+            log::info!("[NOTIFY] delivery requested for tab {tab_id} (click routing: {wants_click})");
 
-    // The notification is already on screen, so a thread-spawn failure must NOT return
-    // Err — that would make commands.rs deliver a second, duplicate toast via the plugin.
-    if let Err(e) = spawned {
-        log::warn!("[NOTIFY] could not spawn waiter for tab {tab_id}; no click routing: {e}");
-    }
+            // Registering the action id "default" asks for the freedesktop body-click
+            // activation; spec-compliant servers do not draw it as a button, though
+            // presentation is ultimately the server's choice.
+            let shown = notify_rust::Notification::new()
+                .summary("TermFlow")
+                .body(&body)
+                .action("default", "Open")
+                .show();
+
+            match shown {
+                Ok(handle) => {
+                    log::info!("[NOTIFY] delivery accepted by the daemon for tab {tab_id}");
+                    if wants_click {
+                        handle.wait_for_action(|action: &str| {
+                            if action == "default" {
+                                emit_activation(&app, &window_label, &tab_id);
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[NOTIFY] delivery failed for tab {tab_id}: {e}; scheduling plugin fallback"
+                    );
+                    use tauri_plugin_notification::NotificationExt;
+                    if let Err(e2) = app
+                        .notification()
+                        .builder()
+                        .title("TermFlow")
+                        .body(body)
+                        .show()
+                    {
+                        log::warn!("[NOTIFY] plugin fallback also failed for tab {tab_id}: {e2}");
+                    }
+                }
+            }
+        })
+        .map_err(|e| format!("failed to spawn notification thread: {e}"))?;
 
     Ok(())
 }
