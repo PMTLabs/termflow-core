@@ -1,6 +1,6 @@
 name: Rust Tests
 
-# Runs the Rust suite on BOTH Linux and Windows.
+# Runs the Rust suite on Linux, Windows, and macOS.
 #
 # - Linux (GitHub-hosted ubuntu-latest): runs the full suite WITH the
 #   `integration-tests` feature. That feature turns on tauri's `test` feature so
@@ -38,6 +38,14 @@ jobs:
             # No integration-tests on Windows (tauri/test crashes the test binary
             # at loader time); default unit suite only.
             test-args: ""
+          - name: macOS
+            # GitHub-hosted. Added because src/native_notify.rs now has a macOS-only
+            # implementation (mac-notification-sys) that CANNOT be compiled from the
+            # Windows or Linux dev boxes: the crate builds Objective-C through cc-rs
+            # and needs the macOS SDK. Without this job that code would first be
+            # compiled by the release build. Unit suite only, same as Windows.
+            runs-on: macos-latest
+            test-args: ""
     steps:
       - uses: actions/checkout@v4
 
@@ -61,8 +69,8 @@ jobs:
       # runner it mangles the temp script path (backslashes stripped) and fails. Use
       # it only on the GitHub-hosted Linux runner; the self-hosted Windows box is the
       # dev machine and already has rustup/cargo installed — just verify it.
-      - name: Setup Rust toolchain (Linux)
-        if: runner.os == 'Linux'
+      - name: Setup Rust toolchain (GitHub-hosted)
+        if: runner.os != 'Windows'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Verify Rust toolchain (Windows)
@@ -101,8 +109,8 @@ jobs:
       # box bun is already installed; oven-sh/setup-bun fails there trying to
       # overwrite the in-use bun.exe (EBUSY), so only run it on Linux and verify on
       # Windows.
-      - name: Setup Bun (Linux)
-        if: runner.os == 'Linux'
+      - name: Setup Bun (GitHub-hosted)
+        if: runner.os != 'Windows'
         uses: oven-sh/setup-bun@v2
 
       - name: Verify Bun (Windows)

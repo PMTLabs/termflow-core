@@ -191,7 +191,7 @@ fn ensure_start_menu_shortcut() -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn register_app_for_notifications() -> Result<(), String> {
+pub fn register_app_for_notifications(_app: &tauri::AppHandle) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
     use windows_registry::CURRENT_USER;
@@ -219,8 +219,17 @@ pub fn register_app_for_notifications() -> Result<(), String> {
     ensure_start_menu_shortcut()
 }
 
-#[cfg(not(windows))]
-pub fn register_app_for_notifications() -> Result<(), String> {
+/// Claim the notification identity at startup, before any other path can consume the
+/// crate's process-global one-shot. See [`ensure_application_set`].
+#[cfg(target_os = "macos")]
+pub fn register_app_for_notifications(app: &tauri::AppHandle) -> Result<(), String> {
+    ensure_application_set(app)
+}
+
+/// Linux needs no identity registration — the notification daemon attributes by the
+/// `desktop-entry` hint / process name.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn register_app_for_notifications(_app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
@@ -337,16 +346,203 @@ pub fn show_activity_notification(
     notifier.Show(&toast).map_err(|e| e.to_string())
 }
 
-// TODO(T4/T5): replaced by the macOS and Linux implementations. Until then non-Windows
-// builds fall through to the plugin toast in commands.rs, exactly as before.
+/// Bounds how many OS threads may sit parked waiting for a notification click.
+///
+/// macOS and Linux both surface the click by *blocking* a thread for the notification's
+/// lifetime. Linux threads normally end on their own (a close arrives as the pseudo-action
+/// `"__closed"`), but a daemon that never sends one — and a macOS notification the user
+/// simply ignores — parks its thread indefinitely. The cap keeps that bounded; past it we
+/// still deliver the notification and only give up the click routing.
 #[cfg(not(windows))]
+mod waiter {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub const MAX_WAITERS: usize = 8;
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+    /// Reserve a slot, or `None` once `MAX_WAITERS` are outstanding.
+    ///
+    /// `fetch_update` rather than load-then-add: two notifications arriving together
+    /// would both observe `n < MAX` and both increment, overshooting the cap.
+    pub fn acquire() -> Option<Guard> {
+        ACTIVE
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_WAITERS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Guard)
+    }
+
+    /// Releases the slot on *every* exit path, panics included — a manual decrement at
+    /// the end of the thread body would leak the slot on unwind, and eight leaked slots
+    /// disable click routing permanently.
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Claim this process's macOS notification identity.
+///
+/// `mac-notification-sys` guards `set_application` with a process-global `Once`, so the
+/// FIRST caller in the process wins and every later call returns `AlreadySet`. Two things
+/// follow:
+///
+/// 1. This must run at startup, before anything else notifies. `tauri-plugin-notification`
+///    calls `set_application` itself on its first desktop notification, and TermFlow
+///    already has such a path (`fabric_manager::maybe_notify_pairing`). Losing that race
+///    is not fatal — the plugin sets the same identity we would — but leaving it to chance
+///    is how the notification ends up attributed to Finder: with no explicit call at all,
+///    the crate's internal fallback resolves `"use_default"` to `com.apple.Finder`.
+/// 2. `AlreadySet` is success, not failure. Treating it as an error would send every
+///    notification after the first down the no-click plugin fallback.
+///
+/// The dev-vs-release identifier split mirrors `tauri-plugin-notification` exactly: in a
+/// dev build `app.termflow.desktop` does not resolve to an installed bundle, and Launch
+/// Services rejects it.
+#[cfg(target_os = "macos")]
+fn ensure_application_set(app: &tauri::AppHandle) -> Result<(), String> {
+    use mac_notification_sys::error::{ApplicationError, Error as MacError};
+    use std::sync::OnceLock;
+
+    // OnceLock<Result>, not a bare Once: a bare Once discards the outcome, so a failed
+    // first attempt would look like success to every later caller.
+    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+    RESULT
+        .get_or_init(|| {
+            let identifier = if tauri::is_dev() {
+                "com.apple.Terminal".to_string()
+            } else {
+                app.config().identifier.clone()
+            };
+            match mac_notification_sys::set_application(&identifier) {
+                Ok(()) => {
+                    log::info!("[NOTIFY] macOS notification identity set to {identifier}");
+                    Ok(())
+                }
+                Err(MacError::Application(ApplicationError::AlreadySet(current))) => {
+                    log::info!("[NOTIFY] macOS notification identity already claimed as {current}");
+                    Ok(())
+                }
+                Err(e) => Err(format!("failed to set macOS notification identity: {e}")),
+            }
+        })
+        .clone()
+}
+
+#[cfg(target_os = "macos")]
 pub fn show_activity_notification(
-    _app: &tauri::AppHandle,
-    _window_label: &str,
-    _tab_id: &str,
-    _body: &str,
+    app: &tauri::AppHandle,
+    window_label: &str,
+    tab_id: &str,
+    body: &str,
 ) -> Result<(), String> {
-    Err("no native notification implementation for this platform".to_string())
+    ensure_application_set(app)?;
+
+    let app = app.clone();
+    let window_label = window_label.to_owned();
+    let tab_id = tab_id.to_owned();
+    let body = body.to_owned();
+
+    // Reserve the click-waiter slot on THIS thread so the cap decision is made before we
+    // commit to a thread, and so the guard's lifetime covers the whole waiter.
+    let slot = waiter::acquire();
+    let wants_click = slot.is_some();
+    if !wants_click {
+        log::warn!(
+            "[NOTIFY] waiter cap ({}) reached; delivering tab {tab_id} without click routing",
+            waiter::MAX_WAITERS
+        );
+    }
+
+    // Everything runs off-thread. `send()` blocks until the click when we are waiting for
+    // one — but it also blocks for up to 2s waiting on delivery confirmation even when we
+    // are NOT (objc/notify.m). This is a synchronous Tauri command, so doing either on the
+    // caller's thread would stall the renderer's IPC.
+    std::thread::Builder::new()
+        .name("termflow-notify-macos".into())
+        .spawn(move || {
+            let _slot = slot; // released here on every path, including a panic
+            log::info!("[NOTIFY] delivery requested for tab {tab_id} (click routing: {wants_click})");
+
+            match mac_notification_sys::Notification::new()
+                .title("TermFlow")
+                .message(body.as_str())
+                .wait_for_click(wants_click)
+                .send()
+            {
+                Ok(mac_notification_sys::NotificationResponse::Click) => {
+                    emit_activation(&app, &window_label, &tab_id);
+                }
+                Ok(other) => {
+                    log::info!("[NOTIFY] notification for tab {tab_id} closed without a click: {other:?}");
+                }
+                Err(e) => log::warn!("[NOTIFY] macOS delivery failed for tab {tab_id}: {e}"),
+            }
+        })
+        .map_err(|e| format!("failed to spawn macOS notification thread: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn show_activity_notification(
+    app: &tauri::AppHandle,
+    window_label: &str,
+    tab_id: &str,
+    body: &str,
+) -> Result<(), String> {
+    // `show()` is synchronous, so a missing D-Bus session or a dead daemon surfaces HERE
+    // and reaches the plugin fallback in commands.rs. Registering the action id "default"
+    // asks for the freedesktop body-click activation; spec-compliant servers do not draw
+    // it as a button, though presentation is ultimately the server's choice.
+    let handle = notify_rust::Notification::new()
+        .summary("TermFlow")
+        .body(body)
+        .action("default", "Open")
+        .show()
+        .map_err(|e| format!("failed to show notification: {e}"))?;
+
+    log::info!("[NOTIFY] delivery accepted by the notification daemon for tab {tab_id}");
+
+    let Some(slot) = waiter::acquire() else {
+        log::warn!(
+            "[NOTIFY] waiter cap ({}) reached; tab {tab_id} delivered without click routing",
+            waiter::MAX_WAITERS
+        );
+        return Ok(());
+    };
+
+    let app = app.clone();
+    let window_label = window_label.to_owned();
+    let tab_id_for_thread = tab_id.to_owned();
+
+    // Note: the zbus backend only installs its signal match rules inside
+    // `wait_for_action`, so an action or close arriving in the gap between `show()` above
+    // and the thread starting can be missed. The cost is a lost click, never a lost
+    // notification.
+    let spawned = std::thread::Builder::new()
+        .name("termflow-notify-linux".into())
+        .spawn(move || {
+            let _slot = slot; // released on every path, including a panic
+            handle.wait_for_action(|action: &str| {
+                if action == "default" {
+                    emit_activation(&app, &window_label, &tab_id_for_thread);
+                }
+            });
+        });
+
+    // The notification is already on screen, so a thread-spawn failure must NOT return
+    // Err — that would make commands.rs deliver a second, duplicate toast via the plugin.
+    if let Err(e) = spawned {
+        log::warn!("[NOTIFY] could not spawn waiter for tab {tab_id}; no click routing: {e}");
+    }
+
+    Ok(())
 }
 
 #[cfg(windows)]

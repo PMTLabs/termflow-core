@@ -99,6 +99,16 @@ termflow-pty-protocol = { path = "pty-protocol" }
 # setsid() for detaching the PTY-host sidecar into its own session on Unix.
 libc = "0.2"
 
+# Native notification click routing (src/native_notify.rs). Both crates are already in
+# the tree via tauri-plugin-notification -> notify-rust, so these add no new compilation.
+# We depend on them directly because the plugin's desktop path is fire-and-forget and
+# exposes no click callback.
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+notify-rust = "4.11"
+
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"
