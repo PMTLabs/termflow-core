@@ -251,6 +251,15 @@ pub(crate) fn emit_activation(app: &tauri::AppHandle, window_label: &str, tab_id
     log::info!("[NOTIFY] click received: window={window_label} tab={tab_id}");
     match app.get_webview_window(window_label) {
         Some(window) => {
+            // `set_focus()` alone is NOT enough, and this is the state notifications
+            // exist for: with "keep running in the background" the last window is
+            // *hidden* on close (see the close handler in lib.rs), and a hidden or
+            // minimized window cannot take focus. Without the show/unminimize the click
+            // would switch tabs inside a window the user cannot see. Same ordering as
+            // `show_or_focus_main_window` in lib.rs, which is the established pattern
+            // for surfacing the app from the tray.
+            let _ = window.unminimize();
+            let _ = window.show();
             if let Err(e) = window.set_focus() {
                 log::warn!("[NOTIFY] failed to focus window {window_label}: {e}");
             }
@@ -424,8 +433,16 @@ fn ensure_application_set(app: &tauri::AppHandle) -> Result<(), String> {
                     log::info!("[NOTIFY] macOS notification identity set to {identifier}");
                     Ok(())
                 }
-                Err(MacError::Application(ApplicationError::AlreadySet(current))) => {
-                    log::info!("[NOTIFY] macOS notification identity already claimed as {current}");
+                // NB: the crate builds this error from the identifier WE just passed,
+                // not from whoever won, so it tells us nothing about which identity is
+                // actually installed — do not log it as if it did. It is still success:
+                // an explicit setter ran, which is all we need to avoid the Finder
+                // fallback.
+                Err(MacError::Application(ApplicationError::AlreadySet(_))) => {
+                    log::info!(
+                        "[NOTIFY] macOS notification identity was already claimed by an \
+                         earlier caller (wanted {identifier}); leaving it as-is"
+                    );
                     Ok(())
                 }
                 Err(e) => Err(format!("failed to set macOS notification identity: {e}")),
@@ -521,10 +538,17 @@ pub fn show_activity_notification(
     let window_label = window_label.to_owned();
     let tab_id_for_thread = tab_id.to_owned();
 
-    // Note: the zbus backend only installs its signal match rules inside
-    // `wait_for_action`, so an action or close arriving in the gap between `show()` above
-    // and the thread starting can be missed. The cost is a lost click, never a lost
-    // notification.
+    // Two known limits, neither of which can lose a notification:
+    //
+    // 1. The zbus backend only installs its signal match rules inside `wait_for_action`,
+    //    so an action or close arriving in the gap between `show()` above and the thread
+    //    starting can be missed. The cost is a lost click.
+    // 2. On Wayland this does NOT guarantee the window is raised. The spec lets a server
+    //    send an `ActivationToken` (an xdg-activation token) just before `ActionInvoked`;
+    //    notify-rust never subscribes to it and hands us only the action string, so our
+    //    `set_focus()` is an unsolicited request the compositor may refuse. Tab routing
+    //    is reliable; surfacing the window is best-effort. Fixing it properly needs a
+    //    lower-level D-Bus subscription than this API exposes.
     let spawned = std::thread::Builder::new()
         .name("termflow-notify-linux".into())
         .spawn(move || {
