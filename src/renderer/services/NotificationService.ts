@@ -11,7 +11,6 @@ import { store } from '../store';
 import { addToast, dismissTabToasts } from '../store/slices/uiSlice';
 import { NOTIF_SETTLE_MS, shouldNotify } from './notificationLogic';
 import { ACTIVITY_CHIME_DATA_URI } from '../assets/activityChime';
-import { startWindowFocusTracking } from './windowFocus';
 
 const SOUND_THROTTLE_MS = 1500; // min gap between chimes so a flurry doesn't machine-gun
 const BURST_MS = 1500; // suppress notifications this long after a visibility/session burst
@@ -39,7 +38,6 @@ class NotificationService {
     if (this.started) return;
     this.started = true;
     this.settleUntil = Date.now() + NOTIF_SETTLE_MS;
-    void startWindowFocusTracking();
 
     const onBell = (e: Event) => this.handleBell((e as CustomEvent).detail as BellDetail);
     window.addEventListener('activity:bell', onBell);

@@ -3,11 +3,20 @@ import { resolveActivation } from '../notificationRouting';
 const tabs = [{ id: 'tb-1' }, { id: 'tb-2' }];
 
 describe('resolveActivation', () => {
-  it('ignores an activation addressed to a different window', () => {
-    // Multi-window: every window receives the emit, only the owner may react. A
-    // non-owner must not even steal focus.
-    expect(resolveActivation({ windowLabel: 'other', tabId: 'tb-1' }, 'main', tabs))
+  it('ignores an activation for another window naming a tab we do not have', () => {
+    // Multi-window: every window receives the emit. A window that neither originated
+    // the notification nor holds the tab must not react at all — not even steal focus.
+    expect(resolveActivation({ windowLabel: 'other', tabId: 'tb-elsewhere' }, 'main', tabs))
       .toEqual({ kind: 'ignore', reason: 'window-mismatch' });
+  });
+
+  it('activates a tab this window holds even when another window raised the notification', () => {
+    // The tab is the durable identity; the window label is only where it lived when the
+    // notification was raised. If the tab was detached into this window in between, this
+    // window is the one that can actually serve the click — the originating window would
+    // otherwise focus itself and show nothing.
+    expect(resolveActivation({ windowLabel: 'other', tabId: 'tb-2' }, 'main', tabs))
+      .toEqual({ kind: 'activate', tabId: 'tb-2' });
   });
 
   it('activates the tab when the payload names a live tab in this window', () => {

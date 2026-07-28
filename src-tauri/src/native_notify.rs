@@ -243,8 +243,11 @@ pub fn register_app_for_notifications(_app: &tauri::AppHandle) -> Result<(), Str
 /// reintroduce one.
 ///
 /// Shared by every platform's activation path so the three can never drift on what a
-/// click means. Best-effort throughout: a missing window still emits, since another
-/// window in the same process may be able to serve the route.
+/// click means. Best-effort throughout: a missing window still emits, because the tab —
+/// not the window — is the destination. A tab can be dragged to another window between
+/// delivery and click (detach.ts), so the renderer routes on which window currently
+/// HOLDS the tab (see notificationRouting.ts) and a surviving window can serve a route
+/// whose original window is gone.
 pub(crate) fn emit_activation(app: &tauri::AppHandle, window_label: &str, tab_id: &str) {
     use tauri::{Emitter, Manager};
 
