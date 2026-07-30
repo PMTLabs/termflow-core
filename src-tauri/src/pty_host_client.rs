@@ -551,21 +551,46 @@ fn spawn_sidecar_detached(
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    // NOTE: deliberately NOT CREATE_NEW_PROCESS_GROUP. Microsoft documents that
+    // flag as "CTRL+C signals will be disabled for all processes within the new
+    // process group", and that group is every DESCENDANT of the root. Since the
+    // host spawns all hosted shells, that made every shell — and every child
+    // under it (bun/node/vite/...) — inherit "ignore Ctrl+C", so a raw \x03 hit
+    // ConPTY but conhost never raised CTRL_C_EVENT and no foreground program
+    // could be interrupted. (An idle PowerShell prompt still LOOKED fine because
+    // PSReadLine aborts the input line off the keypress itself, no signal
+    // involved.) DETACHED_PROCESS already gives us console detachment and
+    // CREATE_BREAKAWAY_FROM_JOB the job independence hot-swap survival needs, so
+    // the process-group flag bought nothing here and cost Ctrl+C entirely.
 
     // Run with CWD set to the host's own (update-stable) dir, never inheriting a
     // CWD inside the app payload — Velopack treats a process whose CWD is inside
     // the swapped `current\` tree as an update blocker it may kill (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
     let record = record_path();
-    let base = || {
+    // Capture the sidecar's diagnostics. These previously went to Stdio::null(),
+    // which made the host completely undiagnosable from the app side — every
+    // warning it prints (failed job breakaway, serve errors, a failed CTRL+C
+    // restore) vanished. Point them at a per-channel log file in the same
+    // update-stable dir instead; truncated on each spawn, so it stays small.
+    // Only lifecycle/error lines are written here — never session I/O.
+    let log_path = runtime_host_dir().map(|d| d.join("host.log"));
+    let base = move || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
             .env("TERMFLOW_PTY_TOKEN", token)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::null());
+        match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
+            Some(f) => {
+                c.stdout(f.try_clone().expect("clone log file handle"));
+                c.stderr(f);
+            }
+            None => {
+                c.stdout(Stdio::null());
+                c.stderr(Stdio::null());
+            }
+        }
         // RP-2: tell the host where to advertise itself (discovery record).
         if let Some(ref rp) = record {
             c.env("TERMFLOW_PTY_RECORD", rp);
@@ -580,7 +605,7 @@ fn spawn_sidecar_detached(
     // the GUI. If the job denies breakaway, CreateProcess fails with that flag;
     // fall back to a non-broken-away spawn and report survival as unavailable.
     match base()
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
+        .creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB)
         .spawn()
     {
         Ok(_) => {
@@ -589,7 +614,7 @@ fn spawn_sidecar_detached(
         }
         Err(_) => {
             base()
-                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+                .creation_flags(DETACHED_PROCESS)
                 .spawn()?;
             log::warn!(
                 "pty-host: spawned WITHOUT job breakaway; hot-swap survival not guaranteed"

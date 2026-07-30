@@ -453,6 +453,44 @@ test('Ctrl+C still gets real Kitty encoding when Kitty is active, even with Win3
   expect(calls.write).toEqual([['p1', '\x1b[99;5u']]); // real Kitty encoding, not a Win32 record
 });
 
+// Regression: bun/PowerShell dev servers stopped responding to a single
+// Ctrl+C after Win32-Input-Mode shipped. ConPTY offers that protocol for
+// every Windows session (not because the foreground app asked to read raw
+// keys itself, unlike Kitty), and its encoded CSI record does not reliably
+// reach the hosted console's own CTRL_C_EVENT generation. Confirmed live: the
+// raw-\x03 burst escape hatch always worked; the ordinary single press,
+// encoded via Win32-Input-Mode, did not.
+test('Ctrl+C at a plain shell prompt (Win32-Input-Mode active, no Kitty) always uses raw legacy \\x03', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'win32-ctrlc-1', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('win32-ctrlc-1');
+
+  term.csiHandlers['?h']([9001]); // ConPTY's session-start offer, no Kitty involved
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(true); // xterm emits legacy \x03 -- NOT encoded via Win32-Input-Mode
+  expect(calls.write).toEqual([]); // nothing written via the Win32 protocol path
+});
+
+test('Ctrl+C keyup at a plain shell prompt does not leak a stray Win32 release record', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'win32-ctrlc-2', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('win32-ctrlc-2');
+
+  term.csiHandlers['?h']([9001]);
+
+  term.keyHandler!(withKey({ key: 'c', ctrlKey: true })); // keydown
+  const keyupHandled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true, type: 'keyup' }));
+
+  expect(keyupHandled).toBe(false); // claimed, suppressed before reaching the Win32 encoder
+  expect(calls.write).toEqual([]); // no stray unmatched release record
+});
+
 // Internal workflow review (docs/review/052): the ?9001l disable path and the
 // DECSTR-on-Windows disable path both had zero test coverage — only the
 // enable side was ever exercised, so a regression in either `if` condition
