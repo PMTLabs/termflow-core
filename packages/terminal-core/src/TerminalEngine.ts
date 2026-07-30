@@ -1468,11 +1468,24 @@ export class TerminalEngine {
           this.opts.onCopy?.();
           return false;
         }
-        // Send path. A 3-press burst is the guaranteed-interrupt escape hatch:
-        // always raw \x03. Otherwise fall through to the shared enhanced-encoding
-        // block below, which emits the protocol-encoded Ctrl+C when a protocol is
-        // active (else the handler's default return sends legacy \x03).
-        if (burst) return true;
+        // Send path. Ctrl+C-as-interrupt always uses the raw \x03 byte, bypassing
+        // the Win32-Input-Mode encoder below: ConPTY offers that protocol for
+        // every Windows session (not because the foreground app asked to read
+        // raw keys itself, unlike Kitty), and its encoded CSI record does not
+        // reliably reach the hosted console's own CTRL_C_EVENT generation.
+        // Regression confirmed live: bun/PowerShell dev servers stopped
+        // responding to a single Ctrl+C once Win32-Input-Mode started
+        // intercepting it, while the raw-\x03 burst escape hatch still worked.
+        // When a real enhanced-keyboard protocol (Kitty/modifyOtherKeys) is
+        // active, still fall through so the app gets its expected
+        // protocol-encoded Ctrl+C.
+        if (burst || !this.protocolActive()) {
+          // Claim so the matching keyup doesn't independently leak a stray
+          // Win32-encoded release record with no preceding press (same hazard
+          // uiClaimedKeydownKeys already guards against for other shortcuts).
+          this.uiClaimedKeydownKeys.add(event.key);
+          return true;
+        }
       }
 
       // macOS: Cmd+Left/Cmd+Right = jump to start/end of line. macOS keyboards have
