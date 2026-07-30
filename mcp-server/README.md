@@ -143,9 +143,22 @@ Note: Stdio mode spawns a new process per client and does not share sessions bet
 
 *   `list_terminals`: List active terminal sessions.
 *   `create_terminal`: Spawn a new terminal (args: `name`, `cols`, `rows`, `cwd`).
-*   `execute_command`: Send a command to a terminal (args: `terminalId`, `command`, `cli_type`).
+*   `execute_command`: Send a command to a terminal (args: `terminalId`, `command`, `cliType`, `submissionSignal`). Pass an empty `command` for a bare submit — it sends only the submit keystroke, pressing Enter on a composer that already holds text.
+*   `send_keys`: Write raw bytes/escape sequences to a terminal's PTY (args: `terminalId`, `keys`). No paste wrapper, nothing appended — for Enter, Ctrl+C, Esc, arrows.
 *   `get_terminal_output`: Read recent output from a terminal.
 *   `close_terminal`: Terminate a session.
+
+### Picking a `cliType`
+
+`cliType` selects the submit keystroke and defaults to `copilot` (`Down-Arrow + Enter`), which is
+wrong for agent TUIs — Down-Arrow navigates message history there. Use `codex` / `opencode`
+(plain Enter) for those, or `submissionSignal` to supply a sequence directly.
+
+Codex additionally absorbs an Enter that arrives in the same PTY read as the end of the pasted
+text, leaving the prompt sitting unsubmitted in its composer. A settle delay between the paste and
+the submit normally prevents this, but a busy CLI that stops draining its input pipe can still
+coalesce the two. If a prompt is stuck in a composer, submit it with an empty `execute_command`
+or `send_keys` with `"\r"`.
 
 ## Configuration
 

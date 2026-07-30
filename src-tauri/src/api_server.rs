@@ -861,6 +861,14 @@ fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
     match cli_type {
         "claude" => Some(("", "\x1b\r\r")), // Escape + two carriage returns (universal for Claude CLI)
         "gemini" | "gemini-probe" => Some(("", "\r")), // Temporary override per user
+        // Codex and opencode TUIs submit on a plain CR. Deliberately NOT the copilot
+        // pattern: Down-Arrow navigates composer/message history in both, so
+        // `\x1b[B\r` risks submitting the wrong buffer. Verified live against
+        // codex-cli 0.146.0 and opencode 1.18.9. See the paste/submit race note in
+        // `send_prompt_to_terminal` — codex swallows a same-read-chunk CR, opencode
+        // does not.
+        "codex" | "codex-probe" => Some(("", "\r")),
+        "opencode" | "opencode-probe" => Some(("", "\r")),
         "chatgpt" => Some(("", shell_enter)),
         "copilot" | "copilot-probe" => Some(("", "\x1b[B\r")), // Down Arrow + Enter for interactive menu bypass
         "default" | "shell" => {
@@ -1564,10 +1572,6 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     use std::io::Write;
 
-    if payload.prompt.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Prompt must be a non-empty string".to_string()));
-    }
-
     // Clone the writer Arc, dropping the DashMap shard guard before the
     // send/probe sleeps below (up to ~48 s total). Holding the shard guard
     // across those `.await`s blocked a concurrent create/close of any terminal
@@ -1602,28 +1606,42 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
         // request does not flash (see design spec 029 §5).
         emit_external_activity(state, id);
 
-        // Send the prompt as a bracketed paste (CSI 200~ … 201~) so any newlines
-        // embedded in the prompt are inserted as literal multi-line input rather
-        // than being treated as Enter and submitting each line as a separate
-        // command. The single submit is the end_indicator written after this.
-        let inner = payload.prompt.replace("\r\n", "\r").replace('\n', "\r");
-        let normalized_prompt = format!("\x1b[200~{}\x1b[201~", inner);
+        // An EMPTY prompt is a deliberate "bare submit": skip the paste and write
+        // only the submit sequence below. It presses Enter on a composer that
+        // already holds text — the recovery when a TUI swallowed the first Enter
+        // (see the same-read-chunk race note below). Callers that want a literal
+        // blank line still get one, since the submit sequence is written either way.
+        if !payload.prompt.is_empty() {
+            // Send the prompt as a bracketed paste (CSI 200~ … 201~) so any newlines
+            // embedded in the prompt are inserted as literal multi-line input rather
+            // than being treated as Enter and submitting each line as a separate
+            // command. The single submit is the end_indicator written after this.
+            let inner = payload.prompt.replace("\r\n", "\r").replace('\n', "\r");
+            let normalized_prompt = format!("\x1b[200~{}\x1b[201~", inner);
 
-        // Write prompt - in scope to drop lock. Host-owned → sidecar.
-        if let Some(wm) = &writer_mutex {
-            let mut writer = wm
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-            writer
-                .write_all(normalized_prompt.as_bytes())
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let _ = writer.flush();
-        } else {
-            state.host_write(id, normalized_prompt.as_bytes());
+            // Write prompt - in scope to drop lock. Host-owned → sidecar.
+            if let Some(wm) = &writer_mutex {
+                let mut writer = wm
+                    .lock()
+                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
+                writer
+                    .write_all(normalized_prompt.as_bytes())
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let _ = writer.flush();
+            } else {
+                state.host_write(id, normalized_prompt.as_bytes());
+            }
+
+            // Brief delay to allow the CLI tool to process the prompt text BEFORE the
+            // submit sequence lands. This gap is load-bearing, not cosmetic: TUIs that
+            // implement paste-burst handling (Codex, verified against codex-cli 0.146.0)
+            // absorb a CR that arrives in the SAME read chunk as the bracketed-paste
+            // terminator, leaving the text sitting unsubmitted in the composer. A busy
+            // CLI that stops draining its input pipe can still coalesce the two reads
+            // despite this delay — that is why an empty prompt (bare submit) exists as
+            // the recovery path.
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
-
-        // Brief delay to allow the CLI tool to process the prompt text
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         // Send Focus In sequence just in case the CLI tool uses Focus Tracking (\x1b[?1004h)
         // and is ignoring input because it thinks it's blurred.
         if let Some(wm) = &writer_mutex {
@@ -1972,9 +1990,8 @@ async fn batch_execute_prompt(
     if body.terminal_ids.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "terminalIds must be a non-empty array" })));
     }
-    if body.prompt.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Prompt must be a non-empty string" })));
-    }
+    // An empty prompt is a valid "bare submit" fan-out (press Enter on every
+    // target's composer), matching single-id execute_prompt's semantics.
     // Validate the request-global submit pattern ONCE, before fanning out. An
     // unknown cliType or a missing custom pattern is a malformed request (the
     // pattern is identical for every id), not a per-terminal failure — so return
@@ -3003,6 +3020,18 @@ mod tests {
     // that exits 3) AND a PowerShell cmdlet (e.g. `Get-Date`) end-to-end, asserting the
     // captured exitCode is correct — the unit test above only checks the wrapper string,
     // which cannot catch cmd.exe parse-time expansion or PowerShell's $null $LASTEXITCODE.
+
+    #[test]
+    fn get_cli_pattern_submits_agent_tuis_with_a_plain_cr() {
+        // Regression guard: codex/opencode must NOT inherit copilot's Down-Arrow
+        // (`\x1b[B\r`), which navigates message history in both TUIs.
+        assert_eq!(get_cli_pattern("codex"), Some(("", "\r")));
+        assert_eq!(get_cli_pattern("opencode"), Some(("", "\r")));
+        assert_eq!(get_cli_pattern("copilot"), Some(("", "\x1b[B\r")));
+        // Unknown types still reject, so a typo'd cliType fails loudly (400)
+        // rather than silently sending the wrong keystrokes.
+        assert_eq!(get_cli_pattern("codexx"), None);
+    }
 
     #[test]
     fn classify_shell_kind_maps_common_shells() {

@@ -126,6 +126,48 @@ describe("createMcpServer tool wiring", () => {
         expect(calls.some((c) => c.url.includes("batch"))).toBe(false);
     });
 
+    it("send_keys writes raw bytes verbatim to /input and resolves \"me\"", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "\r" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-self/input");
+        expect(call).toBeTruthy();
+        // Nothing appended, nothing wrapped — a bare CR must arrive as a bare CR.
+        expect((call!.body as any).data).toBe("\r");
+    });
+
+    it("forwards an empty command as a bare submit instead of rejecting it", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "execute_command", arguments: { terminalId: "me", command: "", cliType: "codex" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-self/execute");
+        expect((call!.body as any).prompt).toBe("");
+        expect((call!.body as any).cliType).toBe("codex");
+    });
+
+    it("accepts codex/opencode cliTypes and forwards submissionSignal", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({
+            name: "execute_command",
+            arguments: { terminalId: "pc-a", command: "hi", cliType: "opencode", submissionSignal: "\r" },
+        });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-a/execute");
+        expect((call!.body as any).cliType).toBe("opencode");
+        expect((call!.body as any).submissionSignal).toBe("\r");
+    });
+
+    it("omits submissionSignal entirely when not supplied", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "execute_command", arguments: { terminalId: "pc-a", command: "hi" } });
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-a/execute");
+        expect("submissionSignal" in (call!.body as object)).toBe(false);
+    });
+
     it("reflects a live getCallerId change between calls (per-session refresh)", async () => {
         const { api, calls } = makeFakeApi();
         let caller: string | undefined = undefined;
