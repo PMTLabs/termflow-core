@@ -847,10 +847,17 @@ pub async fn load_command_dir_usage(
 /// Stream 1: show an OS notification for background-tab activity, but ONLY when no
 /// TermFlow window is focused (app-wide check — a focused window already gets the
 /// in-app sound/toast, so notifying there too would be noisy/duplicate). `window_label`
-/// + `tab_id` identify the exact destination when a Windows toast is activated.
+/// + `tab_id` identify the exact destination when the notification is clicked.
 /// Best-effort; failures are non-fatal.
-/// Returns `true` if a toast was actually shown, `false` if suppressed because a window
-/// was focused. Only a real click on the toast navigates (it emits `notification:activated`
+///
+/// Returns `false` when suppressed because a window was focused, and `true` when a
+/// notification was *attempted*. `true` deliberately does NOT mean "the user saw a
+/// toast": no platform here can promise that. The plugin fallback in particular spawns
+/// an async task and discards the delivery result before returning
+/// (tauri-plugin-notification desktop.rs), and macOS delivery happens on a background
+/// thread. Do not build logic on `true` meaning "delivered".
+///
+/// Only a real click on the notification navigates (it emits `notification:activated`
 /// with this `tab_id`); re-focusing a window never switches tabs.
 #[tauri::command]
 pub fn show_activity_notification(
@@ -876,35 +883,26 @@ pub fn show_activity_notification(
     } else {
         title
     };
-    #[cfg(windows)]
-    {
-        match crate::native_notify::show_activity_notification(&app, &window_label, &tab_id, &body) {
-            Ok(()) => log::info!("show_activity_notification: native WinRT toast shown for tab {tab_id}"),
-            Err(native_error) => {
-                // Keep notifications best-effort even on machines where WinRT is
-                // disabled by policy. The plugin toast has no click callback, but is
-                // still preferable to silently dropping the activity notification.
-                log::warn!("Native activity notification failed: {native_error}; using plugin fallback");
-                use tauri_plugin_notification::NotificationExt;
-                app.notification()
-                    .builder()
-                    .title("TermFlow")
-                    .body(body)
-                    .show()
-                    .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
-            }
+    // One seam, three platform implementations (native_notify.rs). Each delivers the
+    // notification AND wires up click activation; only the mechanism differs.
+    match crate::native_notify::show_activity_notification(&app, &window_label, &tab_id, &body) {
+        Ok(()) => log::info!("[NOTIFY] native notification accepted for tab {tab_id}"),
+        Err(native_error) => {
+            // Keep notifications best-effort even where the native path is unavailable
+            // (WinRT disabled by policy, no D-Bus session, etc). The plugin toast has no
+            // click callback, but is still preferable to silently dropping the activity
+            // notification. Note the plugin returns Ok before it has actually tried to
+            // deliver, so the map_err below only catches *scheduling* failures — this
+            // logs "scheduled", never "shown".
+            log::warn!("[NOTIFY] native notification failed: {native_error}; scheduling plugin fallback");
+            use tauri_plugin_notification::NotificationExt;
+            app.notification()
+                .builder()
+                .title("TermFlow")
+                .body(body)
+                .show()
+                .map_err(|e| format!("native toast failed ({native_error}); plugin fallback failed: {e}"))?;
         }
-    }
-    #[cfg(not(windows))]
-    {
-        use tauri_plugin_notification::NotificationExt;
-        let _ = (&window_label, &tab_id);
-        app.notification()
-            .builder()
-            .title("TermFlow")
-            .body(body)
-            .show()
-            .map_err(|e| e.to_string())?;
     }
     Ok(true)
 }

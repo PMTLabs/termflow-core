@@ -11,7 +11,6 @@ import { store } from '../store';
 import { addToast, dismissTabToasts } from '../store/slices/uiSlice';
 import { NOTIF_SETTLE_MS, shouldNotify } from './notificationLogic';
 import { ACTIVITY_CHIME_DATA_URI } from '../assets/activityChime';
-import { startWindowFocusTracking } from './windowFocus';
 
 const SOUND_THROTTLE_MS = 1500; // min gap between chimes so a flurry doesn't machine-gun
 const BURST_MS = 1500; // suppress notifications this long after a visibility/session burst
@@ -39,7 +38,6 @@ class NotificationService {
     if (this.started) return;
     this.started = true;
     this.settleUntil = Date.now() + NOTIF_SETTLE_MS;
-    void startWindowFocusTracking();
 
     const onBell = (e: Event) => this.handleBell((e as CustomEvent).detail as BellDetail);
     window.addEventListener('activity:bell', onBell);
@@ -124,8 +122,8 @@ class NotificationService {
       // true — a missed/late focus event, a multi-window setup, or an init race — and
       // would then silently drop EVERY OS notification. The backend
       // (show_activity_notification) does the AUTHORITATIVE app-wide focus check and
-      // returns shown=false when any window is focused, so double-notify is still
-      // prevented and the return-to-app routing (which keys off shown) stays correct.
+      // skips the notification when any window is focused, so double-notify is still
+      // prevented.
       this.showOsNotification(detail.tabId, tabTitle);
     }
   }
@@ -150,9 +148,10 @@ class NotificationService {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      // The backend returns whether a toast was actually shown (it suppresses one when
-      // any window is focused). Nothing to route on: the destination travels with the
-      // toast itself, so only a real click on it can move the user.
+      // The return value is deliberately ignored. It reports only that a notification was
+      // *attempted* (false = suppressed because a window was focused) — no platform here
+      // can confirm the user saw one, so there is nothing to act on. The destination
+      // travels with the notification itself, so only a real click on it moves the user.
       await invoke<boolean>('show_activity_notification', {
         windowLabel: getCurrentWindow().label,
         tabId,

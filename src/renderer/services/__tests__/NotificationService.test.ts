@@ -14,9 +14,6 @@ const mockState: {
   ui: { toasts: [] },
 };
 
-// Controllable window-focus mock so tests can drive the OS path and focus-regain routing.
-let mockFocused = true;
-let focusCb: ((f: boolean) => void) | null = null;
 // Holder so tests can fire the store-change callback the service subscribes with.
 const storeSub: { cb: (() => void) | null } = { cb: null };
 
@@ -33,14 +30,6 @@ jest.mock('../../store/slices/uiSlice', () => ({
 }));
 jest.mock('../../store/slices/tabsSlice', () => ({
   setActiveTab: (id: string) => ({ type: 'tabs/setActiveTab', payload: id }),
-}));
-jest.mock('../windowFocus', () => ({
-  isWindowFocused: () => mockFocused,
-  onWindowFocusChange: (cb: (f: boolean) => void) => {
-    focusCb = cb;
-    return () => { focusCb = null; };
-  },
-  startWindowFocusTracking: async () => {},
 }));
 jest.mock('../../assets/activityChime', () => ({ ACTIVITY_CHIME_DATA_URI: 'data:audio/wav;base64,AAAA' }));
 
@@ -65,7 +54,6 @@ describe('NotificationService — in-app channels', () => {
   beforeEach(() => {
     dispatch.mockClear();
     playMock.mockClear();
-    mockFocused = true;
     mockState.settings = { notifySoundEnabled: false, notifyToastEnabled: false, notifyOsEnabled: false };
     mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
     mockState.ui = { toasts: [] };
@@ -130,7 +118,6 @@ describe('NotificationService — OS notification (never steals the active tab)'
     mockState.settings = { notifySoundEnabled: false, notifyToastEnabled: false, notifyOsEnabled: true };
     mockState.tabs = { activeTabId: null, tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
     mockState.ui = { toasts: [] };
-    mockFocused = false; // app not focused → OS path eligible
     notificationService.stop();
     notificationService.start();
   });
@@ -142,43 +129,42 @@ describe('NotificationService — OS notification (never steals the active tab)'
     expect(invokeMock).toHaveBeenCalledWith('show_activity_notification', expect.objectContaining({ tabId: 'tb-1' }));
   });
 
-  it('still requests even if this window\'s cached focus says focused (backend is the authority)', async () => {
-    // A stuck/stale renderer focus flag must NOT suppress the OS path — the backend does
-    // the authoritative app-wide focus check and returns shown=false when actually focused.
-    mockFocused = true;
+  it('does not pre-gate on renderer focus state (the backend is the authority)', async () => {
+    // The renderer must not try to second-guess whether the app is focused: a stale
+    // per-window flag would silently drop every OS notification. The backend does the
+    // authoritative app-wide check.
     bell('tb-1', AFTER_SETTLE());
     await flush();
     expect(invokeMock).toHaveBeenCalledWith('show_activity_notification', expect.objectContaining({ tabId: 'tb-1' }));
   });
 
-  // Returning to the app is NOT consent to be moved. Clicking the window (or
-  // alt-tabbing back) must leave the user on whatever tab they were working in;
-  // only an explicit click on the OS notification navigates, and that arrives as
-  // the backend's `notification:activated` event (handled in App.tsx), never here.
-  it('does NOT switch tabs when the window regains focus after a toast was shown', async () => {
-    bell('tb-1', AFTER_SETTLE());
-    await flush(); // let showOsNotification resolve
-    dispatch.mockClear();
-    focusCb?.(true); // user clicks the app window itself, not the toast
-    const nav = dispatch.mock.calls.map(([a]) => a).find((a) => a.type === 'tabs/setActiveTab');
-    expect(nav).toBeUndefined();
-  });
-
-  it('does NOT switch tabs on focus regain when the backend suppressed the toast', async () => {
-    invokeMock.mockResolvedValue(false); // backend suppressed (another window focused)
-    bell('tb-1', AFTER_SETTLE());
-    await flush();
-    dispatch.mockClear();
-    focusCb?.(true);
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  it('does NOT switch tabs on focus regain even while the belled tab is still unseen', async () => {
+  // THE INVARIANT: this service never changes the active tab, by any mechanism.
+  //
+  // It used to switch tabs whenever the window regained focus, so clicking the app
+  // window yanked the user off the tab they were working in. Returning to the app is not
+  // consent to be moved. Navigation belongs solely to an explicit click on the OS
+  // notification, which arrives as the backend's `notification:activated` event and is
+  // handled in App.tsx.
+  //
+  // Asserted against the whole surface rather than against a focus listener specifically:
+  // the old test could only catch a refocus regression, while this catches ANY future
+  // mechanism that reintroduces auto-navigation here.
+  it('never dispatches setActiveTab, through any path', async () => {
+    // Drive everything the service reacts to: a bell with all channels on, a shown
+    // notification, a suppressed one, and a store change.
+    mockState.settings = { notifySoundEnabled: true, notifyToastEnabled: true, notifyOsEnabled: true };
     bell('tb-1', AFTER_SETTLE());
     await flush();
-    // tb-1 still has hasUnseenOutput: true — previously the trigger for a forced switch.
-    dispatch.mockClear();
-    focusCb?.(true);
-    expect(dispatch).not.toHaveBeenCalled();
+
+    invokeMock.mockResolvedValue(false); // backend suppressed it (a window was focused)
+    bell('tb-1', AFTER_SETTLE());
+    await flush();
+
+    mockState.tabs = { activeTabId: 'tb-1', tabs: [{ id: 'tb-1', title: 'build', hasUnseenOutput: true }] };
+    storeSub.cb?.();
+    await flush();
+
+    const navs = dispatch.mock.calls.map(([a]) => a).filter((a) => a.type === 'tabs/setActiveTab');
+    expect(navs).toEqual([]);
   });
 });

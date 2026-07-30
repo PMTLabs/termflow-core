@@ -855,9 +855,11 @@ pub fn run() {
     ))
     .setup(move |app| {
         // Unpackaged Windows apps need an AUMID registered before WinRT can
-        // attribute and deliver native toast notifications. This is idempotent
+        // attribute and deliver native toast notifications. On macOS this claims the
+        // notification bundle identity, which MUST happen before anything else in the
+        // process notifies (mac-notification-sys guards it with a one-shot). Idempotent
         // and deliberately non-fatal so a registry policy cannot prevent launch.
-        if let Err(e) = crate::native_notify::register_app_for_notifications() {
+        if let Err(e) = crate::native_notify::register_app_for_notifications(app.handle()) {
             log::warn!("Failed to register native notification identity: {}", e);
         }
 

@@ -152,6 +152,8 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "log",
+ "mac-notification-sys",
+ "notify-rust",
  "parking_lot",
  "portable-pty",
  "reqwest",
