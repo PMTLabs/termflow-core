@@ -97,15 +97,20 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 terminalId: z.union([z.string(), z.array(z.string())]).optional().describe(
                     `The ID(s) of the terminal(s) to execute on. Pass a single id or an array of ids to send the same command to several terminals. Optional for fleet routing (targetOS/machineId). ${ME_HINT}`
                 ),
-                command: z.string().describe("The command string to execute"),
-                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot"]).optional().describe("The CLI personality/keystroke pattern. Defaults to copilot if omitted."),
+                command: z.string().describe(
+                    "The command string to execute. Pass an EMPTY string for a bare submit: it skips the paste and sends only the submit keystroke, which presses Enter on a composer that already holds text (use it when a TUI left your prompt sitting unsubmitted)."
+                ),
+                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot", "codex", "opencode"]).optional().describe(
+                    "The CLI personality/keystroke pattern. Defaults to copilot if omitted. Use `codex` or `opencode` for those TUIs — they submit on a plain Enter, whereas the copilot default prefixes a Down-Arrow that navigates message history in them."
+                ),
+                submissionSignal: z.string().optional().describe("Raw escape sequence to use as the submit keystroke, overriding cliType's pattern (e.g. \"\\r\"). For TUIs with no built-in pattern."),
                 useBracketedPaste: z.boolean().optional().describe("Whether to use bracketed paste mode for the prompt (more reliable for long inputs)"),
                 targetOS: z.enum(["windows", "macos", "linux"]).optional().describe("Route to the unique online peer running this OS (fleet). Mutually informative with machineId/terminalId."),
                 machineId: z.string().optional().describe("Route to a specific peer machine by its machineId (fleet)."),
                 timeoutMs: z.number().optional().describe("Fleet: max ms to wait for command completion before returning a live handle (done=false). Clamped server-side to [1000, 3600000]."),
             },
         },
-        async ({ terminalId, command, cliType, useBracketedPaste, targetOS, machineId, timeoutMs }) => {
+        async ({ terminalId, command, cliType, useBracketedPaste, submissionSignal, targetOS, machineId, timeoutMs }) => {
             try {
                 // Fleet routing: an explicit targetOS or machineId means route through the
                 // cross-machine resolver (core POST /fleet/execute) instead of the local path.
@@ -131,6 +136,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 const extras = {
                     cliType: cliType || "copilot",
                     ...(useBracketedPaste !== undefined && { useBracketedPaste }),
+                    ...(submissionSignal !== undefined && { submissionSignal }),
                 };
                 if (Array.isArray(terminalId)) {
                     const resolved = [...new Set(terminalId.map((t) => resolveTerminalId(t, getCallerId())))];
@@ -155,6 +161,31 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                     prompt: command,
                     ...extras,
                 });
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
+    // Tool: send_keys — raw PTY write. The escape hatch for anything the
+    // execute_command keystroke patterns don't cover (submitting a stuck
+    // composer, answering a y/n prompt, Ctrl+C, arrow keys).
+    server.registerTool(
+        "send_keys",
+        {
+            description:
+                "Write raw bytes/escape sequences straight to a terminal's PTY — no paste wrapper, no submit keystroke appended. Use for keys rather than text: Enter \"\\r\", Ctrl+C \"\\u0003\", Esc \"\\u001b\", Up \"\\u001b[A\", Down \"\\u001b[B\". Prefer execute_command for sending a prompt; use this to submit a composer a TUI left unsubmitted, or to answer an interactive y/n prompt.",
+            inputSchema: {
+                terminalId: z.string().describe(`The ID of the terminal to write to. ${ME_HINT}`),
+                keys: z.string().describe("Raw bytes to write, verbatim. Sent exactly as given — nothing is appended."),
+            },
+        },
+        async ({ terminalId, keys }) => {
+            try {
+                const id = resolveTerminalId(terminalId, getCallerId());
+                const response = await api.post(`/terminals/${id}/input`, { data: keys });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);
@@ -279,7 +310,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "get_terminal_screen",
         {
-            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer). Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
+            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer) as readable plain text — ANSI stripped, column alignment preserved. Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
             inputSchema: {
                 machineId: z.string().optional().describe("Target peer machineId. Omit for a terminal on this machine."),
                 terminalId: z.string().describe("The ID of the terminal whose live screen to read."),

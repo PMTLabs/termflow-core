@@ -495,6 +495,28 @@ impl<R: Runtime> AppState<R> {
         Some(parser.screen().contents_formatted())
     }
 
+    /// Render the terminal's current visible screen as PLAIN TEXT — the same grid
+    /// `screen_snapshot` returns, minus every escape sequence.
+    ///
+    /// This is the read-for-comprehension counterpart to `screen_snapshot`, for
+    /// API/MCP callers that display the screen to a human or an agent rather than
+    /// replaying it into a terminal. Note this is NOT equivalent to stripping
+    /// escapes from the formatted blob: that blob encodes runs of blanks as cursor
+    /// ops (`CUF`/`ECH`), so stripping collapses the column layout. The parser has
+    /// already applied those ops to the grid, so rendering from the grid keeps
+    /// alignment intact.
+    pub fn screen_text(&self, id: &str) -> Option<String> {
+        let screen = self.terminal_screens.get(id)?;
+        let parser = match screen.lock() {
+            Ok(parser) => parser,
+            Err(_) => {
+                log::warn!("screen_text: screen parser mutex poisoned for {}", id);
+                return None;
+            }
+        };
+        Some(parser.screen().contents())
+    }
+
     /// Escape sequences restoring the terminal's live input modes, appended to
     /// hydration snapshots by the /snapshot endpoint: the vt100 parser's tracked
     /// modes (mouse protocol + encoding, bracketed paste, application cursor /

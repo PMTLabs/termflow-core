@@ -158,3 +158,6 @@ signing
 # Infisical project link (public repo - keep the project id out)
 .infisical.json
 releases-osx/*
+
+# Rust build output (CARGO_TARGET_DIR convention, e.g. target/sdd-test)
+/target/
