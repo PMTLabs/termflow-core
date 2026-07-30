@@ -12,7 +12,11 @@ import { StateManager } from '../../services/StateManager';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { BellIcon } from '../UI/BellIcon';
 import { CloseSummary } from './CloseSummary';
-import { computeAffectedTabs, filterMeaningfulProcesses } from '../../services/closeTabs';
+import {
+  computeAffectedTabs,
+  filterMeaningfulProcesses,
+  collectTabCloseTerminalIds,
+} from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
@@ -478,46 +482,36 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     const tabPanes = (window as any).tabPanes;
     const paneTree = tabPanes ? tabPanes[id] : null;
 
-    const closeAllTerminalsInNode = (node: any) => {
-      if (!node) return;
-      if (node.type === 'terminal' && node.terminalId) {
-        console.log(`TabManager: Closing terminal ${node.terminalId} from pane ${node.id}`);
-        terminalService.closeTerminal(node.terminalId).catch(error => {
-          console.error(`Failed to close terminal ${node.terminalId}:`, error);
-        });
-        // Spec 045 §3.3: the terminal is gone for good — drop its directory, as
-        // PaneManager.performClose does for a single pane. Without this, closing a
-        // whole tab leaked its panes' entries for the rest of the session.
-        clearCwdSnapshot(node.terminalId);
-      } else if (node.type === 'split' && node.children) {
-        node.children.forEach(closeAllTerminalsInNode);
-      }
-    };
+    // The terminals this tab still owns — the tree when we have one, else the
+    // tab-id fallback. Deliberately NOT "tree + tab id": a pane dragged into
+    // another tab (or window) takes its terminal with it while this tab keeps
+    // its id, and the root pane's terminalId IS the tab id. See
+    // collectTabCloseTerminalIds.
+    for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
+      console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
+      terminalService.closeTerminal(terminalId).catch((error) => {
+        // Non-fatal (process may already be gone) but never silent: a failed
+        // backend close with a removed tab = invisible orphaned PTY.
+        console.warn(`TabManager: closeTerminal(${terminalId}) failed:`, error);
+      });
+      // Spec 045 §3.3: the terminal is gone for good — drop its directory, as
+      // PaneManager.performClose does for a single pane. Without this, closing a
+      // whole tab leaked its panes' entries for the rest of the session.
+      clearCwdSnapshot(terminalId);
+      // The xterm cache is keyed by terminalId (cacheKey === terminalId), so it
+      // must be disposed per terminal — doing it once for the tab id both missed
+      // the extra panes of a split tab and hit a moved-away pane.
+      cleanupTerminalCache(terminalId);
+    }
 
     if (paneTree) {
-      closeAllTerminalsInNode(paneTree);
       console.log(`TabManager: Cleaning up tabPanes entry for ${id}`);
       delete tabPanes[id];
     }
 
-    // Also close the tab's main terminal if it's not in the pane tree
-    // (Usually it is, but just in case)
-    terminalService.closeTerminal(id).catch((error) => {
-      // Non-fatal (process may already be gone) but never silent: a failed
-      // backend close with a removed tab = invisible orphaned PTY.
-      console.warn(`TabManager: closeTerminal(${id}) failed:`, error);
-    });
-    // Mirrors the close above: the root pane's terminalId is usually the tab id
-    // (so the walk covered it), but clear it unconditionally for the same reason
-    // the close is unconditional — a tab whose tree we never saw.
-    clearCwdSnapshot(id);
-
     // Remove tab from Redux state (UI update)
     dispatch(removeTab(id));
     console.log(`TabManager: Removed tab ${id} from Redux state`);
-
-    // Clean up terminal cache for this tab
-    cleanupTerminalCache(id);
   }, [dispatch]);
 
   // Immediate single-tab close (no confirm) — used by ui:forceTabClose.

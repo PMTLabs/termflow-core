@@ -2,7 +2,22 @@ import {
   isShellName,
   filterMeaningfulProcesses,
   computeAffectedTabs,
+  collectTabCloseTerminalIds,
 } from '../closeTabs';
+import type { PaneNode } from '../../store/slices/panesSlice';
+
+const leaf = (id: string, terminalId: string): PaneNode => ({
+  id,
+  type: 'terminal',
+  terminalId,
+});
+
+const split = (id: string, children: PaneNode[]): PaneNode => ({
+  id,
+  type: 'split',
+  direction: 'horizontal',
+  children,
+});
 
 describe('isShellName', () => {
   it.each(['pwsh', 'powershell', 'bash', 'sh', 'zsh', 'cmd', 'fish'])(
@@ -98,5 +113,35 @@ describe('computeAffectedTabs', () => {
   it('returns [] when the clicked tab is not present', () => {
     expect(computeAffectedTabs(tabs, 'z', 'right')).toEqual([]);
     expect(computeAffectedTabs(tabs, 'z', 'single')).toEqual([]);
+  });
+});
+
+describe('collectTabCloseTerminalIds', () => {
+  it('single-pane tab → its one terminal (which is the tab id)', () => {
+    expect(collectTabCloseTerminalIds(leaf('pn1', 'tabA'), 'tabA')).toEqual(['tabA']);
+  });
+
+  it('split tab → every terminal in the tree', () => {
+    const tree = split('sp1', [leaf('pn1', 'tabA'), leaf('pn2', 'term2')]);
+    expect(collectTabCloseTerminalIds(tree, 'tabA')).toEqual(['tabA', 'term2']);
+  });
+
+  it('no tree (tab we never rendered) → falls back to the tab id', () => {
+    expect(collectTabCloseTerminalIds(null, 'tabA')).toEqual(['tabA']);
+  });
+
+  // Regression: dragging a pane into another tab moves its TERMINAL out while
+  // the source tab keeps its id. The root pane's terminalId IS the source tab
+  // id, so an unconditional tab-id teardown killed a pane that is now live in
+  // the destination tab.
+  it('does NOT include the tab id once that pane was moved to another tab', () => {
+    // tabB started as [pn1(term=tabB), pn2(term=termB2)]; pn1 was dragged to tabA.
+    const prunedTabB = leaf('pn2', 'termB2');
+    expect(collectTabCloseTerminalIds(prunedTabB, 'tabB')).toEqual(['termB2']);
+  });
+
+  it('the destination tab now owns the moved terminal', () => {
+    const tabA = split('sp1', [leaf('pnA', 'tabA'), leaf('pn1', 'tabB')]);
+    expect(collectTabCloseTerminalIds(tabA, 'tabA')).toEqual(['tabA', 'tabB']);
   });
 });

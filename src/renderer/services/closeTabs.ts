@@ -7,8 +7,34 @@
  * can be tested in isolation (see __tests__/closeTabs.test.ts).
  */
 
+import type { PaneNode } from '../store/slices/panesSlice';
+import { getAllTerminalIds } from '../store/slices/paneTreeOps';
+
 /** Which set of tabs a close action targets, relative to the clicked tab. */
 export type CloseKind = 'single' | 'right' | 'left' | 'others';
+
+/**
+ * The terminals closing `tabId` must tear down.
+ *
+ * A tab's root pane is created with `terminalId === tab.id` (TerminalContainer),
+ * and splits preserve it — so the close path used to *also* tear down `tabId` as
+ * a terminal id unconditionally, as a safety net for a tab whose tree we never
+ * saw. That only holds while the pane still belongs to the tab: dragging it into
+ * another tab (`movePaneToTab`) or another window (detach) carries the terminal
+ * away while the source tab keeps its id, so the unconditional teardown killed a
+ * pane that is now live somewhere else.
+ *
+ * The pane tree is authoritative whenever we have one — it lists exactly the
+ * terminals the tab still owns. The `tabId` fallback applies ONLY when there is
+ * no tree at all.
+ */
+export function collectTabCloseTerminalIds(
+  paneTree: PaneNode | null,
+  tabId: string,
+): string[] {
+  if (!paneTree) return [tabId];
+  return getAllTerminalIds(paneTree);
+}
 
 /**
  * Bare shell executable names. The backend's `/api/processes` reports the
