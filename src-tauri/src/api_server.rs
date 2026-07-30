@@ -1473,10 +1473,10 @@ async fn fleet_screen(
             };
             let title = terminal.name.clone();
             drop(terminal);
-            let screen = state
-                .screen_snapshot(&body.terminal_id)
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-                .unwrap_or_default();
+            // Plain text, not the replayable blob: this screen is read by a human or
+            // an agent, and a full-screen TUI's formatted snapshot is mostly truecolor
+            // SGR and cursor-op noise with the words buried in it.
+            let screen = state.screen_text(&body.terminal_id).unwrap_or_default();
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -1964,10 +1964,8 @@ async fn fleet_local_run(
 
     // Authoritative live screen; the terminal PERSISTS (never closed here). On
     // timeout, done=false/exitCode=null and the screen shows the in-progress run.
-    let screen = state
-        .screen_snapshot(&terminal_id)
-        .map(|b| String::from_utf8_lossy(&b).to_string())
-        .unwrap_or_default();
+    // Plain text — same reader-facing rationale as fleet_screen.
+    let screen = state.screen_text(&terminal_id).unwrap_or_default();
 
     (
         StatusCode::OK,
@@ -3358,6 +3356,32 @@ mod tests {
             restored.screen().cursor_position(),
             source.screen().cursor_position(),
             "snapshot replay must restore the cursor position"
+        );
+    }
+
+    // Pins WHY the reader-facing screen (`/fleet/screen`, fleet execute) renders from
+    // the grid via `contents()` instead of regex-stripping escapes out of
+    // `contents_formatted()`: the formatted blob encodes runs of blanks as cursor ops,
+    // so stripping silently collapses column alignment.
+    #[test]
+    fn plain_screen_text_keeps_alignment_that_escape_stripping_destroys() {
+        let mut p = vt100::Parser::new(24, 80, 0);
+        // Two columns, the second placed by absolute cursor positioning — the shape a
+        // full-screen TUI (status bar, sidebar) produces.
+        p.process(b"\x1b[1;1HNAME\x1b[1;40HSTATUS\r\n\x1b[2;1Hbuild\x1b[2;40Hok");
+
+        let text = p.screen().contents();
+        let first = text.lines().next().expect("a first row");
+        // The gap survives as real spaces, so the columns still line up.
+        assert!(first.starts_with("NAME"), "got {first:?}");
+        assert_eq!(first.find("STATUS"), Some(39), "STATUS must stay in column 40");
+
+        // Whereas the formatted blob carries no such spaces to preserve: it moves the
+        // cursor instead, so dropping escapes would butt the columns together.
+        let formatted = String::from_utf8_lossy(&p.screen().contents_formatted()).into_owned();
+        assert!(
+            !formatted.contains("NAME                                   STATUS"),
+            "formatted blob is expected to encode the gap as cursor motion, not spaces"
         );
     }
 

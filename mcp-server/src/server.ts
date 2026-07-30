@@ -310,7 +310,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "get_terminal_screen",
         {
-            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer). Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
+            description: "Get the authoritative LIVE screen of a terminal (local or a fleet peer) as readable plain text — ANSI stripped, column alignment preserved. Prefer this over get_terminal_output for watching progress. Returns { terminalId, title, running, screen }.",
             inputSchema: {
                 machineId: z.string().optional().describe("Target peer machineId. Omit for a terminal on this machine."),
                 terminalId: z.string().describe("The ID of the terminal whose live screen to read."),
