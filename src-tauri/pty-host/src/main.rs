@@ -11,8 +11,47 @@ mod session;
 mod transport;
 mod util;
 
+/// Restore normal CTRL+C processing for this process, so every hosted shell we
+/// spawn (and everything under it) can actually be interrupted.
+///
+/// Whoever launched us may have used `CREATE_NEW_PROCESS_GROUP`, which Microsoft
+/// documents as disabling CTRL+C for the whole descendant group — and that state
+/// is inherited by children, so a raw `\x03` would reach ConPTY but conhost would
+/// never raise `CTRL_C_EVENT` for the foreground program. Per `SetConsoleCtrlHandler`:
+/// a NULL handler with `Add=FALSE` "restores normal processing of CTRL+C input",
+/// and "this attribute of ignoring or processing CTRL+C is inherited by child
+/// processes". The GUI no longer passes that flag; this is belt-and-braces so the
+/// sidecar is correct however it was started. Best-effort: failure just leaves the
+/// inherited state as-is.
+#[cfg(windows)]
+fn restore_ctrl_c_processing() {
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    // SAFETY: plain Win32 call; NULL handler + FALSE is the documented
+    // "stop ignoring CTRL+C" form and touches no memory we own.
+    let ok = unsafe { SetConsoleCtrlHandler(None, 0) } != 0;
+    if !ok {
+        eprintln!(
+            "termflow-pty-host: WARNING: could not restore CTRL+C processing \
+             (os error {}); Ctrl+C may not interrupt hosted programs",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn restore_ctrl_c_processing() {}
+
 #[tokio::main]
 async fn main() {
+    // Must run BEFORE any session spawns: children inherit this process's
+    // ignore-vs-process CTRL+C attribute at creation time.
+    restore_ctrl_c_processing();
+
     // If we cannot outlive the GUI (Windows kill-on-close job / not a Unix
     // session leader), survival across GUI exit is not guaranteed. Log loudly
     // AND carry the verdict into the serve loop so an arm is REFUSED rather than
