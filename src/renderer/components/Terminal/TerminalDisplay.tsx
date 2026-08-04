@@ -236,6 +236,12 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // (stashed by attachExistingTerminal) fills the gap. Single-use — undefined
       // for a normal (non-detach) mount.
       initialPromptGate: terminalService.takePromptGateHandoff(terminalId),
+      // Reattach to a session that outlived this renderer (hot-swap update /
+      // webview reload): re-seed Win32-Input-Mode, whose ?9001h handshake no
+      // stream still carries. Single-use — false for a normal mount, and the
+      // engine ignores it off-Windows and whenever the cache entry already
+      // tracks the session itself.
+      initialWin32InputMode: terminalService.takeWin32InputModeHandoff(terminalId),
       onInputLineChanged: (text) => suggestRef.current.onInputLineChanged(text),
       onCommandSubmitted: (cmd) => commandHistoryService.record(cmd, getCwdSnapshot(terminalId)),
       onSuggestAction: (action) => suggestRef.current.onAction(action),

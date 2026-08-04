@@ -410,6 +410,96 @@ test('attach() to a NEW processId resets win32State (new PTY session, own handsh
   expect(calls.write).toEqual([]); // nothing written via the protocol path
 });
 
+// ---------------------------------------------------------------------------
+// Win32-Input-Mode across a hot-swap / renderer-reload REATTACH
+//
+// ConPTY asserts ?9001h exactly once, as the first chunk of a session. When the
+// app updates (PTY-host hot-swap) or the webview reloads, the renderer restarts
+// with an empty terminalCache while the PTY session lives on — and nothing
+// replays that handshake: the hydration snapshot carries screen CONTENT only,
+// and the persisted scrollback is parser-RENDERED rows (state.rs
+// persist_terminal_history), so no layer retains the mode. The pane then sent
+// legacy bytes to a ConPTY expecting records, and Escape silently died in agent
+// CLIs (confirmed live: toggling "Enhanced keyboard protocols" off reproduces
+// it exactly, down to Esc no longer clearing a PSReadLine prompt line).
+// ---------------------------------------------------------------------------
+
+test('hot-swap reattach: initialWin32InputMode keeps Escape a Win32 record on a first-ever mount', () => {
+  const { bridge, calls } = makeBridge();
+  // Fresh renderer process after an update: no cache entry for this cacheKey,
+  // and the surviving session's ?9001h was sent long before this renderer existed.
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 'hotswap-esc',
+    isWindows: true,
+    initialWin32InputMode: true,
+  });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('hotswap-esc');
+
+  const handled = term.keyHandler!(withKey({ key: 'Escape', keyCode: 27 }));
+
+  expect(handled).toBe(false); // encoded by us; xterm's bare \x1b suppressed
+  expect(calls.write).toEqual([['p1', '\x1b[27;1;27;1;0;1_']]);
+});
+
+test('without the seed a first-ever mount stays legacy (the pre-fix behavior this reproduces)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'hotswap-esc-off', isWindows: true });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('hotswap-esc-off');
+
+  const handled = term.keyHandler!(withKey({ key: 'Escape', keyCode: 27 }));
+
+  expect(handled).toBe(true); // legacy \x1b — the byte ConPTY does not deliver as Escape
+  expect(calls.write).toEqual([]);
+});
+
+test('initialWin32InputMode never overrides a cache entry that tracked the session itself', () => {
+  const { bridge, calls } = makeBridge();
+  const engine1 = new TerminalEngine(bridge, { cacheKey: 'seed-nooverride', isWindows: true });
+  engine1.mount(makeContainer());
+  engine1.attach('p1');
+  const term = mockTerm('seed-nooverride');
+  term.csiHandlers['?h']([9001]); // real handshake observed...
+  term.csiHandlers['?l']([9001]); // ...then the app turned it back off
+  engine1.unmount();
+
+  // A remount in the SAME renderer carries the seed, but the adopted state is
+  // first-hand knowledge and must win — re-enabling would send records to a
+  // session that stopped accepting them.
+  const engine2 = new TerminalEngine(bridge, {
+    cacheKey: 'seed-nooverride',
+    isWindows: true,
+    initialWin32InputMode: true,
+  });
+  engine2.mount(makeContainer());
+  engine2.attach('p1');
+
+  const handled = term.keyHandler!(withKey({ key: 'Escape', keyCode: 27 }));
+
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
+test('initialWin32InputMode is inert off-Windows (no ConPTY, no records)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 'seed-nonwin',
+    isWindows: false,
+    initialWin32InputMode: true,
+  });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('seed-nonwin');
+
+  const handled = term.keyHandler!(withKey({ key: 'Escape', keyCode: 27 }));
+
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
 // Internal workflow review (docs/review/052) found and verified this live:
 // win32InputModeActive() alone is not enough to gate the Win32 block. Kitty's
 // encodeKey deliberately returns null (defer to legacy) for bare/unmodified

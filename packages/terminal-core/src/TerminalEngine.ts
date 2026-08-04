@@ -716,6 +716,14 @@ export class TerminalEngine {
     // adopted (pre-existing) instance — it just rebinds the closure.
     if (cached?.kbState) this.kbState = cached.kbState;
     if (cached?.win32State) this.win32State = cached.win32State;
+    // …and when there is NO prior mount to adopt from because the whole renderer
+    // restarted (hot-swap update / webview reload) while the PTY session lived
+    // on, seed it from the host instead: that session's ?9001h is long gone from
+    // every stream we can still read (see initialWin32InputMode). Strictly a
+    // first-ever-mount fallback — the adopted state above is first-hand and wins.
+    else if (this.opts.initialWin32InputMode && this.isWindowsPlatform()) {
+      this.win32State.enable();
+    }
 
     const fontSize = this.opts.fontSize ?? DEFAULT_FONT_SIZE;
 

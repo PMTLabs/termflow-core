@@ -148,6 +148,16 @@ export interface TerminalEngineOptions {
   // its own yet. Only consulted on this cacheKey's first-ever mount in this
   // window (a cache entry with its own promptGate always wins).
   initialPromptGate?: PromptGate | null;
+  // Windows: seed Win32-Input-Mode as ACTIVE on this cacheKey's first-ever mount,
+  // for a pane REATTACHING to a PTY session that outlived this renderer (app
+  // update via PTY-host hot-swap, or a webview reload). ConPTY asserts ?9001h
+  // once, as the first chunk of a session, and nothing replays it: the hydration
+  // snapshot reproduces screen CONTENT only, and the persisted scrollback is
+  // parser-rendered rows. Without the seed the pane sends legacy bytes to a
+  // ConPTY that expects records and Escape never arrives. Ignored off-Windows,
+  // and a cache entry with its own tracked state always wins (that's first-hand
+  // knowledge); self-heals from any later ?9001l / DECSTR.
+  initialWin32InputMode?: boolean;
   // Current prompt input changed (shell echo applied). '' means "no input /
   // submitted / suppressed" — the host closes the popup on it.
   onInputLineChanged?(text: string): void;

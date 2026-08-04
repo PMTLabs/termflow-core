@@ -322,6 +322,12 @@ class StateManagerClass {
           reattachPromptGate(keep.promptHook, false),
         );
         if (keep.promptHook === true) markArmProbePending(rendererId);
+        // This PTY predates the current renderer, so its one-shot ?9001h is gone
+        // from every stream we can still read — re-seed Win32-Input-Mode for the
+        // pane's mount, or Escape dies in whatever is running in it. Unlike the
+        // gate above this is NOT hook-dependent: ConPTY asserts the mode for every
+        // Windows session, hookless shells (cmd, ssh) included.
+        terminalService.markReattachedSession(rendererId);
         for (const dup of stale) orphansToClose.push(dup.processId);
       }
 

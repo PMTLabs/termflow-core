@@ -15,6 +15,10 @@ class TerminalServiceClass {
   // (as TerminalEngine's initialPromptGate option) before the engine's own
   // terminalCache entry exists in this window.
   private promptGateHandoff: Map<string, PromptGate> = new Map();
+  // Terminals reattaching to a PTY that outlived this renderer (hot-swap update /
+  // webview reload). Consumed once by TerminalDisplay as `initialWin32InputMode`;
+  // see markReattachedSession.
+  private win32InputModeHandoff: Set<string> = new Set();
 
   constructor() {
     // Initialize listeners immediately and synchronously
@@ -225,6 +229,28 @@ class TerminalServiceClass {
     const gate = this.promptGateHandoff.get(terminalId);
     this.promptGateHandoff.delete(terminalId);
     return gate;
+  }
+
+  /**
+   * Mark `terminalId` as REATTACHING to a PTY session that outlived this renderer
+   * (hot-swap update or webview reload), so its next engine mount re-seeds
+   * Win32-Input-Mode. ConPTY announced ?9001h once at session start, long before
+   * this renderer existed, and no stream we can still read replays it — without
+   * the seed the pane sends legacy bytes to a ConPTY expecting records and Escape
+   * never reaches the app. Platform-agnostic on purpose: the engine ignores it
+   * off-Windows, so callers stay dumb.
+   */
+  markReattachedSession(terminalId: string): void {
+    this.win32InputModeHandoff.add(terminalId);
+  }
+
+  /**
+   * Single-use companion to markReattachedSession, consumed by TerminalDisplay as
+   * the engine's `initialWin32InputMode` — so an ordinary same-session remount
+   * (which adopts the live state from the terminalCache) never gets seeded.
+   */
+  takeWin32InputModeHandoff(terminalId: string): boolean {
+    return this.win32InputModeHandoff.delete(terminalId);
   }
 
   /**

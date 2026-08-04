@@ -281,6 +281,15 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               terminalId,
               reattachPromptGate(seed.promptHook, seed.atPrompt),
             );
+            // A drained seed IS the "backend reattached this session" signal, so
+            // it also re-seeds Win32-Input-Mode: ConPTY announced ?9001h once,
+            // before this renderer (and this core) existed, and neither the
+            // hydration snapshot nor the persisted scrollback replays a mode.
+            // Without it the pane sends legacy bytes to a ConPTY expecting
+            // records and Escape never reaches the agent CLI that survived the
+            // update. Hook-independent — ConPTY asserts the mode for every
+            // Windows session, hookless shells included.
+            terminalService.markReattachedSession(terminalId);
           }
         } catch (e) {
           console.warn('TerminalPane: reattach prompt-gate seed skipped:', e);
