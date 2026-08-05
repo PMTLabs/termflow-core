@@ -271,6 +271,42 @@ export const enableWebGLGlobally = () => {
   setWebGLGloballyDisabled(false);
 };
 
+// Force every live WebGL terminal to re-upload its glyph atlas to the GPU.
+//
+// xterm's WebGL renderer draws text by sampling a texture atlas, and uploads that
+// texture only when the CPU-side page version changes (GlyphRenderer:
+// `atlas.pages[i].version !== _atlasTextures[i].version`). A system STANDBY resets
+// the GPU device and discards the texture's CONTENTS, but leaves the CPU-side atlas
+// object — and therefore its version — untouched. xterm has no way to notice, so it
+// never re-uploads: background rectangles (which need no texture) keep drawing
+// correctly while every glyph samples an empty texture. The pane comes back showing
+// the right background colour and NO text.
+//
+// Nothing self-heals it either, because only a never-before-rasterized glyph bumps
+// the version — every character already in the atlas stays invisible indefinitely.
+// (The user-visible workaround was changing the color scheme, which reaches the same
+// repair by a different road: applyColorSchemaToTerminals → xterm's _handleColorChange
+// → _refreshCharAtlas → GlyphRenderer.setAtlas, which resets each texture version to -1.)
+//
+// clearTextureAtlas() clears each atlas page (version++) and requests a redraw, which
+// is what forces the re-upload. Cost is one glyph re-rasterization pass, so this is
+// only called on resume signals — see App.tsx (`system:resume` / `session:reconnect`).
+//
+// Terminals on the DOM renderer (WebGL disabled, or the addon already disposed by the
+// context-loss handler in webgl.ts) have no addon and are skipped: they never had the
+// problem. Guarded per entry like disableWebGLGlobally — one dead addon must not stop
+// the rest of the panes from being repaired.
+export const refreshGlyphAtlases = (): void => {
+  terminalCache.forEach((cached, terminalId) => {
+    if (!cached.webglAddon) return;
+    try {
+      cached.webglAddon.clearTextureAtlas();
+    } catch (e) {
+      console.warn(`terminal-core/cache: Error refreshing glyph atlas for ${terminalId}:`, e);
+    }
+  });
+};
+
 // Apply a color schema (xterm ITheme-shaped) to every live cached terminal,
 // e.g. when the user changes the Settings color schema. Mirrors
 // disableWebGLGlobally's "iterate the cache, mutate in place" shape.

@@ -13,6 +13,15 @@
 //! switches slipped through and the bell still rang. Here we hook the authoritative
 //! signal — `WM_WTSSESSION_CHANGE` — and emit `session:reconnect` so the renderer
 //! arms the same reconnect cooldown it uses for `visibilitychange`.
+//!
+//! The same window subclass also hooks `WM_POWERBROADCAST` and emits `system:resume`
+//! when the machine wakes from standby. That is a rendering concern, not a bell one:
+//! a suspend resets the GPU device and discards the WebGL glyph-atlas texture, which
+//! xterm cannot detect and therefore never re-uploads — panes come back with the
+//! correct background and no text. The renderer repairs it by forcing an atlas
+//! re-upload (see `refreshGlyphAtlases` in terminal-core). A wake does NOT reliably
+//! produce a session change (only a locked machine emits one), so this needs its own
+//! signal.
 
 #[cfg(windows)]
 use std::sync::OnceLock;
@@ -38,6 +47,15 @@ const WTS_REMOTE_CONNECT: u32 = 0x3;
 #[cfg(windows)]
 const WTS_SESSION_UNLOCK: u32 = 0x8;
 
+// WM_POWERBROADCAST wParam code (winuser.h), defined locally for the same reason as
+// the WTS_* codes above. PBT_APMRESUMEAUTOMATIC is delivered on EVERY resume from
+// sleep/hibernate, whether or not a user is present — which is exactly the coverage
+// we want. Its sibling PBT_APMRESUMESUSPEND (0x7) is deliberately NOT handled: it is
+// delivered only for user-triggered resumes, so it adds no coverage and would just
+// emit a duplicate event (and a second atlas re-rasterization) on those wakes.
+#[cfg(windows)]
+const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
+
 #[cfg(windows)]
 unsafe extern "system" fn subclass_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -48,7 +66,19 @@ unsafe extern "system" fn subclass_proc(
     _dwrefdata: usize,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::Shell::DefSubclassProc;
-    use windows::Win32::UI::WindowsAndMessaging::WM_WTSSESSION_CHANGE;
+    use windows::Win32::UI::WindowsAndMessaging::{WM_POWERBROADCAST, WM_WTSSESSION_CHANGE};
+
+    if msg == WM_POWERBROADCAST {
+        let code = wparam.0 as u32;
+        log::info!("session_notify: WM_POWERBROADCAST code={code}");
+        if code == PBT_APMRESUMEAUTOMATIC {
+            if let Some(app) = APP_HANDLE.get() {
+                if let Err(e) = app.emit("system:resume", code) {
+                    log::warn!("session_notify: emit system:resume failed: {e}");
+                }
+            }
+        }
+    }
 
     if msg == WM_WTSSESSION_CHANGE {
         let code = wparam.0 as u32;
@@ -69,7 +99,10 @@ unsafe extern "system" fn subclass_proc(
 }
 
 /// Register for session-change notifications on `window` and subclass it so
-/// `WM_WTSSESSION_CHANGE` is translated into a `session:reconnect` Tauri event.
+/// `WM_WTSSESSION_CHANGE` is translated into a `session:reconnect` Tauri event and
+/// `WM_POWERBROADCAST` (resume from standby) into a `system:resume` one. Only the
+/// session notifications need registering — `WM_POWERBROADCAST` is broadcast to
+/// top-level windows already, so the subclass alone is enough to receive it.
 /// Best-effort: every failure is logged and never fatal. No-op off Windows.
 #[cfg(windows)]
 pub fn install(window: &tauri::WebviewWindow, app: AppHandle) {
