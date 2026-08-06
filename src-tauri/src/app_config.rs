@@ -9,30 +9,35 @@ pub fn is_dev() -> bool {
     cfg!(debug_assertions)
 }
 
-/// Per-instance config filename so dev and prod never overwrite each other.
-pub fn instance_config_name() -> &'static str {
-    if is_dev() {
-        "config.dev.json"
-    } else {
-        "config.json"
-    }
+/// Per-instance config filename so dev and prod never overwrite each other,
+/// and so two profiles never share one settings file.
+pub fn instance_config_name() -> String {
+    dev_file("config.json")
 }
 
 /// Suffix a data file/dir name with `.dev` in debug builds so a debug instance
-/// never shares mutable state with an installed release running for production.
-/// Release names are unchanged. Mirrors the existing `config.dev.json` /
-/// `history.dev.db` convention.
+/// never shares mutable state with an installed release running for production,
+/// then with the profile identity so two instances never share one artifact.
+/// Release default-profile names are unchanged. Mirrors the existing
+/// `config.dev.json` / `history.dev.db` convention.
+///
+/// This is the single choke point for mutable artifact names: every caller that
+/// resolves one goes through here, so a new profile dimension only has to be
+/// added once (plan 011 Task 3).
 ///
 /// - `dev_file("layout.json")` → `"layout.dev.json"` (dev) / `"layout.json"` (release)
 /// - `dev_file("recordings")`  → `"recordings.dev"`   (dev) / `"recordings"`   (release)
+/// - under `--profile work`    → `"layout.work.json"`, `"recordings.work"`
 pub fn dev_file(name: &str) -> String {
-    if !is_dev() {
-        return name.to_string();
-    }
-    match name.rsplit_once('.') {
-        Some((stem, ext)) => format!("{stem}.dev.{ext}"),
-        None => format!("{name}.dev"),
-    }
+    let name = if is_dev() {
+        match name.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}.dev.{ext}"),
+            None => format!("{name}.dev"),
+        }
+    } else {
+        name.to_string()
+    };
+    crate::profile::scoped_file(&name)
 }
 
 pub fn default_api_port() -> u16 {

@@ -682,8 +682,7 @@ fn spawn_pipeline_watchdog(state: AppState) {
 fn history_db_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let dir = app.path().app_data_dir().ok()?;
     let _ = std::fs::create_dir_all(&dir);
-    let name = if crate::app_config::is_dev() { "history.dev.db" } else { "history.db" };
-    Some(dir.join(name))
+    Some(dir.join(crate::app_config::dev_file("history.db")))
 }
 
 // NOTE: the per-terminal persist logic lives in `AppState::persist_terminal_history`
@@ -798,6 +797,23 @@ pub fn run() {
   panic_hook::install();
 
   let args = Args::parse();
+
+  // Resolve the instance identity BEFORE anything resolves a path. Every mutable
+  // artifact name flows from it (app_config::dev_file), so a late resolution
+  // would silently write the wrong profile's files.
+  let identity = match profile::ProfileIdentity::resolve(
+    args.profile.as_deref(),
+    profile::elevation(),
+    app_config::is_dev(),
+  ) {
+    Ok(id) => id,
+    Err(e) => {
+      eprintln!("TermFlow: {e}");
+      std::process::exit(2);
+    }
+  };
+  profile::set_current(identity.clone());
+
   let is_headless = args.headless;
   // Runtime-only port overrides (B5): applied to the loaded config before binding,
   // never persisted — so a second instance can start on free ports without touching
@@ -805,6 +821,11 @@ pub fn run() {
   let cli_api_port = args.api_port;
   let cli_mcp_port = args.mcp_port;
   let initial_open_path = args.path.or(args.positional_path);
+
+  // Hoisted so the log target can be named from the real product name rather
+  // than a second hardcoded copy of it.
+  let context = tauri::generate_context!();
+  let log_file_name = identity.scoped_stem(&context.package_info().name);
 
   let mut builder = tauri::Builder::default();
   #[cfg(desktop)]
@@ -844,6 +865,15 @@ pub fn run() {
   builder
     .plugin(
       tauri_plugin_log::Builder::default()
+        // Same two targets the plugin defaults to, but with the log-dir file
+        // named per profile so two instances never fight over one rotating
+        // file. The default identity yields the product name unchanged.
+        .targets([
+          tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+          tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+            file_name: Some(log_file_name),
+          }),
+        ])
         .level(log::LevelFilter::Info)  // Only INFO and above
         .level_for("tokio_tungstenite", log::LevelFilter::Warn)
         .level_for("tungstenite", log::LevelFilter::Warn)
@@ -1024,18 +1054,30 @@ pub fn run() {
                     // Spawn the peering fabric sidecar. Spawn failure (binary absent /
                     // not bundled) is logged and NON-FATAL — the open-core app runs
                     // fine with peering "not installed".
-                    let fabric_state = api_state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) =
-                            crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
-                                .await
-                        {
-                            log::warn!(
-                                "[FABRIC] termflow-fabric not started (peering not installed): {}",
-                                e
-                            );
-                        }
-                    });
+                    //
+                    // Only the primary instance runs it: the fabric owns machine-wide
+                    // singletons (its identity keypair in the OS keychain and its peer
+                    // listener port), which are not profile-scoped. A second profile
+                    // starting one would contend for both.
+                    if crate::profile::current().is_primary() {
+                        let fabric_state = api_state.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
+                                    .await
+                            {
+                                log::warn!(
+                                    "[FABRIC] termflow-fabric not started (peering not installed): {}",
+                                    e
+                                );
+                            }
+                        });
+                    } else {
+                        log::info!(
+                            "[FABRIC] Not started: profile '{}' is not the primary instance",
+                            crate::profile::current().name
+                        );
+                    }
                     crate::api_server::start_api_server(
                         api_state,
                         listener,
@@ -1256,7 +1298,7 @@ pub fn run() {
             commands::refresh_menu(window.app_handle());
         }
     })
-    .build(tauri::generate_context!())
+    .build(context)
     .expect("error while building tauri application")
     .run(|app_handle, event| {
         if let RunEvent::Exit = event {
