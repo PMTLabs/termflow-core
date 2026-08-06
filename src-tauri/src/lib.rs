@@ -21,6 +21,7 @@ pub mod layout_endpoints;
 pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
+mod gpu_preference;
 mod native_notify;
 mod panic_hook;
 mod shell_integration;
