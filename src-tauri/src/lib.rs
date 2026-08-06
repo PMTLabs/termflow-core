@@ -3,6 +3,7 @@ pub mod context_menu;
 pub mod session_notify;
 pub mod app_config;
 pub mod profile;
+pub mod instance_lock;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
@@ -232,8 +233,9 @@ struct Args {
    /// Run in headless mode (no GUI)
    #[arg(long, default_value_t = false)]
    headless: bool,
-   /// Override the API server port for THIS run — e.g. to launch a second instance
-   /// without a port conflict. Runtime-only; not persisted to the shared config.
+   /// Override the API server port for THIS run. Runtime-only; not persisted.
+   /// This no longer bypasses single-instance (D6) — use `--profile` for a
+   /// second instance, which picks free ports on its own.
    #[arg(long)]
    api_port: Option<u16>,
    /// Override the MCP server port for THIS run. Runtime-only; not persisted.
@@ -830,19 +832,21 @@ pub fn run() {
   let mut builder = tauri::Builder::default();
   #[cfg(desktop)]
   {
-    // Single-instance is enforced for RELEASE only. The plugin keys its lock on
-    // the app identifier (shared by debug + release), so enforcing it in dev
-    // would block a debug build from running alongside the installed release
-    // used for production. Dev is fully isolated otherwise (config.dev.json,
-    // history.dev.db, layout.dev.json, dev ports, …), so a debug instance can
-    // safely coexist. Release keeps single-instance so a second production
-    // launch focuses the existing window instead of starting a duplicate.
-    if !crate::app_config::is_dev()
-      && !args.headless
-      && args.api_port.is_none()
-      && args.mcp_port.is_none()
-    {
-      builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    // Single-instance is enforced per PROFILE IDENTITY (channel, name, integrity),
+    // and unconditionally for GUI processes — the `--api-port`/`--mcp-port` bypass
+    // is gone (D6): it existed only as the pre-profile escape hatch for a second
+    // instance, and letting two processes share one identity puts them back on one
+    // pipe, lock and pair of ports.
+    //
+    // Two exemptions remain, both deliberate:
+    //   * headless — no window to focus, so there is nothing to relay to;
+    //   * dev builds — a debug build must be able to run beside the installed
+    //     release used for production. Dev is isolated by its own channel
+    //     ("dev"), so it never shares an artifact with release anyway.
+    // In both cases two processes CAN share one identity and would contend for
+    // its pipe; that is the accepted cost of each exemption.
+    if !crate::app_config::is_dev() && !args.headless {
+      let on_second_launch = |app: &tauri::AppHandle, argv: Vec<String>, _cwd: String| {
         let path = Args::try_parse_from(argv)
           .ok()
           .and_then(|args| args.path.or(args.positional_path));
@@ -858,7 +862,19 @@ pub fn run() {
           // creates one if none exist (e.g. tray-only or the main window was detached).
           show_or_focus_main_window(app);
         }
-      }));
+      };
+
+      #[cfg(windows)]
+      {
+        builder = builder.plugin(instance_lock::init(&identity, Box::new(on_second_launch)));
+      }
+      // Unix keeps the identifier-keyed plugin, which is exactly the previous
+      // behaviour for the primary profile. A named profile there is unenforced
+      // for now — see instance_lock.rs.
+      #[cfg(not(windows))]
+      if identity.is_primary() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
+      }
     }
   }
 
