@@ -6,7 +6,8 @@ use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::Request,
     http::StatusCode,
-    http::header::AUTHORIZATION,
+    http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN},
+    http::{HeaderValue, Method},
     middleware::{self, Next},
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,89 @@ fn ct_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// The renderer's own origins. Windows/Android serve the app over
+/// `http(s)://tauri.localhost`; macOS/Linux use the `tauri://localhost` custom
+/// protocol. In debug the renderer is served by the Vite dev server declared as
+/// `devUrl` in `tauri.conf.json`, so it must be allowed too — omitting it 403s
+/// the dev renderer on day one.
+const APP_ORIGINS: &[&str] = &[
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "tauri://localhost",
+];
+#[cfg(debug_assertions)]
+const DEV_ORIGIN: &str = "http://localhost:42010";
+
+fn origin_is_app(origin: &str) -> bool {
+    if APP_ORIGINS.contains(&origin) {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    {
+        return origin == DEV_ORIGIN;
+    }
+    #[cfg(not(debug_assertions))]
+    false
+}
+
+/// Reject a `Host` that is not a loopback name. Defence in depth against DNS
+/// rebinding: a page on `attacker.example` (resolving to 127.0.0.1) reaches a
+/// loopback-bound server, and requests it makes without an `Origin` header would
+/// otherwise pass. Absent header ⇒ nothing to validate.
+fn host_is_loopback(host: Option<&str>) -> bool {
+    let Some(h) = host else { return true };
+    let name = if let Some(rest) = h.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, _)) => inner,
+            None => return false,
+        }
+    } else {
+        h.rsplit_once(':').map(|(n, _)| n).unwrap_or(h)
+    };
+    name == "localhost"
+        || name == "::1"
+        || name
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
+
+/// Is this request's provenance acceptable?
+///
+/// D1 keeps the loopback API unauthenticated, so provenance is what stops a web
+/// page in the user's browser from driving the user's terminals. A request with
+/// NO `Origin` — curl, the MCP sidecar, user scripts — is still allowed: those
+/// are the documented clients and a browser always sends one.
+fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
+    host_is_loopback(host) && origin.map(origin_is_app).unwrap_or(true)
+}
+
+/// Explicit CORS, replacing `CorsLayer::permissive()`. Permissive echoed back
+/// whatever `Origin` it was given, so any web page could read API responses —
+/// the provenance gate above would be pointless if the browser were still told
+/// the response is readable by anyone.
+fn cors_layer() -> CorsLayer {
+    let mut origins: Vec<HeaderValue> = APP_ORIGINS
+        .iter()
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+    #[cfg(debug_assertions)]
+    if let Ok(v) = HeaderValue::from_str(DEV_ORIGIN) {
+        origins.push(v);
+    }
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+        .max_age(std::time::Duration::from_secs(600))
 }
 
 /// Start the API server on an already-bound listener. Binding happens in the
@@ -180,7 +264,35 @@ pub async fn start_api_server(
                 }
             }
         }))
-        .layer(CorsLayer::permissive())
+        // Provenance gate, outside the auth gate so it runs first. Applies in
+        // every mode: when the loopback API is unauthenticated (D1) this is the
+        // only thing standing between a web page and the user's terminals.
+        .layer(middleware::from_fn(move |req: Request, next: Next| async move {
+            let origin = req
+                .headers()
+                .get(ORIGIN)
+                .and_then(|h| h.to_str().ok())
+                .map(str::to_owned);
+            let host = req
+                .headers()
+                .get(HOST)
+                .and_then(|h| h.to_str().ok())
+                .map(str::to_owned);
+            // When exposed the listener is deliberately non-loopback, so the
+            // Host is legitimately not a loopback name; only the Origin applies.
+            let host = if expose { None } else { host };
+            if origin_allowed(origin.as_deref(), host.as_deref()) {
+                next.run(req).await
+            } else {
+                log::warn!(
+                    "[API] rejected request from origin={:?} host={:?}",
+                    origin,
+                    host
+                );
+                (StatusCode::FORBIDDEN, "forbidden origin").into_response()
+            }
+        }))
+        .layer(cors_layer())
         .with_state(state);
 
     let local = listener.local_addr();
@@ -2982,6 +3094,54 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_release_and_dev_renderers_are_both_allowed() {
+        assert!(origin_allowed(Some("http://tauri.localhost"), Some("127.0.0.1:42031")));
+        assert!(origin_allowed(Some("https://tauri.localhost"), Some("127.0.0.1:42031")));
+        // macOS/Linux serve the app over the custom protocol instead.
+        assert!(origin_allowed(Some("tauri://localhost"), Some("127.0.0.1:42031")));
+        // tauri.conf.json:9 -- rev 1 omitted this and would have broken dev.
+        #[cfg(debug_assertions)]
+        assert!(origin_allowed(Some("http://localhost:42010"), Some("127.0.0.1:42031")));
+    }
+
+    #[test]
+    fn requests_from_a_web_page_are_rejected() {
+        assert!(!origin_allowed(Some("https://evil.example"), Some("127.0.0.1:42031")));
+        assert!(!origin_allowed(Some("http://localhost:3000"), Some("127.0.0.1:42031")));
+        // Near-misses on the app origin must not slip through a prefix check.
+        assert!(!origin_allowed(Some("http://tauri.localhost.evil.example"), None));
+        assert!(!origin_allowed(Some("http://evil.tauri.localhost"), None));
+    }
+
+    #[test]
+    fn requests_with_no_origin_are_allowed() {
+        // D1: curl, the MCP sidecar and user scripts are unchanged.
+        assert!(origin_allowed(None, Some("127.0.0.1:42031")));
+    }
+
+    #[test]
+    fn every_allowed_origin_is_a_legal_header_value() {
+        // `cors_layer` silently drops an origin that fails to parse, which would
+        // 403 that renderer at runtime with no compile-time signal. Build it here
+        // and check each candidate converts.
+        for o in APP_ORIGINS {
+            assert!(HeaderValue::from_str(o).is_ok(), "unusable origin: {o}");
+        }
+        #[cfg(debug_assertions)]
+        assert!(HeaderValue::from_str(DEV_ORIGIN).is_ok());
+        let _ = cors_layer();
+    }
+
+    #[test]
+    fn dns_rebinding_hosts_are_rejected() {
+        assert!(!origin_allowed(None, Some("attacker.example")));
+        assert!(origin_allowed(None, Some("localhost:42031")));
+        assert!(origin_allowed(None, Some("[::1]:42031")));
+        assert!(origin_allowed(None, Some("127.0.0.1")));
+        assert!(origin_allowed(None, None));
+    }
 
     #[test]
     fn test_dedup_preserve_order_keeps_first_occurrence() {
