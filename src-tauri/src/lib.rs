@@ -1148,6 +1148,7 @@ pub fn run() {
         commands::read_legal_document,
         commands::quit_app,
         commands::save_config,
+        commands::merge_config,
         commands::load_config,
         commands::close_terminal,
         commands::prune_terminal_history,

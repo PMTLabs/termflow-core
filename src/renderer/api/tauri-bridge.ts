@@ -414,11 +414,12 @@ const tauriBridge: ElectronAPI = {
     }
   },
 
+  // Merge in the BACKEND, under an inter-process lock. Reading the whole config
+  // here and saving it back lost every key written in between — by the backend,
+  // or by another instance now that profiles let two run at once.
   updateConfig: async (updates) => {
     try {
-      const current = await tauriBridge.getConfig();
-      const newConfig = { ...current, ...updates };
-      await invoke('save_config', { config: JSON.stringify(newConfig, null, 2) });
+      await invoke('merge_config', { updates });
     } catch (e) {
       console.error('Failed to update config:', e);
     }

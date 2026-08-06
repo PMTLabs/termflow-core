@@ -91,6 +91,9 @@ if-addrs = "0.13"
 # Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
 # (not a workspace member) to avoid disturbing the existing single-package build.
 termflow-pty-protocol = { path = "pty-protocol" }
+# Advisory INTER-PROCESS file locking for the config read-merge-write window. A
+# process-local mutex cannot help here: two profiles are two processes.
+fs4 = "1.1"
 
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.

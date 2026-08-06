@@ -750,16 +750,31 @@ pub fn get_terminal_size(state: State<'_, AppState>, id: String) -> Result<Termi
     }
 }
 
+/// Replace the whole settings blob. Prefer [`merge_config`]: this clobbers keys
+/// written by anyone else since the caller read the file.
 #[tauri::command]
 pub async fn save_config(app_handle: tauri::AppHandle, config: String) -> Result<(), String> {
-    use tauri::Manager;
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    // Per-instance filename (config.json / config.dev.json) so dev and prod
-    // settings — not just the network block — stay isolated.
-    let config_path = config_dir.join(crate::app_config::instance_config_name());
-    std::fs::write(config_path, config).map_err(|e| e.to_string())?;
-    Ok(())
+    // Through app_config::config_path, never a hand-built one: this used to
+    // resolve the filename itself, so any change to the naming rule split
+    // settings across two files.
+    let path = crate::app_config::config_path(&app_handle)?;
+    crate::app_config::write_atomic(&path, &config)
+}
+
+/// Merge top-level settings keys, leaving every other key alone. The renderer
+/// used to read the whole config, merge in JS and save it back — a lost update
+/// whenever the backend (or another instance) wrote in between.
+#[tauri::command]
+pub async fn merge_config(
+    app_handle: tauri::AppHandle,
+    updates: serde_json::Value,
+) -> Result<(), String> {
+    let updates = updates
+        .as_object()
+        .ok_or_else(|| "merge_config expects a JSON object".to_string())?
+        .clone();
+    let path = crate::app_config::config_path(&app_handle)?;
+    crate::app_config::merge_many_locked(&path, &updates)
 }
 
 /// Backlog 011: record one submitted command into the global command history.
@@ -909,11 +924,9 @@ pub fn show_activity_notification(
 
 #[tauri::command]
 pub async fn load_config(app_handle: tauri::AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    let config_path = config_dir.join(crate::app_config::instance_config_name());
-    if config_path.exists() {
-        std::fs::read_to_string(config_path).map_err(|e| e.to_string())
+    let path = crate::app_config::config_path(&app_handle)?;
+    if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())
     } else {
         Ok("{}".to_string())
     }
