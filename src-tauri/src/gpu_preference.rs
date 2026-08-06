@@ -17,6 +17,8 @@ const WRY_DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartSc
 
 #[cfg(any(windows, test))]
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 #[cfg(any(windows, test))]
 const FORCE_HIGH: &str = "--force_high_performance_gpu";
@@ -200,10 +202,142 @@ fn resolve_adapter(requested: AdapterId) -> Option<Preference> {
     }
 }
 
+/// Walk the candidates and return the first that actually expresses a GPU
+/// decision. A readable entry that says nothing about GPU selection, or a read
+/// that fails, must not mask a real preference on a later candidate.
+#[cfg(any(windows, test))]
+fn search(candidates: &[PathBuf], read: impl Fn(&Path) -> Option<String>) -> Preference {
+    for path in candidates {
+        let Some(value) = read(path) else { continue };
+
+        #[cfg(windows)]
+        let preference = parse_with(&value, resolve_adapter);
+        #[cfg(not(windows))]
+        let preference = parse_with(&value, |_| None);
+
+        if preference.is_decision() {
+            log::info!(
+                "gpu_preference: resolved {preference:?} from {}",
+                path.display()
+            );
+            return preference;
+        }
+    }
+    Preference::NoPreference
+}
+
+#[cfg(windows)]
+const REG_PATH: &str = r"Software\Microsoft\DirectX\UserGpuPreferences";
+
+#[cfg(windows)]
+fn read_registry(path: &Path) -> Option<String> {
+    let key = windows_registry::CURRENT_USER.open(REG_PATH).ok()?;
+    key.get_string(path.to_str()?).ok()
+}
+
+#[cfg(windows)]
+fn resolve() -> Preference {
+    let Ok(exe) = std::env::current_exe() else {
+        log::info!("gpu_preference: current_exe() unavailable; using the default");
+        return Preference::NoPreference;
+    };
+
+    let candidates = candidate_paths(&exe, crate::native_notify::is_velopack_install());
+    let preference = search(&candidates, read_registry);
+
+    if !preference.is_decision() {
+        log::info!(
+            "gpu_preference: no OS graphics preference registered for {}; defaulting to high performance",
+            exe.display()
+        );
+    }
+    preference
+}
+
+/// Browser arguments for every webview in this process.
+///
+/// INVARIANT: every webview creation site must pass this exact string. WebView2
+/// environments sharing a user data folder must agree on
+/// `AdditionalBrowserArguments`; a mismatch fails creation with
+/// `ERROR_INVALID_STATE` (0x8007139F) and the window does not open. The `OnceLock`
+/// is what guarantees one value -- resolution happens once, every caller gets it.
+#[cfg(windows)]
+pub fn browser_args() -> &'static str {
+    static ARGS: OnceLock<String> = OnceLock::new();
+    ARGS.get_or_init(|| format!("{WRY_DEFAULT_ARGS} {}", resolve().switch()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn an_entry_without_a_gpu_field_does_not_mask_the_next_candidate() {
+        let first = PathBuf::from("a.exe");
+        let second = PathBuf::from("b.exe");
+        let candidates = vec![first.clone(), second];
+        let read = |p: &Path| {
+            if p == first {
+                Some("AutoHDREnable=1;".to_string())
+            } else {
+                Some("GpuPreference=1;".to_string())
+            }
+        };
+        assert_eq!(search(&candidates, read), Preference::Low);
+    }
+
+    #[test]
+    fn a_failed_read_does_not_mask_the_next_candidate() {
+        let first = PathBuf::from("a.exe");
+        let second = PathBuf::from("b.exe");
+        let candidates = vec![first.clone(), second];
+        let read = |p: &Path| {
+            if p == first {
+                None
+            } else {
+                Some("GpuPreference=1;".to_string())
+            }
+        };
+        assert_eq!(search(&candidates, read), Preference::Low);
+    }
+
+    #[test]
+    fn let_windows_decide_on_the_first_candidate_stops_the_search() {
+        let first = PathBuf::from("a.exe");
+        let second = PathBuf::from("b.exe");
+        let candidates = vec![first.clone(), second];
+        let read = |p: &Path| {
+            if p == first {
+                Some("GpuPreference=0;".to_string())
+            } else {
+                Some("GpuPreference=1;".to_string())
+            }
+        };
+        assert_eq!(search(&candidates, read), Preference::WindowsDefault);
+    }
+
+    #[test]
+    fn exhausting_every_candidate_expresses_nothing() {
+        let candidates = vec![PathBuf::from("a.exe")];
+        assert_eq!(search(&candidates, |_| None), Preference::NoPreference);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_args_preserve_wry_defaults_and_add_exactly_one_switch() {
+        let args = browser_args();
+        assert!(args.starts_with(WRY_DEFAULT_ARGS), "got: {args}");
+        assert_eq!(args.matches("--force_").count(), 1, "got: {args}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn every_call_returns_equal_content() {
+        // The real WebView2 requirement is content equality across all four
+        // creation sites; pointer identity is a supporting detail, not the contract.
+        assert_eq!(browser_args(), browser_args());
+    }
 
     #[test]
     fn velopack_install_also_checks_the_stub_path() {
