@@ -16,6 +16,9 @@
 const WRY_DEFAULT_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 
 #[cfg(any(windows, test))]
+use std::path::{Path, PathBuf};
+
+#[cfg(any(windows, test))]
 const FORCE_HIGH: &str = "--force_high_performance_gpu";
 #[cfg(any(windows, test))]
 const FORCE_LOW: &str = "--force_low_power_gpu";
@@ -71,6 +74,33 @@ fn parse_gpu_preference(value: &str) -> Preference {
     }
 }
 
+/// Paths the preference may have been registered against, most specific first.
+///
+/// A Velopack install carries the binary at both `…\TermFlow\current\termflow.exe`
+/// and the stub `…\TermFlow\termflow.exe`, and the Windows Settings UI records
+/// whichever one the user browsed to -- checking only one would miss half the cases.
+///
+/// `is_velopack` must come from an actual layout check, not from the directory
+/// merely being named `current`; otherwise an unrelated `…\current\termflow.exe`
+/// would read a stranger's sibling entry.
+#[cfg(any(windows, test))]
+fn candidate_paths(exe: &Path, is_velopack: bool) -> Vec<PathBuf> {
+    let mut paths = vec![exe.to_path_buf()];
+
+    if is_velopack {
+        if let (Some(parent), Some(file_name)) = (exe.parent(), exe.file_name()) {
+            if let Some(root) = parent.parent() {
+                let stub = root.join(file_name);
+                if stub != exe {
+                    paths.push(stub);
+                }
+            }
+        }
+    }
+
+    paths
+}
+
 /// The identity Windows records for an explicitly chosen adapter:
 /// `SpecificAdapter=<vendor>&<device>&<subsystem>`, all hex.
 #[cfg(any(windows, test))]
@@ -124,6 +154,54 @@ fn parse_with(value: &str, resolve: impl Fn(AdapterId) -> Option<Preference>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn velopack_install_also_checks_the_stub_path() {
+        let root = PathBuf::from("TermFlow");
+        let exe = root.join("current").join("termflow.exe");
+        let paths = candidate_paths(&exe, true);
+        assert_eq!(paths, vec![exe.clone(), root.join("termflow.exe")]);
+    }
+
+    #[test]
+    fn a_non_velopack_current_directory_yields_one_candidate() {
+        // A stranger's directory that merely happens to be named `current` must
+        // not cause us to read their sibling registry entry.
+        let exe = PathBuf::from("unrelated").join("current").join("termflow.exe");
+        assert_eq!(candidate_paths(&exe, false), vec![exe]);
+    }
+
+    #[test]
+    fn dev_build_yields_a_single_candidate() {
+        let exe = PathBuf::from("target").join("debug").join("termflow-app.exe");
+        assert_eq!(candidate_paths(&exe, false), vec![exe]);
+    }
+
+    #[test]
+    fn a_bare_filename_is_safe() {
+        let exe = PathBuf::from("termflow.exe");
+        assert_eq!(candidate_paths(&exe, true), vec![exe]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_root_is_safe() {
+        let exe = PathBuf::from(r"C:\termflow.exe");
+        assert_eq!(candidate_paths(&exe, true), vec![exe]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_unc_velopack_path_derives_the_stub() {
+        let exe = PathBuf::from(r"\\server\share\TermFlow\current\termflow.exe");
+        let paths = candidate_paths(&exe, true);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(
+            paths[1],
+            PathBuf::from(r"\\server\share\TermFlow\termflow.exe")
+        );
+    }
 
     // Stub resolvers standing in for DXGI.
     fn never_resolves(_: AdapterId) -> Option<Preference> {

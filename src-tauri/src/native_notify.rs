@@ -5,7 +5,7 @@ const APP_USER_MODEL_ID: &str = "app.termflow.desktop";
 /// termflow.exe` with the updater stub at `<root>\Update.exe`). Dev builds run
 /// from the repo target dir and portable unzips lack Update.exe → false.
 #[cfg(windows)]
-fn is_velopack_install() -> bool {
+pub(crate) fn is_velopack_install() -> bool {
     std::env::current_exe()
         .ok()
         .and_then(|exe| {
