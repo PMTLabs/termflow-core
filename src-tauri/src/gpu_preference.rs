@@ -267,10 +267,61 @@ pub fn browser_args() -> &'static str {
     ARGS.get_or_init(|| format!("{WRY_DEFAULT_ARGS} {}", resolve().switch()))
 }
 
+#[cfg(windows)]
+fn apply_to_windows(windows: &mut [tauri::utils::config::WindowConfig]) {
+    for window in windows.iter_mut() {
+        window.additional_browser_args = Some(browser_args().to_string());
+    }
+}
+
+/// Stamp the resolved browser arguments onto every window declared in
+/// `tauri.conf.json`, before Tauri creates them.
+///
+/// Tauri builds config-declared windows *before* the app's `setup` closure runs
+/// (`tauri-2.9.5/src/app.rs:2375`), so this cannot be done from `setup` -- by then
+/// the main window's WebView2 environment already exists.
+#[cfg(windows)]
+pub fn apply_to_context<R: tauri::Runtime>(mut context: tauri::Context<R>) -> tauri::Context<R> {
+    apply_to_windows(&mut context.config_mut().app.windows);
+    context
+}
+
+/// No-op passthrough: GPU selection via browser arguments is Windows-only.
+#[cfg(not(windows))]
+pub fn apply_to_context<R: tauri::Runtime>(context: tauri::Context<R>) -> tauri::Context<R> {
+    context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(windows)]
+    #[test]
+    fn every_config_window_gets_the_identical_argument_string() {
+        use tauri::utils::config::WindowConfig;
+
+        let mut windows = vec![WindowConfig::default(), WindowConfig::default()];
+        apply_to_windows(&mut windows);
+
+        assert_eq!(
+            windows[0].additional_browser_args, windows[1].additional_browser_args,
+            "all windows must receive a byte-identical string"
+        );
+        assert_eq!(
+            windows[0].additional_browser_args.as_deref(),
+            Some(browser_args())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn applying_to_an_empty_window_list_is_harmless() {
+        let mut windows: Vec<tauri::utils::config::WindowConfig> = vec![];
+        apply_to_windows(&mut windows);
+        assert!(windows.is_empty());
+    }
 
     #[test]
     fn an_entry_without_a_gpu_field_does_not_mask_the_next_candidate() {
