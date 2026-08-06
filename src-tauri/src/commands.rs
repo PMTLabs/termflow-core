@@ -1212,6 +1212,12 @@ pub async fn create_detached_window(
             .hidden_title(true);
     }
 
+    // Must match every other webview's arguments exactly -- see gpu_preference.
+    #[cfg(windows)]
+    {
+        builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
+    }
+
     // Position the new window under the cursor. We ask the OS for the actual
     // global cursor position rather than computing it from the source window +
     // client coords: that manual math breaks across monitors with different DPI
@@ -1260,8 +1266,9 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         url.push_str("&path=");
         url.push_str(&percent_encode_url_component(&path));
     }
-    // `mut` is only used by the macOS-only block below (Overlay title bar).
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    // `mut` is only used by the macOS-only (Overlay title bar) and Windows-only
+    // (GPU browser args) blocks below.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(unused_mut))]
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         &label,
@@ -1282,6 +1289,12 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         builder = builder
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
+    }
+
+    // Must match every other webview's arguments exactly -- see gpu_preference.
+    #[cfg(windows)]
+    {
+        builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
     let window = builder.build().map_err(|e| e.to_string())?;
@@ -1743,7 +1756,8 @@ pub async fn show_drag_preview(
         w
     } else {
         let url = format!("index.html?dragPreview=1&title={}", encode_query(&title));
-        let w = tauri::WebviewWindowBuilder::new(
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut builder = tauri::WebviewWindowBuilder::new(
             &app_handle,
             PREVIEW_LABEL,
             tauri::WebviewUrl::App(url.into()),
@@ -1756,9 +1770,15 @@ pub async fn show_drag_preview(
         .resizable(false)
         .shadow(false)
         .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .visible(false);
+
+        // Must match every other webview's arguments exactly -- see gpu_preference.
+        #[cfg(windows)]
+        {
+            builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
+        }
+
+        let w = builder.build().map_err(|e| e.to_string())?;
         // Click-through so it never steals the in-flight drag's pointer events.
         let _ = w.set_ignore_cursor_events(true);
         w
