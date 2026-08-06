@@ -151,6 +151,55 @@ fn parse_with(value: &str, resolve: impl Fn(AdapterId) -> Option<Preference>) ->
     explicit
 }
 
+/// Ask the system which adapter is actually its high-performance one, and report
+/// whether `requested` is that adapter.
+///
+/// Returns `None` when DXGI is unavailable or `requested` matches no present
+/// adapter (a stale entry for a GPU since removed), so the caller can fall back.
+#[cfg(windows)]
+fn resolve_adapter(requested: AdapterId) -> Option<Preference> {
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6, DXGI_ADAPTER_DESC1,
+        DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+    };
+
+    fn matches(desc: &DXGI_ADAPTER_DESC1, id: AdapterId) -> bool {
+        desc.VendorId == id.vendor && desc.DeviceId == id.device && desc.SubSysId == id.subsys
+    }
+
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+        let factory6: IDXGIFactory6 = factory.cast().ok()?;
+
+        // The machine's high-performance adapter, per the OS itself. This is the
+        // whole point: vendor id cannot tell us this, but DXGI can.
+        let high: IDXGIAdapter1 = factory6
+            .EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE)
+            .ok()?;
+        if matches(&high.GetDesc1().ok()?, requested) {
+            return Some(Preference::High);
+        }
+
+        // Not the high-performance one. Confirm it is present at all before
+        // calling it low power -- a stale entry must fall back, not force the iGPU.
+        for index in 0u32.. {
+            let Ok(adapter) = factory.EnumAdapters1(index) else {
+                break;
+            };
+            // A descriptor we cannot read tells us nothing about THIS adapter;
+            // skip it rather than abandoning the whole search.
+            if let Ok(desc) = adapter.GetDesc1() {
+                if matches(&desc, requested) {
+                    return Some(Preference::Low);
+                }
+            }
+        }
+
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
