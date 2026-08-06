@@ -71,9 +71,156 @@ fn parse_gpu_preference(value: &str) -> Preference {
     }
 }
 
+/// The identity Windows records for an explicitly chosen adapter:
+/// `SpecificAdapter=<vendor>&<device>&<subsystem>`, all hex.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdapterId {
+    vendor: u32,
+    device: u32,
+    subsys: u32,
+}
+
+#[cfg(any(windows, test))]
+fn parse_adapter(s: &str) -> Option<AdapterId> {
+    let mut parts = s.split('&');
+    let vendor = u32::from_str_radix(parts.next()?.trim(), 16).ok()?;
+    let device = u32::from_str_radix(parts.next()?.trim(), 16).ok()?;
+    let subsys = u32::from_str_radix(parts.next()?.trim(), 16).ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(AdapterId {
+        vendor,
+        device,
+        subsys,
+    })
+}
+
+/// Reduce a registry value to a preference class.
+///
+/// `resolve` answers "is this adapter the high-performance one on this machine?"
+/// It is a parameter so the parser stays pure and testable off Windows; the DXGI
+/// implementation lives in `resolve_adapter`.
+///
+/// PCI vendor id deliberately plays no part. Vendor identifies the manufacturer,
+/// not the power class -- an AMD iGPU beside an NVIDIA dGPU, or an Intel Arc dGPU
+/// beside an Intel iGPU, both invert under a vendor table (design 008).
+#[cfg(any(windows, test))]
+fn parse_with(value: &str, resolve: impl Fn(AdapterId) -> Option<Preference>) -> Preference {
+    let explicit = parse_gpu_preference(value);
+
+    if let Some(adapter) = field(value, "SpecificAdapter") {
+        if let Some(resolved) = parse_adapter(adapter).and_then(resolve) {
+            return resolved;
+        }
+        // Unparseable, or an adapter this machine no longer has: fall back to a
+        // usable GpuPreference in the same value rather than discarding it.
+    }
+
+    explicit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Stub resolvers standing in for DXGI.
+    fn never_resolves(_: AdapterId) -> Option<Preference> {
+        None
+    }
+    fn always_high(_: AdapterId) -> Option<Preference> {
+        Some(Preference::High)
+    }
+    fn always_low(_: AdapterId) -> Option<Preference> {
+        Some(Preference::Low)
+    }
+
+    #[test]
+    fn adapter_triple_parses_case_insensitively() {
+        assert_eq!(
+            parse_adapter("10DE&2544&88A81043"),
+            Some(AdapterId {
+                vendor: 0x10DE,
+                device: 0x2544,
+                subsys: 0x88A8_1043
+            })
+        );
+        assert_eq!(
+            parse_adapter("10de&2544&88a81043"),
+            Some(AdapterId {
+                vendor: 0x10DE,
+                device: 0x2544,
+                subsys: 0x88A8_1043
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_adapter_triples_are_rejected() {
+        assert_eq!(parse_adapter(""), None);
+        assert_eq!(parse_adapter("10DE"), None);
+        assert_eq!(parse_adapter("10DE&2544"), None);
+        assert_eq!(parse_adapter("ZZZZ&2544&88A81043"), None);
+    }
+
+    #[test]
+    fn the_resolver_decides_the_specific_adapter_form() {
+        let value = "SpecificAdapter=10DE&2544&88A81043;GpuPreference=1073741824;";
+        assert_eq!(parse_with(value, always_high), Preference::High);
+        assert_eq!(parse_with(value, always_low), Preference::Low);
+    }
+
+    #[test]
+    fn vendor_id_alone_never_decides() {
+        // The regression this whole task exists for: an AMD iGPU on an
+        // AMD-APU + NVIDIA-dGPU laptop must NOT be read as high performance.
+        let amd = "SpecificAdapter=1002&164E&00000000;GpuPreference=1073741824;";
+        assert_eq!(parse_with(amd, always_low), Preference::Low);
+        // And an Intel Arc dGPU must NOT be read as low power.
+        let arc = "SpecificAdapter=8086&56A0&00000000;GpuPreference=1073741824;";
+        assert_eq!(parse_with(arc, always_high), Preference::High);
+    }
+
+    #[test]
+    fn unresolvable_adapter_falls_back_to_a_valid_gpu_preference() {
+        // A stale entry for a removed GPU, or an empty adapter field, must not
+        // discard a usable GpuPreference sitting in the same value.
+        assert_eq!(
+            parse_with("SpecificAdapter=;GpuPreference=1;", never_resolves),
+            Preference::Low
+        );
+        assert_eq!(
+            parse_with(
+                "SpecificAdapter=BEEF&0000&00000000;GpuPreference=1;",
+                never_resolves
+            ),
+            Preference::Low
+        );
+    }
+
+    #[test]
+    fn unresolvable_adapter_with_no_fallback_expresses_nothing() {
+        assert_eq!(
+            parse_with(
+                "SpecificAdapter=BEEF&0000&00000000;GpuPreference=1073741824;",
+                never_resolves
+            ),
+            Preference::NoPreference
+        );
+    }
+
+    #[test]
+    fn values_without_an_adapter_never_call_the_resolver() {
+        fn explodes(_: AdapterId) -> Option<Preference> {
+            panic!("resolver must not run when no SpecificAdapter is present")
+        }
+        assert_eq!(parse_with("GpuPreference=2;", explodes), Preference::High);
+        assert_eq!(
+            parse_with("AutoHDREnable=1;", explodes),
+            Preference::NoPreference
+        );
+    }
 
     #[test]
     fn explicit_high_and_low() {
