@@ -960,6 +960,16 @@ pub fn run() {
             log::info!("[CONFIG] --mcp-port override: {} -> {}", network.mcp_port, p);
             network.mcp_port = p;
         }
+        // D5: an elevated instance authenticates on loopback, with a token minted
+        // for THIS launch and never written to disk. A persisted token would sit
+        // in a file any medium-integrity process owned by this user can read,
+        // which would defeat the whole point of requiring one.
+        let elevated =
+            crate::profile::current().integrity == crate::profile::Integrity::High;
+        if elevated {
+            network.auth_token = crate::app_config::generate_token();
+            log::info!("[CONFIG] elevated instance: minted a per-launch API token");
+        }
         log::info!(
             "[CONFIG] instance={} api_port={} mcp_port={} expose={}",
             crate::app_config::instance_config_name(),
@@ -1029,7 +1039,20 @@ pub fn run() {
         if let Ok(mut g) = api_state.api_shutdown.lock() {
             *g = Some(api_sd_tx);
         }
+        // An elevated instance serves its API/MCP only when the user explicitly
+        // asked for it with a port flag. Otherwise the safest surface is none at
+        // all: the default is an admin terminal you drive by hand, not one any
+        // local program can reach.
+        let serve_endpoints =
+            !elevated || cli_api_port.is_some() || cli_mcp_port.is_some();
         tauri::async_runtime::spawn(async move {
+            if !serve_endpoints {
+                log::info!(
+                    "[API] Suppressed for the elevated profile: pass --api-port or --mcp-port \
+                     to serve them (the token is minted per launch)"
+                );
+                return;
+            }
             let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
             let addr = std::net::SocketAddr::from((host, api_net.api_port));
             // P0b: refuse to start if another instance already owns this port. With
@@ -1105,7 +1128,7 @@ pub fn run() {
                 Err(e) => log::error!("API bind failed on {}: {}", addr, e),
             }
         });
-        
+
         // Spawn the PTY Output Listener (consumer generation 0) and the stall
         // watchdog that auto-heals it (respawn + repaint) if it ever wedges.
         // The consumer subscribes to the broadcast channel via state.output_tx.

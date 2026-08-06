@@ -307,11 +307,15 @@ pub fn merge_root_value(
 /// Merge the network section into the instance config file without clobbering
 /// other keys (shellProfiles, theme, etc.).
 pub fn save(app: &tauri::AppHandle, cfg: &NetworkConfig) -> Result<(), String> {
-    merge_locked(
-        &config_path(app)?,
-        "network",
-        serde_json::to_value(cfg).map_err(|e| e.to_string())?,
-    )
+    let mut value = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
+    // D5: an elevated instance's API token is minted per launch precisely so it
+    // never lands in a file every medium-integrity process of this user can
+    // read. Writing it here would hand that escalation straight back.
+    // `load_or_init` ignores an empty token, so the next launch mints a new one.
+    if crate::profile::current().integrity == crate::profile::Integrity::High {
+        value["authToken"] = serde_json::json!("");
+    }
+    merge_locked(&config_path(app)?, "network", value)
 }
 
 #[cfg(test)]

@@ -132,6 +132,18 @@ fn cors_layer() -> CorsLayer {
         .max_age(std::time::Duration::from_secs(600))
 }
 
+/// Must this request carry a bearer token?
+///
+/// D1 keeps loopback open for NORMAL instances — curl, the MCP sidecar and user
+/// scripts stay zero-friction. An ELEVATED instance is a different risk class:
+/// an unauthenticated write there turns any medium-integrity process on the
+/// machine into Medium→High privilege escalation, because the API spawns
+/// processes. Provenance checks alone do not cover that — they only stop
+/// browsers, not local programs.
+pub fn auth_required(integrity: crate::profile::Integrity, expose: bool) -> bool {
+    expose || integrity == crate::profile::Integrity::High
+}
+
 /// Start the API server on an already-bound listener. Binding happens in the
 /// caller so a bind failure is surfaced BEFORE the old server is torn down
 /// (no "silent success with no server" window).
@@ -145,6 +157,12 @@ pub async fn start_api_server(
     // so rotating the token takes effect WITHOUT restarting this server — no
     // dropped UI connections and no same-port rebind race. See `rotate_auth_token`.
     let auth_net = state.network.clone();
+    let require_auth = auth_required(crate::profile::current().integrity, expose);
+    log::info!(
+        "[API] auth {} (expose={expose}, profile={})",
+        if require_auth { "REQUIRED" } else { "not required" },
+        crate::profile::current().key()
+    );
     let app = Router::new()
         // Standard health check
         .route("/health", get(health_check))
@@ -221,12 +239,13 @@ pub async fn start_api_server(
         .route("/api/system/tmux-status", get(get_tmux_status))
         .route("/api/ws", get(ws_handler)) // Also support /api/ws for monitor
         .route("/ws", get(ws_handler))
-        // Auth gate: enforced ONLY when exposed on the network. Localhost mode
-        // stays open (backward compatible). Added before CORS so CORS wraps it.
+        // Auth gate: enforced when exposed on the network OR when this instance
+        // runs elevated (D5). A normal loopback instance stays open (backward
+        // compatible). Added before CORS so CORS wraps it.
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let auth_net = auth_net.clone();
             async move {
-                if !expose {
+                if !require_auth {
                     return next.run(req).await;
                 }
                 let path = req.uri().path().to_string();
@@ -3119,6 +3138,18 @@ mod tests {
     fn requests_with_no_origin_are_allowed() {
         // D1: curl, the MCP sidecar and user scripts are unchanged.
         assert!(origin_allowed(None, Some("127.0.0.1:42031")));
+    }
+
+    #[test]
+    fn an_elevated_instance_requires_a_token_even_on_loopback() {
+        use crate::profile::Integrity;
+        // D1 keeps loopback open for NORMAL instances. An elevated instance is a
+        // different risk class: an unauthenticated write becomes Medium->High
+        // privilege escalation, so provenance checks are not sufficient there.
+        assert!(auth_required(Integrity::High, /*expose*/ false));
+        assert!(!auth_required(Integrity::Medium, false));
+        assert!(auth_required(Integrity::Medium, true));
+        assert!(auth_required(Integrity::High, true));
     }
 
     #[test]
