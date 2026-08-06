@@ -2,6 +2,7 @@ pub mod state;
 pub mod context_menu;
 pub mod session_notify;
 pub mod app_config;
+pub mod profile;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
