@@ -111,6 +111,8 @@ fn origin_allowed(origin: Option<&str>, host: Option<&str>) -> bool {
 /// the provenance gate above would be pointless if the browser were still told
 /// the response is readable by anyone.
 fn cors_layer() -> CorsLayer {
+    // `mut` is only used by the debug-only dev-origin push below.
+    #[allow(unused_mut)]
     let mut origins: Vec<HeaderValue> = APP_ORIGINS
         .iter()
         .filter_map(|o| HeaderValue::from_str(o).ok())
