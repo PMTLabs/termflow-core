@@ -124,6 +124,9 @@ windows = { version = "0.61", features = [
     # Session-change notifications (RDP/console switch) → suppress the repaint-burst
     # bell. See src/session_notify.rs.
     "Win32_Foundation",
+    # Process-token elevation query → profile identity. See src/profile.rs.
+    "Win32_Security",
+    "Win32_System_Threading",
     "Win32_System_RemoteDesktop",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",

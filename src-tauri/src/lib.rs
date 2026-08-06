@@ -239,6 +239,10 @@ struct Args {
    /// Override the MCP server port for THIS run. Runtime-only; not persisted.
    #[arg(long)]
    mcp_port: Option<u16>,
+   /// Run as a named instance with its own config, history, shells and ports.
+   /// Launching the same profile twice focuses the existing window.
+   #[arg(long, value_parser = crate::profile::sanitize_arg)]
+   profile: Option<String>,
    /// Open a new terminal rooted at this folder.
    #[arg(long = "path")]
    path: Option<String>,
@@ -265,6 +269,19 @@ mod cli_args_tests {
         assert_eq!(a.api_port, None);
         assert_eq!(a.mcp_port, None);
         assert!(!a.headless);
+    }
+
+    #[test]
+    fn rejects_an_unsafe_profile_at_parse_time() {
+        // The value reaches Path::join, a pipe name and a mutex name, so a bad
+        // one must never get as far as identity resolution.
+        assert_eq!(
+            Args::try_parse_from(["app", "--profile", "Work"]).unwrap().profile.as_deref(),
+            Some("work")
+        );
+        assert!(Args::try_parse_from(["app", "--profile", "../etc"]).is_err());
+        assert!(Args::try_parse_from(["app", "--profile", ""]).is_err());
+        assert_eq!(Args::try_parse_from(["app"]).unwrap().profile, None);
     }
 
     #[test]
