@@ -855,6 +855,9 @@ pub fn run() {
         None,
     ))
     .setup(move |app| {
+        // Resolved before the builder ran, so it could not be logged then.
+        gpu_preference::log_resolution();
+
         // Unpackaged Windows apps need an AUMID registered before WinRT can
         // attribute and deliver native toast notifications. On macOS this claims the
         // notification bundle identity, which MUST happen before anything else in the

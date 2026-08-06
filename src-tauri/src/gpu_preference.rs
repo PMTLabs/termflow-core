@@ -203,10 +203,17 @@ fn resolve_adapter(requested: AdapterId) -> Option<Preference> {
 }
 
 /// Walk the candidates and return the first that actually expresses a GPU
-/// decision. A readable entry that says nothing about GPU selection, or a read
-/// that fails, must not mask a real preference on a later candidate.
+/// decision, together with the candidate it came from. A readable entry that says
+/// nothing about GPU selection, or a read that fails, must not mask a real
+/// preference on a later candidate.
+///
+/// The deciding path is returned rather than logged here: resolution runs before
+/// a logger exists (see `log_resolution`).
 #[cfg(any(windows, test))]
-fn search(candidates: &[PathBuf], read: impl Fn(&Path) -> Option<String>) -> Preference {
+fn search<'a>(
+    candidates: &'a [PathBuf],
+    read: impl Fn(&Path) -> Option<String>,
+) -> (Preference, Option<&'a Path>) {
     for path in candidates {
         let Some(value) = read(path) else { continue };
 
@@ -216,14 +223,10 @@ fn search(candidates: &[PathBuf], read: impl Fn(&Path) -> Option<String>) -> Pre
         let preference = parse_with(&value, |_| None);
 
         if preference.is_decision() {
-            log::info!(
-                "gpu_preference: resolved {preference:?} from {}",
-                path.display()
-            );
-            return preference;
+            return (preference, Some(path.as_path()));
         }
     }
-    Preference::NoPreference
+    (Preference::NoPreference, None)
 }
 
 #[cfg(windows)]
@@ -235,24 +238,55 @@ fn read_registry(path: &Path) -> Option<String> {
     key.get_string(path.to_str()?).ok()
 }
 
+/// How the preference was decided, captured at resolution time so it can be
+/// logged once a logger exists. See `log_resolution` for why it is deferred.
+#[cfg(windows)]
+static RESOLUTION: OnceLock<String> = OnceLock::new();
+
 #[cfg(windows)]
 fn resolve() -> Preference {
     let Ok(exe) = std::env::current_exe() else {
-        log::info!("gpu_preference: current_exe() unavailable; using the default");
+        let _ = RESOLUTION.set(
+            "gpu_preference: current_exe() unavailable; defaulting to high performance".to_string(),
+        );
         return Preference::NoPreference;
     };
 
     let candidates = candidate_paths(&exe, crate::native_notify::is_velopack_install());
-    let preference = search(&candidates, read_registry);
+    let (preference, source) = search(&candidates, read_registry);
 
-    if !preference.is_decision() {
-        log::info!(
+    let _ = RESOLUTION.set(match source {
+        Some(path) => format!(
+            "gpu_preference: resolved {preference:?} from {}",
+            path.display()
+        ),
+        None => format!(
             "gpu_preference: no OS graphics preference registered for {}; defaulting to high performance",
             exe.display()
-        );
-    }
+        ),
+    });
+
     preference
 }
+
+/// Log how the GPU preference was resolved.
+///
+/// This CANNOT be done during resolution. `browser_args` is first called while
+/// evaluating the argument to `tauri::Builder::build`, which happens before the
+/// builder's plugins initialize -- so `tauri_plugin_log` has not installed a
+/// logger yet and any record emitted there goes to the `log` crate's no-op
+/// default and is lost. The `OnceLock` then prevents a later call from
+/// re-emitting it. Call this from `setup`, where the logger is live.
+#[cfg(windows)]
+pub fn log_resolution() {
+    if let Some(message) = RESOLUTION.get() {
+        log::info!("{message}");
+    }
+}
+
+/// No-op: GPU selection via browser arguments is Windows-only.
+#[cfg(not(windows))]
+pub fn log_resolution() {}
 
 /// Browser arguments for every webview in this process.
 ///
@@ -335,7 +369,10 @@ mod tests {
                 Some("GpuPreference=1;".to_string())
             }
         };
-        assert_eq!(search(&candidates, read), Preference::Low);
+        assert_eq!(
+            search(&candidates, read),
+            (Preference::Low, Some(Path::new("b.exe")))
+        );
     }
 
     #[test]
@@ -350,7 +387,10 @@ mod tests {
                 Some("GpuPreference=1;".to_string())
             }
         };
-        assert_eq!(search(&candidates, read), Preference::Low);
+        assert_eq!(
+            search(&candidates, read),
+            (Preference::Low, Some(Path::new("b.exe")))
+        );
     }
 
     #[test]
@@ -365,13 +405,20 @@ mod tests {
                 Some("GpuPreference=1;".to_string())
             }
         };
-        assert_eq!(search(&candidates, read), Preference::WindowsDefault);
+        assert_eq!(
+            search(&candidates, read),
+            (Preference::WindowsDefault, Some(Path::new("a.exe")))
+        );
     }
 
     #[test]
     fn exhausting_every_candidate_expresses_nothing() {
         let candidates = vec![PathBuf::from("a.exe")];
-        assert_eq!(search(&candidates, |_| None), Preference::NoPreference);
+        assert_eq!(
+            search(&candidates, |_| None),
+            (Preference::NoPreference, None),
+            "no candidate decided, so there is no source path to report"
+        );
     }
 
     #[cfg(windows)]
