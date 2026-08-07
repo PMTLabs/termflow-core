@@ -1219,7 +1219,7 @@ pub async fn create_detached_window(
         &label,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("TermFlow")
+    .title(crate::profile::decorate_title("TermFlow"))
     .inner_size(900.0, 600.0)
     .resizable(true)
     // Frameless on Windows/Linux (the custom in-app title bar owns the chrome);
@@ -1288,7 +1288,7 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         &label,
         tauri::WebviewUrl::App(url.into()),
     )
-    .title("TermFlow")
+    .title(crate::profile::decorate_title("TermFlow"))
     .inner_size(1280.0, 800.0)
     // Center like the main window (the tauri.conf `center` flag only applies to
     // the boot-time window, not builder-spawned ones).
@@ -1698,6 +1698,9 @@ pub fn set_window_title(
     state: State<'_, AppState>,
     title: String,
 ) {
+    // Decorate HERE, not once at startup: this fires on every tab change, so a
+    // startup-only mark would vanish the first time the user switched tabs.
+    let title = crate::profile::decorate_title(&title);
     state
         .window_titles
         .insert(window.label().to_string(), title.clone());

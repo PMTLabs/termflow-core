@@ -741,7 +741,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // Left-click is handled by on_tray_icon_event (show window); the menu opens
         // on right-click only, so a left-click doesn't pop the menu instead.
         .show_menu_on_left_click(false)
-        .tooltip("TermFlow")
+        // Marked per profile: several instances mean several tray icons.
+        .tooltip(crate::profile::decorate_title("TermFlow"))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "tray_show" => show_or_focus_main_window(app),
             "tray_peers" => {
@@ -1014,6 +1015,9 @@ pub fn run() {
         // Trim the WebView2 right-click menu (Windows) to Print + Inspect on the
         // primary window. New windows install the same filter at build time.
         if let Some(main) = app.get_webview_window("main") {
+            // The main window's title comes from tauri.conf.json, so mark it here.
+            // Every later update goes through set_window_title, which decorates too.
+            let _ = main.set_title(&crate::profile::decorate_title("TermFlow"));
             crate::context_menu::install(&main);
             // Detect RDP/console session switches (Windows) and tell the renderer to
             // suppress the resulting ConPTY repaint burst — otherwise the activity

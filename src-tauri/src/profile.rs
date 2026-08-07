@@ -173,6 +173,15 @@ pub fn scoped_file(name: &str) -> String {
     current().scoped_file(name)
 }
 
+const ADMIN_TAG: &str = " [Administrator]";
+
+/// Decorate a window or tray title for the current identity. Every window
+/// builder AND `set_window_title` route through here — decorating only at
+/// startup would lose the mark on the first tab change.
+pub fn decorate_title(base: &str) -> String {
+    current().decorate_title(base)
+}
+
 /// What the renderer needs: which profile this window belongs to, and the
 /// discriminator its storage keys hang off. Two instances share one WebView2
 /// user-data folder — hence one localStorage — so the renderer cannot work this
@@ -192,6 +201,29 @@ pub struct ProfileInfo {
 }
 
 impl ProfileIdentity {
+    /// Mark a window or tray title with this instance's identity, so a user
+    /// running several at once can tell them apart at a glance:
+    ///
+    /// - default, normal → unchanged
+    /// - `work`          → `… (work)`
+    /// - elevated        → `… [Administrator]`
+    ///
+    /// Idempotent: re-decorating an already-decorated title is a no-op, because
+    /// the renderer round-trips titles through `set_window_title`.
+    pub fn decorate_title(&self, base: &str) -> String {
+        let mut out = base.to_string();
+        if !is_default(&self.name) {
+            let tag = format!(" ({})", self.name);
+            if !out.ends_with(&tag) && !out.contains(&format!("{tag} [")) {
+                out.push_str(&tag);
+            }
+        }
+        if self.integrity == Integrity::High && !out.ends_with(ADMIN_TAG) {
+            out.push_str(ADMIN_TAG);
+        }
+        out
+    }
+
     pub fn info(&self) -> ProfileInfo {
         let elevated = self.integrity == Integrity::High;
         ProfileInfo {
@@ -333,6 +365,38 @@ mod tests {
             assert_eq!(id.scoped_file(name), name, "default profile must not move {name}");
         }
         assert_eq!(id.scoped_stem("TermFlow"), "TermFlow");
+    }
+
+    #[test]
+    fn titles_are_marked_for_every_identity_but_the_default() {
+        let id = |n: &str, i| ProfileIdentity { channel: "rel", name: n.into(), integrity: i };
+        assert_eq!(id("default", Integrity::Medium).decorate_title("TermFlow"), "TermFlow");
+        assert_eq!(id("work", Integrity::Medium).decorate_title("TermFlow"), "TermFlow (work)");
+        assert_eq!(
+            id("default", Integrity::High).decorate_title("TermFlow"),
+            "TermFlow [Administrator]"
+        );
+        assert_eq!(
+            id("work", Integrity::High).decorate_title("TermFlow"),
+            "TermFlow (work) [Administrator]"
+        );
+        // The decorator runs on the ACTIVE TAB title, not a fixed app name.
+        assert_eq!(
+            id("work", Integrity::Medium).decorate_title(r"pwsh - D:\src"),
+            r"pwsh - D:\src (work)"
+        );
+    }
+
+    #[test]
+    fn decorating_twice_does_not_stack_the_marks() {
+        // The renderer round-trips titles through set_window_title, so a title
+        // that has already been through here can come back.
+        let work = ProfileIdentity { channel: "rel", name: "work".into(), integrity: Integrity::High };
+        let once = work.decorate_title("TermFlow");
+        assert_eq!(work.decorate_title(&once), once);
+        let medium = ProfileIdentity { channel: "rel", name: "work".into(), integrity: Integrity::Medium };
+        let once = medium.decorate_title("TermFlow");
+        assert_eq!(medium.decorate_title(&once), once);
     }
 
     #[test]
