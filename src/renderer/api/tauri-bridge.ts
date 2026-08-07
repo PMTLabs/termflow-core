@@ -15,6 +15,12 @@ export interface NetworkConfig {
   authToken: string;
 }
 
+/** See `EffectiveEndpoints` in `../types/electron`. */
+export interface EffectiveEndpoints {
+  apiPort: number | null;
+  mcpPort: number | null;
+}
+
 // Velopack update availability (mirrors the Rust UpdateStatus enum).
 export type UpdateStatus =
   | { state: 'notInstalled' }
@@ -93,6 +99,7 @@ interface ElectronAPI {
   getAPIConfig: () => Promise<any>;
   // Network settings (ports, expose-on-network, access token)
   getNetworkConfig: () => Promise<NetworkConfig>;
+  getEffectiveEndpoints: () => Promise<EffectiveEndpoints>;
   setNetworkConfig: (apiPort: number, mcpPort: number, exposeOnNetwork: boolean) => Promise<NetworkConfig>;
   rotateAuthToken: () => Promise<NetworkConfig>;
   listNetworkInterfaces: () => Promise<NetworkInterfaceInfo[]>;
@@ -531,6 +538,7 @@ const tauriBridge: ElectronAPI = {
 
   // Network settings
   getNetworkConfig: async () => invoke('get_network_config'),
+  getEffectiveEndpoints: async () => invoke('get_effective_endpoints'),
   setNetworkConfig: async (apiPort, mcpPort, exposeOnNetwork) => {
     const cfg = await invoke<NetworkConfig>('set_network_config', { apiPort, mcpPort, exposeOnNetwork });
     // Re-point the bridge at the (possibly new) port so REST calls — terminal

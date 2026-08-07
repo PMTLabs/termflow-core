@@ -13,6 +13,17 @@ export interface NetworkConfig {
   authToken: string;
 }
 
+/**
+ * The ports this instance actually serves on. They differ from the configured
+ * ones when a sibling profile held them first. `null` means "not serving".
+ * Never submit these on save — that would turn a one-off fallback into the
+ * user's stored setting.
+ */
+export interface EffectiveEndpoints {
+  apiPort: number | null;
+  mcpPort: number | null;
+}
+
 // Velopack update availability (mirrors the Rust UpdateStatus enum).
 export type UpdateStatus =
   | { state: 'notInstalled' }
@@ -232,6 +243,7 @@ export interface ElectronAPI {
 
   // Network settings (ports, expose-on-network, access token)
   getNetworkConfig?: () => Promise<NetworkConfig>;
+  getEffectiveEndpoints?: () => Promise<EffectiveEndpoints>;
   setNetworkConfig?: (apiPort: number, mcpPort: number, exposeOnNetwork: boolean) => Promise<NetworkConfig>;
   rotateAuthToken?: () => Promise<NetworkConfig>;
   listNetworkInterfaces?: () => Promise<NetworkInterfaceInfo[]>;

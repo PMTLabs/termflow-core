@@ -1278,6 +1278,7 @@ pub fn run() {
         commands::check_connection_health,
         commands::generate_api_token,
         network_commands::get_network_config,
+        network_commands::get_effective_endpoints,
         network_commands::set_network_config,
         network_commands::rotate_auth_token,
         network_commands::list_network_interfaces,
