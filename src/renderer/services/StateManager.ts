@@ -10,7 +10,7 @@ import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { stateKey, layoutsKey, apiTokenKey } from './profileScope';
+import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
 
 export interface AppState {
   tabs: any[];
@@ -282,6 +282,21 @@ class StateManagerClass {
       if (!res.ok) return;
 
       const data = await res.json();
+
+      // Owner check. Reattaching to — or worse, REAPING — another instance's
+      // PTYs would kill live shells in someone else's window. The configured
+      // port can belong to a sibling profile that bound it first, so prove the
+      // answer came from OUR backend before touching anything it lists.
+      const owner: string | undefined = data?.instance;
+      const mine = currentProfile().key;
+      if (isForeignInstance(owner, mine)) {
+        console.warn(
+          `StateManager: /api/terminals answered by instance '${owner}', not '${mine}' — ` +
+            'skipping reattach/reap and spawning fresh'
+        );
+        return;
+      }
+
       const list: any[] = Array.isArray(data) ? data : data?.terminals ?? [];
 
       // Group every live PTY by the renderer id that spawned it (its `tabId`),

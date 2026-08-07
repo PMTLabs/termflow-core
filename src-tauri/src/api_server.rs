@@ -366,7 +366,16 @@ async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
             "promptHook": t.prompt_hook
         })
     }).collect();
-    Json(json!({ "terminals": terminals }))
+    // Owner discriminator. Terminals live in this process's own AppState, so
+    // every entry above belongs to this instance by construction — the useful
+    // guarantee is therefore at the RESPONSE level: a client that reaches the
+    // wrong instance's port (a stale configured port, a fallback bind) can see
+    // that it did, and refuse to reattach to or reap terminals that are not its
+    // own. Per-terminal tagging would say the same thing N times.
+    Json(json!({
+        "terminals": terminals,
+        "instance": crate::profile::current().key(),
+    }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

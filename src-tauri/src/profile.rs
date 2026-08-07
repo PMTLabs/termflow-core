@@ -185,6 +185,10 @@ pub struct ProfileInfo {
     /// `name`, plus `.high` when elevated. `"default"` keeps today's keys.
     pub scope: String,
     pub is_default: bool,
+    /// The full identity key, including the channel. The renderer compares this
+    /// against the `instance` field of an API response to prove it is talking to
+    /// its OWN backend before acting on the terminals it lists.
+    pub key: String,
 }
 
 impl ProfileIdentity {
@@ -195,6 +199,7 @@ impl ProfileIdentity {
             elevated,
             scope: format!("{}{}", self.name, if elevated { ".high" } else { "" }),
             is_default: is_default(&self.name) && !elevated,
+            key: self.key(),
         }
     }
 }

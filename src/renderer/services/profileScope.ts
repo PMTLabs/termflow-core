@@ -21,6 +21,13 @@ export interface ProfileInfo {
   /** Storage discriminator: `name`, plus `.high` when elevated. */
   scope: string;
   isDefault: boolean;
+  /**
+   * Full identity key including the channel (`rel`, `rel.work`, `dev.work.high`).
+   * Compare against an API response's `instance` field to prove the backend on
+   * the other end is ours before acting on the terminals it reports.
+   * Empty when the backend could not be asked.
+   */
+  key: string;
 }
 
 let current: ProfileInfo = {
@@ -28,6 +35,7 @@ let current: ProfileInfo = {
   elevated: false,
   scope: DEFAULT_SCOPE,
   isDefault: true,
+  key: '',
 };
 
 /** Suffix a storage key with the scope, leaving the default profile untouched. */
@@ -54,6 +62,18 @@ export const apiTokenKey = (): string => apiTokenKeyFor(current.scope);
 
 export function currentProfile(): ProfileInfo {
   return current;
+}
+
+/**
+ * Did this API response come from a DIFFERENT instance than ours?
+ *
+ * Reattaching to — or reaping — a sibling profile's PTYs would kill live shells
+ * in someone else's window. Unknown on either side means "cannot tell", and the
+ * answer is `false`: an older backend sends no `instance` field, and refusing to
+ * reattach there would spawn duplicate PTYs on every reload.
+ */
+export function isForeignInstance(owner: string | undefined, mine: string): boolean {
+  return !!owner && !!mine && owner !== mine;
 }
 
 /**
