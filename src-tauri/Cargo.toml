@@ -125,6 +125,9 @@ windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     # CreateMutexW takes SECURITY_ATTRIBUTES, which lives behind this feature.
     "Win32_Security",
+    # Owner-only + integrity-labelled instance discovery file (src/net_ports.rs).
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

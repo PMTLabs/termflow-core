@@ -1014,6 +1014,29 @@ pub fn run() {
         // Manage state in Tauri
         app.manage(state.clone());
 
+        // Advertise this instance BEFORE the servers come up: an instance that
+        // serves no endpoints at all (an elevated launch without a port flag) is
+        // still a running sibling, and the updater must see it (Task 17).
+        // Re-published with the real ports once they are bound.
+        let publish_record = |api_port, mcp_port| {
+            let id = crate::profile::current();
+            let rec = crate::net_ports::InstanceRecord {
+                profile: id.key(),
+                pid: std::process::id(),
+                api_port,
+                mcp_port,
+                // Only an elevated instance needs a token published, and the file
+                // it goes into carries a HIGH integrity label so a medium process
+                // of this user cannot read it back (D5).
+                token: (id.integrity == crate::profile::Integrity::High)
+                    .then(|| network.auth_token.clone()),
+            };
+            if let Err(e) = crate::net_ports::publish(&rec, elevated) {
+                log::warn!("[NET] could not publish the instance record: {e}");
+            }
+        };
+        publish_record(None, None);
+
         // Seed the background-mode flag from persisted settings (Plan 010) BEFORE any
         // window can close, so the exit guard reads the user's saved choice. The
         // renderer re-hydrates the same value into its toggle at boot.
@@ -1121,6 +1144,22 @@ pub fn run() {
                         "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
                         api_net.api_port, mcp_port, api_net.mcp_port
                     );
+                    // Re-advertise with the ports we actually got, so a sibling
+                    // (or the user) can find this instance without guessing.
+                    if let Err(e) = crate::net_ports::publish(
+                        &crate::net_ports::InstanceRecord {
+                            profile: crate::profile::current().key(),
+                            pid: std::process::id(),
+                            api_port: Some(api_port),
+                            mcp_port,
+                            token: (crate::profile::current().integrity
+                                == crate::profile::Integrity::High)
+                                .then(|| api_net.auth_token.clone()),
+                        },
+                        crate::profile::current().integrity == crate::profile::Integrity::High,
+                    ) {
+                        log::warn!("[NET] could not republish the instance record: {e}");
+                    }
                     // Only NOW start the MCP sidecar (which forwards every tool call
                     // to this API), so a bind failure can never leave a sidecar
                     // advertising our instanceId while pointing at a port we don't
@@ -1405,6 +1444,10 @@ pub fn run() {
                 // Gracefully shutdown the peering fabric sidecar on app exit.
                 crate::fabric_manager::shutdown_fabric(&state);
             }
+            // Stop advertising this instance. A crash leaves the record behind,
+            // which is why readers treat a dead pid as stale rather than trusting
+            // the file's existence.
+            crate::net_ports::retract(&crate::profile::current().key());
         }
     });
 }
