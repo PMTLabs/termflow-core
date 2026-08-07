@@ -4,6 +4,7 @@ pub mod session_notify;
 pub mod app_config;
 pub mod profile;
 pub mod instance_lock;
+pub mod net_ports;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
@@ -62,7 +63,14 @@ pub(crate) fn shutdown_mcp_server(state: &AppState) {
     }
 }
 
-async fn wait_for_mcp_health(port: u16) -> bool {
+/// Poll the MCP server's `/health` until OUR sidecar answers.
+///
+/// A 200 is not enough: with per-profile instances another TermFlow's MCP server
+/// can hold this port, and treating its reply as "healthy" would have us report
+/// a running server we do not own — and quietly route this instance's tool calls
+/// into the other app. The sidecar echoes `AUTO_TERMINAL_INSTANCE_ID`, so
+/// compare it (`classify_health_owner`, the same rule the Settings check uses).
+async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
@@ -75,8 +83,24 @@ async fn wait_for_mcp_health(port: u16) -> bool {
         };
         match result {
             Ok(response) if response.status().is_success() => {
-                log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
-                return true;
+                let body: serde_json::Value =
+                    response.json().await.unwrap_or_else(|_| serde_json::json!({}));
+                let reported = body.get("instanceId").and_then(|v| v.as_str());
+                let (healthy, conflict) =
+                    crate::network_commands::classify_health_owner(reported, own_id);
+                if healthy {
+                    log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
+                    return true;
+                }
+                if conflict {
+                    log::error!(
+                        "[MCP] port {port} is served by ANOTHER instance ({}) — this instance's \
+                         MCP server is not running. Change the MCP port in Settings.",
+                        reported.unwrap_or("unknown")
+                    );
+                    return false;
+                }
+                log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet");
             }
             Ok(response) => {
                 log::debug!("[MCP] Health check attempt {} returned status: {}", attempt, response.status());
@@ -87,7 +111,7 @@ async fn wait_for_mcp_health(port: u16) -> bool {
         }
     }
 
-    log::warn!("[MCP] MCP Server health check failed after 10 attempts");
+    log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
     false
 }
 
@@ -154,7 +178,7 @@ async fn start_mcp_sidecar(
         while rx.recv().await.is_some() {}
     });
 
-    let _ = wait_for_mcp_health(cfg.mcp_port).await;
+    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
     Ok(())
 }
 
@@ -200,7 +224,7 @@ async fn start_mcp_legacy(
         *guard = Some(McpProcessHandle::Legacy(child));
     }
 
-    let _ = wait_for_mcp_health(cfg.mcp_port).await;
+    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
     Ok(())
 }
 
@@ -1058,42 +1082,64 @@ pub fn run() {
                 return;
             }
             let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
-            let addr = std::net::SocketAddr::from((host, api_net.api_port));
-            // P0b: refuse to start if another instance already owns this port. With
-            // SO_REUSEADDR our bind would otherwise SUCCEED and hijack the port, so we
-            // probe /health first. We ALSO skip the MCP sidecar here: MCP forwards
-            // every tool call to AUTO_TERMINAL_API_URL (= this api_port), so starting
-            // it while the port belongs to ANOTHER instance would silently route MCP
-            // operations into the other app. The Settings health check surfaces the
-            // conflict and lets the user pick a different port (or use --api-port).
-            if matches!(
-                crate::network_commands::probe_port_owner(api_net.api_port, &api_state.instance_id).await,
-                crate::network_commands::PortOwner::OwnedByOther
-            ) {
-                log::warn!(
-                    "API port {} is already owned by another instance — not starting the API or MCP servers. \
-                     Change the port in Settings > Connections (or pass --api-port) to run a second instance.",
-                    api_net.api_port
-                );
-                return;
-            }
-            // Bind with SO_REUSEADDR (same path as the hot-restart) so the very
-            // first "Save & apply (restart)" can rebind this same port even while
-            // this initial socket is still lingering. A plain TcpListener::bind
-            // would leave it non-reuse on Windows, and the SO_REUSEADDR rebind
-            // would then fail with WSAEACCES (os error 10013). See bind_reuseaddr.
-            match crate::network_commands::bind_reuseaddr(addr) {
-                Ok(listener) => {
-                    // Bound successfully → the API port is genuinely ours. Only NOW
-                    // start the MCP sidecar (which forwards every tool call to this
-                    // API), so a bind failure AFTER a Free/Self probe (cold-start
-                    // race, stale non-HTTP process, permission error) can never leave
-                    // a sidecar advertising our instanceId while pointing at a port we
-                    // don't own.
+            // Bind-and-RETAIN, walking forward from the configured port. A probe
+            // followed by a separate bind leaves a window in which a sibling can
+            // take the port, and `SO_REUSEADDR` (needed for the hot-restart
+            // rebind) means our bind would then SUCCEED and hijack it — silently
+            // rerouting the other instance's MCP tool calls into this app. With
+            // per-profile instances, two apps starting at once is normal.
+            //
+            // The fallback port is NEVER written back to the config: `network`
+            // stays what the user configured, `effective_endpoints` records what
+            // we actually got.
+            let picked = crate::net_ports::bind_api_listener(
+                host,
+                api_net.api_port,
+                crate::net_ports::DEFAULT_SPAN,
+                &api_state.instance_id,
+            )
+            .await;
+            match picked {
+                Some(crate::net_ports::Picked { port: api_port, bound: listener }) => {
+                    // Bound successfully → the API port is genuinely ours. Publish
+                    // it BEFORE anything derived from it is built: `mcp_env` used to
+                    // read a config clone captured before binding, so a fallback
+                    // port left the MCP sidecar forwarding to the OTHER instance's
+                    // API. Same for the fabric and the renderer.
+                    let mcp_port = crate::net_ports::pick_mcp_port(
+                        api_net.mcp_port,
+                        crate::net_ports::DEFAULT_SPAN,
+                        &api_state.instance_id,
+                    )
+                    .await;
+                    {
+                        let mut eff = api_state.effective_endpoints.write();
+                        eff.api_port = Some(api_port);
+                        eff.mcp_port = mcp_port;
+                    }
+                    log::info!(
+                        "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
+                        api_net.api_port, mcp_port, api_net.mcp_port
+                    );
+                    // Only NOW start the MCP sidecar (which forwards every tool call
+                    // to this API), so a bind failure can never leave a sidecar
+                    // advertising our instanceId while pointing at a port we don't
+                    // own. It is launched with the EFFECTIVE ports.
+                    let mut mcp_net = mcp_net;
+                    mcp_net.api_port = api_port;
                     let mcp_state = api_state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
-                    });
+                    match mcp_port {
+                        Some(p) => {
+                            mcp_net.mcp_port = p;
+                            tauri::async_runtime::spawn(async move {
+                                respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
+                            });
+                        }
+                        None => log::error!(
+                            "[MCP] no free MCP port near {} — the MCP server is NOT running",
+                            api_net.mcp_port
+                        ),
+                    }
                     // Spawn the peering fabric sidecar. Spawn failure (binary absent /
                     // not bundled) is logged and NON-FATAL — the open-core app runs
                     // fine with peering "not installed".
@@ -1129,7 +1175,11 @@ pub fn run() {
                     )
                     .await;
                 }
-                Err(e) => log::error!("API bind failed on {}: {}", addr, e),
+                None => log::error!(
+                    "API could not bind any port near {} — the REST/WebSocket API and MCP are \
+                     NOT running. Change the port in Settings > Connections.",
+                    api_net.api_port
+                ),
             }
         });
 
