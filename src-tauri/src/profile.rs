@@ -173,6 +173,32 @@ pub fn scoped_file(name: &str) -> String {
     current().scoped_file(name)
 }
 
+/// What the renderer needs: which profile this window belongs to, and the
+/// discriminator its storage keys hang off. Two instances share one WebView2
+/// user-data folder — hence one localStorage — so the renderer cannot work this
+/// out for itself.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileInfo {
+    pub name: String,
+    pub elevated: bool,
+    /// `name`, plus `.high` when elevated. `"default"` keeps today's keys.
+    pub scope: String,
+    pub is_default: bool,
+}
+
+impl ProfileIdentity {
+    pub fn info(&self) -> ProfileInfo {
+        let elevated = self.integrity == Integrity::High;
+        ProfileInfo {
+            name: self.name.clone(),
+            elevated,
+            scope: format!("{}{}", self.name, if elevated { ".high" } else { "" }),
+            is_default: is_default(&self.name) && !elevated,
+        }
+    }
+}
+
 /// `Some(true|false)` when the token was readable, `None` when it was not.
 #[cfg(windows)]
 pub fn elevation() -> Option<bool> {

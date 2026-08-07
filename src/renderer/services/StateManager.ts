@@ -10,6 +10,7 @@ import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
+import { stateKey, layoutsKey, apiTokenKey } from './profileScope';
 
 export interface AppState {
   tabs: any[];
@@ -39,8 +40,11 @@ export interface SavedLayout {
 }
 
 class StateManagerClass {
-  private readonly STATE_KEY = 'auto-terminal-state';
-  private readonly LAYOUTS_KEY = 'auto-terminal-layouts';
+  // Getters, not fields: the profile is resolved during bootstrap and this
+  // singleton may be constructed either side of that. The default profile keeps
+  // the original key names, so existing saved state loads untouched.
+  private get STATE_KEY(): string { return stateKey(); }
+  private get LAYOUTS_KEY(): string { return layoutsKey(); }
 
   /** Every terminal id currently present in any tab's pane tree. */
   private collectLiveTerminalIds(state: RootState): Set<string> {
@@ -271,7 +275,7 @@ class StateManagerClass {
       } catch {
         // keep the dev/prod default
       }
-      const token = localStorage.getItem('api_token');
+      const token = localStorage.getItem(apiTokenKey());
       const res = await fetch(`http://localhost:${port}/api/terminals`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });

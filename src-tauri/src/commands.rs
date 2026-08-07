@@ -750,6 +750,14 @@ pub fn get_terminal_size(state: State<'_, AppState>, id: String) -> Result<Termi
     }
 }
 
+/// Which profile this instance is. The renderer scopes its localStorage keys on
+/// the returned `scope` — two instances share one WebView2 user-data folder, so
+/// without it a named profile would overwrite the default profile's tabs.
+#[tauri::command]
+pub fn get_profile() -> crate::profile::ProfileInfo {
+    crate::profile::current().info()
+}
+
 /// Replace the whole settings blob. Prefer [`merge_config`]: this clobbers keys
 /// written by anyone else since the caller read the file.
 #[tauri::command]

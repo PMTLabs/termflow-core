@@ -6,6 +6,7 @@ import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
+import { apiTokenKey } from '../services/profileScope';
 
 export interface NetworkConfig {
   apiPort: number;
@@ -190,7 +191,7 @@ invoke<{ apiPort: number; authToken: string }>('get_network_config')
     // (including this renderer's loopback calls), so the renderer must send it.
     // Harmless in localhost mode (auth is not enforced there).
     if (cfg?.authToken) {
-      localStorage.setItem('api_token', cfg.authToken);
+      localStorage.setItem(apiTokenKey(), cfg.authToken);
     }
   })
   .catch(() => { /* keep default */ });
@@ -211,7 +212,7 @@ export function getWindowsBuildNumber(): number {
 }
 
 const buildAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem('api_token');
+  const token = localStorage.getItem(apiTokenKey());
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
@@ -538,12 +539,12 @@ const tauriBridge: ElectronAPI = {
       API_PORT = cfg.apiPort;
       API_BASE_URL = `http://localhost:${API_PORT}/api`;
     }
-    if (cfg?.authToken) localStorage.setItem('api_token', cfg.authToken);
+    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
     return cfg;
   },
   rotateAuthToken: async () => {
     const cfg = await invoke<NetworkConfig>('rotate_auth_token');
-    if (cfg?.authToken) localStorage.setItem('api_token', cfg.authToken);
+    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
     return cfg;
   },
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),

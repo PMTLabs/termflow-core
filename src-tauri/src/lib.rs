@@ -1170,6 +1170,7 @@ pub fn run() {
         commands::get_shell_profiles,
         commands::read_legal_document,
         commands::quit_app,
+        commands::get_profile,
         commands::save_config,
         commands::merge_config,
         commands::load_config,
