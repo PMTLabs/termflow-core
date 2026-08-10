@@ -6,12 +6,19 @@ import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
+import { apiTokenKey } from '../services/profileScope';
 
 export interface NetworkConfig {
   apiPort: number;
   mcpPort: number;
   exposeOnNetwork: boolean;
   authToken: string;
+}
+
+/** See `EffectiveEndpoints` in `../types/electron`. */
+export interface EffectiveEndpoints {
+  apiPort: number | null;
+  mcpPort: number | null;
 }
 
 // Velopack update availability (mirrors the Rust UpdateStatus enum).
@@ -38,6 +45,11 @@ interface ElectronAPI {
   getTerminalFullScrollback: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
   createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number) => Promise<string>;
+  /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
+  /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
+  /// `az login` WAM prompt) open in front instead of behind the app. Fired on
+  /// every process bind, so a pane moved between windows re-owns to the new one.
+  adoptConsoleWindow: (processId: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
@@ -92,6 +104,7 @@ interface ElectronAPI {
   getAPIConfig: () => Promise<any>;
   // Network settings (ports, expose-on-network, access token)
   getNetworkConfig: () => Promise<NetworkConfig>;
+  getEffectiveEndpoints: () => Promise<EffectiveEndpoints>;
   setNetworkConfig: (apiPort: number, mcpPort: number, exposeOnNetwork: boolean) => Promise<NetworkConfig>;
   rotateAuthToken: () => Promise<NetworkConfig>;
   listNetworkInterfaces: () => Promise<NetworkInterfaceInfo[]>;
@@ -190,7 +203,7 @@ invoke<{ apiPort: number; authToken: string }>('get_network_config')
     // (including this renderer's loopback calls), so the renderer must send it.
     // Harmless in localhost mode (auth is not enforced there).
     if (cfg?.authToken) {
-      localStorage.setItem('api_token', cfg.authToken);
+      localStorage.setItem(apiTokenKey(), cfg.authToken);
     }
   })
   .catch(() => { /* keep default */ });
@@ -211,7 +224,7 @@ export function getWindowsBuildNumber(): number {
 }
 
 const buildAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem('api_token');
+  const token = localStorage.getItem(apiTokenKey());
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
@@ -284,6 +297,10 @@ const tauriBridge: ElectronAPI = {
       cwd,
       tabId,
     });
+  },
+
+  adoptConsoleWindow: async (processId: string) => {
+    await invoke('adopt_console_window', { terminalId: processId });
   },
 
   closeTerminal: async (id) => {
@@ -414,11 +431,12 @@ const tauriBridge: ElectronAPI = {
     }
   },
 
+  // Merge in the BACKEND, under an inter-process lock. Reading the whole config
+  // here and saving it back lost every key written in between — by the backend,
+  // or by another instance now that profiles let two run at once.
   updateConfig: async (updates) => {
     try {
-      const current = await tauriBridge.getConfig();
-      const newConfig = { ...current, ...updates };
-      await invoke('save_config', { config: JSON.stringify(newConfig, null, 2) });
+      await invoke('merge_config', { updates });
     } catch (e) {
       console.error('Failed to update config:', e);
     }
@@ -529,6 +547,7 @@ const tauriBridge: ElectronAPI = {
 
   // Network settings
   getNetworkConfig: async () => invoke('get_network_config'),
+  getEffectiveEndpoints: async () => invoke('get_effective_endpoints'),
   setNetworkConfig: async (apiPort, mcpPort, exposeOnNetwork) => {
     const cfg = await invoke<NetworkConfig>('set_network_config', { apiPort, mcpPort, exposeOnNetwork });
     // Re-point the bridge at the (possibly new) port so REST calls — terminal
@@ -537,12 +556,12 @@ const tauriBridge: ElectronAPI = {
       API_PORT = cfg.apiPort;
       API_BASE_URL = `http://localhost:${API_PORT}/api`;
     }
-    if (cfg?.authToken) localStorage.setItem('api_token', cfg.authToken);
+    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
     return cfg;
   },
   rotateAuthToken: async () => {
     const cfg = await invoke<NetworkConfig>('rotate_auth_token');
-    if (cfg?.authToken) localStorage.setItem('api_token', cfg.authToken);
+    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
     return cfg;
   },
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),

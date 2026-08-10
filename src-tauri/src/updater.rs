@@ -80,6 +80,7 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // terminal is in-process / the sidecar can't survive, refuse now.
     log::info!("[UPDATE] update_and_restart: running survivability preflight");
     crate::commands::hotswap_preflight(state)?;
+    crate::commands::sibling_instance_preflight()?;
 
     // Check + download off the async runtime.
     let info = tokio::task::spawn_blocking(check_and_download)

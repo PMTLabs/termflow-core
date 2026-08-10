@@ -1,7 +1,11 @@
 pub mod state;
+pub mod console_window;
 pub mod context_menu;
 pub mod session_notify;
 pub mod app_config;
+pub mod profile;
+pub mod instance_lock;
+pub mod net_ports;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
@@ -21,6 +25,7 @@ pub mod layout_endpoints;
 pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
+mod gpu_preference;
 mod native_notify;
 mod panic_hook;
 mod shell_integration;
@@ -60,7 +65,14 @@ pub(crate) fn shutdown_mcp_server(state: &AppState) {
     }
 }
 
-async fn wait_for_mcp_health(port: u16) -> bool {
+/// Poll the MCP server's `/health` until OUR sidecar answers.
+///
+/// A 200 is not enough: with per-profile instances another TermFlow's MCP server
+/// can hold this port, and treating its reply as "healthy" would have us report
+/// a running server we do not own — and quietly route this instance's tool calls
+/// into the other app. The sidecar echoes `AUTO_TERMINAL_INSTANCE_ID`, so
+/// compare it (`classify_health_owner`, the same rule the Settings check uses).
+async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
@@ -73,8 +85,24 @@ async fn wait_for_mcp_health(port: u16) -> bool {
         };
         match result {
             Ok(response) if response.status().is_success() => {
-                log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
-                return true;
+                let body: serde_json::Value =
+                    response.json().await.unwrap_or_else(|_| serde_json::json!({}));
+                let reported = body.get("instanceId").and_then(|v| v.as_str());
+                let (healthy, conflict) =
+                    crate::network_commands::classify_health_owner(reported, own_id);
+                if healthy {
+                    log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
+                    return true;
+                }
+                if conflict {
+                    log::error!(
+                        "[MCP] port {port} is served by ANOTHER instance ({}) — this instance's \
+                         MCP server is not running. Change the MCP port in Settings.",
+                        reported.unwrap_or("unknown")
+                    );
+                    return false;
+                }
+                log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet");
             }
             Ok(response) => {
                 log::debug!("[MCP] Health check attempt {} returned status: {}", attempt, response.status());
@@ -85,7 +113,7 @@ async fn wait_for_mcp_health(port: u16) -> bool {
         }
     }
 
-    log::warn!("[MCP] MCP Server health check failed after 10 attempts");
+    log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
     false
 }
 
@@ -152,7 +180,7 @@ async fn start_mcp_sidecar(
         while rx.recv().await.is_some() {}
     });
 
-    let _ = wait_for_mcp_health(cfg.mcp_port).await;
+    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
     Ok(())
 }
 
@@ -198,7 +226,7 @@ async fn start_mcp_legacy(
         *guard = Some(McpProcessHandle::Legacy(child));
     }
 
-    let _ = wait_for_mcp_health(cfg.mcp_port).await;
+    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
     Ok(())
 }
 
@@ -231,13 +259,18 @@ struct Args {
    /// Run in headless mode (no GUI)
    #[arg(long, default_value_t = false)]
    headless: bool,
-   /// Override the API server port for THIS run — e.g. to launch a second instance
-   /// without a port conflict. Runtime-only; not persisted to the shared config.
+   /// Override the API server port for THIS run. Runtime-only; not persisted.
+   /// This no longer bypasses single-instance (D6) — use `--profile` for a
+   /// second instance, which picks free ports on its own.
    #[arg(long)]
    api_port: Option<u16>,
    /// Override the MCP server port for THIS run. Runtime-only; not persisted.
    #[arg(long)]
    mcp_port: Option<u16>,
+   /// Run as a named instance with its own config, history, shells and ports.
+   /// Launching the same profile twice focuses the existing window.
+   #[arg(long, value_parser = crate::profile::sanitize_arg)]
+   profile: Option<String>,
    /// Open a new terminal rooted at this folder.
    #[arg(long = "path")]
    path: Option<String>,
@@ -264,6 +297,19 @@ mod cli_args_tests {
         assert_eq!(a.api_port, None);
         assert_eq!(a.mcp_port, None);
         assert!(!a.headless);
+    }
+
+    #[test]
+    fn rejects_an_unsafe_profile_at_parse_time() {
+        // The value reaches Path::join, a pipe name and a mutex name, so a bad
+        // one must never get as far as identity resolution.
+        assert_eq!(
+            Args::try_parse_from(["app", "--profile", "Work"]).unwrap().profile.as_deref(),
+            Some("work")
+        );
+        assert!(Args::try_parse_from(["app", "--profile", "../etc"]).is_err());
+        assert!(Args::try_parse_from(["app", "--profile", ""]).is_err());
+        assert_eq!(Args::try_parse_from(["app"]).unwrap().profile, None);
     }
 
     #[test]
@@ -664,8 +710,7 @@ fn spawn_pipeline_watchdog(state: AppState) {
 fn history_db_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let dir = app.path().app_data_dir().ok()?;
     let _ = std::fs::create_dir_all(&dir);
-    let name = if crate::app_config::is_dev() { "history.dev.db" } else { "history.db" };
-    Some(dir.join(name))
+    Some(dir.join(crate::app_config::dev_file("history.db")))
 }
 
 // NOTE: the per-terminal persist logic lives in `AppState::persist_terminal_history`
@@ -722,7 +767,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         // Left-click is handled by on_tray_icon_event (show window); the menu opens
         // on right-click only, so a left-click doesn't pop the menu instead.
         .show_menu_on_left_click(false)
-        .tooltip("TermFlow")
+        // Marked per profile: several instances mean several tray icons.
+        .tooltip(crate::profile::decorate_title("TermFlow"))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "tray_show" => show_or_focus_main_window(app),
             "tray_peers" => {
@@ -780,6 +826,23 @@ pub fn run() {
   panic_hook::install();
 
   let args = Args::parse();
+
+  // Resolve the instance identity BEFORE anything resolves a path. Every mutable
+  // artifact name flows from it (app_config::dev_file), so a late resolution
+  // would silently write the wrong profile's files.
+  let identity = match profile::ProfileIdentity::resolve(
+    args.profile.as_deref(),
+    profile::elevation(),
+    app_config::is_dev(),
+  ) {
+    Ok(id) => id,
+    Err(e) => {
+      eprintln!("TermFlow: {e}");
+      std::process::exit(2);
+    }
+  };
+  profile::set_current(identity.clone());
+
   let is_headless = args.headless;
   // Runtime-only port overrides (B5): applied to the loaded config before binding,
   // never persisted — so a second instance can start on free ports without touching
@@ -788,22 +851,29 @@ pub fn run() {
   let cli_mcp_port = args.mcp_port;
   let initial_open_path = args.path.or(args.positional_path);
 
+  // Hoisted so the log target can be named from the real product name rather
+  // than a second hardcoded copy of it.
+  let context = tauri::generate_context!();
+  let log_file_name = identity.scoped_stem(&context.package_info().name);
+
   let mut builder = tauri::Builder::default();
   #[cfg(desktop)]
   {
-    // Single-instance is enforced for RELEASE only. The plugin keys its lock on
-    // the app identifier (shared by debug + release), so enforcing it in dev
-    // would block a debug build from running alongside the installed release
-    // used for production. Dev is fully isolated otherwise (config.dev.json,
-    // history.dev.db, layout.dev.json, dev ports, …), so a debug instance can
-    // safely coexist. Release keeps single-instance so a second production
-    // launch focuses the existing window instead of starting a duplicate.
-    if !crate::app_config::is_dev()
-      && !args.headless
-      && args.api_port.is_none()
-      && args.mcp_port.is_none()
-    {
-      builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+    // Single-instance is enforced per PROFILE IDENTITY (channel, name, integrity),
+    // and unconditionally for GUI processes — the `--api-port`/`--mcp-port` bypass
+    // is gone (D6): it existed only as the pre-profile escape hatch for a second
+    // instance, and letting two processes share one identity puts them back on one
+    // pipe, lock and pair of ports.
+    //
+    // Two exemptions remain, both deliberate:
+    //   * headless — no window to focus, so there is nothing to relay to;
+    //   * dev builds — a debug build must be able to run beside the installed
+    //     release used for production. Dev is isolated by its own channel
+    //     ("dev"), so it never shares an artifact with release anyway.
+    // In both cases two processes CAN share one identity and would contend for
+    // its pipe; that is the accepted cost of each exemption.
+    if !crate::app_config::is_dev() && !args.headless {
+      let on_second_launch = |app: &tauri::AppHandle, argv: Vec<String>, _cwd: String| {
         let path = Args::try_parse_from(argv)
           .ok()
           .and_then(|args| args.path.or(args.positional_path));
@@ -819,13 +889,34 @@ pub fn run() {
           // creates one if none exist (e.g. tray-only or the main window was detached).
           show_or_focus_main_window(app);
         }
-      }));
+      };
+
+      #[cfg(windows)]
+      {
+        builder = builder.plugin(instance_lock::init(&identity, Box::new(on_second_launch)));
+      }
+      // Unix keeps the identifier-keyed plugin, which is exactly the previous
+      // behaviour for the primary profile. A named profile there is unenforced
+      // for now — see instance_lock.rs.
+      #[cfg(not(windows))]
+      if identity.is_primary() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(on_second_launch));
+      }
     }
   }
 
   builder
     .plugin(
       tauri_plugin_log::Builder::default()
+        // Same two targets the plugin defaults to, but with the log-dir file
+        // named per profile so two instances never fight over one rotating
+        // file. The default identity yields the product name unchanged.
+        .targets([
+          tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+          tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+            file_name: Some(log_file_name),
+          }),
+        ])
         .level(log::LevelFilter::Info)  // Only INFO and above
         .level_for("tokio_tungstenite", log::LevelFilter::Warn)
         .level_for("tungstenite", log::LevelFilter::Warn)
@@ -854,6 +945,9 @@ pub fn run() {
         None,
     ))
     .setup(move |app| {
+        // Resolved before the builder ran, so it could not be logged then.
+        gpu_preference::log_resolution();
+
         // Unpackaged Windows apps need an AUMID registered before WinRT can
         // attribute and deliver native toast notifications. On macOS this claims the
         // notification bundle identity, which MUST happen before anything else in the
@@ -896,6 +990,16 @@ pub fn run() {
             log::info!("[CONFIG] --mcp-port override: {} -> {}", network.mcp_port, p);
             network.mcp_port = p;
         }
+        // D5: an elevated instance authenticates on loopback, with a token minted
+        // for THIS launch and never written to disk. A persisted token would sit
+        // in a file any medium-integrity process owned by this user can read,
+        // which would defeat the whole point of requiring one.
+        let elevated =
+            crate::profile::current().integrity == crate::profile::Integrity::High;
+        if elevated {
+            network.auth_token = crate::app_config::generate_token();
+            log::info!("[CONFIG] elevated instance: minted a per-launch API token");
+        }
         log::info!(
             "[CONFIG] instance={} api_port={} mcp_port={} expose={}",
             crate::app_config::instance_config_name(),
@@ -914,6 +1018,29 @@ pub fn run() {
 
         // Manage state in Tauri
         app.manage(state.clone());
+
+        // Advertise this instance BEFORE the servers come up: an instance that
+        // serves no endpoints at all (an elevated launch without a port flag) is
+        // still a running sibling, and the updater must see it (Task 17).
+        // Re-published with the real ports once they are bound.
+        let publish_record = |api_port, mcp_port| {
+            let id = crate::profile::current();
+            let rec = crate::net_ports::InstanceRecord {
+                profile: id.key(),
+                pid: std::process::id(),
+                api_port,
+                mcp_port,
+                // Only an elevated instance needs a token published, and the file
+                // it goes into carries a HIGH integrity label so a medium process
+                // of this user cannot read it back (D5).
+                token: (id.integrity == crate::profile::Integrity::High)
+                    .then(|| network.auth_token.clone()),
+            };
+            if let Err(e) = crate::net_ports::publish(&rec, elevated) {
+                log::warn!("[NET] could not publish the instance record: {e}");
+            }
+        };
+        publish_record(None, None);
 
         // Seed the background-mode flag from persisted settings (Plan 010) BEFORE any
         // window can close, so the exit guard reads the user's saved choice. The
@@ -940,6 +1067,9 @@ pub fn run() {
         // Trim the WebView2 right-click menu (Windows) to Print + Inspect on the
         // primary window. New windows install the same filter at build time.
         if let Some(main) = app.get_webview_window("main") {
+            // The main window's title comes from tauri.conf.json, so mark it here.
+            // Every later update goes through set_window_title, which decorates too.
+            let _ = main.set_title(&crate::profile::decorate_title("TermFlow"));
             crate::context_menu::install(&main);
             // Detect RDP/console session switches (Windows) and tell the renderer to
             // suppress the resulting ConPTY repaint burst — otherwise the activity
@@ -965,59 +1095,122 @@ pub fn run() {
         if let Ok(mut g) = api_state.api_shutdown.lock() {
             *g = Some(api_sd_tx);
         }
+        // An elevated instance serves its API/MCP only when the user explicitly
+        // asked for it with a port flag. Otherwise the safest surface is none at
+        // all: the default is an admin terminal you drive by hand, not one any
+        // local program can reach.
+        let serve_endpoints =
+            !elevated || cli_api_port.is_some() || cli_mcp_port.is_some();
         tauri::async_runtime::spawn(async move {
-            let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
-            let addr = std::net::SocketAddr::from((host, api_net.api_port));
-            // P0b: refuse to start if another instance already owns this port. With
-            // SO_REUSEADDR our bind would otherwise SUCCEED and hijack the port, so we
-            // probe /health first. We ALSO skip the MCP sidecar here: MCP forwards
-            // every tool call to AUTO_TERMINAL_API_URL (= this api_port), so starting
-            // it while the port belongs to ANOTHER instance would silently route MCP
-            // operations into the other app. The Settings health check surfaces the
-            // conflict and lets the user pick a different port (or use --api-port).
-            if matches!(
-                crate::network_commands::probe_port_owner(api_net.api_port, &api_state.instance_id).await,
-                crate::network_commands::PortOwner::OwnedByOther
-            ) {
-                log::warn!(
-                    "API port {} is already owned by another instance — not starting the API or MCP servers. \
-                     Change the port in Settings > Connections (or pass --api-port) to run a second instance.",
-                    api_net.api_port
+            if !serve_endpoints {
+                log::info!(
+                    "[API] Suppressed for the elevated profile: pass --api-port or --mcp-port \
+                     to serve them (the token is minted per launch)"
                 );
                 return;
             }
-            // Bind with SO_REUSEADDR (same path as the hot-restart) so the very
-            // first "Save & apply (restart)" can rebind this same port even while
-            // this initial socket is still lingering. A plain TcpListener::bind
-            // would leave it non-reuse on Windows, and the SO_REUSEADDR rebind
-            // would then fail with WSAEACCES (os error 10013). See bind_reuseaddr.
-            match crate::network_commands::bind_reuseaddr(addr) {
-                Ok(listener) => {
-                    // Bound successfully → the API port is genuinely ours. Only NOW
-                    // start the MCP sidecar (which forwards every tool call to this
-                    // API), so a bind failure AFTER a Free/Self probe (cold-start
-                    // race, stale non-HTTP process, permission error) can never leave
-                    // a sidecar advertising our instanceId while pointing at a port we
-                    // don't own.
+            let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+            // Bind-and-RETAIN, walking forward from the configured port. A probe
+            // followed by a separate bind leaves a window in which a sibling can
+            // take the port, and `SO_REUSEADDR` (needed for the hot-restart
+            // rebind) means our bind would then SUCCEED and hijack it — silently
+            // rerouting the other instance's MCP tool calls into this app. With
+            // per-profile instances, two apps starting at once is normal.
+            //
+            // The fallback port is NEVER written back to the config: `network`
+            // stays what the user configured, `effective_endpoints` records what
+            // we actually got.
+            let picked = crate::net_ports::bind_api_listener(
+                host,
+                api_net.api_port,
+                crate::net_ports::DEFAULT_SPAN,
+                &api_state.instance_id,
+            )
+            .await;
+            match picked {
+                Some(crate::net_ports::Picked { port: api_port, bound: listener }) => {
+                    // Bound successfully → the API port is genuinely ours. Publish
+                    // it BEFORE anything derived from it is built: `mcp_env` used to
+                    // read a config clone captured before binding, so a fallback
+                    // port left the MCP sidecar forwarding to the OTHER instance's
+                    // API. Same for the fabric and the renderer.
+                    let mcp_port = crate::net_ports::pick_mcp_port(
+                        api_net.mcp_port,
+                        crate::net_ports::DEFAULT_SPAN,
+                        &api_state.instance_id,
+                    )
+                    .await;
+                    {
+                        let mut eff = api_state.effective_endpoints.write();
+                        eff.api_port = Some(api_port);
+                        eff.mcp_port = mcp_port;
+                    }
+                    log::info!(
+                        "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
+                        api_net.api_port, mcp_port, api_net.mcp_port
+                    );
+                    // Re-advertise with the ports we actually got, so a sibling
+                    // (or the user) can find this instance without guessing.
+                    if let Err(e) = crate::net_ports::publish(
+                        &crate::net_ports::InstanceRecord {
+                            profile: crate::profile::current().key(),
+                            pid: std::process::id(),
+                            api_port: Some(api_port),
+                            mcp_port,
+                            token: (crate::profile::current().integrity
+                                == crate::profile::Integrity::High)
+                                .then(|| api_net.auth_token.clone()),
+                        },
+                        crate::profile::current().integrity == crate::profile::Integrity::High,
+                    ) {
+                        log::warn!("[NET] could not republish the instance record: {e}");
+                    }
+                    // Only NOW start the MCP sidecar (which forwards every tool call
+                    // to this API), so a bind failure can never leave a sidecar
+                    // advertising our instanceId while pointing at a port we don't
+                    // own. It is launched with the EFFECTIVE ports.
+                    let mut mcp_net = mcp_net;
+                    mcp_net.api_port = api_port;
                     let mcp_state = api_state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
-                    });
+                    match mcp_port {
+                        Some(p) => {
+                            mcp_net.mcp_port = p;
+                            tauri::async_runtime::spawn(async move {
+                                respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
+                            });
+                        }
+                        None => log::error!(
+                            "[MCP] no free MCP port near {} — the MCP server is NOT running",
+                            api_net.mcp_port
+                        ),
+                    }
                     // Spawn the peering fabric sidecar. Spawn failure (binary absent /
                     // not bundled) is logged and NON-FATAL — the open-core app runs
                     // fine with peering "not installed".
-                    let fabric_state = api_state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) =
-                            crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
-                                .await
-                        {
-                            log::warn!(
-                                "[FABRIC] termflow-fabric not started (peering not installed): {}",
-                                e
-                            );
-                        }
-                    });
+                    //
+                    // Only the primary instance runs it: the fabric owns machine-wide
+                    // singletons (its identity keypair in the OS keychain and its peer
+                    // listener port), which are not profile-scoped. A second profile
+                    // starting one would contend for both.
+                    if crate::profile::current().is_primary() {
+                        let fabric_state = api_state.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
+                                    .await
+                            {
+                                log::warn!(
+                                    "[FABRIC] termflow-fabric not started (peering not installed): {}",
+                                    e
+                                );
+                            }
+                        });
+                    } else {
+                        log::info!(
+                            "[FABRIC] Not started: profile '{}' is not the primary instance",
+                            crate::profile::current().name
+                        );
+                    }
                     crate::api_server::start_api_server(
                         api_state,
                         listener,
@@ -1026,10 +1219,14 @@ pub fn run() {
                     )
                     .await;
                 }
-                Err(e) => log::error!("API bind failed on {}: {}", addr, e),
+                None => log::error!(
+                    "API could not bind any port near {} — the REST/WebSocket API and MCP are \
+                     NOT running. Change the port in Settings > Connections.",
+                    api_net.api_port
+                ),
             }
         });
-        
+
         // Spawn the PTY Output Listener (consumer generation 0) and the stall
         // watchdog that auto-heals it (respawn + repaint) if it ever wedges.
         // The consumer subscribes to the broadcast channel via state.output_tx.
@@ -1050,6 +1247,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
+        commands::adopt_console_window,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::take_reattach_prompt_hook,
@@ -1071,7 +1269,9 @@ pub fn run() {
         commands::get_shell_profiles,
         commands::read_legal_document,
         commands::quit_app,
+        commands::get_profile,
         commands::save_config,
+        commands::merge_config,
         commands::load_config,
         commands::close_terminal,
         commands::prune_terminal_history,
@@ -1084,6 +1284,7 @@ pub fn run() {
         commands::check_connection_health,
         commands::generate_api_token,
         network_commands::get_network_config,
+        network_commands::get_effective_endpoints,
         network_commands::set_network_config,
         network_commands::rotate_auth_token,
         network_commands::list_network_interfaces,
@@ -1238,7 +1439,7 @@ pub fn run() {
             commands::refresh_menu(window.app_handle());
         }
     })
-    .build(tauri::generate_context!())
+    .build(gpu_preference::apply_to_context(context))
     .expect("error while building tauri application")
     .run(|app_handle, event| {
         if let RunEvent::Exit = event {
@@ -1250,6 +1451,10 @@ pub fn run() {
                 // Gracefully shutdown the peering fabric sidecar on app exit.
                 crate::fabric_manager::shutdown_fabric(&state);
             }
+            // Stop advertising this instance. A crash leaves the record behind,
+            // which is why readers treat a dead pid as stale rather than trusting
+            // the file's existence.
+            crate::net_ports::retract(&crate::profile::current().key());
         }
     });
 }

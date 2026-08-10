@@ -8,14 +8,24 @@ if (previewParams.has('dragPreview')) {
   const { renderDragPreview } = require('./components/Tabs/DragPreview');
   renderDragPreview(previewParams.get('title') || 'Terminal');
 } else {
-  bootstrapApp();
+  void bootstrapApp();
 }
 
-function bootstrapApp(): void {
+async function bootstrapApp(): Promise<void> {
 // Detect environment and setup bridge BEFORE importing the rest of the app
 const isTauri = !!(window as any).__TAURI_INTERNALS__ || !!(window as any).__TAURI__;
 
 if (isTauri) {
+  // Resolve the profile FIRST — before the bridge, before App. Two instances
+  // share one WebView2 user-data folder, so they share one localStorage; the
+  // bridge writes the API token as soon as its config request resolves and App
+  // registers unload/interval saves the moment it mounts. Either landing before
+  // the scope is known writes to the DEFAULT profile's keys.
+  const { invoke } = require('@tauri-apps/api/core');
+  const { initProfileScope } = require('./services/profileScope');
+  const profile = await initProfileScope(invoke);
+  console.log('Profile:', profile.scope);
+
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
 } else if (!(window as any).electronAPI) {

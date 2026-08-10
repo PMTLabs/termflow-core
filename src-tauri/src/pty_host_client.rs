@@ -759,24 +759,36 @@ pub async fn connect_or_spawn(
     ))
 }
 
-/// Per-user endpoint so two users on one machine never collide. `dev` vs
-/// `release` is distinguished by the debug_assertions flag. On Windows this is a
-/// named-pipe name; on Unix a socket path in the user's runtime dir. The GUI
-/// passes this to the sidecar via `TERMFLOW_PTY_PIPE`, so both agree by
-/// construction (the sidecar creates the socket's parent dir on bind).
+/// Windows named-pipe name for an identity. Pure, so the naming invariant is
+/// testable without touching the environment. `id.key()` is `"rel"` for the
+/// default identity, so today's name is reproduced byte for byte.
+#[cfg(windows)]
+fn pipe_for(user: &str, id: &crate::profile::ProfileIdentity) -> String {
+    format!(r"\\.\pipe\termflow-pty-host.{user}.{}", id.key())
+}
+
+/// Unix socket path for an identity. Same reasoning as `pipe_for`.
+#[cfg(unix)]
+fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String {
+    format!("{runtime_dir}/termflow-pty-host.{}.sock", id.key())
+}
+
+/// Per-user, per-identity endpoint so two users — or two profiles — on one
+/// machine never collide. On Windows this is a named-pipe name; on Unix a socket
+/// path in the user's runtime dir. The GUI passes this to the sidecar via
+/// `TERMFLOW_PTY_PIPE`, so both agree by construction (the sidecar creates the
+/// socket's parent dir on bind).
 pub fn resolve_pipe() -> String {
     #[cfg(windows)]
     {
         let user = std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_else(|_| "user".to_string());
-        let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
-        format!(r"\\.\pipe\termflow-pty-host.{user}.{chan}")
+        pipe_for(&user, crate::profile::current())
     }
     #[cfg(unix)]
     {
-        let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
-        format!("{}/termflow-pty-host.{chan}.sock", unix_runtime_dir())
+        socket_for(&unix_runtime_dir(), crate::profile::current())
     }
 }
 
@@ -886,7 +898,14 @@ fn host_binary_name() -> &'static str {
 /// Old copies under the previous location are simply orphaned (the Windows
 /// uninstaller removes the root; dev/mac copies are a few MB) — the stable pipe
 /// name means a still-running old-dir host keeps working regardless.
-/// Channel-qualified so dev and release never collide.
+/// Qualified by the full profile identity so dev/release — and two profiles, and
+/// a normal instance beside an elevated one — never collide.
+///
+/// Scoping the pipe alone was NOT enough (plan 011 rev 1's blocking bug):
+/// `ensure_pty_host_inner` reads the record here and, on `ConnectPlan::Bootstrap`,
+/// substitutes the record's advertised endpoint for the computed pipe
+/// (`state.rs:712-729`) — so an unscoped record redirected profile B straight
+/// onto profile A's host.
 pub fn runtime_host_dir() -> Option<std::path::PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)
@@ -901,13 +920,60 @@ pub fn runtime_host_dir() -> Option<std::path::PathBuf> {
                     .map(|h| std::path::PathBuf::from(h).join(".local").join("share"))
             })
     }?;
-    let chan = if cfg!(debug_assertions) { "dev" } else { "rel" };
-    Some(base.join("app.termflow.desktop").join("host").join(chan))
+    Some(record_dir_for(&base, crate::profile::current()))
+}
+
+/// Pure form of [`runtime_host_dir`], so the identity-scoping invariant can be
+/// asserted without an environment.
+fn record_dir_for(
+    base: &std::path::Path,
+    id: &crate::profile::ProfileIdentity,
+) -> std::path::PathBuf {
+    base.join("app.termflow.desktop").join("host").join(id.key())
 }
 
 #[cfg(test)]
 mod runtime_dir_tests {
-    use super::runtime_host_dir;
+    use super::{record_dir_for, runtime_host_dir};
+    use crate::profile::{Integrity, ProfileIdentity};
+    use std::path::Path;
+
+    fn id(name: &str, integrity: Integrity) -> ProfileIdentity {
+        ProfileIdentity { channel: "rel", name: name.into(), integrity }
+    }
+
+    #[test]
+    fn the_default_identity_keeps_todays_pipe_and_record() {
+        // Renaming either would orphan shells surviving from a previous build.
+        let default = id("default", Integrity::Medium);
+        assert!(record_dir_for(Path::new("base"), &default)
+            .ends_with(Path::new("host").join("rel")));
+        #[cfg(windows)]
+        assert_eq!(
+            super::pipe_for("TESTUSER", &default),
+            r"\\.\pipe\termflow-pty-host.TESTUSER.rel"
+        );
+    }
+
+    #[test]
+    fn each_identity_gets_its_own_pipe_and_its_own_record_dir() {
+        let a = id("work", Integrity::Medium);
+        let b = id("work", Integrity::High);
+        let c = id("default", Integrity::Medium);
+        // The rev-1 bug: the pipe was scoped but the record was not, and
+        // ensure_pty_host_inner SUBSTITUTES the record's endpoint for the
+        // computed pipe (state.rs:712-729) -- so scoping the pipe alone did
+        // nothing at all.
+        let dir = |i| record_dir_for(Path::new("base"), i);
+        assert_ne!(dir(&a), dir(&b));
+        assert_ne!(dir(&a), dir(&c));
+        assert_ne!(dir(&b), dir(&c));
+        #[cfg(windows)]
+        {
+            assert_ne!(super::pipe_for("u", &a), super::pipe_for("u", &b));
+            assert_ne!(super::pipe_for("u", &a), super::pipe_for("u", &c));
+        }
+    }
 
     /// C1 regression guard: the host runtime dir must NEVER live under the
     /// Velopack install root (`…\TermFlow\`), or Update.exe kills the armed
@@ -928,9 +994,12 @@ mod runtime_dir_tests {
 }
 
 /// Where the running host advertises itself (RP-2 discovery). Lives in the
-/// update-stable runtime dir (per-user + per-channel, matching the pipe name's
+/// update-stable runtime dir (per-user + per-identity, matching the pipe name's
 /// scope) so it survives updates alongside the host itself. Absent file ⇒
 /// legacy host or none running.
+///
+/// The sidecar never computes this path — the GUI passes it as
+/// `TERMFLOW_PTY_RECORD`, so scoping it here scopes the writer too.
 pub fn record_path() -> Option<std::path::PathBuf> {
     runtime_host_dir().map(|d| d.join("host-record.json"))
 }

@@ -8,7 +8,8 @@ import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
 import { ShellProfile } from '../../store/slices/settingsSlice';
-import { NetworkConfig, NetworkInterfaceInfo } from '../../types/electron';
+import { NetworkConfig, NetworkInterfaceInfo, EffectiveEndpoints } from '../../types/electron';
+import { apiTokenKey } from '../../services/profileScope';
 import { McpConnectModal } from './McpConnectModal';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { UnsavedChangesDialog } from '../UI/UnsavedChangesDialog';
@@ -101,6 +102,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     // Network settings state (ports, expose-on-network, access token)
     const [netCfg, setNetCfg] = useState<NetworkConfig | null>(null);
+    // What the servers ACTUALLY bound. Kept apart from the configured values
+    // above so a fallback port can never be submitted back as a setting.
+    const [effective, setEffective] = useState<EffectiveEndpoints | null>(null);
     const [apiPort, setApiPort] = useState<number>(IS_DEV ? 42051 : 42031);
     const [mcpPort, setMcpPort] = useState<number>(IS_DEV ? 42052 : 42032);
     const [expose, setExpose] = useState<boolean>(false);
@@ -511,6 +515,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     setMcpPort(cfg.mcpPort);
                     setExpose(cfg.exposeOnNetwork);
                 }
+                // What we're ACTUALLY serving on. A sibling profile may have held
+                // the configured port, in which case the endpoints below must show
+                // the real one — while the port input keeps showing (and saving)
+                // the configured value.
+                const eff = await window.electronAPI?.getEffectiveEndpoints?.();
+                if (eff) setEffective(eff);
                 const ifaces = await window.electronAPI?.listNetworkInterfaces?.();
                 if (ifaces) setInterfaces(ifaces);
             } catch (err) {
@@ -528,7 +538,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             // Keep the renderer's bearer token current so its own (loopback) calls
             // stay authorized once the network token is being enforced.
-            if (cfg.authToken) localStorage.setItem('api_token', cfg.authToken);
+            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+            // The restart re-binds, so the effective ports may have changed too.
+            try {
+                const eff = await window.electronAPI?.getEffectiveEndpoints?.();
+                if (eff) setEffective(eff);
+            } catch { /* keep the previous values */ }
             dispatch(addToast({ message: 'Network settings applied — servers restarted.', type: 'success' }));
             setTimeout(() => { checkConnectionHealth(); }, 700);
         } catch (err) {
@@ -581,7 +596,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             setRevealToken(true);
             // Update the renderer's bearer token to the freshly rotated one.
-            if (cfg.authToken) localStorage.setItem('api_token', cfg.authToken);
+            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
             dispatch(addToast({ message: 'Access token rotated.', type: 'success' }));
         } catch (err) {
             dispatch(addToast({ message: `Failed to rotate token: ${err}`, type: 'error' }));
@@ -1380,6 +1395,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 ⚠ Unsaved — click “Save &amp; apply (restart)” below to apply.
             </span>
         );
+        // Show the port we are really serving on. It differs from the configured
+        // one when another instance held that port first — the URLs below must
+        // then be the ones that actually work, or every copied endpoint is wrong.
+        const liveApiPort = effective?.apiPort ?? apiPort;
+        const liveMcpPort = effective?.mcpPort ?? mcpPort;
+        const fallbackNote = (configured: number, live: number | null | undefined) =>
+            live != null && live !== configured ? (
+                <span className="apply-hint" role="status">
+                    ⓘ Port {configured} was taken by another instance — serving on {live}. Your
+                    configured port is unchanged.
+                </span>
+            ) : null;
         return (
         <>
                 <div className="settings-section">
@@ -1407,12 +1434,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             <div className="connection-status">{statusDot('API Server')}</div>
                         </div>
                         <div className="connection-url">
-                            <code>http://localhost:{apiPort}</code>
-                            {renderCopy(`http://localhost:${apiPort}`)}
+                            <code>http://localhost:{liveApiPort}</code>
+                            {renderCopy(`http://localhost:${liveApiPort}`)}
                         </div>
                         <div className="connection-url subline">
-                            <code>ws://localhost:{apiPort}/ws</code>
-                            {renderCopy(`ws://localhost:${apiPort}/ws`)}
+                            <code>ws://localhost:{liveApiPort}/ws</code>
+                            {renderCopy(`ws://localhost:${liveApiPort}/ws`)}
                         </div>
                         <div className="port-row">
                             <label className="setting-label">Port</label>
@@ -1425,6 +1452,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                 onChange={(e) => setApiPort(parseInt(e.target.value) || 0)}
                             />
                             {apiPortDirty && applyHint}
+                            {!apiPortDirty && fallbackNote(apiPort, effective?.apiPort)}
                         </div>
                         {conflictNote('API Server')}
                     </div>
@@ -1446,8 +1474,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             </div>
                         </div>
                         <div className="connection-url">
-                            <code>http://localhost:{mcpPort}/mcp</code>
-                            {renderCopy(`http://localhost:${mcpPort}/mcp`)}
+                            <code>http://localhost:{liveMcpPort}/mcp</code>
+                            {renderCopy(`http://localhost:${liveMcpPort}/mcp`)}
                         </div>
                         <div className="port-row">
                             <label className="setting-label">Port</label>
@@ -1460,6 +1488,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                 onChange={(e) => setMcpPort(parseInt(e.target.value) || 0)}
                             />
                             {mcpPortDirty && applyHint}
+                            {!mcpPortDirty && fallbackNote(mcpPort, effective?.mcpPort)}
                         </div>
                         {conflictNote('MCP Server')}
                     </div>

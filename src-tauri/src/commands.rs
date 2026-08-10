@@ -154,6 +154,37 @@ pub async fn create_terminal(
     Ok(id)
 }
 
+/// Give this shell's ConPTY pseudo-console window an owner: the window the pane
+/// currently lives in. Without it, dialogs a console program parents to
+/// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open
+/// behind TermFlow where they can't be seen or dismissed — see `console_window`.
+///
+/// The renderer calls this every time a terminal id is bound to a process, not
+/// just on spawn, so a pane dragged to another window re-owns against its new
+/// HWND rather than keeping a stale one.
+#[tauri::command]
+pub fn adopt_console_window(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    terminal_id: String,
+) -> Result<(), String> {
+    // Not registered (yet, or already gone) — nothing to adopt, and not an error:
+    // the renderer fires this optimistically off its own binding lifecycle.
+    let Some(pid) = state.terminals.get(&terminal_id).map(|t| t.pid) else {
+        return Ok(());
+    };
+    #[cfg(windows)]
+    {
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        crate::console_window::adopt(pid, hwnd.0 as isize);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, pid);
+    }
+    Ok(())
+}
+
 /// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
 /// stable `tab_id` (the reattach key), so the sidecar session, the output
 /// broadcast id, and the vt100 screen key all align — live routing works with
@@ -355,6 +386,23 @@ fn host_fallback(
 /// alive, WITHOUT performing it. `Ok(())` ⇒ the offload would proceed; `Err`
 /// carries the reason it would be refused. Used by the Settings preflight so the
 /// UI only warns when the action is actually blocked.
+/// Refuse an update/restart while another TermFlow instance is running.
+///
+/// The Velopack apply kills every process under the install root, not just the
+/// one asking — and a sibling has NOT armed its pty-host, so its shells die with
+/// it. `hotswap_preflight` only guarantees THIS instance's terminals survive.
+pub fn sibling_instance_preflight() -> Result<(), String> {
+    let own = crate::profile::current().key();
+    let siblings = crate::net_ports::live_siblings_now(&own);
+    match crate::net_ports::describe_sibling_block(&siblings) {
+        Some(msg) => {
+            log::warn!("[UPDATE] refused: {msg}");
+            Err(msg)
+        }
+        None => Ok(()),
+    }
+}
+
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
     let client = state
         .pty_host_clone()
@@ -501,6 +549,9 @@ pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String
 #[tauri::command]
 pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
     hotswap_preflight(&state)?;
+    // Same reasoning as the update path: a sibling instance would be killed by
+    // whatever swaps the binary, taking its unarmed shells with it.
+    sibling_instance_preflight()?;
     let client = state
         .pty_host_clone()
         .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
@@ -750,16 +801,39 @@ pub fn get_terminal_size(state: State<'_, AppState>, id: String) -> Result<Termi
     }
 }
 
+/// Which profile this instance is. The renderer scopes its localStorage keys on
+/// the returned `scope` — two instances share one WebView2 user-data folder, so
+/// without it a named profile would overwrite the default profile's tabs.
+#[tauri::command]
+pub fn get_profile() -> crate::profile::ProfileInfo {
+    crate::profile::current().info()
+}
+
+/// Replace the whole settings blob. Prefer [`merge_config`]: this clobbers keys
+/// written by anyone else since the caller read the file.
 #[tauri::command]
 pub async fn save_config(app_handle: tauri::AppHandle, config: String) -> Result<(), String> {
-    use tauri::Manager;
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
-    // Per-instance filename (config.json / config.dev.json) so dev and prod
-    // settings — not just the network block — stay isolated.
-    let config_path = config_dir.join(crate::app_config::instance_config_name());
-    std::fs::write(config_path, config).map_err(|e| e.to_string())?;
-    Ok(())
+    // Through app_config::config_path, never a hand-built one: this used to
+    // resolve the filename itself, so any change to the naming rule split
+    // settings across two files.
+    let path = crate::app_config::config_path(&app_handle)?;
+    crate::app_config::write_atomic(&path, &config)
+}
+
+/// Merge top-level settings keys, leaving every other key alone. The renderer
+/// used to read the whole config, merge in JS and save it back — a lost update
+/// whenever the backend (or another instance) wrote in between.
+#[tauri::command]
+pub async fn merge_config(
+    app_handle: tauri::AppHandle,
+    updates: serde_json::Value,
+) -> Result<(), String> {
+    let updates = updates
+        .as_object()
+        .ok_or_else(|| "merge_config expects a JSON object".to_string())?
+        .clone();
+    let path = crate::app_config::config_path(&app_handle)?;
+    crate::app_config::merge_many_locked(&path, &updates)
 }
 
 /// Backlog 011: record one submitted command into the global command history.
@@ -909,11 +983,9 @@ pub fn show_activity_notification(
 
 #[tauri::command]
 pub async fn load_config(app_handle: tauri::AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    let config_path = config_dir.join(crate::app_config::instance_config_name());
-    if config_path.exists() {
-        std::fs::read_to_string(config_path).map_err(|e| e.to_string())
+    let path = crate::app_config::config_path(&app_handle)?;
+    if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| e.to_string())
     } else {
         Ok("{}".to_string())
     }
@@ -1198,7 +1270,7 @@ pub async fn create_detached_window(
         &label,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("TermFlow")
+    .title(crate::profile::decorate_title("TermFlow"))
     .inner_size(900.0, 600.0)
     .resizable(true)
     // Frameless on Windows/Linux (the custom in-app title bar owns the chrome);
@@ -1210,6 +1282,12 @@ pub async fn create_detached_window(
         builder = builder
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
+    }
+
+    // Must match every other webview's arguments exactly -- see gpu_preference.
+    #[cfg(windows)]
+    {
+        builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
     // Position the new window under the cursor. We ask the OS for the actual
@@ -1260,14 +1338,15 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         url.push_str("&path=");
         url.push_str(&percent_encode_url_component(&path));
     }
-    // `mut` is only used by the macOS-only block below (Overlay title bar).
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    // `mut` is only used by the macOS-only (Overlay title bar) and Windows-only
+    // (GPU browser args) blocks below.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(unused_mut))]
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
         &label,
         tauri::WebviewUrl::App(url.into()),
     )
-    .title("TermFlow")
+    .title(crate::profile::decorate_title("TermFlow"))
     .inner_size(1280.0, 800.0)
     // Center like the main window (the tauri.conf `center` flag only applies to
     // the boot-time window, not builder-spawned ones).
@@ -1282,6 +1361,12 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         builder = builder
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
+    }
+
+    // Must match every other webview's arguments exactly -- see gpu_preference.
+    #[cfg(windows)]
+    {
+        builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
     let window = builder.build().map_err(|e| e.to_string())?;
@@ -1677,6 +1762,9 @@ pub fn set_window_title(
     state: State<'_, AppState>,
     title: String,
 ) {
+    // Decorate HERE, not once at startup: this fires on every tab change, so a
+    // startup-only mark would vanish the first time the user switched tabs.
+    let title = crate::profile::decorate_title(&title);
     state
         .window_titles
         .insert(window.label().to_string(), title.clone());
@@ -1743,7 +1831,8 @@ pub async fn show_drag_preview(
         w
     } else {
         let url = format!("index.html?dragPreview=1&title={}", encode_query(&title));
-        let w = tauri::WebviewWindowBuilder::new(
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut builder = tauri::WebviewWindowBuilder::new(
             &app_handle,
             PREVIEW_LABEL,
             tauri::WebviewUrl::App(url.into()),
@@ -1756,9 +1845,15 @@ pub async fn show_drag_preview(
         .resizable(false)
         .shadow(false)
         .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|e| e.to_string())?;
+        .visible(false);
+
+        // Must match every other webview's arguments exactly -- see gpu_preference.
+        #[cfg(windows)]
+        {
+            builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
+        }
+
+        let w = builder.build().map_err(|e| e.to_string())?;
         // Click-through so it never steals the in-flight drag's pointer events.
         let _ = w.set_ignore_cursor_events(true);
         w

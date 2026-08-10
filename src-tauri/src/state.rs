@@ -172,6 +172,12 @@ pub struct AppState<R: Runtime = Wry> {
     pub keep_running_in_background: Arc<AtomicBool>,
     // Current resolved network settings (ports, expose flag, access token).
     pub network: Arc<RwLock<crate::app_config::NetworkConfig>>,
+    // The ports this instance ACTUALLY serves on. Distinct from `network`, which
+    // holds what the user CONFIGURED: a sibling profile may already hold the
+    // configured port, and persisting the fallback would silently move the
+    // user's setting. Published before the MCP env is built, the fabric starts,
+    // or the renderer boots — all of which need the real port.
+    pub effective_endpoints: Arc<RwLock<crate::net_ports::EffectiveEndpoints>>,
     // Shutdown trigger for the running Axum API server (for hot restart).
     pub api_shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     // Serializes network mutations (set_network_config / rotate_auth_token) so
@@ -295,6 +301,7 @@ impl<R: Runtime> Clone for AppState<R> {
             fabric_control_port: self.fabric_control_port,
             keep_running_in_background: self.keep_running_in_background.clone(),
             network: self.network.clone(),
+            effective_endpoints: self.effective_endpoints.clone(),
             api_shutdown: self.api_shutdown.clone(),
             network_op_lock: self.network_op_lock.clone(),
             jwt_secret: self.jwt_secret.clone(),
@@ -364,6 +371,7 @@ impl<R: Runtime> AppState<R> {
             fabric_control_port: crate::app_config::resolve_fabric_control_port(),
             keep_running_in_background: Arc::new(AtomicBool::new(false)),
             network: Arc::new(RwLock::new(network)),
+            effective_endpoints: Arc::new(RwLock::new(Default::default())),
             api_shutdown: Arc::new(Mutex::new(None)),
             network_op_lock: Arc::new(tokio::sync::Mutex::new(())),
             jwt_secret,
@@ -770,6 +778,9 @@ impl<R: Runtime> AppState<R> {
                     "terminal:exit",
                     serde_json::json!({ "id": tab_id, "exitCode": 0, "cwd": cwd }),
                 );
+                // Same as the in-process path: release the app window if a dialog
+                // this shell owned took it down with it (see console_window).
+                crate::console_window::unstick_all(&st_exit.app_handle);
             }),
             on_gap: Arc::new(move |tab_id: String| {
                 st_gap.host_repaint(&tab_id);
