@@ -64,7 +64,6 @@ tauri-plugin-dialog = "2"
 # key, macOS LaunchAgent, Linux autostart .desktop). Desktop-only crate; the app only
 # builds for desktop, so it is a plain dependency (no cfg(desktop) target section).
 tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
 portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
@@ -92,12 +91,20 @@ if-addrs = "0.13"
 # Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
 # (not a workspace member) to avoid disturbing the existing single-package build.
 termflow-pty-protocol = { path = "pty-protocol" }
+# Advisory INTER-PROCESS file locking for the config read-merge-write window. A
+# process-local mutex cannot help here: two profiles are two processes.
+fs4 = "1.1"
 
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.
 [target.'cfg(unix)'.dependencies]
 # setsid() for detaching the PTY-host sidecar into its own session on Unix.
 libc = "0.2"
+# Windows owns its single-instance guard (src/instance_lock.rs) so the lock can be
+# keyed on the profile identity; this plugin keys solely on the app identifier,
+# which D7 forbids us to mutate. Unix keeps the plugin for the primary profile
+# (identical to previous behaviour) — see instance_lock.rs for the consequence.
+tauri-plugin-single-instance = "2"
 
 # Native notification click routing (src/native_notify.rs). Both crates are already in
 # the tree via tauri-plugin-notification -> notify-rust, so these add no new compilation.
@@ -112,6 +119,20 @@ notify-rust = "4.11"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
 windows-core = "0.61"
+# Single-instance guard (src/instance_lock.rs): named mutex + hidden event window
+# + WM_COPYDATA argv relay, all keyed on the profile identity.
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    # CreateMutexW takes SECURITY_ATTRIBUTES, which lives behind this feature.
+    "Win32_Security",
+    # Owner-only + integrity-labelled instance discovery file (src/net_ports.rs).
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 windows-registry = "0.5"
 windows = { version = "0.61", features = [
     "Data_Xml_Dom",
@@ -124,6 +145,9 @@ windows = { version = "0.61", features = [
     # Session-change notifications (RDP/console switch) → suppress the repaint-burst
     # bell. See src/session_notify.rs.
     "Win32_Foundation",
+    # Process-token elevation query → profile identity. See src/profile.rs.
+    "Win32_Security",
+    "Win32_System_Threading",
     "Win32_System_RemoteDesktop",
     # EnableWindow/IsWindowEnabled — releasing an app window left disabled by a
     # console dialog that died undismissed. See src/console_window.rs.

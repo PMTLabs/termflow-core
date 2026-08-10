@@ -217,6 +217,17 @@ pub async fn get_network_config(state: State<'_, AppState>) -> Result<NetworkCon
     Ok(state.network.read().clone())
 }
 
+/// The ports this instance is ACTUALLY serving on, which differ from the
+/// configured ones when a sibling profile held them first. Kept separate from
+/// [`get_network_config`] on purpose: Settings must submit the CONFIGURED value
+/// on save, or a one-off fallback would silently become the user's setting.
+#[tauri::command]
+pub async fn get_effective_endpoints(
+    state: State<'_, AppState>,
+) -> Result<crate::net_ports::EffectiveEndpoints, String> {
+    Ok(*state.effective_endpoints.read())
+}
+
 #[tauri::command]
 pub async fn list_network_interfaces() -> Result<Vec<NetworkInterface>, String> {
     let mut out = Vec::new();
