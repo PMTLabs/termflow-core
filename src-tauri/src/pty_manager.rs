@@ -954,6 +954,12 @@ pub fn spawn_terminal(
         })) {
             log::warn!("Failed to emit terminal exit: {}", e);
         }
+
+        // A dialog this shell owned (parented to the pseudo-console window we
+        // adopt — see console_window) disables the app window while it is up.
+        // If it died with the shell instead of being dismissed, nothing restores
+        // that, and the whole window silently stops accepting input.
+        crate::console_window::unstick_all(&app_state.app_handle);
     });
 
     Ok(id)

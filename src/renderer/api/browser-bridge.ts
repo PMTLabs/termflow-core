@@ -174,6 +174,9 @@ class BrowserBridge implements ElectronAPI {
         }
     }
 
+    /// No-op in the browser: there is no OS window here to own a console dialog.
+    async adoptConsoleWindow(_processId: string): Promise<void> { }
+
     async closeTerminal(id: string): Promise<void> {
         try {
             await fetch(`${API_BASE_URL}/terminals/${id}`, {

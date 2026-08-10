@@ -13,6 +13,17 @@ export interface NetworkConfig {
   authToken: string;
 }
 
+/**
+ * The ports this instance actually serves on. They differ from the configured
+ * ones when a sibling profile held them first. `null` means "not serving".
+ * Never submit these on save — that would turn a one-off fallback into the
+ * user's stored setting.
+ */
+export interface EffectiveEndpoints {
+  apiPort: number | null;
+  mcpPort: number | null;
+}
+
 // Velopack update availability (mirrors the Rust UpdateStatus enum).
 export type UpdateStatus =
   | { state: 'notInstalled' }
@@ -129,6 +140,13 @@ export interface ElectronAPI {
 
   // Terminal management
   createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number) => Promise<string>;
+  /**
+   * Windows: make the calling window the owner of this shell's ConPTY
+   * pseudo-console window, so console-app dialogs parented to
+   * `GetConsoleWindow()` (e.g. the `az login` WAM prompt) surface in front of
+   * TermFlow instead of behind it. Optional — desktop bridges only.
+   */
+  adoptConsoleWindow?: (processId: string) => Promise<void>;
   // P0a active-window routing: which window receives API/MCP-created terminals.
   // Optional — only the Tauri bridge implements it (browser bridge is single-window).
   getActiveWindow?: () => Promise<string>;
@@ -232,6 +250,7 @@ export interface ElectronAPI {
 
   // Network settings (ports, expose-on-network, access token)
   getNetworkConfig?: () => Promise<NetworkConfig>;
+  getEffectiveEndpoints?: () => Promise<EffectiveEndpoints>;
   setNetworkConfig?: (apiPort: number, mcpPort: number, exposeOnNetwork: boolean) => Promise<NetworkConfig>;
   rotateAuthToken?: () => Promise<NetworkConfig>;
   listNetworkInterfaces?: () => Promise<NetworkInterfaceInfo[]>;
