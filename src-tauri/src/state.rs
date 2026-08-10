@@ -770,6 +770,9 @@ impl<R: Runtime> AppState<R> {
                     "terminal:exit",
                     serde_json::json!({ "id": tab_id, "exitCode": 0, "cwd": cwd }),
                 );
+                // Same as the in-process path: release the app window if a dialog
+                // this shell owned took it down with it (see console_window).
+                crate::console_window::unstick_all(&st_exit.app_handle);
             }),
             on_gap: Arc::new(move |tab_id: String| {
                 st_gap.host_repaint(&tab_id);

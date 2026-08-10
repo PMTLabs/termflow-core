@@ -1,4 +1,5 @@
 pub mod state;
+pub mod console_window;
 pub mod context_menu;
 pub mod session_notify;
 pub mod app_config;
@@ -1050,6 +1051,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
+        commands::adopt_console_window,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::take_reattach_prompt_hook,
