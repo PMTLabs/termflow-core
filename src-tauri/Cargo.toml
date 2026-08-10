@@ -125,6 +125,9 @@ windows = { version = "0.61", features = [
     # bell. See src/session_notify.rs.
     "Win32_Foundation",
     "Win32_System_RemoteDesktop",
+    # EnableWindow/IsWindowEnabled — releasing an app window left disabled by a
+    # console dialog that died undismissed. See src/console_window.rs.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",

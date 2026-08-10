@@ -154,6 +154,37 @@ pub async fn create_terminal(
     Ok(id)
 }
 
+/// Give this shell's ConPTY pseudo-console window an owner: the window the pane
+/// currently lives in. Without it, dialogs a console program parents to
+/// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open
+/// behind TermFlow where they can't be seen or dismissed — see `console_window`.
+///
+/// The renderer calls this every time a terminal id is bound to a process, not
+/// just on spawn, so a pane dragged to another window re-owns against its new
+/// HWND rather than keeping a stale one.
+#[tauri::command]
+pub fn adopt_console_window(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    terminal_id: String,
+) -> Result<(), String> {
+    // Not registered (yet, or already gone) — nothing to adopt, and not an error:
+    // the renderer fires this optimistically off its own binding lifecycle.
+    let Some(pid) = state.terminals.get(&terminal_id).map(|t| t.pid) else {
+        return Ok(());
+    };
+    #[cfg(windows)]
+    {
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+        crate::console_window::adopt(pid, hwnd.0 as isize);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (window, pid);
+    }
+    Ok(())
+}
+
 /// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
 /// stable `tab_id` (the reattach key), so the sidecar session, the output
 /// broadcast id, and the vt100 screen key all align — live routing works with

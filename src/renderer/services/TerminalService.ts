@@ -107,10 +107,7 @@ class TerminalServiceClass {
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // Store the mapping
-      this.processes.set(terminalId, {
-        id: processId,
-        terminalId
-      });
+      this.bindProcess(terminalId, processId);
       console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
 
       return processId;
@@ -183,10 +180,25 @@ class TerminalServiceClass {
 
   registerExistingTerminal(terminalId: string, processId: string): void {
     console.log(`TerminalService: Registering existing terminal ${terminalId} with process ${processId}`);
+    this.bindProcess(terminalId, processId);
+  }
+
+  /**
+   * The single point every path binds a terminal id to its backend process:
+   * fresh spawn, cross-window attach, and hot-swap reattach all land here.
+   *
+   * Claiming the console window from here rather than at spawn time is
+   * deliberate — the owner has to track the window the pane is CURRENTLY in, so
+   * a pane dragged to another window re-owns instead of leaving its dialogs
+   * pointed at the window it came from. Best-effort: the only thing a failure
+   * costs is the (Windows-only) console-dialog fix.
+   */
+  private bindProcess(terminalId: string, processId: string): void {
     this.processes.set(terminalId, {
       id: processId,
       terminalId
     });
+    window.electronAPI?.adoptConsoleWindow?.(processId)?.catch(() => { });
   }
 
   /**
