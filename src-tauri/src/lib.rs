@@ -25,6 +25,7 @@ pub mod layout_endpoints;
 pub mod tmux_manager;
 pub mod fabric_manager;
 pub mod peer_commands;
+mod gpu_preference;
 mod native_notify;
 mod panic_hook;
 mod shell_integration;
@@ -944,6 +945,9 @@ pub fn run() {
         None,
     ))
     .setup(move |app| {
+        // Resolved before the builder ran, so it could not be logged then.
+        gpu_preference::log_resolution();
+
         // Unpackaged Windows apps need an AUMID registered before WinRT can
         // attribute and deliver native toast notifications. On macOS this claims the
         // notification bundle identity, which MUST happen before anything else in the
@@ -1435,7 +1439,7 @@ pub fn run() {
             commands::refresh_menu(window.app_handle());
         }
     })
-    .build(context)
+    .build(gpu_preference::apply_to_context(context))
     .expect("error while building tauri application")
     .run(|app_handle, event| {
         if let RunEvent::Exit = event {

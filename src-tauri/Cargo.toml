@@ -145,6 +145,9 @@ windows = { version = "0.61", features = [
     # Session-change notifications (RDP/console switch) → suppress the repaint-burst
     # bell. See src/session_notify.rs.
     "Win32_Foundation",
+    # Adapter enumeration for the specific-adapter form of the OS graphics
+    # preference. See src/gpu_preference.rs.
+    "Win32_Graphics_Dxgi",
     # Process-token elevation query → profile identity. See src/profile.rs.
     "Win32_Security",
     "Win32_System_Threading",
