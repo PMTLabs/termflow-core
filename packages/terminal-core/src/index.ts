@@ -6,6 +6,7 @@ export {
   resetTerminalRendering,
   disableWebGLGlobally,
   enableWebGLGlobally,
+  refreshGlyphAtlases,
   applyColorSchemaGlobally,
   applyColorSchemaToTerminals,
   setAgentColorLock,

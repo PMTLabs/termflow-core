@@ -1,4 +1,10 @@
-import { terminalCache, cleanupTerminalCache, MAX_TERMINAL_CACHE_ENTRIES, setAgentColorLock } from '../cache';
+import {
+  terminalCache,
+  cleanupTerminalCache,
+  MAX_TERMINAL_CACHE_ENTRIES,
+  setAgentColorLock,
+  refreshGlyphAtlases,
+} from '../cache';
 import type { TerminalCacheEntry } from '../cache';
 import { TerminalEngine } from '../TerminalEngine';
 import type { TerminalBridge, Disposable } from '../types';
@@ -231,4 +237,44 @@ it('never evicts an entry whose element is still in the DOM', () => {
   }
   expect(terminalCache.has('cap-live')).toBe(true);
   expect(terminalCache.size).toBeLessThanOrEqual(MAX_TERMINAL_CACHE_ENTRIES);
+});
+
+// --- refreshGlyphAtlases (standby/resume blank-text repair) ---------------------
+
+function webglEntry(onClear: () => void) {
+  return {
+    webglAddon: { clearTextureAtlas: onClear },
+    useWebGL: true,
+  } as unknown as TerminalCacheEntry;
+}
+
+test('refreshGlyphAtlases clears the texture atlas on every WebGL terminal', () => {
+  const cleared: string[] = [];
+  terminalCache.set('g1', webglEntry(() => cleared.push('g1')));
+  terminalCache.set('g2', webglEntry(() => cleared.push('g2')));
+
+  refreshGlyphAtlases();
+
+  expect(cleared).toEqual(['g1', 'g2']);
+});
+
+test('refreshGlyphAtlases skips terminals with no WebGL addon (DOM renderer / context already lost)', () => {
+  terminalCache.set('dom', {
+    webglAddon: null,
+    useWebGL: false,
+  } as unknown as TerminalCacheEntry);
+
+  expect(() => refreshGlyphAtlases()).not.toThrow();
+});
+
+test('refreshGlyphAtlases: a throwing addon does not stop the remaining terminals', () => {
+  const cleared: string[] = [];
+  // Insertion order is iteration order, so the thrower runs first.
+  terminalCache.set('bad', webglEntry(() => {
+    throw new Error('context gone');
+  }));
+  terminalCache.set('good', webglEntry(() => cleared.push('good')));
+
+  expect(() => refreshGlyphAtlases()).not.toThrow();
+  expect(cleared).toEqual(['good']);
 });
