@@ -97,7 +97,7 @@ termflow-core/
 │   │   ├── recording_service.rs        # Session recording & export
 │   │   ├── search_endpoints.rs         # Search Engine API
 │   │   ├── search_service.rs           # In-memory full-text search
-│   │   ├── session_notify.rs           # Windows-only: WM_WTSSESSION_CHANGE hook, emits session:reconnect to suppress false-positive activity bell on RDP/unlock
+│   │   ├── session_notify.rs           # Windows-only: WM_WTSSESSION_CHANGE hook, emits session:reconnect to suppress false-positive activity bell on RDP/unlock; also WM_POWERBROADCAST → system:resume so the renderer repairs WebGL glyph atlases after standby
 │   │   └── state.rs                    # Application state (adds network config + API shutdown handle)
 │   ├── build.rs                        # Build script (compiles MCP sidecar)
 │   ├── capabilities/                   # Tauri permission scopes (shell sidecar, dialog:allow-open)
@@ -157,7 +157,7 @@ termflow-core/
     -   `context_menu.rs`: Windows-only WebView2 right-click filter (no-op on macOS/Linux); preserves the full native Cut/Copy/Paste/Undo menu on editable targets, only trims it elsewhere.
     -   `history_store.rs`: SQLite-backed per-terminal scrollback persistence (`history.db`), keyed by the stable renderer `tab_id`; degrades to a silent no-op if the DB can't be opened.
     -   `open_commands.rs`: Backend commands to open a detected URL/file path/editor target from terminal output (`open_external`, `open_path`, `open_in_editor`), with a bounded BFS descendant-path fallback search.
-    -   `session_notify.rs`: Windows-only — hooks `WM_WTSSESSION_CHANGE` (RDP/console reconnect, session unlock) and emits a `session:reconnect` event so the renderer suppresses the false-positive activity bell caused by ConPTY's synchronized repaint burst.
+    -   `session_notify.rs`: Windows-only — hooks `WM_WTSSESSION_CHANGE` (RDP/console reconnect, session unlock) and emits a `session:reconnect` event so the renderer suppresses the false-positive activity bell caused by ConPTY's synchronized repaint burst. The same subclass hooks `WM_POWERBROADCAST` (`PBT_APMRESUMEAUTOMATIC`) and emits `system:resume`: a standby resets the GPU device and discards the WebGL glyph-atlas texture without xterm being able to notice, so panes wake up correctly coloured but with no text until the renderer forces a re-upload (`refreshGlyphAtlases`).
 -   **Dependencies**: `tauri`, `tauri-plugin-dialog` (native file picker), `portable-pty`, `axum`, `tokio`, `serde`, `clap`, `vt100`, `dashmap`, `sysinfo`, `if-addrs` (LAN IP discovery), `rusqlite` (bundled SQLite, backs `history_store.rs`), and Windows-only `webview2-com`/`windows`/`windows-core` (context menu + `session_notify.rs` session-change detection).
 -   **Capabilities**: `clipboard-manager` (native read/write text), `drag-preview`/`window-*` scopes for multi-window detach, `dialog:allow-open` (native file picker for Settings' default-editor field).
 -   **MCP Sidecar**: `build.rs` compiles `mcp-server/` into a native sidecar binary; the shell plugin is permitted (via `capabilities/`) to spawn/kill only that named binary.

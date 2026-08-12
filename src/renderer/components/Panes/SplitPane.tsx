@@ -112,6 +112,7 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
         <div
           className={`split-pane-divider ${split}`}
           onMouseDown={handleMouseDown}
+          onDoubleClick={() => onDragFinished?.(50)}
         >
           <div className="split-pane-divider-inner" />
         </div>

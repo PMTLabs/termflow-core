@@ -41,6 +41,7 @@ import {
 import { openSettingsTab } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
+import { refreshGlyphAtlases } from '@termflow/terminal-core';
 import { addTab, markTabExited, flagTabActivity, setActiveTab } from './store/slices/tabsSlice';
 import { RootState, store } from './store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -248,13 +249,32 @@ const App: React.FC = () => {
     // fire on a session connect/disconnect, so the backend (session_notify.rs)
     // detects it and emits `session:reconnect`; arm the same burst suppression the
     // visibility path uses.
+    //
+    // A session switch also tears the GPU device down, so repair the WebGL glyph
+    // atlases here too (see the `system:resume` listener below for why).
     let sessionAlive = true;
     let unlistenSession: (() => void) | undefined;
     listen('session:reconnect', () => {
       runningActivityTracker.notifyReconnectBurst();
       notificationService.notifyReconnectBurst();
+      refreshGlyphAtlases();
     })
       .then(fn => { if (sessionAlive) unlistenSession = fn; else fn(); })
+      .catch(() => { /* not a tauri window / event API unavailable */ });
+
+    // Resume from standby (session_notify.rs, WM_POWERBROADCAST). A suspend resets the
+    // GPU device and discards the WebGL glyph-atlas TEXTURE while leaving xterm's
+    // CPU-side atlas — and its version counter — untouched, so xterm never re-uploads
+    // it: panes wake up painting the right background colour with no text at all, and
+    // no amount of output fixes it (only a never-before-seen glyph bumps the version).
+    // Force the re-upload. Standby does not reliably raise a session change — an
+    // unlocked machine emits none — so this needs its own signal.
+    let resumeAlive = true;
+    let unlistenResume: (() => void) | undefined;
+    listen('system:resume', () => {
+      refreshGlyphAtlases();
+    })
+      .then(fn => { if (resumeAlive) unlistenResume = fn; else fn(); })
       .catch(() => { /* not a tauri window / event API unavailable */ });
 
     // True click routing: each platform's native activator (native_notify.rs) emits this
@@ -312,6 +332,8 @@ const App: React.FC = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       sessionAlive = false;
       if (unlistenSession) unlistenSession();
+      resumeAlive = false;
+      if (unlistenResume) unlistenResume();
       cwdFeedAlive = false;
       if (unlistenCwd) unlistenCwd();
       activatedAlive = false;
