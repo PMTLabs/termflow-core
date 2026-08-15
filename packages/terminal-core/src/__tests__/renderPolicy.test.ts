@@ -18,6 +18,8 @@ import {
   getTerminalRenderPolicy,
   countActiveWebGLAddons,
   setTerminalRenderPolicy,
+  setCanvasWebGLBudget,
+  webglAllowedAtCreation,
 } from '../renderPolicy';
 import { terminalCache, resetTerminalRendering } from '../cache';
 import { Terminal } from '@xterm/xterm';
@@ -61,6 +63,10 @@ afterEach(() => {
   document.body.innerHTML = '';
   MockWebgl.failNextConstruction = false;
   MockWebgl.lastContextLossHandler = null;
+  // Test HYGIENE only — it keeps a leaked budget from poisoning the next test. It
+  // is NOT the BUDGET-OWNER invariant (§5.2 note (c)), which is about production
+  // teardown and gets its own test and release mechanism in Task 9.
+  setCanvasWebGLBudget(null);
 });
 
 describe('design/013 §5.3 LB — never fit a terminal with no layout box', () => {
@@ -210,5 +216,31 @@ describe('design/013 §5.3 LB — resetTerminalRendering must not fit blind', ()
     const { fitAddon } = makeEntry('reset-box');
     resetTerminalRendering('reset-box');
     expect(fitAddon.fitCount).toBe(1);
+  });
+});
+
+describe('design/013 §5.1 — creation under an active budget', () => {
+  it('allows WebGL at creation when no budget is active (every ordinary launch)', () => {
+    expect(webglAllowedAtCreation()).toBe(true);
+  });
+
+  it('allows creation while the budget has room', () => {
+    makeEntry('cap-a').entry.webglAddon = {} as never;
+    setCanvasWebGLBudget(2);
+    expect(webglAllowedAtCreation()).toBe(true);
+  });
+
+  // Spec test 10 — with the budget full, a NEWLY created terminal opens on DOM.
+  it('refuses creation-time WebGL once the budget is full', () => {
+    makeEntry('cap-1').entry.webglAddon = {} as never;
+    makeEntry('cap-2').entry.webglAddon = {} as never;
+    setCanvasWebGLBudget(2);
+    expect(countActiveWebGLAddons()).toBe(2);
+    expect(webglAllowedAtCreation()).toBe(false);
+  });
+
+  it('a budget of 0 refuses everything', () => {
+    setCanvasWebGLBudget(0);
+    expect(webglAllowedAtCreation()).toBe(false);
   });
 });

@@ -99,3 +99,36 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
   fitIfLaidOut(entry);
   return 'webgl';
 }
+
+/**
+ * The GPU budget Canvas Mode is currently enforcing, or `null` when no canvas
+ * session is active. Module-level because mount()'s create branch — which runs
+ * before any reconciler can see the new terminal — has no other way to ask.
+ */
+let canvasWebGLBudget: number | null = null;
+
+/**
+ * Canvas Mode arms this on entry and clears it (`null`) on exit.
+ *
+ * Clearing on the exit path alone does NOT satisfy BUDGET-OWNER (§5.2 note (c)),
+ * because canvas exit is not guaranteed to run — webview reload, renderer crash and
+ * cross-window detach all skip it. Task 9 adds the release mechanism that closes
+ * that; this setter is only the arming half.
+ */
+export function setCanvasWebGLBudget(budget: number | null): void {
+  canvasWebGLBudget = budget;
+}
+
+/**
+ * design/013 §5.1 "Creation-time policy". Consulted by mount()'s create branch
+ * BEFORE loadWebGLAddon, so a terminal created mid-canvas-session never transiently
+ * exceeds the budget and the reconciler never has to chase a context it did not
+ * approve.
+ *
+ * `true` whenever no budget is armed, which is every ordinary launch — arming is
+ * what changes behaviour, so nothing outside a canvas session is affected.
+ */
+export function webglAllowedAtCreation(): boolean {
+  if (canvasWebGLBudget === null) return true;
+  return countActiveWebGLAddons() < canvasWebGLBudget;
+}

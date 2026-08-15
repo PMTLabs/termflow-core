@@ -35,6 +35,7 @@ import {
   loadWebGLAddon,
   isWebGLGloballyDisabled,
 } from './webgl';
+import { webglAllowedAtCreation } from './renderPolicy';
 
 // Platform-native default font stacks. Cross-platform correctness matters here:
 // each OS must resolve to ITS OWN crisp system monospace, not another platform's
@@ -1298,8 +1299,12 @@ export class TerminalEngine {
         }
       }
 
-      // Load WebGL addon AFTER open (respects the global-disabled flag).
-      const webglAddon = loadWebGLAddon(term, this.cacheKey);
+      // Load WebGL addon AFTER open (respects the global-disabled flag), and only
+      // if the canvas budget has room — design/013 §5.1. Without this gate a
+      // terminal created during a canvas session opens on the GPU regardless of
+      // the budget, and the reconciler cannot un-spend a context it never approved.
+      // Outside a canvas session no budget is armed and this is always true.
+      const webglAddon = webglAllowedAtCreation() ? loadWebGLAddon(term, this.cacheKey) : null;
 
       // Store a fresh cache entry. Preserve Task-4 fields' shape.
       terminalCache.set(this.cacheKey, {
