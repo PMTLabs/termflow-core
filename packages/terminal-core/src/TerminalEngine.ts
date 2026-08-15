@@ -3594,6 +3594,14 @@ export class TerminalEngine {
     }
     const element = term.element;
 
+    // --- R1: capture focus ownership (§5.2) ---
+    // Sampled HERE, before anything moves, while everything is still attached.
+    // Spike 004 Q3 measured that the move blurs synchronously — `blur` and
+    // `focusout` fire as part of it and document.activeElement is already false on
+    // the next synchronous line — so this must be read first.
+    const hadFocus =
+      typeof document !== 'undefined' && !!element.contains(document.activeElement);
+
     // --- R2: invalidate in-flight geometry work, arm the convergence stamp,
     //         cancel NOTHING (§5.3) ---
     // resizeEpoch is already this engine's "geometry intent changed" generation
@@ -3647,6 +3655,42 @@ export class TerminalEngine {
     // reads this.container, which R6 has just updated. Both correct only because
     // the wiring is SHARED with mount() rather than duplicated.
     this.wireContainerLocals(container, term, this.fitAddon ?? undefined, { paneChrome });
+
+    // --- R8: re-target the ended-region rail (§5.9) ---
+    // MUST run after R6: wrapper resolution walks UP from term.element. Reuses
+    // this.endedRegions untouched — same instance, same regions, same open span,
+    // same colours, same single onRender subscription. Moving the memoised layer
+    // carries every child region.railEl with it in one DOM operation.
+    this.endedRegions?.retargetRail();
+
+    // --- R9: restore focus (§5.10) ---
+    // Conditional on R1's sample, so a background pane relocated onto canvas
+    // cannot steal focus. Same synchronous task as the move: spike 004 Q3 measured
+    // exactly one focus/focusin pair and nothing arriving late.
+    if (hadFocus) term.focus();
+
+    // --- R10: chrome-mode side effects — the suggest gate (§5.11) ---
+    // R7 has already set this.paneChromeActive from the same normalised local.
+    // Stops the key interception at :1346 dead: with the popup unable to open, no
+    // key is ever claimed (§8.1).
+    if (!this.paneChromeActive) this.suggestState = 'closed';
+    // UNCONDITIONAL, in both directions: the dedup at :2930 must not swallow the
+    // first input line emitted after the return trip.
+    this.lastEmittedInput = '';
+
+    // --- R11: the in-progress capture mark — do nothing (§5.12) ---
+    // HeuristicCapture holds `private mark` and a `readonly term`
+    // (commandCapture.ts:58-65): zero DOM references, no listeners, no timers.
+    // Nothing binds it to a container, so it is reused outright. The cache's
+    // captureMark — written only by unmount() at :3226-3229 — goes stale during a
+    // relocated session, which is harmless: nothing reads it until the next real
+    // mount() (:1063), which is always preceded by the unmount() that refreshes it.
+    // NOTE what §6 makes of this: a geometry-CHANGING relocation runs the live
+    // onResize handler, which cancels the mark and sets suppressUntilSubmit
+    // (:1112-1116). That is the existing, correct reflow behaviour — an absolute
+    // row/col mark is untranslatable after reflow — and relocation must not defeat
+    // it. Under §6.5's rate contract it happens exactly twice per terminal per
+    // canvas session, which is why RC1 matters: without it, this fires per pan tick.
 
     return 'relocated';
   }
