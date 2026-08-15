@@ -1726,6 +1726,14 @@ export class TerminalEngine {
     // that order IS the LRU order enforceCacheCap() evicts from.
     terminalCache.delete(this.cacheKey);
     terminalCache.set(this.cacheKey, {
+      // Spread the existing entry FIRST so any field TerminalCacheEntry declares
+      // that isn't explicitly re-listed below survives this rebuild by default.
+      // Without this, agentColorLocked/lastSnapshot/lastDataAt/lastInputAt were
+      // silently dropped on every remount (never listed here even though the
+      // type declares them) — see terminal-cache-drops-fields-on-mount. Explicit
+      // keys AFTER the spread still win where this rebuild must overwrite/reset
+      // a field (terminal, fitAddon, disposables, kbState, win32State, ...).
+      ...existingCache,
       terminal: term,
       processId: existingCache?.processId,
       fitAddon: fit,
