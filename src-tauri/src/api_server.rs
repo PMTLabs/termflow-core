@@ -642,6 +642,32 @@ async fn resize_terminal(
     }
 }
 
+/// The `terminal:external-activity` event body. Pure so the routing contract —
+/// which id the renderer is supposed to flash a tab with — is unit-testable.
+///
+/// `terminal_id`/`processId` is the DashMap KEY (a `pc-*` id on the in-process
+/// path, the renderer leaf on the sidecar path). It is deliberately NOT the
+/// same thing `terminalId` means in a REST response; `rendererTerminalId` is
+/// the new, unambiguous name for the leaf.
+fn external_activity_payload(
+    process_id: &str,
+    renderer_terminal_id: Option<&str>,
+    owning_tab_id: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        // Unchanged for existing consumers.
+        "terminalId": process_id,
+        "tabId": renderer_terminal_id,
+        // NEW, unambiguous names.
+        "processId": process_id,
+        "rendererTerminalId": renderer_terminal_id,
+        // NEW: what `flagTabActivity` actually needs. A `tm-*` leaf resolves
+        // against nothing in `state.tabs`, so before P0-A a split pane's
+        // activity indicator was silently dropped (design 011 §1.1 item 4).
+        "owningTabId": owning_tab_id,
+    })
+}
+
 /// Emit a one-shot "external interaction" signal so the UI can flash the owning
 /// tab. Fired only from the external-only REST handlers (write input / execute
 /// prompt) — user keystrokes go through a Tauri invoke command and never reach
@@ -654,13 +680,18 @@ fn emit_external_activity<R: tauri::Runtime>(state: &AppState<R>, terminal_id: &
         t.last_input_source = Some("api".to_string());
         t.last_input_at = Some(chrono::Utc::now().timestamp_millis());
     }
-    let tab_id = state
+    let (renderer_terminal_id, owning_tab_id) = state
         .terminals
         .get(terminal_id)
-        .and_then(|t| t.renderer_terminal_id.clone());
+        .map(|t| (t.renderer_terminal_id.clone(), t.owning_tab_id.clone()))
+        .unwrap_or((None, None));
     if let Err(e) = state.app_handle.emit(
         "terminal:external-activity",
-        json!({ "terminalId": terminal_id, "tabId": tab_id }),
+        external_activity_payload(
+            terminal_id,
+            renderer_terminal_id.as_deref(),
+            owning_tab_id.as_deref(),
+        ),
     ) {
         log::trace!("Failed to emit terminal:external-activity: {}", e);
     }
@@ -3167,6 +3198,45 @@ mod tests {
         assert_eq!(v["owningTabId"], json!(null));
         // The PTY is still addressable — only the renderer identities are absent.
         assert_eq!(v["id"], json!("pc-abc123def"));
+    }
+
+    /// Correction C4. `flagTabActivity` (tabsSlice.ts:133-141) resolves its
+    /// argument against `state.tabs`, which holds ONLY root tab ids — a `tm-*`
+    /// leaf finds nothing and the dispatch silently no-ops. The payload must
+    /// therefore carry the OWNER explicitly.
+    #[test]
+    fn a_split_panes_activity_payload_carries_the_owning_tab() {
+        let v = external_activity_payload(
+            "pc-abc123def",
+            Some("tm-9f2c1a4b7"),
+            Some("tb-4e8d0c2f1"),
+        );
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_eq!(v["rendererTerminalId"], json!("tm-9f2c1a4b7"));
+    }
+
+    /// The two pre-existing keys must not move: `terminalId` here has always
+    /// been the PROCESS id (the DashMap key passed by the caller), unlike every
+    /// REST response where it is the leaf. That asymmetry is why the new
+    /// explicit `processId` / `rendererTerminalId` keys exist.
+    #[test]
+    fn the_legacy_activity_keys_are_unchanged() {
+        let v = external_activity_payload(
+            "pc-abc123def",
+            Some("tm-9f2c1a4b7"),
+            Some("tb-4e8d0c2f1"),
+        );
+        assert_eq!(v["terminalId"], json!("pc-abc123def"));
+        assert_eq!(v["processId"], json!("pc-abc123def"));
+        assert_eq!(v["tabId"], json!("tm-9f2c1a4b7"));
+    }
+
+    #[test]
+    fn an_unknown_terminal_yields_nulls_rather_than_a_missing_key() {
+        let v = external_activity_payload("pc-gone", None, None);
+        assert_eq!(v["rendererTerminalId"], json!(null));
+        assert_eq!(v["owningTabId"], json!(null));
+        assert_eq!(v["terminalId"], json!("pc-gone"));
     }
 
     #[test]
