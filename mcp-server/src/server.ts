@@ -35,7 +35,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "list_terminals",
         {
-            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine.",
+            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine. Each entry also carries `terminalId` (the renderer pane) and `owningTabId` (its tab).",
         },
         async () => {
             try {
@@ -56,19 +56,31 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "create_terminal",
         {
-            description: "Spawn a new terminal process (supports split panel layout)",
+            description:
+                "Spawn a new terminal process (supports split panel layout). Terminal ids come " +
+                "in three flavours and are NOT interchangeable: `terminalId`/`processId` (`pc-…`) " +
+                "addresses the PTY for every other tool; `owningTabId` (`tb-…`) names a TAB; and " +
+                "the `terminalId` field of a terminal-detail response is the renderer PANE " +
+                "(`tb-…` for a solo pane, `tm-…` for a split).",
             inputSchema: {
                 name: z.string().optional().describe("Name of the terminal session"),
                 profile: z.string().optional().describe("Shell profile ID (e.g., 'powershell', 'cmd', 'git-bash'). Defaults to system default."),
                 cols: z.number().optional().default(120),
                 rows: z.number().optional().default(40),
                 cwd: z.string().optional().describe("Current working directory"),
-                tabId: z.string().optional().describe("Tab ID where the terminal pane should be created/split"),
+                owningTabId: z.string().optional().describe(
+                    "The TAB (`tb-…`) the new pane should belong to — read it from " +
+                    "get_terminal_detail's `owningTabId`. Preferred over `tabId`."
+                ),
+                tabId: z.string().optional().describe(
+                    "DEPRECATED alias of owningTabId. Must be a TAB id (`tb-…`); passing a " +
+                    "pane id (`tm-…`) is rejected with 400 — use owningTabId instead."
+                ),
                 paneId: z.string().optional().describe("Pane ID within the tab to split"),
                 direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction: 'horizontal' (split right) or 'vertical' (split bottom)"),
             },
         },
-        async ({ name, profile, cols, rows, cwd, tabId, paneId, direction }) => {
+        async ({ name, profile, cols, rows, cwd, owningTabId, tabId, paneId, direction }) => {
             try {
                 const response = await api.post(`/terminals`, {
                     name,
@@ -76,6 +88,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                     cols,
                     rows,
                     cwd,
+                    owningTabId,
                     tabId,
                     paneId,
                     direction,
@@ -223,7 +236,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "get_terminal_detail",
         {
-            description: "Get detailed information about a specific terminal session (including its tabId)",
+            description: "Get detailed information about a specific terminal session, including its renderer pane id (`terminalId`) and the tab that owns it (`owningTabId`). `tabId` is a deprecated alias of `terminalId` and is NOT a tab id for a split pane.",
             inputSchema: {
                 terminalId: z.string().describe(`The ID of the terminal session to retrieve. ${ME_HINT}`),
             },
@@ -245,10 +258,12 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         "get_my_terminal",
         {
             description:
-                "Get YOUR OWN terminal's identity and details (id, pid, tabId, name) — the terminal " +
-                "this agent is running in. Resolved from the X-Termflow-Terminal-Id header (mapped " +
-                "from the $TERMFLOW_TERMINAL_ID env var injected into every terminal). Use the returned " +
-                'id, or the "me" shorthand, to target your own terminal with the other tools.',
+                "Get YOUR OWN terminal's identity and details (id, pid, terminalId, owningTabId, name) " +
+                "— the terminal this agent is running in. Resolved from the X-Termflow-Terminal-Id " +
+                "header (mapped from the $TERMFLOW_TERMINAL_ID env var injected into every terminal). " +
+                "The response carries `terminalId` (this pane) and `owningTabId` (the tab it lives in); " +
+                "pass the latter to create_terminal to open a sibling pane in the same tab. Use the " +
+                'returned id, or the "me" shorthand, to target your own terminal with the other tools.',
         },
         async () => {
             try {

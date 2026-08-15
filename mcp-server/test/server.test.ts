@@ -250,6 +250,45 @@ describe("list_machines tool", () => {
     });
 });
 
+describe("terminal identity is described unambiguously to AI clients", () => {
+    async function toolMap(client: Client) {
+        const { tools } = await client.listTools();
+        return new Map(tools.map((t: any) => [t.name, t]));
+    }
+
+    // Ground-truth correction C5: `tabId` was described as "Tab ID where the
+    // terminal pane should be created/split", but for a split the backend
+    // returns a `tm-` LEAF under that key — so an agent round-tripping it
+    // created the pane in the wrong tab (and, before P0-A, silently got a brand
+    // new unrelated tab).
+    it("create_terminal steers the caller to owningTabId", async () => {
+        const { api } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const tool: any = (await toolMap(client)).get("create_terminal");
+        const described = JSON.stringify(tool.inputSchema);
+        expect(described).toContain("owningTabId");
+    });
+
+    it("create_terminal forwards owningTabId to the backend", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({
+            name: "create_terminal",
+            arguments: { owningTabId: "tb-4e8d0c2f1", paneId: "pn-a", direction: "vertical" },
+        });
+        const post = calls.find((c) => c.method === "post" && c.url === "/terminals");
+        expect((post?.body as any)?.owningTabId).toBe("tb-4e8d0c2f1");
+    });
+
+    it("get_terminal_detail and get_my_terminal advertise owningTabId", async () => {
+        const { api } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const tools = await toolMap(client);
+        expect(tools.get("get_terminal_detail")!.description).toContain("owningTabId");
+        expect(tools.get("get_my_terminal")!.description).toContain("owningTabId");
+    });
+});
+
 describe("get_terminal_screen tool", () => {
     it("posts { terminalId } to /fleet/screen for a local screen", async () => {
         const { api, calls } = makeFakeApi();
