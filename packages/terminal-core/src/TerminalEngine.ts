@@ -2542,12 +2542,12 @@ export class TerminalEngine {
    * `relocateTo` is its only caller: the transition lives inside the operation so
    * that every abort path can restore it from the R0 snapshot (§5.4).
    *
-   * It NEVER touches focus, and it NEVER cancels fitTimer — in either direction
-   * (the FT rule, design 012 §5.3 / D10 / §7.2 row 4). On the return trip R3
-   * lowers eligibility BEFORE R6 moves the element and BEFORE R7 re-arms the
-   * observer, whose initial callback is gated on geometryEligible() — so on a
-   * background pane the timer this method would have cancelled is the ONLY fit
-   * that will measure the pane after the return.
+   * It NEVER touches focus, and it never leaves the engine with NO pending fit —
+   * in either direction (the FT rule, design 012 §5.3 / D10 / §7.2 rows 4/4a). On
+   * the return trip R3 lowers eligibility BEFORE R6 moves the element and BEFORE
+   * R7 re-arms the observer, whose initial callback is gated on geometryEligible()
+   * — so on a BACKGROUND pane nothing in `relocateTo` would otherwise measure the
+   * pane, and this method owns the only fit that will.
    */
   setSurfaceDisplayed(displayed: boolean): void {
     const wasEligible = this.geometryEligible();
@@ -2555,7 +2555,30 @@ export class TerminalEngine {
     // A false->true ELIGIBILITY transition arms the settle fit — identical
     // semantics to setActive(true), minus focus. Already eligible => record and
     // return; a second settle fit is churn.
-    if (displayed && !wasEligible) this.armActivationFit();
+    if (displayed && !wasEligible) {
+      this.armActivationFit();
+      return;
+    }
+    // §7.2 row 4a — the return leg onto a BACKGROUND pane (external review 103
+    // finding 1). Eligibility is now false, so R7's observer callback is skipped
+    // and no other geometry path in relocateTo will run: this arm is the whole
+    // repair. Rev 6 recorded and returned here, on the strength of §7.3's claim
+    // that "the surviving fitTimer" fills the gap. That claim only holds if the
+    // canvas visit was SHORTER THAN 50ms — the outbound timer nulls itself when it
+    // fires, so after any real visit there is nothing left to survive, and xterm
+    // stayed at the canvas node's grid until the tab was next activated.
+    //
+    // armActivationFit() clears-and-replaces rather than dropping, so the FT rule
+    // still holds as stated: the fit is preserved, rescheduled to fire 50ms from
+    // HERE — i.e. after R6's synchronous move, so it measures the pane, which is
+    // strictly better than a timer armed before the outbound leg.
+    //
+    // This does NOT breach the hidden-pane SIGWINCH park (§6.2): the fit resizes
+    // xterm only, and the backend resize it provokes hits flushBackendResize's
+    // ineligibility check and parks. The PTY still learns the size on the next
+    // activation, via the flush this same timer's callback performs. Narrow to an
+    // inactive pane on purpose — with paneActive true, R7's observer already fits.
+    if (!displayed && !this.paneActive) this.armActivationFit();
   }
 
   /**

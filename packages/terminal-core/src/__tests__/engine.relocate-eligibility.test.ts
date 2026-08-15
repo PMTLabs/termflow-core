@@ -172,8 +172,10 @@ describe('design/012 §5.3 — the FT rule and the PARK invariant under relocati
     // …and exit again INSIDE those 50ms.
     engine.relocateTo(pane, { paneChrome: true });
 
-    // THE ASSERTION: the timer is still armed. setSurfaceDisplayed(false) did not
-    // cancel it, in either direction (the FT rule).
+    // THE ASSERTION: a fit is still armed. setSurfaceDisplayed(false) never leaves
+    // the engine with none (the FT rule). Under rev 7 the return leg re-arms rather
+    // than merely preserving — either way a fit remains, which is what the rule is
+    // actually protecting; rev 5's cancel-and-leave-nothing is what it forbids.
     expect((engine as any).fitTimer).not.toBeNull();
 
     const fitsBefore = fit.fitCount;
@@ -196,15 +198,17 @@ describe('design/012 §5.3 — the FT rule and the PARK invariant under relocati
   // BETTER rather than merely safe. Cancelling leaves xterm at the canvas node's
   // grid while parked in the pane, until the tab is next activated.
   //
-  // NOTE on the sequencing, which differs from plan 015 Task 9's draft: the
-  // mechanism §7.3 names is "the SURVIVING fitTimer" — the one R3 armed on the way
-  // OUT, which has NOT yet fired. The draft drained all timers between the two
-  // legs, which fires and nulls exactly that timer; the return leg then arms
-  // nothing (§7.2 row 4 records and returns), so no fit remains and the scenario
-  // is unreachable by design rather than by a bug. The canvas node's grid is
-  // therefore applied SYNCHRONOUSLY here — modelling the canvas host's own
-  // ResizeObserver fit landing — so the outbound fitTimer is still pending when the
-  // terminal comes home, which is precisely the state §7.3 describes.
+  // NOTE on the sequencing: this covers the SHORT visit, where the mechanism rev 6's
+  // §7.3 named — "the SURVIVING fitTimer", the one R3 armed on the way OUT — has not
+  // yet fired. The canvas node's grid is therefore applied SYNCHRONOUSLY here,
+  // modelling the canvas host's own ResizeObserver fit landing, so that timer is
+  // still pending when the terminal comes home.
+  //
+  // An earlier revision of this comment called the drained-timer variant
+  // "unreachable by design rather than by a bug". That was wrong, and external
+  // review 103 finding 1 caught it: draining is what a canvas visit longer than 50ms
+  // does, i.e. all of them. T10e directly below is that case, and rev 7's §7.2 row 4a
+  // is what makes it pass. Keep BOTH — they exercise different arms of the same rule.
   it('a background pane returning from a differently sized node ends at the PANE grid',
     async () => {
       jest.useFakeTimers();
@@ -228,5 +232,47 @@ describe('design/012 §5.3 — the FT rule and the PARK invariant under relocati
       await jest.runAllTimersAsync();
 
       expect(term.cols).toBe(80);
+    });
+
+  // §13 T10e — external review 103 finding 1. T10d above covers the SHORT visit,
+  // where the outbound fitTimer is still pending when the surface comes home. That
+  // is the rare case. A real canvas session lasts longer than 50ms, so by the time
+  // the user leaves the canvas the outbound timer has long since fired and nulled
+  // itself, and there is no "surviving fitTimer" for §7.3 to lean on.
+  //
+  // Rev 6's §7.2 row 4 recorded and returned here, which left xterm at the CANVAS
+  // node's grid — parked in a pane it had never measured — until the tab was next
+  // activated. Rev 7 arms the settle fit on that return leg instead (row 4a).
+  it('a background pane returning after the outbound fit has already fired still '
+    + 'ends at the PANE grid', async () => {
+      jest.useFakeTimers();
+      const { engine, pane, term, fit, resizeCalls } = await mountAttached('rel-ft-t10e');
+      engine.setActive(false);
+
+      const host = makeHost();
+      engine.relocateTo(host, { paneChrome: false });
+      fit.setNextFit(200, 50);                  // the canvas node's grid
+      await jest.runAllTimersAsync();           // the outbound fit fires AND NULLS
+      expect(term.cols).toBe(200);
+      expect((engine as any).fitTimer).toBeNull();   // nothing survives to fill the gap
+      // While displayed on canvas the terminal IS eligible, so the node's grid
+      // reaches the PTY — §6.1's normal case, not a park.
+      expect(resizeCalls).toEqual([[200, 50]]);
+      resizeCalls.length = 0;
+
+      // Home again, with NO tab activation anywhere in this test.
+      fit.setNextFit(80, 24);                   // what the pane measures
+      engine.relocateTo(pane, { paneChrome: true });
+      await jest.runAllTimersAsync();
+
+      expect(term.cols).toBe(80);
+      // …and the PARK invariant still holds: the pane is hidden, so the PTY is NOT
+      // SIGWINCH'd. The pane-sized resize is parked for the next activation.
+      expect(resizeCalls).toEqual([]);
+      expect((engine as any).pendingResize).not.toBeNull();
+
+      engine.setActive(true);
+      await jest.runAllTimersAsync();
+      expect(resizeCalls).toEqual([[80, 24]]);
     });
 });
