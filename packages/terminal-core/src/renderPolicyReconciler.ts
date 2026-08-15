@@ -1,8 +1,11 @@
+import type { Terminal } from '@xterm/xterm';
 import {
   countActiveWebGLAddons,
+  getTerminalRenderPolicy,
   setTerminalRenderPolicy,
   type RenderPolicy,
 } from './renderPolicy';
+import { terminalCache } from './cache';
 
 export interface ReconcileInput {
   /** From the LOD tier map. */
@@ -72,4 +75,52 @@ export function reconcileRenderPolicies(
   }
 
   return { applied, webglCount: count() };
+}
+
+export type RenderPolicySnapshot = Map<string, { terminal: Terminal; policy: RenderPolicy }>;
+
+/**
+ * design/013 D6 — capture the pre-canvas policy so leaving canvas mode does not
+ * leave every terminal it demoted permanently on the DOM renderer.
+ *
+ * Keyed by `entry.terminal`, NOT the cache entry (§5.1 / design/012 §9 C1): the
+ * Terminal is stable across relocation AND remount, whereas the entry is stable
+ * across relocation only — and mount()'s entry rebuild carries webglAddon/useWebGL
+ * forward, so an entry swap alone is not evidence the render policy changed.
+ *
+ * Reads the addon reference directly rather than through getTerminalRenderPolicy,
+ * because it already holds the entry it would look up again (D8 keeps both on the
+ * same source of truth).
+ */
+export function snapshotRenderPolicies(ids: string[]): RenderPolicySnapshot {
+  const snap: RenderPolicySnapshot = new Map();
+  for (const id of ids) {
+    const entry = terminalCache.get(id);
+    if (!entry) continue;
+    snap.set(id, { terminal: entry.terminal, policy: entry.webglAddon ? 'webgl' : 'dom' });
+  }
+  return snap;
+}
+
+/**
+ * Reinstate what `snapshotRenderPolicies` captured. Returns only the ids actually
+ * restored — an id absent from the result was deliberately left alone.
+ *
+ * A snapshot is DISCARDED rather than applied when its Terminal no longer matches
+ * (§5.1 "Snapshot conflicts"): the id may now address a different session, and
+ * restoring blindly would undo an explicit user action — a context-menu "Reset
+ * Rendering", a global WebGL toggle, or a context loss — or address a dead entry.
+ */
+export function restoreRenderPolicies(snap: RenderPolicySnapshot): Record<string, RenderPolicy> {
+  const restored: Record<string, RenderPolicy> = {};
+  for (const [id, want] of snap) {
+    const entry = terminalCache.get(id);
+    if (!entry || entry.terminal !== want.terminal) continue;
+    if (getTerminalRenderPolicy(id) === want.policy) {
+      restored[id] = want.policy;
+      continue;
+    }
+    restored[id] = setTerminalRenderPolicy(id, want.policy);
+  }
+  return restored;
 }

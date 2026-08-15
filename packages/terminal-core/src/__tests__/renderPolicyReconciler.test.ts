@@ -9,8 +9,19 @@
  * context cap, never against a tier string.
  */
 
-import { reconcileRenderPolicies } from '../renderPolicyReconciler';
-import type { RenderPolicy } from '../renderPolicy';
+import {
+  reconcileRenderPolicies,
+  snapshotRenderPolicies,
+  restoreRenderPolicies,
+} from '../renderPolicyReconciler';
+import {
+  getTerminalRenderPolicy,
+  setTerminalRenderPolicy,
+  type RenderPolicy,
+} from '../renderPolicy';
+import { terminalCache } from '../cache';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 
 /** A fake policy setter with a hard context cap, so budget behaviour is asserted
  *  against COUNTS rather than tier strings — review 084's point. */
@@ -31,6 +42,29 @@ function makeFake(opts: { cap?: number; failOn?: string[]; preloaded?: string[] 
   };
   return { setPolicy, count: () => live.size, calls, live };
 }
+
+/** Same shape as renderPolicy.test.ts's helper: jsdom reports offsetWidth 0 for
+ *  everything, so a real layout box has to be faked or the LB guard (§5.3) would
+ *  skip every fit a promotion issues. The snapshot/restore tests below drive the
+ *  REAL setTerminalRenderPolicy against the real cache, unlike the fake-setter
+ *  reconciler tests above. */
+function makeEntry(key: string) {
+  const term = new Terminal();
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon as never);
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  term.open(host);
+  Object.defineProperty(term.element!, 'offsetWidth', { value: 800, configurable: true });
+  Object.defineProperty(term.element!, 'offsetHeight', { value: 600, configurable: true });
+  terminalCache.set(key, { terminal: term, fitAddon, webglAddon: null, useWebGL: false } as never);
+  return { term, fitAddon, entry: terminalCache.get(key)! };
+}
+
+afterEach(() => {
+  terminalCache.clear();
+  document.body.innerHTML = '';
+});
 
 describe('design/013 §5 — the reconciler', () => {
   // Spec test 4 — the budget is enforced by COUNT, not by tier strings.
@@ -167,5 +201,59 @@ describe('design/013 §5 / spec test 12 — `order` under a numeric id set', () 
     });
     expect(applied).toEqual({ '007': 'webgl' });
     expect(fake.calls).toEqual([['007', 'webgl']]);
+  });
+});
+
+describe('design/013 D6 — snapshot and restore', () => {
+  // Spec test 7. Without this, leaving canvas mode leaves every terminal it
+  // demoted permanently on the DOM renderer — a silent, cumulative degradation.
+  it('reinstates the pre-canvas policy on exit', () => {
+    makeEntry('snap-a');
+    makeEntry('snap-b');
+    setTerminalRenderPolicy('snap-a', 'webgl');           // a was on GPU before canvas
+    const snap = snapshotRenderPolicies(['snap-a', 'snap-b']);
+
+    setTerminalRenderPolicy('snap-a', 'dom');             // canvas demoted it
+    setTerminalRenderPolicy('snap-b', 'webgl');           // and promoted b
+
+    const restored = restoreRenderPolicies(snap);
+    expect(restored['snap-a']).toBe('webgl');
+    expect(restored['snap-b']).toBe('dom');
+  });
+
+  // Spec test 11 — the entry can be REPLACED without the policy having changed
+  // (mount()'s rebuild carries webglAddon/useWebGL forward), so identity must key
+  // on entry.terminal. A snapshot whose Terminal no longer matches is DISCARDED,
+  // not applied — restoring blindly would address a dead entry or undo an explicit
+  // user action ("Reset Rendering", a global toggle, a context loss).
+  it('discards a snapshot whose Terminal object no longer matches', () => {
+    makeEntry('stale');
+    setTerminalRenderPolicy('stale', 'webgl');
+    const snap = snapshotRenderPolicies(['stale']);
+
+    terminalCache.delete('stale');
+    makeEntry('stale');                                   // same id, NEW Terminal
+    expect(getTerminalRenderPolicy('stale')).toBe('dom');
+
+    const restored = restoreRenderPolicies(snap);
+    expect(restored['stale']).toBeUndefined();            // not applied
+    expect(getTerminalRenderPolicy('stale')).toBe('dom'); // left alone
+  });
+
+  it('survives an entry REBUILD that keeps the same Terminal', () => {
+    const { term } = makeEntry('rebuild');
+    setTerminalRenderPolicy('rebuild', 'webgl');
+    const snap = snapshotRenderPolicies(['rebuild']);
+    const old = terminalCache.get('rebuild')!;
+    terminalCache.set('rebuild', { ...old, terminal: term });  // same Terminal
+    setTerminalRenderPolicy('rebuild', 'dom');
+    expect(restoreRenderPolicies(snap)['rebuild']).toBe('webgl');
+  });
+
+  it('skips ids that have left the cache entirely', () => {
+    makeEntry('gone');
+    const snap = snapshotRenderPolicies(['gone']);
+    terminalCache.delete('gone');
+    expect(restoreRenderPolicies(snap)).toEqual({});
   });
 });
