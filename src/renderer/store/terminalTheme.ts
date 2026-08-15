@@ -38,10 +38,22 @@ export function resolveSchemaId(
  *  scrollbar pseudo-elements. No-op outside the browser / before the pane mounts. */
 export function setPaneBackgroundVar(terminalId: string, background: string | undefined): void {
   if (typeof document === 'undefined' || !background) return;
-  const el = document.querySelector(
+  // querySelectorAll, not querySelector (design 012 §4.4 row 6): while a terminal
+  // is displayed on a Canvas Mode node there are TWO nodes carrying this
+  // data-terminal-id — the pane's `.terminal-display` and the node's host — and
+  // both need the var, because `term.element` has left the React-owned node's
+  // subtree while the pane keeps painting its own slack/scrollbar chrome.
+  //
+  // Safe: `data-terminal-id` appears in exactly two places in the repo
+  // (TerminalDisplay.tsx:548 and the selector below), so no consumer assumes
+  // uniqueness. PlaybackViewer.tsx also renders a `.terminal-display`, but without
+  // the attribute, so this selector never matches it.
+  const nodes = document.querySelectorAll<HTMLElement>(
     `.terminal-display[data-terminal-id="${CSS.escape(terminalId)}"]`,
-  ) as HTMLElement | null;
-  el?.style.setProperty('--terminal-display-background', background);
+  );
+  nodes.forEach((el) => {
+    el.style.setProperty('--terminal-display-background', background);
+  });
 }
 
 /**

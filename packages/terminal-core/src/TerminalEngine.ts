@@ -163,6 +163,44 @@ const LIVE_WRITE_MAX_MS = 64;
 // run seconds later is never misattributed.
 const ED3_EXPECT_WINDOW_MS = 1500;
 
+// How long after a relocation a backend resize is still attributable to that
+// relocation, and therefore worth stamping convergenceResizeAt for (design 012
+// §6.2). Comfortably covers "observe() initial callback next frame -> fit() ->
+// onResize -> 120ms debounce"; short enough that an unrelated `clear` is very
+// unlikely to fall inside it. A TUNED constant, not a derived one (§15.3).
+const RELOCATION_CONVERGENCE_ARM_MS = 500;
+
+/** What `TerminalEngine.relocateTo` did (design 012 §5). */
+export type RelocationResult = 'relocated' | 'aborted';
+
+/**
+ * Everything `relocateTo` must be able to put back if it fails partway.
+ *
+ * `abortRelocation`'s contract is "nothing changed", and it is enforced by
+ * restoring from this snapshot rather than by unwinding step by step. Two fields
+ * R2 mutates are DELIBERATELY not restored: `resizeEpoch` (a monotonic generation
+ * counter — rolling it back would resurrect a decision the bump correctly
+ * invalidated) and any `fitTimer` R3 armed (design 012 §5.1 point 2 — leaving it
+ * running is provably safe, and the FT rule forbids cancelling it).
+ */
+interface RelocationSnapshot {
+  /** The container the element is still in if R6 throws. */
+  container: HTMLElement | null;
+  /** Restored so an aborted relocation can never leave the hidden-pane SIGWINCH
+   *  park disabled — reviews 093 B2 / 094 B4, the highest-priority regression. */
+  surfaceDisplayed: boolean;
+  /** Restored so an aborted canvas -> pane move cannot re-wire the CANVAS host
+   *  with pane chrome — review 094 B5. */
+  paneChrome: boolean;
+  /** Restored so an abort cannot leave a <=500ms arm on an engine that never
+   *  moved — review 096. */
+  convergenceArmUntil: number;
+  /** True once R4/R5 have torn the old wiring down, so an abort at R0's
+   *  precondition check does not re-wire a container that was never unwired
+   *  (which would double-register the four listeners). */
+  rewired: boolean;
+}
+
 // Backlog 011: window after a suggestion accept during which Enter keydowns are
 // swallowed. Covers OS key auto-repeat (~30ms interval after a ~500ms delay)
 // without noticeably delaying a deliberate follow-up Enter.
@@ -563,11 +601,26 @@ export class TerminalEngine {
   // that never call setActive (mirror/grid) keep today's behavior.
   private paneActive = true;
 
+  // Host-reported SURFACE visibility, orthogonal to paneActive above. True while
+  // this terminal's rendered surface is displayed somewhere other than its pane —
+  // a Canvas Mode node (design 012 D15). A background tab's terminal shown on
+  // canvas has paneActive === false but is GENUINELY VISIBLE, so every geometry
+  // path must run. Written ONLY by setSurfaceDisplayed, whose only caller in this
+  // design is relocateTo (R3, §5.4) — putting the transition inside the operation
+  // is what makes an aborted relocation incapable of leaving eligibility raised
+  // (reviews 093 B2 / 094 B4).
+  private surfaceDisplayed = false;
+
   // Debounce for backend PTY resizes (see BACKEND_RESIZE_DEBOUNCE_MS). xterm's
   // own resize is immediate; only the bridge.resize() call is coalesced. Cleared
   // on unmount so it can't fire against a torn-down mount.
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingResize: { cols: number; rows: number } | null = null;
+  // Was `pendingResize` measured while the engine was INELIGIBLE? Decides whether
+  // unmount()'s force bypass may send it (see flushBackendResize). Set per scheduled
+  // value: the engine is ineligible at teardown in both the shipped force case and
+  // the parked one, so only the value's own provenance separates them.
+  private pendingResizeMeasuredWhileIneligible = false;
   // True while a bridge.resize() round-trip is outstanding (set by flushBackendResize
   // and the hydrate pre-resize, cleared when it settles). The heal skips while set —
   // flushBackendResize nulls pendingResize BEFORE awaiting, so pendingResize alone
@@ -585,6 +638,14 @@ export class TerminalEngine {
   // Bumped on every scheduleBackendResize so a heal that began before a resize can
   // detect the change after its await and abort.
   private resizeEpoch = 0;
+  // Epoch ms until which a backend resize is attributable to a relocation. Set by
+  // relocateTo's R2 to Date.now() + RELOCATION_CONVERGENCE_ARM_MS, consumed at most
+  // ONCE by stampConvergenceIfArmed, and restored from the R0 snapshot on every
+  // abort path — otherwise an aborted relocation would leave a <=500ms arm on an
+  // engine that never moved, and an unrelated resize would open a spurious 1500ms
+  // ED3 repair window: exactly the misattribution :2386-2388 exists to avoid
+  // (design 012 §5.1, review 096).
+  private convergenceArmUntil = 0;
   // Global suppression after a backend pipeline-healed jiggle (which resizes EVERY
   // terminal's PTY). Static so one event quiets all engines.
   static suppressHealUntil = 0;
@@ -673,6 +734,21 @@ export class TerminalEngine {
   // only by dispose()/cleanupTerminalCache).
   private disposables: Array<() => void> = [];
 
+  // CONTAINER-LOCAL disposables — the four DOM listeners bound to the container
+  // argument (click-to-focus, zoom keydown, Ctrl/Cmd+F, modifier+wheel). Split
+  // out of `disposables` above so relocateTo() can tear down the OLD container's
+  // bindings while every xterm/addon subscription — bound to the surviving
+  // `Terminal` — stays live (design 012 D6). Mirrored onto the cache entry by
+  // reference, exactly like `disposables`.
+  private containerDisposables: Array<() => void> = [];
+  // The chrome mode of the container this engine is currently wired to.
+  // `true` = the container sits inside the TerminalDisplay subtree that renders
+  // the pane's chrome (search bar, context menu, suggest popup). mount() always
+  // wires with `true`, so this initializer matches today's behaviour for the
+  // window before mount() runs (design 012 §5.8). Read by the suggest gate
+  // (§5.11) and restored from the R0 snapshot on an aborted relocation (§5.1).
+  private paneChromeActive = true;
+
   constructor(bridge: TerminalBridge, opts: TerminalEngineOptions = {}) {
     this.bridge = bridge;
     this.opts = opts;
@@ -682,6 +758,230 @@ export class TerminalEngine {
     // Establish visibility BEFORE mount()/attach() — the host mounts a background
     // tab before its setActive effect fires (see the `active` option / paneActive).
     this.paneActive = opts.active ?? true;
+  }
+
+  /**
+   * Wire everything that binds to the CURRENT container: the four DOM listeners
+   * and the ResizeObserver. Called by `mount()` and by `relocateTo()` (design
+   * 012 §5.8), so the two paths cannot drift.
+   *
+   * The four listeners bind to the `container` PARAMETER, so they are inherently
+   * tied to whichever container was passed. The observer's normal-branch fit body
+   * reads `this.container` (not the parameter) — which relocateTo's R6 has
+   * already updated by the time it calls this — and only `observe(container)`
+   * uses the parameter. Both are correct after R6, and both are wrong if this
+   * wiring is duplicated between the two call sites instead of shared. That is
+   * why this helper is mandatory rather than stylistic (review 089).
+   *
+   * NOT a straight cut of :1785-1927: `autoFocus` and the rAF settle-fit sit
+   * BETWEEN the wheel listener and the observer and stay in mount(), so a single
+   * call placed at mount()'s old :1785 moves the observer's creation ahead of
+   * those two. Immaterial — `observe()` delivers its initial callback
+   * asynchronously, so nothing observes the reorder (design 012 §5.8).
+   *
+   * `o.paneChrome` gates the two affordances that belong to a PANE and not to a
+   * chromeless canvas host (design 012 D16): click-to-focus and Ctrl/Cmd+F. Zoom
+   * (keys and wheel) is wired in BOTH modes — 010:376 keeps it as "existing
+   * behaviour, unchanged".
+   */
+  private wireContainerLocals(
+    container: HTMLElement,
+    boundTerm: Terminal,
+    fit: FitAddon | undefined,
+    o: { paneChrome: boolean },
+  ): void {
+    // --- Click-to-focus (source 535-542) ---
+    // Pane hosts only. design 012 D16 / 010:377-378 reserve a single click on a
+    // canvas node for node SELECTION; focusing is 010's double-click, after the
+    // fly-to-z=1 (010:223-225), and Canvas Mode calls the engine's public focus()
+    // itself. NOTE this omission is a SECONDARY measure only: xterm binds its own
+    // "always on" mousedown to term.element (CoreBrowserTerminal bindMouse), which
+    // TRAVELS WITH THE ELEMENT, so the actual guarantee comes from the host giving
+    // term.element no pointer events while unfocused (design 012 D19 / §4.4 row 8).
+    if (o.paneChrome) {
+      const clickHandler = () => {
+        boundTerm.focus();
+      };
+      container.addEventListener('click', clickHandler);
+      this.containerDisposables.push(() => {
+        container.removeEventListener('click', clickHandler);
+      });
+    }
+
+    // --- Capture-phase zoom listener (source 544-582) ---
+    // Dual path: this fires in the CAPTURE phase and stopsPropagation, so the
+    // custom key handler does NOT also fire -> exactly +1 per keypress.
+    // OS-aware modifier: Cmd on macOS, Ctrl elsewhere.
+    // Both locals must live HERE: the keydown handler AND the wheel handler close
+    // over zoomModifier, and the Ctrl/Cmd+F handler closes over isMac.
+    const isMac =
+      this.opts.isMac ??
+      (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac'));
+    const zoomModifier = (event: KeyboardEvent | WheelEvent): boolean =>
+      isMac ? event.metaKey : event.ctrlKey;
+
+    const zoomHandler = (event: KeyboardEvent) => {
+      if (!zoomModifier(event)) return;
+      const key = event.key;
+      const code = event.code;
+
+      if (key === '=' || key === '+' || code === 'Equal' || code === 'NumpadAdd') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('in');
+        return;
+      }
+      if (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('out');
+        return;
+      }
+      if (key === '0' || code === 'Digit0' || code === 'Numpad0') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('reset');
+        return;
+      }
+    };
+    container.addEventListener('keydown', zoomHandler, true);
+    this.containerDisposables.push(() => {
+      container.removeEventListener('keydown', zoomHandler, true);
+    });
+
+    // Ctrl+F (Win/Linux) / Cmd+F (macOS) opens the host search overlay. Intercept in
+    // the CAPTURE phase so we preventDefault the browser's native find-in-page dialog
+    // before it opens, and only while THIS pane is focused (the listener is on the
+    // pane container). Shift/Alt excluded so Ctrl+Shift+F etc. pass through.
+    //
+    // Pane hosts only (design 012 §8): on a chromeless host this would call
+    // onOpenSearch -> setSearchOpen(true) -> the bar renders in the OFF-SCREEN pane
+    // and autofocuses its input (TerminalSearchBar.tsx:39-41), pulling focus out of
+    // the canvas. Unwired, xterm forwards ^F to the PTY as a normal terminal key.
+    if (o.paneChrome) {
+      const searchKeyHandler = (event: KeyboardEvent) => {
+        const modifier = isMac ? event.metaKey : event.ctrlKey;
+        if (!modifier || event.shiftKey || event.altKey) return;
+        if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
+          event.preventDefault();
+          event.stopPropagation();
+          this.opts.onOpenSearch?.();
+        }
+      };
+      container.addEventListener('keydown', searchKeyHandler, true);
+      this.containerDisposables.push(() => {
+        container.removeEventListener('keydown', searchKeyHandler, true);
+      });
+    }
+
+    // --- Modifier + mouse-wheel zoom (capture, non-passive so preventDefault
+    // actually blocks the WebView's native page zoom + xterm scrollback). Routes
+    // through the same handleZoom path as the keys. ---
+    const wheelZoomHandler = (event: WheelEvent) => {
+      if (!zoomModifier(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.deltaY < 0) this.handleZoom('in');
+      else if (event.deltaY > 0) this.handleZoom('out');
+    };
+    container.addEventListener('wheel', wheelZoomHandler, { passive: false, capture: true });
+    this.containerDisposables.push(() => {
+      container.removeEventListener('wheel', wheelZoomHandler, true);
+    });
+
+    // --- ResizeObserver: rAF-debounced fit (source 598-621) ---
+    // NOT a containerDisposable (design 012 D7): `this.resizeObserver` is its
+    // single owner, disconnected explicitly by mount(), unmount() and relocateTo.
+    if (typeof ResizeObserver === 'function') {
+      if (this.opts.mirror) {
+        // Mirror: the GRID stays pinned to the backend; on pane resize we only
+        // re-fit the FONT (zoom-to-fit) so the whole terminal stays visible. Works
+        // per-pane, so grid view fits every cell independently.
+        const ro = new ResizeObserver(() => {
+          if (typeof requestAnimationFrame !== 'function') {
+            this.applyMirrorFit();
+            return;
+          }
+          requestAnimationFrame(() => this.applyMirrorFit());
+        });
+        ro.observe(container);
+        this.resizeObserver = ro;
+      } else {
+        const resizeObserver = new ResizeObserver(() => {
+          if (typeof requestAnimationFrame !== 'function') return;
+          requestAnimationFrame(() => {
+            // Hidden pane (background tab): don't follow layout changes — no
+            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
+            // setActive(true) fit flushes the final geometry on activation.
+            if (!this.geometryEligible()) return;
+            const el = this.container;
+            if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
+              try {
+                const dims = fit?.proposeDimensions();
+                // Diagnostics (source TerminalDisplay.tsx:606-609): observer-driven fit.
+                this.opts.onDiag?.(
+                  () => `[TERM-DIAG] ResizeObserver | xterm=${this.term?.cols}x${this.term?.rows}`,
+                );
+                if (dims && dims.cols > 10 && dims.rows > 5) {
+                  fit?.fit();
+                }
+              } catch (error) {
+                console.warn('terminal-core/engine: Failed to fit terminal:', error);
+              }
+            }
+          });
+        });
+        resizeObserver.observe(container);
+        this.resizeObserver = resizeObserver;
+      }
+    }
+
+    // Last: record the chrome mode this engine is now wired for. An aborted
+    // relocation restores it from the R0 snapshot (design 012 §5.1 / review 094 B5).
+    this.paneChromeActive = o.paneChrome;
+  }
+
+  // ---------------------------------------------------------------------------
+  /**
+   * Remove any OTHER cached terminal's render element from `container` before this
+   * mount attaches its own (design 012 §14 criterion 7 — external review 103
+   * finding 2).
+   *
+   * `mount()` is append-only and `unmount()` deliberately leaves `term.element` in
+   * the DOM, because the cache still owns the live Terminal and a later mount
+   * reattaches it (see the closing comment of unmount()). Both are correct on their
+   * own. Together they leak whenever a pane node is REUSED for a different terminal
+   * id: `TerminalPane` renders an unkeyed `TerminalDisplay`, so changing
+   * `terminalId` in place keeps the same DOM node, and engine A's surface is still
+   * sitting in it when engine B appends its own. The pane then hosts both — both
+   * full-height, with A still painting through its cache-lifetime bridge
+   * subscription while its input wiring is gone.
+   *
+   * It also pins A's cache entry: `enforceCacheCap` skips any entry whose element
+   * is still `isConnected` (`cache.ts:142`), so a connected orphan is never evicted
+   * and holds its Terminal, scrollback and two bridge subscriptions forever.
+   *
+   * Keyed on ELEMENT IDENTITY via the cache, not on a `.xterm` class sweep: the
+   * only nodes we may remove are ones we can positively identify as some other
+   * engine's surface. Anything else in the container — overlays, the WebGL scratch
+   * canvas, future chrome — is none of this method's business.
+   *
+   * Removing is safe and non-destructive. The element stays owned by its cache
+   * entry, and A's own `mount()` reattaches it with `container.appendChild`, which
+   * works just as well from a detached node.
+   *
+   * NOTE this is not a P0-B defect — the bare mount/unmount/mount sequence
+   * reproduces it with no canvas involved, which is why the repair belongs here
+   * rather than in the relocation cleanup that made it reachable.
+   */
+  private detachForeignSurfaces(container: HTMLElement, ours: HTMLElement | null): void {
+    for (const [key, entry] of terminalCache) {
+      if (key === this.cacheKey) continue;
+      const element = entry.terminal.element;
+      if (element && element !== ours && element.parentElement === container) {
+        element.remove();
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -697,8 +997,13 @@ export class TerminalEngine {
 
     this.container = container;
     this.disposables = [];
+    this.containerDisposables = [];
 
     let cached = terminalCache.get(this.cacheKey);
+    // Evict ANOTHER terminal's surface from this container before we put ours in
+    // (design 012 §14 criterion 7, external review 103 finding 2).
+    this.detachForeignSurfaces(container, cached?.terminal.element ?? null);
+
     let term: Terminal | undefined;
     let fit: FitAddon | undefined;
     let search: SearchAddon | undefined;
@@ -740,6 +1045,11 @@ export class TerminalEngine {
 
       // Dispose the previous mount's local event handlers before re-wiring.
       cached.disposables.forEach((dispose) => dispose());
+      // …and the previous CONTAINER's listeners (design 012 §5.5 site 4).
+      // LOAD-BEARING: without this a remount leaves the old container's four
+      // listeners attached to the abandoned node, still focusing this terminal
+      // and still opening its search bar from a pane that is no longer on screen.
+      cached.containerDisposables.forEach((dispose) => dispose());
 
       try {
         const existingElement = term.element;
@@ -1003,6 +1313,7 @@ export class TerminalEngine {
         pendingOutput: [],
         pendingOutputBytes: 0,
         disposables: [],
+        containerDisposables: [],
         hydrationGeneration: 0,
         protocolDisposables,
         edRepairGeneration: 0,
@@ -1751,6 +2062,13 @@ export class TerminalEngine {
       // switch — exactly the repaint storm 035 warns about.
       lastSentSize: existingCache?.lastSentSize,
       disposables: this.disposables,
+      // Explicit AFTER the `...existingCache` spread at :1758 on purpose: the
+      // spread would otherwise carry the PREVIOUS mount's already-run array
+      // forward, and relocateTo's R4 — which disposes off the ENTRY's reference,
+      // not the engine's — would then dispose the wrong one (design 012 §5.5
+      // site 6). What is stored is the ARRAY REFERENCE; the container wiring
+      // below mutates it. Do not "fix" this by copying the array.
+      containerDisposables: this.containerDisposables,
       dataDisposable: existingCache?.dataDisposable,
       exitDisposable: existingCache?.exitDisposable,
       hydrationGeneration: existingCache?.hydrationGeneration ?? 0,
@@ -1782,86 +2100,10 @@ export class TerminalEngine {
     });
     enforceCacheCap();
 
-    // --- Click-to-focus (source 535-542) ---
-    const clickHandler = () => {
-      boundTerm.focus();
-    };
-    container.addEventListener('click', clickHandler);
-    this.disposables.push(() => {
-      container.removeEventListener('click', clickHandler);
-    });
-
-    // --- Capture-phase zoom listener (source 544-582) ---
-    // Dual path: this fires in the CAPTURE phase and stopsPropagation, so the
-    // custom key handler above does NOT also fire -> exactly +1 per keypress.
-    // OS-aware modifier: Cmd on macOS, Ctrl elsewhere.
-    const isMac =
-      this.opts.isMac ??
-      (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac'));
-    const zoomModifier = (event: KeyboardEvent | WheelEvent): boolean =>
-      isMac ? event.metaKey : event.ctrlKey;
-
-    const zoomHandler = (event: KeyboardEvent) => {
-      if (!zoomModifier(event)) return;
-      const key = event.key;
-      const code = event.code;
-
-      if (key === '=' || key === '+' || code === 'Equal' || code === 'NumpadAdd') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('in');
-        return;
-      }
-      if (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('out');
-        return;
-      }
-      if (key === '0' || code === 'Digit0' || code === 'Numpad0') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('reset');
-        return;
-      }
-    };
-    container.addEventListener('keydown', zoomHandler, true);
-    this.disposables.push(() => {
-      container.removeEventListener('keydown', zoomHandler, true);
-    });
-
-    // Ctrl+F (Win/Linux) / Cmd+F (macOS) opens the host search overlay. Intercept in
-    // the CAPTURE phase so we preventDefault the browser's native find-in-page dialog
-    // before it opens, and only while THIS pane is focused (the listener is on the
-    // pane container). Shift/Alt excluded so Ctrl+Shift+F etc. pass through.
-    const searchKeyHandler = (event: KeyboardEvent) => {
-      const modifier = isMac ? event.metaKey : event.ctrlKey;
-      if (!modifier || event.shiftKey || event.altKey) return;
-      if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.opts.onOpenSearch?.();
-      }
-    };
-    container.addEventListener('keydown', searchKeyHandler, true);
-    this.disposables.push(() => {
-      container.removeEventListener('keydown', searchKeyHandler, true);
-    });
-
-    // --- Modifier + mouse-wheel zoom (capture, non-passive so preventDefault
-    // actually blocks the WebView's native page zoom + xterm scrollback). Routes
-    // through the same handleZoom path as the keys. ---
-    const wheelZoomHandler = (event: WheelEvent) => {
-      if (!zoomModifier(event)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.deltaY < 0) this.handleZoom('in');
-      else if (event.deltaY > 0) this.handleZoom('out');
-    };
-    container.addEventListener('wheel', wheelZoomHandler, { passive: false, capture: true });
-    this.disposables.push(() => {
-      container.removeEventListener('wheel', wheelZoomHandler, true);
-    });
+    // design 012 §5.8: one definition of "everything bound to the container",
+    // shared with relocateTo(). mount() always wires pane chrome — that preserves
+    // today's behaviour byte-for-byte.
+    this.wireContainerLocals(container, boundTerm, fit, { paneChrome: true });
 
     // Focus the terminal (source 589). Gated by autoFocus (default true) so grid
     // panes that aren't selected don't steal focus from each other on mount.
@@ -1880,51 +2122,6 @@ export class TerminalEngine {
         }
       });
       this.disposables.push(() => cancelAnimationFrame(rafId));
-    }
-
-    // --- ResizeObserver: rAF-debounced fit (source 598-621) ---
-    if (typeof ResizeObserver === 'function') {
-      if (this.opts.mirror) {
-        // Mirror: the GRID stays pinned to the backend; on pane resize we only
-        // re-fit the FONT (zoom-to-fit) so the whole terminal stays visible. Works
-        // per-pane, so grid view fits every cell independently.
-        const ro = new ResizeObserver(() => {
-          if (typeof requestAnimationFrame !== 'function') {
-            this.applyMirrorFit();
-            return;
-          }
-          requestAnimationFrame(() => this.applyMirrorFit());
-        });
-        ro.observe(container);
-        this.resizeObserver = ro;
-      } else {
-        const resizeObserver = new ResizeObserver(() => {
-          if (typeof requestAnimationFrame !== 'function') return;
-          requestAnimationFrame(() => {
-            // Hidden pane (background tab): don't follow layout changes — no
-            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
-            // setActive(true) fit flushes the final geometry on activation.
-            if (!this.paneActive) return;
-            const el = this.container;
-            if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
-              try {
-                const dims = fit?.proposeDimensions();
-                // Diagnostics (source TerminalDisplay.tsx:606-609): observer-driven fit.
-                this.opts.onDiag?.(
-                  () => `[TERM-DIAG] ResizeObserver | xterm=${this.term?.cols}x${this.term?.rows}`,
-                );
-                if (dims && dims.cols > 10 && dims.rows > 5) {
-                  fit?.fit();
-                }
-              } catch (error) {
-                console.warn('terminal-core/engine: Failed to fit terminal:', error);
-              }
-            }
-          });
-        });
-        resizeObserver.observe(container);
-        this.resizeObserver = resizeObserver;
-      }
     }
 
     // Reconcile the BACKEND size with the size xterm already adopted on REATTACH.
@@ -2181,6 +2378,10 @@ export class TerminalEngine {
           await this.bridge.resize(processId, cols, rows);
           const e = terminalCache.get(this.cacheKey);
           if (e) e.lastSentSize = { cols, rows };
+          // design 012 §6.2 / H2: the ONE direct sender that bypasses
+          // scheduleBackendResize. A relocation landing while this hydration was
+          // still awaiting must not SIGWINCH a ratatui PTY with no repair armed.
+          this.stampConvergenceIfArmed();
         } catch (e) {
           console.warn(
             `terminal-core/engine: pre-hydration resize failed for ${this.cacheKey}:`,
@@ -2342,31 +2543,109 @@ export class TerminalEngine {
     this.paneActive = active;
     // Deactivation: cancel any armed fit so it can't resize a now-hidden pane
     // (e.g. an activation fit scheduled 50ms before a quick tab switch away).
+    //
+    // THE ONE CANCEL the FT rule permits (design 012 §5.3 / D10), and only while
+    // the surface is NOT displayed elsewhere: hiding the TAB must never kill the
+    // settle fit a canvas display armed. A tab hide is not a move — nothing is
+    // racing to replace this timer — which is exactly why setSurfaceDisplayed
+    // (always part of a move) must NOT mirror it.
     if (!active) {
-      if (this.fitTimer) {
+      if (!this.surfaceDisplayed && this.fitTimer) {
         clearTimeout(this.fitTimer);
         this.fitTimer = null;
       }
       return;
     }
-    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Also the
-    // FLUSH point for geometry changes deferred while hidden (paneActive above):
-    // fit() re-measures the container, and an actual size change flows through
-    // xterm onResize -> scheduleBackendResize (deduped when nothing changed).
-    if (active && this.fitAddon) {
-      if (this.fitTimer) clearTimeout(this.fitTimer);
-      this.fitTimer = setTimeout(() => {
-        this.fitTimer = null;
-        try {
-          this.fitAddon?.fit();
-        } catch (error) {
-          console.warn('terminal-core/engine: Failed to fit terminal on activation:', error);
-        }
-        // Deliver geometry deferred while hidden (parked pending, or a stale
-        // backend size the no-op fit above didn't correct). MUST run after fit().
-        this.flushDeferredResizeOnActivation();
-      }, 50);
+    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Unconditional
+    // even when surfaceDisplayed already made us eligible: that asymmetry with
+    // setSurfaceDisplayed(true) is DELIBERATE (design 012 §7.2). This is shipped
+    // tab-switch behaviour exercised on every activation; narrowing it to save one
+    // no-op FitAddon.fit() would change a hot, well-tested path for no benefit.
+    // Do not "fix" it.
+    this.armActivationFit();
+  }
+
+  /**
+   * Arm the 50ms settle fit and the deferred-resize flush that follows it —
+   * the body of the old setActive(true) branch, MINUS its `active` test, so it
+   * can also be driven by setSurfaceDisplayed (design 012 §7.2).
+   */
+  private armActivationFit(): void {
+    if (!this.fitAddon) return;
+    if (this.fitTimer) clearTimeout(this.fitTimer);
+    this.fitTimer = setTimeout(() => {
+      this.fitTimer = null;
+      try {
+        this.fitAddon?.fit();
+      } catch (error) {
+        console.warn('terminal-core/engine: Failed to fit terminal on activation:', error);
+      }
+      // Deliver geometry deferred while hidden (parked pending, or a stale
+      // backend size the no-op fit above didn't correct). MUST run after fit().
+      this.flushDeferredResizeOnActivation();
+    }, 50);
+  }
+
+  /**
+   * Host tells the engine its surface is (or is no longer) displayed somewhere
+   * other than its pane — a Canvas Mode node (design 012 D15).
+   *
+   * Public because design/010 and design/013 need the concept, but in THIS design
+   * `relocateTo` is its only caller: the transition lives inside the operation so
+   * that every abort path can restore it from the R0 snapshot (§5.4).
+   *
+   * It NEVER touches focus, and it never leaves the engine with NO pending fit —
+   * in either direction (the FT rule, design 012 §5.3 / D10 / §7.2 rows 4/4a). On
+   * the return trip R3 lowers eligibility BEFORE R6 moves the element and BEFORE
+   * R7 re-arms the observer, whose initial callback is gated on geometryEligible()
+   * — so on a BACKGROUND pane nothing in `relocateTo` would otherwise measure the
+   * pane, and this method owns the only fit that will.
+   */
+  setSurfaceDisplayed(displayed: boolean): void {
+    const wasEligible = this.geometryEligible();
+    this.surfaceDisplayed = displayed;
+    // A false->true ELIGIBILITY transition arms the settle fit — identical
+    // semantics to setActive(true), minus focus. Already eligible => record and
+    // return; a second settle fit is churn.
+    if (displayed && !wasEligible) {
+      this.armActivationFit();
+      return;
     }
+    // §7.2 row 4a — the return leg onto a BACKGROUND pane (external review 103
+    // finding 1). Eligibility is now false, so R7's observer callback is skipped
+    // and no other geometry path in relocateTo will run: this arm is the whole
+    // repair. Rev 6 recorded and returned here, on the strength of §7.3's claim
+    // that "the surviving fitTimer" fills the gap. That claim only holds if the
+    // canvas visit was SHORTER THAN 50ms — the outbound timer nulls itself when it
+    // fires, so after any real visit there is nothing left to survive, and xterm
+    // stayed at the canvas node's grid until the tab was next activated.
+    //
+    // armActivationFit() clears-and-replaces rather than dropping, so the FT rule
+    // still holds as stated: the fit is preserved, rescheduled to fire 50ms from
+    // HERE — i.e. after R6's synchronous move, so it measures the pane, which is
+    // strictly better than a timer armed before the outbound leg.
+    //
+    // This does NOT breach the hidden-pane SIGWINCH park (§6.2): the fit resizes
+    // xterm only, and the backend resize it provokes hits flushBackendResize's
+    // ineligibility check and parks. The PTY still learns the size on the next
+    // activation, via the flush this same timer's callback performs. Narrow to an
+    // inactive pane on purpose — with paneActive true, R7's observer already fits.
+    if (!displayed && !this.paneActive) this.armActivationFit();
+  }
+
+  /**
+   * "Is this terminal's geometry live?" — the single predicate the six sites in
+   * design 012 §7.1 gate on, replacing a bare `this.paneActive` read at each:
+   * the ResizeObserver rAF callback, flushDeferredResizeOnActivation, setFontSize,
+   * flushBackendResize's park, and healOnce (entry + post-await recheck).
+   *
+   * Leaving any of them on the old flag alone silently breaks a canvas-displayed
+   * background tab: the observer ignores its resize, the parked flush never fires,
+   * a font change never refits, the PTY never learns its size, and the dimension
+   * heal aborts AFTER paying for getSize().
+   */
+  private geometryEligible(): boolean {
+    return this.paneActive || this.surfaceDisplayed;
   }
 
   // Called by the setActive(true) settle fit. The fit() above re-measures the
@@ -2375,7 +2654,7 @@ export class TerminalEngine {
   // resize was PARKED by flushBackendResize while hidden, or a hidden hydration
   // deferred its size — so reconcile the PTY to xterm's real size exactly once.
   private flushDeferredResizeOnActivation(): void {
-    if (this.opts.mirror || !this.paneActive) return;
+    if (this.opts.mirror || !this.geometryEligible()) return;
     const term = this.term;
     if (!term || term.cols <= 0 || term.rows <= 0 || this.resizeInFlight) return;
     // ED3 resize-wipe repair: this function only ever runs as part of the
@@ -2386,17 +2665,13 @@ export class TerminalEngine {
     // Narrower than stamping unconditionally on every activation: a reactivation
     // that resizes nothing never stamps, so it can't misattribute an unrelated
     // wipe days later.
-    const stampConvergenceResize = () => {
-      const e = terminalCache.get(this.cacheKey);
-      if (e) e.convergenceResizeAt = Date.now();
-    };
     if (this.pendingResize) {
       // A size is pending (freshly armed by the fit's onResize just above — it
       // synchronously calls scheduleBackendResize on a real dimension change —
       // or parked at deactivation with its timer cleared). Either way this IS
       // the convergence resize; stamp regardless of whether the debounce timer
       // still needs (re)arming.
-      stampConvergenceResize();
+      this.stampConvergenceResize();
       if (!this.resizeTimer) {
         this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
       }
@@ -2404,9 +2679,45 @@ export class TerminalEngine {
     }
     const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
     if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
-      stampConvergenceResize();
+      this.stampConvergenceResize();
       this.scheduleBackendResize(term.cols, term.rows);
     }
+  }
+
+  /**
+   * Mark "this terminal's PTY size is converging RIGHT NOW", so a CSI-3J arriving
+   * within ED3_EXPECT_WINDOW_MS can be attributed to OUR resize rather than to an
+   * unrelated clear. Extracted from flushDeferredResizeOnActivation's local
+   * closure so relocation can reuse it (design 012 §6.2); the two call sites there
+   * (:2399, :2407) are unchanged in behaviour.
+   */
+  private stampConvergenceResize(): void {
+    const e = terminalCache.get(this.cacheKey);
+    if (e) e.convergenceResizeAt = Date.now();
+  }
+
+  /**
+   * Stamp only if a relocation armed the window, and consume the arm.
+   *
+   * Called from the two places a size can reach the PTY (design 012 §6.2):
+   *   - scheduleBackendResize — the debounced choke point, and the route the
+   *     relocation path itself takes (onResize at :1119);
+   *   - hydrate()'s direct pre-hydration resize at :2181, the ONE sender that
+   *     bypasses the debounce. A hydrate() started by an earlier attach() can
+   *     still be awaiting when a relocation lands, and its SIGWINCH would then hit
+   *     a ratatui PTY inside the arm window with no repair armed (review 093 B5).
+   *
+   * Armed rather than unconditional so an unchanged-geometry relocation — which
+   * produces no resize at all — never stamps, preserving the property the comment
+   * at :2386-2388 protects. If some OTHER caller fires inside the window (a heal
+   * at :2657, a hydrate reconcile at :2274), that is still a genuine PTY resize
+   * converging immediately after a relocation, so attributing a following ED3 to
+   * it is correct rather than a misattribution.
+   */
+  private stampConvergenceIfArmed(): void {
+    if (Date.now() >= this.convergenceArmUntil) return;
+    this.convergenceArmUntil = 0;
+    this.stampConvergenceResize();
   }
 
   // ED3 resize-wipe repair: debounce on output idle (so codex's post-ED3 re-emit
@@ -2506,19 +2817,29 @@ export class TerminalEngine {
     this.term.options.fontSize = px;
     // Hidden pane: apply the render option but defer the geometry refit to the
     // setActive(true) fit — a refit here would SIGWINCH a background PTY.
-    if (!this.paneActive) return;
+    if (!this.geometryEligible()) return;
     // Re-fit after font size change with a 50ms settle (source 217-225 / R7).
-    if (this.fitAddon) {
-      if (this.fitTimer) clearTimeout(this.fitTimer);
-      this.fitTimer = setTimeout(() => {
-        this.fitTimer = null;
-        try {
-          this.fitAddon?.fit();
-        } catch (e) {
-          console.warn('terminal-core/engine: fit after font change failed:', e);
-        }
-      }, 50);
-    }
+    //
+    // This MUST be `armActivationFit`, not a bespoke fit-only timer (external
+    // review 103, finding 3). The two timers share one `fitTimer` slot, so
+    // whichever is armed second replaces the first — and before this change the
+    // font timer replaced it with a callback that fits but never calls
+    // `flushDeferredResizeOnActivation()`. That is a strand:
+    //
+    //   hidden pane parks a resize (pendingResize set, resizeTimer null)
+    //   -> relocateTo(canvas) raises eligibility and arms the ONLY callback that
+    //      will ever flush that parked value
+    //   -> a font change inside those 50ms replaces it with the fit-only timer
+    //   -> if the new fit proposes the same grid, xterm emits no onResize, so
+    //      nothing reschedules — and `healOnce` refuses to run while
+    //      `pendingResize` is set, so the PTY stays stale indefinitely.
+    //
+    // Note this path is reachable at all only because §7.1 row 3 widened this
+    // gate from `paneActive` to `geometryEligible()`: on develop the early
+    // return above fired for a hidden pane and the timers could never collide.
+    // Arming the richer callback costs nothing — `flushDeferredResizeOnActivation`
+    // early-returns when there is nothing parked.
+    this.armActivationFit();
   }
 
   focus(): void {
@@ -2563,8 +2884,18 @@ export class TerminalEngine {
   // Coalesce rapid xterm resizes into a single backend PTY resize at the final
   // size (see BACKEND_RESIZE_DEBOUNCE_MS).
   private scheduleBackendResize(cols: number, rows: number): void {
+    // design 012 §6.2 / H2: if a relocation armed the window, this resize IS the
+    // convergence resize — stamp it so the ED3 detector at :1261-1274 opens its
+    // 1500ms repair window and a codex/ratatui scrollback wipe is repaired rather
+    // than lost. No-op when nothing armed it.
+    this.stampConvergenceIfArmed();
     this.resizeEpoch++;
     this.pendingResize = { cols, rows };
+    // Provenance, for unmount()'s force bypass (external review 105). Recorded per
+    // scheduled value, because it is the VALUE's history that decides whether
+    // teardown may send it — not the engine's state at teardown time, which is
+    // ineligible in both cases.
+    this.pendingResizeMeasuredWhileIneligible = !this.geometryEligible();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
   }
@@ -2580,13 +2911,32 @@ export class TerminalEngine {
   // pane is inactive we PARK the pending geometry here instead of sending it — the
   // setActive(true) activation reconcile flushes it. `force` (unmount teardown)
   // bypasses the park so the PTY still ends at the correct final size.
+  //
+  // …but ONLY for geometry that was MEASURED while eligible (external review 105).
+  // The shipped force case is an interrupted in-flight resize: the pane was visible,
+  // a real resize was measured and debounced, and the pane was hidden and torn down
+  // before the 120 ms elapsed — teardown must still deliver it, which is what the
+  // pane-collapse fix relies on. That value was always allowed to be sent; only the
+  // timing was interrupted.
+  //
+  // Geometry measured while INELIGIBLE is the opposite case. The park is not a delay
+  // there, it is a refusal: §6.2 says this engine may not SIGWINCH its PTY at all
+  // right now. Forcing such a value out at teardown is strictly worse than dropping
+  // it, because the ED3 detector that repairs a wipe is a PER-MOUNT disposable
+  // (disposed a few lines below this call) while the data subscription that receives
+  // the wipe is CACHE-LIFETIME — so the PTY's ESC[2J ESC[3J answer lands
+  // asynchronously, after the only thing that could repair it is gone.
+  //
+  // Dropping it costs nothing: the geometry is not lost, because the next mount's
+  // reattach fit re-measures the same container and re-sends it — with the detector
+  // armed. Same SIGWINCH, same final size, delivered where it can be repaired.
   private flushBackendResize(force = false): void {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
     // Park: keep pendingResize (do NOT null it) so activation can deliver it.
-    if (!this.paneActive && !force) return;
+    if (!this.geometryEligible() && !(force && !this.pendingResizeMeasuredWhileIneligible)) return;
     const pending = this.pendingResize;
     this.pendingResize = null;
     if (!pending || !this.attachedProcessId) return;
@@ -2631,7 +2981,7 @@ export class TerminalEngine {
     // via `visibility:hidden` (offsetParent stays non-null), so the offsetParent
     // check below never catches them — the host's setActive signal does. A heal
     // resize against a hidden codex pane wipes its scrollback (ED3 re-emit).
-    if (!this.paneActive) return;
+    if (!this.geometryEligible()) return;
     const c = this.container;
     if (!c || c.offsetParent === null || c.offsetWidth <= 50) return; // pane visible
     if (Date.now() < TerminalEngine.suppressHealUntil) return;        // post-jiggle
@@ -2644,7 +2994,7 @@ export class TerminalEngine {
       const size = await this.getBackendSize(pid);
       if (!size || size.cols <= 0 || size.rows <= 0) return;
       // Re-validate after the await.
-      if (!this.paneActive) return; // pane hidden while getSize was in flight
+      if (!this.geometryEligible()) return; // pane hidden while getSize was in flight
       if (this.attachedProcessId !== pid) return;
       const e2 = terminalCache.get(this.cacheKey);
       if (!e2 || e2.terminal !== term || e2.hydrating) return;
@@ -2927,6 +3277,13 @@ export class TerminalEngine {
   }
 
   private emitInputLine(text: string): void {
+    // design 012 §5.11 / §8.1: on a chromeless host (a Canvas Mode node) the
+    // engine emits NOTHING, so useCommandSuggest never re-opens the popup, so
+    // suggestState never leaves 'closed', so the interception at :1346 never
+    // claims Up/Down/Tab/Enter. True by construction rather than by a one-shot
+    // close (review 093 B3). The capture heuristic itself keeps running — only
+    // the emission to the host stops (§5.12).
+    if (!this.paneChromeActive) return;
     if (text === this.lastEmittedInput) return;
     this.lastEmittedInput = text;
     this.opts.onInputLineChanged?.(text);
@@ -2934,7 +3291,9 @@ export class TerminalEngine {
 
   /** Host tells the engine the popup's current state (drives key interception). */
   setSuggestPopupState(state: SuggestPopupState): void {
-    this.suggestState = state;
+    // Belt-and-braces for any future caller (design 012 §5.11): the popup cannot
+    // exist on a chromeless host, so it must not be able to claim keys there.
+    this.suggestState = this.paneChromeActive ? state : 'closed';
   }
 
   /** Insert a history command at the prompt: move the cursor to the end of the
@@ -3249,8 +3608,13 @@ export class TerminalEngine {
     }
     // Flush (don't drop) any pending backend resize so the PTY isn't left at a
     // stale size when a drag is interrupted by this unmount (tab switch / pane move).
-    // force=true bypasses the hidden-pane park: teardown must deliver the final size
-    // even for a background tab (the next mount reattaches to that PTY).
+    //
+    // `force` bypasses the hidden-pane park ONLY for geometry that was measured
+    // while the engine was eligible — the interrupted-mid-debounce case this line
+    // exists for. Geometry the park REFUSED (measured while ineligible) stays
+    // parked and is dropped here; the next mount re-measures and re-sends it with
+    // the ED3 detector armed. See flushBackendResize for why that distinction is
+    // load-bearing rather than cautious (external review 105).
     this.flushBackendResize(true);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
@@ -3259,6 +3623,9 @@ export class TerminalEngine {
     this.stopHealWatchdog();
     this.disposables.forEach((dispose) => dispose());
     this.disposables = [];
+    // design 012 §5.5 site 7: the container listeners are a separate array now.
+    this.containerDisposables.forEach((dispose) => dispose());
+    this.containerDisposables = [];
     this.container = null;
     // Clear the active query AND its decorations. The SearchAddon lives on the
     // cached terminal, so highlights drawn before this unmount would otherwise stay
@@ -3273,6 +3640,231 @@ export class TerminalEngine {
     unregisterEndedRegionTracker(this.cacheKey);
     // Intentionally keep this.term / this.fitAddon references — the cache still
     // owns the live instance, and a later mount() reattaches it.
+  }
+
+  // ---------------------------------------------------------------------------
+  // relocateTo — design 012 §5. Move this terminal's RENDERED SURFACE to a new
+  // container without ending the session.
+  //
+  // It is NOT mount() (design 012 D2). mount() does eight things relocation must
+  // not do (§5.0): construct a second EndedRegionTracker (which would leak the
+  // live one's onRender subscription, debounce timer and rail layer), construct a
+  // second HeuristicCapture (which would restore a stale mark), re-apply
+  // opts.fontSize (reverting every zoom since engine creation), focus
+  // unconditionally (stealing focus for a background pane), rebuild the cache
+  // entry (breaking design/013's identity keying), call enforceCacheCap(), call
+  // startHealWatchdog(), and — worst of all — fall through to the CREATE branch on
+  // any thrown error (:757-767), producing a brand-new blank Terminal with the
+  // entire scrollback gone, silently. That is hazard H1.
+  //
+  // The mechanism is one synchronous `container.appendChild(this.term.element)`
+  // (D1). Per the DOM spec that is remove-then-insert inside ONE synchronous
+  // algorithm; spike 004 Q2 measured that no observer of any kind ever sees
+  // `isConnected === false`. No portal, anywhere.
+  // ---------------------------------------------------------------------------
+  relocateTo(container: HTMLElement, opts?: { paneChrome?: boolean }): RelocationResult {
+    // --- R0: normalise, preconditions, restore snapshot (§5.1) ---
+    // Normalised ONCE, here. Every later step reads THIS local, never
+    // `opts.paneChrome` — which is undefined on the documented call
+    // `relocateTo(container)` (reviews 098 C1 + 096).
+    const paneChrome = opts?.paneChrome ?? false;
+
+    // Placed BEFORE the identity no-op deliberately: a mirror engine must never
+    // reach any part of this operation, including the free path. Grid-view mirrors
+    // are not canvas nodes (design 012 §12), and applyMirrorFit's container reads
+    // (:3066, :3071) are dismissed by this line rather than merely documented.
+    if (this.opts.mirror) {
+      console.error('terminal-core/engine: relocateTo is not supported for mirror engines');
+      return 'aborted';
+    }
+
+    // The identity no-op. LOAD-BEARING: both §4.2.2 cleanups call
+    // relocateTo(pane, { paneChrome: true }) unconditionally, and this is what
+    // makes the redundant one free. It must perform NO work at all — no dispose,
+    // no re-wire, no observer churn, no epoch bump, no convergenceArmUntil write,
+    // no eligibility change (§13 T2b).
+    if (container === this.container) return 'relocated';
+
+    const term = this.term;
+    const entry = terminalCache.get(this.cacheKey);
+    const snap: RelocationSnapshot = {
+      container: this.container,
+      surfaceDisplayed: this.surfaceDisplayed,
+      paneChrome: this.paneChromeActive,
+      convergenceArmUntil: this.convergenceArmUntil,
+      rewired: false,
+    };
+
+    // This precondition exists specifically to avoid mount()'s reattach catch-all
+    // (:757-763), which terminalCache.delete()s and falls into the create branch
+    // (:767). H1.
+    if (!term || !entry || entry.terminal !== term || !term.element) {
+      return this.abortRelocation(
+        `relocateTo: preconditions failed for ${this.cacheKey} ` +
+          `(term=${!!term} entry=${!!entry} owned=${entry?.terminal === term} ` +
+          `element=${!!term?.element})`,
+        snap,
+      );
+    }
+    const element = term.element;
+
+    // --- R1: capture focus ownership (§5.2) ---
+    // Sampled HERE, before anything moves, while everything is still attached.
+    // Spike 004 Q3 measured that the move blurs synchronously — `blur` and
+    // `focusout` fire as part of it and document.activeElement is already false on
+    // the next synchronous line — so this must be read first.
+    const hadFocus =
+      typeof document !== 'undefined' && !!element.contains(document.activeElement);
+
+    // --- R2: invalidate in-flight geometry work, arm the convergence stamp,
+    //         cancel NOTHING (§5.3) ---
+    // resizeEpoch is already this engine's "geometry intent changed" generation
+    // (sole writer scheduleBackendResize at :2566, sole readers healOnce at :2641
+    // and :2652). Reuse before reinvent: do NOT add a second counter. The risk it
+    // covers is a DUPLICATE backend resize — healOnce decided to resize by
+    // comparing the backend size against dims measured before the move, and the
+    // relocation's own fit is about to supersede that decision (H6).
+    this.resizeEpoch++;
+    // Arm the ED3 repair window (§6.2 / H2): the resize this move is about to
+    // cause reaches the PTY through :1119 -> scheduleBackendResize, which stamps
+    // convergenceResizeAt only while this arm is live. Without the stamp a
+    // ratatui/codex PTY answers the SIGWINCH with ESC[2J ESC[3J and the scrollback
+    // is wiped with no repair armed — silent data loss.
+    this.convergenceArmUntil = Date.now() + RELOCATION_CONVERGENCE_ARM_MS;
+
+    // --- R3: raise (or lower) surface eligibility (§5.4) ---
+    // INSIDE the operation, not in the renderer: that is what makes an aborted
+    // relocation incapable of leaving eligibility raised (reviews 093 B2 / 094 B4).
+    // Rev 4 had the renderer do this one line before and one line after, and an
+    // abort then left surfaceDisplayed === true for the life of the engine —
+    // permanently un-gating flushBackendResize's park (:2589), the observer fit and
+    // both healOnce gates, so a hidden ratatui/codex pane gets SIGWINCH'd and its
+    // scrollback wiped.
+    //
+    // ORDERING IS LOAD-BEARING: eligibility must already be true when R7 arms the
+    // new ResizeObserver, because that observer's initial callback is gated on
+    // geometryEligible(). On the return trip a BACKGROUND pane does get a gap —
+    // R7's callback is skipped — and the fitTimer the FT rule preserves (§5.3) is
+    // what fills it. Raising eligibility on the way home instead would defeat the
+    // hidden-pane SIGWINCH park §6.2 exists to arm.
+    //
+    // Under the FT rule this call can never leave the engine with NO pending fit,
+    // in either direction: outbound it arms one (§7.2 row 2), on the return leg onto
+    // a background pane it arms one (row 4a), and on the return leg onto a visible
+    // pane eligibility never drops so R7's observer fits on its own.
+    this.setSurfaceDisplayed(!paneChrome);
+
+    // --- R4: dispose the PREVIOUS container's disposables (§5.5) ---
+    // Off the CACHE ENTRY's reference, not this.containerDisposables — exactly
+    // what mount()'s reattach branch already does at :742. Imitate, do not invent.
+    // Double-dispose is a pre-existing tolerated pattern here (unmount() runs the
+    // disposers but never clears the entry's reference, so cleanupTerminalCache
+    // runs them again), so every disposer already survives a second call.
+    entry.containerDisposables.forEach((d) => d());
+    this.containerDisposables = [];
+    entry.containerDisposables = this.containerDisposables;   // share the reference
+
+    // --- R5: disconnect the ResizeObserver (§5.6) ---
+    // The same two lines mount() runs at :695-696 and unmount() at :3255-3258.
+    // Per D7 this is its ONLY owner, so this is a real step, not a re-run of R4.
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    // Set HERE, at the end of the teardown pair, so "the old wiring is fully down"
+    // is the literal precondition for the abort re-wire, and so the re-wire cannot
+    // double-register (this.resizeObserver is already null).
+    snap.rewired = true;
+
+    // --- R6: move the xterm element (§5.7) ---
+    // The catch is not theatre: appendChild throws HierarchyRequestError if
+    // `container` is inside term.element — reachable if a canvas node ever
+    // registers a host that is a descendant of the terminal. appendChild leaves
+    // the tree unchanged when it throws, so the element is still in snap.container.
+    try {
+      container.appendChild(element);
+    } catch (e) {
+      return this.abortRelocation(`relocateTo: appendChild failed: ${e}`, snap);
+    }
+    this.container = container;
+
+    // --- R7: re-wire the container locals, record the chrome mode (§5.8) ---
+    // The four listeners bind to the `container` parameter; the observer's fit body
+    // reads this.container, which R6 has just updated. Both correct only because
+    // the wiring is SHARED with mount() rather than duplicated.
+    this.wireContainerLocals(container, term, this.fitAddon ?? undefined, { paneChrome });
+
+    // --- R8: re-target the ended-region rail (§5.9) ---
+    // MUST run after R6: wrapper resolution walks UP from term.element. Reuses
+    // this.endedRegions untouched — same instance, same regions, same open span,
+    // same colours, same single onRender subscription. Moving the memoised layer
+    // carries every child region.railEl with it in one DOM operation.
+    this.endedRegions?.retargetRail();
+
+    // --- R9: restore focus (§5.10) ---
+    // Conditional on R1's sample, so a background pane relocated onto canvas
+    // cannot steal focus. Same synchronous task as the move: spike 004 Q3 measured
+    // exactly one focus/focusin pair and nothing arriving late.
+    if (hadFocus) term.focus();
+
+    // --- R10: chrome-mode side effects — the suggest gate (§5.11) ---
+    // R7 has already set this.paneChromeActive from the same normalised local.
+    // Stops the key interception at :1346 dead: with the popup unable to open, no
+    // key is ever claimed (§8.1).
+    if (!this.paneChromeActive) this.suggestState = 'closed';
+    // UNCONDITIONAL, in both directions: the dedup at :2930 must not swallow the
+    // first input line emitted after the return trip.
+    this.lastEmittedInput = '';
+
+    // --- R11: the in-progress capture mark — do nothing (§5.12) ---
+    // HeuristicCapture holds `private mark` and a `readonly term`
+    // (commandCapture.ts:58-65): zero DOM references, no listeners, no timers.
+    // Nothing binds it to a container, so it is reused outright. The cache's
+    // captureMark — written only by unmount() at :3226-3229 — goes stale during a
+    // relocated session, which is harmless: nothing reads it until the next real
+    // mount() (:1063), which is always preceded by the unmount() that refreshes it.
+    // NOTE what §6 makes of this: a geometry-CHANGING relocation runs the live
+    // onResize handler, which cancels the mark and sets suppressUntilSubmit
+    // (:1112-1116). That is the existing, correct reflow behaviour — an absolute
+    // row/col mark is untranslatable after reflow — and relocation must not defeat
+    // it. Under §6.5's rate contract it happens exactly twice per terminal per
+    // canvas session, which is why RC1 matters: without it, this fires per pan tick.
+
+    return 'relocated';
+  }
+
+  /**
+   * Undo a partial relocation and report it. Aborting CHANGES NOTHING: the
+   * terminal has not moved and is still fully wired in its current, live
+   * container, with its eligibility, chrome mode and convergence arm exactly as
+   * they were (design 012 §5.1).
+   *
+   * `surfaceDisplayed` is restored by DIRECT FIELD WRITE, not through
+   * setSurfaceDisplayed(): restoring a snapshot must be a state assignment, not a
+   * transition. Going through the setter would run the transition table, and on an
+   * aborted return trip (snapshot true, current false) that means arming a FRESH
+   * 50ms fit on an engine that never moved. Harmless but wrong — arming a timer is
+   * a change.
+   */
+  private abortRelocation(reason: string, snap: RelocationSnapshot): RelocationResult {
+    this.surfaceDisplayed = snap.surfaceDisplayed;
+    this.paneChromeActive = snap.paneChrome;
+    this.convergenceArmUntil = snap.convergenceArmUntil;
+    // Only re-wire if the wiring was actually removed, and re-wire with the
+    // RECORDED chrome mode, not a literal `true`: on an aborted canvas -> pane
+    // move snap.container IS the canvas host, and pane chrome there would install
+    // Ctrl/Cmd+F on it (review 094 B5). `this.container` is untouched on every
+    // abort path — R6 assigns it only after a successful appendChild — so there is
+    // nothing to restore there.
+    if (snap.rewired && snap.container && this.term) {
+      this.wireContainerLocals(
+        snap.container,
+        this.term,
+        this.fitAddon ?? undefined,
+        { paneChrome: snap.paneChrome },
+      );
+    }
+    console.error(`terminal-core/engine: ${reason}`);
+    this.opts.onDiag?.(() => `[TERM-DIAG] ${reason}`);
+    return 'aborted';
   }
 
   // ---------------------------------------------------------------------------

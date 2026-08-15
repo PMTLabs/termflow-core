@@ -195,6 +195,9 @@ export class EndedRegionTracker {
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private pendingWiden = false;
   private railLayer: HTMLElement | undefined;
+  /** Handle for retargetRail's follow-up reposition frame, so dispose() can cancel
+   *  it (design 012 §5.9 / correction 0.3.10). Undefined when none is armed. */
+  private retargetRaf: number | undefined;
   private readonly renderSub: IDisposable | undefined;
 
   constructor(private readonly term: Terminal, opts: EndedRegionOptions = {}) {
@@ -417,6 +420,10 @@ export class EndedRegionTracker {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = undefined;
     }
+    if (this.retargetRaf !== undefined) {
+      cancelAnimationFrame(this.retargetRaf);
+      this.retargetRaf = undefined;
+    }
     this.renderSub?.dispose();
     for (const r of this.regions) this.disposeRegion(r);
     this.regions = [];
@@ -551,6 +558,42 @@ export class EndedRegionTracker {
     el.style.background =
       `linear-gradient(to right, ${rail}, ${rail} ${RAIL_WIDTH_PX}px, ${wash} ${RAIL_WIDTH_PX}px)`;
     el.style.display = 'block';
+  }
+
+  /**
+   * Move the memoised rail layer into the wrapper that now contains term.element.
+   *
+   * MUST run AFTER the xterm element has been appended to its new container
+   * (design 012 §5.9, ordering R8-after-R6): wrapper resolution walks UP from
+   * term.element, so before the move it would resolve the OLD wrapper.
+   *
+   * Moving the layer carries every child region.railEl with it in one DOM
+   * operation. Do NOT drop and rebuild it: each Region memoises `railEl` (:126)
+   * and ensureRail returns early when it is set (:569-570), so a rebuild leaks the
+   * old layer AND stops existing rails ever reappearing.
+   *
+   * The extra frame answers review 089: onRender (:207-215) fires on GRID changes
+   * only, so an idle terminal relocated into a host whose layout settles a frame
+   * later would otherwise get no repositioning trigger at all — there is no
+   * ResizeObserver on the wrapper and no output to render.
+   */
+  retargetRail(): void {
+    const layer = this.railLayer;
+    if (!layer) return;   // created lazily by ensureRailLayer() on first paint,
+                          // which will resolve the NEW wrapper by itself
+    const el = this.term.element;
+    if (!el) return;
+    const wrapper = el.closest(WRAPPER_SELECTOR) ?? el.parentElement;
+    if (wrapper && wrapper !== layer.parentElement) {
+      wrapper.appendChild(layer);
+    }
+    this.positionRails();
+    if (typeof requestAnimationFrame !== 'function') return;
+    if (this.retargetRaf !== undefined) cancelAnimationFrame(this.retargetRaf);
+    this.retargetRaf = requestAnimationFrame(() => {
+      this.retargetRaf = undefined;
+      this.positionRails();
+    });
   }
 
   /** Create the rail layer in the terminal's outer wrapper, once the DOM exists. */
