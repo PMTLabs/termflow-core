@@ -40,7 +40,17 @@ function makeFake(opts: { cap?: number; failOn?: string[]; preloaded?: string[] 
     live.add(id);
     return 'webgl';
   };
-  return { setPolicy, count: () => live.size, calls, live };
+  return {
+    setPolicy,
+    count: () => live.size,
+    // The reconciler must allocate against what is ALREADY live, so the fake has to
+    // answer "what policy is this on right now?" from the same `live` set its setter
+    // mutates. Without this the fake can only model the everything-starts-on-DOM
+    // case, which is exactly the blind spot that hid the bug these tests cover.
+    getPolicy: (id: string): RenderPolicy | null => (live.has(id) ? 'webgl' : 'dom'),
+    calls,
+    live,
+  };
 }
 
 /** Same shape as renderPolicy.test.ts's helper: jsdom reports offsetWidth 0 for
@@ -255,5 +265,92 @@ describe('design/013 D6 — snapshot and restore', () => {
     const snap = snapshotRenderPolicies(['gone']);
     terminalCache.delete('gone');
     expect(restoreRenderPolicies(snap)).toEqual({});
+  });
+});
+
+/**
+ * P0-C review round 1 (report 120, codex) — HIGH.
+ *
+ * The reconciler checked `count() >= budget` inside the promotion loop WITHOUT first
+ * resolving each terminal's current policy. That is correct only while every
+ * candidate starts on DOM, which is the one state the original tests set up — they
+ * either started with no live WebGL terminals, or made the preloaded one explicitly
+ * desire DOM. Every case below starts with contexts ALREADY HELD, which is the
+ * steady state Canvas Mode actually reconciles from on every pan and zoom.
+ */
+describe('reconcileRenderPolicies with slots already held (review 120 HIGH)', () => {
+  it('reports webgl — and does not churn — for an already-WebGL winner at a full budget', () => {
+    const fake = makeFake({ cap: 4, preloaded: ['a'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl' },
+      budget: 1,
+      order: ['a'],
+      ...fake,
+    });
+
+    // Before the fix this reported 'dom' while `a` was still WebGL — `applied` lied
+    // about the end state, so the caller's LOD bookkeeping drifted from reality.
+    expect(out.applied.a).toBe('webgl');
+    expect(fake.live.has('a')).toBe(true);
+    expect(out.webglCount).toBe(1);
+    // Idempotent: a steady state must not thrash the GPU context.
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('takes the last slot from a lower-priority holder and gives it to the focused terminal', () => {
+    // `b` holds the only slot; `a` is higher priority and also wants WebGL.
+    const fake = makeFake({ cap: 4, preloaded: ['b'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['a', 'b'],
+      ...fake,
+    });
+
+    // Before the fix `a` was refused and `b` was never demoted, so the focused
+    // terminal could never obtain a context — design/010 D8 requires the opposite.
+    expect(out.applied.a).toBe('webgl');
+    expect(out.applied.b).toBe('dom');
+    expect(out.webglCount).toBe(1);
+    // RULE 1: the loser is freed BEFORE the winner asks, or the swap fails at the
+    // boundary because the context being freed is still held.
+    expect(fake.calls).toEqual([['b', 'dom'], ['a', 'webgl']]);
+  });
+
+  it('enforces the budget on a desired set that STARTS over it', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `t${i}`);
+    const fake = makeFake({ cap: 20, preloaded: ids });
+    const desired: Record<string, RenderPolicy> = {};
+    ids.forEach(id => { desired[id] = 'webgl'; });
+
+    const out = reconcileRenderPolicies({ desired, budget: 12, order: ids, ...fake });
+
+    // Before the fix this made NO calls at all and returned webglCount 20: the
+    // budget was simply not enforced once the set began over it.
+    expect(out.webglCount).toBe(12);
+    expect(fake.live.size).toBe(12);
+    // The 12 kept are the highest-priority 12, and the rest are reported honestly.
+    ids.slice(0, 12).forEach(id => expect(out.applied[id]).toBe('webgl'));
+    ids.slice(12).forEach(id => expect(out.applied[id]).toBe('dom'));
+  });
+
+  it('does not reallocate contexts held by terminals absent from the request', () => {
+    // `x` is live but not in `desired` — §5.1's count is GLOBAL, and `x` is not
+    // ours to demote, so it must reduce the slots available rather than be freed.
+    const fake = makeFake({ cap: 4, preloaded: ['x'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl', b: 'webgl' },
+      budget: 2,
+      order: ['a', 'b'],
+      ...fake,
+    });
+
+    expect(fake.live.has('x')).toBe(true);
+    expect(out.applied.a).toBe('webgl');
+    expect(out.applied.b).toBe('dom');   // only one slot was actually free
+    expect(out.webglCount).toBe(2);
   });
 });

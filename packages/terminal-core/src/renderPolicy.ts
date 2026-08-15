@@ -18,16 +18,26 @@ export type RenderPolicy = 'webgl' | 'dom';
  *   - a `display:none` ancestor -> proposeDimensions() returns a BOGUS grid (spike 004
  *     Q4), so fit() happily resizes to garbage
  * The second is why a `parentElement` check alone is not enough.
+ *
+ * MEASURE THE HOST, NOT THE XTERM CHILD. `FitAddon.proposeDimensions()` measures
+ * `term.element.parentElement` — the host — so this predicate must measure the same
+ * element or it guards the wrong thing. An earlier version took a `Terminal` and
+ * measured `term.element`, which a zero-sized host can defeat: an overflowing or
+ * fixed-size xterm child still reports non-zero offsets, the guard passes, and the
+ * fit then runs against the zero-sized host and produces exactly the bogus grid LB
+ * exists to prevent. Taking an `HTMLElement` is also the signature design/013 §5.3
+ * declares.
  */
-export function hasLayoutBox(term: Terminal): boolean {
-  const el = term.element;
-  if (!el || !el.parentElement) return false;
+export function hasLayoutBox(el: HTMLElement | null | undefined): boolean {
+  if (!el) return false;
   return el.offsetWidth > 0 && el.offsetHeight > 0;
 }
 
 /** Fit only when it is safe to. Returns whether the fit actually ran. */
 export function fitIfLaidOut(entry: TerminalCacheEntry): boolean {
-  if (!hasLayoutBox(entry.terminal)) return false;
+  // The exact element FitAddon will measure. A null parentElement is the first
+  // failure case above and is caught by hasLayoutBox's null branch.
+  if (!hasLayoutBox(entry.terminal.element?.parentElement)) return false;
   try {
     entry.fitAddon.fit();
   } catch (e) {

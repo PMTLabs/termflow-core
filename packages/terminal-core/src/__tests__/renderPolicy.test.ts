@@ -52,20 +52,34 @@ const asMock = (addon: unknown): MockWebglInstance => addon as MockWebglInstance
  *  .test.ts:81) and this narrows that to the one field we assert on. */
 type CountingFit = FitAddon & { fitCount: number };
 
-function makeEntry(key: string, opts: { parent?: boolean; box?: boolean } = {}) {
+function makeEntry(
+  key: string,
+  opts: { parent?: boolean; box?: boolean; childBox?: boolean } = {},
+) {
   const term = new Terminal();
   const fitAddon = new FitAddon() as CountingFit;
   term.loadAddon(fitAddon as never);
   const host = document.createElement('div');
   document.body.appendChild(host);
   term.open(host);
-  if (opts.parent === false) term.element!.remove();
   // jsdom reports 0 for every box; opt IN to a real one so the default is
   // the dangerous case rather than the safe one.
+  //
+  // Fake the box on the HOST (term.element.parentElement), because that is the
+  // element FitAddon.proposeDimensions() measures and therefore the one LB has to
+  // guard. Faking it on the xterm CHILD instead is what let review 120's HIGH hide:
+  // the child can report a box while the host it will actually be measured against
+  // has none. `opts.childBox` exists to build exactly that asymmetric case.
+  const hostEl = term.element!.parentElement!;
   const w = opts.box === false ? 0 : 800;
   const h = opts.box === false ? 0 : 600;
-  Object.defineProperty(term.element!, 'offsetWidth', { value: w, configurable: true });
-  Object.defineProperty(term.element!, 'offsetHeight', { value: h, configurable: true });
+  Object.defineProperty(hostEl, 'offsetWidth', { value: w, configurable: true });
+  Object.defineProperty(hostEl, 'offsetHeight', { value: h, configurable: true });
+  if (opts.childBox) {
+    Object.defineProperty(term.element!, 'offsetWidth', { value: 800, configurable: true });
+    Object.defineProperty(term.element!, 'offsetHeight', { value: 600, configurable: true });
+  }
+  if (opts.parent === false) term.element!.remove();
   const entry = { terminal: term, fitAddon, webglAddon: null, useWebGL: false } as never;
   terminalCache.set(key, entry);
   return { term, fitAddon, entry: terminalCache.get(key)! };
@@ -102,17 +116,32 @@ afterEach(() => {
 describe('design/013 §5.3 LB — never fit a terminal with no layout box', () => {
   it('is false when term.element has no parentElement', () => {
     const { term } = makeEntry('lb-noparent', { parent: false });
-    expect(hasLayoutBox(term)).toBe(false);
+    expect(hasLayoutBox(term.element?.parentElement)).toBe(false);
   });
 
   it('is false when the element has a parent but zero box (display:none ancestor)', () => {
     const { term } = makeEntry('lb-nobox', { box: false });
-    expect(hasLayoutBox(term)).toBe(false);
+    expect(hasLayoutBox(term.element?.parentElement)).toBe(false);
   });
 
   it('is true for a normally laid-out terminal', () => {
     const { term } = makeEntry('lb-ok');
-    expect(hasLayoutBox(term)).toBe(true);
+    expect(hasLayoutBox(term.element?.parentElement)).toBe(true);
+  });
+
+  // Review 120 HIGH — the asymmetric case. An overflowing or fixed-size xterm child
+  // inside a zero-sized host reports its own non-zero box. Measuring the CHILD says
+  // "laid out" and lets the fit run against the zero-sized host FitAddon actually
+  // measures, producing the bogus grid LB exists to prevent.
+  it('is false when the xterm child has a box but its HOST does not', () => {
+    const { term, fitAddon, entry } = makeEntry('lb-asymmetric', {
+      box: false,
+      childBox: true,
+    });
+    expect(term.element!.offsetWidth).toBe(800);            // the child looks fine
+    expect(hasLayoutBox(term.element?.parentElement)).toBe(false);   // the host does not
+    expect(fitIfLaidOut(entry)).toBe(false);
+    expect(fitAddon.fitCount).toBe(0);
   });
 
   it('fitIfLaidOut skips the fit entirely when there is no box', () => {
