@@ -1501,6 +1501,10 @@ async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
                 "machineId": machine_id,
                 "os": os,
                 "deviceName": device_name,
+                // Identity parity with the other terminal responses (design 011
+                // §4). The MCP `list_terminals` tool proxies this body verbatim.
+                "terminalId": t.renderer_terminal_id,
+                "owningTabId": t.owning_tab_id,
             })
         })
         .collect();
@@ -2136,6 +2140,12 @@ async fn fleet_local_run(
                 None => (None, None, None, "default".to_string()),
             };
             let terminal_name = payload.label.clone().unwrap_or_else(|| "Fleet".to_string());
+            // Mint the renderer identity BEFORE the spawn. Patching
+            // `entry.renderer_terminal_id` in afterwards is the exact pattern
+            // `pty_manager.rs:704-708` records as a fixed bug (review 062 F-01):
+            // a fast-exiting shell's exit-path persist can run in that window and
+            // file the final scrollback under the ephemeral pc- id.
+            let fleet_tab_id = mint_renderer_id("tb");
             let new_id = match crate::pty_manager::spawn_terminal(
                 state.clone(),
                 80,
@@ -2145,7 +2155,8 @@ async fn fleet_local_run(
                 shell_cwd,
                 shell_name.clone(),
                 terminal_name.clone(),
-                None, // tab_id: keep the pc- id default (tb- alias is cosmetic)
+                Some(fleet_tab_id.clone()),
+                Some(fleet_tab_id.clone()),
                 None, // fleet terminal: fresh session, no restored scrollback
             ) {
                 Ok(id) => id,
@@ -2155,10 +2166,7 @@ async fn fleet_local_run(
                 }
             };
             // Make the fleet terminal VISIBLE as a labeled UI tab, mirroring
-            // create_terminal. The backend (`pc-`) id stays the map key; the
-            // `tb-` tab id is a cosmetic renderer alias.
-            let raw_uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let tab_id = format!("tb-{}", &raw_uuid[..9]);
+            // create_terminal. The backend (`pc-`) id stays the map key.
             let target_window = state.resolve_active_window_label();
             if let Err(e) = state.app_handle.emit(
                 "api:createTerminalTab",
@@ -2166,16 +2174,16 @@ async fn fleet_local_run(
                     "name": terminal_name,
                     "profile": shell_name,
                     "terminalId": new_id,
-                    "tabId": Some(tab_id.clone()),
+                    "tabId": Some(fleet_tab_id.clone()),
+                    "processId": new_id,
+                    "rendererTerminalId": fleet_tab_id.clone(),
+                    "owningTabId": fleet_tab_id.clone(),
                     "paneId": serde_json::Value::Null,
                     "direction": serde_json::Value::Null,
                     "targetWindow": target_window,
                 }),
             ) {
                 log::warn!("Failed to emit api:createTerminalTab for fleet terminal: {}", e);
-            }
-            if let Some(mut entry) = state.terminals.get_mut(&new_id) {
-                entry.renderer_terminal_id = Some(tab_id);
             }
             new_id
         }
