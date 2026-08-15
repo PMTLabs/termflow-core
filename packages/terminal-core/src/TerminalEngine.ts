@@ -673,6 +673,21 @@ export class TerminalEngine {
   // only by dispose()/cleanupTerminalCache).
   private disposables: Array<() => void> = [];
 
+  // CONTAINER-LOCAL disposables — the four DOM listeners bound to the container
+  // argument (click-to-focus, zoom keydown, Ctrl/Cmd+F, modifier+wheel). Split
+  // out of `disposables` above so relocateTo() can tear down the OLD container's
+  // bindings while every xterm/addon subscription — bound to the surviving
+  // `Terminal` — stays live (design 012 D6). Mirrored onto the cache entry by
+  // reference, exactly like `disposables`.
+  private containerDisposables: Array<() => void> = [];
+  // The chrome mode of the container this engine is currently wired to.
+  // `true` = the container sits inside the TerminalDisplay subtree that renders
+  // the pane's chrome (search bar, context menu, suggest popup). mount() always
+  // wires with `true`, so this initializer matches today's behaviour for the
+  // window before mount() runs (design 012 §5.8). Read by the suggest gate
+  // (§5.11) and restored from the R0 snapshot on an aborted relocation (§5.1).
+  private paneChromeActive = true;
+
   constructor(bridge: TerminalBridge, opts: TerminalEngineOptions = {}) {
     this.bridge = bridge;
     this.opts = opts;
@@ -682,6 +697,187 @@ export class TerminalEngine {
     // Establish visibility BEFORE mount()/attach() — the host mounts a background
     // tab before its setActive effect fires (see the `active` option / paneActive).
     this.paneActive = opts.active ?? true;
+  }
+
+  /**
+   * Wire everything that binds to the CURRENT container: the four DOM listeners
+   * and the ResizeObserver. Called by `mount()` and by `relocateTo()` (design
+   * 012 §5.8), so the two paths cannot drift.
+   *
+   * The four listeners bind to the `container` PARAMETER, so they are inherently
+   * tied to whichever container was passed. The observer's normal-branch fit body
+   * reads `this.container` (not the parameter) — which relocateTo's R6 has
+   * already updated by the time it calls this — and only `observe(container)`
+   * uses the parameter. Both are correct after R6, and both are wrong if this
+   * wiring is duplicated between the two call sites instead of shared. That is
+   * why this helper is mandatory rather than stylistic (review 089).
+   *
+   * NOT a straight cut of :1785-1927: `autoFocus` and the rAF settle-fit sit
+   * BETWEEN the wheel listener and the observer and stay in mount(), so a single
+   * call placed at mount()'s old :1785 moves the observer's creation ahead of
+   * those two. Immaterial — `observe()` delivers its initial callback
+   * asynchronously, so nothing observes the reorder (design 012 §5.8).
+   *
+   * `o.paneChrome` gates the two affordances that belong to a PANE and not to a
+   * chromeless canvas host (design 012 D16): click-to-focus and Ctrl/Cmd+F. Zoom
+   * (keys and wheel) is wired in BOTH modes — 010:376 keeps it as "existing
+   * behaviour, unchanged".
+   */
+  private wireContainerLocals(
+    container: HTMLElement,
+    boundTerm: Terminal,
+    fit: FitAddon | undefined,
+    o: { paneChrome: boolean },
+  ): void {
+    // --- Click-to-focus (source 535-542) ---
+    // Pane hosts only. design 012 D16 / 010:377-378 reserve a single click on a
+    // canvas node for node SELECTION; focusing is 010's double-click, after the
+    // fly-to-z=1 (010:223-225), and Canvas Mode calls the engine's public focus()
+    // itself. NOTE this omission is a SECONDARY measure only: xterm binds its own
+    // "always on" mousedown to term.element (CoreBrowserTerminal bindMouse), which
+    // TRAVELS WITH THE ELEMENT, so the actual guarantee comes from the host giving
+    // term.element no pointer events while unfocused (design 012 D19 / §4.4 row 8).
+    if (o.paneChrome) {
+      const clickHandler = () => {
+        boundTerm.focus();
+      };
+      container.addEventListener('click', clickHandler);
+      this.containerDisposables.push(() => {
+        container.removeEventListener('click', clickHandler);
+      });
+    }
+
+    // --- Capture-phase zoom listener (source 544-582) ---
+    // Dual path: this fires in the CAPTURE phase and stopsPropagation, so the
+    // custom key handler does NOT also fire -> exactly +1 per keypress.
+    // OS-aware modifier: Cmd on macOS, Ctrl elsewhere.
+    // Both locals must live HERE: the keydown handler AND the wheel handler close
+    // over zoomModifier, and the Ctrl/Cmd+F handler closes over isMac.
+    const isMac =
+      this.opts.isMac ??
+      (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac'));
+    const zoomModifier = (event: KeyboardEvent | WheelEvent): boolean =>
+      isMac ? event.metaKey : event.ctrlKey;
+
+    const zoomHandler = (event: KeyboardEvent) => {
+      if (!zoomModifier(event)) return;
+      const key = event.key;
+      const code = event.code;
+
+      if (key === '=' || key === '+' || code === 'Equal' || code === 'NumpadAdd') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('in');
+        return;
+      }
+      if (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('out');
+        return;
+      }
+      if (key === '0' || code === 'Digit0' || code === 'Numpad0') {
+        event.preventDefault();
+        event.stopPropagation();
+        this.handleZoom('reset');
+        return;
+      }
+    };
+    container.addEventListener('keydown', zoomHandler, true);
+    this.containerDisposables.push(() => {
+      container.removeEventListener('keydown', zoomHandler, true);
+    });
+
+    // Ctrl+F (Win/Linux) / Cmd+F (macOS) opens the host search overlay. Intercept in
+    // the CAPTURE phase so we preventDefault the browser's native find-in-page dialog
+    // before it opens, and only while THIS pane is focused (the listener is on the
+    // pane container). Shift/Alt excluded so Ctrl+Shift+F etc. pass through.
+    //
+    // Pane hosts only (design 012 §8): on a chromeless host this would call
+    // onOpenSearch -> setSearchOpen(true) -> the bar renders in the OFF-SCREEN pane
+    // and autofocuses its input (TerminalSearchBar.tsx:39-41), pulling focus out of
+    // the canvas. Unwired, xterm forwards ^F to the PTY as a normal terminal key.
+    if (o.paneChrome) {
+      const searchKeyHandler = (event: KeyboardEvent) => {
+        const modifier = isMac ? event.metaKey : event.ctrlKey;
+        if (!modifier || event.shiftKey || event.altKey) return;
+        if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
+          event.preventDefault();
+          event.stopPropagation();
+          this.opts.onOpenSearch?.();
+        }
+      };
+      container.addEventListener('keydown', searchKeyHandler, true);
+      this.containerDisposables.push(() => {
+        container.removeEventListener('keydown', searchKeyHandler, true);
+      });
+    }
+
+    // --- Modifier + mouse-wheel zoom (capture, non-passive so preventDefault
+    // actually blocks the WebView's native page zoom + xterm scrollback). Routes
+    // through the same handleZoom path as the keys. ---
+    const wheelZoomHandler = (event: WheelEvent) => {
+      if (!zoomModifier(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.deltaY < 0) this.handleZoom('in');
+      else if (event.deltaY > 0) this.handleZoom('out');
+    };
+    container.addEventListener('wheel', wheelZoomHandler, { passive: false, capture: true });
+    this.containerDisposables.push(() => {
+      container.removeEventListener('wheel', wheelZoomHandler, true);
+    });
+
+    // --- ResizeObserver: rAF-debounced fit (source 598-621) ---
+    // NOT a containerDisposable (design 012 D7): `this.resizeObserver` is its
+    // single owner, disconnected explicitly by mount(), unmount() and relocateTo.
+    if (typeof ResizeObserver === 'function') {
+      if (this.opts.mirror) {
+        // Mirror: the GRID stays pinned to the backend; on pane resize we only
+        // re-fit the FONT (zoom-to-fit) so the whole terminal stays visible. Works
+        // per-pane, so grid view fits every cell independently.
+        const ro = new ResizeObserver(() => {
+          if (typeof requestAnimationFrame !== 'function') {
+            this.applyMirrorFit();
+            return;
+          }
+          requestAnimationFrame(() => this.applyMirrorFit());
+        });
+        ro.observe(container);
+        this.resizeObserver = ro;
+      } else {
+        const resizeObserver = new ResizeObserver(() => {
+          if (typeof requestAnimationFrame !== 'function') return;
+          requestAnimationFrame(() => {
+            // Hidden pane (background tab): don't follow layout changes — no
+            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
+            // setActive(true) fit flushes the final geometry on activation.
+            if (!this.paneActive) return;
+            const el = this.container;
+            if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
+              try {
+                const dims = fit?.proposeDimensions();
+                // Diagnostics (source TerminalDisplay.tsx:606-609): observer-driven fit.
+                this.opts.onDiag?.(
+                  () => `[TERM-DIAG] ResizeObserver | xterm=${this.term?.cols}x${this.term?.rows}`,
+                );
+                if (dims && dims.cols > 10 && dims.rows > 5) {
+                  fit?.fit();
+                }
+              } catch (error) {
+                console.warn('terminal-core/engine: Failed to fit terminal:', error);
+              }
+            }
+          });
+        });
+        resizeObserver.observe(container);
+        this.resizeObserver = resizeObserver;
+      }
+    }
+
+    // Last: record the chrome mode this engine is now wired for. An aborted
+    // relocation restores it from the R0 snapshot (design 012 §5.1 / review 094 B5).
+    this.paneChromeActive = o.paneChrome;
   }
 
   // ---------------------------------------------------------------------------
@@ -697,6 +893,7 @@ export class TerminalEngine {
 
     this.container = container;
     this.disposables = [];
+    this.containerDisposables = [];
 
     let cached = terminalCache.get(this.cacheKey);
     let term: Terminal | undefined;
@@ -740,6 +937,11 @@ export class TerminalEngine {
 
       // Dispose the previous mount's local event handlers before re-wiring.
       cached.disposables.forEach((dispose) => dispose());
+      // …and the previous CONTAINER's listeners (design 012 §5.5 site 4).
+      // LOAD-BEARING: without this a remount leaves the old container's four
+      // listeners attached to the abandoned node, still focusing this terminal
+      // and still opening its search bar from a pane that is no longer on screen.
+      cached.containerDisposables.forEach((dispose) => dispose());
 
       try {
         const existingElement = term.element;
@@ -1003,6 +1205,7 @@ export class TerminalEngine {
         pendingOutput: [],
         pendingOutputBytes: 0,
         disposables: [],
+        containerDisposables: [],
         hydrationGeneration: 0,
         protocolDisposables,
         edRepairGeneration: 0,
@@ -1751,6 +1954,13 @@ export class TerminalEngine {
       // switch — exactly the repaint storm 035 warns about.
       lastSentSize: existingCache?.lastSentSize,
       disposables: this.disposables,
+      // Explicit AFTER the `...existingCache` spread at :1758 on purpose: the
+      // spread would otherwise carry the PREVIOUS mount's already-run array
+      // forward, and relocateTo's R4 — which disposes off the ENTRY's reference,
+      // not the engine's — would then dispose the wrong one (design 012 §5.5
+      // site 6). What is stored is the ARRAY REFERENCE; the container wiring
+      // below mutates it. Do not "fix" this by copying the array.
+      containerDisposables: this.containerDisposables,
       dataDisposable: existingCache?.dataDisposable,
       exitDisposable: existingCache?.exitDisposable,
       hydrationGeneration: existingCache?.hydrationGeneration ?? 0,
@@ -1782,86 +1992,10 @@ export class TerminalEngine {
     });
     enforceCacheCap();
 
-    // --- Click-to-focus (source 535-542) ---
-    const clickHandler = () => {
-      boundTerm.focus();
-    };
-    container.addEventListener('click', clickHandler);
-    this.disposables.push(() => {
-      container.removeEventListener('click', clickHandler);
-    });
-
-    // --- Capture-phase zoom listener (source 544-582) ---
-    // Dual path: this fires in the CAPTURE phase and stopsPropagation, so the
-    // custom key handler above does NOT also fire -> exactly +1 per keypress.
-    // OS-aware modifier: Cmd on macOS, Ctrl elsewhere.
-    const isMac =
-      this.opts.isMac ??
-      (typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac'));
-    const zoomModifier = (event: KeyboardEvent | WheelEvent): boolean =>
-      isMac ? event.metaKey : event.ctrlKey;
-
-    const zoomHandler = (event: KeyboardEvent) => {
-      if (!zoomModifier(event)) return;
-      const key = event.key;
-      const code = event.code;
-
-      if (key === '=' || key === '+' || code === 'Equal' || code === 'NumpadAdd') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('in');
-        return;
-      }
-      if (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('out');
-        return;
-      }
-      if (key === '0' || code === 'Digit0' || code === 'Numpad0') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.handleZoom('reset');
-        return;
-      }
-    };
-    container.addEventListener('keydown', zoomHandler, true);
-    this.disposables.push(() => {
-      container.removeEventListener('keydown', zoomHandler, true);
-    });
-
-    // Ctrl+F (Win/Linux) / Cmd+F (macOS) opens the host search overlay. Intercept in
-    // the CAPTURE phase so we preventDefault the browser's native find-in-page dialog
-    // before it opens, and only while THIS pane is focused (the listener is on the
-    // pane container). Shift/Alt excluded so Ctrl+Shift+F etc. pass through.
-    const searchKeyHandler = (event: KeyboardEvent) => {
-      const modifier = isMac ? event.metaKey : event.ctrlKey;
-      if (!modifier || event.shiftKey || event.altKey) return;
-      if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
-        event.preventDefault();
-        event.stopPropagation();
-        this.opts.onOpenSearch?.();
-      }
-    };
-    container.addEventListener('keydown', searchKeyHandler, true);
-    this.disposables.push(() => {
-      container.removeEventListener('keydown', searchKeyHandler, true);
-    });
-
-    // --- Modifier + mouse-wheel zoom (capture, non-passive so preventDefault
-    // actually blocks the WebView's native page zoom + xterm scrollback). Routes
-    // through the same handleZoom path as the keys. ---
-    const wheelZoomHandler = (event: WheelEvent) => {
-      if (!zoomModifier(event)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.deltaY < 0) this.handleZoom('in');
-      else if (event.deltaY > 0) this.handleZoom('out');
-    };
-    container.addEventListener('wheel', wheelZoomHandler, { passive: false, capture: true });
-    this.disposables.push(() => {
-      container.removeEventListener('wheel', wheelZoomHandler, true);
-    });
+    // design 012 §5.8: one definition of "everything bound to the container",
+    // shared with relocateTo(). mount() always wires pane chrome — that preserves
+    // today's behaviour byte-for-byte.
+    this.wireContainerLocals(container, boundTerm, fit, { paneChrome: true });
 
     // Focus the terminal (source 589). Gated by autoFocus (default true) so grid
     // panes that aren't selected don't steal focus from each other on mount.
@@ -1880,51 +2014,6 @@ export class TerminalEngine {
         }
       });
       this.disposables.push(() => cancelAnimationFrame(rafId));
-    }
-
-    // --- ResizeObserver: rAF-debounced fit (source 598-621) ---
-    if (typeof ResizeObserver === 'function') {
-      if (this.opts.mirror) {
-        // Mirror: the GRID stays pinned to the backend; on pane resize we only
-        // re-fit the FONT (zoom-to-fit) so the whole terminal stays visible. Works
-        // per-pane, so grid view fits every cell independently.
-        const ro = new ResizeObserver(() => {
-          if (typeof requestAnimationFrame !== 'function') {
-            this.applyMirrorFit();
-            return;
-          }
-          requestAnimationFrame(() => this.applyMirrorFit());
-        });
-        ro.observe(container);
-        this.resizeObserver = ro;
-      } else {
-        const resizeObserver = new ResizeObserver(() => {
-          if (typeof requestAnimationFrame !== 'function') return;
-          requestAnimationFrame(() => {
-            // Hidden pane (background tab): don't follow layout changes — no
-            // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
-            // setActive(true) fit flushes the final geometry on activation.
-            if (!this.paneActive) return;
-            const el = this.container;
-            if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
-              try {
-                const dims = fit?.proposeDimensions();
-                // Diagnostics (source TerminalDisplay.tsx:606-609): observer-driven fit.
-                this.opts.onDiag?.(
-                  () => `[TERM-DIAG] ResizeObserver | xterm=${this.term?.cols}x${this.term?.rows}`,
-                );
-                if (dims && dims.cols > 10 && dims.rows > 5) {
-                  fit?.fit();
-                }
-              } catch (error) {
-                console.warn('terminal-core/engine: Failed to fit terminal:', error);
-              }
-            }
-          });
-        });
-        resizeObserver.observe(container);
-        this.resizeObserver = resizeObserver;
-      }
     }
 
     // Reconcile the BACKEND size with the size xterm already adopted on REATTACH.
@@ -3259,6 +3348,9 @@ export class TerminalEngine {
     this.stopHealWatchdog();
     this.disposables.forEach((dispose) => dispose());
     this.disposables = [];
+    // design 012 §5.5 site 7: the container listeners are a separate array now.
+    this.containerDisposables.forEach((dispose) => dispose());
+    this.containerDisposables = [];
     this.container = null;
     // Clear the active query AND its decorations. The SearchAddon lives on the
     // cached terminal, so highlights drawn before this unmount would otherwise stay

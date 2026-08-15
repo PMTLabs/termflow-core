@@ -19,6 +19,7 @@ function fakeEntry() {
     hydrating: false,
     pendingOutput: [],
     disposables: [() => disposed.push('d1')],
+    containerDisposables: [],
     dataDisposable: { dispose: () => disposed.push('data') },
     exitDisposable: { dispose: () => disposed.push('exit') },
   } as unknown as TerminalCacheEntry;
@@ -70,6 +71,7 @@ test('cleanupTerminalCache works when R1 subscriptions are absent', () => {
     hydrating: false,
     pendingOutput: [],
     disposables: [() => disposed.push('d1')],
+    containerDisposables: [],
   } as unknown as TerminalCacheEntry;
   terminalCache.set('t2', entry);
 
@@ -93,6 +95,7 @@ test('cleanupTerminalCache: a throwing webglAddon.dispose() still tears down the
     hydrating: false,
     pendingOutput: [],
     disposables: [() => disposed.push('d1')],
+    containerDisposables: [],
   } as unknown as TerminalCacheEntry;
   terminalCache.set('t3', entry);
 
@@ -113,6 +116,7 @@ test('cleanupTerminalCache disposes protocolDisposables (backlog 003)', () => {
     hydrating: false,
     pendingOutput: [],
     disposables: [() => disposed.push('d1')],
+    containerDisposables: [],
     protocolDisposables: [() => disposed.push('proto1'), () => disposed.push('proto2')],
   } as unknown as TerminalCacheEntry;
   terminalCache.set('t-proto', entry);
@@ -133,6 +137,7 @@ test('cleanupTerminalCache: a throwing protocolDisposable still lets the rest te
     hydrating: false,
     pendingOutput: [],
     disposables: [],
+    containerDisposables: [],
     protocolDisposables: [
       () => {
         throw new Error('boom');
@@ -165,6 +170,7 @@ test('cleanupTerminalCache: a throwing local disposable still lets data/exit sub
       },
       () => disposed.push('d2'),
     ],
+    containerDisposables: [],
     dataDisposable: { dispose: () => disposed.push('data') },
     exitDisposable: { dispose: () => disposed.push('exit') },
   } as unknown as TerminalCacheEntry;

@@ -38,6 +38,24 @@ export interface TerminalCacheEntry {
   // Declared now; consumed by Task 4 (R1 output delivery).
   lastHydratedProcessId?: string;
   disposables: Array<() => void>;
+  /**
+   * Teardowns for the four DOM listeners bound to the CURRENT container — the
+   * only things in the engine tied to the container rather than to the terminal
+   * (design 012 D6 / §5.5): click-to-focus, capture-phase zoom keydown,
+   * Ctrl/Cmd+F, and modifier+wheel zoom.
+   *
+   * Split out of `disposables` so `relocateTo()` can tear down the OLD
+   * container's bindings without touching the xterm/addon subscriptions, which
+   * are bound to the surviving `Terminal` and must stay live across the move.
+   * Keeping `boundTerm.onResize` alive is what makes relocation immune to the
+   * orphaned-resize class documented by engine.remount-resize.test.ts:12-20.
+   *
+   * REQUIRED, not optional, mirroring `disposables` above: the compiler then
+   * enforces both `terminalCache.set` literals instead of a `?? []` at the read
+   * site. The ResizeObserver is deliberately NOT here — it has exactly one
+   * owner, `TerminalEngine.resizeObserver` (design 012 D7).
+   */
+  containerDisposables: Array<() => void>;
   // Spec §17 R1: cache-lifetime bridge subscriptions. Created in mount (first time
   // for a cacheKey), disposed ONLY in cleanupTerminalCache/dispose — never in unmount().
   // Declared now; consumed by Task 4 (R1 output delivery).
@@ -172,6 +190,17 @@ export const cleanupTerminalCache = (terminalId: string) => {
         dispose();
       } catch (e) {
         console.warn(`terminal-core/cache: Error disposing local disposable for ${terminalId}:`, e);
+      }
+    });
+
+    // design 012 §5.5 site 7: the container listeners live in their own array
+    // now, and a cache teardown must run them too or the four DOM listeners
+    // outlive the terminal they were bound to.
+    cached.containerDisposables.forEach(dispose => {
+      try {
+        dispose();
+      } catch (e) {
+        console.warn(`terminal-core/cache: Error disposing container disposable for ${terminalId}:`, e);
       }
     });
 
