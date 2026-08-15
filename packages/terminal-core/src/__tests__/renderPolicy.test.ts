@@ -536,10 +536,14 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
 
     engine.mount(makeLaidOutContainer());          // still no unmount()
 
-    // The entry object itself survives — nothing was deleted and re-created, so the
-    // scrollback and the addon are both still owned by the cache.
-    expect(terminalCache.get('orphan-reattach-fail')).toBe(entryBefore);
-    expect(terminalCache.get('orphan-reattach-fail')!.webglAddon).toBe(first);
+    // Nothing was deleted and re-created: the same Terminal and the same addon are
+    // still owned by the cache, so the scrollback and the GPU context both survive.
+    // (The ENTRY OBJECT is legitimately rebuilt at the end of a successful mount,
+    // carrying these forward — so identity is asserted on the terminal and the
+    // addon, not on the entry wrapper.)
+    const after = terminalCache.get('orphan-reattach-fail')!;
+    expect(after.terminal).toBe(entryBefore.terminal);
+    expect(after.webglAddon).toBe(first);
     expect(first.disposed).toBe(false);
     // No second addon was constructed to replace it.
     expect(MockWebgl.instances).toHaveLength(1);
@@ -547,6 +551,35 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
     const live = MockWebgl.instances.filter((a) => !a.disposed).length;
     expect(live).toBe(reachable);
+  });
+
+  // Review 124 HIGH — the abort itself was the bug. Aborting mid-mount left the
+  // engine half-built: `this.container` repointed, both disposable sets already
+  // run, and the early return skipping `this.term`, the listener/observer wiring
+  // and the watchdog. mount() returns void, so no caller can detect it;
+  // TerminalDisplay went on to attach() and then read `engine.terminal`, whose
+  // getter throws. A fit failure must therefore be NON-fatal.
+  it('finishes the mount when the reattach fit throws, leaving a usable engine', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'reattach-fit-nonfatal' });
+    engine.mount(makeLaidOutContainer());
+    const entryBefore = terminalCache.get('reattach-fit-nonfatal')!;
+
+    (entryBefore.fitAddon as unknown as { fit: () => void }).fit = () => {
+      throw new Error('test: reattach fit failed');
+    };
+
+    const target = makeLaidOutContainer();
+    engine.mount(target);
+
+    // Same Terminal — no delete-and-recreate. (The entry wrapper is rebuilt by a
+    // successful mount, which is exactly the point: the mount COMPLETED.)
+    const after = terminalCache.get('reattach-fit-nonfatal')!;
+    expect(after.terminal).toBe(entryBefore.terminal);
+    // The surface really did move to the new host...
+    expect(after.terminal.element!.parentElement).toBe(target);
+    // ...and the engine is USABLE: this getter is what threw for the caller before.
+    expect(() => engine.terminal).not.toThrow();
+    expect(engine.terminal).toBe(entryBefore.terminal);
   });
 
   // Review 120 HIGH (b) — disposal that THROWS on the create path. Nulling the entry

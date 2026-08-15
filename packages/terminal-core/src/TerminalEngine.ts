@@ -1059,9 +1059,34 @@ export class TerminalEngine {
         const existingElement = term.element;
         if (existingElement) {
           // Move the existing render element into the new container, then re-fit.
+          //
+          // The move and the fit are separated on purpose (review 124 HIGH). Only
+          // the MOVE is fatal: if appendChild throws, the surface never left its old
+          // container and there is nothing to continue with, so we abort with the
+          // entry intact. A FIT failure is NOT fatal — the surface has already moved,
+          // and aborting there left a half-mounted engine: `this.container` had been
+          // repointed, both disposable sets were already run, and the early return
+          // skipped assigning `this.term`, re-wiring listeners and the observer, and
+          // starting the watchdog. `mount()` returns void, so no caller can detect
+          // that; TerminalDisplay went on to call attach() and then `engine.terminal`,
+          // whose getter throws "terminal accessed before mount()" — turning a
+          // transient layout hiccup into a dead, unwired pane still painting output.
           container.appendChild(existingElement);
-          fit.fit();
-          didReattachFit = true;
+          try {
+            fit.fit();
+            didReattachFit = true;
+          } catch (fitError) {
+            // Carry on and finish the mount. Geometry converges through the normal
+            // armed-fit path (design/012's FT rule): leaving didReattachFit false
+            // also skips the reattach-specific backend sizing at :2208, which is
+            // exactly right — we have no trustworthy measurement to send.
+            console.warn(
+              'terminal-core/engine: reattach fit failed; continuing the mount and ' +
+                'deferring geometry to the armed fit (review 124):',
+              fitError,
+            );
+            this.armActivationFit();
+          }
         } else {
           // UNREACHABLE: this whole branch is gated on `cached.terminal.element`
           // being truthy, and `term` is that same object. It survives only because
@@ -1080,7 +1105,9 @@ export class TerminalEngine {
           return;
         }
       } catch (e) {
-        // ABORT the mount; do NOT delete-and-recreate (review 120 HIGH).
+        // Reached only when the surface MOVE itself failed (see above) — the fit is
+        // handled non-fatally inside. ABORT the mount; do NOT delete-and-recreate
+        // (review 120 HIGH).
         //
         // Deleting the entry here fell through to the create branch, whose
         // disposeOrphanedWebGLAddon() then looked this id up in terminalCache, found
