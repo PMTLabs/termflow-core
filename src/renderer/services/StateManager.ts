@@ -8,6 +8,7 @@ import { restoreTabPanesInPlace } from './tabPanesStore';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
+import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
@@ -242,10 +243,12 @@ class StateManagerClass {
   /**
    * Reattach restored panes to PTYs that are still alive in the backend, instead
    * of spawning fresh ones (which orphans the survivors). The backend tags every
-   * terminal with the renderer terminalId that created it (its `tabId` field), so
-   * we can map each saved pane back to its live process. Best-effort: any failure
-   * (API unreachable, exposed-mode 401, prod mixed-content) is swallowed and the
-   * normal spawn path runs — no regression.
+   * terminal with the renderer terminalId that created it (its `terminalId`
+   * field — the `tb-*`/`tm-*` leaf; `tabId` is a deprecated alias and two splits
+   * in one tab share an `owningTabId`, so grouping by either would reap a live
+   * PTY), so we can map each saved pane back to its live process. Best-effort:
+   * any failure (API unreachable, exposed-mode 401, prod mixed-content) is
+   * swallowed and the normal spawn path runs — no regression.
    */
   private async reconcileExistingTerminals(appState: AppState): Promise<void> {
     try {
@@ -299,26 +302,14 @@ class StateManagerClass {
 
       const list: any[] = Array.isArray(data) ? data : data?.terminals ?? [];
 
-      // Group every live PTY by the renderer id that spawned it (its `tabId`),
-      // restricted to ids the restore is about to recreate. We only consider these
-      // "wanted" ids so API-created terminals (mode "api", no UI tab) and other
-      // windows' terminals are never touched.
-      const byRenderer = new Map<
-        string,
-        Array<{ processId: string; createdAt: number; promptHook: unknown }>
-      >();
-      for (const term of list) {
-        const rendererId: string | undefined = term?.tabId; // id that spawned it
-        const processId: string | undefined = term?.id ?? term?.processId;
-        if (!rendererId || !processId || !wanted.has(rendererId)) continue;
-        const createdAt = Date.parse(term?.createdAt ?? '') || 0;
-        const arr = byRenderer.get(rendererId) ?? [];
-        // promptHook re-arms command-suggest's prompt gate on reattach (see
-        // reattachPromptGate) — a reload wipes the in-memory gate, so without it
-        // an agent CLI running across the reload leaks input into the popup.
-        arr.push({ processId, createdAt, promptHook: term?.promptHook });
-        byRenderer.set(rendererId, arr);
-      }
+      // Group every live PTY by the renderer LEAF that spawned it (its
+      // `terminalId` field — the `tb-*`/`tm-*` leaf; `tabId` is a deprecated
+      // alias and two splits in one tab share an `owningTabId`, so grouping by
+      // either would reap a live PTY), restricted to ids the restore is about
+      // to recreate. We only consider these "wanted" ids so API-created
+      // terminals (mode "api", no UI tab) and other windows' terminals are
+      // never touched.
+      const byRenderer = groupLiveTerminalsByLeaf(list, wanted);
 
       // Reattach to the NEWEST PTY per id, and REAP the older duplicates: a prior
       // reload that failed to reattach leaves several live PTYs sharing one tabId,
@@ -326,7 +317,6 @@ class StateManagerClass {
       // self-heals the leak on the next load instead of letting orphans accumulate.
       const orphansToClose: string[] = [];
       for (const [rendererId, candidates] of byRenderer) {
-        candidates.sort((a, b) => b.createdAt - a.createdAt); // newest first
         const [keep, ...stale] = candidates;
         // Registers id→process AND seeds the init guards so the mount effect
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
