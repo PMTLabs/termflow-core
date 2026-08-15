@@ -344,7 +344,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     });
     engineRef.current = engine;
 
-    engine.mount(pane);              // the identical element captured at :179
+    engine.mount(pane);              // the identical element captured at the top of this effect
     engineMounted();                 // ADDED — the relocation dep (design 012 §4.2.1)
     setAtBottom(engine.isScrolledToBottom());
     const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);
@@ -378,7 +378,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // canvas host with nothing to reclaim it (hazard H11).
       //
       // Both bindings are captured: `engine` is this effect's own local, and `pane`
-      // was captured at :179.
+      // was captured at the top of this effect body — NOT re-read here, because
+      // React has already nulled `terminalRef.current` by the time a deletion's
+      // passive cleanup runs (review 099 T1-F3).
       engine.relocateTo(pane, { paneChrome: true });
       engine.unmount();
       engineRef.current = null;
