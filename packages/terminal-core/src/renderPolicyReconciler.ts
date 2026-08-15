@@ -156,7 +156,10 @@ export function reconcileRenderPolicies(
   return { applied, webglCount: count() };
 }
 
-export type RenderPolicySnapshot = Map<string, { terminal: Terminal; policy: RenderPolicy }>;
+export type RenderPolicySnapshot = Map<
+  string,
+  { terminal: Terminal; policy: RenderPolicy; generation: number }
+>;
 
 /**
  * design/013 D6 — capture the pre-canvas policy so leaving canvas mode does not
@@ -176,7 +179,14 @@ export function snapshotRenderPolicies(ids: string[]): RenderPolicySnapshot {
   for (const id of ids) {
     const entry = terminalCache.get(id);
     if (!entry) continue;
-    snap.set(id, { terminal: entry.terminal, policy: entry.webglAddon ? 'webgl' : 'dom' });
+    snap.set(id, {
+      terminal: entry.terminal,
+      policy: entry.webglAddon ? 'webgl' : 'dom',
+      // Terminal identity alone cannot detect Reset Rendering, the global toggle,
+      // or a context loss — all three mutate the policy of the SAME Terminal
+      // (review 124). Each bumps this generation; canvas reconciliation does not.
+      generation: entry.nonCanvasPolicyGeneration ?? 0,
+    });
   }
   return snap;
 }
@@ -185,16 +195,26 @@ export function snapshotRenderPolicies(ids: string[]): RenderPolicySnapshot {
  * Reinstate what `snapshotRenderPolicies` captured. Returns only the ids actually
  * restored — an id absent from the result was deliberately left alone.
  *
- * A snapshot is DISCARDED rather than applied when its Terminal no longer matches
- * (§5.1 "Snapshot conflicts"): the id may now address a different session, and
- * restoring blindly would undo an explicit user action — a context-menu "Reset
- * Rendering", a global WebGL toggle, or a context loss — or address a dead entry.
+ * A snapshot is DISCARDED rather than applied when EITHER check fails
+ * (§5.1 "Snapshot conflicts"):
+ *
+ *   1. the Terminal no longer matches — the id now addresses a different session,
+ *      or the entry is dead;
+ *   2. `nonCanvasPolicyGeneration` has moved — Reset Rendering, the global WebGL
+ *      toggle, or a context loss changed the policy while canvas was active.
+ *
+ * Check 2 is not redundant (review 124). All three of those events mutate the
+ * policy of the SAME Terminal object, so they sailed through the identity check
+ * and canvas exit promoted the terminal straight back to WebGL — undoing the
+ * explicit action this contract says must win, or re-promoting onto a context the
+ * GPU had just taken away.
  */
 export function restoreRenderPolicies(snap: RenderPolicySnapshot): Record<string, RenderPolicy> {
   const restored: Record<string, RenderPolicy> = {};
   for (const [id, want] of snap) {
     const entry = terminalCache.get(id);
     if (!entry || entry.terminal !== want.terminal) continue;
+    if ((entry.nonCanvasPolicyGeneration ?? 0) !== want.generation) continue;
     if (getTerminalRenderPolicy(id) === want.policy) {
       restored[id] = want.policy;
       continue;

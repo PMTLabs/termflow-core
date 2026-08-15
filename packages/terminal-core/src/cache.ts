@@ -33,6 +33,21 @@ export interface TerminalCacheEntry {
   searchAddon: SearchAddon;
   webglAddon: WebglAddon | null;
   useWebGL: boolean;
+  /**
+   * design/013 D6 — bumped by every NON-Canvas write to this terminal's render
+   * policy: Reset Rendering, the global WebGL toggle, and context loss. Canvas's
+   * own reconciliation deliberately does NOT bump it.
+   *
+   * Snapshot/restore records this alongside the Terminal, and restores only when
+   * BOTH still match. Terminal identity alone is not enough (review 124): all
+   * three of those events mutate the policy of the SAME Terminal object, so they
+   * passed an identity check and canvas exit silently promoted a terminal back to
+   * WebGL, undoing the explicit action the snapshot-conflict contract says wins.
+   *
+   * Optional so entries built before this field (and test fixtures) still load;
+   * `?? 0` at both ends makes absent-vs-absent compare equal.
+   */
+  nonCanvasPolicyGeneration?: number;
   hydrating: boolean;
   pendingOutput: string[];
   // Running byte total of pendingOutput (kept in sync by the onData cap logic).
@@ -243,7 +258,19 @@ export const cleanupTerminalCache = (terminalId: string) => {
 //
 // Returns whether the reset SUCCEEDED. `false` means either the id is not cached or
 // the addon's dispose() threw — see the retention comment below.
-export const resetTerminalRendering = (terminalId: string): boolean => {
+/**
+ * @param opts.canvasOwned  Set by Canvas Mode's own policy layer
+ *   (`setTerminalRenderPolicy`), which reuses this as its demotion primitive.
+ *   A canvas-owned demotion must NOT bump `nonCanvasPolicyGeneration`, or canvas
+ *   would invalidate its own snapshot the moment it demoted anything and could
+ *   never restore on exit. Every OTHER caller — the context menu's "Reset
+ *   Rendering", the engine's own reset — is a user/system decision that must win
+ *   over a pending restore, so it bumps (design/013 D6, review 124).
+ */
+export const resetTerminalRendering = (
+  terminalId: string,
+  opts: { canvasOwned?: boolean } = {},
+): boolean => {
   const cached = terminalCache.get(terminalId);
   if (!cached) return false;
 
@@ -265,6 +292,14 @@ export const resetTerminalRendering = (terminalId: string): boolean => {
     }
     cached.webglAddon = null;
     cached.useWebGL = false;
+    // design/013 D6 — a NON-Canvas policy change (Reset Rendering, or the engine's
+    // own reset). Bumping invalidates any canvas snapshot taken before it, so
+    // exiting canvas mode cannot silently undo the reset the user explicitly asked
+    // for (review 124). Only bumped when a demotion ACTUALLY happened, and never
+    // for canvas's own demotion — see the canvasOwned note on the signature.
+    if (!opts.canvasOwned) {
+      cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
+    }
   }
 
   // Force a refresh, then re-fit. The FIT is conditional (design/013 §5.3,
@@ -312,6 +347,9 @@ export const disableWebGLGlobally = () => {
       if (disposed) {
         cached.webglAddon = null;
         cached.useWebGL = false;
+        // design/013 D6 — the global toggle is a NON-Canvas policy change, so it
+        // invalidates any canvas snapshot (review 124).
+        cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
       }
 
       // Refresh the terminal

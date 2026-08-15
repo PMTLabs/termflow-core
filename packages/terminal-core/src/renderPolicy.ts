@@ -178,7 +178,11 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
     // the addon on the entry (review 120): the context may still be held, so the
     // demotion has NOT been achieved and reporting 'dom' would both lie and free a
     // budget slot that is not free. D3 says report what was achieved.
-    if (!resetTerminalRendering(terminalId)) return entry.webglAddon ? 'webgl' : 'dom';
+    // canvasOwned: this IS the canvas policy layer, so the demotion must not
+    // invalidate canvas's own snapshot (review 124 / D6).
+    if (!resetTerminalRendering(terminalId, { canvasOwned: true })) {
+      return entry.webglAddon ? 'webgl' : 'dom';
+    }
     return 'dom';
   }
 

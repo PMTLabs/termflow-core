@@ -19,9 +19,10 @@ import {
   setTerminalRenderPolicy,
   type RenderPolicy,
 } from '../renderPolicy';
-import { terminalCache } from '../cache';
+import { terminalCache, resetTerminalRendering } from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
 
 /** A fake policy setter with a hard context cap, so budget behaviour is asserted
  *  against COUNTS rather than tier strings — review 084's point. */
@@ -466,5 +467,68 @@ describe('reconcileRenderPolicies with duplicate ids in `order` (review 124)', (
     expect(out.applied.focused).toBe('webgl');
     expect(out.applied.other).toBe('dom');
     expect(out.webglCount).toBe(1);
+  });
+});
+
+/**
+ * Review 124 MEDIUM — snapshot invalidation must survive a SAME-Terminal policy
+ * change. Terminal identity is not enough: Reset Rendering, the global WebGL
+ * toggle and a context loss all mutate the policy of the same Terminal object, so
+ * they passed the identity check and canvas exit promoted the terminal straight
+ * back to WebGL — undoing the explicit action or re-promoting onto a context the
+ * GPU had just taken away.
+ */
+describe('restoreRenderPolicies vs same-Terminal invalidation (review 124)', () => {
+  it('does NOT restore after Reset Rendering demoted the same Terminal', () => {
+    const { entry } = makeEntry('snap-reset');
+    // Canvas entry: the terminal is on WebGL and gets snapshotted.
+    setTerminalRenderPolicy('snap-reset', 'webgl');
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('webgl');
+    const snap = snapshotRenderPolicies(['snap-reset']);
+
+    // While canvas is active the user invokes Reset Rendering. Same Terminal object.
+    const before = entry.terminal;
+    resetTerminalRendering('snap-reset');
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('dom');
+    expect(terminalCache.get('snap-reset')!.terminal).toBe(before);
+
+    const restored = restoreRenderPolicies(snap);
+
+    // The reset must win. Before the fix this re-promoted to 'webgl'.
+    expect(restored['snap-reset']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('dom');
+  });
+
+  it('does NOT restore after a context loss on the same Terminal', () => {
+    makeEntry('snap-ctxloss');
+    setTerminalRenderPolicy('snap-ctxloss', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-ctxloss']);
+
+    // The GPU takes the context away; loadWebGLAddon's handler nulls the addon and
+    // bumps the generation.
+    const onLoss = (WebglAddon as unknown as { lastContextLossHandler: (() => void) | null })
+      .lastContextLossHandler;
+    expect(onLoss).toBeTruthy();
+    onLoss!();
+    expect(getTerminalRenderPolicy('snap-ctxloss')).toBe('dom');
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-ctxloss']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-ctxloss')).toBe('dom');
+  });
+
+  it('DOES restore when only canvas itself changed the policy', () => {
+    makeEntry('snap-canvas-only');
+    setTerminalRenderPolicy('snap-canvas-only', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-only']);
+
+    // Canvas demotes it — its own reconciliation must NOT invalidate the snapshot.
+    setTerminalRenderPolicy('snap-canvas-only', 'dom');
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-only']).toBe('webgl');
+    expect(getTerminalRenderPolicy('snap-canvas-only')).toBe('webgl');
   });
 });

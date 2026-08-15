@@ -56,6 +56,10 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
       if (cached) {
         cached.webglAddon = null;
         cached.useWebGL = false;
+        // design/013 D6: a NON-Canvas policy change. Bumping this invalidates any
+        // canvas snapshot taken before it, so leaving canvas mode cannot promote
+        // this terminal back onto a context the GPU just took away (review 124).
+        cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
       }
     });
 
