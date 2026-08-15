@@ -264,3 +264,45 @@ describe('design/012 §13 T11 — the paneActive tripwire', () => {
     expect(src).not.toContain('if (!this.paneActive) return');
   });
 });
+
+/**
+ * External review 103, finding 3 — the two 50ms timers share one slot.
+ *
+ * `armActivationFit` and `setFontSize` both write `this.fitTimer`, so whichever
+ * arms second replaces the first. Before the fix `setFontSize` installed a
+ * FIT-ONLY callback, which silently dropped the deferred-resize flush that the
+ * activation callback carries — stranding a parked `pendingResize` with no
+ * remaining path to deliver it, because `healOnce` also refuses to run while
+ * `pendingResize` is set.
+ *
+ * Reachable only on this branch: §7.1 row 3 widened setFontSize's gate from
+ * `paneActive` to `geometryEligible()`, so a canvas-displayed terminal on a
+ * BACKGROUND tab now gets past the early return for the first time.
+ */
+describe('design/012 §7 — setFontSize must not replace the flush-bearing timer', () => {
+  it('flushes a resize parked while hidden, even when a font change lands inside the 50ms window',
+    async () => {
+      jest.useFakeTimers();
+      const { engine, resizeCalls, fit } = await mountAttached('ft-fontsize-strand');
+
+      // A background tab: not active, so a resize parks rather than sending.
+      engine.setActive(false);
+      resizeCalls.length = 0;
+      fit.setNextFit(160, 24);
+      fit.fit();
+      await jest.runAllTimersAsync();
+      expect(resizeCalls).toEqual([]);            // parked, as designed
+
+      // Displayed on canvas: eligibility goes false->true and arms the ONLY
+      // callback that will flush that parked value.
+      engine.setSurfaceDisplayed(true);
+      expect((engine as any).fitTimer).not.toBeNull();
+
+      // A font change inside the 50ms window. It re-arms the shared slot.
+      engine.setFontSize(15);
+
+      // The parked resize must still be delivered.
+      await jest.runAllTimersAsync();
+      expect(resizeCalls).toEqual([[160, 24]]);
+    });
+});

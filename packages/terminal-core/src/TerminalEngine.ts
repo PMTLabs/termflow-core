@@ -2744,17 +2744,27 @@ export class TerminalEngine {
     // setActive(true) fit — a refit here would SIGWINCH a background PTY.
     if (!this.geometryEligible()) return;
     // Re-fit after font size change with a 50ms settle (source 217-225 / R7).
-    if (this.fitAddon) {
-      if (this.fitTimer) clearTimeout(this.fitTimer);
-      this.fitTimer = setTimeout(() => {
-        this.fitTimer = null;
-        try {
-          this.fitAddon?.fit();
-        } catch (e) {
-          console.warn('terminal-core/engine: fit after font change failed:', e);
-        }
-      }, 50);
-    }
+    //
+    // This MUST be `armActivationFit`, not a bespoke fit-only timer (external
+    // review 103, finding 3). The two timers share one `fitTimer` slot, so
+    // whichever is armed second replaces the first — and before this change the
+    // font timer replaced it with a callback that fits but never calls
+    // `flushDeferredResizeOnActivation()`. That is a strand:
+    //
+    //   hidden pane parks a resize (pendingResize set, resizeTimer null)
+    //   -> relocateTo(canvas) raises eligibility and arms the ONLY callback that
+    //      will ever flush that parked value
+    //   -> a font change inside those 50ms replaces it with the fit-only timer
+    //   -> if the new fit proposes the same grid, xterm emits no onResize, so
+    //      nothing reschedules — and `healOnce` refuses to run while
+    //      `pendingResize` is set, so the PTY stays stale indefinitely.
+    //
+    // Note this path is reachable at all only because §7.1 row 3 widened this
+    // gate from `paneActive` to `geometryEligible()`: on develop the early
+    // return above fired for a hidden pane and the timers could never collide.
+    // Arming the richer callback costs nothing — `flushDeferredResizeOnActivation`
+    // early-returns when there is nothing parked.
+    this.armActivationFit();
   }
 
   focus(): void {
