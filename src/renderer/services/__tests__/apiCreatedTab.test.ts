@@ -88,11 +88,21 @@ describe('resolveApiCreateIds', () => {
   });
 
   // A payload from a build that predates P0-A: `terminalId` was the process id
-  // and `tabId` the owning tab, with no leaf at all.
-  it('falls back to the legacy keys', () => {
+  // and `tabId` the owning tab, with no leaf at all. The leaf falls back to the
+  // unique process id — NOT the owning tab id — because every caller that reads
+  // `leafId` (App.tsx Mode 1/Mode 2) is minting a sibling pane in a tab that may
+  // already have an occupied root pane at leaf === owningTabId; reusing that
+  // leaf would duplicate the root's pane-tree identity (review 099 T2-F3).
+  it('falls back to the legacy process id as the leaf (not the owning tab id)', () => {
     expect(
       resolveApiCreateIds({ terminalId: 'pc-legacy', tabId: 'tb-legacy1' }),
-    ).toEqual({ processId: 'pc-legacy', leafId: 'tb-legacy1', owningTabId: 'tb-legacy1' });
+    ).toEqual({ processId: 'pc-legacy', leafId: 'pc-legacy', owningTabId: 'tb-legacy1' });
+  });
+
+  it('falls back to the owning tab id as a last resort when even the process id is missing', () => {
+    expect(
+      resolveApiCreateIds({ tabId: 'tb-legacy1' }),
+    ).toEqual({ processId: undefined, leafId: 'tb-legacy1', owningTabId: 'tb-legacy1' });
   });
 
   it('reports missing ids as undefined rather than inventing them', () => {

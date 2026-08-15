@@ -65,7 +65,10 @@ export interface ApiCreateIds {
  * backend PROCESS id (api_server.rs `create_terminal` emit), unlike a REST
  * response where it is the leaf — which is exactly why P0-A added the explicit
  * `processId` / `rendererTerminalId` / `owningTabId` keys. The legacy keys are
- * still read so an event from an older backend keeps working.
+ * still read so an event from an older backend does not crash — but review 099
+ * T2-F3 found that "keeps working" was too strong a claim for a legacy SPLIT
+ * event: see the leafId fallback below for the corrected (degraded, not
+ * regressed) behaviour.
  */
 export function resolveApiCreateIds(detail: {
   terminalId?: string;
@@ -75,11 +78,22 @@ export function resolveApiCreateIds(detail: {
   owningTabId?: string;
 }): ApiCreateIds {
   const owningTabId = detail.owningTabId ?? detail.tabId;
+  const processId = detail.processId ?? detail.terminalId;
   return {
-    processId: detail.processId ?? detail.terminalId,
-    // Before P0-A no leaf was sent; the owning tab was the only renderer id
-    // available, and it IS the leaf for a root pane.
-    leafId: detail.rendererTerminalId ?? owningTabId,
+    processId,
+    // Before P0-A no leaf was sent. Every consumer of `leafId` (App.tsx Mode 1
+    // and Mode 2) is minting a NEW sibling pane in a tab that may already have
+    // an occupied root pane whose leaf === owningTabId — so falling back to
+    // owningTabId here would hand that new pane the root's own leaf, which
+    // App.tsx then rebinds in TerminalService and inserts a second pane-tree
+    // node carrying it, corrupting both the root's PTY mapping and the tree's
+    // identity uniqueness (review 099 T2-F3). Fall back to the unique
+    // `processId` instead: this reproduces the exact pre-P0-A behaviour, where
+    // a process id briefly doubles as a leaf until StateManager.sanitizeLayoutData
+    // remaps it to a fresh `tm-*` on the next restore (design 011 §6) — a known,
+    // already-handled degradation, not a fresh collision. `owningTabId` remains
+    // the final fallback only for the no-ids-at-all case.
+    leafId: detail.rendererTerminalId ?? processId ?? owningTabId,
     owningTabId,
   };
 }
