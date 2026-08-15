@@ -632,4 +632,44 @@ describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
     expect(out.applied['q-recon']).toBe('webgl');
     expect(out.webglCount).toBe(1);
   });
+
+  /**
+   * Review 129 LOW — the drain must sit on the SAME injection boundary as the rest
+   * of the reconciler. `ReconcileInput` advertises `setPolicy`/`count`/`getPolicy`
+   * as the complete set of seams and §5 calls the reconciler pure orchestration over
+   * them; an unconditional `drainWebGLQuarantine()` was a fourth mutation of real
+   * module state that a caller supplying all three seams could neither observe nor
+   * prevent — it disposed a REAL quarantined addon during what was supposed to be an
+   * isolated pass.
+   */
+  it('drains through the injected seam, leaving real module state alone', () => {
+    let stuckDisposeCalls = 0;
+    const stuck = {
+      dispose() {
+        stuckDisposeCalls += 1;
+      },
+    };
+    quarantineWebGLAddon(stuck);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    let drainCalls = 0;
+    const out = reconcileRenderPolicies({
+      desired: { fake: 'webgl' as RenderPolicy },
+      budget: 4,
+      order: ['fake'],
+      setPolicy: () => 'webgl' as RenderPolicy,
+      count: () => 0,
+      getPolicy: () => 'dom' as RenderPolicy,
+      drain: () => {
+        drainCalls += 1;
+        return 0;
+      },
+    });
+
+    expect(drainCalls).toBe(1);
+    // The real quarantine was never touched: no dispose attempt, still held.
+    expect(stuckDisposeCalls).toBe(0);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(out.applied['fake']).toBe('webgl');
+  });
 });

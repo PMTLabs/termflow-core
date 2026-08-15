@@ -32,6 +32,16 @@ export interface ReconcileInput {
    * it. `null` (id not cached) is treated as not holding a context.
    */
   getPolicy?: (id: string) => RenderPolicy | null;
+  /**
+   * Retry the failed-disposal quarantine. Defaults to `drainWebGLQuarantine`.
+   *
+   * A seam like the other three (review 129 LOW): §5 calls this function pure
+   * orchestration over the injected API, and an unconditional module-level drain
+   * broke that claim — a caller supplying all three policy/count fakes still had a
+   * REAL quarantined addon disposed underneath it, with no seam able to observe or
+   * prevent it. Production omits it, exactly as it omits the other three.
+   */
+  drain?: () => number;
 }
 
 /**
@@ -45,6 +55,7 @@ export function reconcileRenderPolicies(
   const setPolicy = input.setPolicy ?? setTerminalRenderPolicy;
   const count = input.count ?? countActiveWebGLAddons;
   const getPolicy = input.getPolicy ?? getTerminalRenderPolicy;
+  const drain = input.drain ?? drainWebGLQuarantine;
   const applied: Record<string, RenderPolicy> = {};
 
   // Retry the quarantine BEFORE any budget arithmetic (review 126 LOW). A
@@ -60,10 +71,24 @@ export function reconcileRenderPolicies(
   // iterator allocation per reconciliation, and a non-empty quarantine is already
   // a logged, session-degrading condition worth one dispose() retry per pass.
   //
-  // Deliberately NOT behind the `count` seam: the quarantine is real module state
-  // that the fake-setter tests do not model, and draining it is correct for the
-  // production count whichever seam this pass reads.
-  drainWebGLQuarantine();
+  // Behind its OWN `drain` seam (review 129 LOW) rather than none at all. Making it
+  // unconditional was the mistake: a caller that fakes all three policy/count seams
+  // is asking for an isolated pass, and this still reached into the real quarantine
+  // and disposed an addon none of those seams could see.
+  //
+  // Not folded into the `count` seam — the drain is a MUTATION and the count is a
+  // read, and a caller that fakes the count still usually wants the production
+  // drain (that is why the default is the production function).
+  //
+  // Unthrottled on purpose: `drainWebGLQuarantine` iterates an empty Set — the only
+  // state this has in a healthy session — so the ordinary cost is one iterator
+  // allocation per reconciliation, and a non-empty quarantine is already a logged,
+  // session-degrading condition worth one dispose() retry per pass. A permanently
+  // wedged addon is retried on every pass, bounded by the quarantine's size (itself
+  // bounded by the GPU budget); no backoff clock is kept, because the recovery test
+  // above depends on the very next reconciliation retrying and a time-based skip
+  // would trade a real recovery guarantee for a handful of try/catch calls.
+  drain();
 
   // `ids` is Object.keys order. Note it is NOT insertion order for integer-like
   // keys — that is precisely why `order` exists and is required (§5).
