@@ -347,11 +347,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // The identical element captured at the top of this effect.
     //
     // The result MUST be checked (review 126). A refused mount — today, a surface
-    // move that throws — wires nothing, so `engine.terminal` below would throw
-    // "terminal accessed before mount()" and attach() would deliver output to an
-    // engine with no terminal. The cache entry is left intact by every refusal, so
-    // the surface and its scrollback survive for a later mount; this effect simply
-    // has no engine to run against and drops out.
+    // move that throws, or a `term.open()` that throws — leaves the engine exactly
+    // as it was before the call (review 129). This effect constructs a FRESH engine
+    // immediately above, so "as it was" means never wired: `engine.terminal` below
+    // would throw "terminal accessed before mount()" and attach() would deliver
+    // output to an engine with no terminal. The cache entry is left intact by every
+    // refusal, and a refused create disposes its own half-built Terminal, so the
+    // pane is left clean and the surface and its scrollback survive for a later
+    // mount; this effect simply has no engine to run against and drops out.
     if (!engine.mount(pane)) {
       console.warn('TerminalDisplay: engine.mount refused; skipping attach/hydration');
       engineRef.current = null;

@@ -627,6 +627,20 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
       throw new Error('test: HierarchyRequestError');
     };
 
+    // REFUSE ON THE ORIGINAL, LIVE ENGINE FIRST (review 129 MEDIUM 1). Asserting
+    // this only through a fresh second engine — as rev 5 did — could not observe
+    // the defect at all: that engine's observer and disposer arrays are empty
+    // before the call, so "the arrays are still populated" was true no matter what
+    // mount() did to the engine that owned the live mount. The engine-local half of
+    // this (the observer, and unmount() still removing the container listeners)
+    // needs a ResizeObserver stub jsdom does not provide and lives in
+    // engine.mount-refusal.test.ts; what belongs HERE is the CACHE-side contract.
+    expect(engine.mount(bad)).toBe(false);
+    expect((engine as unknown as { containerDisposables: unknown[] }).containerDisposables)
+      .toHaveLength(4);
+    expect(terminalCache.get('move-fail')!.disposables.length).toBeGreaterThan(0);
+    expect(surface.parentElement).toBe(homeContainer);
+
     // Production builds a FRESH engine per React mount.
     const engine2 = new TerminalEngine(makeBridge(), { cacheKey: 'move-fail' });
     expect(engine2.mount(bad)).toBe(false);
@@ -639,7 +653,11 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     expect(after.containerDisposables.length).toBeGreaterThan(0);
     expect(surface.parentElement).toBe(homeContainer);
     // The refusal is DETECTABLE, and the engine that refused is honest about it.
+    // `engine2` was never mounted, so its getter throws; `engine` — refused while
+    // ALREADY mounted — stays usable where it was, which is the contract rev 6
+    // states and rev 5 got backwards.
     expect(() => engine2.terminal).toThrow();
+    expect(() => engine.terminal).not.toThrow();
 
     // ...and a retry into a good container still works.
     const good = makeLaidOutContainer();

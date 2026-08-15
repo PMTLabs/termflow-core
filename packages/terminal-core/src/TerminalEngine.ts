@@ -985,32 +985,88 @@ export class TerminalEngine {
     }
   }
 
+  /**
+   * The COMMIT POINT of `mount()` (review 129 MEDIUM 1). Everything it touches is
+   * this engine's OWN wiring, and every caller of it has already cleared its path's
+   * one fatal step — so from here on the mount will complete and a `false` return
+   * is no longer possible.
+   *
+   * It must not run any earlier than that. Disconnecting the observer and replacing
+   * the two disposer arrays used to be the FIRST thing mount() did, ahead of the
+   * surface move; a refused move then left the previous pane's ResizeObserver
+   * permanently disconnected and the engine holding two empty arrays, so `unmount()`
+   * could no longer remove the container listeners it had wired — while the return
+   * value claimed nothing had happened.
+   *
+   * The observer disconnect is still LOAD-BEARING here: a mount() without a prior
+   * unmount() (legit pattern: pane moved to a new container) would otherwise strand
+   * the old ResizeObserver, which keeps firing fit() against the abandoned
+   * container forever.
+   */
+  private beginMountWiring(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.disposables = [];
+    this.containerDisposables = [];
+  }
+
+  /**
+   * Run a set of disposers, isolating each failure (review 129 MEDIUM 3).
+   *
+   * The reattach sweeps run functions this engine did not write — the PREVIOUS
+   * mount's, off the cache entry — and one of them throwing used to escape mount()
+   * entirely. By then the surface had already moved but `this.term`, the listeners,
+   * the observer and the React cleanup were not yet in place, so the throw
+   * reconstructed exactly the half-mounted state the reordered block exists to
+   * eliminate, in a method whose boolean callers do not catch.
+   *
+   * A teardown that fails is a leak; a teardown that fails and also prevents the
+   * new mount from being wired is an unusable pane. Isolate, log, continue.
+   */
+  private static runDisposers(list: Array<() => void>, what: string): void {
+    for (const dispose of list) {
+      try {
+        dispose();
+      } catch (e) {
+        console.warn(`terminal-core/engine: a ${what} disposer threw; continuing:`, e);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // mount — create-or-reattach the xterm instance into `container`.
   // Ports TerminalDisplay.tsx:242-630 (minus the hydration effect / Task 4).
   //
-  // RETURNS whether the engine is mounted. `false` means the mount was REFUSED and
-  // nothing was wired: `this.term` is unassigned, so `attach()` and the `terminal`
-  // getter must not be called — the getter throws "terminal accessed before
-  // mount()". A caller that ignores the result turns a refused mount into that
-  // throw, which is exactly what review 124/126 found: `mount(): void` gave the
-  // caller no way to tell (review 126). Every refusal leaves the cache entry
-  // intact, so a later mount() can reattach it.
+  // RETURNS whether the engine is mounted. `false` means the mount was REFUSED:
+  // THIS CALL wired nothing and left the engine exactly as it was before the call
+  // (review 129). Two shapes follow from that one rule:
+  //
+  //   - the PRODUCTION shape — a fresh TerminalEngine per React mount, so the
+  //     engine was never mounted and stays that way: `this.term` is unassigned, and
+  //     `attach()` and the `terminal` getter must not be called (the getter throws
+  //     "terminal accessed before mount()"). A caller that ignores the result turns
+  //     a refused mount into that throw, which is exactly what review 124/126
+  //     found: `mount(): void` gave the caller no way to tell (review 126).
+  //   - an ALREADY-MOUNTED engine being moved to a new container (the documented
+  //     mount()-without-unmount() path): it stays mounted, wired and observed where
+  //     it already was. `this.term` is still assigned and still valid — the earlier
+  //     "false means this.term is unassigned" wording was false for this shape
+  //     (review 129 MEDIUM 1) and the engine really was half-dismantled to match it.
+  //
+  // Either way the cache entry is left intact, so a later mount() can reattach it.
+  //
+  // The mechanism is `beginMountWiring()`: every mutation of this engine's own
+  // wiring happens at or after that commit point, and the commit point is placed
+  // after the single fatal step of each path (the surface move for a reattach,
+  // `term.open()` for a create). Before it, the only engine-local state touched is
+  // `this.container`, which every abort restores.
   // ---------------------------------------------------------------------------
   mount(container: HTMLElement): boolean {
-    // A mount() without a prior unmount() (legit pattern: pane moved to a new
-    // container) must not strand the old ResizeObserver — it would keep firing
-    // fit() against the abandoned container forever.
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-
     // Restored by every abort path below, so a refused mount leaves this engine
     // pointing where it did before rather than at a container it never wired
     // (review 126).
     const previousContainer = this.container;
     this.container = container;
-    this.disposables = [];
-    this.containerDisposables = [];
 
     let cached = terminalCache.get(this.cacheKey);
     // Evict ANOTHER terminal's surface from this container before we put ours in
@@ -1114,14 +1170,23 @@ export class TerminalEngine {
         return false;
       }
 
+      // The move succeeded, so the mount is committed: from here on nothing can
+      // refuse, and this engine's own wiring may be replaced (review 129).
+      this.beginMountWiring();
+
       // Only now dispose the previous mount's local event handlers, before
-      // re-wiring.
-      cached.disposables.forEach((dispose) => dispose());
+      // re-wiring. Guarded per disposer — see runDisposers.
+      TerminalEngine.runDisposers(cached.disposables, 'cached local');
       // …and the previous CONTAINER's listeners (design 012 §5.5 site 4).
       // LOAD-BEARING: without this a remount leaves the old container's four
       // listeners attached to the abandoned node, still focusing this terminal
       // and still opening its search bar from a pane that is no longer on screen.
-      cached.containerDisposables.forEach((dispose) => dispose());
+      //
+      // These arrays are EMPTY when the previous mount ended in unmount(), which
+      // consumes them by splicing the shared array rather than reassigning its own
+      // reference — otherwise this sweep ran every already-run disposer a second
+      // time (review 129 MEDIUM 3).
+      TerminalEngine.runDisposers(cached.containerDisposables, 'cached container');
 
       // A FIT failure is NOT fatal — the surface has already moved, and aborting
       // there left a half-mounted engine (review 124 HIGH): `this.term` unassigned,
@@ -1268,10 +1333,38 @@ export class TerminalEngine {
       } catch (error) {
         console.error('terminal-core/engine: Error opening terminal:', error);
         // Nothing was wired and no entry was stored, so this is a refusal like the
-        // reattach ones above (review 126).
+        // reattach ones above (review 126) — but a refusal is only clean if the
+        // half-built object goes away with it (review 129 MEDIUM 2).
+        //
+        // open() can append its render element and initialize part of xterm's
+        // browser services before a later step throws. This Terminal never reached
+        // `terminalCache`, so `detachForeignSurfaces` — which is keyed on cache
+        // entries — can NEVER find it: a retry would open a second surface into the
+        // same pane and the dead one would sit there beside it for the life of the
+        // pane, holding its addon registrations.
+        //
+        // `term.dispose()` disposes the four addons loaded above with it (xterm
+        // owns them once loaded), so they need no separate teardown. Each step is
+        // isolated: the object is already in a failed state, and one failing step
+        // must not skip the other.
+        const orphanElement = term.element;
+        try {
+          term.dispose();
+        } catch (e) {
+          console.warn('terminal-core/engine: disposing the unopened terminal threw:', e);
+        }
+        try {
+          orphanElement?.remove();
+        } catch (e) {
+          console.warn('terminal-core/engine: removing the unopened render element threw:', e);
+        }
         this.container = previousContainer;
         return false;
       }
+
+      // open() succeeded, so the mount is committed — same rule as the reattach
+      // path's move above (review 129).
+      this.beginMountWiring();
 
       // Backlog 003 (protocol-state-lost-while-unmounted): register the
       // STATE-MUTATING Kitty/Win32-Input-Mode CSI/OSC handlers ONCE per cache
@@ -3749,11 +3842,21 @@ export class TerminalEngine {
       this.resizeObserver = null;
     }
     this.stopHealWatchdog();
-    this.disposables.forEach((dispose) => dispose());
+    // SPLICE, don't just reassign (review 129 MEDIUM 3). The cache entry stores the
+    // ARRAY REFERENCE (`disposables: this.disposables` at the mount-end entry
+    // rebuild), so reassigning `this.disposables` to a fresh array left the entry
+    // pointing at the populated original. mount()'s reattach sweeps read the ENTRY,
+    // so a tab switch away and back ran every one of these functions a SECOND time
+    // — and a dependency whose disposer is not idempotent threw out of mount().
+    // `splice(0)` empties the shared array in place AND hands back what to run, so
+    // the entry is already empty before the first disposer is invoked.
+    const localDisposers = this.disposables.splice(0);
     this.disposables = [];
     // design 012 §5.5 site 7: the container listeners are a separate array now.
-    this.containerDisposables.forEach((dispose) => dispose());
+    const containerDisposers = this.containerDisposables.splice(0);
     this.containerDisposables = [];
+    localDisposers.forEach((dispose) => dispose());
+    containerDisposers.forEach((dispose) => dispose());
     this.container = null;
     // Clear the active query AND its decorations. The SearchAddon lives on the
     // cached terminal, so highlights drawn before this unmount would otherwise stay
