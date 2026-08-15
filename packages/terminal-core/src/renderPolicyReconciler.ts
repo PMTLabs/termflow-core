@@ -53,7 +53,16 @@ export function reconcileRenderPolicies(
   // Promotion priority. Array.prototype.sort is stable (ES2019+), so ids absent
   // from `order` compare equal to each other and keep their `ids` (Object.keys)
   // order behind every listed id — the tie-break §5 specifies.
-  const priority = new Map(input.order.map((id, i) => [id, i]));
+  // FIRST occurrence wins. `new Map(order.map(...))` would let a later duplicate
+  // overwrite the earlier rank, so `['focused', 'other', 'focused']` ranks `other`
+  // above `focused` and hands it the last context — contradicting the
+  // highest-priority-first contract and design/010 D8's unconditional focused
+  // promotion. The contract does not require `order` to be duplicate-free, so the
+  // reconciler must tolerate duplicates rather than assume them away (review 124).
+  const priority = new Map<string, number>();
+  input.order.forEach((id, i) => {
+    if (!priority.has(id)) priority.set(id, i);
+  });
   const rank = (id: string): number => priority.get(id) ?? Number.MAX_SAFE_INTEGER;
   const ordered = [...ids].sort((a, b) => rank(a) - rank(b));
 

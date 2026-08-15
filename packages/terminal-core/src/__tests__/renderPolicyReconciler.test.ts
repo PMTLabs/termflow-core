@@ -345,8 +345,11 @@ describe('reconcileRenderPolicies with slots already held (review 120 HIGH)', ()
     // Before the fix this made NO calls at all and returned webglCount 20: the
     // budget was simply not enforced once the set began over it.
     expect(out.webglCount).toBe(12);
-    expect(fake.live.size).toBe(12);
-    // The 12 kept are the highest-priority 12, and the rest are reported honestly.
+    // Assert WHICH contexts remain live, not just how many (review 124 LOW). A
+    // state/report divergence that kept the wrong 12 alive while reporting the
+    // requested top 12 would satisfy a count-only assertion.
+    expect([...fake.live].sort()).toEqual(ids.slice(0, 12).sort());
+    // ...and the report agrees with that state.
     ids.slice(0, 12).forEach(id => expect(out.applied[id]).toBe('webgl'));
     ids.slice(12).forEach(id => expect(out.applied[id]).toBe('dom'));
   });
@@ -439,5 +442,29 @@ describe('reconcileRenderPolicies is call-idempotent (review 122 MEDIUM)', () =>
     expect(second.applied).toEqual({ old: 'dom', focused: 'webgl' });
     expect(fake.calls).toEqual([]);
     expect(second.webglCount).toBe(1);
+  });
+});
+
+/**
+ * Review 124 MEDIUM. `order` is documented as highest-priority-first and is NOT
+ * required to be duplicate-free, so a repeated id must not demote itself: building
+ * the rank map with `new Map(order.map(...))` let the LAST occurrence win.
+ */
+describe('reconcileRenderPolicies with duplicate ids in `order` (review 124)', () => {
+  it('ranks a duplicated id by its FIRST occurrence, so focus still wins', () => {
+    const fake = makeFake({ cap: 4 });
+
+    const out = reconcileRenderPolicies({
+      desired: { focused: 'webgl', other: 'webgl' },
+      budget: 1,
+      order: ['focused', 'other', 'focused'],
+      ...fake,
+    });
+
+    // Before the fix `focused` was ranked 2 and `other` 1, so `other` took the only
+    // context — the exact inversion design/010 D8 forbids.
+    expect(out.applied.focused).toBe('webgl');
+    expect(out.applied.other).toBe('dom');
+    expect(out.webglCount).toBe(1);
   });
 });
