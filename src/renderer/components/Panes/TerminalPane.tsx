@@ -258,8 +258,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const terminalName = name || tab?.title || 'Terminal';
     console.log(`TerminalPane: Determining name - pane name: "${name}", tab title: "${tab?.title}", final: "${terminalName}"`);
 
+    // Ownership lives only in the pane tree, so resolve it here. A tab root's
+    // leaf id IS its tab id, so the `|| terminalId` fallback is correct for a
+    // solo pane and for a pane whose tree has not been committed yet.
+    const owningTabId =
+      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
+
     // Create the promise and store it immediately
-    const initPromise = terminalService.createTerminal(terminalId, finalShellType, terminalName, cwd);
+    const initPromise = terminalService.createTerminal(
+      terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
+    );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
 
@@ -470,13 +478,23 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // handled by the backend (pty_manager.rs is_dir()-checks the spawn cwd).
     const cwd = getCwdSnapshot(terminalId) ?? takeInitialCwd(terminalId) ?? profile?.cwd;
     const terminalName = name || tab?.title || 'Terminal';
+    // A tab can be marked "exited" once every pane in its tree has exited
+    // (see App.tsx handleTerminalProcessExit / resolveExitedTabId), even for
+    // a non-root pane's terminalId — so resolve the owning tab rather than
+    // assuming terminalId === tab.id. Resolved up front so it can also be
+    // forwarded to the backend at spawn (design 011 §6).
+    const ownerTabId =
+      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
 
     try {
       const newPid = await terminalService.createTerminal(
         terminalId,
         finalShellType,
         terminalName,
-        cwd
+        cwd,
+        undefined,
+        undefined,
+        ownerTabId,
       );
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
@@ -486,12 +504,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       clearCwdSnapshot(terminalId);
       // A restarted session is a fresh shell — return its zoom to 100%.
       dispatch(resetZoom(terminalId));
-      // A tab can be marked "exited" once every pane in its tree has exited
-      // (see App.tsx handleTerminalProcessExit / resolveExitedTabId), even for
-      // a non-root pane's terminalId — so resolve the owning tab rather than
-      // assuming terminalId === tab.id.
-      const ownerTabId =
-        findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
       dispatch(clearTabExited(ownerTabId));
     } catch (error) {
       console.error('TerminalPane: Failed to restart session:', error);

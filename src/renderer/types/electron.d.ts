@@ -139,7 +139,7 @@ export interface ElectronAPI {
   getActiveProcesses?: () => Promise<ActiveProcess[]>;
 
   // Terminal management
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => Promise<string>;
   /**
    * Windows: make the calling window the owner of this shell's ConPTY
    * pseudo-console window, so console-app dialogs parented to

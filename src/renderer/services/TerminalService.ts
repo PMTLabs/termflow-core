@@ -85,7 +85,18 @@ class TerminalServiceClass {
     this.listenersInitialized = true;
   }
 
-  async createTerminal(terminalId: string, shellType: string = 'default', name?: string, cwd?: string, cols?: number, rows?: number): Promise<string> {
+  async createTerminal(
+    terminalId: string,
+    shellType: string = 'default',
+    name?: string,
+    cwd?: string,
+    cols?: number,
+    rows?: number,
+    /** The tab that owns this pane. Equal to `terminalId` for a tab root; the
+     *  owning `tb-` id for a split (`tm-`) pane. Design 011 §6: the backend
+     *  cannot derive it — ownership lives only in `panes.treesByTabId`. */
+    owningTabId?: string,
+  ): Promise<string> {
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
 
@@ -103,7 +114,7 @@ class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows);
+      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId);
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // Store the mapping

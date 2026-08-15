@@ -287,7 +287,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -296,6 +296,9 @@ const tauriBridge: ElectronAPI = {
       profileId: profile,
       cwd,
       tabId,
+      // Tauri maps camelCase JS keys onto snake_case Rust parameters, so this
+      // reaches `create_terminal(… owning_tab_id: Option<String>)`.
+      owningTabId,
     });
   },
 

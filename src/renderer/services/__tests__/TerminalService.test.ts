@@ -50,6 +50,39 @@ describe('TerminalService console-window adoption', () => {
   });
 });
 
+describe('TerminalService.createTerminal owning-tab plumbing', () => {
+  let createTerminal: jest.Mock;
+
+  beforeEach(() => {
+    createTerminal = jest.fn().mockResolvedValue('pc-owner-1');
+    (window as any).electronAPI = {
+      createTerminal,
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  // Design 011 §6: the owner must reach the backend AT SPAWN. Without it the
+  // Rust owning_tab_id is null for every UI-created terminal and the
+  // split-pane activity fix cannot work.
+  it('forwards the owning tab id to the bridge', async () => {
+    await terminalService.createTerminal(
+      'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab',
+    );
+  });
+
+  // A root/solo pane owns itself; callers that pass nothing must still work
+  // (the backend treats `undefined` as "unknown" and falls back to the leaf).
+  it('omits the owner when the caller does not know one', async () => {
+    await terminalService.createTerminal('tb-solo-1');
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined,
+    );
+  });
+});
+
 describe('TerminalService.stashPromptGate (backlog 011 hot-swap reattach seed)', () => {
   it('stashes a gate that takePromptGateHandoff drains exactly once', () => {
     terminalService.stashPromptGate('tb-seed-1', { seen: true, armed: false });
