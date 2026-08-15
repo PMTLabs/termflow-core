@@ -1012,6 +1012,11 @@ export class TerminalEngine {
     // onResize event is orphaned (no listener is wired yet), so it is the only one
     // whose size must be re-delivered to the backend at the end of mount().
     let didReattachFit = false;
+    // Set when the reattach fit THREW. A fit can throw after it has already
+    // resized xterm (a synchronous render/resize subscriber failing), so the
+    // mount-end backend reconciliation must run for this case too — see the
+    // catch below and the reconciliation at the end of mount().
+    let reattachFitThrew = false;
 
     // Adopt enhanced-keyboard-protocol state from a prior mount on this same
     // cacheKey (review 046/047: TerminalEngine is a fresh JS object per React
@@ -1076,16 +1081,30 @@ export class TerminalEngine {
             fit.fit();
             didReattachFit = true;
           } catch (fitError) {
-            // Carry on and finish the mount. Geometry converges through the normal
-            // armed-fit path (design/012's FT rule): leaving didReattachFit false
-            // also skips the reattach-specific backend sizing at :2208, which is
-            // exactly right — we have no trustworthy measurement to send.
+            // Carry on and finish the mount, and reconcile the backend with
+            // whatever grid xterm is ACTUALLY on at the end of mount().
+            //
+            // a7fb3a3 called `this.armActivationFit()` here and its message claimed
+            // geometry was deferred to that armed fit. That claim was FALSE (review
+            // 126): `this.fitAddon` is not assigned until :1439, so on the
+            // production path — a fresh TerminalEngine per React mount, as :1016
+            // records — armActivationFit() hit its own null guard and armed nothing.
+            //
+            // Arming it correctly would still not be enough. fit() can throw AFTER
+            // it has resized xterm (a synchronous render/resize subscriber failing),
+            // and any later fit is then a no-op that emits no resize event, while
+            // the mutating fit's own event was orphaned — the previous mount's
+            // listener is disposed above and the new one is not wired yet. So the
+            // fix is the reconciliation at the end of mount(), which sends xterm's
+            // real dimensions and is deduped against lastSentSize, making it a
+            // no-op when the fit failed before changing anything.
+            reattachFitThrew = true;
             console.warn(
               'terminal-core/engine: reattach fit failed; continuing the mount and ' +
-                'deferring geometry to the armed fit (review 124):',
+                'reconciling the backend with xterm\'s current size at mount end ' +
+                '(review 126):',
               fitError,
             );
-            this.armActivationFit();
           }
         } else {
           // UNREACHABLE: this whole branch is gated on `cached.terminal.element`
@@ -2216,7 +2235,7 @@ export class TerminalEngine {
     // (FitAddon.fit() no-ops once xterm already matches), and a same-pid attach()
     // can't either (hydrate() early-returns at :1885).
     //
-    // Scoped to didReattachFit on purpose: the CREATE path's backend sizing is
+    // Scoped to the REATTACH path on purpose: the CREATE path's backend sizing is
     // deliberately owned by hydrate(), not by any fit here — see :768-771
     // ("backend resize is DEFERRED to attach()"). hydrate() cannot early-return on
     // the create path because the fresh cache entry stored above (:799) omits
@@ -2239,7 +2258,13 @@ export class TerminalEngine {
     //
     // Ordering-safe: mount() runs before attach(), but flushBackendResize() reads
     // attachedProcessId at call time (:2166) and the debounce fires after attach().
-    if (didReattachFit && !this.opts.mirror && boundTerm.cols > 0 && boundTerm.rows > 0
+    // `reattachFitThrew` is included for the same reason (review 126): a fit that
+    // mutated xterm and then threw leaves exactly the orphaned-event state above,
+    // and no later fit re-emits it because xterm already matches. The lastSentSize
+    // dedup below makes this free when the fit failed before mutating anything —
+    // the size is unchanged, so nothing is sent.
+    if ((didReattachFit || reattachFitThrew) && !this.opts.mirror
+        && boundTerm.cols > 0 && boundTerm.rows > 0
         && !this.resizeInFlight && !this.pendingResize) {
       const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
       if (!sent || sent.cols !== boundTerm.cols || sent.rows !== boundTerm.rows) {

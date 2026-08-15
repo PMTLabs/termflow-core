@@ -217,3 +217,72 @@ test('a collapse reflows within one resize-debounce window, not via the 1s idle 
 
   engine2.unmount();
 });
+
+// ---------------------------------------------------------------------------
+// Review 126 MEDIUM — the reattach fit that MUTATES and THEN throws.
+//
+// a7fb3a3 made a failed reattach fit non-fatal and claimed geometry was
+// "deferred to the armed fit". It was not: the catch called armActivationFit()
+// BEFORE `this.fitAddon` is assigned (:1434), and that method returns immediately
+// when the field is null. Production reattach constructs a FRESH engine per React
+// mount — the source says so at :1016-1019 — so the field really is null there and
+// the call armed nothing. The existing regressions reuse ONE engine across both
+// mounts, which leaves `fitAddon` populated from the first mount and hides it.
+//
+// The rAF settle-fit covers a fit that fails BEFORE mutating anything. It does not
+// cover this case: fit() resized xterm and a synchronous onResize/render subscriber
+// then threw. xterm is already at the new grid, so the rAF fit is a no-op and emits
+// no resize; the old listener was disposed, so the mutating fit's own event was
+// orphaned; and didReattachFit stayed false, skipping the mount-end reconciliation.
+// The PTY then wrapped at the old width until the 1s heal watchdog noticed.
+// ---------------------------------------------------------------------------
+
+test('a reattach fit that resizes xterm and THEN throws still reaches the backend', async () => {
+  jest.useFakeTimers();
+
+  const resizeCalls: Array<[number, number]> = [];
+  const bridge = makeFakeBridge({
+    resize: (_pid, c, r) => {
+      resizeCalls.push([c, r]);
+    },
+    getSnapshot: async () => ({ snapshot: '', cols: 80, rows: 24 }),
+  });
+
+  const cacheKey = 'collapse-fit-throws';
+
+  const engine1 = new TerminalEngine(bridge, { cacheKey });
+  engine1.mount(makeContainer(400, 600));
+  engine1.attach('pid-1');
+  await jest.runAllTimersAsync();
+
+  const entry = terminalCache.get(cacheKey)!;
+  const mockTerm = entry.terminal as unknown as MockTerminal;
+  expect(mockTerm.cols).toBe(80);
+  resizeCalls.length = 0;
+
+  engine1.unmount();
+
+  // The fit applies the new grid to xterm and THEN throws — a synchronous
+  // render/resize subscriber failing after FitAddon already called term.resize().
+  const fit = entry.fitAddon as unknown as MockFitAddon;
+  const applyFit = fit.fit.bind(fit);
+  fit.setNextFit(160, 24);
+  (fit as unknown as { fit: () => void }).fit = () => {
+    applyFit();
+    throw new Error('test: a resize subscriber threw after the fit mutated xterm');
+  };
+
+  // A FRESH engine, as production does on every React mount. This is what makes
+  // `this.fitAddon` null at the moment the catch runs.
+  const engine2 = new TerminalEngine(bridge, { cacheKey });
+  engine2.mount(makeContainer(800, 600));
+  engine2.attach('pid-1');
+  await jest.runAllTimersAsync();
+
+  // xterm took the new geometry before the throw...
+  expect(mockTerm.cols).toBe(160);
+  // ...so the PTY must be told, or the shell wraps at 80 until the idle watchdog.
+  expect(resizeCalls).toContainEqual([160, 24]);
+
+  engine2.unmount();
+});
