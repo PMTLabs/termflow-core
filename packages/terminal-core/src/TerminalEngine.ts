@@ -35,7 +35,7 @@ import {
   loadWebGLAddon,
   isWebGLGloballyDisabled,
 } from './webgl';
-import { webglAllowedAtCreation } from './renderPolicy';
+import { disposeOrphanedWebGLAddon, webglAllowedAtCreation } from './renderPolicy';
 
 // Platform-native default font stacks. Cross-platform correctness matters here:
 // each OS must resolve to ITS OWN crisp system monospace, not another platform's
@@ -1298,6 +1298,15 @@ export class TerminalEngine {
           term.resize(80, 24);
         }
       }
+
+      // design/013 §5.2 ORPHAN: this branch REPLACES the cache entry below, so any
+      // addon on the outgoing entry would keep its GPU context while becoming
+      // unreachable — and invisible to the budget. Dispose it before we construct
+      // ours. No-op on a first mount, and on the reattach path, which never gets
+      // here. This must stay BEFORE webglAllowedAtCreation(): the slot it frees is
+      // one the new terminal is entitled to, and reversing the two makes a remount
+      // under a full budget silently drop to the DOM renderer.
+      disposeOrphanedWebGLAddon(this.cacheKey);
 
       // Load WebGL addon AFTER open (respects the global-disabled flag), and only
       // if the canvas budget has room — design/013 §5.1. Without this gate a

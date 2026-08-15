@@ -27,6 +27,8 @@ import { terminalCache, resetTerminalRendering, refreshGlyphAtlases } from '../c
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { TerminalEngine } from '../TerminalEngine';
+import type { TerminalBridge, Disposable } from '../types';
 
 /** One mock instance. `disposed` does not exist on the real addon; it records that
  *  our dispose() was CALLED, which is all jsdom can show (§6.1 item 1). */
@@ -67,6 +69,22 @@ function makeEntry(key: string, opts: { parent?: boolean; box?: boolean } = {}) 
   const entry = { terminal: term, fitAddon, webglAddon: null, useWebGL: false } as never;
   terminalCache.set(key, entry);
   return { term, fitAddon, entry: terminalCache.get(key)! };
+}
+
+/** ORPHAN's tests go through the real mount() path, which needs a bridge and a
+ *  container with a layout box; nothing here exercises the PTY side. */
+function makeBridge(): TerminalBridge {
+  const noop: Disposable = { dispose() {} };
+  return { onData: () => noop, onExit: () => noop, write: () => {}, resize: () => {} };
+}
+
+function makeLaidOutContainer(): HTMLElement {
+  const el = document.createElement('div');
+  Object.defineProperty(el, 'offsetWidth', { value: 800, configurable: true });
+  Object.defineProperty(el, 'offsetHeight', { value: 600, configurable: true });
+  Object.defineProperty(el, 'offsetParent', { value: document.body, configurable: true });
+  document.body.appendChild(el);
+  return el;
 }
 
 afterEach(() => {
@@ -340,5 +358,64 @@ describe('design/013 §4.2 FA — promotion always constructs a fresh addon', ()
     addon.clearTextureAtlas = jest.fn();
     refreshGlyphAtlases();
     expect(addon.clearTextureAtlas).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('design/013 §5.2 ORPHAN — no addon is replaced without being disposed', () => {
+  // The reattach half: a mount() with no unmount() carries the SAME addon forward
+  // (TerminalEngine.ts:2052-2053), so nothing is orphaned and the count is unchanged.
+  it('a remount that reattaches keeps the same addon and the same count', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'orphan-reattach' });
+    engine.mount(makeLaidOutContainer());
+    const first = asMock(terminalCache.get('orphan-reattach')!.webglAddon);
+    expect(first).toBeTruthy();
+
+    engine.mount(makeLaidOutContainer());          // no unmount() in between
+
+    expect(terminalCache.get('orphan-reattach')!.webglAddon).toBe(first);
+    expect(first.disposed).toBe(false);
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
+  // The create half — the hole. The create branch is entered when the cached
+  // terminal has no element, and it REPLACES the entry. Every constructed addon
+  // must therefore be either reachable from the cache or disposed; an addon that
+  // is neither is a GPU context nobody can free and nobody can count.
+  it('a remount that falls to the create branch disposes the addon it replaces', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'orphan-create' });
+    engine.mount(makeLaidOutContainer());
+    const first = asMock(terminalCache.get('orphan-create')!.webglAddon);
+    expect(first).toBeTruthy();
+
+    // Force the create branch on the next mount: the reattach path is gated on
+    // `cached.terminal.element`, the create path on its negation.
+    (terminalCache.get('orphan-create')!.terminal as { element?: unknown }).element = undefined;
+
+    engine.mount(makeLaidOutContainer());          // still no unmount()
+
+    const second = asMock(terminalCache.get('orphan-create')!.webglAddon);
+    expect(second).not.toBe(first);
+    expect(first.disposed).toBe(true);             // silently orphaned without the fix
+    // ORPHAN, stated as the end-state property it is: live addons == reachable addons.
+    const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
+    const live = MockWebgl.instances.filter((a) => !a.disposed).length;
+    expect(live).toBe(reachable);
+    expect(countActiveWebGLAddons()).toBe(reachable);
+  });
+
+  // The ordering the fix depends on: the dispose frees a slot the NEW terminal is
+  // entitled to, so it must run BEFORE webglAllowedAtCreation(). Reversed, a
+  // remount under a full budget silently drops to the DOM renderer.
+  it('the freed slot is available to the terminal replacing it, even at a full budget', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'orphan-budget' });
+    engine.mount(makeLaidOutContainer());
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    setCanvasWebGLBudget(1);                       // full, counting this terminal
+    (terminalCache.get('orphan-budget')!.terminal as { element?: unknown }).element = undefined;
+    engine.mount(makeLaidOutContainer());
+
+    expect(getTerminalRenderPolicy('orphan-budget')).toBe('webgl');
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 });

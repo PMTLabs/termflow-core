@@ -165,3 +165,27 @@ export function webglAllowedAtCreation(): boolean {
   if (canvasWebGLBudget === null) return true;
   return countActiveWebGLAddons() < canvasWebGLBudget;
 }
+
+/**
+ * design/013 §5.2 invariant ORPHAN. Called by any path that is about to REPLACE a
+ * cache entry's `webglAddon` rather than carry it forward — today that is exactly
+ * mount()'s create branch, which can be reached without a prior unmount() when a
+ * pane moves to a new container and the cached terminal has lost its element.
+ *
+ * Without this, the outgoing addon keeps its GPU context, becomes unreachable from
+ * terminalCache, and stops being visible to countActiveWebGLAddons() — the budget
+ * under-counts, which is the one direction a budget must never fail in.
+ *
+ * Idempotent and total: unknown ids and addon-less entries are no-ops.
+ */
+export function disposeOrphanedWebGLAddon(terminalId: string): void {
+  const entry = terminalCache.get(terminalId);
+  if (!entry?.webglAddon) return;
+  try {
+    entry.webglAddon.dispose();
+  } catch (e) {
+    console.warn('terminal-core/renderPolicy: error disposing orphaned WebGL addon:', e);
+  }
+  entry.webglAddon = null;
+  entry.useWebGL = false; // advisory field kept in step (D8)
+}
