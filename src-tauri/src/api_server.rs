@@ -343,29 +343,42 @@ fn health_body(instance_id: &str) -> serde_json::Value {
     })
 }
 
+/// The identity + status block every terminal-shaped API response carries.
+///
+/// One function so `list_terminals`, `create_terminal` and `get_terminal`
+/// cannot drift — they were three hand-copied `json!` literals that already
+/// disagreed (`get_terminal` omitted `promptHook`, and used mode "default").
+///
+/// Key contract (design 011 §4), all of it load-bearing for existing clients:
+///   `id` / `processId` — the PTY routing key. Unchanged.
+///   `terminalId`       — the renderer LEAF (`tb-*` root, `tm-*` split).
+///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
+///                        so no existing API/MCP client breaks. Removing it is
+///                        a major-version change, explicitly not done here.
+///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
+///                        headless (no-renderer-pane) terminal.
+fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "processId": t.id,
+        "terminalId": t.renderer_terminal_id,
+        "tabId": t.renderer_terminal_id,
+        "owningTabId": t.owning_tab_id,
+        "name": t.name,
+        "profile": t.shell,
+        "status": "running",
+        "pid": t.pid,
+        "createdAt": t.created_at,
+        "mode": mode,
+        // Command-suggest reads this on reload-reattach to re-seed its prompt
+        // gate DISARMED; the ARMED decision is sampled pre-mount via
+        // probe_reattach_prompt_gate, NOT here (review 008 M-1).
+        "promptHook": t.prompt_hook,
+    })
+}
+
 async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
-    let terminals: Vec<_> = state.terminals.iter().map(|entry| {
-        let t = entry.value();
-        json!({
-            "id": t.id,
-            "processId": t.id,
-            // Stable renderer id: `tm-` for a split pane, `tb-` for a root/solo
-            // pane (where it equals the tabId). This is the UI-level terminal id.
-            "terminalId": t.renderer_terminal_id,
-            "name": t.name,
-            "profile": t.shell,
-            "status": "running",
-            "pid": t.pid,
-            "createdAt": t.created_at,
-            "mode": "ui",
-            "tabId": t.renderer_terminal_id,
-            // Command-suggest reads this on reload-reattach to re-seed its prompt
-            // gate DISARMED; the ARMED decision is sampled pre-mount via the
-            // probe_reattach_prompt_gate command, NOT here — a fetch-time sample
-            // would be stale by the time the engine mounts (review 008 M-1).
-            "promptHook": t.prompt_hook
-        })
-    }).collect();
+    let terminals: Vec<_> = state.terminals.iter().map(|e| terminal_identity_json(e.value(), "ui")).collect();
     // Owner discriminator. Terminals live in this process's own AppState, so
     // every entry above belongs to this instance by construction — the useful
     // guarantee is therefore at the RESPONSE level: a client that reaches the
@@ -536,21 +549,7 @@ async fn create_terminal(
             }
 
             if let Some(t) = state.terminals.get(&id) {
-                let t = t.value();
-                (StatusCode::OK, Json(json!({
-                    "id": t.id,
-                    "processId": t.id,
-                    // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-                    "terminalId": t.renderer_terminal_id,
-                    "name": t.name,
-                    "profile": t.shell,
-                    "status": "running",
-                    "pid": t.pid,
-                    "createdAt": t.created_at,
-                    "mode": "ui",
-                    "tabId": t.renderer_terminal_id,
-                    "promptHook": t.prompt_hook
-                }))).into_response()
+                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui"))).into_response()
             } else {
                 (StatusCode::OK, Json(json!({ "id": id, "status": "running" }))).into_response()
             }
@@ -976,20 +975,7 @@ async fn get_terminal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(terminal) = state.terminals.get(&id) {
-        let t = terminal.value();
-        (StatusCode::OK, Json(json!({
-            "id": t.id,
-            "processId": t.id,
-            // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-            "terminalId": t.renderer_terminal_id,
-            "name": t.name,
-            "profile": t.shell,
-            "status": "running",
-            "pid": t.pid,
-            "createdAt": t.created_at,
-            "mode": "default",
-            "tabId": t.renderer_terminal_id
-        })))
+        (StatusCode::OK, Json(terminal_identity_json(terminal.value(), "default")))
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" })))
     }
@@ -3124,6 +3110,64 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity_sample() -> crate::state::Terminal {
+        crate::state::Terminal {
+            id: "pc-abc123def".into(),
+            pid: 4242,
+            shell: "pwsh".into(),
+            name: "Terminal-pwsh".into(),
+            created_at: "2026-08-14T10:00:00+07:00".into(),
+            cols: 120,
+            rows: 40,
+            backend: crate::tmux_manager::TerminalBackend::PortablePty,
+            renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
+            owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            last_input_source: None,
+            last_input_at: None,
+            prompt_hook: true,
+        }
+    }
+
+    /// Exact key names, asserted (design 011 §7 test 4). `tabId` stays a
+    /// DEPRECATED alias of `terminalId` — redefining it would silently break
+    /// every existing API/MCP client (D4).
+    #[test]
+    fn an_identity_response_carries_all_three_ids_under_exact_keys() {
+        let v = terminal_identity_json(&identity_sample(), "ui");
+        assert_eq!(v["id"], json!("pc-abc123def"));
+        assert_eq!(v["processId"], json!("pc-abc123def"));
+        assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["tabId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_eq!(v["mode"], json!("ui"));
+        assert_eq!(v["promptHook"], json!(true));
+    }
+
+    /// Root-pane invariant (design 011 §7 test 5): leaf == owner.
+    #[test]
+    fn a_root_pane_reports_the_same_value_for_leaf_and_owner() {
+        let mut t = identity_sample();
+        t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
+        let v = terminal_identity_json(&t, "ui");
+        assert_eq!(v["terminalId"], v["owningTabId"]);
+    }
+
+    /// Correction C1: before P0-A `tab_id` was never None, so this shape could
+    /// not occur. It can now — a headless API/fleet spawn has no renderer pane —
+    /// and it must serialise as JSON null, NOT as the `pc-` process id.
+    #[test]
+    fn a_headless_terminal_reports_null_identities_not_a_process_id() {
+        let mut t = identity_sample();
+        t.renderer_terminal_id = None;
+        t.owning_tab_id = None;
+        let v = terminal_identity_json(&t, "ui");
+        assert_eq!(v["terminalId"], json!(null));
+        assert_eq!(v["tabId"], json!(null));
+        assert_eq!(v["owningTabId"], json!(null));
+        // The PTY is still addressable — only the renderer identities are absent.
+        assert_eq!(v["id"], json!("pc-abc123def"));
+    }
 
     #[test]
     fn the_release_and_dev_renderers_are_both_allowed() {
