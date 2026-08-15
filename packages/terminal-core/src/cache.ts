@@ -291,13 +291,28 @@ export const disableWebGLGlobally = () => {
   // Reset all cached terminals
   terminalCache.forEach((cached, _terminalId) => {
     if (cached.webglAddon) {
+      // design/013 D4 + review 120: the addon REFERENCE is the source of truth for
+      // countActiveWebGLAddons, so it may only be nulled once the context is known
+      // to be released. Swallowing a dispose() error and nulling anyway erases the
+      // only countable reference to a context that may still be held, which
+      // under-counts the budget in the unsafe direction — the same hazard the
+      // round-1 HIGH found in disposeOrphanedWebGLAddon / resetTerminalRendering.
+      //
+      // On failure we keep the reference (still counted, still disposable later)
+      // and leave useWebGL alone so the entry does not claim a renderer state it
+      // does not have. One failed entry must not stop the rest from being reset,
+      // so the loop continues either way.
+      let disposed = true;
       try {
         cached.webglAddon.dispose();
       } catch (e) {
-        // Ignore
+        disposed = false;
+        console.warn('terminal-core/cache: WebGL dispose failed during global disable:', e);
       }
-      cached.webglAddon = null;
-      cached.useWebGL = false;
+      if (disposed) {
+        cached.webglAddon = null;
+        cached.useWebGL = false;
+      }
 
       // Refresh the terminal
       try {

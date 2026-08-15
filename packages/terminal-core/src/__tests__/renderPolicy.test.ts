@@ -23,7 +23,13 @@ import {
   getCanvasWebGLBudget,
   webglAllowedAtCreation,
 } from '../renderPolicy';
-import { terminalCache, resetTerminalRendering, refreshGlyphAtlases } from '../cache';
+import {
+  terminalCache,
+  resetTerminalRendering,
+  refreshGlyphAtlases,
+  disableWebGLGlobally,
+} from '../cache';
+import { setWebGLGloballyDisabled } from '../webgl';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -584,5 +590,49 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
 
     expect(getTerminalRenderPolicy('orphan-budget')).toBe('webgl');
     expect(countActiveWebGLAddons()).toBe(1);
+  });
+});
+
+/**
+ * design/013 D4 — the addon REFERENCE is the source of truth for the budget count,
+ * so no path may null it while the context may still be held.
+ *
+ * `disableWebGLGlobally` swallowed a dispose() error and nulled anyway. Before P0-C
+ * that was merely untidy; now `countActiveWebGLAddons` reads that reference, so it
+ * under-counts a context we failed to free — the unsafe direction for a hard budget,
+ * and the same hazard review 120 found in the disposal helpers. Flagged by the
+ * implementer of `fd860c1`; no reviewer had examined it.
+ */
+describe('design/013 D4 — global disable must not erase a possibly-live addon', () => {
+  it('retains the reference (and the count) when dispose() throws', () => {
+    const { entry } = makeEntry('gd-throws');
+    const addon = { dispose: () => { throw new Error('gpu wedged'); }, clearTextureAtlas: () => {} };
+    entry.webglAddon = addon as never;
+    entry.useWebGL = true;
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    disableWebGLGlobally();
+
+    // The context may still be held, so it must still be counted.
+    expect(entry.webglAddon).toBe(addon);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    setWebGLGloballyDisabled(false);
+  });
+
+  it('clears the reference when dispose() succeeds', () => {
+    const { entry } = makeEntry('gd-ok');
+    let disposed = false;
+    entry.webglAddon = { dispose: () => { disposed = true; }, clearTextureAtlas: () => {} } as never;
+    entry.useWebGL = true;
+
+    disableWebGLGlobally();
+
+    expect(disposed).toBe(true);
+    expect(entry.webglAddon).toBeNull();
+    expect(entry.useWebGL).toBe(false);
+    expect(countActiveWebGLAddons()).toBe(0);
+
+    setWebGLGloballyDisabled(false);
   });
 });

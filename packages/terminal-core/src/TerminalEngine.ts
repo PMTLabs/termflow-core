@@ -1063,10 +1063,21 @@ export class TerminalEngine {
           fit.fit();
           didReattachFit = true;
         } else {
-          terminalCache.delete(this.cacheKey);
-          cached = undefined;
-          term = undefined;
-          fit = undefined;
+          // UNREACHABLE: this whole branch is gated on `cached.terminal.element`
+          // being truthy, and `term` is that same object. It survives only because
+          // TypeScript cannot narrow across the assignment.
+          //
+          // It used to delete the entry and fall through to create, which is the
+          // exact ORPHAN leak the catch below documents — disposeOrphanedWebGLAddon
+          // would find nothing to dispose and the outgoing context would be live,
+          // unreachable and uncounted. Kept as an ABORT rather than deleted outright
+          // so that if a future refactor ever makes it reachable, it fails safe in
+          // the same direction as the catch instead of silently re-opening the leak.
+          console.warn(
+            'terminal-core/engine: reattach found no render element despite a cached ' +
+              'entry; aborting the mount rather than rebuilding (review 124).',
+          );
+          return;
         }
       } catch (e) {
         // ABORT the mount; do NOT delete-and-recreate (review 120 HIGH).
