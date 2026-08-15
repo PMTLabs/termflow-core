@@ -12,7 +12,12 @@
  * under display:none rather than undefined.
  */
 
-import { hasLayoutBox, fitIfLaidOut } from '../renderPolicy';
+import {
+  hasLayoutBox,
+  fitIfLaidOut,
+  getTerminalRenderPolicy,
+  countActiveWebGLAddons,
+} from '../renderPolicy';
 import { terminalCache } from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -72,5 +77,42 @@ describe('design/013 §5.3 LB — never fit a terminal with no layout box', () =
     const { fitAddon, entry } = makeEntry('lb-fit');
     expect(fitIfLaidOut(entry)).toBe(true);
     expect(fitAddon.fitCount).toBe(1);
+  });
+});
+
+describe('design/013 §4 — reading policy and counting addons', () => {
+  it('returns null for an unknown terminal id', () => {
+    expect(getTerminalRenderPolicy('nope')).toBeNull();
+  });
+
+  it('reports dom for an entry with no addon, webgl for one with', () => {
+    const { entry } = makeEntry('read-dom');
+    expect(getTerminalRenderPolicy('read-dom')).toBe('dom');
+    entry.webglAddon = {} as never;
+    entry.useWebGL = true;
+    expect(getTerminalRenderPolicy('read-dom')).toBe('webgl');
+  });
+
+  // D4: we count addons WE manage, never browser-global GPU contexts.
+  it('counts addons across the whole cache, not one entry', () => {
+    const a = makeEntry('count-a');
+    makeEntry('count-b');
+    const c = makeEntry('count-c');
+    expect(countActiveWebGLAddons()).toBe(0);
+    a.entry.webglAddon = {} as never;
+    c.entry.webglAddon = {} as never;
+    expect(countActiveWebGLAddons()).toBe(2);
+  });
+
+  // Spec test 13 / D8 / §4.1 — the addon reference is the source of truth and
+  // `useWebGL` is ADVISORY. A context loss nulls the addon (webgl.ts:48-49) and an
+  // entry that disagreed would hold budget for a context nobody holds. Both the
+  // READ and the COUNT must key off the addon.
+  it('the addon reference, not useWebGL, drives both the read and the count', () => {
+    const a = makeEntry('count-flag');
+    a.entry.useWebGL = true;
+    a.entry.webglAddon = null;
+    expect(getTerminalRenderPolicy('count-flag')).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(0);
   });
 });

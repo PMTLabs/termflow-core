@@ -35,3 +35,24 @@ export function fitIfLaidOut(entry: TerminalCacheEntry): boolean {
   }
   return true;
 }
+
+/** The policy a terminal is CURRENTLY on. `null` when the id is not cached. */
+export function getTerminalRenderPolicy(terminalId: string): RenderPolicy | null {
+  const entry = terminalCache.get(terminalId);
+  if (!entry) return null;
+  return entry.webglAddon ? 'webgl' : 'dom';
+}
+
+/**
+ * design/013 D4 — addons THIS PROCESS manages, not browser GPU contexts, which we
+ * cannot observe. Named for what it actually measures.
+ *
+ * Keys off the addon reference rather than `useWebGL`, because a context loss nulls
+ * `webglAddon` (webgl.ts) and the flag is only advisory; counting the flag would hold
+ * budget against a terminal that no longer has a context.
+ */
+export function countActiveWebGLAddons(): number {
+  let n = 0;
+  for (const entry of terminalCache.values()) if (entry.webglAddon) n += 1;
+  return n;
+}
