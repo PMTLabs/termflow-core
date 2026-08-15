@@ -3137,6 +3137,13 @@ export class TerminalEngine {
   }
 
   private emitInputLine(text: string): void {
+    // design 012 §5.11 / §8.1: on a chromeless host (a Canvas Mode node) the
+    // engine emits NOTHING, so useCommandSuggest never re-opens the popup, so
+    // suggestState never leaves 'closed', so the interception at :1346 never
+    // claims Up/Down/Tab/Enter. True by construction rather than by a one-shot
+    // close (review 093 B3). The capture heuristic itself keeps running — only
+    // the emission to the host stops (§5.12).
+    if (!this.paneChromeActive) return;
     if (text === this.lastEmittedInput) return;
     this.lastEmittedInput = text;
     this.opts.onInputLineChanged?.(text);
@@ -3144,7 +3151,9 @@ export class TerminalEngine {
 
   /** Host tells the engine the popup's current state (drives key interception). */
   setSuggestPopupState(state: SuggestPopupState): void {
-    this.suggestState = state;
+    // Belt-and-braces for any future caller (design 012 §5.11): the popup cannot
+    // exist on a chromeless host, so it must not be able to claim keys there.
+    this.suggestState = this.paneChromeActive ? state : 'closed';
   }
 
   /** Insert a history command at the prompt: move the cursor to the end of the
