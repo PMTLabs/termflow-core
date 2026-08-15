@@ -167,6 +167,9 @@ export class Terminal {
     // Real xterm appends its render element to the container; emulate enough that
     // the reattach path (`cached.terminal.element`) sees a live node.
     const el = (typeof document !== 'undefined' ? document.createElement('div') : ({} as HTMLElement));
+    // Real xterm classes its render element `terminal xterm`. Carried here so a
+    // test can tell a terminal surface apart from the pane's other children.
+    if (typeof (el as HTMLElement).className === 'string') el.className = 'terminal xterm';
     this.element = el;
     if (container && typeof (container as HTMLElement).appendChild === 'function') {
       container.appendChild(el);

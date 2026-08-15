@@ -55,9 +55,18 @@ module.exports = {
   // Coverage reporters
   coverageReporters: ['text', 'lcov', 'html'],
   
+  // Git worktrees live in `<project>/.claude/` by project convention, which puts a
+  // second full copy of the repo INSIDE the repo. Without this, jest builds one
+  // module map across both copies, every package.json name collides, and suites fail
+  // in the MAIN tree as well — reporting failures that have nothing to do with the
+  // code under test. modulePathIgnorePatterns (not just testPathIgnorePatterns) is
+  // the one that keeps the copy out of the module map.
+  modulePathIgnorePatterns: ['<rootDir>/.claude/'],
+
   // Ignore patterns
   testPathIgnorePatterns: [
     '/node_modules/',
+    '/\\.claude/',  // worktrees — see modulePathIgnorePatterns above
     '/dist/',
     '/build/',
     '/tests/e2e/',
