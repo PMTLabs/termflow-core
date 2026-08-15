@@ -9,6 +9,7 @@ import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { useCommandSuggest } from './useCommandSuggest';
+import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -173,10 +174,53 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
 
+  // Canvas Mode surface relocation (design 012 §4.2). Placed here because its
+  // callbacks close over dispatch (:85), setContextMenu (:123), setPathPicker
+  // (:126), setSchemaPicker (:133) and suggestRef (:173), all declared above.
+  // `engineMounted` is a stable useCallback the engine effect below calls right
+  // after mount() — that bump is what makes relocation-at-mount reachable at all
+  // (hazard H12, measured by spike 004 Q1).
+  const { engineMounted } = useSurfaceRelocation({
+    terminalId,
+    engineRef,
+    paneRef: terminalRef,
+    onRelocated: (toCanvas) => {
+      // The suggest popup's REACT state — the engine's own gate (design 012 §8.1)
+      // is what stops it coming back while relocated. Only on the way out: the
+      // return trip should be able to re-open it normally.
+      if (toCanvas) suggestRef.current.close();
+      // ContextMenu portals to <body> with position: fixed at literal x/y
+      // (ContextMenu.tsx:63, :67), so a menu opened before the move floats at a
+      // viewport point unrelated to the terminal. Same for both pickers.
+      setContextMenu(null);
+      setPathPicker(null);
+      setSchemaPicker(null);
+      // The SEARCH BAR is deliberately left open with its state intact (§8): it
+      // holds user-typed query/caseSensitive/wholeWord/regex
+      // (TerminalSearchBar.tsx:27-30) and the SearchAddon's highlights live on the
+      // buffer and travel with term.element. Closing it would call clearSearch()
+      // and discard their query.
+    },
+    onAborted: () => {
+      // design 012 §5.1's recovery contract. The engine is fully restored and the
+      // terminal is still usable in its previous container; the surface-host
+      // registration is left alone, so the canvas node shows an empty box.
+      dispatch(addToast({ message: 'Could not move this terminal', type: 'error' }));
+    },
+  });
+
   // Create the engine + mount it once per terminalId. Reattach existing process
   // when available. Cleanup → unmount() (NOT dispose — preserve the cache).
   useEffect(() => {
-    if (!terminalRef.current) return;
+    // CAPTURED, not re-read at cleanup time: on a whole-component deletion React
+    // detaches host refs (terminalRef.current = null) during the deletion traversal,
+    // which runs BEFORE passive deletion cleanup. Rev 5 of design 012 guarded the
+    // cleanup on `terminalRef.current` and that guard was FALSE on exactly the
+    // interleaving it was written for, so the fallback cover relocated nothing
+    // (review 099 T1-F3). The captured element is still a real — now detached — div,
+    // which is all appendChild needs.
+    const pane = terminalRef.current;
+    if (!pane) return;
 
     // Ensure the host-level pipeline-healed suppressor is registered once.
     ensurePipelineHealSuppression();
@@ -300,7 +344,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     });
     engineRef.current = engine;
 
-    engine.mount(terminalRef.current);
+    engine.mount(pane);              // the identical element captured at :179
+    engineMounted();                 // ADDED — the relocation dep (design 012 §4.2.1)
     setAtBottom(engine.isScrolledToBottom());
     const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);
     // Scope this pane's slack/scrollbar background to its own effective scheme
@@ -320,6 +365,21 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
 
     return () => {
       scrollPositionDisposable.dispose();
+      // The ORDERED FALLBACK (design 012 §4.2.2). The relocation effect's LAYOUT
+      // cleanup is the PRIMARY cover and the only one that returns the element to a
+      // CONNECTED node; this one runs later, in the passive phase, and lands it in a
+      // detached pane div — the same place today's every remount already leaves it.
+      // Whichever runs second is a free R0 identity no-op.
+      //
+      // It must run BEFORE unmount(): unmount() disposes every subscription, removes
+      // the rail layer and nulls this.container, but it NEVER removes term.element
+      // from the DOM (TerminalEngine.ts:3218-3276) — so without this, a pane teardown
+      // while displayed on canvas strands a live-painting, input-dead surface in the
+      // canvas host with nothing to reclaim it (hazard H11).
+      //
+      // Both bindings are captured: `engine` is this effect's own local, and `pane`
+      // was captured at :179.
+      engine.relocateTo(pane, { paneChrome: true });
       engine.unmount();
       engineRef.current = null;
     };
