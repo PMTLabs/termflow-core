@@ -23,18 +23,27 @@ import {
   getCanvasWebGLBudget,
   webglAllowedAtCreation,
 } from '../renderPolicy';
-import { terminalCache, resetTerminalRendering } from '../cache';
+import { terminalCache, resetTerminalRendering, refreshGlyphAtlases } from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 
-/** The jsdom WebglAddon mock (src/__mocks__/addon-webgl.ts) adds two statics the real
- *  addon has no equivalent of: a one-shot construction-failure switch and the last
- *  onContextLoss callback loadWebGLAddon registered. */
+/** One mock instance. `disposed` does not exist on the real addon; it records that
+ *  our dispose() was CALLED, which is all jsdom can show (§6.1 item 1). */
+type MockWebglInstance = { disposed: boolean; clearTextureAtlas: () => void };
+
+/** The jsdom WebglAddon mock (src/__mocks__/addon-webgl.ts) adds three statics the
+ *  real addon has no equivalent of: a one-shot construction-failure switch, the last
+ *  onContextLoss callback loadWebGLAddon registered, and the instance log the FA and
+ *  ORPHAN invariants are stated over. */
 const MockWebgl = WebglAddon as unknown as {
   failNextConstruction: boolean;
   lastContextLossHandler: (() => void) | null;
+  instances: MockWebglInstance[];
 };
+
+/** Entries carry the real addon type; these tests need the mock's extra fields. */
+const asMock = (addon: unknown): MockWebglInstance => addon as MockWebglInstance;
 
 /** The jsdom FitAddon mock (src/__mocks__/addon-fit.ts) exposes a fitCount the real
  *  addon does not; existing tests reach it via `as any` (engine.relocate-eligibility
@@ -65,6 +74,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   MockWebgl.failNextConstruction = false;
   MockWebgl.lastContextLossHandler = null;
+  MockWebgl.instances = [];
   // Test HYGIENE only — it keeps a leaked budget from poisoning the next test. It
   // is NOT the BUDGET-OWNER invariant (§5.2 note (c)), which is about production
   // teardown and gets its own test and release mechanism in Task 9.
@@ -284,5 +294,51 @@ describe('design/013 §5.2 BUDGET-OWNER — the creation budget survives no tear
     expect(getCanvasWebGLBudget()).toBe(5);
     window.dispatchEvent(new Event('pagehide'));
     expect(getCanvasWebGLBudget()).toBeNull();
+  });
+});
+
+describe('design/013 §4.2 FA — promotion always constructs a fresh addon', () => {
+  it('never hands back the disposed addon on a re-promotion', () => {
+    makeEntry('fa-cycle');
+    setTerminalRenderPolicy('fa-cycle', 'webgl');
+    const first = asMock(terminalCache.get('fa-cycle')!.webglAddon);
+    expect(MockWebgl.instances).toHaveLength(1);
+
+    setTerminalRenderPolicy('fa-cycle', 'dom');
+    expect(first.disposed).toBe(true);
+    expect(terminalCache.get('fa-cycle')!.webglAddon).toBeNull();
+
+    setTerminalRenderPolicy('fa-cycle', 'webgl');
+    const second = asMock(terminalCache.get('fa-cycle')!.webglAddon);
+    expect(second).not.toBe(first);          // FA: a FRESH addon, not the cached one
+    expect(second.disposed).toBe(false);
+    expect(MockWebgl.instances).toHaveLength(2);
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
+  // The budget-boundary thrash the "optimisation" would target: N cycles must
+  // produce N addons, all but the last disposed. If a disposed addon is ever
+  // retained, the instance count stops tracking the cycle count.
+  it('produces one addon per cycle across repeated thrash', () => {
+    makeEntry('fa-thrash');
+    for (let i = 0; i < 5; i++) {
+      setTerminalRenderPolicy('fa-thrash', 'webgl');
+      setTerminalRenderPolicy('fa-thrash', 'dom');
+    }
+    expect(MockWebgl.instances).toHaveLength(5);
+    expect(MockWebgl.instances.every((a) => a.disposed)).toBe(true);
+    expect(countActiveWebGLAddons()).toBe(0);
+  });
+
+  // The §4.2 corollary: an addon promoted around a resume signal has a NEW atlas,
+  // so refreshGlyphAtlases' order-dependence is not incorrectness. Pinned because
+  // the corollary is what makes the FA statement load-bearing rather than a note.
+  it('a freshly promoted addon is reachable by refreshGlyphAtlases', () => {
+    makeEntry('fa-atlas');
+    setTerminalRenderPolicy('fa-atlas', 'webgl');
+    const addon = asMock(terminalCache.get('fa-atlas')!.webglAddon);
+    addon.clearTextureAtlas = jest.fn();
+    refreshGlyphAtlases();
+    expect(addon.clearTextureAtlas).toHaveBeenCalledTimes(1);
   });
 });
