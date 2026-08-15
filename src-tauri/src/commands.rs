@@ -69,6 +69,23 @@ pub fn get_os_build_number() -> u32 {
     0
 }
 
+/// Which owner, if any, this create must reserve before it spawns.
+///
+/// `Some(owner)` exactly when the spawn will register a terminal whose renderer
+/// leaf IS a tab id — the only case that can collide with another creator, since
+/// a `tm-` split leaf is freshly minted and unique by construction. Pure so the
+/// decision can be tested without a `tauri::State`.
+fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
+    match (tab_id, owning_tab_id) {
+        // A tab root: the leaf IS the owner (design 011 §3).
+        (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
+        // A renderer that predates P0-A sends no owner; a `tb-` leaf is a root.
+        (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
+        // A split leaf, or no leaf at all — nothing to reserve.
+        _ => None,
+    }
+}
+
 #[tauri::command]
 pub async fn create_terminal(
     state: State<'_, AppState>,
@@ -107,6 +124,41 @@ pub async fn create_terminal(
     };
     
     let terminal_name = format!("Terminal-{}", shell_name);
+
+    // Reserve the owner across THIS spawn too (external review 101, F1).
+    //
+    // `6941b4c` put the reservation only in `api_server::create_terminal`, which
+    // serialised the REST path against itself but left this path — the renderer's
+    // own create — outside it entirely. A restart-in-place of a dead tab root
+    // spawns with `renderer_terminal_id == owning_tab_id == tb-a`; a REST create
+    // for `tb-a` landing in the window before `spawn_terminal`'s final
+    // `terminals.insert` would scan the tab as empty and take `tb-a` as its leaf
+    // too, registering the same live leaf twice. Taking the same claim here
+    // closes the renderer-first ordering: the REST path's `try_claim` then
+    // returns `None` and it correctly mints a `tm-` split leaf instead.
+    //
+    // We claim but never REFUSE on contention: this call is a user action on a
+    // pane that already exists and owns its leaf, so it must not fail. The
+    // reverse ordering — a REST create winning the claim and committing to `tb-a`
+    // before this spawn registers — is therefore still open, and closing it is a
+    // design question (which creator wins a contested root leaf), not a lock:
+    // see docs/progress/010 for the options. The warning below is what makes that
+    // window observable instead of silent.
+    let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
+    // Held to the end of this command (and dropped on the sidecar path's early
+    // return) — releasing it before `spawn_terminal` has registered would reopen
+    // the very window it exists to cover.
+    let _root_leaf_claim = root_leaf_owner.as_deref().and_then(|owner| {
+        let claim = state.root_leaf_claims.try_claim(owner);
+        if claim.is_none() {
+            log::warn!(
+                "create_terminal: root leaf {owner} is already claimed by an in-flight create; \
+                 proceeding because a renderer create owns its pane, but this is the contested \
+                 ordering external review 101 F1 describes"
+            );
+        }
+        claim
+    });
 
     // Opt-in PTY-host sidecar path (Windows). Requires a stable tab_id as the
     // reattach key; without one we fall through to the in-process path.
@@ -2350,5 +2402,69 @@ mod host_identity_tests {
     fn a_missing_owner_degrades_to_the_leaf_not_to_none() {
         let (_, owner) = host_identity("tm-9f2c1a4b7", None);
         assert_eq!(owner, "tm-9f2c1a4b7");
+    }
+}
+
+/// The renderer create path's own root-leaf reservation (external review 101, F1).
+///
+/// Plain `#[cfg(test)]` — nothing here needs tauri's `test` feature, which breaks
+/// the Windows test binary at loader time (see the gate on
+/// `scrollback_restore_tests` above).
+#[cfg(test)]
+mod root_leaf_reservation_tests {
+    use super::root_leaf_owner_to_reserve;
+    use crate::state::RootLeafClaims;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_tab_root_reserves_its_own_id() {
+        // leaf == owner is the definition of a tab root (design 011 §3), and it
+        // is the only shape the REST path can also decide to take.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-a1b2c3"), Some("tb-a1b2c3")),
+            Some("tb-a1b2c3".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_split_pane_reserves_nothing() {
+        // A `tm-` leaf is minted fresh, so it cannot collide and must not take a
+        // claim — doing so would stall an unrelated root create for no gain.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tm-9f2c1a4"), Some("tb-a1b2c3")),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_pre_p0a_renderer_sending_no_owner_still_reserves_a_tb_leaf() {
+        // `owning_tab_id` is Optional precisely so an older renderer keeps
+        // working; a `tb-` leaf from one of those IS a tab root.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-a1b2c3"), None),
+            Some("tb-a1b2c3".to_string()),
+        );
+        assert_eq!(root_leaf_owner_to_reserve(Some("tm-9f2c1a4"), None), None);
+        assert_eq!(root_leaf_owner_to_reserve(None, None), None);
+    }
+
+    #[test]
+    fn the_renderer_and_the_rest_path_cannot_both_hold_one_owner() {
+        // The whole point of F1's fix: these two paths now contend for the SAME
+        // map, so whichever gets there first excludes the other. Before the fix
+        // the renderer path never touched this map at all, so both could commit
+        // to the same live leaf.
+        let claims: Arc<RootLeafClaims> = Arc::new(RootLeafClaims::default());
+        let renderer = claims.try_claim("tb-a1b2c3");
+        assert!(renderer.is_some(), "the first creator reserves the owner");
+        assert!(
+            claims.try_claim("tb-a1b2c3").is_none(),
+            "a concurrent REST create must be refused and mint a tm- split leaf",
+        );
+        drop(renderer);
+        assert!(
+            claims.try_claim("tb-a1b2c3").is_some(),
+            "the owner is free again once the winning spawn has registered",
+        );
     }
 }
