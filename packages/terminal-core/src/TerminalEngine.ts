@@ -170,6 +170,37 @@ const ED3_EXPECT_WINDOW_MS = 1500;
 // unlikely to fall inside it. A TUNED constant, not a derived one (§15.3).
 const RELOCATION_CONVERGENCE_ARM_MS = 500;
 
+/** What `TerminalEngine.relocateTo` did (design 012 §5). */
+export type RelocationResult = 'relocated' | 'aborted';
+
+/**
+ * Everything `relocateTo` must be able to put back if it fails partway.
+ *
+ * `abortRelocation`'s contract is "nothing changed", and it is enforced by
+ * restoring from this snapshot rather than by unwinding step by step. Two fields
+ * R2 mutates are DELIBERATELY not restored: `resizeEpoch` (a monotonic generation
+ * counter — rolling it back would resurrect a decision the bump correctly
+ * invalidated) and any `fitTimer` R3 armed (design 012 §5.1 point 2 — leaving it
+ * running is provably safe, and the FT rule forbids cancelling it).
+ */
+interface RelocationSnapshot {
+  /** The container the element is still in if R6 throws. */
+  container: HTMLElement | null;
+  /** Restored so an aborted relocation can never leave the hidden-pane SIGWINCH
+   *  park disabled — reviews 093 B2 / 094 B4, the highest-priority regression. */
+  surfaceDisplayed: boolean;
+  /** Restored so an aborted canvas -> pane move cannot re-wire the CANVAS host
+   *  with pane chrome — review 094 B5. */
+  paneChrome: boolean;
+  /** Restored so an abort cannot leave a <=500ms arm on an engine that never
+   *  moved — review 096. */
+  convergenceArmUntil: number;
+  /** True once R4/R5 have torn the old wiring down, so an abort at R0's
+   *  precondition check does not re-wire a container that was never unwired
+   *  (which would double-register the four listeners). */
+  rewired: boolean;
+}
+
 // Backlog 011: window after a suggestion accept during which Enter keydowns are
 // swallowed. Covers OS key auto-repeat (~30ms interval after a ~500ms delay)
 // without noticeably delaying a deliberate follow-up Enter.
@@ -3495,6 +3526,165 @@ export class TerminalEngine {
     unregisterEndedRegionTracker(this.cacheKey);
     // Intentionally keep this.term / this.fitAddon references — the cache still
     // owns the live instance, and a later mount() reattaches it.
+  }
+
+  // ---------------------------------------------------------------------------
+  // relocateTo — design 012 §5. Move this terminal's RENDERED SURFACE to a new
+  // container without ending the session.
+  //
+  // It is NOT mount() (design 012 D2). mount() does eight things relocation must
+  // not do (§5.0): construct a second EndedRegionTracker (which would leak the
+  // live one's onRender subscription, debounce timer and rail layer), construct a
+  // second HeuristicCapture (which would restore a stale mark), re-apply
+  // opts.fontSize (reverting every zoom since engine creation), focus
+  // unconditionally (stealing focus for a background pane), rebuild the cache
+  // entry (breaking design/013's identity keying), call enforceCacheCap(), call
+  // startHealWatchdog(), and — worst of all — fall through to the CREATE branch on
+  // any thrown error (:757-767), producing a brand-new blank Terminal with the
+  // entire scrollback gone, silently. That is hazard H1.
+  //
+  // The mechanism is one synchronous `container.appendChild(this.term.element)`
+  // (D1). Per the DOM spec that is remove-then-insert inside ONE synchronous
+  // algorithm; spike 004 Q2 measured that no observer of any kind ever sees
+  // `isConnected === false`. No portal, anywhere.
+  // ---------------------------------------------------------------------------
+  relocateTo(container: HTMLElement, opts?: { paneChrome?: boolean }): RelocationResult {
+    // --- R0: normalise, preconditions, restore snapshot (§5.1) ---
+    // Normalised ONCE, here. Every later step reads THIS local, never
+    // `opts.paneChrome` — which is undefined on the documented call
+    // `relocateTo(container)` (reviews 098 C1 + 096).
+    const paneChrome = opts?.paneChrome ?? false;
+
+    // Placed BEFORE the identity no-op deliberately: a mirror engine must never
+    // reach any part of this operation, including the free path. Grid-view mirrors
+    // are not canvas nodes (design 012 §12), and applyMirrorFit's container reads
+    // (:3066, :3071) are dismissed by this line rather than merely documented.
+    if (this.opts.mirror) {
+      console.error('terminal-core/engine: relocateTo is not supported for mirror engines');
+      return 'aborted';
+    }
+
+    // The identity no-op. LOAD-BEARING: both §4.2.2 cleanups call
+    // relocateTo(pane, { paneChrome: true }) unconditionally, and this is what
+    // makes the redundant one free. It must perform NO work at all — no dispose,
+    // no re-wire, no observer churn, no epoch bump, no convergenceArmUntil write,
+    // no eligibility change (§13 T2b).
+    if (container === this.container) return 'relocated';
+
+    const term = this.term;
+    const entry = terminalCache.get(this.cacheKey);
+    const snap: RelocationSnapshot = {
+      container: this.container,
+      surfaceDisplayed: this.surfaceDisplayed,
+      paneChrome: this.paneChromeActive,
+      convergenceArmUntil: this.convergenceArmUntil,
+      rewired: false,
+    };
+
+    // This precondition exists specifically to avoid mount()'s reattach catch-all
+    // (:757-763), which terminalCache.delete()s and falls into the create branch
+    // (:767). H1.
+    if (!term || !entry || entry.terminal !== term || !term.element) {
+      return this.abortRelocation(
+        `relocateTo: preconditions failed for ${this.cacheKey} ` +
+          `(term=${!!term} entry=${!!entry} owned=${entry?.terminal === term} ` +
+          `element=${!!term?.element})`,
+        snap,
+      );
+    }
+    const element = term.element;
+
+    // --- R2: invalidate in-flight geometry work, arm the convergence stamp,
+    //         cancel NOTHING (§5.3) ---
+    // resizeEpoch is already this engine's "geometry intent changed" generation
+    // (sole writer scheduleBackendResize at :2566, sole readers healOnce at :2641
+    // and :2652). Reuse before reinvent: do NOT add a second counter. The risk it
+    // covers is a DUPLICATE backend resize — healOnce decided to resize by
+    // comparing the backend size against dims measured before the move, and the
+    // relocation's own fit is about to supersede that decision (H6).
+    this.resizeEpoch++;
+    // Arm the ED3 repair window (§6.2 / H2): the resize this move is about to
+    // cause reaches the PTY through :1119 -> scheduleBackendResize, which stamps
+    // convergenceResizeAt only while this arm is live. Without the stamp a
+    // ratatui/codex PTY answers the SIGWINCH with ESC[2J ESC[3J and the scrollback
+    // is wiped with no repair armed — silent data loss.
+    this.convergenceArmUntil = Date.now() + RELOCATION_CONVERGENCE_ARM_MS;
+
+    // --- R4: dispose the PREVIOUS container's disposables (§5.5) ---
+    // Off the CACHE ENTRY's reference, not this.containerDisposables — exactly
+    // what mount()'s reattach branch already does at :742. Imitate, do not invent.
+    // Double-dispose is a pre-existing tolerated pattern here (unmount() runs the
+    // disposers but never clears the entry's reference, so cleanupTerminalCache
+    // runs them again), so every disposer already survives a second call.
+    entry.containerDisposables.forEach((d) => d());
+    this.containerDisposables = [];
+    entry.containerDisposables = this.containerDisposables;   // share the reference
+
+    // --- R5: disconnect the ResizeObserver (§5.6) ---
+    // The same two lines mount() runs at :695-696 and unmount() at :3255-3258.
+    // Per D7 this is its ONLY owner, so this is a real step, not a re-run of R4.
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    // Set HERE, at the end of the teardown pair, so "the old wiring is fully down"
+    // is the literal precondition for the abort re-wire, and so the re-wire cannot
+    // double-register (this.resizeObserver is already null).
+    snap.rewired = true;
+
+    // --- R6: move the xterm element (§5.7) ---
+    // The catch is not theatre: appendChild throws HierarchyRequestError if
+    // `container` is inside term.element — reachable if a canvas node ever
+    // registers a host that is a descendant of the terminal. appendChild leaves
+    // the tree unchanged when it throws, so the element is still in snap.container.
+    try {
+      container.appendChild(element);
+    } catch (e) {
+      return this.abortRelocation(`relocateTo: appendChild failed: ${e}`, snap);
+    }
+    this.container = container;
+
+    // --- R7: re-wire the container locals, record the chrome mode (§5.8) ---
+    // The four listeners bind to the `container` parameter; the observer's fit body
+    // reads this.container, which R6 has just updated. Both correct only because
+    // the wiring is SHARED with mount() rather than duplicated.
+    this.wireContainerLocals(container, term, this.fitAddon ?? undefined, { paneChrome });
+
+    return 'relocated';
+  }
+
+  /**
+   * Undo a partial relocation and report it. Aborting CHANGES NOTHING: the
+   * terminal has not moved and is still fully wired in its current, live
+   * container, with its eligibility, chrome mode and convergence arm exactly as
+   * they were (design 012 §5.1).
+   *
+   * `surfaceDisplayed` is restored by DIRECT FIELD WRITE, not through
+   * setSurfaceDisplayed(): restoring a snapshot must be a state assignment, not a
+   * transition. Going through the setter would run the transition table, and on an
+   * aborted return trip (snapshot true, current false) that means arming a FRESH
+   * 50ms fit on an engine that never moved. Harmless but wrong — arming a timer is
+   * a change.
+   */
+  private abortRelocation(reason: string, snap: RelocationSnapshot): RelocationResult {
+    this.surfaceDisplayed = snap.surfaceDisplayed;
+    this.paneChromeActive = snap.paneChrome;
+    this.convergenceArmUntil = snap.convergenceArmUntil;
+    // Only re-wire if the wiring was actually removed, and re-wire with the
+    // RECORDED chrome mode, not a literal `true`: on an aborted canvas -> pane
+    // move snap.container IS the canvas host, and pane chrome there would install
+    // Ctrl/Cmd+F on it (review 094 B5). `this.container` is untouched on every
+    // abort path — R6 assigns it only after a successful appendChild — so there is
+    // nothing to restore there.
+    if (snap.rewired && snap.container && this.term) {
+      this.wireContainerLocals(
+        snap.container,
+        this.term,
+        this.fitAddon ?? undefined,
+        { paneChrome: snap.paneChrome },
+      );
+    }
+    console.error(`terminal-core/engine: ${reason}`);
+    this.opts.onDiag?.(() => `[TERM-DIAG] ${reason}`);
+    return 'aborted';
   }
 
   // ---------------------------------------------------------------------------

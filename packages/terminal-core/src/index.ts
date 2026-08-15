@@ -1,4 +1,5 @@
 export { TerminalEngine, DEFAULT_THEME } from './TerminalEngine';
+export type { RelocationResult } from './TerminalEngine';
 export {
   terminalCache,
   pasteToTerminal,
