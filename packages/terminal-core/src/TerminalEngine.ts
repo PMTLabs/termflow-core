@@ -962,6 +962,14 @@ export class TerminalEngine {
    * ResizeObserver delivers at end-of-frame and MutationObserver on a microtask, so
    * neither can interleave. The end state is identical to the pre-commit ordering.
    *
+   * The one real behavioural difference is on the CREATE path, where `term.open()`
+   * now runs with the foreign element still in the container. It changes nothing:
+   * open() sizes the terminal from `options.rows`/`cols`, not from the host, and the
+   * host box is parent-driven anyway (`.terminal-display` is `width/height: 100%`,
+   * non-flex), so it does not respond to how many `.xterm` children it transiently
+   * holds — which is also the box `FitAddon` measures, and the fit runs after the
+   * eviction regardless.
+   *
    * `mount()` is append-only and `unmount()` deliberately leaves `term.element` in
    * the DOM, because the cache still owns the live Terminal and a later mount
    * reattaches it (see the closing comment of unmount()). Both are correct on their
