@@ -17,6 +17,10 @@ import {
 import {
   getTerminalRenderPolicy,
   setTerminalRenderPolicy,
+  countActiveWebGLAddons,
+  quarantineWebGLAddon,
+  getQuarantinedWebGLAddonCount,
+  clearWebGLQuarantine,
   type RenderPolicy,
 } from '../renderPolicy';
 import {
@@ -94,6 +98,8 @@ function makeEntry(key: string) {
 
 afterEach(() => {
   terminalCache.clear();
+  // The quarantine is module state that deliberately outlives terminalCache.clear().
+  clearWebGLQuarantine();
   document.body.innerHTML = '';
 });
 
@@ -586,5 +592,44 @@ describe('non-canvas invalidation after canvas already demoted (review 126)', ()
 
     expect(restored['snap-canvas-then-global']).toBeUndefined();
     expect(getTerminalRenderPolicy('snap-canvas-then-global')).toBe('dom');
+  });
+});
+
+/**
+ * Review 126 LOW — the path BLOCKED by the quarantine must be a path that can also
+ * clear it. `drainWebGLQuarantine()` was reachable only from the create-path
+ * disposal helper, so a transient driver failure taxed the budget until the next
+ * terminal creation: reconciliation read the count, refused every promotion, and
+ * never retried the disposal that would have given the slot back. In a canvas
+ * session with no new terminals that is the rest of the session.
+ */
+describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
+  it('gives the slot back on a later reconciliation, with no mount or create event', () => {
+    makeEntry('q-recon');
+
+    // A wedged addon: dispose() throws, so it is held and counted.
+    let wedged = true;
+    const stuck = {
+      dispose() {
+        if (wedged) throw new Error('test: dispose failed before releasing the context');
+      },
+    };
+    quarantineWebGLAddon(stuck);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Budget 1, entirely consumed by the wedged context: nothing may be promoted.
+    const input = { desired: { 'q-recon': 'webgl' as RenderPolicy }, budget: 1, order: ['q-recon'] };
+    expect(reconcileRenderPolicies(input).applied['q-recon']).toBe('dom');
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+
+    // The driver recovers. Nothing mounts, nothing is created — the only event in
+    // the session is a second reconciliation.
+    wedged = false;
+
+    const out = reconcileRenderPolicies(input);
+
+    expect(getQuarantinedWebGLAddonCount()).toBe(0);
+    expect(out.applied['q-recon']).toBe('webgl');
+    expect(out.webglCount).toBe(1);
   });
 });

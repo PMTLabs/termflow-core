@@ -150,8 +150,13 @@ export function releaseFromWebGLQuarantine(addon: DisposableAddon | null | undef
 /**
  * Retry every quarantined addon and release the ones that finally dispose — a driver
  * hiccup must not tax the budget for the life of the session. Returns how many are
- * still held. Called opportunistically from disposeOrphanedWebGLAddon (the one path
- * that is already doing disposal work), so no caller has to remember to drain.
+ * still held.
+ *
+ * Called opportunistically from two places, so no caller has to remember to drain:
+ * `disposeOrphanedWebGLAddon` (the path already doing disposal work) and
+ * `reconcileRenderPolicies` (review 126 LOW — the path the quarantine BLOCKS). The
+ * first alone was not enough: a canvas session need never create a terminal, so a
+ * recovered addon could go on refusing every promotion for the rest of the session.
  */
 export function drainWebGLQuarantine(): number {
   for (const addon of [...webglQuarantine]) {

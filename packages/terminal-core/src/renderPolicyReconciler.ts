@@ -1,6 +1,7 @@
 import type { Terminal } from '@xterm/xterm';
 import {
   countActiveWebGLAddons,
+  drainWebGLQuarantine,
   getTerminalRenderPolicy,
   setTerminalRenderPolicy,
   type RenderPolicy,
@@ -45,6 +46,24 @@ export function reconcileRenderPolicies(
   const count = input.count ?? countActiveWebGLAddons;
   const getPolicy = input.getPolicy ?? getTerminalRenderPolicy;
   const applied: Record<string, RenderPolicy> = {};
+
+  // Retry the quarantine BEFORE any budget arithmetic (review 126 LOW). A
+  // quarantined addon is counted against the budget, so it can refuse every
+  // promotion in this pass — and until now the only automatic drain lived on the
+  // terminal create path, which a canvas session need never reach. A transient
+  // driver failure therefore taxed a slot for the rest of the session even after
+  // the driver recovered. This is the path the quarantine BLOCKS, so it is the
+  // path that must give it a chance to clear.
+  //
+  // Unthrottled on purpose: `drainWebGLQuarantine` iterates an empty Set — the
+  // only state this has in a healthy session — so the ordinary cost is one
+  // iterator allocation per reconciliation, and a non-empty quarantine is already
+  // a logged, session-degrading condition worth one dispose() retry per pass.
+  //
+  // Deliberately NOT behind the `count` seam: the quarantine is real module state
+  // that the fake-setter tests do not model, and draining it is correct for the
+  // production count whichever seam this pass reads.
+  drainWebGLQuarantine();
 
   // `ids` is Object.keys order. Note it is NOT insertion order for integer-like
   // keys — that is precisely why `order` exists and is required (§5).
