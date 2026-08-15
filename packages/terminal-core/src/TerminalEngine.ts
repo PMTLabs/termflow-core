@@ -1056,10 +1056,25 @@ export class TerminalEngine {
   // Either way the cache entry is left intact, so a later mount() can reattach it.
   //
   // The mechanism is `beginMountWiring()`: every mutation of this engine's own
-  // wiring happens at or after that commit point, and the commit point is placed
+  // WIRING happens at or after that commit point, and the commit point is placed
   // after the single fatal step of each path (the surface move for a reattach,
-  // `term.open()` for a create). Before it, the only engine-local state touched is
-  // `this.container`, which every abort restores.
+  // `term.open()` for a create).
+  //
+  // Two exact exceptions before it, both deliberate and neither wiring:
+  //   - `this.container`, which every abort restores;
+  //   - the protocol-state adoption at :1096-1104 (`kbState` / `win32State`).
+  //
+  // The adoption is NOT restored on a refusal, so "exactly as it was" is precise
+  // about wiring and about the cache entry, not literally about every field. It is
+  // benign in both refusal shapes and the reasons differ, so neither is an accident:
+  //   - an ALREADY-MOUNTED engine adopted the very same cached objects at its first
+  //     successful mount, so re-adopting them is an idempotent self-assignment;
+  //   - a FRESH engine only reaches the `win32State.enable()` branch when there is
+  //     no cached state to adopt, and a refused fresh engine is discarded by both
+  //     production callers, so the mutated state dies with it.
+  // If a caller is ever added that RETRIES on the same fresh engine, this stops
+  // being benign — the retry would start with win32 input mode already enabled —
+  // and the adoption must move below the commit point.
   // ---------------------------------------------------------------------------
   mount(container: HTMLElement): boolean {
     // Restored by every abort path below, so a refused mount leaves this engine
