@@ -1,7 +1,7 @@
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs } from '../store/slices/tabsSlice';
-import { setPaneTree, focusPane } from '../store/slices/panesSlice';
+import { setPaneTree, addTabTree, focusPane } from '../store/slices/panesSlice';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
@@ -38,6 +38,14 @@ export interface SavedLayout {
   activePaneId: string | null;
   createdAt: number;
   updatedAt: number;
+  /** Per-tab tree map (review 109 H2). `saveLayout` writes this for EVERY tab,
+   *  not just the active one, so a background tab's tree — and an API-created
+   *  tab's real `tm-` root leaf — survive a save/load round-trip. `paneTree`
+   *  above is kept only for backward compatibility with layouts written before
+   *  this field existed; `loadLayout` prefers `treesByTabId` when present and
+   *  falls back to the old single-tree behavior per tab when it is missing
+   *  (an old-format layout, or one saved before this field was introduced). */
+  treesByTabId?: Record<string, any>;
 }
 
 class StateManagerClass {
@@ -413,6 +421,10 @@ class StateManagerClass {
         activeTabId: state.tabs.activeTabId,
         paneTree: state.panes.paneTree,
         activePaneId: state.panes.activePaneId,
+        // Per-tab, not just the active tab's tree — a background tab (e.g. an
+        // API-created one) would otherwise have no saved tree at all and would
+        // be restored as a `tb-` seed permanently (review 109 H2).
+        treesByTabId: { ...state.panes.treesByTabId },
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
@@ -452,7 +464,15 @@ class StateManagerClass {
       // Wait a bit for the clear to complete
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Load layout tabs
+      // Load layout tabs. Review 109 H2: a tab must never be renderable without
+      // its authoritative tree, or TerminalContainer's seed effects manufacture
+      // a `terminalId: tab.id` root and can spawn a PTY the real tree later
+      // orphans. So each tab's tree — when the layout carries one — is
+      // dispatched in the SAME synchronous block as its `addTab`, with no
+      // `await`/timeout between them. An OLD-format layout (saved before
+      // `treesByTabId` existed) has no per-tab tree; those tabs fall back to
+      // today's behavior (seeded by TerminalContainer, corrected by the
+      // deferred setPaneTree/setActiveTab below for the active tab only).
       if (sanitizedLayout.tabs?.length > 0) {
         console.log(`Loading ${sanitizedLayout.tabs.length} tabs`);
         for (const tab of sanitizedLayout.tabs) {
@@ -460,8 +480,12 @@ class StateManagerClass {
             ...tab,
             isActive: false // Ensure tabs are not active initially
           }));
+          const tabTree = sanitizedLayout.treesByTabId?.[tab.id];
+          if (tabTree) {
+            dispatch(addTabTree({ tabId: tab.id, tree: tabTree }));
+          }
         }
-        
+
         // Set active tab after all tabs are added
         if (sanitizedLayout.activeTabId) {
           console.log(`Setting active tab: ${sanitizedLayout.activeTabId}`);
@@ -471,12 +495,16 @@ class StateManagerClass {
         }
       }
 
-      // Load layout pane tree after tabs
+      // Load the active tab's pane tree after tabs. When treesByTabId already
+      // carried the active tab's tree above, this re-dispatches the identical
+      // tree (harmless) — it exists mainly for OLD-format layouts, whose only
+      // tree lives in `paneTree` and needs this deferred path to land after
+      // `setActiveTab` mirrors it correctly.
       if (sanitizedLayout.paneTree) {
         console.log(`Loading pane tree`);
         setTimeout(() => {
           dispatch(setPaneTree(sanitizedLayout.paneTree));
-          
+
           if (sanitizedLayout.activePaneId) {
             dispatch(focusPane(sanitizedLayout.activePaneId));
           }
@@ -633,6 +661,7 @@ class StateManagerClass {
     activePaneId: string | null;
     tabPanes?: { [tabId: string]: any };
     terminalCwds?: { [terminalId: string]: string };
+    treesByTabId?: { [tabId: string]: any };
   }>(data: T): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
@@ -729,8 +758,19 @@ class StateManagerClass {
       });
     }
 
+    // 2b. Sanitize the per-tab tree map (review 109 H2), same remapping as
+    // tabPanes above — each tab's tree is sanitized under its (possibly
+    // remapped) tab id so a saved API tab's `tm-` leaf survives intact.
+    const sanitizedTreesByTabId: { [tabId: string]: any } = {};
+    if (data.treesByTabId) {
+      Object.entries(data.treesByTabId).forEach(([oldTabId, tree]) => {
+        const newTabId = tabIdMap.has(oldTabId) ? tabIdMap.get(oldTabId)! : oldTabId;
+        sanitizedTreesByTabId[newTabId] = sanitizeNode(tree, newTabId);
+      });
+    }
+
     // 3. Sanitize active paneTree
-    const sanitizedPaneTree = data.paneTree 
+    const sanitizedPaneTree = data.paneTree
       ? sanitizeNode(data.paneTree, sanitizedActiveTabId || '')
       : null;
 
@@ -749,6 +789,10 @@ class StateManagerClass {
 
     if (data.tabPanes) {
       (result as any).tabPanes = sanitizedTabPanes;
+    }
+
+    if (data.treesByTabId) {
+      (result as any).treesByTabId = sanitizedTreesByTabId;
     }
 
     return result;
