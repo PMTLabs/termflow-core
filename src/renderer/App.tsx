@@ -816,8 +816,11 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     // A split-pane terminal's exit is surfaced inline by the "[Process exited]"
     // banner the TerminalDisplay listener writes; here we decide the tab-level
-    // affordance. A tab's root pane carries terminalId === tabId, so a root-pane
-    // exit resolves directly; a non-root pane's exit is resolved via its tree.
+    // affordance. A RENDERER-created tab's root pane carries terminalId === tabId,
+    // so that case resolves directly; every other pane — a split, or the root of an
+    // API-created tab, which carries a `tm-` leaf like any other pane (design 011,
+    // option A) — is resolved via its tree by findTabIdByTerminalId. The direct
+    // check is a fast path, never the only one.
     // Either way, the tab only counts as exited once EVERY terminal in its tree
     // has no live process — a lone sibling exiting leaves a multi-pane tab
     // running, but the LAST pane to exit (root or not) must still trigger the

@@ -138,12 +138,17 @@ pub async fn create_terminal(
     // returns `None` and it correctly mints a `tm-` split leaf instead.
     //
     // We claim but never REFUSE on contention: this call is a user action on a
-    // pane that already exists and owns its leaf, so it must not fail. The
-    // reverse ordering — a REST create winning the claim and committing to `tb-a`
-    // before this spawn registers — is therefore still open, and closing it is a
-    // design question (which creator wins a contested root leaf), not a lock:
-    // see docs/progress/010 for the options. The warning below is what makes that
-    // window observable instead of silent.
+    // pane that already exists and owns its leaf, so it must not fail.
+    //
+    // The reverse ordering — a REST create winning the claim and committing to
+    // `tb-a` before this spawn registers — used to be open, and is now CLOSED by
+    // construction (design 011, option A): `resolve_api_spawn_identity` never takes
+    // a caller-supplied tab's root leaf at all, it always mints a `tm-`. So this is
+    // the only path that can ever claim a `tb-` root leaf, and there is nobody left
+    // to contend with. The claim is kept anyway — it costs one DashMap insert, it
+    // still serialises this path against itself, and the warning below turns any
+    // future re-opening of that window into a log line rather than a silent
+    // duplicate-leaf registration.
     let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
     // Held to the end of this command (and dropped on the sidecar path's early
     // return) — releasing it before `spawn_terminal` has registered would reopen
