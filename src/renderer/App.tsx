@@ -47,7 +47,7 @@ import { RootState, store } from './store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
-import { buildApiCreatedTab, resolveApiCreateIds } from './services/apiCreatedTab';
+import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
 import { resolveActivation } from './services/notificationRouting';
@@ -816,8 +816,11 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     // A split-pane terminal's exit is surfaced inline by the "[Process exited]"
     // banner the TerminalDisplay listener writes; here we decide the tab-level
-    // affordance. A tab's root pane carries terminalId === tabId, so a root-pane
-    // exit resolves directly; a non-root pane's exit is resolved via its tree.
+    // affordance. A RENDERER-created tab's root pane carries terminalId === tabId,
+    // so that case resolves directly; every other pane — a split, or the root of an
+    // API-created tab, which carries a `tm-` leaf like any other pane (design 011,
+    // option A) — is resolved via its tree by findTabIdByTerminalId. The direct
+    // check is a fast path, never the only one.
     // Either way, the tab only counts as exited once EVERY terminal in its tree
     // has no live process — a lone sibling exiting leaves a multi-pane tab
     // running, but the LAST pane to exit (root or not) must still trigger the
@@ -921,53 +924,35 @@ const App: React.FC = () => {
         // which carry a paneId, are handled by Mode 1.)
         console.log(`API: Creating new tab for backend terminal ${terminalId} (tabId ${tabId || 'none'})`);
 
-        // Resolve a tab ID that starts with 'tb-' (or generate one if not provided)
-        const targetTabId = tabId || generateId('tb');
-
-        // Map the UI terminalId (the tab id) to the backend processId so the pane
-        // reuses the existing PTY instead of spawning a new one.
         const terminalService = (window as any).terminalService;
-        if (terminalService && terminalId) {
-          terminalService.registerExistingTerminal(targetTabId, terminalId);
-        }
-
-        const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile });
-
-        const paneTree = {
-          id: generateId('pn'),
-          type: 'terminal' as const,
-          terminalId: targetTabId,
-          name: name || 'Terminal',
-          shellType: profile || defaultProfile || 'default',
-        };
-
-        // Seed the window map (API/persistence) AND the authoritative Redux store
-        // (which TerminalContainer renders from) so the tab shows immediately.
         if (!(window as any).tabPanes) (window as any).tabPanes = {};
-        (window as any).tabPanes[targetTabId] = paneTree;
-
         const { setActiveTab } = await import('./store/slices/tabsSlice');
         const { addTabTree, setActiveTabId } = await import('./store/slices/panesSlice');
-        // Default: do NOT steal focus for an API/MCP-created tab. Activate only
-        // when the user opted in, or when there is no tab at all (otherwise the
-        // UI would have no active tab and render blank).
-        const shouldActivate = activateOnApiCreate || tabCount === 0;
-        dispatch(addTab({ ...newTab, isActive: shouldActivate }));
-        dispatch(addTabTree({ tabId: targetTabId, tree: paneTree }));
-        if (shouldActivate) {
-          dispatch(setActiveTab(targetTabId));
-          dispatch(setActiveTabId(targetTabId));
-        }
 
-        // Notify backend that UI tab is ready
-        if (window.electronAPI) {
-          window.electronAPI.sendToMain('api:terminalTabCreated', {
-            terminalId: terminalId,
-            tabId: targetTabId,
-            name: name,
-            success: true
-          });
-        }
+        runApiCreateMode0(options, {
+          dispatch,
+          generateId,
+          defaultProfile,
+          registerExistingTerminal: (leaf, proc) => terminalService?.registerExistingTerminal(leaf, proc),
+          tabPanes: (window as any).tabPanes,
+          tabExists,
+          activateOnApiCreate,
+          tabCount,
+          addTab,
+          addTabTree,
+          setActiveTab,
+          setActiveTabId,
+          notifyTabCreated: ({ terminalId: notifiedTerminalId, tabId: notifiedTabId, name: notifiedName }) => {
+            if (window.electronAPI) {
+              window.electronAPI.sendToMain('api:terminalTabCreated', {
+                terminalId: notifiedTerminalId,
+                tabId: notifiedTabId,
+                name: notifiedName,
+                success: true,
+              });
+            }
+          },
+        });
         return;
       }
 

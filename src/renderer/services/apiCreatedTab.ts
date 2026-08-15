@@ -54,7 +54,12 @@ export function buildApiCreatedTab(options: ApiCreatedTabOptions): ApiCreatedTab
 export interface ApiCreateIds {
   /** Backend PTY id (`pc-*`) to bind the pane to. */
   processId?: string;
-  /** Renderer pane-tree leaf (`tb-*` root, `tm-*` split). */
+  /**
+   * Renderer pane-tree leaf. Two id FORMS, describing who minted the leaf and
+   * NOT the pane's shape: `tb-*` for a renderer-created tab root (leaf ==
+   * owner), `tm-*` for split panes AND for every API-created terminal,
+   * including a solo root. Root/solo/split comes only from the pane tree.
+   */
   leafId?: string;
   /** The tab that owns the leaf (`tb-*`). */
   owningTabId?: string;
@@ -96,4 +101,116 @@ export function resolveApiCreateIds(detail: {
     leafId: detail.rendererTerminalId ?? processId ?? owningTabId,
     owningTabId,
   };
+}
+
+/**
+ * Dependencies `runApiCreateMode0` needs from its caller, injected so the
+ * function is unit-testable without mounting `App.tsx` or its IPC/store
+ * plumbing. Production (`App.tsx handleAPICreateTerminalTab`) supplies real
+ * store/terminalService bindings; tests supply a real Redux store's dispatch
+ * plus lightweight fakes for the rest.
+ */
+export interface ApiCreateMode0Deps {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dispatch: (action: any) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  generateId: (prefix: any) => string;
+  defaultProfile?: string;
+  /** Bind the backend PTY to the pane's leaf id — same role as
+   *  `terminalService.registerExistingTerminal`. */
+  registerExistingTerminal: (leafId: string, processId: string) => void;
+  /** The module-scoped `window.tabPanes` map (or a test double for it). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tabPanes: Record<string, any>;
+  /** True if a tab with this id already exists in the store. */
+  tabExists: (id: string) => boolean;
+  activateOnApiCreate: boolean;
+  tabCount: number;
+  /** Fired once the UI tab is ready — mirrors the `api:terminalTabCreated`
+   *  IPC notify. Optional so tests that don't care can omit it. */
+  notifyTabCreated?: (payload: { terminalId?: string; tabId: string; name?: string }) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  addTab: (tab: any) => any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  addTabTree: (payload: { tabId: string; tree: any }) => any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setActiveTab: (tabId: string) => any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  setActiveTabId: (tabId: string) => any;
+}
+
+export interface ApiCreateMode0Result {
+  targetTabId: string;
+  /** The leaf the pane tree's root node ends up carrying — `tm-*` for an
+   *  API-created tab, per option A. */
+  leafId?: string;
+  paneTree: { id: string; type: 'terminal'; terminalId?: string; name?: string; shellType?: string };
+}
+
+/**
+ * Mode 0 of `api:createTerminalTab`: create a brand-new UI tab for a
+ * backend-spawned terminal that has no open UI tab yet (e.g. an agent created
+ * it via the API/MCP). Extracted from `App.tsx handleAPICreateTerminalTab` so
+ * it can be exercised directly by a test that drives the REAL code path
+ * (review 109 MEDIUM) instead of hand-assembling the tree/registration the
+ * production ordering is supposed to produce.
+ *
+ * Mirrors `App.tsx` exactly: seed the window `tabPanes` map AND dispatch
+ * `addTabTree` in the SAME synchronous block as `addTab`, before returning —
+ * that ordering is what keeps `TerminalContainer`'s default-seed effect from
+ * ever overwriting an API tab's `tm-*` leaf with `tab.id`.
+ */
+export function runApiCreateMode0(
+  detail: {
+    name?: string;
+    profile?: string;
+    processId?: string;
+    terminalId?: string;
+    rendererTerminalId?: string;
+    owningTabId?: string;
+    tabId?: string;
+  },
+  deps: ApiCreateMode0Deps,
+): ApiCreateMode0Result {
+  const { name, profile } = detail;
+  const { processId: terminalId, leafId, owningTabId } = resolveApiCreateIds(detail);
+  const tabId = owningTabId;
+
+  const targetTabId = tabId || deps.generateId('tb');
+
+  // Bind the backend PTY to the LEAF id (the `tm-*` the pane tree below is
+  // given), not to the tab id — must match the pane tree's terminalId or
+  // TerminalPane's mount effect finds no registered process and spawns a
+  // duplicate PTY.
+  if (leafId && terminalId) {
+    deps.registerExistingTerminal(leafId, terminalId);
+  }
+
+  const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile: deps.defaultProfile });
+
+  const paneTree: ApiCreateMode0Result['paneTree'] = {
+    id: deps.generateId('pn'),
+    type: 'terminal',
+    terminalId: leafId,
+    name: name || 'Terminal',
+    shellType: profile || deps.defaultProfile || 'default',
+  };
+
+  // Seed the window map (API/persistence) BEFORE the tab enters the `tabs`
+  // slice below. The authoritative Redux tree (`addTabTree`) is dispatched
+  // AFTER `addTab`, not before — TerminalContainer only ever observes both
+  // in the same synchronous turn, so no render sees the tab without a tree.
+  deps.tabPanes[targetTabId] = paneTree;
+
+  const shouldActivate = deps.activateOnApiCreate || deps.tabCount === 0;
+  deps.dispatch(deps.addTab({ ...newTab, isActive: shouldActivate }));
+  deps.dispatch(deps.addTabTree({ tabId: targetTabId, tree: paneTree }));
+  if (shouldActivate) {
+    deps.dispatch(deps.setActiveTab(targetTabId));
+    deps.dispatch(deps.setActiveTabId(targetTabId));
+  }
+
+  deps.notifyTabCreated?.({ terminalId, tabId: targetTabId, name });
+
+  return { targetTabId, leafId, paneTree };
 }

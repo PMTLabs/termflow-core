@@ -9,11 +9,58 @@ import {
   getSelectedPaneId,
   isTerminalMuted,
   resolveExitedTabId,
+  soloRootLeafId,
+  tabLeafIds,
 } from '../paneTreeOps';
 
 const leaf = (id: string, tid: string): PaneNode => ({ id, type: 'terminal', terminalId: tid });
 const hsplit = (id: string, a: PaneNode, b: PaneNode): PaneNode =>
   ({ id, type: 'split', direction: 'horizontal', size: 50, children: [a, b] });
+
+// Review 109 H3: TabManager's process/rename lookups must resolve an
+// API-created tab's real tm- root leaf, not assume tab.id is a live leaf.
+describe('soloRootLeafId', () => {
+  it('returns the API-created tab\'s tm- leaf for a solo (unsplit) root pane', () => {
+    const tree = leaf('pn-api1', 'tm-api-leaf-1');
+    expect(soloRootLeafId(tree)).toBe('tm-api-leaf-1');
+  });
+
+  it('returns tab.id for a renderer-created solo root pane (leaf === tab.id)', () => {
+    const tree = leaf('pn-r1', 'tb-renderer1');
+    expect(soloRootLeafId(tree)).toBe('tb-renderer1');
+  });
+
+  it('returns null for a split tree — no single root leaf to resolve', () => {
+    const tree = hsplit('s1', leaf('p1', 't1'), leaf('p2', 't2'));
+    expect(soloRootLeafId(tree)).toBeNull();
+  });
+
+  it('returns null for a missing tree', () => {
+    expect(soloRootLeafId(null)).toBeNull();
+  });
+});
+
+// Re-review 111 finding 3: a SPLIT API-created tab made soloRootLeafId return
+// null, and the `tab.id` fallback then resolved to a terminal that never
+// existed — Copy Tab Info dropped the process and rename hit no backend at all.
+describe('tabLeafIds', () => {
+  it('returns the single leaf of a solo renderer-created tab', () => {
+    expect(tabLeafIds(leaf('pn-r1', 'tb-renderer1'), 'tb-renderer1')).toEqual(['tb-renderer1']);
+  });
+
+  it('returns the tm- leaf (never tab.id) for a solo API-created tab', () => {
+    expect(tabLeafIds(leaf('pn-api1', 'tm-api-leaf-1'), 'tb-api1')).toEqual(['tm-api-leaf-1']);
+  });
+
+  it('returns EVERY leaf of a split tab, not the tab id', () => {
+    const tree = hsplit('s1', leaf('p1', 'tm-api-leaf-1'), leaf('p2', 'tm-api-leaf-2'));
+    expect(tabLeafIds(tree, 'tb-api1')).toEqual(['tm-api-leaf-1', 'tm-api-leaf-2']);
+  });
+
+  it('falls back to tab.id only when there is no tree at all', () => {
+    expect(tabLeafIds(null, 'tb-x')).toEqual(['tb-x']);
+  });
+});
 
 describe('isTerminalMuted', () => {
   const mutedLeaf = (id: string, tid: string): PaneNode => ({ ...leaf(id, tid), notifyMuted: true });

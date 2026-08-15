@@ -141,10 +141,13 @@ export const TerminalContainer: React.FC = () => {
         // paneTree mirror, so switching tabs can't show another tab's content.
         let displayPaneTree = treesByTabId[tab.id] || tabPanes[tab.id];
         // Keep a single-pane tab's pane name in step with the tab title (renames).
+        // `type === 'terminal'` alone already scopes this to the solo/root pane
+        // (a split tab's tree is a 'split' node here, never 'terminal') — an
+        // additional `terminalId === tab.id` check is over-narrow now that an
+        // API-created tab's root pane carries a `tm-` leaf, not the tab's own id.
         if (
           displayPaneTree &&
           displayPaneTree.type === 'terminal' &&
-          displayPaneTree.terminalId === tab.id &&
           displayPaneTree.name !== tab.title
         ) {
           displayPaneTree = { ...displayPaneTree, name: tab.title };

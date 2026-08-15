@@ -351,7 +351,12 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 ///
 /// Key contract (design 011 §4), all of it load-bearing for existing clients:
 ///   `id` / `processId` — the PTY routing key. Unchanged.
-///   `terminalId`       — the renderer LEAF (`tb-*` root, `tm-*` split).
+///   `terminalId`       — the renderer LEAF. Two id FORMS, describing who minted
+///                        the leaf and NOT the pane's shape: `tb-*` for a
+///                        renderer-created tab root (leaf == owner), `tm-*` for
+///                        split panes AND for every API-created terminal,
+///                        including a solo root. Root/solo/split is determined
+///                        only by the pane-tree structure, never by the prefix.
 ///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
 ///                        so no existing API/MCP client breaks. Removing it is
 ///                        a major-version change, explicitly not done here.
@@ -484,7 +489,8 @@ fn mint_renderer_id(prefix: &str) -> String {
 /// `mint` supplies the id so the decision is deterministically testable;
 /// production passes `mint_renderer_id`.
 ///
-/// Rules (design 011 §5 "The corrected write"):
+/// Rules (design 011 §5 "The corrected write", as amended by option A — see
+/// below):
 ///   * An explicit `owningTabId`, else `tabId`, is the OWNER — accepted verbatim
 ///     when it starts with `tb-`, exactly as `api_server.rs:494` did before.
 ///   * A `tm-` value in either field is a PANE id, not a tab id. Before P0-A it
@@ -492,45 +498,14 @@ fn mint_renderer_id(prefix: &str) -> String {
 ///     (ground-truth correction C3), so the pane appeared in the wrong tab. Fail
 ///     closed with a message naming the right field. The spec's §5 snippet does
 ///     not cover this case; this is a GAP FILL, flagged in the plan header.
-///   * The leaf must be a fresh `tm-` whenever this create lands in a tab that
-///     **already holds a live terminal** — only a tab's FIRST pane may use the
-///     tab's own id as its leaf (design 011 §3, D7). `pane_id.is_some()` is one
-///     way to know that, but NOT the only one: `paneId` is optional in the MCP
-///     tool and `App.tsx` Mode 2 splits a populated tab without it, so keying
-///     off `pane_id` alone re-registers the tab root's leaf onto a second live
-///     terminal — the `terminal_history` PRIMARY KEY collision P0-A exists to
-///     remove (review 095 B1).
-///   * Otherwise this is the tab's first/solo pane and leaf == owner, as before.
-///
-/// CONCURRENCY (review 099 T2-F1). "Already holds a live terminal" is read from
-/// `terminals`, but the create that would make it true registers its `Terminal`
-/// only at the very END of `spawn_terminal` (`pty_manager.rs:862-871`, an order
-/// that must not change). Two parallel POSTs naming the same empty tab therefore
-/// both read "unoccupied" and both took the tab id as their leaf. So occupancy is
-/// now the disjunction of two sources, and the second is taken as a RESERVATION:
-///
-///   1. `claim_root_leaf` — atomically reserves the OWNER for this create and
-///      hands back an RAII guard; `None` means another create already holds it.
-///      Claimed FIRST, before the scan, because a claim is released only after
-///      the winner's `Terminal` is visible (see `RootLeafClaims::try_claim`).
-///   2. `owner_has_live_terminal` — the pre-existing scan, for creates that
-///      already finished.
-///
-/// The returned guard belongs to the CALLER and must outlive `spawn_terminal`.
-///
-/// Both hooks are injected rather than read from `AppState` so this stays a pure
-/// unit-testable decision (the Windows test binary cannot build the
-/// `integration-tests` feature that `mock_app` needs). A freshly minted owner
-/// trivially has neither a live terminal nor a competing claim, so the extra
-/// probes cannot disturb the new-tab path.
-fn resolve_api_spawn_identity<C>(
+///   * The leaf is ALWAYS a fresh `tm-`, unconditionally — see the comment at
+///     the mint site below for why an API create may never claim a tab's root
+///     (`tb-`) leaf, even for a brand-new, empty tab.
+fn resolve_api_spawn_identity(
     tab_id: Option<&str>,
     owning_tab_id: Option<&str>,
-    pane_id: Option<&str>,
-    claim_root_leaf: impl FnOnce(&str) -> Option<C>,
-    owner_has_live_terminal: impl Fn(&str) -> bool,
     mut mint: impl FnMut(&str) -> String,
-) -> Result<(ApiSpawnIdentity, Option<C>), String> {
+) -> Result<ApiSpawnIdentity, String> {
     let owner_hint = owning_tab_id
         .or(tab_id)
         .map(str::trim)
@@ -548,33 +523,35 @@ fn resolve_api_spawn_identity<C>(
         _ => mint("tb"),
     };
 
-    // D7: the trigger is "this tab is already occupied", not "the caller named a
-    // pane". `pane_id` is kept as a signal because a caller that DOES name a pane
-    // is telling us it wants a split even if the tab's live set is momentarily
-    // empty (e.g. its only PTY just exited).
-    let (renderer_terminal_id, root_leaf_claim) = if pane_id.is_some() {
-        // Unconditionally a split: a fresh `tm-` is unique by construction, so
-        // there is nothing to reserve and no reason to block a concurrent root.
-        (mint("tm"), None)
-    } else {
-        match claim_root_leaf(&owning_tab_id) {
-            // We reserved the owner AND no finished create holds it: this is the
-            // tab root, leaf == owner. The guard travels back to the caller.
-            Some(claim) if !owner_has_live_terminal(&owning_tab_id) => {
-                (owning_tab_id.clone(), Some(claim))
-            }
-            // Occupied by a registered terminal. We drop the reservation right
-            // here: we are not taking the root leaf, so holding it would only
-            // stall the next create for no gain.
-            Some(_) => (mint("tm"), None),
-            // Another create is IN FLIGHT as this tab's root. It may not be
-            // visible in `terminals` yet, but it has already committed to the
-            // tab id as its leaf — so this one is a split.
-            None => (mint("tm"), None),
-        }
-    };
+    // OPTION A (design 011, root-leaf revision): an API/MCP create NEVER takes
+    // a tab's root (`tb-`) leaf — it always mints a fresh `tm-`, even for a
+    // brand-new, currently-empty tab.
+    //
+    // This used to be conditional: a create landing in an empty tab claimed the
+    // tab id itself as its leaf (leaf == owner), guarded by `RootLeafClaims` +
+    // an `owner_has_live_terminal` scan against the TOCTOU window between that
+    // decision and `spawn_terminal` registering its `Terminal`
+    // (`pty_manager.rs:862-871`). That guard closed the race between two API
+    // creates, but not the race this path can never see: `commands::create_terminal`
+    // (the renderer path) *must* be able to reclaim a tab's root leaf when the
+    // user restarts an exited root pane — it cannot be refused. So the REST-first
+    // ordering (API create claims `tb-a` and commits to it, then the renderer's
+    // restart of the same tab also registers `tb-a`) produced two live terminals
+    // on one `terminal_history` PRIMARY KEY regardless of how tight the API-side
+    // claim was, because the claim only ever covered API-vs-API contention, not
+    // API-vs-renderer.
+    //
+    // The API path cannot distinguish "this is a genuinely new tab" from "this
+    // tab's root pane just exited and is about to be restarted by the renderer"
+    // — both look identical from here (an owner with no live terminal). Guessing
+    // wrong is exactly what produced the duplicate-leaf bug. Rather than narrow
+    // that window further, this removes the contention: only
+    // `commands::create_terminal` may ever claim a `tb-` root leaf now, so there
+    // is nobody left to race it. `RootLeafClaims` (`state.rs`) still exists and
+    // is still used there — see `commands.rs`.
+    let renderer_terminal_id = mint("tm");
 
-    Ok((ApiSpawnIdentity { renderer_terminal_id, owning_tab_id }, root_leaf_claim))
+    Ok(ApiSpawnIdentity { renderer_terminal_id, owning_tab_id })
 }
 
 async fn create_terminal(
@@ -623,35 +600,13 @@ async fn create_terminal(
     // registers with them up front (review 062 F-01: patching an id in after
     // spawn returns races a fast-exiting shell's exit-path persist, which then
     // files the final scrollback under the ephemeral pc- id).
-    let (identity, root_leaf_claim) = match resolve_api_spawn_identity(
+    let identity = match resolve_api_spawn_identity(
         payload.tab_id.as_deref(),
         payload.owning_tab_id.as_deref(),
-        payload.pane_id.as_deref(),
-        // Reserve the owner for the decision→registration window (review 099
-        // T2-F1). Atomic insert, taken BEFORE the scan below; released by the
-        // guard's `Drop` once `spawn_terminal` has returned.
-        |owner: &str| state.root_leaf_claims.try_claim(owner),
-        // D7 / review 095 B1: a create that lands in an already-occupied tab is a
-        // SPLIT even with no `paneId` (App.tsx Mode 2), so the leaf must be fresh.
-        // A terminal claims a tab either as its owner or — for a tab root, and for
-        // anything registered before P0-A — as its own renderer leaf.
-        // Read-only iteration that completes before the spawn: no shard guard is
-        // held across `spawn_terminal`, and nothing inside takes another lock.
-        // On its own this is a TOCTOU read, which is why the reservation above
-        // covers the creates it cannot see yet.
-        |owner: &str| {
-            state.terminals.iter().any(|e| {
-                let t = e.value();
-                t.owning_tab_id.as_deref() == Some(owner)
-                    || t.renderer_terminal_id.as_deref() == Some(owner)
-            })
-        },
         mint_renderer_id,
     ) {
         Ok(i) => i,
         Err(e) => {
-            // No claim exists yet on this path (resolution failed before it was
-            // taken), so there is nothing to release.
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response()
         }
     };
@@ -669,13 +624,6 @@ async fn create_terminal(
         Some(identity.owning_tab_id.clone()),
         None, // API-created terminal: fresh session, no restored scrollback
     );
-    // EARLIEST CORRECT RELEASE, and the only one that matters: `spawn_terminal`
-    // has either registered the `Terminal` (so the scan above now sees this tab
-    // as occupied) or failed (so the owner is free again). Explicit rather than
-    // left to end-of-scope so the guard's lifetime — everything above this line —
-    // is visible; `Drop` still covers the `?`-free early return paths.
-    drop(root_leaf_claim);
-
     match spawned {
         Ok(id) => {
             // Notify the UI to create a tab for this new terminal. We BROADCAST (a
@@ -3338,9 +3286,11 @@ mod tests {
         assert_eq!(v["promptHook"], json!(true));
     }
 
-    /// Root-pane invariant (design 011 §7 test 5): leaf == owner.
+    /// design 011 §7 test 5: leaf == owner for a RENDERER-created tab root.
+    /// Not a general root-pane invariant — an API-created root's leaf is a
+    /// `tm-*` owned by a different `tb-*` id, so leaf != owner there.
     #[test]
-    fn a_root_pane_reports_the_same_value_for_leaf_and_owner() {
+    fn a_renderer_created_root_reports_the_same_value_for_leaf_and_owner() {
         let mut t = identity_sample();
         t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
         let v = terminal_identity_json(&t, "ui");
@@ -3411,40 +3361,21 @@ mod tests {
         }
     }
 
-    /// An EMPTY tab: no live terminal is registered against any owner yet.
-    /// Production passes a closure over `state.terminals` (Task 5 Step 3).
-    fn no_live_terminals(_owner: &str) -> bool {
-        false
-    }
-
-    /// No other create is in flight, so the owner reservation always succeeds.
-    /// `()` stands in for the RAII guard in tests that don't exercise it;
-    /// production passes `state.root_leaf_claims.try_claim`.
-    fn no_competing_create(_owner: &str) -> Option<()> {
-        Some(())
-    }
-
-    /// THE REGRESSION TEST (design 011 §7 test 1). Two API creates targeting the
-    /// same tab with a pane_id — the split-a-pane flow — must produce DISTINCT
-    /// leaves and the SAME owner. Before P0-A both stored `tb-shared01` as
-    /// `tab_id`, which is the `terminal_history` PRIMARY KEY: one PTY got reaped
-    /// by StateManager's reconcile, and closing either pane deleted the other's
-    /// scrollback.
+    /// THE REGRESSION TEST (design 011 §7 test 1), as amended by option A. Two
+    /// API creates targeting the same tab must produce DISTINCT leaves and the
+    /// SAME owner. Before P0-A both stored `tb-shared01` as `tab_id`, which is
+    /// the `terminal_history` PRIMARY KEY: one PTY got reaped by StateManager's
+    /// reconcile, and closing either pane deleted the other's scrollback.
+    /// Originally this test drove the collision through the split-a-pane
+    /// (`paneId`) flow specifically, alongside a sibling test for the no-`paneId`
+    /// (Mode 2) shape. Option A removed `pane_id` from the decision entirely —
+    /// EVERY API create takes this path now, `paneId` or not — so both shapes
+    /// collapse onto the same two-calls-in-a-row test.
     #[test]
     fn spawn_identity_two_api_splits_get_distinct_leaves_and_one_owner() {
         let mut mint = counting_mint();
-        let (a, _) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, Some("pn-a"),
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("split a");
-        // By the time split b arrives, split a is live in that tab — so BOTH
-        // signals are true here, and either alone must be enough (see D7).
-        let (b, _) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, Some("pn-b"),
-            no_competing_create, |owner| owner == "tb-shared01", &mut mint,
-        )
-        .expect("split b");
+        let a = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint).expect("split a");
+        let b = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint).expect("split b");
 
         assert_ne!(a.renderer_terminal_id, b.renderer_terminal_id);
         assert!(a.renderer_terminal_id.starts_with("tm-"));
@@ -3453,63 +3384,75 @@ mod tests {
         assert_eq!(b.owning_tab_id, "tb-shared01");
     }
 
-    /// Root-pane invariant (design 011 §7 test 5), stated the way it is actually
-    /// true: the leaf equals the owner for a tab's FIRST live terminal. The
-    /// earlier revision of this test asserted `pane_id == None ⇒ leaf == owner`
-    /// unconditionally, which locked in the review-095 B1 gap as correct.
+    /// THE PINNED BEHAVIOUR CHANGE (option A). Design 011 §7 test 5 used to read
+    /// "the leaf equals the owner for a tab's FIRST live terminal" — true right
+    /// up until the *renderer* path could ALSO be that tab's first live
+    /// terminal (a user restarting an exited root pane, which `commands::create_terminal`
+    /// can never refuse). An API create cannot tell "genuinely new tab" from
+    /// "this tab's root just died" apart from this signal alone, and guessing
+    /// wrong (claiming the root) is exactly what produced the duplicate-leaf
+    /// bug: two live terminals sharing one `terminal_history` PRIMARY KEY. So an
+    /// API create now NEVER claims the root leaf — not even here, into a
+    /// brand-new empty tab with no `paneId`, the one shape that used to be the
+    /// clearest-cut "obviously it's the root". This is the exact behaviour
+    /// change P0-A/option A makes and the one this test exists to pin.
     #[test]
-    fn spawn_identity_first_create_into_an_empty_tab_keeps_leaf_equal_to_owner() {
+    fn spawn_identity_first_create_into_an_empty_tab_still_gets_a_fresh_tm_leaf() {
         let mut mint = counting_mint();
-        let (r, claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("root");
-        assert_eq!(r.renderer_terminal_id, "tb-shared01");
-        assert!(claim.is_some(), "a create that takes the root leaf must hold the reservation");
+        let r = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint).expect("root");
+        assert!(
+            r.renderer_terminal_id.starts_with("tm-"),
+            "an API create must never take the tab's own id as its leaf, even \
+             into a brand-new empty tab: got {}",
+            r.renderer_terminal_id
+        );
+        assert_ne!(r.renderer_terminal_id, "tb-shared01");
         assert_eq!(r.owning_tab_id, "tb-shared01");
     }
 
+    /// NEW (not a conversion). Pins the exact shape of the behaviour change in
+    /// isolation, independent of the test above: no `paneId` at all (there is no
+    /// such parameter any more), a brand-new tab with no id supplied by the
+    /// caller (so it is minted here, same as any other API create), and the
+    /// resulting pane still gets a `tm-` leaf with `owning_tab_id` correctly set
+    /// to that freshly-minted tab. If this ever regresses to `leaf == owner`,
+    /// this is the test that must fail.
+    #[test]
+    fn an_api_create_with_no_pane_id_into_a_brand_new_tab_gets_a_tm_leaf_not_the_tab_id() {
+        let mut mint = counting_mint();
+        let r = resolve_api_spawn_identity(None, None, &mut mint)
+            .expect("brand-new tab, no ids supplied at all");
+        assert!(
+            r.renderer_terminal_id.starts_with("tm-"),
+            "got {} instead of a tm- leaf",
+            r.renderer_terminal_id
+        );
+        assert!(r.owning_tab_id.starts_with("tb-"));
+        assert_eq!(
+            r.owning_tab_id, "tb-000000001",
+            "the owner is the freshly-minted tab, same as before option A"
+        );
+        assert_ne!(
+            r.renderer_terminal_id, r.owning_tab_id,
+            "the whole point: leaf and owner are no longer the same id"
+        );
+    }
+
     /// Design 011 §7 test 9 / D7 — the gap review 095 B1 found, which the suite
-    /// previously asserted as CORRECT. `paneId` is OPTIONAL in the MCP tool
-    /// (`mcp-server/src/server.ts:67`), and `App.tsx` Mode 2
-    /// (`:1085` `else if (tabId && !paneId)`) serves exactly this shape: it
-    /// picks a pane in the named tab and splits it (`:1305-1335`). Mode 0 cannot
-    /// claim it — that branch requires `!tabExists(tabId)` (`:904`). Deciding on
-    /// `pane_id` alone therefore hands this terminal the leaf the tab's root
-    /// pane already holds (`TerminalContainer.tsx:108-113`): two live terminals
-    /// on one `terminal_history` PRIMARY KEY, i.e. the bug in the test above,
-    /// reached without a `pane_id`.
+    /// previously asserted as CORRECT for the `pane_id`-absent-but-tab-occupied
+    /// case only. Option A generalises the fix: it no longer depends on the tab
+    /// already being occupied, or on any occupancy scan at all — a second create
+    /// into the same tab (still no pane id) gets a distinct `tm-` leaf for
+    /// exactly the same reason the FIRST one now does.
     #[test]
     fn spawn_identity_second_create_into_a_populated_tab_gets_a_distinct_leaf() {
         let mut mint = counting_mint();
-        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
-        let (root, root_claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            |o| claims.try_claim(o), no_live_terminals, &mut mint,
-        )
-        .expect("first create");
-        assert_eq!(root.renderer_terminal_id, "tb-shared01");
-        // The root has REGISTERED and released by the time the second create
-        // arrives; occupancy is now carried by the `terminals` scan alone.
-        drop(root_claim);
-        assert!(!claims.is_claimed("tb-shared01"));
+        let root = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("first create");
+        assert!(root.renderer_terminal_id.starts_with("tm-"));
 
-        // The identical call, with the tab now occupied by `root`.
-        let (second, second_claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"),
-            None,
-            None, // NO pane_id — the Mode 2 call shape
-            |o| claims.try_claim(o),
-            |owner| owner == "tb-shared01",
-            &mut mint,
-        )
-        .expect("second create");
-        assert!(
-            second_claim.is_none(),
-            "a split reserves nothing — its `tm-` leaf is unique by construction"
-        );
-
+        let second = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("second create");
         assert_ne!(
             second.renderer_terminal_id, root.renderer_terminal_id,
             "a renderer leaf id must be unique per live terminal"
@@ -3522,207 +3465,137 @@ mod tests {
         assert_eq!(second.owning_tab_id, "tb-shared01", "and it stays in that tab");
     }
 
-    /// A `terminals`-scan stand-in that only reports what has been REGISTERED,
-    /// so a test can place a create inside the decision→registration window.
-    fn registered_scan(
-        registered: &std::sync::Arc<dashmap::DashMap<String, ()>>,
-    ) -> impl Fn(&str) -> bool + '_ {
-        move |owner: &str| registered.contains_key(owner)
-    }
-
-    /// THE T2-F1 REGRESSION TEST (external review 099). The interleaving the
-    /// sequential tests above structurally cannot reach: create B resolves while
-    /// create A is between its identity decision and its `terminals` insert.
-    ///
-    /// Against the pre-fix code both creates took `tb-shared01` as their leaf —
-    /// two live terminals on one `terminal_history` PRIMARY KEY, the exact
-    /// invariant P0-A exists to establish (design 011 §3, success criterion 7).
+    /// THE T2-F1 REGRESSION TEST (external review 099), CONVERTED. This used to
+    /// model the decision→registration window between an identity decision and
+    /// `spawn_terminal`'s final `terminals` insert, and prove a claim held
+    /// across it. Option A removes that window for the API path entirely:
+    /// `resolve_api_spawn_identity` reads and writes no shared state at all —
+    /// not `terminals`, not `RootLeafClaims` — so there is nothing to interleave
+    /// and nothing left to race. What survives is the stronger property that
+    /// makes the window irrelevant: however many API creates are interleaved for
+    /// the same tab — sequential here, real concurrency in the test below —
+    /// none of them may ever produce a `tb-` leaf.
     #[test]
     fn a_create_inside_another_creates_spawn_window_cannot_take_the_same_root_leaf() {
-        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
-        // Stands in for `state.terminals`: a create appears here only when
-        // `spawn_terminal` reaches its final insert (`pty_manager.rs:867`).
-        let registered = std::sync::Arc::new(dashmap::DashMap::new());
         let mut mint = counting_mint();
 
-        // Create A decides its identity. Its PTY is still being built, so it has
-        // NOT registered — `registered` is empty.
-        let (a, a_claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            |o| claims.try_claim(o),
-            registered_scan(&registered),
-            &mut mint,
-        )
-        .expect("create A");
-        assert_eq!(a.renderer_terminal_id, "tb-shared01", "A is the tab root");
-        assert!(a_claim.is_some(), "A must hold the owner reservation across its spawn");
-        assert!(claims.is_claimed("tb-shared01"));
+        // "A" decides its identity. Under the pre-option-A code its PTY was
+        // still being built at this point, so it had NOT registered anywhere.
+        let a = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("create A");
+        assert!(a.renderer_terminal_id.starts_with("tm-"), "A is never the tab root");
 
-        // Create B arrives INSIDE that window. The scan still says "empty" —
-        // that is precisely the stale read T2-F1 is about.
-        let (b, b_claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            |o| claims.try_claim(o),
-            registered_scan(&registered),
-            &mut mint,
-        )
-        .expect("create B");
+        // "B" arrives INSIDE what used to be that window. There is no scan left
+        // to go stale — B's answer never depended on A having registered.
+        let b = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("create B");
         assert_ne!(
             b.renderer_terminal_id, a.renderer_terminal_id,
             "two live terminals must never carry the same renderer leaf"
         );
-        assert!(
-            b.renderer_terminal_id.starts_with("tm-"),
-            "B lost the root race, so it is a split: {}",
-            b.renderer_terminal_id
-        );
+        assert!(b.renderer_terminal_id.starts_with("tm-"));
         assert_eq!(b.owning_tab_id, "tb-shared01", "and it still lands in that tab");
-        assert!(b_claim.is_none(), "a split reserves nothing");
 
-        // A now registers and releases, in that order.
-        registered.insert(a.renderer_terminal_id.clone(), ());
-        drop(a_claim);
-        assert!(!claims.is_claimed("tb-shared01"), "the reservation is released once registered");
-
-        // The window is closed, but the tab is now genuinely occupied — the
-        // release must NOT hand the root leaf to the next create.
-        let (c, _) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            |o| claims.try_claim(o),
-            registered_scan(&registered),
-            &mut mint,
-        )
-        .expect("create C");
+        // "C" arrives after "A" would have registered. Still just another split.
+        let c = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("create C");
         assert!(
             c.renderer_terminal_id.starts_with("tm-"),
-            "after A registered, later creates are splits: {}",
+            "every API create into this tab is a split, in any order: {}",
             c.renderer_terminal_id
         );
     }
 
-    /// The release must also happen when the spawn FAILS: a leaked reservation
-    /// would permanently force every future create into that tab to mint a
-    /// `tm-`, leaving the tab with no root pane. RAII, so a `?`/early return
-    /// cannot skip it.
+    /// CONVERTED. This used to prove a failed spawn releases its RAII root-leaf
+    /// reservation, so a retry could still claim the root. Option A removes the
+    /// reservation itself (`RootLeafClaims` is no longer consulted from the API
+    /// path) — there is nothing to leak, because there is nothing to hold. What
+    /// survives is the retry guarantee: a create that follows a failed one (real
+    /// or simulated — resolution can't tell the difference, it has no side
+    /// effects to undo) still independently mints its own fresh `tm-` leaf,
+    /// never the tab id, and never collides with the attempt before it.
     #[test]
-    fn a_failed_spawn_releases_the_owner_reservation() {
-        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
-        let registered = std::sync::Arc::new(dashmap::DashMap::new());
+    fn a_failed_spawn_leaves_nothing_to_leak_and_the_retry_gets_its_own_tm_leaf() {
         let mut mint = counting_mint();
 
-        {
-            let (first, claim) = resolve_api_spawn_identity(
-                Some("tb-shared01"), None, None,
-                |o| claims.try_claim(o),
-                registered_scan(&registered),
-                &mut mint,
-            )
+        // Stands in for an attempt whose `spawn_terminal` subsequently failed —
+        // resolution itself has no state to roll back.
+        let first = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
             .expect("first create");
-            assert_eq!(first.renderer_terminal_id, "tb-shared01");
-            assert!(claims.is_claimed("tb-shared01"));
-            // `spawn_terminal` returns Err: nothing is ever registered, and the
-            // guard goes out of scope exactly as it does in `create_terminal`.
-            drop(claim);
-        }
-        assert!(
-            !claims.is_claimed("tb-shared01"),
-            "a failed spawn must not leak the reservation"
-        );
+        assert!(first.renderer_terminal_id.starts_with("tm-"));
 
-        // The retry is a first create again, not a split.
-        let (retry, retry_claim) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, None,
-            |o| claims.try_claim(o),
-            registered_scan(&registered),
-            &mut mint,
-        )
-        .expect("retry");
-        assert_eq!(
-            retry.renderer_terminal_id, "tb-shared01",
-            "the tab is still empty, so its root leaf is still available"
+        let retry = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint)
+            .expect("retry");
+        assert!(
+            retry.renderer_terminal_id.starts_with("tm-"),
+            "the tab is still empty, but a retry still never claims its id: {}",
+            retry.renderer_terminal_id
         );
-        assert!(retry_claim.is_some());
+        assert_ne!(retry.renderer_terminal_id, first.renderer_terminal_id);
     }
 
-    /// The same schedule under REAL threads, so the atomicity of the claim
-    /// itself is exercised rather than modelled: N creates race for one empty
-    /// tab, all inside each other's spawn window (every guard is held until the
-    /// end). Exactly one may come out as the tab root.
+    /// CONVERTED. Used to prove exactly one of many racing creates could win the
+    /// root leaf under real thread concurrency (the atomicity of
+    /// `RootLeafClaims::try_claim`). Option A makes that race structurally
+    /// impossible for the API path — `resolve_api_spawn_identity` touches no
+    /// shared state, so there is nothing for concurrent callers to contend over
+    /// — so the stronger property this now pins is design 011's headline
+    /// invariant directly: no API create, under ANY ordering or concurrency,
+    /// ever produces a `tb-` renderer leaf. Real threads (not just sequential
+    /// calls) still earn their keep here: they exercise `mint_renderer_id`'s
+    /// uuid generation under genuine concurrency, proving leaf uniqueness holds
+    /// even without a coordinating claim.
     #[test]
-    fn only_one_of_many_racing_creates_gets_the_root_leaf() {
+    fn no_racing_api_create_ever_gets_the_root_leaf() {
         const RACERS: usize = 8;
-        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(RACERS));
 
         let handles: Vec<_> = (0..RACERS)
             .map(|_| {
-                let claims = std::sync::Arc::clone(&claims);
                 let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    // Nothing has registered yet — every racer's scan says
-                    // "empty", exactly as in the reported defect.
-                    resolve_api_spawn_identity(
-                        Some("tb-shared01"), None, None,
-                        |o| claims.try_claim(o),
-                        no_live_terminals,
-                        mint_renderer_id,
-                    )
-                    .expect("racing create")
+                    resolve_api_spawn_identity(Some("tb-shared01"), None, mint_renderer_id)
+                        .expect("racing create")
                 })
             })
             .collect();
 
-        // Guards stay alive in `results` for the whole assertion block: all
-        // RACERS creates are still "in flight".
         let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("thread")).collect();
 
-        let roots = results
-            .iter()
-            .filter(|(id, _)| id.renderer_terminal_id == "tb-shared01")
-            .count();
-        assert_eq!(roots, 1, "exactly one racer may take the tab id as its leaf");
-
-        let leaves: std::collections::HashSet<_> =
-            results.iter().map(|(id, _)| id.renderer_terminal_id.clone()).collect();
-        assert_eq!(leaves.len(), RACERS, "every racer's leaf must be distinct: {leaves:?}");
-        assert!(results.iter().all(|(id, _)| id.owning_tab_id == "tb-shared01"));
-        assert_eq!(
-            results.iter().filter(|(_, claim)| claim.is_some()).count(),
-            1,
-            "and only the root holds a reservation"
+        assert!(
+            results.iter().all(|id| id.renderer_terminal_id.starts_with("tm-")),
+            "no racer may take the tab id as its leaf: {results:?}"
         );
+        let leaves: std::collections::HashSet<_> =
+            results.iter().map(|id| id.renderer_terminal_id.clone()).collect();
+        assert_eq!(leaves.len(), RACERS, "every racer's leaf must be distinct: {leaves:?}");
+        assert!(results.iter().all(|id| id.owning_tab_id == "tb-shared01"));
     }
 
     #[test]
     fn spawn_identity_no_caller_id_mints_a_tab_exactly_as_before() {
         let mut mint = counting_mint();
-        let (r, _) = resolve_api_spawn_identity(
-            None, None, None, no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("minted");
+        let r = resolve_api_spawn_identity(None, None, &mut mint).expect("minted");
         assert_eq!(r.owning_tab_id, "tb-000000001");
-        assert_eq!(r.renderer_terminal_id, "tb-000000001");
+        // Pre-option-A this asserted `r.renderer_terminal_id == r.owning_tab_id`
+        // ("exactly as before" meant leaf == owner for a fresh tab). Now the
+        // owner is still freshly minted exactly as before, but the leaf is not.
+        assert!(r.renderer_terminal_id.starts_with("tm-"));
+        assert_ne!(r.renderer_terminal_id, r.owning_tab_id);
     }
 
     #[test]
     fn spawn_identity_an_empty_or_unrecognised_tab_id_still_mints_rather_than_failing() {
         let mut mint = counting_mint();
-        assert!(resolve_api_spawn_identity(
-            Some("   "), None, None, no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("blank")
-        .0
-        .owning_tab_id
-        .starts_with("tb-"));
-        assert!(resolve_api_spawn_identity(
-            Some("legacy-monitor-id"), None, None,
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("junk")
-        .0
-        .owning_tab_id
-        .starts_with("tb-"));
+        assert!(resolve_api_spawn_identity(Some("   "), None, &mut mint)
+            .expect("blank")
+            .owning_tab_id
+            .starts_with("tb-"));
+        assert!(resolve_api_spawn_identity(Some("legacy-monitor-id"), None, &mut mint)
+            .expect("junk")
+            .owning_tab_id
+            .starts_with("tb-"));
     }
 
     /// Correction C3. `api_server.rs:494` recognised `tb-` ONLY: a caller that
@@ -3733,11 +3606,8 @@ mod tests {
     #[test]
     fn spawn_identity_a_pane_leaf_id_in_the_tab_field_is_rejected_not_silently_replaced() {
         let mut mint = counting_mint();
-        let err = resolve_api_spawn_identity(
-            Some("tm-9f2c1a4b7"), None, Some("pn-a"),
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect_err("a tm- id is a pane id, not a tab id");
+        let err = resolve_api_spawn_identity(Some("tm-9f2c1a4b7"), None, &mut mint)
+            .expect_err("a tm- id is a pane id, not a tab id");
         assert!(err.contains("tm-9f2c1a4b7"), "the message must name the offending id: {err}");
         assert!(err.contains("owningTabId"), "the message must name the right field: {err}");
     }
@@ -3746,15 +3616,8 @@ mod tests {
     #[test]
     fn spawn_identity_an_explicit_owning_tab_id_takes_precedence() {
         let mut mint = counting_mint();
-        let (r, _) = resolve_api_spawn_identity(
-            Some("tb-ignored1"),
-            Some("tb-explicit"),
-            Some("pn-a"),
-            no_competing_create,
-            no_live_terminals,
-            &mut mint,
-        )
-        .expect("explicit owner");
+        let r = resolve_api_spawn_identity(Some("tb-ignored1"), Some("tb-explicit"), &mut mint)
+            .expect("explicit owner");
         assert_eq!(r.owning_tab_id, "tb-explicit");
         assert!(r.renderer_terminal_id.starts_with("tm-"));
     }
@@ -3780,18 +3643,10 @@ mod tests {
     #[test]
     fn two_api_splits_no_longer_share_one_history_row() {
         let mut mint = counting_mint();
-        // `no_live_terminals` (Task 4's helper): with a `pane_id` present the
-        // occupancy probe is not even needed to force distinct leaves.
-        let (a, _) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, Some("pn-a"),
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("split a");
-        let (b, _) = resolve_api_spawn_identity(
-            Some("tb-shared01"), None, Some("pn-b"),
-            no_competing_create, no_live_terminals, &mut mint,
-        )
-        .expect("split b");
+        // Every API create mints a fresh `tm-` unconditionally now, so distinct
+        // leaves need no occupancy probe to force them.
+        let a = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint).expect("split a");
+        let b = resolve_api_spawn_identity(Some("tb-shared01"), None, &mut mint).expect("split b");
 
         let store = crate::history_store::HistoryStore::new();
         store.init(&identity_temp_db());

@@ -19,6 +19,7 @@ import {
 } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
+import { resolveTabProcessIds, renameTabProcesses } from '../../services/tabProcessIds';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
@@ -292,8 +293,13 @@ const TabItem: React.FC<TabItemProps> = ({
     onOpenContextMenu(e.clientX, e.clientY);
   };
 
-  // Get process ID from terminal service
-  const processId = terminalService.getProcessIdForTerminal(tab.id);
+  // Get process IDs from terminal service. Review 109 H3 / re-review 111
+  // finding 3: an API-created tab's process is registered under its real `tm-*`
+  // leaf, never `tab.id` — and once such a tab is SPLIT there are several live
+  // leaves. Resolve every leaf the tab's tree declares (`tab.id` is used only
+  // when the tab has no tree at all).
+  const tabTree = useSelector((state: RootState) => state.panes.treesByTabId[tab.id] ?? null);
+  const processIds = resolveTabProcessIds(tabTree, tab.id);
 
   return (
     <>
@@ -350,7 +356,7 @@ const TabItem: React.FC<TabItemProps> = ({
           y={contextMenuPos.y}
           tabId={tab.id}
           tabTitle={tab.title}
-          processId={processId}
+          processIds={processIds}
           canDetach={canDetach}
           onCloseKind={onCloseKind}
           onClose={onCloseContextMenu}
@@ -485,8 +491,11 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     // The terminals this tab still owns — the tree when we have one, else the
     // tab-id fallback. Deliberately NOT "tree + tab id": a pane dragged into
     // another tab (or window) takes its terminal with it while this tab keeps
-    // its id, and the root pane's terminalId IS the tab id. See
-    // collectTabCloseTerminalIds.
+    // its id, and a RENDERER-originated root pane's terminalId IS the tab id.
+    // See collectTabCloseTerminalIds — including the residual risk it documents
+    // for an API-created tab (root leaf is `tm-`, not `id`) if `tabPanes` above
+    // were ever null/unpopulated for it; believed unreachable given Mode 0's
+    // synchronous seed, per App.tsx / TerminalContainer.tsx.
     for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
       console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
       terminalService.closeTerminal(terminalId).catch((error) => {
@@ -635,17 +644,14 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     console.log(`TabManager: handleEditTitle - id: ${id}, new title: "${title}"`);
     dispatch(updateTabTitle({ id, title }));
 
-    // Also update the terminal name in the backend
-    const processId = terminalService.getProcessIdForTerminal(id);
-    console.log(`TabManager: Found processId: ${processId} for tab ${id}`);
-    if (processId) {
-      try {
-        await window.electronAPI.updateTerminalName(processId, title);
-        console.log(`TabManager: Successfully updated backend name to "${title}"`);
-      } catch (error) {
-        console.error('Failed to update terminal name:', error);
-      }
-    }
+    // Also update the terminal name in the backend. Review 109 H3 / re-review
+    // 111 finding 3: an API-created tab's process lives under its `tm-*` leaf,
+    // not `id`, and a SPLIT tab has several live leaves. A tab title is
+    // tab-level, so name EVERY live leaf process; `id` is used only when the
+    // tab has no tree at all.
+    const tabTree = store.getState().panes.treesByTabId[id] ?? null;
+    const renamed = await renameTabProcesses(tabTree, id, title);
+    console.log(`TabManager: Renamed backend processes [${renamed.join(', ')}] to "${title}"`);
 
     // Save state immediately after name change
     setTimeout(() => {
