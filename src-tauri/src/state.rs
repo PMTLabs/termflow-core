@@ -352,6 +352,23 @@ impl<R: Runtime> Clone for AppState<R> {
     }
 }
 
+/// The key a terminal's scrollback is filed under in `terminal_history`, or
+/// `None` to skip persistence entirely.
+///
+/// Pure so the "a process id is never a history key" rule (design 011 §5) is
+/// unit-testable without a live PTY or a Tauri `AppHandle` — inline
+/// `#[cfg(test)]` only; the `integration-tests` feature breaks the Windows test
+/// binary.
+pub(crate) fn history_key(renderer_terminal_id: Option<&str>) -> Option<&str> {
+    match renderer_terminal_id {
+        // A `pc-` id is a PTY process id: it is regenerated on every spawn, so a
+        // row keyed by one is orphaned the moment the app restarts and can never
+        // be matched to a pane again.
+        Some(id) if id.starts_with("pc-") => None,
+        other => other,
+    }
+}
+
 impl<R: Runtime> AppState<R> {
     pub fn new(
         output_tx: broadcast::Sender<ChannelPayload>,
@@ -633,7 +650,8 @@ impl<R: Runtime> AppState<R> {
         Some(blob)
     }
 
-    /// Persist one terminal's RENDERED scrollback under its renderer id (tab_id).
+    /// Persist one terminal's RENDERED scrollback under its renderer leaf id
+    /// (`renderer_terminal_id` — `tb-*`/`tm-*`).
     /// Skips terminals that are gone or have no renderer id (e.g. API-created PTYs).
     ///
     /// We persist the authoritative vt100 parser's FULL buffer (scrollback + visible
@@ -656,13 +674,17 @@ impl<R: Runtime> AppState<R> {
         // since a dead terminal is never persisted again.
         let guard_arc = self.history_persist_guard(id);
         let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(tab_id) = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone()) else { return };
+        let renderer_id = self
+            .terminals
+            .get(id)
+            .and_then(|t| t.renderer_terminal_id.clone());
+        let Some(key) = history_key(renderer_id.as_deref()) else { return };
         // Skip when the parser is absent or the whole buffer is blank (brand-new or
         // already-cleared terminal) so we never persist a blank blob that would replay as
         // an empty "session restored" divider with nothing above it.
         let Some(snapshot) = self.full_scrollback_snapshot(id) else { return };
         let blob = String::from_utf8_lossy(&snapshot).into_owned();
-        self.history_store.upsert(&tab_id, std::slice::from_ref(&blob), now_ms);
+        self.history_store.upsert(key, std::slice::from_ref(&blob), now_ms);
     }
 
     /// The per-terminal persistence lock (see `history_persist_locks`). The Arc is
@@ -1792,5 +1814,35 @@ mod terminal_identity_serde_tests {
         assert_eq!(back.id, "pc-abc123def");
         assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
         assert_eq!(back.owning_tab_id.as_deref(), Some("tb-4e8d0c2f1"));
+    }
+}
+
+#[cfg(test)]
+mod history_key_tests {
+    use super::history_key;
+
+    #[test]
+    fn a_renderer_leaf_is_a_valid_history_key() {
+        assert_eq!(history_key(Some("tb-4e8d0c2f1")), Some("tb-4e8d0c2f1"));
+        assert_eq!(history_key(Some("tm-9f2c1a4b7")), Some("tm-9f2c1a4b7"));
+    }
+
+    /// Ground-truth correction C1: before P0-A this could not happen — every
+    /// write site wrapped `Some(...)` and the `else { return }` guard at
+    /// state.rs:636 was dead code. A headless API/fleet PTY now genuinely has no
+    /// renderer id, and must simply not be persisted.
+    #[test]
+    fn no_renderer_id_means_no_history_row() {
+        assert_eq!(history_key(None), None);
+    }
+
+    /// Defence in depth. `spawn_terminal`'s old `unwrap_or_else(|| id.clone())`
+    /// produced `Some("pc-…")`, which `persist_terminal_history` upserted like
+    /// any other key (state.rs:642) — a row keyed by an id that cannot survive a
+    /// restart, orphaned forever. Even if someone reintroduces that fallback,
+    /// the row must not be written.
+    #[test]
+    fn a_process_id_is_never_a_history_key() {
+        assert_eq!(history_key(Some("pc-abc123def")), None);
     }
 }
