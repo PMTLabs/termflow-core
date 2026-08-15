@@ -988,14 +988,26 @@ export class TerminalEngine {
   // ---------------------------------------------------------------------------
   // mount — create-or-reattach the xterm instance into `container`.
   // Ports TerminalDisplay.tsx:242-630 (minus the hydration effect / Task 4).
+  //
+  // RETURNS whether the engine is mounted. `false` means the mount was REFUSED and
+  // nothing was wired: `this.term` is unassigned, so `attach()` and the `terminal`
+  // getter must not be called — the getter throws "terminal accessed before
+  // mount()". A caller that ignores the result turns a refused mount into that
+  // throw, which is exactly what review 124/126 found: `mount(): void` gave the
+  // caller no way to tell (review 126). Every refusal leaves the cache entry
+  // intact, so a later mount() can reattach it.
   // ---------------------------------------------------------------------------
-  mount(container: HTMLElement): void {
+  mount(container: HTMLElement): boolean {
     // A mount() without a prior unmount() (legit pattern: pane moved to a new
     // container) must not strand the old ResizeObserver — it would keep firing
     // fit() against the abandoned container forever.
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
 
+    // Restored by every abort path below, so a refused mount leaves this engine
+    // pointing where it did before rather than at a container it never wired
+    // (review 126).
+    const previousContainer = this.container;
     this.container = container;
     this.disposables = [];
     this.containerDisposables = [];
@@ -1040,9 +1052,6 @@ export class TerminalEngine {
 
     // --- Reattach path (TerminalDisplay.tsx:251-289) ---
     if (cached && cached.terminal.element) {
-      // Stable alias: the else-branch below reassigns `cached` to undefined, which
-      // costs the narrowing the catch clause needs.
-      const cachedEntry = cached;
       term = cached.terminal;
       fit = cached.fitAddon;
       search = cached.searchAddon;
@@ -1052,7 +1061,61 @@ export class TerminalEngine {
         term.options.fontSize = fontSize;
       }
 
-      // Dispose the previous mount's local event handlers before re-wiring.
+      const existingElement = term.element;
+      if (!existingElement) {
+        // UNREACHABLE: this whole branch is gated on `cached.terminal.element`
+        // being truthy, and `term` is that same object. It survives only because
+        // TypeScript cannot narrow across the assignment.
+        //
+        // It used to delete the entry and fall through to create, which is the
+        // exact ORPHAN leak the move failure below documents —
+        // disposeOrphanedWebGLAddon would find nothing to dispose and the outgoing
+        // context would be live, unreachable and uncounted. Kept as an ABORT rather
+        // than deleted outright so that if a future refactor ever makes it
+        // reachable, it fails safe in the same direction instead of silently
+        // re-opening the leak.
+        console.warn(
+          'terminal-core/engine: reattach found no render element despite a cached ' +
+            'entry; aborting the mount rather than rebuilding (review 124).',
+        );
+        this.container = previousContainer;
+        return false;
+      }
+
+      // MOVE FIRST, before destroying any of the previous mount's wiring
+      // (review 126). The move is the one fatal step: if appendChild throws — a
+      // host supplying a descendant of the terminal surface as the new container
+      // raises HierarchyRequestError — the surface never left its old container
+      // and there is nothing to continue with, so we abort.
+      //
+      // Doing it first is what makes that abort HONEST. Ordered the other way,
+      // the abort left an entry whose two disposable sets had already been run —
+      // the old container's focus/search listeners gone, the local handlers gone —
+      // while the comment claimed the entry stayed "exactly as it was" and mount()
+      // returned void, so no caller could tell. Now nothing has been torn down
+      // when we bail, and the only engine-local state to undo is `this.container`.
+      try {
+        container.appendChild(existingElement);
+      } catch (e) {
+        // ABORT the mount; do NOT delete-and-recreate (review 120 HIGH). Deleting
+        // the entry here fell through to the create branch, whose
+        // disposeOrphanedWebGLAddon() then looked this id up in terminalCache,
+        // found nothing, and could not dispose the outgoing addon — a live GPU
+        // context reachable from nothing and counted by nothing, so the creation
+        // gate could allocate beyond the real budget (design/013 §5.2 ORPHAN). It
+        // also threw away the terminal's scrollback for what is usually a
+        // transient layout failure.
+        //
+        // The cache entry really is untouched now, so a later mount() can reattach
+        // it — and the `false` return tells the caller not to attach() or read
+        // `engine.terminal`, whose getter throws before a successful mount.
+        console.warn('terminal-core/engine: Could not reattach terminal, aborting mount:', e);
+        this.container = previousContainer;
+        return false;
+      }
+
+      // Only now dispose the previous mount's local event handlers, before
+      // re-wiring.
       cached.disposables.forEach((dispose) => dispose());
       // …and the previous CONTAINER's listeners (design 012 §5.5 site 4).
       // LOAD-BEARING: without this a remount leaves the old container's four
@@ -1060,89 +1123,39 @@ export class TerminalEngine {
       // and still opening its search bar from a pane that is no longer on screen.
       cached.containerDisposables.forEach((dispose) => dispose());
 
+      // A FIT failure is NOT fatal — the surface has already moved, and aborting
+      // there left a half-mounted engine (review 124 HIGH): `this.term` unassigned,
+      // no listeners, no observer, no watchdog, and a caller that went on to
+      // attach() and read `engine.terminal`.
       try {
-        const existingElement = term.element;
-        if (existingElement) {
-          // Move the existing render element into the new container, then re-fit.
-          //
-          // The move and the fit are separated on purpose (review 124 HIGH). Only
-          // the MOVE is fatal: if appendChild throws, the surface never left its old
-          // container and there is nothing to continue with, so we abort with the
-          // entry intact. A FIT failure is NOT fatal — the surface has already moved,
-          // and aborting there left a half-mounted engine: `this.container` had been
-          // repointed, both disposable sets were already run, and the early return
-          // skipped assigning `this.term`, re-wiring listeners and the observer, and
-          // starting the watchdog. `mount()` returns void, so no caller can detect
-          // that; TerminalDisplay went on to call attach() and then `engine.terminal`,
-          // whose getter throws "terminal accessed before mount()" — turning a
-          // transient layout hiccup into a dead, unwired pane still painting output.
-          container.appendChild(existingElement);
-          try {
-            fit.fit();
-            didReattachFit = true;
-          } catch (fitError) {
-            // Carry on and finish the mount, and reconcile the backend with
-            // whatever grid xterm is ACTUALLY on at the end of mount().
-            //
-            // a7fb3a3 called `this.armActivationFit()` here and its message claimed
-            // geometry was deferred to that armed fit. That claim was FALSE (review
-            // 126): `this.fitAddon` is not assigned until :1439, so on the
-            // production path — a fresh TerminalEngine per React mount, as :1016
-            // records — armActivationFit() hit its own null guard and armed nothing.
-            //
-            // Arming it correctly would still not be enough. fit() can throw AFTER
-            // it has resized xterm (a synchronous render/resize subscriber failing),
-            // and any later fit is then a no-op that emits no resize event, while
-            // the mutating fit's own event was orphaned — the previous mount's
-            // listener is disposed above and the new one is not wired yet. So the
-            // fix is the reconciliation at the end of mount(), which sends xterm's
-            // real dimensions and is deduped against lastSentSize, making it a
-            // no-op when the fit failed before changing anything.
-            reattachFitThrew = true;
-            console.warn(
-              'terminal-core/engine: reattach fit failed; continuing the mount and ' +
-                'reconciling the backend with xterm\'s current size at mount end ' +
-                '(review 126):',
-              fitError,
-            );
-          }
-        } else {
-          // UNREACHABLE: this whole branch is gated on `cached.terminal.element`
-          // being truthy, and `term` is that same object. It survives only because
-          // TypeScript cannot narrow across the assignment.
-          //
-          // It used to delete the entry and fall through to create, which is the
-          // exact ORPHAN leak the catch below documents — disposeOrphanedWebGLAddon
-          // would find nothing to dispose and the outgoing context would be live,
-          // unreachable and uncounted. Kept as an ABORT rather than deleted outright
-          // so that if a future refactor ever makes it reachable, it fails safe in
-          // the same direction as the catch instead of silently re-opening the leak.
-          console.warn(
-            'terminal-core/engine: reattach found no render element despite a cached ' +
-              'entry; aborting the mount rather than rebuilding (review 124).',
-          );
-          return;
-        }
-      } catch (e) {
-        // Reached only when the surface MOVE itself failed (see above) — the fit is
-        // handled non-fatally inside. ABORT the mount; do NOT delete-and-recreate
-        // (review 120 HIGH).
+        fit.fit();
+        didReattachFit = true;
+      } catch (fitError) {
+        // Carry on and finish the mount, and reconcile the backend with whatever
+        // grid xterm is ACTUALLY on at the end of mount().
         //
-        // Deleting the entry here fell through to the create branch, whose
-        // disposeOrphanedWebGLAddon() then looked this id up in terminalCache, found
-        // nothing, and could not dispose the outgoing addon — a live GPU context that
-        // is reachable from nothing and counted by nothing, so the creation gate could
-        // allocate beyond the real budget (design/013 §5.2 ORPHAN). It also threw away
-        // the terminal's scrollback for what is usually a transient layout failure.
+        // a7fb3a3 called `this.armActivationFit()` here and its message claimed
+        // geometry was deferred to that armed fit. That claim was FALSE (review
+        // 126): `this.fitAddon` is not assigned until the wiring below, so on the
+        // production path — a fresh TerminalEngine per React mount, as the
+        // enhanced-keyboard note above records — armActivationFit() hit its own
+        // null guard and armed nothing.
         //
-        // The entry stays exactly as it was, so a later mount() can reattach it.
-        console.warn('terminal-core/engine: Could not reattach terminal, aborting mount:', e);
-        // The two disposable sets were already run above, before the re-wiring that
-        // never happened. Clear them so the next mount() does not run them a second
-        // time; the end of mount() would otherwise have replaced both arrays.
-        cachedEntry.disposables = [];
-        cachedEntry.containerDisposables = [];
-        return;
+        // Arming it correctly would still not be enough. fit() can throw AFTER it
+        // has resized xterm (a synchronous render/resize subscriber failing), and
+        // any later fit is then a no-op that emits no resize event, while the
+        // mutating fit's own event was orphaned — the previous mount's listener is
+        // disposed above and the new one is not wired yet. So the fix is the
+        // reconciliation at the end of mount(), which sends xterm's real
+        // dimensions and is deduped against lastSentSize, making it a no-op when
+        // the fit failed before changing anything.
+        reattachFitThrew = true;
+        console.warn(
+          'terminal-core/engine: reattach fit failed; continuing the mount and ' +
+            'reconciling the backend with xterm\'s current size at mount end ' +
+            '(review 126):',
+          fitError,
+        );
       }
     }
 
@@ -1254,7 +1267,10 @@ export class TerminalEngine {
         term.open(container);
       } catch (error) {
         console.error('terminal-core/engine: Error opening terminal:', error);
-        return;
+        // Nothing was wired and no entry was stored, so this is a refusal like the
+        // reattach ones above (review 126).
+        this.container = previousContainer;
+        return false;
       }
 
       // Backlog 003 (protocol-state-lost-while-unmounted): register the
@@ -1446,7 +1462,8 @@ export class TerminalEngine {
 
     if (!term || !fit || !search) {
       console.error('terminal-core/engine: Failed to create or reuse terminal');
-      return;
+      this.container = previousContainer;
+      return false;
     }
 
     this.term = term;
@@ -2274,6 +2291,10 @@ export class TerminalEngine {
 
     // Start the idle dimension heal watchdog (non-mirror only; idempotent).
     this.startHealWatchdog();
+
+    // The engine is fully wired: `this.term` is assigned, listeners and the
+    // observer are attached, and `engine.terminal` is safe to read (review 126).
+    return true;
   }
 
   // ---------------------------------------------------------------------------

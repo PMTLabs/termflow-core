@@ -344,7 +344,19 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     });
     engineRef.current = engine;
 
-    engine.mount(pane);              // the identical element captured at the top of this effect
+    // The identical element captured at the top of this effect.
+    //
+    // The result MUST be checked (review 126). A refused mount — today, a surface
+    // move that throws — wires nothing, so `engine.terminal` below would throw
+    // "terminal accessed before mount()" and attach() would deliver output to an
+    // engine with no terminal. The cache entry is left intact by every refusal, so
+    // the surface and its scrollback survive for a later mount; this effect simply
+    // has no engine to run against and drops out.
+    if (!engine.mount(pane)) {
+      console.warn('TerminalDisplay: engine.mount refused; skipping attach/hydration');
+      engineRef.current = null;
+      return () => {};
+    }
     engineMounted();                 // ADDED — the relocation dep (design 012 §4.2.1)
     setAtBottom(engine.isScrolledToBottom());
     const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);

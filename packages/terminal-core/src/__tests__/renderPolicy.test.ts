@@ -599,6 +599,56 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     expect(engine.terminal).toBe(entryBefore.terminal);
   });
 
+  // Review 126 MEDIUM — the surface MOVE failure, as a PUBLIC contract.
+  //
+  // Making only the FIT non-fatal left the MOVE abort with the same unreportable
+  // shape: before appendChild the method had already repointed `this.container`,
+  // disconnected the observer and run BOTH of the entry's disposable sets, so the
+  // comment claiming the entry stayed "exactly as it was" was false — the old
+  // container's focus/search listeners and the local handlers were gone — and
+  // `mount(): void` gave the caller no way to know. A caller continuing to
+  // `engine.terminal` got "terminal accessed before mount()".
+  //
+  // The move now runs BEFORE anything is torn down, and mount() returns whether it
+  // mounted.
+  it('a reattach whose surface MOVE throws refuses the mount and leaves the entry usable', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'move-fail' });
+    expect(engine.mount(makeLaidOutContainer())).toBe(true);
+    const entry = terminalCache.get('move-fail')!;
+    const surface = entry.terminal.element!;
+    const homeContainer = surface.parentElement;
+    expect(entry.disposables.length).toBeGreaterThan(0);
+    expect(entry.containerDisposables.length).toBeGreaterThan(0);
+
+    // A host supplies a container appendChild refuses — e.g. a descendant of the
+    // terminal surface, which raises HierarchyRequestError.
+    const bad = makeLaidOutContainer();
+    bad.appendChild = () => {
+      throw new Error('test: HierarchyRequestError');
+    };
+
+    // Production builds a FRESH engine per React mount.
+    const engine2 = new TerminalEngine(makeBridge(), { cacheKey: 'move-fail' });
+    expect(engine2.mount(bad)).toBe(false);
+
+    // Nothing was torn down and nothing moved: same Terminal, same addon, both
+    // disposable sets still live, surface still in its old container.
+    const after = terminalCache.get('move-fail')!;
+    expect(after.terminal).toBe(entry.terminal);
+    expect(after.disposables.length).toBeGreaterThan(0);
+    expect(after.containerDisposables.length).toBeGreaterThan(0);
+    expect(surface.parentElement).toBe(homeContainer);
+    // The refusal is DETECTABLE, and the engine that refused is honest about it.
+    expect(() => engine2.terminal).toThrow();
+
+    // ...and a retry into a good container still works.
+    const good = makeLaidOutContainer();
+    const engine3 = new TerminalEngine(makeBridge(), { cacheKey: 'move-fail' });
+    expect(engine3.mount(good)).toBe(true);
+    expect(engine3.terminal).toBe(entry.terminal);
+    expect(entry.terminal.element!.parentElement).toBe(good);
+  });
+
   // Review 120 HIGH (b) — disposal that THROWS on the create path. Nulling the entry
   // fields anyway erases the only countable reference to a context that may still be
   // held; allocating a replacement on top of it is the unsafe direction for a hard

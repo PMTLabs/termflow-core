@@ -36,7 +36,9 @@ describe('TerminalDisplay relocation wiring', () => {
   // renders EVERY tab, so it would move N xterm constructions onto the pre-paint
   // critical path at app start (§15.2).
   it('keeps the engine effect passive and keyed on terminalId alone', () => {
-    expect(SOURCE).toContain('engine.mount(pane);');
+    // The mount call is now RESULT-CHECKED (review 126): mount() returns whether
+    // it mounted, and a refused mount must not reach attach()/engine.terminal.
+    expect(SOURCE).toContain('if (!engine.mount(pane)) {');
     expect(SOURCE).not.toContain('useLayoutEffect(() => {\n    if (!terminalRef.current)');
     // The engine effect's dep array, unchanged.
     expect(SOURCE).toContain('}, [terminalId]);');
@@ -66,7 +68,7 @@ describe('TerminalDisplay relocation wiring', () => {
   it('bumps the engine generation right after mount()', () => {
     expect(SOURCE).toContain('useSurfaceRelocation');
     expect(SOURCE).toContain('engineMounted();');
-    const mountAt = SOURCE.indexOf('engine.mount(pane);');
+    const mountAt = SOURCE.indexOf('if (!engine.mount(pane)) {');
     const bumpAt = SOURCE.indexOf('engineMounted();');
     expect(mountAt).toBeGreaterThan(-1);
     expect(bumpAt).toBeGreaterThan(mountAt);
