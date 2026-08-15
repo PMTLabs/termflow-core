@@ -72,16 +72,25 @@ export function reconcileRenderPolicies(
   // None of those states are reachable when every candidate starts on DOM, which is
   // why an implementation that only ever saw that case looked correct.
   //
-  // `wantWebgl` is in promotion priority; the first `slots` of it are the winners.
+  // `wantWebgl` is in promotion priority.
   const wantWebgl = ordered.filter(id => input.desired[id] === 'webgl');
+
+  /** Holding a context right now. `null` (uncached) is NOT holding. */
+  const holdsContext = (id: string): boolean => getPolicy(id) === 'webgl';
 
   // The count is GLOBAL (§5.1): terminals ABSENT from `desired` still hold addons
   // and still consume budget. They are not ours to demote, so they reduce the slots
-  // available to this request rather than being reallocated.
-  const liveOutside = Math.max(0, count() - ids.filter(id => getPolicy(id) === 'webgl').length);
+  // available to this request rather than being reallocated. If they alone exceed
+  // the budget, `slots` clamps to 0: every request-owned context is demoted and
+  // none is promoted. That is the correct conservative outcome — `webglCount` then
+  // stays above budget and exposes the external over-allocation to the caller
+  // rather than hiding it by demoting terminals this request does not own.
+  const liveOutside = Math.max(0, count() - ids.filter(holdsContext).length);
   const slots = Math.max(0, input.budget - liveOutside);
 
-  const winners = new Set(wantWebgl.slice(0, slots));
+  // PROVISIONAL winners, used ONLY to decide which live candidates must be freed.
+  // It is deliberately not used to gate promotion: see the promotion pass below.
+  const provisionalWinners = new Set(wantWebgl.slice(0, slots));
 
   // RULE 1: demote first — every requested demotion, PLUS every priority loser that
   // is currently holding a context. Freeing before requesting is what makes the
@@ -93,24 +102,42 @@ export function reconcileRenderPolicies(
   // the spec does not grant while changing nothing observable.
   for (const id of ids) {
     const wantsDom = input.desired[id] === 'dom';
-    const isLoser = input.desired[id] === 'webgl' && !winners.has(id);
+    const isLoser = input.desired[id] === 'webgl' && !provisionalWinners.has(id);
     if (!wantsDom && !isLoser) continue;
-    // A loser already on DOM needs no call; record the end state and move on.
-    if (isLoser && getPolicy(id) !== 'webgl') {
+    // Nothing to free: record the end state without a call. This applies to an
+    // explicit-DOM entry as much as to a loser — calling setPolicy(id, 'dom') on a
+    // terminal already on DOM made every repeat pass emit calls, so reconciling the
+    // same mixed input twice was not call-idempotent (review 122 MEDIUM).
+    if (!holdsContext(id)) {
       applied[id] = 'dom';
       continue;
     }
     applied[id] = setPolicy(id, 'dom');
   }
 
-  // RULE 2: promote the winners, in `order`.
+  // RULE 2/3: promote in priority order, over ALL WebGL candidates — not over a
+  // fixed winners set.
+  //
+  // Gating on `provisionalWinners` here would strand a slot: if a winner's
+  // promotion FAILS (RULE 3 / D7 — it returns 'dom'), the next candidate must be
+  // able to take the freed capacity, but a preselected set skips it forever. Same
+  // hole for an id absent from the cache, where production `getPolicy` returns
+  // `null` and `setTerminalRenderPolicy` returns 'dom' — it would reserve a slot it
+  // can never use (review 122 HIGH).
+  //
+  // Re-reading `count()` each iteration is what makes the cascade correct: a failed
+  // promotion does not increment it, so the capacity really is still there for the
+  // next candidate. It is also the honest budget basis per §5.1.
   for (const id of wantWebgl) {
-    if (!winners.has(id)) continue;
-    // Idempotent: an already-WebGL winner keeps its context untouched. Calling
+    // Idempotent: an already-WebGL candidate keeps its context untouched. Calling
     // setPolicy anyway would be a no-op by design, but recording the end state
     // without the call keeps a full-budget steady state free of churn.
-    if (getPolicy(id) === 'webgl') {
+    if (holdsContext(id)) {
       applied[id] = 'webgl';
+      continue;
+    }
+    if (count() >= input.budget) {
+      applied[id] = 'dom';           // RULE 4: report what happened, not the request
       continue;
     }
     // RULE 3: a failed promotion records 'dom' and the pass continues (D7).

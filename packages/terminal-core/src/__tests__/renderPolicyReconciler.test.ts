@@ -25,7 +25,18 @@ import { FitAddon } from '@xterm/addon-fit';
 
 /** A fake policy setter with a hard context cap, so budget behaviour is asserted
  *  against COUNTS rather than tier strings — review 084's point. */
-function makeFake(opts: { cap?: number; failOn?: string[]; preloaded?: string[] } = {}) {
+function makeFake(
+  opts: {
+    cap?: number;
+    failOn?: string[];
+    preloaded?: string[];
+    /** Ids NOT in the cache at all — production getPolicy returns null for these,
+     *  and setTerminalRenderPolicy returns 'dom'. Without this the fake reports
+     *  'dom' for every unknown id and cannot model the uncached case its own seam
+     *  documents (review 122). */
+    uncached?: string[];
+  } = {},
+) {
   const cap = opts.cap ?? Infinity;
   const live = new Set<string>(opts.preloaded ?? []);
   const calls: Array<[string, RenderPolicy]> = [];
@@ -35,6 +46,7 @@ function makeFake(opts: { cap?: number; failOn?: string[]; preloaded?: string[] 
       live.delete(id);
       return 'dom';
     }
+    if (opts.uncached?.includes(id)) return 'dom';   // no cache entry to promote
     if (opts.failOn?.includes(id)) return 'dom';
     if (live.size >= cap) return 'dom';
     live.add(id);
@@ -47,7 +59,10 @@ function makeFake(opts: { cap?: number; failOn?: string[]; preloaded?: string[] 
     // answer "what policy is this on right now?" from the same `live` set its setter
     // mutates. Without this the fake can only model the everything-starts-on-DOM
     // case, which is exactly the blind spot that hid the bug these tests cover.
-    getPolicy: (id: string): RenderPolicy | null => (live.has(id) ? 'webgl' : 'dom'),
+    getPolicy: (id: string): RenderPolicy | null => {
+      if (opts.uncached?.includes(id)) return null;
+      return live.has(id) ? 'webgl' : 'dom';
+    },
     calls,
     live,
   };
@@ -352,5 +367,77 @@ describe('reconcileRenderPolicies with slots already held (review 120 HIGH)', ()
     expect(out.applied.a).toBe('webgl');
     expect(out.applied.b).toBe('dom');   // only one slot was actually free
     expect(out.webglCount).toBe(2);
+  });
+});
+
+/**
+ * P0-C review round 2 (report 122, codex) — HIGH + MEDIUM.
+ *
+ * The round-1 fix preselected a fixed `winners` set and gated promotion on it. That
+ * strands a slot: RULE 3 says a failed promotion records 'dom' and the pass
+ * CONTINUES, but a preselected set skips every non-winner forever, so the freed
+ * capacity is never offered to the next candidate. The existing failed-promotion
+ * test uses budget 10 for three candidates, so all three are winners and it cannot
+ * reach the boundary.
+ */
+describe('reconcileRenderPolicies promotion cascade (review 122 HIGH)', () => {
+  it('offers the slot to the next candidate when the top choice FAILS to promote', () => {
+    // Both start on DOM, both want WebGL, one slot, and `a` (top priority) fails.
+    const fake = makeFake({ cap: 4, failOn: ['a'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['a', 'b'],
+      ...fake,
+    });
+
+    // Before the fix the pass ended at count 0: `b` was a non-winner and never
+    // attempted, even though the budget was entirely free.
+    expect(out.applied.a).toBe('dom');
+    expect(out.applied.b).toBe('webgl');
+    expect(out.webglCount).toBe(1);
+  });
+
+  it('offers the slot to the next candidate when the top choice is not in the cache', () => {
+    // Production getPolicy returns null for an uncached id and the promotion
+    // returns 'dom'; it must not reserve a slot it can never use.
+    const fake = makeFake({ cap: 4, uncached: ['ghost'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { ghost: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['ghost', 'b'],
+      ...fake,
+    });
+
+    expect(out.applied.ghost).toBe('dom');
+    expect(out.applied.b).toBe('webgl');
+    expect(out.webglCount).toBe(1);
+  });
+});
+
+describe('reconcileRenderPolicies is call-idempotent (review 122 MEDIUM)', () => {
+  it('emits no calls on a second identical pass over a MIXED set', () => {
+    const fake = makeFake({ cap: 4, preloaded: ['old'] });
+    const input = {
+      desired: { old: 'dom' as RenderPolicy, focused: 'webgl' as RenderPolicy },
+      budget: 1,
+      order: ['focused', 'old'],
+      ...fake,
+    };
+
+    const first = reconcileRenderPolicies(input);
+    expect(first.applied).toEqual({ old: 'dom', focused: 'webgl' });
+    expect(fake.calls).toEqual([['old', 'dom'], ['focused', 'webgl']]);
+
+    fake.calls.length = 0;
+    const second = reconcileRenderPolicies(input);
+
+    // Before the fix the demote pass called setPolicy('old', 'dom') unconditionally,
+    // so a steady state kept emitting calls forever.
+    expect(second.applied).toEqual({ old: 'dom', focused: 'webgl' });
+    expect(fake.calls).toEqual([]);
+    expect(second.webglCount).toBe(1);
   });
 });
