@@ -108,15 +108,48 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
 let canvasWebGLBudget: number | null = null;
 
 /**
- * Canvas Mode arms this on entry and clears it (`null`) on exit.
+ * design/013 §5.2 invariant BUDGET-OWNER. The budget is owned by Canvas Mode and
+ * must be `null` whenever canvas mode is not active — INCLUDING teardowns that never
+ * run the canvas exit path (webview reload, cross-window detach, renderer crash).
+ * Clearing it only on the exit path is not sufficient, so the release is armed at
+ * the moment the budget is armed.
  *
- * Clearing on the exit path alone does NOT satisfy BUDGET-OWNER (§5.2 note (c)),
- * because canvas exit is not guaranteed to run — webview reload, renderer crash and
- * cross-window detach all skip it. Task 9 adds the release mechanism that closes
- * that; this setter is only the arming half.
+ * Reload and crash destroy this module's state along with the JS realm, so they are
+ * self-healing; the path that is not is a teardown inside a SURVIVING realm, and
+ * `pagehide` is the last point our code runs there. `beforeunload` is deliberately
+ * not used — a webview does not fire it reliably.
+ *
+ * Registered lazily at ARM time, never at module load, so this module still has no
+ * top-level execution (the import cycle with cache.ts depends on that) and an app
+ * that never enters canvas mode never touches `window`. Idempotent: one listener for
+ * the life of the module, not one per canvas entry.
  */
+let budgetReleaseArmed = false;
+
+function armBudgetRelease(): void {
+  if (budgetReleaseArmed) return;
+  if (typeof window === 'undefined') return; // non-DOM host: nothing to tear down
+  budgetReleaseArmed = true;
+  window.addEventListener('pagehide', () => {
+    canvasWebGLBudget = null;
+  });
+}
+
+/** Canvas Mode arms this on entry. Passing `null` releases it. */
 export function setCanvasWebGLBudget(budget: number | null): void {
   canvasWebGLBudget = budget;
+  if (budget !== null) armBudgetRelease();
+}
+
+/** Explicit release, for the normal canvas-exit path. */
+export function releaseCanvasWebGLBudget(): void {
+  canvasWebGLBudget = null;
+}
+
+/** Read-only accessor — BUDGET-OWNER is asserted against it, and it is the only way
+ *  a diagnostic can tell "no canvas session" from "a budget of 0". */
+export function getCanvasWebGLBudget(): number | null {
+  return canvasWebGLBudget;
 }
 
 /**

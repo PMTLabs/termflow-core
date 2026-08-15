@@ -19,6 +19,8 @@ import {
   countActiveWebGLAddons,
   setTerminalRenderPolicy,
   setCanvasWebGLBudget,
+  releaseCanvasWebGLBudget,
+  getCanvasWebGLBudget,
   webglAllowedAtCreation,
 } from '../renderPolicy';
 import { terminalCache, resetTerminalRendering } from '../cache';
@@ -242,5 +244,45 @@ describe('design/013 §5.1 — creation under an active budget', () => {
   it('a budget of 0 refuses everything', () => {
     setCanvasWebGLBudget(0);
     expect(webglAllowedAtCreation()).toBe(false);
+  });
+});
+
+describe('design/013 §5.2 BUDGET-OWNER — the creation budget survives no teardown', () => {
+  it('is null before canvas mode ever runs', () => {
+    expect(getCanvasWebGLBudget()).toBeNull();
+  });
+
+  // Spec test 14, the normal path.
+  it('is null after an explicit release', () => {
+    setCanvasWebGLBudget(12);
+    expect(getCanvasWebGLBudget()).toBe(12);
+    releaseCanvasWebGLBudget();
+    expect(getCanvasWebGLBudget()).toBeNull();
+    expect(webglAllowedAtCreation()).toBe(true);
+  });
+
+  // Spec test 14, the path that matters: canvas exit NEVER RUNS. Nothing calls
+  // releaseCanvasWebGLBudget here — the arming itself must have registered the
+  // release. Without it, every terminal created for the rest of the session opens
+  // on the DOM renderer with no cause a user or a log could point at.
+  it('is null after a teardown that never runs the canvas exit path', () => {
+    setCanvasWebGLBudget(0);
+    expect(webglAllowedAtCreation()).toBe(false);   // budget is armed and biting
+
+    window.dispatchEvent(new Event('pagehide'));    // reload / detach / window close
+
+    expect(getCanvasWebGLBudget()).toBeNull();
+    expect(webglAllowedAtCreation()).toBe(true);
+  });
+
+  // Re-arming after a teardown must still work, and must not stack a second
+  // listener per arm — a leak that grows with every canvas entry.
+  it('re-arms cleanly after a teardown release', () => {
+    setCanvasWebGLBudget(3);
+    window.dispatchEvent(new Event('pagehide'));
+    setCanvasWebGLBudget(5);
+    expect(getCanvasWebGLBudget()).toBe(5);
+    window.dispatchEvent(new Event('pagehide'));
+    expect(getCanvasWebGLBudget()).toBeNull();
   });
 });
