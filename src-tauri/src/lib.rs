@@ -1248,6 +1248,7 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
         commands::adopt_console_window,
+        commands::set_terminal_owning_tab,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::take_reattach_prompt_hook,

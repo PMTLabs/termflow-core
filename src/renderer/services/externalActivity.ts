@@ -29,20 +29,31 @@ export function resolveActivityTabId(
   treesByTabId: Record<string, PaneNode>,
   knownTabIds: Set<string>,
 ): string | null {
-  // 1. The backend told us the owner outright. Trust it only if the tab is
-  //    still open — a closed tab must not resurrect an indicator.
-  if (detail.owningTabId && knownTabIds.has(detail.owningTabId)) {
-    return detail.owningTabId;
-  }
-
-  // 2. Resolve a renderer leaf through the pane tree. `tabId` is a deprecated
-  //    alias of the leaf, so it is a leaf candidate, NOT a tab candidate —
-  //    except in the one case where it is genuinely a root tab id (below).
+  // 1. The PANE TREE IS AUTHORITATIVE. Resolve the renderer leaf through it
+  //    first: it is this window's live record of which tab holds which pane,
+  //    whereas the emitted owner is a backend copy written at spawn that a pane
+  //    move can invalidate (review 099 T2-F2 — `setTerminalOwningTab` repairs
+  //    it, but an event already in flight can still carry the old value, and a
+  //    build/instance without the repair carries it always). Whenever the tree
+  //    has an answer it wins, so a moved pane lights the tab it is IN.
+  //    `tabId` is a deprecated alias of the leaf, so it is a leaf candidate, NOT
+  //    a tab candidate — except in the one case where it is genuinely a root tab
+  //    id (the second half of the loop body).
   for (const leaf of [detail.rendererTerminalId, detail.tabId]) {
     if (!leaf) continue;
     const owner = findTabIdByTerminalId(treesByTabId, leaf);
     if (owner && knownTabIds.has(owner)) return owner;
     if (knownTabIds.has(leaf)) return leaf;
+  }
+
+  // 2. The backend's owner, now a HINT rather than the first answer: used only
+  //    where the tree has none. That is a real case, not a formality — an
+  //    API-created pane's first write can beat the renderer's own insertion into
+  //    the tree, and the sidecar/headless paths never enter it at all. Still
+  //    gated on the tab being open, so a closed tab cannot resurrect an
+  //    indicator.
+  if (detail.owningTabId && knownTabIds.has(detail.owningTabId)) {
+    return detail.owningTabId;
   }
 
   // 3. Last resort: an event from a build that only sent the process id. This

@@ -147,6 +147,13 @@ export interface ElectronAPI {
    * TermFlow instead of behind it. Optional — desktop bridges only.
    */
   adoptConsoleWindow?: (processId: string) => Promise<void>;
+  /**
+   * Re-point a live terminal's owning tab after its pane was moved into another
+   * tab (same-window drag, cross-window drop, detached-window boot). Keyed by
+   * the renderer LEAF, since that is what the pane tree holds. Optional — only
+   * bridges backed by a real terminal registry implement it.
+   */
+  setTerminalOwningTab?: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
   // P0a active-window routing: which window receives API/MCP-created terminals.
   // Optional — only the Tauri bridge implements it (browser bridge is single-window).
   getActiveWindow?: () => Promise<string>;

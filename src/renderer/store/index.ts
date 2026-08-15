@@ -6,6 +6,7 @@ import layoutsReducer from './slices/layoutsSlice';
 import uiReducer from './slices/uiSlice';
 import zoomReducer from './slices/zoomSlice';
 import peersReducer from './slices/peersSlice';
+import { attachPaneOwnershipSync } from '../services/paneOwnership';
 
 // Simple logging middleware for debugging
 const loggingMiddleware = (storeAPI: any) => (next: any) => (action: any) => {
@@ -54,6 +55,12 @@ if (typeof window !== 'undefined') {
     }
     w.__TAB_PANES__ = w.tabPanes;
   });
+
+  // Tell the backend when a pane changes tab (review 099 T2-F2). Driven off the
+  // pane tree rather than off the individual move/attach dispatch sites, so no
+  // reparent path can be added later that forgets to report itself — see
+  // services/paneOwnership.ts.
+  attachPaneOwnershipSync(store);
 }
 
 export type RootState = ReturnType<typeof store.getState>;

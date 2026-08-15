@@ -441,6 +441,80 @@ pub(crate) fn history_key(renderer_terminal_id: Option<&str>) -> Option<&str> {
     }
 }
 
+/// Repoint a live terminal's OWNING TAB after its pane was moved into a
+/// different tab.
+///
+/// `owning_tab_id` is written once, at spawn (`pty_manager::spawn_terminal`),
+/// but the pane it names moves: a same-window drag dispatches `movePaneToTab`
+/// and a cross-window drop re-parents the leaf into another window's tab. The
+/// terminal's IDENTITY does not change — the leaf travels with the pane — so
+/// nothing else in the system notices, and the stored owner keeps naming a tab
+/// the pane has left.
+///
+/// That is not cosmetic (external review 099, T2-F2). The stale owner is echoed
+/// by `terminal_identity_json` to `get_terminal_detail` / `get_my_terminal`, and
+/// the MCP tool descriptions tell an agent to pass that `owningTabId` straight
+/// back when it creates a sibling pane — so the agent's next pane is created in
+/// the wrong tab. It is also emitted on `terminal:external-activity`, lighting
+/// the wrong tab. Silently dropping a split's indicator (the pre-P0-A behaviour)
+/// is not equivalent to actively routing new work somewhere wrong.
+///
+/// Keyed by the renderer LEAF rather than by the `terminals` map key, because
+/// the leaf is what the renderer's pane tree — the authority on ownership —
+/// actually holds; P0-A's uniqueness invariant (design 011 §3, D7) makes it
+/// unambiguous, and it is the one identity that means the same thing on both
+/// spawn paths (the sidecar path registers under the leaf, the in-process path
+/// under a `pc-` id).
+///
+/// Returns whether a terminal matched. A miss is NOT an error: panes are moved
+/// freely, and a leaf can belong to a pane whose PTY has not spawned yet, has
+/// already exited, or lives in another instance.
+///
+/// Takes the map rather than `AppState` so the guard rules stay unit-testable in
+/// an inline `#[cfg(test)]` module — the `integration-tests` feature that
+/// `mock_app` needs breaks the Windows test binary.
+pub(crate) fn retarget_owning_tab(
+    terminals: &DashMap<String, Terminal>,
+    renderer_terminal_id: &str,
+    owning_tab_id: &str,
+) -> Result<bool, String> {
+    let leaf = renderer_terminal_id.trim();
+    let owner = owning_tab_id.trim();
+    if leaf.is_empty() || owner.is_empty() {
+        return Err("both a renderer terminal (leaf) id and an owning tab id are required".to_string());
+    }
+    // Fail closed on the one value that is definitely NOT a tab, exactly as the
+    // API create path does (`api_server::resolve_api_spawn_identity`). Anything
+    // else is accepted verbatim: there is nothing to mint on an update path, and
+    // a layout restored from before the `tb-` convention still has to be able to
+    // correct its own ownership.
+    if owner.starts_with("tm-") {
+        return Err(format!(
+            "'{owner}' is a pane (leaf) id, not a tab id — pass the owning tab id"
+        ));
+    }
+    // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under
+    // the same shard guard, so a concurrent writer cannot slip between them.
+    // Nothing inside takes another lock, so this cannot deadlock against the
+    // read-only occupancy scan in `create_terminal`.
+    for mut entry in terminals.iter_mut() {
+        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+            continue;
+        }
+        if entry.owning_tab_id.as_deref() != Some(owner) {
+            let previous = entry.owning_tab_id.clone();
+            entry.owning_tab_id = Some(owner.to_string());
+            log::info!(
+                "Terminal {} (leaf {leaf}) re-parented: owning tab {:?} -> {owner}",
+                entry.id,
+                previous
+            );
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 impl<R: Runtime> AppState<R> {
     pub fn new(
         output_tx: broadcast::Sender<ChannelPayload>,
@@ -1887,6 +1961,120 @@ mod terminal_identity_serde_tests {
         assert_eq!(back.id, "pc-abc123def");
         assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
         assert_eq!(back.owning_tab_id.as_deref(), Some("tb-4e8d0c2f1"));
+    }
+}
+
+/// Review 099 T2-F2: the owner recorded at spawn goes stale the moment a pane is
+/// dragged into another tab, and it is what `get_terminal_detail` hands an agent
+/// to create a sibling pane with.
+#[cfg(test)]
+mod retarget_owning_tab_tests {
+    use super::{retarget_owning_tab, Terminal, TerminalBackend};
+    use dashmap::DashMap;
+
+    /// One live terminal: process `pc-1`, pane leaf `tm-x`, owned by tab `tb-a`.
+    fn one_split_pane() -> DashMap<String, Terminal> {
+        let map = DashMap::new();
+        map.insert(
+            "pc-1".to_string(),
+            Terminal {
+                id: "pc-1".into(),
+                pid: 4242,
+                shell: "pwsh".into(),
+                name: "Terminal-pwsh".into(),
+                created_at: "2026-08-15T10:00:00+07:00".into(),
+                cols: 80,
+                rows: 24,
+                backend: TerminalBackend::PortablePty,
+                renderer_terminal_id: Some("tm-x".into()),
+                owning_tab_id: Some("tb-a".into()),
+                last_input_source: None,
+                last_input_at: None,
+                prompt_hook: false,
+            },
+        );
+        map
+    }
+
+    /// THE regression: after the pane moves from tab A to tab B, the backend
+    /// owner must be tab B — otherwise activity lights A and an agent asking for
+    /// `owningTabId` creates its next pane in A.
+    #[test]
+    fn a_moved_pane_updates_the_stored_owner() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tb-b"), Ok(true));
+        let t = terminals.get("pc-1").expect("terminal");
+        assert_eq!(t.owning_tab_id.as_deref(), Some("tb-b"));
+        // The leaf is the pane's identity and travels WITH it — a move must not
+        // touch it (that is what makes history/reattach survive the move).
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tm-x"));
+    }
+
+    /// The map is keyed by the PROCESS id; the renderer only ever knows the leaf.
+    #[test]
+    fn it_matches_on_the_leaf_not_on_the_map_key() {
+        let terminals = one_split_pane();
+        assert_eq!(
+            retarget_owning_tab(&terminals, "pc-1", "tb-b"),
+            Ok(false),
+            "the map key is not a renderer identity"
+        );
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+        );
+    }
+
+    /// Panes move freely; a leaf with no live PTY (never spawned, already exited,
+    /// or another instance's) is an ordinary no-op, not a failure the renderer
+    /// should surface.
+    #[test]
+    fn an_unknown_leaf_is_a_miss_not_an_error() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-gone", "tb-b"), Ok(false));
+    }
+
+    #[test]
+    fn a_no_op_move_back_to_the_same_tab_still_reports_a_match() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tb-a"), Ok(true));
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+        );
+    }
+
+    /// Same fail-closed rule as the create path: a `tm-` value is a pane, and
+    /// accepting it would file a terminal under an owner no tab can ever match.
+    #[test]
+    fn a_pane_id_is_rejected_as_an_owner() {
+        let terminals = one_split_pane();
+        let err = retarget_owning_tab(&terminals, "tm-x", "tm-sibling").expect_err("must reject");
+        assert!(err.contains("not a tab id"), "unhelpful message: {err}");
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+            "a rejected call must not have written anything"
+        );
+    }
+
+    #[test]
+    fn blank_ids_are_rejected() {
+        let terminals = one_split_pane();
+        assert!(retarget_owning_tab(&terminals, "  ", "tb-b").is_err());
+        assert!(retarget_owning_tab(&terminals, "tm-x", "  ").is_err());
+    }
+
+    /// A layout persisted before the `tb-` convention still has to be able to
+    /// correct itself — there is nothing to mint on an update path.
+    #[test]
+    fn a_legacy_non_tb_tab_id_is_accepted_verbatim() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tab-legacy-7"), Ok(true));
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tab-legacy-7"),
+        );
     }
 }
 

@@ -177,6 +177,10 @@ class BrowserBridge implements ElectronAPI {
     /// No-op in the browser: there is no OS window here to own a console dialog.
     async adoptConsoleWindow(_processId: string): Promise<void> { }
 
+    /// No-op in the browser: the REST surface exposes no ownership update, and a
+    /// browser session has no pane-drag/detach paths to move a pane between tabs.
+    async setTerminalOwningTab(_rendererTerminalId: string, _owningTabId: string): Promise<void> { }
+
     async closeTerminal(id: string): Promise<void> {
         try {
             await fetch(`${API_BASE_URL}/terminals/${id}`, {

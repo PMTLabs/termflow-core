@@ -57,6 +57,73 @@ describe('resolveActivityTabId', () => {
     ).toBeNull();
   });
 
+  // Review 099 T2-F2. Tab A had two panes; the split leaf was dragged into tab
+  // B, which leaves A OPEN — so the owner the backend recorded at spawn still
+  // names a live tab and the old "trust it if the tab exists" rule lit A. The
+  // tree knows the pane is in B.
+  it('lights the NEW tab after a pane moved, even when the emitted owner is stale', () => {
+    const movedTrees = {
+      'tb-4e8d0c2f1': { id: 'pn-a', type: 'terminal' as const, terminalId: 'tb-4e8d0c2f1' },
+      'tb-target007': {
+        id: 'pn-root-b',
+        type: 'split' as const,
+        direction: 'vertical' as const,
+        children: [
+          { id: 'pn-c', type: 'terminal' as const, terminalId: 'tb-target007' },
+          { id: 'pn-b', type: 'terminal' as const, terminalId: 'tm-9f2c1a4b7' },
+        ],
+      },
+    } as any;
+    const bothOpen = new Set(['tb-4e8d0c2f1', 'tb-target007']);
+
+    expect(
+      resolveActivityTabId(
+        { owningTabId: 'tb-4e8d0c2f1', rendererTerminalId: 'tm-9f2c1a4b7', tabId: 'tm-9f2c1a4b7' },
+        movedTrees,
+        bothOpen,
+      ),
+    ).toBe('tb-target007');
+  });
+
+  // Same for a TAB ROOT leaf dragged into another tab: its leaf id is still
+  // `tb-`, and the tab it names is still open, so both the stale owner and the
+  // "leaf that is itself a tab" shortcut point at the wrong tab.
+  it('lights the NEW tab when the moved pane carried a root tb- leaf', () => {
+    const movedTrees = {
+      'tb-source001': { id: 'pn-keep', type: 'terminal' as const, terminalId: 'tm-kept0001' },
+      'tb-target007': {
+        id: 'pn-root-b',
+        type: 'split' as const,
+        direction: 'vertical' as const,
+        children: [
+          { id: 'pn-c', type: 'terminal' as const, terminalId: 'tb-target007' },
+          { id: 'pn-moved', type: 'terminal' as const, terminalId: 'tb-source001' },
+        ],
+      },
+    } as any;
+    const bothOpen = new Set(['tb-source001', 'tb-target007']);
+
+    expect(
+      resolveActivityTabId(
+        { owningTabId: 'tb-source001', rendererTerminalId: 'tb-source001' },
+        movedTrees,
+        bothOpen,
+      ),
+    ).toBe('tb-target007');
+  });
+
+  // The hint still earns its place: an API-created pane can produce activity
+  // before the renderer has inserted it into the tree.
+  it('falls back to the emitted owner when the tree has no answer yet', () => {
+    expect(
+      resolveActivityTabId(
+        { owningTabId: 'tb-4e8d0c2f1', rendererTerminalId: 'tm-notyetinserted' },
+        trees,
+        knownTabIds,
+      ),
+    ).toBe('tb-4e8d0c2f1');
+  });
+
   it('returns null rather than guessing when nothing resolves', () => {
     expect(resolveActivityTabId({}, trees, knownTabIds)).toBeNull();
     expect(

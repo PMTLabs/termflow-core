@@ -190,6 +190,34 @@ pub fn adopt_console_window(
     Ok(())
 }
 
+/// Tell the backend that a pane moved into a different tab, so the owner stored
+/// at spawn stops naming the tab the pane left (review 099 T2-F2).
+///
+/// The renderer is the authority here: tab ownership lives only in
+/// `panes.treesByTabId`, and the backend cannot derive it. Fired from the pane
+/// tree's own change subscription (`services/paneOwnership.ts`), which is why it
+/// covers every reparent path — same-window drag, cross-window drop, detached
+/// window boot — rather than only fresh process binding.
+///
+/// `renderer_terminal_id` is the LEAF (`tb-*` root, `tm-*` split), not the
+/// process id: the leaf is what the pane tree holds and it is unique per live
+/// pane (design 011 §3, D7). Best-effort like `adopt_console_window` — an
+/// unmatched leaf is not an error, since the renderer fires this off its own
+/// tree lifecycle and a pane's PTY may not exist (yet, or any more).
+#[tauri::command]
+pub fn set_terminal_owning_tab(
+    state: State<'_, AppState>,
+    renderer_terminal_id: String,
+    owning_tab_id: String,
+) -> Result<(), String> {
+    if !crate::state::retarget_owning_tab(&state.terminals, &renderer_terminal_id, &owning_tab_id)? {
+        log::debug!(
+            "set_terminal_owning_tab: no live terminal carries leaf {renderer_terminal_id}"
+        );
+    }
+    Ok(())
+}
+
 /// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
 /// stable `tab_id` (the reattach key), so the sidecar session, the output
 /// broadcast id, and the vt100 screen key all align — live routing works with

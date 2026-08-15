@@ -50,6 +50,10 @@ interface ElectronAPI {
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
   /// every process bind, so a pane moved between windows re-owns to the new one.
   adoptConsoleWindow: (processId: string) => Promise<void>;
+  /// Re-point a live terminal's owning tab after its pane was moved into a
+  /// different tab. Keyed by the renderer LEAF (`tb-*` root, `tm-*` split) —
+  /// see services/paneOwnership.ts.
+  setTerminalOwningTab: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
@@ -304,6 +308,11 @@ const tauriBridge: ElectronAPI = {
 
   adoptConsoleWindow: async (processId: string) => {
     await invoke('adopt_console_window', { terminalId: processId });
+  },
+
+  setTerminalOwningTab: async (rendererTerminalId: string, owningTabId: string) => {
+    // Tauri maps camelCase JS keys onto the snake_case Rust parameters.
+    await invoke('set_terminal_owning_tab', { rendererTerminalId, owningTabId });
   },
 
   closeTerminal: async (id) => {
