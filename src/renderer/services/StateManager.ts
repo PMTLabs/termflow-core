@@ -7,7 +7,8 @@ import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
-import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
+import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
+import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
@@ -242,10 +243,12 @@ class StateManagerClass {
   /**
    * Reattach restored panes to PTYs that are still alive in the backend, instead
    * of spawning fresh ones (which orphans the survivors). The backend tags every
-   * terminal with the renderer terminalId that created it (its `tabId` field), so
-   * we can map each saved pane back to its live process. Best-effort: any failure
-   * (API unreachable, exposed-mode 401, prod mixed-content) is swallowed and the
-   * normal spawn path runs — no regression.
+   * terminal with the renderer terminalId that created it (its `terminalId`
+   * field — the `tb-*`/`tm-*` leaf; `tabId` is a deprecated alias and two splits
+   * in one tab share an `owningTabId`, so grouping by either would reap a live
+   * PTY), so we can map each saved pane back to its live process. Best-effort:
+   * any failure (API unreachable, exposed-mode 401, prod mixed-content) is
+   * swallowed and the normal spawn path runs — no regression.
    */
   private async reconcileExistingTerminals(appState: AppState): Promise<void> {
     try {
@@ -299,26 +302,14 @@ class StateManagerClass {
 
       const list: any[] = Array.isArray(data) ? data : data?.terminals ?? [];
 
-      // Group every live PTY by the renderer id that spawned it (its `tabId`),
-      // restricted to ids the restore is about to recreate. We only consider these
-      // "wanted" ids so API-created terminals (mode "api", no UI tab) and other
-      // windows' terminals are never touched.
-      const byRenderer = new Map<
-        string,
-        Array<{ processId: string; createdAt: number; promptHook: unknown }>
-      >();
-      for (const term of list) {
-        const rendererId: string | undefined = term?.tabId; // id that spawned it
-        const processId: string | undefined = term?.id ?? term?.processId;
-        if (!rendererId || !processId || !wanted.has(rendererId)) continue;
-        const createdAt = Date.parse(term?.createdAt ?? '') || 0;
-        const arr = byRenderer.get(rendererId) ?? [];
-        // promptHook re-arms command-suggest's prompt gate on reattach (see
-        // reattachPromptGate) — a reload wipes the in-memory gate, so without it
-        // an agent CLI running across the reload leaks input into the popup.
-        arr.push({ processId, createdAt, promptHook: term?.promptHook });
-        byRenderer.set(rendererId, arr);
-      }
+      // Group every live PTY by the renderer LEAF that spawned it (its
+      // `terminalId` field — the `tb-*`/`tm-*` leaf; `tabId` is a deprecated
+      // alias and two splits in one tab share an `owningTabId`, so grouping by
+      // either would reap a live PTY), restricted to ids the restore is about
+      // to recreate. We only consider these "wanted" ids so API-created
+      // terminals (mode "api", no UI tab) and other windows' terminals are
+      // never touched.
+      const byRenderer = groupLiveTerminalsByLeaf(list, wanted);
 
       // Reattach to the NEWEST PTY per id, and REAP the older duplicates: a prior
       // reload that failed to reattach leaves several live PTYs sharing one tabId,
@@ -326,7 +317,6 @@ class StateManagerClass {
       // self-heals the leak on the next load instead of letting orphans accumulate.
       const orphansToClose: string[] = [];
       for (const [rendererId, candidates] of byRenderer) {
-        candidates.sort((a, b) => b.createdAt - a.createdAt); // newest first
         const [keep, ...stale] = candidates;
         // Registers id→process AND seeds the init guards so the mount effect
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
@@ -636,15 +626,17 @@ class StateManagerClass {
   /**
    * Helper to sanitize state and layouts to ensure they use correct prefixed IDs and avoid GUIDs.
    */
-  private sanitizeLayoutData<T extends { 
-    tabs: any[]; 
-    activeTabId: string | null; 
-    paneTree: any; 
-    activePaneId: string | null; 
-    tabPanes?: { [tabId: string]: any } 
+  private sanitizeLayoutData<T extends {
+    tabs: any[];
+    activeTabId: string | null;
+    paneTree: any;
+    activePaneId: string | null;
+    tabPanes?: { [tabId: string]: any };
+    terminalCwds?: { [terminalId: string]: string };
   }>(data: T): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
+    const terminalIdMap = new Map<string, string>();
 
     // 1. Map old tab IDs to new tab IDs
     const sanitizedTabs = (data.tabs || []).map(tab => {
@@ -694,6 +686,7 @@ class StateManagerClass {
 
       if (newNode.type === 'terminal') {
         if (newNode.terminalId) {
+          const oldTerminalId = newNode.terminalId;
           // If it was matching the old tab ID (main terminal of that tab)
           if (tabIdMap.has(newNode.terminalId)) {
             newNode.terminalId = tabIdMap.get(newNode.terminalId)!;
@@ -702,6 +695,22 @@ class StateManagerClass {
           } else if (!newNode.terminalId.startsWith('tm-') && !newNode.terminalId.startsWith('tb-')) {
             // Split terminal ID that is not tb- or tm-
             newNode.terminalId = generateId('tm');
+          }
+          // GUARD (blast-radius review 092 B1): `sanitizeNode` runs TWICE over
+          // the same logical tree — once inside the `tabPanes` loop below
+          // (whose output IS what `restoreTabPanesInPlace` actually restores)
+          // and once standalone over `paneTree` (whose output `restoreState`
+          // never dispatches — no `setPaneTree` call exists there). For a
+          // legacy leaf id that needs regeneration, each pass independently
+          // calls the non-deterministic `generateId('tm')` and gets a
+          // DIFFERENT id. The tabPanes pass runs first (it is physically
+          // earlier in this function), so its id is the one that ends up on
+          // screen — the FIRST mapping must therefore win. Without this guard
+          // the second (discarded) id silently overwrites the first, and
+          // `remapCwds` re-keys the cwd onto an id no restored pane carries —
+          // reproducing the exact bug this task exists to fix.
+          if (newNode.terminalId !== oldTerminalId && !terminalIdMap.has(oldTerminalId)) {
+            terminalIdMap.set(oldTerminalId, newNode.terminalId);
           }
         }
       } else if (newNode.type === 'split' && newNode.children) {
@@ -735,6 +744,7 @@ class StateManagerClass {
       activeTabId: sanitizedActiveTabId,
       paneTree: sanitizedPaneTree,
       activePaneId: sanitizedActivePaneId,
+      terminalCwds: remapCwds(data.terminalCwds || {}, terminalIdMap),
     };
 
     if (data.tabPanes) {

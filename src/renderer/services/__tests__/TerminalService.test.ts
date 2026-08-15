@@ -50,6 +50,39 @@ describe('TerminalService console-window adoption', () => {
   });
 });
 
+describe('TerminalService.createTerminal owning-tab plumbing', () => {
+  let createTerminal: jest.Mock;
+
+  beforeEach(() => {
+    createTerminal = jest.fn().mockResolvedValue('pc-owner-1');
+    (window as any).electronAPI = {
+      createTerminal,
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  // Design 011 §6: the owner must reach the backend AT SPAWN. Without it the
+  // Rust owning_tab_id is null for every UI-created terminal and the
+  // split-pane activity fix cannot work.
+  it('forwards the owning tab id to the bridge', async () => {
+    await terminalService.createTerminal(
+      'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab',
+    );
+  });
+
+  // A root/solo pane owns itself; callers that pass nothing must still work
+  // (the backend treats `undefined` as "unknown" and falls back to the leaf).
+  it('omits the owner when the caller does not know one', async () => {
+    await terminalService.createTerminal('tb-solo-1');
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined,
+    );
+  });
+});
+
 describe('TerminalService.stashPromptGate (backlog 011 hot-swap reattach seed)', () => {
   it('stashes a gate that takePromptGateHandoff drains exactly once', () => {
     terminalService.stashPromptGate('tb-seed-1', { seen: true, armed: false });
@@ -62,5 +95,53 @@ describe('TerminalService.stashPromptGate (backlog 011 hot-swap reattach seed)',
     terminalService.stashPromptGate('tb-seed-2', { seen: true, armed: false });
     terminalService.stashPromptGate('tb-seed-2', null);
     expect(terminalService.takePromptGateHandoff('tb-seed-2')).toBeUndefined();
+  });
+});
+
+/**
+ * External review 101, F2 — the WIRING, not the rule.
+ *
+ * `paneOwnershipSync.test.ts` covers what `reassertOwnerAfterSpawn` decides.
+ * This covers the part that regressed the last time around: nobody calling it.
+ * `createTerminal` is the single choke point every renderer create passes
+ * through, and the moment it returns is the first moment the backend has the
+ * terminal registered — which is exactly what a mid-spawn pane move needs.
+ */
+describe('TerminalService.createTerminal re-asserts pane ownership after the spawn', () => {
+  const { attachPaneOwnershipSync } = require('../paneOwnership');
+  const panesReducer = require('../../store/slices/panesSlice').default;
+  const { addTabTree, insertPaneIntoTab } = require('../../store/slices/panesSlice');
+  const { configureStore } = require('@reduxjs/toolkit');
+
+  let setTerminalOwningTab: jest.Mock;
+  let unsubscribe: () => void;
+
+  beforeEach(() => {
+    setTerminalOwningTab = jest.fn().mockResolvedValue(undefined);
+    (window as any).electronAPI = {
+      createTerminal: jest.fn().mockResolvedValue('pc-reassert-1'),
+      setTerminalOwningTab,
+    };
+    const store = configureStore({ reducer: { panes: panesReducer } });
+    unsubscribe = attachPaneOwnershipSync(store);
+    // The pane is born under tb-src, then dragged to tb-dst while its create is
+    // still in flight — so the owner the spawn carries is already stale by the
+    // time the backend registers the terminal.
+    store.dispatch(addTabTree({ tabId: 'tb-src', tree: { id: 'pn-a', type: 'terminal', terminalId: 'tm-reassert' } }));
+    store.dispatch(addTabTree({ tabId: 'tb-dst', tree: { id: 'pn-b', type: 'terminal', terminalId: 'tb-dst' } }));
+    store.dispatch(insertPaneIntoTab({
+      tabId: 'tb-dst',
+      targetPaneId: 'pn-b',
+      zone: 'right',
+      node: { id: 'pn-a', type: 'terminal', terminalId: 'tm-reassert' },
+    }));
+    setTerminalOwningTab.mockClear();
+  });
+
+  afterEach(() => unsubscribe());
+
+  it('pushes the tree\'s current owner, not the one the spawn carried', async () => {
+    await terminalService.createTerminal('tm-reassert', 'default', undefined, undefined, undefined, undefined, 'tb-src');
+    expect(setTerminalOwningTab).toHaveBeenCalledWith('tm-reassert', 'tb-dst');
   });
 });

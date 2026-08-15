@@ -23,3 +23,22 @@ export function seedRestoredCwds(saved: Record<string, string> | undefined): voi
     }
   }
 }
+
+/** Re-key saved directories when sanitisation rewrites a pane's terminal id.
+ *  Without this the cwd is orphaned under the old id and the restored pane
+ *  starts in the profile default instead of where the user left it
+ *  (design 011 §6, review 086 Q4). An entry that already exists under the NEW
+ *  id is fresher and wins. */
+export function remapCwds(
+  all: Record<string, string>,
+  mapping: Map<string, string>,
+): Record<string, string> {
+  if (mapping.size === 0) return { ...all };
+  const out: Record<string, string> = {};
+  for (const [terminalId, cwd] of Object.entries(all)) {
+    const target = mapping.get(terminalId) ?? terminalId;
+    if (mapping.has(terminalId) && Object.prototype.hasOwnProperty.call(all, target)) continue;
+    out[target] = cwd;
+  }
+  return out;
+}

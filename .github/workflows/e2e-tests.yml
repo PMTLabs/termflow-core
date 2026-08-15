@@ -28,8 +28,20 @@ jobs:
       with:
         node-version: '18'
 
-    - name: Setup Bun
+    # This job runs on the self-hosted Windows box, where bun is already
+    # installed and usually already RUNNING — oven-sh/setup-bun then fails
+    # trying to overwrite the in-use bun.exe with `EBUSY: resource busy or
+    # locked`, which surfaces as a random red X on an otherwise green PR.
+    # rust-tests.yml has carried this workaround for a while; e2e-tests.yml
+    # was missed. Same two-step shape, so the jobs stay comparable and a
+    # future move to a GitHub-hosted runner still installs bun.
+    - name: Setup Bun (GitHub-hosted)
+      if: runner.os != 'Windows'
       uses: oven-sh/setup-bun@v2
+
+    - name: Verify Bun (Windows)
+      if: runner.os == 'Windows'
+      run: bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -95,8 +107,14 @@ jobs:
       with:
         node-version: '18'
 
-    - name: Setup Bun
+    # Same EBUSY workaround as the e2e job above — see the comment there.
+    - name: Setup Bun (GitHub-hosted)
+      if: runner.os != 'Windows'
       uses: oven-sh/setup-bun@v2
+
+    - name: Verify Bun (Windows)
+      if: runner.os == 'Windows'
+      run: bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile

@@ -343,29 +343,42 @@ fn health_body(instance_id: &str) -> serde_json::Value {
     })
 }
 
+/// The identity + status block every terminal-shaped API response carries.
+///
+/// One function so `list_terminals`, `create_terminal` and `get_terminal`
+/// cannot drift — they were three hand-copied `json!` literals that already
+/// disagreed (`get_terminal` omitted `promptHook`, and used mode "default").
+///
+/// Key contract (design 011 §4), all of it load-bearing for existing clients:
+///   `id` / `processId` — the PTY routing key. Unchanged.
+///   `terminalId`       — the renderer LEAF (`tb-*` root, `tm-*` split).
+///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
+///                        so no existing API/MCP client breaks. Removing it is
+///                        a major-version change, explicitly not done here.
+///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
+///                        headless (no-renderer-pane) terminal.
+fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
+    json!({
+        "id": t.id,
+        "processId": t.id,
+        "terminalId": t.renderer_terminal_id,
+        "tabId": t.renderer_terminal_id,
+        "owningTabId": t.owning_tab_id,
+        "name": t.name,
+        "profile": t.shell,
+        "status": "running",
+        "pid": t.pid,
+        "createdAt": t.created_at,
+        "mode": mode,
+        // Command-suggest reads this on reload-reattach to re-seed its prompt
+        // gate DISARMED; the ARMED decision is sampled pre-mount via
+        // probe_reattach_prompt_gate, NOT here (review 008 M-1).
+        "promptHook": t.prompt_hook,
+    })
+}
+
 async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
-    let terminals: Vec<_> = state.terminals.iter().map(|entry| {
-        let t = entry.value();
-        json!({
-            "id": t.id,
-            "processId": t.id,
-            // Stable renderer id: `tm-` for a split pane, `tb-` for a root/solo
-            // pane (where it equals the tabId). This is the UI-level terminal id.
-            "terminalId": t.tab_id,
-            "name": t.name,
-            "profile": t.shell,
-            "status": "running",
-            "pid": t.pid,
-            "createdAt": t.created_at,
-            "mode": "ui",
-            "tabId": t.tab_id,
-            // Command-suggest reads this on reload-reattach to re-seed its prompt
-            // gate DISARMED; the ARMED decision is sampled pre-mount via the
-            // probe_reattach_prompt_gate command, NOT here — a fetch-time sample
-            // would be stale by the time the engine mounts (review 008 M-1).
-            "promptHook": t.prompt_hook
-        })
-    }).collect();
+    let terminals: Vec<_> = state.terminals.iter().map(|e| terminal_identity_json(e.value(), "ui")).collect();
     // Owner discriminator. Terminals live in this process's own AppState, so
     // every entry above belongs to this instance by construction — the useful
     // guarantee is therefore at the RESPONSE level: a client that reaches the
@@ -439,9 +452,129 @@ struct CreateTerminalReq {
     cwd: Option<String>,
     #[serde(alias = "tabId")]
     tab_id: Option<String>,
+    /// The tab that should own the new pane. Preferred over `tab_id`, which is
+    /// ambiguous for a split (a client reading `tabId` back off a split pane
+    /// gets a `tm-` LEAF, not a tab).
+    #[serde(alias = "owningTabId")]
+    owning_tab_id: Option<String>,
     #[serde(alias = "paneId")]
     pane_id: Option<String>,
     direction: Option<String>,
+}
+
+/// The two renderer identities an API-created terminal registers.
+#[derive(Debug, PartialEq, Eq)]
+struct ApiSpawnIdentity {
+    /// Unique per UI pane. The `terminal_history` PRIMARY KEY and the
+    /// `terminalId` of every response.
+    renderer_terminal_id: String,
+    /// The tab the pane belongs to.
+    owning_tab_id: String,
+}
+
+/// Mint a renderer id: `<prefix>-<9 hex chars of a v4 uuid>`, matching the
+/// format the renderer's own generator produces (`utils/id.ts:1-8`).
+fn mint_renderer_id(prefix: &str) -> String {
+    let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
+    format!("{prefix}-{}", &raw[..9])
+}
+
+/// Decide both renderer identities for `POST /api/terminals`.
+///
+/// `mint` supplies the id so the decision is deterministically testable;
+/// production passes `mint_renderer_id`.
+///
+/// Rules (design 011 §5 "The corrected write"):
+///   * An explicit `owningTabId`, else `tabId`, is the OWNER — accepted verbatim
+///     when it starts with `tb-`, exactly as `api_server.rs:494` did before.
+///   * A `tm-` value in either field is a PANE id, not a tab id. Before P0-A it
+///     was silently discarded and replaced with an unrelated fresh `tb-`
+///     (ground-truth correction C3), so the pane appeared in the wrong tab. Fail
+///     closed with a message naming the right field. The spec's §5 snippet does
+///     not cover this case; this is a GAP FILL, flagged in the plan header.
+///   * The leaf must be a fresh `tm-` whenever this create lands in a tab that
+///     **already holds a live terminal** — only a tab's FIRST pane may use the
+///     tab's own id as its leaf (design 011 §3, D7). `pane_id.is_some()` is one
+///     way to know that, but NOT the only one: `paneId` is optional in the MCP
+///     tool and `App.tsx` Mode 2 splits a populated tab without it, so keying
+///     off `pane_id` alone re-registers the tab root's leaf onto a second live
+///     terminal — the `terminal_history` PRIMARY KEY collision P0-A exists to
+///     remove (review 095 B1).
+///   * Otherwise this is the tab's first/solo pane and leaf == owner, as before.
+///
+/// CONCURRENCY (review 099 T2-F1). "Already holds a live terminal" is read from
+/// `terminals`, but the create that would make it true registers its `Terminal`
+/// only at the very END of `spawn_terminal` (`pty_manager.rs:862-871`, an order
+/// that must not change). Two parallel POSTs naming the same empty tab therefore
+/// both read "unoccupied" and both took the tab id as their leaf. So occupancy is
+/// now the disjunction of two sources, and the second is taken as a RESERVATION:
+///
+///   1. `claim_root_leaf` — atomically reserves the OWNER for this create and
+///      hands back an RAII guard; `None` means another create already holds it.
+///      Claimed FIRST, before the scan, because a claim is released only after
+///      the winner's `Terminal` is visible (see `RootLeafClaims::try_claim`).
+///   2. `owner_has_live_terminal` — the pre-existing scan, for creates that
+///      already finished.
+///
+/// The returned guard belongs to the CALLER and must outlive `spawn_terminal`.
+///
+/// Both hooks are injected rather than read from `AppState` so this stays a pure
+/// unit-testable decision (the Windows test binary cannot build the
+/// `integration-tests` feature that `mock_app` needs). A freshly minted owner
+/// trivially has neither a live terminal nor a competing claim, so the extra
+/// probes cannot disturb the new-tab path.
+fn resolve_api_spawn_identity<C>(
+    tab_id: Option<&str>,
+    owning_tab_id: Option<&str>,
+    pane_id: Option<&str>,
+    claim_root_leaf: impl FnOnce(&str) -> Option<C>,
+    owner_has_live_terminal: impl Fn(&str) -> bool,
+    mut mint: impl FnMut(&str) -> String,
+) -> Result<(ApiSpawnIdentity, Option<C>), String> {
+    let owner_hint = owning_tab_id
+        .or(tab_id)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let owning_tab_id = match owner_hint {
+        Some(id) if id.starts_with("tb-") => id.to_string(),
+        Some(id) if id.starts_with("tm-") => {
+            return Err(format!(
+                "'{id}' is a pane (leaf) id, not a tab id — pass the owning tab id \
+                 (the `owningTabId` field of GET /api/terminals/{{id}})"
+            ))
+        }
+        // Absent, blank, or an unrecognised format: mint one, as before.
+        _ => mint("tb"),
+    };
+
+    // D7: the trigger is "this tab is already occupied", not "the caller named a
+    // pane". `pane_id` is kept as a signal because a caller that DOES name a pane
+    // is telling us it wants a split even if the tab's live set is momentarily
+    // empty (e.g. its only PTY just exited).
+    let (renderer_terminal_id, root_leaf_claim) = if pane_id.is_some() {
+        // Unconditionally a split: a fresh `tm-` is unique by construction, so
+        // there is nothing to reserve and no reason to block a concurrent root.
+        (mint("tm"), None)
+    } else {
+        match claim_root_leaf(&owning_tab_id) {
+            // We reserved the owner AND no finished create holds it: this is the
+            // tab root, leaf == owner. The guard travels back to the caller.
+            Some(claim) if !owner_has_live_terminal(&owning_tab_id) => {
+                (owning_tab_id.clone(), Some(claim))
+            }
+            // Occupied by a registered terminal. We drop the reservation right
+            // here: we are not taking the root leaf, so holding it would only
+            // stall the next create for no gain.
+            Some(_) => (mint("tm"), None),
+            // Another create is IN FLIGHT as this tab's root. It may not be
+            // visible in `terminals` yet, but it has already committed to the
+            // tab id as its leaf — so this one is a split.
+            None => (mint("tm"), None),
+        }
+    };
+
+    Ok((ApiSpawnIdentity { renderer_terminal_id, owning_tab_id }, root_leaf_claim))
 }
 
 async fn create_terminal(
@@ -486,25 +619,44 @@ async fn create_terminal(
     let rows = payload.rows.unwrap_or(24);
     log::info!("Creating terminal with size {}x{}, profile: {}", cols, rows, shell_name);
 
-    // Resolve or generate a proper tb- prefixed tab ID. Computed BEFORE the spawn
-    // so the Terminal registers with it up front (review 062 F-01: patching
-    // tab_id in after spawn races a fast-exiting shell's exit-path persist).
-    let tab_id = match payload.tab_id.as_ref() {
-        Some(tid) if !tid.is_empty() => {
-            if tid.starts_with("tb-") {
-                tid.clone()
-            } else {
-                let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-                format!("tb-{}", &raw_uuid[..9])
-            }
-        }
-        _ => {
-            let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-            format!("tb-{}", &raw_uuid[..9])
+    // Resolve BOTH renderer identities BEFORE the spawn, so the Terminal
+    // registers with them up front (review 062 F-01: patching an id in after
+    // spawn returns races a fast-exiting shell's exit-path persist, which then
+    // files the final scrollback under the ephemeral pc- id).
+    let (identity, root_leaf_claim) = match resolve_api_spawn_identity(
+        payload.tab_id.as_deref(),
+        payload.owning_tab_id.as_deref(),
+        payload.pane_id.as_deref(),
+        // Reserve the owner for the decision→registration window (review 099
+        // T2-F1). Atomic insert, taken BEFORE the scan below; released by the
+        // guard's `Drop` once `spawn_terminal` has returned.
+        |owner: &str| state.root_leaf_claims.try_claim(owner),
+        // D7 / review 095 B1: a create that lands in an already-occupied tab is a
+        // SPLIT even with no `paneId` (App.tsx Mode 2), so the leaf must be fresh.
+        // A terminal claims a tab either as its owner or — for a tab root, and for
+        // anything registered before P0-A — as its own renderer leaf.
+        // Read-only iteration that completes before the spawn: no shard guard is
+        // held across `spawn_terminal`, and nothing inside takes another lock.
+        // On its own this is a TOCTOU read, which is why the reservation above
+        // covers the creates it cannot see yet.
+        |owner: &str| {
+            state.terminals.iter().any(|e| {
+                let t = e.value();
+                t.owning_tab_id.as_deref() == Some(owner)
+                    || t.renderer_terminal_id.as_deref() == Some(owner)
+            })
+        },
+        mint_renderer_id,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            // No claim exists yet on this path (resolution failed before it was
+            // taken), so there is nothing to release.
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response()
         }
     };
 
-    match crate::pty_manager::spawn_terminal(
+    let spawned = crate::pty_manager::spawn_terminal(
         state.clone(),
         cols,
         rows,
@@ -513,9 +665,18 @@ async fn create_terminal(
         shell_cwd,
         shell_name.clone(),
         terminal_name.clone(),
-        Some(tab_id.clone()),
+        Some(identity.renderer_terminal_id.clone()),
+        Some(identity.owning_tab_id.clone()),
         None, // API-created terminal: fresh session, no restored scrollback
-    ) {
+    );
+    // EARLIEST CORRECT RELEASE, and the only one that matters: `spawn_terminal`
+    // has either registered the `Terminal` (so the scan above now sees this tab
+    // as occupied) or failed (so the owner is free again). Explicit rather than
+    // left to end-of-scope so the guard's lifetime — everything above this line —
+    // is visible; `Drop` still covers the `?`-free early return paths.
+    drop(root_leaf_claim);
+
+    match spawned {
         Ok(id) => {
             // Notify the UI to create a tab for this new terminal. We BROADCAST (a
             // bare emit_to is documented as not reaching the JS listener here — see
@@ -526,8 +687,15 @@ async fn create_terminal(
             if let Err(e) = state.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": terminal_name,
                 "profile": shell_name,
-                "terminalId": id, // Pass the actual backend ID
-                "tabId": Some(tab_id.clone()),
+                // UNCHANGED: this key has always carried the backend PROCESS id
+                // here (unlike a REST response, where `terminalId` is the leaf).
+                // Mode 0 in App.tsx reads it as the process id.
+                "terminalId": id,
+                "tabId": Some(identity.owning_tab_id.clone()),
+                // NEW, unambiguous names — see App.tsx Modes 0/1.
+                "processId": id,
+                "rendererTerminalId": identity.renderer_terminal_id.clone(),
+                "owningTabId": identity.owning_tab_id.clone(),
                 "paneId": payload.pane_id,
                 "direction": payload.direction,
                 "targetWindow": target_window
@@ -536,21 +704,7 @@ async fn create_terminal(
             }
 
             if let Some(t) = state.terminals.get(&id) {
-                let t = t.value();
-                (StatusCode::OK, Json(json!({
-                    "id": t.id,
-                    "processId": t.id,
-                    // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-                    "terminalId": t.tab_id,
-                    "name": t.name,
-                    "profile": t.shell,
-                    "status": "running",
-                    "pid": t.pid,
-                    "createdAt": t.created_at,
-                    "mode": "ui",
-                    "tabId": t.tab_id,
-                    "promptHook": t.prompt_hook
-                }))).into_response()
+                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui"))).into_response()
             } else {
                 (StatusCode::OK, Json(json!({ "id": id, "status": "running" }))).into_response()
             }
@@ -643,6 +797,32 @@ async fn resize_terminal(
     }
 }
 
+/// The `terminal:external-activity` event body. Pure so the routing contract —
+/// which id the renderer is supposed to flash a tab with — is unit-testable.
+///
+/// `terminal_id`/`processId` is the DashMap KEY (a `pc-*` id on the in-process
+/// path, the renderer leaf on the sidecar path). It is deliberately NOT the
+/// same thing `terminalId` means in a REST response; `rendererTerminalId` is
+/// the new, unambiguous name for the leaf.
+fn external_activity_payload(
+    process_id: &str,
+    renderer_terminal_id: Option<&str>,
+    owning_tab_id: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        // Unchanged for existing consumers.
+        "terminalId": process_id,
+        "tabId": renderer_terminal_id,
+        // NEW, unambiguous names.
+        "processId": process_id,
+        "rendererTerminalId": renderer_terminal_id,
+        // NEW: what `flagTabActivity` actually needs. A `tm-*` leaf resolves
+        // against nothing in `state.tabs`, so before P0-A a split pane's
+        // activity indicator was silently dropped (design 011 §1.1 item 4).
+        "owningTabId": owning_tab_id,
+    })
+}
+
 /// Emit a one-shot "external interaction" signal so the UI can flash the owning
 /// tab. Fired only from the external-only REST handlers (write input / execute
 /// prompt) — user keystrokes go through a Tauri invoke command and never reach
@@ -655,13 +835,18 @@ fn emit_external_activity<R: tauri::Runtime>(state: &AppState<R>, terminal_id: &
         t.last_input_source = Some("api".to_string());
         t.last_input_at = Some(chrono::Utc::now().timestamp_millis());
     }
-    let tab_id = state
+    let (renderer_terminal_id, owning_tab_id) = state
         .terminals
         .get(terminal_id)
-        .and_then(|t| t.tab_id.clone());
+        .map(|t| (t.renderer_terminal_id.clone(), t.owning_tab_id.clone()))
+        .unwrap_or((None, None));
     if let Err(e) = state.app_handle.emit(
         "terminal:external-activity",
-        json!({ "terminalId": terminal_id, "tabId": tab_id }),
+        external_activity_payload(
+            terminal_id,
+            renderer_terminal_id.as_deref(),
+            owning_tab_id.as_deref(),
+        ),
     ) {
         log::trace!("Failed to emit terminal:external-activity: {}", e);
     }
@@ -976,20 +1161,7 @@ async fn get_terminal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(terminal) = state.terminals.get(&id) {
-        let t = terminal.value();
-        (StatusCode::OK, Json(json!({
-            "id": t.id,
-            "processId": t.id,
-            // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-            "terminalId": t.tab_id,
-            "name": t.name,
-            "profile": t.shell,
-            "status": "running",
-            "pid": t.pid,
-            "createdAt": t.created_at,
-            "mode": "default",
-            "tabId": t.tab_id
-        })))
+        (StatusCode::OK, Json(terminal_identity_json(terminal.value(), "default")))
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" })))
     }
@@ -1378,6 +1550,10 @@ async fn fleet_terminals(State(state): State<AppState>) -> impl IntoResponse {
                 "machineId": machine_id,
                 "os": os,
                 "deviceName": device_name,
+                // Identity parity with the other terminal responses (design 011
+                // §4). The MCP `list_terminals` tool proxies this body verbatim.
+                "terminalId": t.renderer_terminal_id,
+                "owningTabId": t.owning_tab_id,
             })
         })
         .collect();
@@ -2013,6 +2189,12 @@ async fn fleet_local_run(
                 None => (None, None, None, "default".to_string()),
             };
             let terminal_name = payload.label.clone().unwrap_or_else(|| "Fleet".to_string());
+            // Mint the renderer identity BEFORE the spawn. Patching
+            // `entry.renderer_terminal_id` in afterwards is the exact pattern
+            // `pty_manager.rs:704-708` records as a fixed bug (review 062 F-01):
+            // a fast-exiting shell's exit-path persist can run in that window and
+            // file the final scrollback under the ephemeral pc- id.
+            let fleet_tab_id = mint_renderer_id("tb");
             let new_id = match crate::pty_manager::spawn_terminal(
                 state.clone(),
                 80,
@@ -2022,7 +2204,8 @@ async fn fleet_local_run(
                 shell_cwd,
                 shell_name.clone(),
                 terminal_name.clone(),
-                None, // tab_id: keep the pc- id default (tb- alias is cosmetic)
+                Some(fleet_tab_id.clone()),
+                Some(fleet_tab_id.clone()),
                 None, // fleet terminal: fresh session, no restored scrollback
             ) {
                 Ok(id) => id,
@@ -2032,10 +2215,7 @@ async fn fleet_local_run(
                 }
             };
             // Make the fleet terminal VISIBLE as a labeled UI tab, mirroring
-            // create_terminal. The backend (`pc-`) id stays the map key; the
-            // `tb-` tab id is a cosmetic renderer alias.
-            let raw_uuid = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let tab_id = format!("tb-{}", &raw_uuid[..9]);
+            // create_terminal. The backend (`pc-`) id stays the map key.
             let target_window = state.resolve_active_window_label();
             if let Err(e) = state.app_handle.emit(
                 "api:createTerminalTab",
@@ -2043,16 +2223,16 @@ async fn fleet_local_run(
                     "name": terminal_name,
                     "profile": shell_name,
                     "terminalId": new_id,
-                    "tabId": Some(tab_id.clone()),
+                    "tabId": Some(fleet_tab_id.clone()),
+                    "processId": new_id,
+                    "rendererTerminalId": fleet_tab_id.clone(),
+                    "owningTabId": fleet_tab_id.clone(),
                     "paneId": serde_json::Value::Null,
                     "direction": serde_json::Value::Null,
                     "targetWindow": target_window,
                 }),
             ) {
                 log::warn!("Failed to emit api:createTerminalTab for fleet terminal: {}", e);
-            }
-            if let Some(mut entry) = state.terminals.get_mut(&new_id) {
-                entry.tab_id = Some(tab_id);
             }
             new_id
         }
@@ -3124,6 +3304,515 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity_sample() -> crate::state::Terminal {
+        crate::state::Terminal {
+            id: "pc-abc123def".into(),
+            pid: 4242,
+            shell: "pwsh".into(),
+            name: "Terminal-pwsh".into(),
+            created_at: "2026-08-14T10:00:00+07:00".into(),
+            cols: 120,
+            rows: 40,
+            backend: crate::tmux_manager::TerminalBackend::PortablePty,
+            renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
+            owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            last_input_source: None,
+            last_input_at: None,
+            prompt_hook: true,
+        }
+    }
+
+    /// Exact key names, asserted (design 011 §7 test 4). `tabId` stays a
+    /// DEPRECATED alias of `terminalId` — redefining it would silently break
+    /// every existing API/MCP client (D4).
+    #[test]
+    fn an_identity_response_carries_all_three_ids_under_exact_keys() {
+        let v = terminal_identity_json(&identity_sample(), "ui");
+        assert_eq!(v["id"], json!("pc-abc123def"));
+        assert_eq!(v["processId"], json!("pc-abc123def"));
+        assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["tabId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_eq!(v["mode"], json!("ui"));
+        assert_eq!(v["promptHook"], json!(true));
+    }
+
+    /// Root-pane invariant (design 011 §7 test 5): leaf == owner.
+    #[test]
+    fn a_root_pane_reports_the_same_value_for_leaf_and_owner() {
+        let mut t = identity_sample();
+        t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
+        let v = terminal_identity_json(&t, "ui");
+        assert_eq!(v["terminalId"], v["owningTabId"]);
+    }
+
+    /// Correction C1: before P0-A `tab_id` was never None, so this shape could
+    /// not occur. It can now — a headless API/fleet spawn has no renderer pane —
+    /// and it must serialise as JSON null, NOT as the `pc-` process id.
+    #[test]
+    fn a_headless_terminal_reports_null_identities_not_a_process_id() {
+        let mut t = identity_sample();
+        t.renderer_terminal_id = None;
+        t.owning_tab_id = None;
+        let v = terminal_identity_json(&t, "ui");
+        assert_eq!(v["terminalId"], json!(null));
+        assert_eq!(v["tabId"], json!(null));
+        assert_eq!(v["owningTabId"], json!(null));
+        // The PTY is still addressable — only the renderer identities are absent.
+        assert_eq!(v["id"], json!("pc-abc123def"));
+    }
+
+    /// Correction C4. `flagTabActivity` (tabsSlice.ts:133-141) resolves its
+    /// argument against `state.tabs`, which holds ONLY root tab ids — a `tm-*`
+    /// leaf finds nothing and the dispatch silently no-ops. The payload must
+    /// therefore carry the OWNER explicitly.
+    #[test]
+    fn a_split_panes_activity_payload_carries_the_owning_tab() {
+        let v = external_activity_payload(
+            "pc-abc123def",
+            Some("tm-9f2c1a4b7"),
+            Some("tb-4e8d0c2f1"),
+        );
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_eq!(v["rendererTerminalId"], json!("tm-9f2c1a4b7"));
+    }
+
+    /// The two pre-existing keys must not move: `terminalId` here has always
+    /// been the PROCESS id (the DashMap key passed by the caller), unlike every
+    /// REST response where it is the leaf. That asymmetry is why the new
+    /// explicit `processId` / `rendererTerminalId` keys exist.
+    #[test]
+    fn the_legacy_activity_keys_are_unchanged() {
+        let v = external_activity_payload(
+            "pc-abc123def",
+            Some("tm-9f2c1a4b7"),
+            Some("tb-4e8d0c2f1"),
+        );
+        assert_eq!(v["terminalId"], json!("pc-abc123def"));
+        assert_eq!(v["processId"], json!("pc-abc123def"));
+        assert_eq!(v["tabId"], json!("tm-9f2c1a4b7"));
+    }
+
+    #[test]
+    fn an_unknown_terminal_yields_nulls_rather_than_a_missing_key() {
+        let v = external_activity_payload("pc-gone", None, None);
+        assert_eq!(v["rendererTerminalId"], json!(null));
+        assert_eq!(v["owningTabId"], json!(null));
+        assert_eq!(v["terminalId"], json!("pc-gone"));
+    }
+
+    /// Deterministic id minting so the tests assert values, not shapes.
+    fn counting_mint() -> impl FnMut(&str) -> String {
+        let mut n = 0u32;
+        move |prefix: &str| {
+            n += 1;
+            format!("{prefix}-{n:09}")
+        }
+    }
+
+    /// An EMPTY tab: no live terminal is registered against any owner yet.
+    /// Production passes a closure over `state.terminals` (Task 5 Step 3).
+    fn no_live_terminals(_owner: &str) -> bool {
+        false
+    }
+
+    /// No other create is in flight, so the owner reservation always succeeds.
+    /// `()` stands in for the RAII guard in tests that don't exercise it;
+    /// production passes `state.root_leaf_claims.try_claim`.
+    fn no_competing_create(_owner: &str) -> Option<()> {
+        Some(())
+    }
+
+    /// THE REGRESSION TEST (design 011 §7 test 1). Two API creates targeting the
+    /// same tab with a pane_id — the split-a-pane flow — must produce DISTINCT
+    /// leaves and the SAME owner. Before P0-A both stored `tb-shared01` as
+    /// `tab_id`, which is the `terminal_history` PRIMARY KEY: one PTY got reaped
+    /// by StateManager's reconcile, and closing either pane deleted the other's
+    /// scrollback.
+    #[test]
+    fn spawn_identity_two_api_splits_get_distinct_leaves_and_one_owner() {
+        let mut mint = counting_mint();
+        let (a, _) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-a"),
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("split a");
+        // By the time split b arrives, split a is live in that tab — so BOTH
+        // signals are true here, and either alone must be enough (see D7).
+        let (b, _) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-b"),
+            no_competing_create, |owner| owner == "tb-shared01", &mut mint,
+        )
+        .expect("split b");
+
+        assert_ne!(a.renderer_terminal_id, b.renderer_terminal_id);
+        assert!(a.renderer_terminal_id.starts_with("tm-"));
+        assert!(b.renderer_terminal_id.starts_with("tm-"));
+        assert_eq!(a.owning_tab_id, "tb-shared01");
+        assert_eq!(b.owning_tab_id, "tb-shared01");
+    }
+
+    /// Root-pane invariant (design 011 §7 test 5), stated the way it is actually
+    /// true: the leaf equals the owner for a tab's FIRST live terminal. The
+    /// earlier revision of this test asserted `pane_id == None ⇒ leaf == owner`
+    /// unconditionally, which locked in the review-095 B1 gap as correct.
+    #[test]
+    fn spawn_identity_first_create_into_an_empty_tab_keeps_leaf_equal_to_owner() {
+        let mut mint = counting_mint();
+        let (r, claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("root");
+        assert_eq!(r.renderer_terminal_id, "tb-shared01");
+        assert!(claim.is_some(), "a create that takes the root leaf must hold the reservation");
+        assert_eq!(r.owning_tab_id, "tb-shared01");
+    }
+
+    /// Design 011 §7 test 9 / D7 — the gap review 095 B1 found, which the suite
+    /// previously asserted as CORRECT. `paneId` is OPTIONAL in the MCP tool
+    /// (`mcp-server/src/server.ts:67`), and `App.tsx` Mode 2
+    /// (`:1085` `else if (tabId && !paneId)`) serves exactly this shape: it
+    /// picks a pane in the named tab and splits it (`:1305-1335`). Mode 0 cannot
+    /// claim it — that branch requires `!tabExists(tabId)` (`:904`). Deciding on
+    /// `pane_id` alone therefore hands this terminal the leaf the tab's root
+    /// pane already holds (`TerminalContainer.tsx:108-113`): two live terminals
+    /// on one `terminal_history` PRIMARY KEY, i.e. the bug in the test above,
+    /// reached without a `pane_id`.
+    #[test]
+    fn spawn_identity_second_create_into_a_populated_tab_gets_a_distinct_leaf() {
+        let mut mint = counting_mint();
+        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
+        let (root, root_claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            |o| claims.try_claim(o), no_live_terminals, &mut mint,
+        )
+        .expect("first create");
+        assert_eq!(root.renderer_terminal_id, "tb-shared01");
+        // The root has REGISTERED and released by the time the second create
+        // arrives; occupancy is now carried by the `terminals` scan alone.
+        drop(root_claim);
+        assert!(!claims.is_claimed("tb-shared01"));
+
+        // The identical call, with the tab now occupied by `root`.
+        let (second, second_claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"),
+            None,
+            None, // NO pane_id — the Mode 2 call shape
+            |o| claims.try_claim(o),
+            |owner| owner == "tb-shared01",
+            &mut mint,
+        )
+        .expect("second create");
+        assert!(
+            second_claim.is_none(),
+            "a split reserves nothing — its `tm-` leaf is unique by construction"
+        );
+
+        assert_ne!(
+            second.renderer_terminal_id, root.renderer_terminal_id,
+            "a renderer leaf id must be unique per live terminal"
+        );
+        assert!(
+            second.renderer_terminal_id.starts_with("tm-"),
+            "a tab's second pane is a split whatever the caller sent, got {}",
+            second.renderer_terminal_id
+        );
+        assert_eq!(second.owning_tab_id, "tb-shared01", "and it stays in that tab");
+    }
+
+    /// A `terminals`-scan stand-in that only reports what has been REGISTERED,
+    /// so a test can place a create inside the decision→registration window.
+    fn registered_scan(
+        registered: &std::sync::Arc<dashmap::DashMap<String, ()>>,
+    ) -> impl Fn(&str) -> bool + '_ {
+        move |owner: &str| registered.contains_key(owner)
+    }
+
+    /// THE T2-F1 REGRESSION TEST (external review 099). The interleaving the
+    /// sequential tests above structurally cannot reach: create B resolves while
+    /// create A is between its identity decision and its `terminals` insert.
+    ///
+    /// Against the pre-fix code both creates took `tb-shared01` as their leaf —
+    /// two live terminals on one `terminal_history` PRIMARY KEY, the exact
+    /// invariant P0-A exists to establish (design 011 §3, success criterion 7).
+    #[test]
+    fn a_create_inside_another_creates_spawn_window_cannot_take_the_same_root_leaf() {
+        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
+        // Stands in for `state.terminals`: a create appears here only when
+        // `spawn_terminal` reaches its final insert (`pty_manager.rs:867`).
+        let registered = std::sync::Arc::new(dashmap::DashMap::new());
+        let mut mint = counting_mint();
+
+        // Create A decides its identity. Its PTY is still being built, so it has
+        // NOT registered — `registered` is empty.
+        let (a, a_claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            |o| claims.try_claim(o),
+            registered_scan(&registered),
+            &mut mint,
+        )
+        .expect("create A");
+        assert_eq!(a.renderer_terminal_id, "tb-shared01", "A is the tab root");
+        assert!(a_claim.is_some(), "A must hold the owner reservation across its spawn");
+        assert!(claims.is_claimed("tb-shared01"));
+
+        // Create B arrives INSIDE that window. The scan still says "empty" —
+        // that is precisely the stale read T2-F1 is about.
+        let (b, b_claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            |o| claims.try_claim(o),
+            registered_scan(&registered),
+            &mut mint,
+        )
+        .expect("create B");
+        assert_ne!(
+            b.renderer_terminal_id, a.renderer_terminal_id,
+            "two live terminals must never carry the same renderer leaf"
+        );
+        assert!(
+            b.renderer_terminal_id.starts_with("tm-"),
+            "B lost the root race, so it is a split: {}",
+            b.renderer_terminal_id
+        );
+        assert_eq!(b.owning_tab_id, "tb-shared01", "and it still lands in that tab");
+        assert!(b_claim.is_none(), "a split reserves nothing");
+
+        // A now registers and releases, in that order.
+        registered.insert(a.renderer_terminal_id.clone(), ());
+        drop(a_claim);
+        assert!(!claims.is_claimed("tb-shared01"), "the reservation is released once registered");
+
+        // The window is closed, but the tab is now genuinely occupied — the
+        // release must NOT hand the root leaf to the next create.
+        let (c, _) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            |o| claims.try_claim(o),
+            registered_scan(&registered),
+            &mut mint,
+        )
+        .expect("create C");
+        assert!(
+            c.renderer_terminal_id.starts_with("tm-"),
+            "after A registered, later creates are splits: {}",
+            c.renderer_terminal_id
+        );
+    }
+
+    /// The release must also happen when the spawn FAILS: a leaked reservation
+    /// would permanently force every future create into that tab to mint a
+    /// `tm-`, leaving the tab with no root pane. RAII, so a `?`/early return
+    /// cannot skip it.
+    #[test]
+    fn a_failed_spawn_releases_the_owner_reservation() {
+        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
+        let registered = std::sync::Arc::new(dashmap::DashMap::new());
+        let mut mint = counting_mint();
+
+        {
+            let (first, claim) = resolve_api_spawn_identity(
+                Some("tb-shared01"), None, None,
+                |o| claims.try_claim(o),
+                registered_scan(&registered),
+                &mut mint,
+            )
+            .expect("first create");
+            assert_eq!(first.renderer_terminal_id, "tb-shared01");
+            assert!(claims.is_claimed("tb-shared01"));
+            // `spawn_terminal` returns Err: nothing is ever registered, and the
+            // guard goes out of scope exactly as it does in `create_terminal`.
+            drop(claim);
+        }
+        assert!(
+            !claims.is_claimed("tb-shared01"),
+            "a failed spawn must not leak the reservation"
+        );
+
+        // The retry is a first create again, not a split.
+        let (retry, retry_claim) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None,
+            |o| claims.try_claim(o),
+            registered_scan(&registered),
+            &mut mint,
+        )
+        .expect("retry");
+        assert_eq!(
+            retry.renderer_terminal_id, "tb-shared01",
+            "the tab is still empty, so its root leaf is still available"
+        );
+        assert!(retry_claim.is_some());
+    }
+
+    /// The same schedule under REAL threads, so the atomicity of the claim
+    /// itself is exercised rather than modelled: N creates race for one empty
+    /// tab, all inside each other's spawn window (every guard is held until the
+    /// end). Exactly one may come out as the tab root.
+    #[test]
+    fn only_one_of_many_racing_creates_gets_the_root_leaf() {
+        const RACERS: usize = 8;
+        let claims = std::sync::Arc::new(crate::state::RootLeafClaims::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let claims = std::sync::Arc::clone(&claims);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    // Nothing has registered yet — every racer's scan says
+                    // "empty", exactly as in the reported defect.
+                    resolve_api_spawn_identity(
+                        Some("tb-shared01"), None, None,
+                        |o| claims.try_claim(o),
+                        no_live_terminals,
+                        mint_renderer_id,
+                    )
+                    .expect("racing create")
+                })
+            })
+            .collect();
+
+        // Guards stay alive in `results` for the whole assertion block: all
+        // RACERS creates are still "in flight".
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("thread")).collect();
+
+        let roots = results
+            .iter()
+            .filter(|(id, _)| id.renderer_terminal_id == "tb-shared01")
+            .count();
+        assert_eq!(roots, 1, "exactly one racer may take the tab id as its leaf");
+
+        let leaves: std::collections::HashSet<_> =
+            results.iter().map(|(id, _)| id.renderer_terminal_id.clone()).collect();
+        assert_eq!(leaves.len(), RACERS, "every racer's leaf must be distinct: {leaves:?}");
+        assert!(results.iter().all(|(id, _)| id.owning_tab_id == "tb-shared01"));
+        assert_eq!(
+            results.iter().filter(|(_, claim)| claim.is_some()).count(),
+            1,
+            "and only the root holds a reservation"
+        );
+    }
+
+    #[test]
+    fn spawn_identity_no_caller_id_mints_a_tab_exactly_as_before() {
+        let mut mint = counting_mint();
+        let (r, _) = resolve_api_spawn_identity(
+            None, None, None, no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("minted");
+        assert_eq!(r.owning_tab_id, "tb-000000001");
+        assert_eq!(r.renderer_terminal_id, "tb-000000001");
+    }
+
+    #[test]
+    fn spawn_identity_an_empty_or_unrecognised_tab_id_still_mints_rather_than_failing() {
+        let mut mint = counting_mint();
+        assert!(resolve_api_spawn_identity(
+            Some("   "), None, None, no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("blank")
+        .0
+        .owning_tab_id
+        .starts_with("tb-"));
+        assert!(resolve_api_spawn_identity(
+            Some("legacy-monitor-id"), None, None,
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("junk")
+        .0
+        .owning_tab_id
+        .starts_with("tb-"));
+    }
+
+    /// Correction C3. `api_server.rs:494` recognised `tb-` ONLY: a caller that
+    /// did the "right" thing and sent a genuine `tm-` id had it silently thrown
+    /// away and replaced by an unrelated fresh `tb-`, so the pane landed in the
+    /// WRONG tab with no diagnostic. Fail closed instead, and name the field
+    /// that carries the correct value.
+    #[test]
+    fn spawn_identity_a_pane_leaf_id_in_the_tab_field_is_rejected_not_silently_replaced() {
+        let mut mint = counting_mint();
+        let err = resolve_api_spawn_identity(
+            Some("tm-9f2c1a4b7"), None, Some("pn-a"),
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect_err("a tm- id is a pane id, not a tab id");
+        assert!(err.contains("tm-9f2c1a4b7"), "the message must name the offending id: {err}");
+        assert!(err.contains("owningTabId"), "the message must name the right field: {err}");
+    }
+
+    /// An explicit `owningTabId` wins over `tabId` — it is the unambiguous field.
+    #[test]
+    fn spawn_identity_an_explicit_owning_tab_id_takes_precedence() {
+        let mut mint = counting_mint();
+        let (r, _) = resolve_api_spawn_identity(
+            Some("tb-ignored1"),
+            Some("tb-explicit"),
+            Some("pn-a"),
+            no_competing_create,
+            no_live_terminals,
+            &mut mint,
+        )
+        .expect("explicit owner");
+        assert_eq!(r.owning_tab_id, "tb-explicit");
+        assert!(r.renderer_terminal_id.starts_with("tm-"));
+    }
+
+    fn identity_temp_db() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "termflow_identity_{}_{}.db",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// Design 011 §7 test 2 — history isolation, end to end at the storage
+    /// layer. Two API splits in one tab must occupy two rows, and closing one
+    /// (`commands.rs:1028-1030` deletes by the renderer id) must leave the
+    /// other's scrollback intact. Before P0-A both ids were `tb-shared01`, so
+    /// the second upsert clobbered the first and the delete wiped both.
+    #[test]
+    fn two_api_splits_no_longer_share_one_history_row() {
+        let mut mint = counting_mint();
+        // `no_live_terminals` (Task 4's helper): with a `pane_id` present the
+        // occupancy probe is not even needed to force distinct leaves.
+        let (a, _) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-a"),
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("split a");
+        let (b, _) = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-b"),
+            no_competing_create, no_live_terminals, &mut mint,
+        )
+        .expect("split b");
+
+        let store = crate::history_store::HistoryStore::new();
+        store.init(&identity_temp_db());
+        store.upsert(&a.renderer_terminal_id, &["pane A scrollback".to_string()], 1);
+        store.upsert(&b.renderer_terminal_id, &["pane B scrollback".to_string()], 2);
+
+        assert_eq!(
+            store.get(&a.renderer_terminal_id),
+            Some(vec!["pane A scrollback".to_string()]),
+            "pane A's history must not be overwritten by pane B's flush"
+        );
+
+        // Closing pane A.
+        store.delete(&a.renderer_terminal_id);
+        assert_eq!(store.get(&a.renderer_terminal_id), None);
+        assert_eq!(
+            store.get(&b.renderer_terminal_id),
+            Some(vec!["pane B scrollback".to_string()]),
+            "closing one split must not delete the other's scrollback"
+        );
+    }
 
     #[test]
     fn the_release_and_dev_renderers_are_both_allowed() {

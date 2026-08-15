@@ -1,5 +1,6 @@
 import { termDiag } from '../utils/diag';
 import { clearZoom } from '../store/slices/zoomSlice';
+import { reassertOwnerAfterSpawn } from './paneOwnership';
 import type { PromptGate } from '@termflow/terminal-core';
 
 export interface TerminalProcess {
@@ -85,7 +86,18 @@ class TerminalServiceClass {
     this.listenersInitialized = true;
   }
 
-  async createTerminal(terminalId: string, shellType: string = 'default', name?: string, cwd?: string, cols?: number, rows?: number): Promise<string> {
+  async createTerminal(
+    terminalId: string,
+    shellType: string = 'default',
+    name?: string,
+    cwd?: string,
+    cols?: number,
+    rows?: number,
+    /** The tab that owns this pane. Equal to `terminalId` for a tab root; the
+     *  owning `tb-` id for a split (`tm-`) pane. Design 011 §6: the backend
+     *  cannot derive it — ownership lives only in `panes.treesByTabId`. */
+    owningTabId?: string,
+  ): Promise<string> {
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
 
@@ -103,12 +115,21 @@ class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows);
+      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId);
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // Store the mapping
       this.bindProcess(terminalId, processId);
       console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
+
+      // The spawn carried the owner resolved BEFORE the await, and the backend
+      // only registers the terminal at the very end of it — so a pane dragged to
+      // another tab while this create was in flight had its ownership update
+      // land on a terminal that did not exist yet, and nothing re-sends it
+      // (external review 101, F2). This is the first moment the leaf is
+      // registered, so it is where that correction belongs. No-ops unless the
+      // tree moved under us.
+      reassertOwnerAfterSpawn(terminalId, owningTabId);
 
       return processId;
     } catch (error) {

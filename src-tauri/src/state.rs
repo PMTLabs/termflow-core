@@ -39,7 +39,30 @@ pub struct Terminal {
     pub rows: u16,
     #[serde(default)]
     pub backend: TerminalBackend,
-    pub tab_id: Option<String>,
+    /// The **stable renderer LEAF id** that owns this PTY: `tb-*` for a tab's
+    /// root/solo pane, `tm-*` for a split pane. Unique per UI pane. It is the
+    /// PRIMARY KEY of `terminal_history` (`history_store.rs:93-98`) and the
+    /// `terminalId` of every API identity response.
+    ///
+    /// `None` when **no renderer pane owns this terminal** (a headless API or
+    /// fleet spawn). Such a terminal is deliberately kept OUT of the history
+    /// table — see `history_key`. Before P0-A this was never `None` at runtime;
+    /// it fell back to the ephemeral `pc-*` process id, which cannot survive a
+    /// restart (design 011 §5, corrected after review 086).
+    ///
+    /// `#[serde(rename)]`, NOT `alias`: `alias` accepts the old key inbound but
+    /// EMITS the Rust field name, silently changing the wire contract. `rename`
+    /// preserves `tab_id` in both directions (design 011 §6).
+    #[serde(rename = "tab_id")]
+    pub renderer_terminal_id: Option<String>,
+    /// The **tab** that owns the pane above. Equal to `renderer_terminal_id`
+    /// for a root/solo pane; different for a split. `None` when unknown (a
+    /// headless spawn, or a client that predates P0-A).
+    ///
+    /// NEW in P0-A: the backend had no notion of tab ownership at all before —
+    /// it lived only in the renderer's `panesSlice.treesByTabId`.
+    #[serde(default)]
+    pub owning_tab_id: Option<String>,
     /// Source of the most recent PTY write: "user" (Tauri invoke = keystrokes/
     /// paste) or "api" (REST/MCP input/execute). Drives the per-agent color-scheme
     /// revert-vs-sticky decision (see docs/plan/007-agent-color-schemes-plan.md).
@@ -62,6 +85,72 @@ fn default_terminal_cols() -> u16 {
 
 fn default_terminal_rows() -> u16 {
     24
+}
+
+/// Owners (`tb-*` tab ids) with an **in-flight root-leaf claim**: an API create
+/// has decided to take that tab id as its pane leaf but has not registered its
+/// `Terminal` yet.
+///
+/// This exists because the leaf-uniqueness rule (design 011 §3, D7) is decided
+/// from a READ of `terminals` while the write that would make it true happens
+/// much later: `spawn_terminal` registers the `Terminal` LAST, after the PTY,
+/// writer and screen parser are in place (`pty_manager.rs:862-871` — that order
+/// is load-bearing for the close/delete existence gate and must not be moved).
+/// Axum serves requests in parallel, so two POSTs naming the same empty tab both
+/// scanned "unoccupied" and both took the tab id as their leaf — the exact
+/// collision P0-A removes (external review 099, T2-F1).
+///
+/// The fix reserves the OWNER, not the leaf, for that window: the claim is taken
+/// ATOMICALLY (a single `DashMap::insert`, never contains-then-insert) BEFORE
+/// the `terminals` scan, and released only once registration has happened or the
+/// spawn has failed. See `try_claim` for the ordering argument.
+#[derive(Default)]
+pub struct RootLeafClaims(DashMap<String, ()>);
+
+impl RootLeafClaims {
+    /// Reserve `owner` for this create, or return `None` because another create
+    /// is already mid-flight for it (that one is the tab root; this one is a
+    /// split and must mint a fresh `tm-` leaf).
+    ///
+    /// ORDER MATTERS: callers must claim FIRST and scan `terminals` SECOND.
+    /// Scanning first would leave the same hole one notch narrower — A scans
+    /// empty, A registers, A releases, B claims (now free) and B still believes
+    /// the tab is empty from its stale scan. Claiming first closes it: a claim
+    /// only becomes free again *after* the winner's `Terminal` is visible in
+    /// `terminals`, so whoever claims next either sees it and splits, or is
+    /// genuinely first.
+    pub fn try_claim(self: &Arc<Self>, owner: &str) -> Option<RootLeafClaim> {
+        // `insert` returns the PREVIOUS value: `None` means we are the ones who
+        // put it there. One atomic shard operation — a `contains_key` followed
+        // by an `insert` would reintroduce the very race this closes.
+        self.0.insert(owner.to_string(), ()).is_none().then(|| RootLeafClaim {
+            owner: owner.to_string(),
+            claims: Arc::clone(self),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn is_claimed(&self, owner: &str) -> bool {
+        self.0.contains_key(owner)
+    }
+}
+
+/// RAII release for a `RootLeafClaims` reservation.
+///
+/// Drop, not an explicit release call, so an early `return`/`?` on any spawn
+/// failure path cannot leak the claim. A leaked claim is degraded-but-safe
+/// (every later create into that tab mints a `tm-` leaf instead of reusing the
+/// tab id); releasing it too EARLY is the unsafe direction, so hold it until
+/// `spawn_terminal` has returned.
+pub struct RootLeafClaim {
+    owner: String,
+    claims: Arc<RootLeafClaims>,
+}
+
+impl Drop for RootLeafClaim {
+    fn drop(&mut self) {
+        self.claims.0.remove(&self.owner);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +193,11 @@ pub struct AppState<R: Runtime = Wry> {
     // managed state and all task clones see the same value.
     pub pending_open_path: Arc<std::sync::Mutex<Option<String>>>,
     pub terminals: Arc<DashMap<String, Terminal>>,
+    // Tabs whose root leaf is claimed by an API create that has not registered
+    // its `Terminal` yet. Closes the decision→registration window in which two
+    // concurrent creates could both take a tab's id as their pane leaf (review
+    // 099 T2-F1). See `RootLeafClaims`.
+    pub root_leaf_claims: Arc<RootLeafClaims>,
     // Values are Arc'd so PTY write paths clone the Arc and DROP the DashMap
     // shard guard before locking the inner Mutex. Holding a shard guard across
     // the send/probe `.await` sleeps (up to ~48 s) blocked any insert/remove on
@@ -275,6 +369,7 @@ impl<R: Runtime> Clone for AppState<R> {
         Self {
             pending_open_path: self.pending_open_path.clone(),
             terminals: self.terminals.clone(),
+            root_leaf_claims: self.root_leaf_claims.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
             ptys: self.ptys.clone(),
             output_tx: self.output_tx.clone(),
@@ -329,6 +424,97 @@ impl<R: Runtime> Clone for AppState<R> {
     }
 }
 
+/// The key a terminal's scrollback is filed under in `terminal_history`, or
+/// `None` to skip persistence entirely.
+///
+/// Pure so the "a process id is never a history key" rule (design 011 §5) is
+/// unit-testable without a live PTY or a Tauri `AppHandle` — inline
+/// `#[cfg(test)]` only; the `integration-tests` feature breaks the Windows test
+/// binary.
+pub(crate) fn history_key(renderer_terminal_id: Option<&str>) -> Option<&str> {
+    match renderer_terminal_id {
+        // A `pc-` id is a PTY process id: it is regenerated on every spawn, so a
+        // row keyed by one is orphaned the moment the app restarts and can never
+        // be matched to a pane again.
+        Some(id) if id.starts_with("pc-") => None,
+        other => other,
+    }
+}
+
+/// Repoint a live terminal's OWNING TAB after its pane was moved into a
+/// different tab.
+///
+/// `owning_tab_id` is written once, at spawn (`pty_manager::spawn_terminal`),
+/// but the pane it names moves: a same-window drag dispatches `movePaneToTab`
+/// and a cross-window drop re-parents the leaf into another window's tab. The
+/// terminal's IDENTITY does not change — the leaf travels with the pane — so
+/// nothing else in the system notices, and the stored owner keeps naming a tab
+/// the pane has left.
+///
+/// That is not cosmetic (external review 099, T2-F2). The stale owner is echoed
+/// by `terminal_identity_json` to `get_terminal_detail` / `get_my_terminal`, and
+/// the MCP tool descriptions tell an agent to pass that `owningTabId` straight
+/// back when it creates a sibling pane — so the agent's next pane is created in
+/// the wrong tab. It is also emitted on `terminal:external-activity`, lighting
+/// the wrong tab. Silently dropping a split's indicator (the pre-P0-A behaviour)
+/// is not equivalent to actively routing new work somewhere wrong.
+///
+/// Keyed by the renderer LEAF rather than by the `terminals` map key, because
+/// the leaf is what the renderer's pane tree — the authority on ownership —
+/// actually holds; P0-A's uniqueness invariant (design 011 §3, D7) makes it
+/// unambiguous, and it is the one identity that means the same thing on both
+/// spawn paths (the sidecar path registers under the leaf, the in-process path
+/// under a `pc-` id).
+///
+/// Returns whether a terminal matched. A miss is NOT an error: panes are moved
+/// freely, and a leaf can belong to a pane whose PTY has not spawned yet, has
+/// already exited, or lives in another instance.
+///
+/// Takes the map rather than `AppState` so the guard rules stay unit-testable in
+/// an inline `#[cfg(test)]` module — the `integration-tests` feature that
+/// `mock_app` needs breaks the Windows test binary.
+pub(crate) fn retarget_owning_tab(
+    terminals: &DashMap<String, Terminal>,
+    renderer_terminal_id: &str,
+    owning_tab_id: &str,
+) -> Result<bool, String> {
+    let leaf = renderer_terminal_id.trim();
+    let owner = owning_tab_id.trim();
+    if leaf.is_empty() || owner.is_empty() {
+        return Err("both a renderer terminal (leaf) id and an owning tab id are required".to_string());
+    }
+    // Fail closed on the one value that is definitely NOT a tab, exactly as the
+    // API create path does (`api_server::resolve_api_spawn_identity`). Anything
+    // else is accepted verbatim: there is nothing to mint on an update path, and
+    // a layout restored from before the `tb-` convention still has to be able to
+    // correct its own ownership.
+    if owner.starts_with("tm-") {
+        return Err(format!(
+            "'{owner}' is a pane (leaf) id, not a tab id — pass the owning tab id"
+        ));
+    }
+    // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under
+    // the same shard guard, so a concurrent writer cannot slip between them.
+    // Nothing inside takes another lock, so this cannot deadlock against the
+    // read-only occupancy scan in `create_terminal`.
+    for mut entry in terminals.iter_mut() {
+        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+            continue;
+        }
+        if entry.owning_tab_id.as_deref() != Some(owner) {
+            let previous = entry.owning_tab_id.clone();
+            entry.owning_tab_id = Some(owner.to_string());
+            log::info!(
+                "Terminal {} (leaf {leaf}) re-parented: owning tab {:?} -> {owner}",
+                entry.id,
+                previous
+            );
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 impl<R: Runtime> AppState<R> {
     pub fn new(
         output_tx: broadcast::Sender<ChannelPayload>,
@@ -345,6 +531,7 @@ impl<R: Runtime> AppState<R> {
         Self {
             pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
+            root_leaf_claims: Arc::new(RootLeafClaims::default()),
             shell_writer_channels: Arc::new(DashMap::new()),
             ptys: Arc::new(DashMap::new()),
             output_tx,
@@ -610,7 +797,8 @@ impl<R: Runtime> AppState<R> {
         Some(blob)
     }
 
-    /// Persist one terminal's RENDERED scrollback under its renderer id (tab_id).
+    /// Persist one terminal's RENDERED scrollback under its renderer leaf id
+    /// (`renderer_terminal_id` — `tb-*`/`tm-*`).
     /// Skips terminals that are gone or have no renderer id (e.g. API-created PTYs).
     ///
     /// We persist the authoritative vt100 parser's FULL buffer (scrollback + visible
@@ -633,13 +821,17 @@ impl<R: Runtime> AppState<R> {
         // since a dead terminal is never persisted again.
         let guard_arc = self.history_persist_guard(id);
         let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(tab_id) = self.terminals.get(id).and_then(|t| t.tab_id.clone()) else { return };
+        let renderer_id = self
+            .terminals
+            .get(id)
+            .and_then(|t| t.renderer_terminal_id.clone());
+        let Some(key) = history_key(renderer_id.as_deref()) else { return };
         // Skip when the parser is absent or the whole buffer is blank (brand-new or
         // already-cleared terminal) so we never persist a blank blob that would replay as
         // an empty "session restored" divider with nothing above it.
         let Some(snapshot) = self.full_scrollback_snapshot(id) else { return };
         let blob = String::from_utf8_lossy(&snapshot).into_owned();
-        self.history_store.upsert(&tab_id, std::slice::from_ref(&blob), now_ms);
+        self.history_store.upsert(key, std::slice::from_ref(&blob), now_ms);
     }
 
     /// The per-terminal persistence lock (see `history_persist_locks`). The Arc is
@@ -1691,5 +1883,227 @@ mod reattach_plan_tests {
         let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
         assert_eq!(reattach.len(), 1);
         assert!(teardown.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod terminal_identity_serde_tests {
+    use super::{Terminal, TerminalBackend};
+
+    fn sample() -> Terminal {
+        Terminal {
+            id: "pc-abc123def".into(),
+            pid: 4242,
+            shell: "pwsh".into(),
+            name: "Terminal-pwsh".into(),
+            created_at: "2026-08-14T10:00:00+07:00".into(),
+            cols: 120,
+            rows: 40,
+            backend: TerminalBackend::PortablePty,
+            renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
+            owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            last_input_source: None,
+            last_input_at: None,
+            prompt_hook: false,
+        }
+    }
+
+    /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
+    /// accept the old key inbound but emit `renderer_terminal_id`, silently
+    /// changing the output contract — `rename` preserves the key in BOTH
+    /// directions (design 011 §6). This repo has already shipped one silent
+    /// serde-key misroute (fleet MCP `targetOS`), so assert the emitted key
+    /// itself, not merely that a round-trip survives.
+    #[test]
+    fn the_emitted_renderer_id_key_is_still_tab_id() {
+        let v = serde_json::to_value(sample()).expect("serialize");
+        let obj = v.as_object().expect("object");
+        assert!(
+            obj.contains_key("tab_id"),
+            "emitted keys were {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("renderer_terminal_id"),
+            "the Rust field name must NOT leak onto the wire"
+        );
+        assert_eq!(obj["tab_id"], serde_json::json!("tm-9f2c1a4b7"));
+    }
+
+    /// The new field is additive and emits under its own key.
+    #[test]
+    fn owning_tab_id_is_emitted_alongside() {
+        let v = serde_json::to_value(sample()).expect("serialize");
+        assert_eq!(v["owning_tab_id"], serde_json::json!("tb-4e8d0c2f1"));
+    }
+
+    /// A payload written by a build that predates P0-A has `tab_id` and no
+    /// owner. It must still deserialise (success criterion 6).
+    #[test]
+    fn a_legacy_payload_without_an_owner_still_deserialises() {
+        let legacy = serde_json::json!({
+            "id": "pc-abc123def",
+            "pid": 4242,
+            "shell": "pwsh",
+            "name": "Terminal-pwsh",
+            "created_at": "2026-08-14T10:00:00+07:00",
+            "tab_id": "tb-4e8d0c2f1"
+        });
+        let t: Terminal = serde_json::from_value(legacy).expect("legacy payload");
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tb-4e8d0c2f1"));
+        assert_eq!(t.owning_tab_id, None);
+    }
+
+    #[test]
+    fn a_round_trip_preserves_all_three_identities() {
+        let json = serde_json::to_string(&sample()).expect("serialize");
+        let back: Terminal = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, "pc-abc123def");
+        assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
+        assert_eq!(back.owning_tab_id.as_deref(), Some("tb-4e8d0c2f1"));
+    }
+}
+
+/// Review 099 T2-F2: the owner recorded at spawn goes stale the moment a pane is
+/// dragged into another tab, and it is what `get_terminal_detail` hands an agent
+/// to create a sibling pane with.
+#[cfg(test)]
+mod retarget_owning_tab_tests {
+    use super::{retarget_owning_tab, Terminal, TerminalBackend};
+    use dashmap::DashMap;
+
+    /// One live terminal: process `pc-1`, pane leaf `tm-x`, owned by tab `tb-a`.
+    fn one_split_pane() -> DashMap<String, Terminal> {
+        let map = DashMap::new();
+        map.insert(
+            "pc-1".to_string(),
+            Terminal {
+                id: "pc-1".into(),
+                pid: 4242,
+                shell: "pwsh".into(),
+                name: "Terminal-pwsh".into(),
+                created_at: "2026-08-15T10:00:00+07:00".into(),
+                cols: 80,
+                rows: 24,
+                backend: TerminalBackend::PortablePty,
+                renderer_terminal_id: Some("tm-x".into()),
+                owning_tab_id: Some("tb-a".into()),
+                last_input_source: None,
+                last_input_at: None,
+                prompt_hook: false,
+            },
+        );
+        map
+    }
+
+    /// THE regression: after the pane moves from tab A to tab B, the backend
+    /// owner must be tab B — otherwise activity lights A and an agent asking for
+    /// `owningTabId` creates its next pane in A.
+    #[test]
+    fn a_moved_pane_updates_the_stored_owner() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tb-b"), Ok(true));
+        let t = terminals.get("pc-1").expect("terminal");
+        assert_eq!(t.owning_tab_id.as_deref(), Some("tb-b"));
+        // The leaf is the pane's identity and travels WITH it — a move must not
+        // touch it (that is what makes history/reattach survive the move).
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tm-x"));
+    }
+
+    /// The map is keyed by the PROCESS id; the renderer only ever knows the leaf.
+    #[test]
+    fn it_matches_on_the_leaf_not_on_the_map_key() {
+        let terminals = one_split_pane();
+        assert_eq!(
+            retarget_owning_tab(&terminals, "pc-1", "tb-b"),
+            Ok(false),
+            "the map key is not a renderer identity"
+        );
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+        );
+    }
+
+    /// Panes move freely; a leaf with no live PTY (never spawned, already exited,
+    /// or another instance's) is an ordinary no-op, not a failure the renderer
+    /// should surface.
+    #[test]
+    fn an_unknown_leaf_is_a_miss_not_an_error() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-gone", "tb-b"), Ok(false));
+    }
+
+    #[test]
+    fn a_no_op_move_back_to_the_same_tab_still_reports_a_match() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tb-a"), Ok(true));
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+        );
+    }
+
+    /// Same fail-closed rule as the create path: a `tm-` value is a pane, and
+    /// accepting it would file a terminal under an owner no tab can ever match.
+    #[test]
+    fn a_pane_id_is_rejected_as_an_owner() {
+        let terminals = one_split_pane();
+        let err = retarget_owning_tab(&terminals, "tm-x", "tm-sibling").expect_err("must reject");
+        assert!(err.contains("not a tab id"), "unhelpful message: {err}");
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tb-a"),
+            "a rejected call must not have written anything"
+        );
+    }
+
+    #[test]
+    fn blank_ids_are_rejected() {
+        let terminals = one_split_pane();
+        assert!(retarget_owning_tab(&terminals, "  ", "tb-b").is_err());
+        assert!(retarget_owning_tab(&terminals, "tm-x", "  ").is_err());
+    }
+
+    /// A layout persisted before the `tb-` convention still has to be able to
+    /// correct itself — there is nothing to mint on an update path.
+    #[test]
+    fn a_legacy_non_tb_tab_id_is_accepted_verbatim() {
+        let terminals = one_split_pane();
+        assert_eq!(retarget_owning_tab(&terminals, "tm-x", "tab-legacy-7"), Ok(true));
+        assert_eq!(
+            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
+            Some("tab-legacy-7"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_key_tests {
+    use super::history_key;
+
+    #[test]
+    fn a_renderer_leaf_is_a_valid_history_key() {
+        assert_eq!(history_key(Some("tb-4e8d0c2f1")), Some("tb-4e8d0c2f1"));
+        assert_eq!(history_key(Some("tm-9f2c1a4b7")), Some("tm-9f2c1a4b7"));
+    }
+
+    /// Ground-truth correction C1: before P0-A this could not happen — every
+    /// write site wrapped `Some(...)` and the `else { return }` guard at
+    /// state.rs:636 was dead code. A headless API/fleet PTY now genuinely has no
+    /// renderer id, and must simply not be persisted.
+    #[test]
+    fn no_renderer_id_means_no_history_row() {
+        assert_eq!(history_key(None), None);
+    }
+
+    /// Defence in depth. `spawn_terminal`'s old `unwrap_or_else(|| id.clone())`
+    /// produced `Some("pc-…")`, which `persist_terminal_history` upserted like
+    /// any other key (state.rs:642) — a row keyed by an id that cannot survive a
+    /// restart, orphaned forever. Even if someone reintroduces that fallback,
+    /// the row must not be written.
+    #[test]
+    fn a_process_id_is_never_a_history_key() {
+        assert_eq!(history_key(Some("pc-abc123def")), None);
     }
 }

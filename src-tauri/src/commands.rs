@@ -69,6 +69,23 @@ pub fn get_os_build_number() -> u32 {
     0
 }
 
+/// Which owner, if any, this create must reserve before it spawns.
+///
+/// `Some(owner)` exactly when the spawn will register a terminal whose renderer
+/// leaf IS a tab id — the only case that can collide with another creator, since
+/// a `tm-` split leaf is freshly minted and unique by construction. Pure so the
+/// decision can be tested without a `tauri::State`.
+fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
+    match (tab_id, owning_tab_id) {
+        // A tab root: the leaf IS the owner (design 011 §3).
+        (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
+        // A renderer that predates P0-A sends no owner; a `tb-` leaf is a root.
+        (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
+        // A split leaf, or no leaf at all — nothing to reserve.
+        _ => None,
+    }
+}
+
 #[tauri::command]
 pub async fn create_terminal(
     state: State<'_, AppState>,
@@ -77,6 +94,9 @@ pub async fn create_terminal(
     profile_id: Option<String>,
     cwd: Option<String>,
     tab_id: Option<String>,
+    // The tab that owns the pane `tab_id` names. Equal to `tab_id` for a
+    // root/solo pane. Optional so a renderer that predates P0-A still works.
+    owning_tab_id: Option<String>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
     let mut shell_name = "default".to_string();
@@ -105,6 +125,41 @@ pub async fn create_terminal(
     
     let terminal_name = format!("Terminal-{}", shell_name);
 
+    // Reserve the owner across THIS spawn too (external review 101, F1).
+    //
+    // `6941b4c` put the reservation only in `api_server::create_terminal`, which
+    // serialised the REST path against itself but left this path — the renderer's
+    // own create — outside it entirely. A restart-in-place of a dead tab root
+    // spawns with `renderer_terminal_id == owning_tab_id == tb-a`; a REST create
+    // for `tb-a` landing in the window before `spawn_terminal`'s final
+    // `terminals.insert` would scan the tab as empty and take `tb-a` as its leaf
+    // too, registering the same live leaf twice. Taking the same claim here
+    // closes the renderer-first ordering: the REST path's `try_claim` then
+    // returns `None` and it correctly mints a `tm-` split leaf instead.
+    //
+    // We claim but never REFUSE on contention: this call is a user action on a
+    // pane that already exists and owns its leaf, so it must not fail. The
+    // reverse ordering — a REST create winning the claim and committing to `tb-a`
+    // before this spawn registers — is therefore still open, and closing it is a
+    // design question (which creator wins a contested root leaf), not a lock:
+    // see docs/progress/010 for the options. The warning below is what makes that
+    // window observable instead of silent.
+    let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
+    // Held to the end of this command (and dropped on the sidecar path's early
+    // return) — releasing it before `spawn_terminal` has registered would reopen
+    // the very window it exists to cover.
+    let _root_leaf_claim = root_leaf_owner.as_deref().and_then(|owner| {
+        let claim = state.root_leaf_claims.try_claim(owner);
+        if claim.is_none() {
+            log::warn!(
+                "create_terminal: root leaf {owner} is already claimed by an in-flight create; \
+                 proceeding because a renderer create owns its pane, but this is the contested \
+                 ordering external review 101 F1 describes"
+            );
+        }
+        claim
+    });
+
     // Opt-in PTY-host sidecar path (Windows). Requires a stable tab_id as the
     // reattach key; without one we fall through to the in-process path.
     if crate::pty_host_client::enabled() {
@@ -112,6 +167,7 @@ pub async fn create_terminal(
             return create_host_terminal(
                 state.inner(),
                 tid,
+                owning_tab_id.clone(),
                 cols,
                 rows,
                 shell_path,
@@ -144,6 +200,7 @@ pub async fn create_terminal(
         // it in after spawn returned raced a fast-exiting shell's exit persist,
         // which then filed history under the ephemeral pc- id (review 062 F-01).
         tab_id,
+        owning_tab_id,
         history_prefix.clone(),
     )?;
 
@@ -185,6 +242,34 @@ pub fn adopt_console_window(
     Ok(())
 }
 
+/// Tell the backend that a pane moved into a different tab, so the owner stored
+/// at spawn stops naming the tab the pane left (review 099 T2-F2).
+///
+/// The renderer is the authority here: tab ownership lives only in
+/// `panes.treesByTabId`, and the backend cannot derive it. Fired from the pane
+/// tree's own change subscription (`services/paneOwnership.ts`), which is why it
+/// covers every reparent path — same-window drag, cross-window drop, detached
+/// window boot — rather than only fresh process binding.
+///
+/// `renderer_terminal_id` is the LEAF (`tb-*` root, `tm-*` split), not the
+/// process id: the leaf is what the pane tree holds and it is unique per live
+/// pane (design 011 §3, D7). Best-effort like `adopt_console_window` — an
+/// unmatched leaf is not an error, since the renderer fires this off its own
+/// tree lifecycle and a pane's PTY may not exist (yet, or any more).
+#[tauri::command]
+pub fn set_terminal_owning_tab(
+    state: State<'_, AppState>,
+    renderer_terminal_id: String,
+    owning_tab_id: String,
+) -> Result<(), String> {
+    if !crate::state::retarget_owning_tab(&state.terminals, &renderer_terminal_id, &owning_tab_id)? {
+        log::debug!(
+            "set_terminal_owning_tab: no live terminal carries leaf {renderer_terminal_id}"
+        );
+    }
+    Ok(())
+}
+
 /// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
 /// stable `tab_id` (the reattach key), so the sidecar session, the output
 /// broadcast id, and the vt100 screen key all align — live routing works with
@@ -194,6 +279,7 @@ pub fn adopt_console_window(
 async fn create_host_terminal(
     state: &AppState,
     id: String,
+    owning_tab_id: Option<String>,
     cols: u16,
     rows: u16,
     shell_path: Option<String>,
@@ -204,13 +290,13 @@ async fn create_host_terminal(
     // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
     // to the in-process path immediately — no host state is registered.
     if let Err(e) = state.ensure_pty_host().await {
-        return host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e);
+        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, &e);
     }
     let client = match state.pty_host_clone() {
         Some(c) => c,
         None => {
             return host_fallback(
-                state, &id, cols, rows, shell_path, shell_name, shell_args, cwd,
+                state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd,
                 "pty-host not connected",
             )
         }
@@ -228,7 +314,7 @@ async fn create_host_terminal(
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
-        register_host_terminal(state, &id, pid, &shell_name, cols, rows, prompt_hook);
+        register_host_terminal(state, &id, owning_tab_id.as_deref(), pid, &shell_name, cols, rows, prompt_hook);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -252,7 +338,7 @@ async fn create_host_terminal(
     // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
-    register_host_terminal(state, &id, 0, &shell_name, cols, rows, prompt_hook);
+    register_host_terminal(state, &id, owning_tab_id.as_deref(), 0, &shell_name, cols, rows, prompt_hook);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -276,9 +362,20 @@ async fn create_host_terminal(
         Err(e) => {
             // Undo the provisional registration, then fall back in-process.
             state.cleanup_terminal_state(&id);
-            host_fallback(state, &id, cols, rows, shell_path, shell_name, shell_args, cwd, &e)
+            host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, &e)
         }
     }
+}
+
+/// The identities a sidecar-hosted terminal registers: `(map_key_and_leaf, owner)`.
+///
+/// On this path the app terminalId IS the DashMap key, the sidecar session id,
+/// the output-broadcast id and the vt100 screen key — that alignment is the
+/// reattach contract (`commands.rs:188-192`) and P0-A leaves it untouched.
+/// The only new thing is the owner, which defaults to the leaf (correct for a
+/// root/solo pane, and the pre-P0-A behaviour for everything else).
+fn host_identity(id: &str, owning_tab_id: Option<&str>) -> (String, String) {
+    (id.to_string(), owning_tab_id.unwrap_or(id).to_string())
 }
 
 /// Register a host-owned terminal's routing state: authoritative screen, host
@@ -286,12 +383,14 @@ async fn create_host_terminal(
 fn register_host_terminal(
     state: &AppState,
     id: &str,
+    owning_tab_id: Option<&str>,
     pid: u32,
     shell_name: &str,
     cols: u16,
     rows: u16,
     prompt_hook: bool,
 ) {
+    let (leaf, owner) = host_identity(id, owning_tab_id);
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), ());
     state.terminals.insert(
@@ -305,7 +404,8 @@ fn register_host_terminal(
             cols,
             rows,
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
-            tab_id: Some(id.to_string()),
+            renderer_terminal_id: Some(leaf),
+            owning_tab_id: Some(owner),
             last_input_source: None,
             last_input_at: None,
             prompt_hook,
@@ -347,6 +447,7 @@ fn stage_scrollback<R: tauri::Runtime>(state: &AppState<R>, history_key: &str, t
 fn host_fallback(
     state: &AppState,
     tab_id: &str,
+    owning_tab_id: Option<&str>,
     cols: u16,
     rows: u16,
     shell_path: Option<String>,
@@ -360,6 +461,9 @@ fn host_fallback(
     // Seed + register the tab_id via spawn_terminal (both land before the reader
     // thread starts), then stage the renderer's one-shot prefix under the new id.
     let history_prefix = restore_prefix(state, tab_id);
+    // Same rule as register_host_terminal: the leaf is the id, the owner
+    // defaults to the leaf. One definition, two call sites.
+    let (leaf, owner) = host_identity(tab_id, owning_tab_id);
     let fallback_id = pty_manager::spawn_terminal(
         state.clone(),
         cols,
@@ -369,7 +473,8 @@ fn host_fallback(
         cwd,
         shell_name,
         name,
-        Some(tab_id.to_string()),
+        Some(leaf),
+        Some(owner),
         history_prefix.clone(),
     )?;
     if let Some(prefix) = history_prefix {
@@ -998,7 +1103,7 @@ pub async fn close_terminal(
 ) -> Result<(), String> {
     // Get the terminal info to retrieve the PID + renderer id.
     let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
-        (terminal.pid, terminal.tab_id.clone())
+        (terminal.pid, terminal.renderer_terminal_id.clone())
     } else {
         return Err("Terminal not found".to_string());
     };
@@ -2110,7 +2215,8 @@ mod scrollback_restore_tests {
                 cols: 80,
                 rows: 24,
                 backend: crate::tmux_manager::TerminalBackend::PortablePty,
-                tab_id: Some(id.to_string()),
+                renderer_terminal_id: Some(id.to_string()),
+                owning_tab_id: Some(id.to_string()),
                 last_input_source: None,
                 last_input_at: None,
                 prompt_hook: false,
@@ -2261,5 +2367,104 @@ mod freedesktop_icon_tests {
             Some(big.as_path())
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod host_identity_tests {
+    use super::host_identity;
+
+    /// On the PTY-host sidecar path the DashMap KEY *is* the renderer leaf
+    /// (`commands.rs:188-192`), and `host_terminals` / `host_reattach_pending` /
+    /// `host_stream_offsets` / `host_close_pending` (`state.rs:235,240,260,270`)
+    /// are all keyed by that same value. P0-A must not move it — hot-swap
+    /// reattach depends on it (ground-truth correction C2).
+    #[test]
+    fn a_split_pane_keeps_its_leaf_as_the_map_and_reattach_key() {
+        let (key, owner) = host_identity("tm-9f2c1a4b7", Some("tb-4e8d0c2f1"));
+        assert_eq!(key, "tm-9f2c1a4b7", "the sidecar reattach key must stay the leaf");
+        assert_eq!(owner, "tb-4e8d0c2f1");
+    }
+
+    /// A root/solo pane owns itself — the invariant that made the old collapse
+    /// invisible until an API split existed (design 011 §3).
+    #[test]
+    fn a_root_pane_owns_itself_when_no_owner_is_supplied() {
+        let (key, owner) = host_identity("tb-4e8d0c2f1", None);
+        assert_eq!(key, "tb-4e8d0c2f1");
+        assert_eq!(owner, "tb-4e8d0c2f1");
+    }
+
+    /// A renderer that predates P0-A sends no owner; a split pane then falls
+    /// back to owning itself. That is the OLD behaviour, preserved — it is no
+    /// worse than today, and Task 10 makes the renderer always send one.
+    #[test]
+    fn a_missing_owner_degrades_to_the_leaf_not_to_none() {
+        let (_, owner) = host_identity("tm-9f2c1a4b7", None);
+        assert_eq!(owner, "tm-9f2c1a4b7");
+    }
+}
+
+/// The renderer create path's own root-leaf reservation (external review 101, F1).
+///
+/// Plain `#[cfg(test)]` — nothing here needs tauri's `test` feature, which breaks
+/// the Windows test binary at loader time (see the gate on
+/// `scrollback_restore_tests` above).
+#[cfg(test)]
+mod root_leaf_reservation_tests {
+    use super::root_leaf_owner_to_reserve;
+    use crate::state::RootLeafClaims;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_tab_root_reserves_its_own_id() {
+        // leaf == owner is the definition of a tab root (design 011 §3), and it
+        // is the only shape the REST path can also decide to take.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-a1b2c3"), Some("tb-a1b2c3")),
+            Some("tb-a1b2c3".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_split_pane_reserves_nothing() {
+        // A `tm-` leaf is minted fresh, so it cannot collide and must not take a
+        // claim — doing so would stall an unrelated root create for no gain.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tm-9f2c1a4"), Some("tb-a1b2c3")),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_pre_p0a_renderer_sending_no_owner_still_reserves_a_tb_leaf() {
+        // `owning_tab_id` is Optional precisely so an older renderer keeps
+        // working; a `tb-` leaf from one of those IS a tab root.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-a1b2c3"), None),
+            Some("tb-a1b2c3".to_string()),
+        );
+        assert_eq!(root_leaf_owner_to_reserve(Some("tm-9f2c1a4"), None), None);
+        assert_eq!(root_leaf_owner_to_reserve(None, None), None);
+    }
+
+    #[test]
+    fn the_renderer_and_the_rest_path_cannot_both_hold_one_owner() {
+        // The whole point of F1's fix: these two paths now contend for the SAME
+        // map, so whichever gets there first excludes the other. Before the fix
+        // the renderer path never touched this map at all, so both could commit
+        // to the same live leaf.
+        let claims: Arc<RootLeafClaims> = Arc::new(RootLeafClaims::default());
+        let renderer = claims.try_claim("tb-a1b2c3");
+        assert!(renderer.is_some(), "the first creator reserves the owner");
+        assert!(
+            claims.try_claim("tb-a1b2c3").is_none(),
+            "a concurrent REST create must be refused and mint a tm- split leaf",
+        );
+        drop(renderer);
+        assert!(
+            claims.try_claim("tb-a1b2c3").is_some(),
+            "the owner is free again once the winning spawn has registered",
+        );
     }
 }
