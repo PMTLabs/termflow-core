@@ -17,10 +17,20 @@ import {
   fitIfLaidOut,
   getTerminalRenderPolicy,
   countActiveWebGLAddons,
+  setTerminalRenderPolicy,
 } from '../renderPolicy';
 import { terminalCache } from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebglAddon } from '@xterm/addon-webgl';
+
+/** The jsdom WebglAddon mock (src/__mocks__/addon-webgl.ts) adds two statics the real
+ *  addon has no equivalent of: a one-shot construction-failure switch and the last
+ *  onContextLoss callback loadWebGLAddon registered. */
+const MockWebgl = WebglAddon as unknown as {
+  failNextConstruction: boolean;
+  lastContextLossHandler: (() => void) | null;
+};
 
 /** The jsdom FitAddon mock (src/__mocks__/addon-fit.ts) exposes a fitCount the real
  *  addon does not; existing tests reach it via `as any` (engine.relocate-eligibility
@@ -49,6 +59,8 @@ function makeEntry(key: string, opts: { parent?: boolean; box?: boolean } = {}) 
 afterEach(() => {
   terminalCache.clear();
   document.body.innerHTML = '';
+  MockWebgl.failNextConstruction = false;
+  MockWebgl.lastContextLossHandler = null;
 });
 
 describe('design/013 §5.3 LB — never fit a terminal with no layout box', () => {
@@ -114,5 +126,72 @@ describe('design/013 §4 — reading policy and counting addons', () => {
     a.entry.webglAddon = null;
     expect(getTerminalRenderPolicy('count-flag')).toBe('dom');
     expect(countActiveWebGLAddons()).toBe(0);
+  });
+});
+
+describe('design/013 §4 — setTerminalRenderPolicy', () => {
+  // Spec test 1 — spike 2 as a real test. This is the capability that did NOT
+  // exist before P0-C: loadWebGLAddon had exactly one call site, in mount()'s
+  // create-only branch, so a terminal could be demoted but never restored.
+  it('promotes an already-open terminal and increments the addon count', () => {
+    makeEntry('promote');
+    expect(countActiveWebGLAddons()).toBe(0);
+    expect(setTerminalRenderPolicy('promote', 'webgl')).toBe('webgl');
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(getTerminalRenderPolicy('promote')).toBe('webgl');
+  });
+
+  // Spec test 2 — the case resetTerminalRendering alone cannot undo.
+  it('demotes, then RE-promotes', () => {
+    makeEntry('cycle');
+    expect(setTerminalRenderPolicy('cycle', 'webgl')).toBe('webgl');
+    expect(setTerminalRenderPolicy('cycle', 'dom')).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(0);
+    expect(setTerminalRenderPolicy('cycle', 'webgl')).toBe('webgl');
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
+  // Spec test 3.
+  it('is idempotent — setting the current policy is a no-op that returns it', () => {
+    const { fitAddon } = makeEntry('idem');
+    setTerminalRenderPolicy('idem', 'webgl');
+    const addonBefore = terminalCache.get('idem')!.webglAddon;
+    const fitsBefore = fitAddon.fitCount;
+    expect(setTerminalRenderPolicy('idem', 'webgl')).toBe('webgl');
+    expect(terminalCache.get('idem')!.webglAddon).toBe(addonBefore); // not rebuilt
+    expect(fitAddon.fitCount).toBe(fitsBefore);                      // no churn
+  });
+
+  // D3 + D7 — reported, not thrown, and the entry is left on a coherent 'dom'.
+  it('reports dom when promotion fails, and does not throw', () => {
+    makeEntry('failpromo');
+    MockWebgl.failNextConstruction = true;
+    expect(setTerminalRenderPolicy('failpromo', 'webgl')).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(0);
+    expect(getTerminalRenderPolicy('failpromo')).toBe('dom');
+  });
+
+  // Spec test 8 — a promoted terminal must carry the SAME onContextLoss handler
+  // the create path installs, or a lost context leaves a dead addon on the entry.
+  // §6.1 item 4: this can only assert the mock captured A handler and that firing
+  // it clears the entry — not that it is behaviourally identical to the create path.
+  it('a context loss on a promoted terminal nulls the entry and reports dom', () => {
+    makeEntry('ctxloss');
+    setTerminalRenderPolicy('ctxloss', 'webgl');
+    expect(MockWebgl.lastContextLossHandler).toBeTruthy();
+    MockWebgl.lastContextLossHandler!();
+    expect(getTerminalRenderPolicy('ctxloss')).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(0);
+  });
+
+  it('returns dom for an unknown terminal id rather than throwing', () => {
+    expect(setTerminalRenderPolicy('ghost', 'webgl')).toBe('dom');
+  });
+
+  // §5.3 LB — a policy change must never fit a terminal with no layout box.
+  it('does not fit when the host has no layout box', () => {
+    const { fitAddon } = makeEntry('nobox-policy', { box: false });
+    setTerminalRenderPolicy('nobox-policy', 'webgl');
+    expect(fitAddon.fitCount).toBe(0);
   });
 });

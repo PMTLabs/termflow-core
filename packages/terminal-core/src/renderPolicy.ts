@@ -1,6 +1,7 @@
 import type { Terminal } from '@xterm/xterm';
 // import cycle is safe: cross-refs are call-time only (never at module load)
-import { terminalCache, type TerminalCacheEntry } from './cache';
+import { terminalCache, resetTerminalRendering, type TerminalCacheEntry } from './cache';
+import { loadWebGLAddon } from './webgl';
 
 /** design/013 D1. There is no 'parked' — every terminal is permanently mounted. */
 export type RenderPolicy = 'webgl' | 'dom';
@@ -55,4 +56,46 @@ export function countActiveWebGLAddons(): number {
   let n = 0;
   for (const entry of terminalCache.values()) if (entry.webglAddon) n += 1;
   return n;
+}
+
+/**
+ * design/013 §4. Returns the policy ACTUALLY ACHIEVED, which may differ from `want`
+ * (D3): promotion can fail on the GPU context limit, a driver refusal, or the global
+ * WebGL toggle. A caller that assumes success silently overruns its budget.
+ *
+ * Both directions are idempotent — setting the policy a terminal already has is a
+ * no-op that returns it, with no addon rebuild and no fit.
+ */
+export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy): RenderPolicy {
+  const entry = terminalCache.get(terminalId);
+  if (!entry) return 'dom';
+
+  const current: RenderPolicy = entry.webglAddon ? 'webgl' : 'dom';
+  if (current === want) return current;
+
+  if (want === 'dom') {
+    // Reuse before reinvent: the existing demotion primitive already disposes the
+    // addon and nulls both fields. Task 4 makes its fit conditional (LB).
+    resetTerminalRendering(terminalId);
+    return 'dom';
+  }
+
+  // Promotion. loadWebGLAddon installs the SAME onContextLoss handler the create
+  // path uses (webgl.ts) — required, or a context loss on a promoted terminal
+  // leaves a dead addon on the entry (spec test 8). It returns null rather than
+  // throwing when the global toggle is off or construction fails. Constructing a
+  // FRESH addon every time is invariant FA (§4.2): a fresh addon is what guarantees
+  // a fresh glyph atlas, so demote -> re-promote cannot resurrect the shipped
+  // stale-atlas defect.
+  const addon = loadWebGLAddon(entry.terminal, terminalId);
+  if (!addon) {
+    entry.webglAddon = null;
+    entry.useWebGL = false;
+    return 'dom';                     // D7: not an error, the budget was reached
+  }
+  entry.webglAddon = addon;
+  entry.useWebGL = true;
+  // Renderer swap can change cell metrics; re-measure, but only when it is safe to.
+  fitIfLaidOut(entry);
+  return 'webgl';
 }
