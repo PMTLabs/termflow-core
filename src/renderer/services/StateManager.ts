@@ -7,7 +7,7 @@ import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
-import { pruneCwds, seedRestoredCwds } from './stateManagerCwd';
+import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
@@ -626,15 +626,17 @@ class StateManagerClass {
   /**
    * Helper to sanitize state and layouts to ensure they use correct prefixed IDs and avoid GUIDs.
    */
-  private sanitizeLayoutData<T extends { 
-    tabs: any[]; 
-    activeTabId: string | null; 
-    paneTree: any; 
-    activePaneId: string | null; 
-    tabPanes?: { [tabId: string]: any } 
+  private sanitizeLayoutData<T extends {
+    tabs: any[];
+    activeTabId: string | null;
+    paneTree: any;
+    activePaneId: string | null;
+    tabPanes?: { [tabId: string]: any };
+    terminalCwds?: { [terminalId: string]: string };
   }>(data: T): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
+    const terminalIdMap = new Map<string, string>();
 
     // 1. Map old tab IDs to new tab IDs
     const sanitizedTabs = (data.tabs || []).map(tab => {
@@ -684,6 +686,7 @@ class StateManagerClass {
 
       if (newNode.type === 'terminal') {
         if (newNode.terminalId) {
+          const oldTerminalId = newNode.terminalId;
           // If it was matching the old tab ID (main terminal of that tab)
           if (tabIdMap.has(newNode.terminalId)) {
             newNode.terminalId = tabIdMap.get(newNode.terminalId)!;
@@ -692,6 +695,22 @@ class StateManagerClass {
           } else if (!newNode.terminalId.startsWith('tm-') && !newNode.terminalId.startsWith('tb-')) {
             // Split terminal ID that is not tb- or tm-
             newNode.terminalId = generateId('tm');
+          }
+          // GUARD (blast-radius review 092 B1): `sanitizeNode` runs TWICE over
+          // the same logical tree — once inside the `tabPanes` loop below
+          // (whose output IS what `restoreTabPanesInPlace` actually restores)
+          // and once standalone over `paneTree` (whose output `restoreState`
+          // never dispatches — no `setPaneTree` call exists there). For a
+          // legacy leaf id that needs regeneration, each pass independently
+          // calls the non-deterministic `generateId('tm')` and gets a
+          // DIFFERENT id. The tabPanes pass runs first (it is physically
+          // earlier in this function), so its id is the one that ends up on
+          // screen — the FIRST mapping must therefore win. Without this guard
+          // the second (discarded) id silently overwrites the first, and
+          // `remapCwds` re-keys the cwd onto an id no restored pane carries —
+          // reproducing the exact bug this task exists to fix.
+          if (newNode.terminalId !== oldTerminalId && !terminalIdMap.has(oldTerminalId)) {
+            terminalIdMap.set(oldTerminalId, newNode.terminalId);
           }
         }
       } else if (newNode.type === 'split' && newNode.children) {
@@ -725,6 +744,7 @@ class StateManagerClass {
       activeTabId: sanitizedActiveTabId,
       paneTree: sanitizedPaneTree,
       activePaneId: sanitizedActivePaneId,
+      terminalCwds: remapCwds(data.terminalCwds || {}, terminalIdMap),
     };
 
     if (data.tabPanes) {

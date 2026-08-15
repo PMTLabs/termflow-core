@@ -3,7 +3,7 @@
  * The map is persisted alongside the pane trees and seeded back before any pane
  * spawns. Legacy saved state (no terminalCwds key) must still load.
  */
-import { pruneCwds, seedRestoredCwds } from '../stateManagerCwd';
+import { pruneCwds, seedRestoredCwds, remapCwds } from '../stateManagerCwd';
 import { getCwdSnapshot, setCwdSnapshot, getAllCwdSnapshots, __resetCwdSnapshots } from '../cwdSnapshot';
 
 jest.mock('../TerminalService', () => ({ terminalService: { getProcessId: () => undefined } }));
@@ -47,5 +47,32 @@ describe('seedRestoredCwds', () => {
     setCwdSnapshot('tm-1', 'D:\\fresh');
     seedRestoredCwds({ 'tm-1': 'D:\\stale' });
     expect(getCwdSnapshot('tm-1')).toBe('D:\\fresh');
+  });
+});
+
+describe('remapCwds', () => {
+  // Review 086 Q4: sanitizeLayoutData rewrites a stale split leaf to a fresh
+  // `tm-` id. Without the same remap, `terminalCwds` still points at the OLD id
+  // and the restored pane silently loses its directory.
+  it('moves a cwd onto the id its leaf was rewritten to', () => {
+    expect(
+      remapCwds(
+        { 'pc-abc123def': 'D:\\work', 'tb-4e8d0c2f1': 'D:\\other' },
+        new Map([['pc-abc123def', 'tm-9f2c1a4b7']]),
+      ),
+    ).toEqual({ 'tm-9f2c1a4b7': 'D:\\work', 'tb-4e8d0c2f1': 'D:\\other' });
+  });
+
+  it('leaves an unmapped map untouched', () => {
+    expect(remapCwds({ 'tb-1': '/a' }, new Map())).toEqual({ 'tb-1': '/a' });
+  });
+
+  it('lets an existing entry for the NEW id win over a remapped one', () => {
+    expect(
+      remapCwds(
+        { 'pc-old': '/stale', 'tm-new': '/fresh' },
+        new Map([['pc-old', 'tm-new']]),
+      ),
+    ).toEqual({ 'tm-new': '/fresh' });
   });
 });
