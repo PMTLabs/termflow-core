@@ -3618,6 +3618,25 @@ export class TerminalEngine {
     // is wiped with no repair armed — silent data loss.
     this.convergenceArmUntil = Date.now() + RELOCATION_CONVERGENCE_ARM_MS;
 
+    // --- R3: raise (or lower) surface eligibility (§5.4) ---
+    // INSIDE the operation, not in the renderer: that is what makes an aborted
+    // relocation incapable of leaving eligibility raised (reviews 093 B2 / 094 B4).
+    // Rev 4 had the renderer do this one line before and one line after, and an
+    // abort then left surfaceDisplayed === true for the life of the engine —
+    // permanently un-gating flushBackendResize's park (:2589), the observer fit and
+    // both healOnce gates, so a hidden ratatui/codex pane gets SIGWINCH'd and its
+    // scrollback wiped.
+    //
+    // ORDERING IS LOAD-BEARING: eligibility must already be true when R7 arms the
+    // new ResizeObserver, because that observer's initial callback is gated on
+    // geometryEligible(). On the return trip a BACKGROUND pane does get a gap —
+    // R7's callback is skipped — and the fitTimer the FT rule preserves (§5.3) is
+    // what fills it. Raising eligibility on the way home instead would defeat the
+    // hidden-pane SIGWINCH park §6.2 exists to arm.
+    //
+    // Under the FT rule this call cannot cancel a fitTimer in either direction.
+    this.setSurfaceDisplayed(!paneChrome);
+
     // --- R4: dispose the PREVIOUS container's disposables (§5.5) ---
     // Off the CACHE ENTRY's reference, not this.containerDisposables — exactly
     // what mount()'s reattach branch already does at :742. Imitate, do not invent.
