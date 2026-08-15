@@ -51,8 +51,11 @@ interface ElectronAPI {
   /// every process bind, so a pane moved between windows re-owns to the new one.
   adoptConsoleWindow: (processId: string) => Promise<void>;
   /// Re-point a live terminal's owning tab after its pane was moved into a
-  /// different tab. Keyed by the renderer LEAF (`tb-*` root, `tm-*` split) —
-  /// see services/paneOwnership.ts.
+  /// different tab. Keyed by the renderer LEAF — two id FORMS, naming who minted
+  /// the leaf and NOT the pane's shape: `tb-*` for a renderer-created tab root,
+  /// `tm-*` for split panes AND for every API-created terminal, including a solo
+  /// root. Shape comes only from the pane tree, and a leaf keeps its id when
+  /// moved — see services/paneOwnership.ts.
   setTerminalOwningTab: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;

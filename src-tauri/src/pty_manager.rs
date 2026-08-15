@@ -701,8 +701,12 @@ pub fn spawn_terminal(
     cwd: Option<String>,
     shell_name: String,
     terminal_name: String,
-    // The stable renderer LEAF id (`tb-*` root, `tm-*` split) this terminal
-    // persists history under. Registered WITH the Terminal before the reader
+    // The stable renderer LEAF id this terminal persists history under. Two id
+    // FORMS, describing who minted the leaf and NOT the pane's shape: `tb-*` for
+    // a renderer-created tab root, `tm-*` for split panes AND for every
+    // API-created terminal, including a solo root. Root/solo/split is determined
+    // only by the pane-tree structure, never by the prefix.
+    // Registered WITH the Terminal before the reader
     // thread starts: a caller patching it in after spawn returns would race a
     // fast-exiting shell's exit-path persist, which would then file the final
     // scrollback under the ephemeral pc- id (review 062 agy F-01).
@@ -715,8 +719,12 @@ pub fn spawn_terminal(
     // review 086). Before P0-A this fallback made the field never-None at
     // runtime (ground-truth correction C1).
     renderer_terminal_id: Option<String>,
-    // The tab that owns the pane above; `None` when unknown. Equal to
-    // `renderer_terminal_id` for a root/solo pane.
+    // The tab that owns the pane above; `None` when unknown. This is the ONLY
+    // source of ownership — never derive it from `renderer_terminal_id` or its
+    // prefix. It happens to equal the leaf for a renderer-created tab root that
+    // has not been moved, but an API-created solo root is a `tm-*` leaf owned by
+    // a different `tb-*` id, and any leaf keeps its id when reparented into
+    // another tab (`set_terminal_owning_tab` exists for exactly that).
     owning_tab_id: Option<String>,
     // Restored scrollback (blob + divider) to seed the fresh parser with, BEFORE
     // the reader thread starts — so persisted history precedes live output and the

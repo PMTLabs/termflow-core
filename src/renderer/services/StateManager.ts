@@ -268,8 +268,12 @@ class StateManagerClass {
    */
   private async reconcileExistingTerminals(appState: AppState): Promise<void> {
     try {
-      // Every terminalId the restore will otherwise spawn: each tab root (tb-)
-      // plus every terminal node in the saved pane trees (splits are tm-).
+      // Every terminalId the restore will otherwise spawn: each tab id plus
+      // every terminal node in the saved pane trees. Leaf ids come in two FORMS
+      // that name who minted them, NOT the pane's shape — `tb-*` for a
+      // renderer-created tab root, `tm-*` for split panes AND for every
+      // API-created terminal, including a solo root — so this walks the tree
+      // rather than filtering on a prefix.
       const wanted = new Set<string>();
       (appState.tabs || []).forEach((t: any) => {
         if (t?.id) wanted.add(t.id);

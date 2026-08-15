@@ -7,10 +7,13 @@
  * a node's host div by callback ref and lets React 19's ref-cleanup closure
  * unregister it.
  *
- * KEY CONTRACT (design 012 §9 C3): the key is the renderer LEAF id — `tb-*` for a
- * root/solo pane, `tm-*` for a split pane — the same key `terminalCache` and the
- * ended-region tracker registry use. The OWNING TAB id must never key a surface,
- * or two split panes alias and one terminal shows in two places.
+ * KEY CONTRACT (design 012 §9 C3): the key is the renderer LEAF id — the same key
+ * `terminalCache` and the ended-region tracker registry use. That leaf id has two
+ * FORMS, naming who minted it and NOT the pane's shape: `tb-*` for a
+ * renderer-created tab root, `tm-*` for split panes AND for every API-created
+ * terminal, including a solo root. Root/solo/split comes only from the pane tree,
+ * never from the prefix. The OWNING TAB id must never key a surface, or two split
+ * panes alias and one terminal shows in two places.
  *
  * SINGLE OWNER PER KEY, and that is load-bearing. Spike 004 Q5 measured that with
  * two owners of one id-keyed slot, whichever unmounts FIRST clears the registry

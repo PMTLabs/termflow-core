@@ -297,9 +297,13 @@ pub fn adopt_console_window(
 /// covers every reparent path — same-window drag, cross-window drop, detached
 /// window boot — rather than only fresh process binding.
 ///
-/// `renderer_terminal_id` is the LEAF (`tb-*` root, `tm-*` split), not the
-/// process id: the leaf is what the pane tree holds and it is unique per live
-/// pane (design 011 §3, D7). Best-effort like `adopt_console_window` — an
+/// `renderer_terminal_id` is the LEAF, not the process id: the leaf is what the
+/// pane tree holds and it is unique per live pane (design 011 §3, D7). It comes
+/// in two id FORMS, describing who minted the leaf and NOT the pane's shape:
+/// `tb-*` for a renderer-created tab root, `tm-*` for split panes AND for every
+/// API-created terminal, including a solo root. Root/solo/split is determined
+/// only by the pane-tree structure, never by the prefix — and a leaf keeps its
+/// id when moved, which is exactly why this command exists. Best-effort like `adopt_console_window` — an
 /// unmatched leaf is not an error, since the renderer fires this off its own
 /// tree lifecycle and a pane's PTY may not exist (yet, or any more).
 #[tauri::command]
