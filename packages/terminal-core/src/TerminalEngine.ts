@@ -163,6 +163,13 @@ const LIVE_WRITE_MAX_MS = 64;
 // run seconds later is never misattributed.
 const ED3_EXPECT_WINDOW_MS = 1500;
 
+// How long after a relocation a backend resize is still attributable to that
+// relocation, and therefore worth stamping convergenceResizeAt for (design 012
+// §6.2). Comfortably covers "observe() initial callback next frame -> fit() ->
+// onResize -> 120ms debounce"; short enough that an unrelated `clear` is very
+// unlikely to fall inside it. A TUNED constant, not a derived one (§15.3).
+const RELOCATION_CONVERGENCE_ARM_MS = 500;
+
 // Backlog 011: window after a suggestion accept during which Enter keydowns are
 // swallowed. Covers OS key auto-repeat (~30ms interval after a ~500ms delay)
 // without noticeably delaying a deliberate follow-up Enter.
@@ -595,6 +602,14 @@ export class TerminalEngine {
   // Bumped on every scheduleBackendResize so a heal that began before a resize can
   // detect the change after its await and abort.
   private resizeEpoch = 0;
+  // Epoch ms until which a backend resize is attributable to a relocation. Set by
+  // relocateTo's R2 to Date.now() + RELOCATION_CONVERGENCE_ARM_MS, consumed at most
+  // ONCE by stampConvergenceIfArmed, and restored from the R0 snapshot on every
+  // abort path — otherwise an aborted relocation would leave a <=500ms arm on an
+  // engine that never moved, and an unrelated resize would open a spurious 1500ms
+  // ED3 repair window: exactly the misattribution :2386-2388 exists to avoid
+  // (design 012 §5.1, review 096).
+  private convergenceArmUntil = 0;
   // Global suppression after a backend pipeline-healed jiggle (which resizes EVERY
   // terminal's PTY). Static so one event quiets all engines.
   static suppressHealUntil = 0;
@@ -2280,6 +2295,10 @@ export class TerminalEngine {
           await this.bridge.resize(processId, cols, rows);
           const e = terminalCache.get(this.cacheKey);
           if (e) e.lastSentSize = { cols, rows };
+          // design 012 §6.2 / H2: the ONE direct sender that bypasses
+          // scheduleBackendResize. A relocation landing while this hydration was
+          // still awaiting must not SIGWINCH a ratatui PTY with no repair armed.
+          this.stampConvergenceIfArmed();
         } catch (e) {
           console.warn(
             `terminal-core/engine: pre-hydration resize failed for ${this.cacheKey}:`,
@@ -2540,17 +2559,13 @@ export class TerminalEngine {
     // Narrower than stamping unconditionally on every activation: a reactivation
     // that resizes nothing never stamps, so it can't misattribute an unrelated
     // wipe days later.
-    const stampConvergenceResize = () => {
-      const e = terminalCache.get(this.cacheKey);
-      if (e) e.convergenceResizeAt = Date.now();
-    };
     if (this.pendingResize) {
       // A size is pending (freshly armed by the fit's onResize just above — it
       // synchronously calls scheduleBackendResize on a real dimension change —
       // or parked at deactivation with its timer cleared). Either way this IS
       // the convergence resize; stamp regardless of whether the debounce timer
       // still needs (re)arming.
-      stampConvergenceResize();
+      this.stampConvergenceResize();
       if (!this.resizeTimer) {
         this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
       }
@@ -2558,9 +2573,45 @@ export class TerminalEngine {
     }
     const sent = terminalCache.get(this.cacheKey)?.lastSentSize;
     if (!sent || sent.cols !== term.cols || sent.rows !== term.rows) {
-      stampConvergenceResize();
+      this.stampConvergenceResize();
       this.scheduleBackendResize(term.cols, term.rows);
     }
+  }
+
+  /**
+   * Mark "this terminal's PTY size is converging RIGHT NOW", so a CSI-3J arriving
+   * within ED3_EXPECT_WINDOW_MS can be attributed to OUR resize rather than to an
+   * unrelated clear. Extracted from flushDeferredResizeOnActivation's local
+   * closure so relocation can reuse it (design 012 §6.2); the two call sites there
+   * (:2399, :2407) are unchanged in behaviour.
+   */
+  private stampConvergenceResize(): void {
+    const e = terminalCache.get(this.cacheKey);
+    if (e) e.convergenceResizeAt = Date.now();
+  }
+
+  /**
+   * Stamp only if a relocation armed the window, and consume the arm.
+   *
+   * Called from the two places a size can reach the PTY (design 012 §6.2):
+   *   - scheduleBackendResize — the debounced choke point, and the route the
+   *     relocation path itself takes (onResize at :1119);
+   *   - hydrate()'s direct pre-hydration resize at :2181, the ONE sender that
+   *     bypasses the debounce. A hydrate() started by an earlier attach() can
+   *     still be awaiting when a relocation lands, and its SIGWINCH would then hit
+   *     a ratatui PTY inside the arm window with no repair armed (review 093 B5).
+   *
+   * Armed rather than unconditional so an unchanged-geometry relocation — which
+   * produces no resize at all — never stamps, preserving the property the comment
+   * at :2386-2388 protects. If some OTHER caller fires inside the window (a heal
+   * at :2657, a hydrate reconcile at :2274), that is still a genuine PTY resize
+   * converging immediately after a relocation, so attributing a following ED3 to
+   * it is correct rather than a misattribution.
+   */
+  private stampConvergenceIfArmed(): void {
+    if (Date.now() >= this.convergenceArmUntil) return;
+    this.convergenceArmUntil = 0;
+    this.stampConvergenceResize();
   }
 
   // ED3 resize-wipe repair: debounce on output idle (so codex's post-ED3 re-emit
@@ -2717,6 +2768,11 @@ export class TerminalEngine {
   // Coalesce rapid xterm resizes into a single backend PTY resize at the final
   // size (see BACKEND_RESIZE_DEBOUNCE_MS).
   private scheduleBackendResize(cols: number, rows: number): void {
+    // design 012 §6.2 / H2: if a relocation armed the window, this resize IS the
+    // convergence resize — stamp it so the ED3 detector at :1261-1274 opens its
+    // 1500ms repair window and a codex/ratatui scrollback wipe is repaired rather
+    // than lost. No-op when nothing armed it.
+    this.stampConvergenceIfArmed();
     this.resizeEpoch++;
     this.pendingResize = { cols, rows };
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
