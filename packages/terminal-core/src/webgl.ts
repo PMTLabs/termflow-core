@@ -2,6 +2,7 @@ import type { Terminal } from '@xterm/xterm';
 import { WebglAddon } from '@xterm/addon-webgl';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { terminalCache } from './cache';
+import { quarantineWebGLAddon } from './renderPolicy';
 
 // Track global WebGL failure - if one terminal fails, disable for all new terminals.
 // WebGL is the default renderer: it draws box-drawing/block glyphs as CUSTOM GLYPHS
@@ -73,6 +74,12 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
           `terminal-core/webgl: error disposing the addon that failed to load for ${terminalId}:`,
           disposeErr,
         );
+        // Review 124 HIGH — the same ownership rule as the create path. This addon
+        // was CONSTRUCTED (so it may hold a context) and refused to be disposed, and
+        // we are about to return null, dropping the only reference that will ever
+        // exist to it. Hand it to the quarantine instead, which keeps it counted
+        // against the budget until a retry can confirm it is gone.
+        quarantineWebGLAddon(webgl);
       }
     }
     return null;

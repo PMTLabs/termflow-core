@@ -61,11 +61,98 @@ export function getTerminalRenderPolicy(terminalId: string): RenderPolicy | null
  * Keys off the addon reference rather than `useWebGL`, because a context loss nulls
  * `webglAddon` (webgl.ts) and the flag is only advisory; counting the flag would hold
  * budget against a terminal that no longer has a context.
+ *
+ * REACHABLE + QUARANTINED (review 124 HIGH). An addon whose dispose() threw may still
+ * hold its context, and the cache entry it was retained on can be REPLACED out from
+ * under it (mount()'s create branch does exactly that). Counting only the cache would
+ * then under-state by one more context per failure, without bound. The quarantine
+ * below is where those addons live, and it is part of the count for as long as they
+ * refuse to be disposed.
  */
 export function countActiveWebGLAddons(): number {
   let n = 0;
   for (const entry of terminalCache.values()) if (entry.webglAddon) n += 1;
-  return n;
+  return n + webglQuarantine.size;
+}
+
+/* ------------------------------------------------------------------ quarantine */
+
+/** Minimal shape the quarantine needs; the real addon and the jsdom mock both fit. */
+type DisposableAddon = { dispose(): void };
+
+/**
+ * design/013 §5.2 ORPHAN, review 124 HIGH — addons whose `dispose()` THREW.
+ *
+ * Retaining such an addon on its cache entry is only safe while that entry survives.
+ * The create path in mount() replaces the whole entry, so the retained addon becomes
+ * unreachable and stops being counted — and every repetition adds another one, which
+ * is why the under-count is UNBOUNDED rather than off-by-one. Neither the cache cap
+ * nor the budget bounds objects that are no longer in the cache.
+ *
+ * This registry is the second half of the count: an addon that could not be disposed
+ * moves here instead of vanishing, so ORPHAN's quiescent equality holds as
+ *
+ *     live === reachable + quarantined === countActiveWebGLAddons()
+ *
+ * A Set, so re-quarantining the same addon cannot double-count it.
+ */
+const webglQuarantine = new Set<DisposableAddon>();
+
+/**
+ * Not an eviction threshold — evicting would silently reintroduce exactly the
+ * under-count this registry exists to prevent, and would not free anything, because
+ * the context is held by the addon, not by our reference to it. Crossing it means
+ * "this session has accumulated this many GPU contexts it cannot free"; that is a
+ * driver-level leak that will end in a lost context, and the log is the only warning
+ * anyone gets. The registry deliberately keeps growing past it.
+ */
+const QUARANTINE_LOG_THRESHOLD = 8;
+
+/** Take ownership of an addon we failed to dispose. Idempotent. */
+export function quarantineWebGLAddon(addon: DisposableAddon | null | undefined): void {
+  if (!addon) return;
+  if (webglQuarantine.has(addon)) return;
+  webglQuarantine.add(addon);
+  if (webglQuarantine.size >= QUARANTINE_LOG_THRESHOLD) {
+    console.error(
+      `terminal-core/renderPolicy: ${webglQuarantine.size} WebGL addons have refused ` +
+        'disposal and are held in quarantine; their GPU contexts are still counted ' +
+        'against the budget and cannot be reclaimed.',
+    );
+  } else {
+    console.warn(
+      'terminal-core/renderPolicy: quarantining a WebGL addon whose dispose() threw ' +
+        `(${webglQuarantine.size} held).`,
+    );
+  }
+}
+
+/** How many un-disposable addons the count is currently carrying. */
+export function getQuarantinedWebGLAddonCount(): number {
+  return webglQuarantine.size;
+}
+
+/**
+ * Retry every quarantined addon and release the ones that finally dispose — a driver
+ * hiccup must not tax the budget for the life of the session. Returns how many are
+ * still held. Called opportunistically from disposeOrphanedWebGLAddon (the one path
+ * that is already doing disposal work), so no caller has to remember to drain.
+ */
+export function drainWebGLQuarantine(): number {
+  for (const addon of [...webglQuarantine]) {
+    try {
+      addon.dispose();
+      webglQuarantine.delete(addon);
+    } catch {
+      // Still wedged. Keep holding it — and keep counting it.
+    }
+  }
+  return webglQuarantine.size;
+}
+
+/** Test hygiene only: the quarantine outlives terminalCache.clear() by design. */
+export function clearWebGLQuarantine(): void {
+  webglQuarantine.clear();
 }
 
 /**
@@ -194,18 +281,32 @@ export function webglAllowedAtCreation(): boolean {
  * Idempotent and total: unknown ids and addon-less entries are no-ops.
  *
  * Returns whether the caller may now allocate a replacement. `true` covers both
- * "disposed it" and "there was nothing to dispose". `false` means dispose() THREW:
- * the addon is left ON THE ENTRY rather than nulled, because it may still hold its
- * context and the entry field is the only thing countActiveWebGLAddons() can see.
- * The caller must not build a replacement on top of it (review 120).
+ * "disposed it" and "there was nothing to dispose". `false` means dispose() THREW.
+ *
+ * Review 124 HIGH corrects what happens then. Leaving the addon ON THE ENTRY was not
+ * enough: this function's only caller replaces that entry immediately afterwards, so
+ * the retained addon became unreachable and uncounted anyway, once per failure and
+ * without bound. It is now moved to the QUARANTINE, which countActiveWebGLAddons()
+ * includes — the count stays exact across the entry replacement, and the entry fields
+ * can be cleared honestly because the quarantine, not the entry, now owns it.
+ *
+ * The caller is still told not to build a replacement on top of it (review 120): the
+ * context may still be held, and declining to add a second one is the conservative
+ * direction for a hard budget.
  */
 export function disposeOrphanedWebGLAddon(terminalId: string): boolean {
+  // Opportunistic retry: this is the path already doing disposal work, so it is the
+  // natural place to give previously-wedged contexts a chance to come back.
+  drainWebGLQuarantine();
   const entry = terminalCache.get(terminalId);
   if (!entry?.webglAddon) return true;
   try {
     entry.webglAddon.dispose();
   } catch (e) {
     console.warn('terminal-core/renderPolicy: error disposing orphaned WebGL addon:', e);
+    quarantineWebGLAddon(entry.webglAddon);
+    entry.webglAddon = null;   // ownership moved to the quarantine; still counted there
+    entry.useWebGL = false;
     return false;
   }
   entry.webglAddon = null;

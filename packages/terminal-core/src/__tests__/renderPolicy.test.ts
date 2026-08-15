@@ -22,6 +22,9 @@ import {
   releaseCanvasWebGLBudget,
   getCanvasWebGLBudget,
   webglAllowedAtCreation,
+  getQuarantinedWebGLAddonCount,
+  drainWebGLQuarantine,
+  clearWebGLQuarantine,
 } from '../renderPolicy';
 import {
   terminalCache,
@@ -98,6 +101,16 @@ function makeBridge(): TerminalBridge {
   return { onData: () => noop, onExit: () => noop, write: () => {}, resize: () => {} };
 }
 
+/** Addons reachable from the cache — one half of ORPHAN's quiescent equality. */
+function reachableAddons(): number {
+  return [...terminalCache.values()].filter((e) => e.webglAddon).length;
+}
+
+/** Addons that were constructed and have not been disposed — the "live" half. */
+function liveAddons(): number {
+  return MockWebgl.instances.filter((a) => !a.disposed).length;
+}
+
 function makeLaidOutContainer(): HTMLElement {
   const el = document.createElement('div');
   Object.defineProperty(el, 'offsetWidth', { value: 800, configurable: true });
@@ -113,6 +126,9 @@ afterEach(() => {
   MockWebgl.failNextConstruction = false;
   MockWebgl.lastContextLossHandler = null;
   MockWebgl.instances = [];
+  // The quarantine is module state that deliberately OUTLIVES the cache (that is the
+  // whole point of it), so clearing the cache is not enough to isolate tests.
+  clearWebGLQuarantine();
   // Test HYGIENE only — it keeps a leaked budget from poisoning the next test. It
   // is NOT the BUDGET-OWNER invariant (§5.2 note (c)), which is about production
   // teardown and gets its own test and release mechanism in Task 9.
@@ -607,6 +623,12 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     // as live as it was before the remount — the count never grows past a failure.
     expect(first.disposed).toBe(false);
     expect(MockWebgl.instances.filter((a) => !a.disposed)).toHaveLength(1);
+    // Review 124 HIGH — and it is still COUNTED. The entry that held it has been
+    // replaced, so `reachable` can no longer see it; the quarantine is what keeps
+    // ORPHAN's equality exact: live === reachable + quarantined === count.
+    expect(reachableAddons()).toBe(0);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 
   // The ordering the fix depends on: the dispose frees a slot the NEW terminal is
@@ -624,6 +646,136 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     expect(getTerminalRenderPolicy('orphan-budget')).toBe('webgl');
     expect(countActiveWebGLAddons()).toBe(1);
   });
+});
+
+/**
+ * design/013 §5.2 ORPHAN, review 124 HIGH — the QUARANTINE.
+ *
+ * `disposeOrphanedWebGLAddon` retaining a failed addon on its entry is defeated the
+ * moment the caller replaces that entry: the addon is then live, unreachable, and
+ * invisible to `countActiveWebGLAddons()`. Refusing to allocate in that one
+ * expression bounds nothing — every repetition adds another uncounted live context,
+ * and neither the cache cap nor the budget bounds objects no longer in the cache.
+ *
+ * The quarantine restates ORPHAN as an equality that survives entry replacement:
+ *
+ *     live === reachable + quarantined === countActiveWebGLAddons()
+ */
+describe('design/013 §5.2 ORPHAN — the failed-disposal quarantine', () => {
+  /** Force the next mount down the create branch: reattach is gated on element. */
+  const dropElement = (key: string) => {
+    (terminalCache.get(key)!.terminal as { element?: unknown }).element = undefined;
+  };
+  const throwOnDispose = (addon: MockWebglInstance) => {
+    addon.dispose = () => {
+      throw new Error('test: dispose failed before releasing the context');
+    };
+  };
+
+  it('keeps a create-path disposal failure counted after its entry is replaced', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-single' });
+    engine.mount(makeLaidOutContainer());
+    const first = asMock(terminalCache.get('q-single')!.webglAddon);
+    throwOnDispose(first);
+
+    dropElement('q-single');
+    engine.mount(makeLaidOutContainer());
+
+    // The entry that held it is gone, so nothing reaches it — but it is still live.
+    expect(first.disposed).toBe(false);
+    expect(terminalCache.get('q-single')!.webglAddon).toBeNull();
+    expect(reachableAddons()).toBe(0);
+    // ORPHAN's equality, stated exactly.
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(liveAddons()).toBe(reachableAddons() + getQuarantinedWebGLAddonCount());
+    expect(countActiveWebGLAddons()).toBe(liveAddons());
+  });
+
+  // The UNBOUNDED half of the finding: one failure is a rounding error, N failures
+  // are a budget that has silently stopped meaning anything. Each iteration wedges a
+  // fresh addon and replaces its entry, so the drift — if any — accumulates.
+  it('never lets the count drift below the live addons across repeated failures', () => {
+    for (let i = 0; i < 5; i++) {
+      const key = `q-repeat-${i}`;
+      const engine = new TerminalEngine(makeBridge(), { cacheKey: key });
+      engine.mount(makeLaidOutContainer());
+      const addon = asMock(terminalCache.get(key)!.webglAddon);
+      throwOnDispose(addon);
+      dropElement(key);
+      engine.mount(makeLaidOutContainer());
+
+      // Asserted INSIDE the loop: the drift is per-iteration, so a check only at the
+      // end cannot tell "never drifted" from "drifted and recovered".
+      expect(countActiveWebGLAddons()).toBe(liveAddons());
+      expect(countActiveWebGLAddons()).toBeGreaterThanOrEqual(i + 1);
+    }
+    expect(getQuarantinedWebGLAddonCount()).toBe(5);
+    expect(liveAddons()).toBe(reachableAddons() + getQuarantinedWebGLAddonCount());
+  });
+
+  // The concrete failure the reviewer described: a free-looking slot. The budget is
+  // the only thing standing between a wedged context and a second context allocated
+  // on top of it, and the budget can only see what the count reports.
+  it('does not free a budget slot for a terminal created after the failure', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget' });
+    engine.mount(makeLaidOutContainer());
+    throwOnDispose(asMock(terminalCache.get('q-budget')!.webglAddon));
+
+    setCanvasWebGLBudget(1);
+    dropElement('q-budget');
+    engine.mount(makeLaidOutContainer());
+
+    // One context is wedged and uncollectable; the budget of 1 is therefore SPENT.
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(webglAllowedAtCreation()).toBe(false);
+
+    const other = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget-2' });
+    other.mount(makeLaidOutContainer());
+    expect(getTerminalRenderPolicy('q-budget-2')).toBe('dom');
+    expect(liveAddons()).toBe(1);
+  });
+
+  // The quarantine is a holding pen, not a graveyard: a context that later frees
+  // must give its slot back, or one transient driver hiccup permanently taxes the
+  // budget for the life of the session.
+  it('releases the slot when a retry finally disposes the addon', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-drain' });
+    engine.mount(makeLaidOutContainer());
+    const first = asMock(terminalCache.get('q-drain')!.webglAddon);
+    const realDispose = first.dispose.bind(first);
+    throwOnDispose(first);
+    dropElement('q-drain');
+    engine.mount(makeLaidOutContainer());
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    first.dispose = realDispose;                 // the driver recovers
+    expect(drainWebGLQuarantine()).toBe(0);      // nothing left held
+
+    expect(first.disposed).toBe(true);
+    expect(getQuarantinedWebGLAddonCount()).toBe(0);
+    expect(countActiveWebGLAddons()).toBe(liveAddons());
+  });
+
+  // webgl.ts's last hole: activation fails, and the cleanup dispose ALSO throws. The
+  // addon was constructed — so it may hold a context — and `loadWebGLAddon` returns
+  // null, dropping the only reference that will ever exist to it.
+  it('quarantines an addon whose failed-activation cleanup also throws', () => {
+    const { entry } = makeEntry('q-activate-fail');
+    (entry.terminal as unknown as { loadAddon: (a: unknown) => void }).loadAddon = (a) => {
+      throwOnDispose(a as MockWebglInstance);
+      throw new Error('test: activation failed');
+    };
+
+    expect(setTerminalRenderPolicy('q-activate-fail', 'webgl')).toBe('dom');
+
+    expect(MockWebgl.instances).toHaveLength(1);
+    expect(MockWebgl.instances[0].disposed).toBe(false);   // it refused to die…
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);       // …so it is still counted
+    expect(entry.webglAddon).toBeNull();
+    expect(liveAddons()).toBe(reachableAddons() + getQuarantinedWebGLAddonCount());
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
 });
 
 /**

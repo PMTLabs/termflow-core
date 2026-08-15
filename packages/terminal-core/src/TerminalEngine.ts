@@ -1361,11 +1361,18 @@ export class TerminalEngine {
       // under a full budget silently drop to the DOM renderer.
       // It returns false when the outgoing addon's dispose() threw, i.e. the context
       // may still be held (review 120). Then we allocate NOTHING here: the new
-      // terminal opens on the DOM renderer, so a failed disposal can never increase
-      // the number of live contexts. The old addon does stop being reachable once the
-      // entry below replaces it — we cannot dispose what refuses to be disposed — but
-      // the count only ever under-states by contexts we already failed to free, never
-      // by ones we chose to add on top of them.
+      // terminal opens on the DOM renderer rather than adding a context on top of one
+      // we could not free.
+      //
+      // Review 124 HIGH: refusing to allocate is NOT on its own what keeps the count
+      // honest, and the earlier claim that it was ("can never increase", "under-states
+      // only by contexts we already failed to free") was wrong. The entry replacement
+      // below makes the retained addon unreachable, so a bare retention loses one
+      // context from the count per failure, unbounded — the cache cap and the budget
+      // bound only what is IN the cache. disposeOrphanedWebGLAddon now moves such an
+      // addon into the module-level quarantine, which countActiveWebGLAddons()
+      // includes; the count therefore stays exact across this replacement, and the
+      // budget below sees the wedged context as still spent.
       const orphanReleased = disposeOrphanedWebGLAddon(this.cacheKey);
 
       // Load WebGL addon AFTER open (respects the global-disabled flag), and only
