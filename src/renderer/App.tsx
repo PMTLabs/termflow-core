@@ -924,11 +924,15 @@ const App: React.FC = () => {
         // Resolve a tab ID that starts with 'tb-' (or generate one if not provided)
         const targetTabId = tabId || generateId('tb');
 
-        // Map the UI terminalId (the tab id) to the backend processId so the pane
-        // reuses the existing PTY instead of spawning a new one.
+        // Map the pane's terminalId (the backend-minted LEAF, not the tab id —
+        // option A means the API path never claims a tab's root leaf, so this is
+        // always a `tm-`) to the backend processId so the pane reuses the
+        // existing PTY instead of spawning a new one. Must match the `terminalId`
+        // the pane tree below is given, or TerminalPane's mount effect finds no
+        // registered process for its own pane id and spawns a duplicate PTY.
         const terminalService = (window as any).terminalService;
-        if (terminalService && terminalId) {
-          terminalService.registerExistingTerminal(targetTabId, terminalId);
+        if (terminalService && leafId && terminalId) {
+          terminalService.registerExistingTerminal(leafId, terminalId);
         }
 
         const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile });
@@ -936,7 +940,12 @@ const App: React.FC = () => {
         const paneTree = {
           id: generateId('pn'),
           type: 'terminal' as const,
-          terminalId: targetTabId,
+          // The backend-minted leaf (`tm-`), NOT `targetTabId`. Before option A
+          // a tab's first/only pane always had terminalId === tab.id (leaf ==
+          // owner); an API-created tab's root pane no longer does — only a
+          // renderer-originated tab root still claims its own id as its leaf
+          // (`TerminalContainer.tsx`, `commands::create_terminal`).
+          terminalId: leafId,
           name: name || 'Terminal',
           shellType: profile || defaultProfile || 'default',
         };

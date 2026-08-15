@@ -485,8 +485,11 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     // The terminals this tab still owns — the tree when we have one, else the
     // tab-id fallback. Deliberately NOT "tree + tab id": a pane dragged into
     // another tab (or window) takes its terminal with it while this tab keeps
-    // its id, and the root pane's terminalId IS the tab id. See
-    // collectTabCloseTerminalIds.
+    // its id, and a RENDERER-originated root pane's terminalId IS the tab id.
+    // See collectTabCloseTerminalIds — including the residual risk it documents
+    // for an API-created tab (root leaf is `tm-`, not `id`) if `tabPanes` above
+    // were ever null/unpopulated for it; believed unreachable given Mode 0's
+    // synchronous seed, per App.tsx / TerminalContainer.tsx.
     for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
       console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
       terminalService.closeTerminal(terminalId).catch((error) => {
