@@ -3608,8 +3608,13 @@ export class TerminalEngine {
     }
     // Flush (don't drop) any pending backend resize so the PTY isn't left at a
     // stale size when a drag is interrupted by this unmount (tab switch / pane move).
-    // force=true bypasses the hidden-pane park: teardown must deliver the final size
-    // even for a background tab (the next mount reattaches to that PTY).
+    //
+    // `force` bypasses the hidden-pane park ONLY for geometry that was measured
+    // while the engine was eligible — the interrupted-mid-debounce case this line
+    // exists for. Geometry the park REFUSED (measured while ineligible) stays
+    // parked and is dropped here; the next mount re-measures and re-sends it with
+    // the ED3 detector armed. See flushBackendResize for why that distinction is
+    // load-bearing rather than cautious (external review 105).
     this.flushBackendResize(true);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
