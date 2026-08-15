@@ -18,6 +18,24 @@ export function findLeaf(tree: PaneNode | null, paneId: string): PaneNode | null
   return null;
 }
 
+/**
+ * The renderer terminal id (leaf, e.g. `tb-*`/`tm-*`) that a tab's OWN root
+ * pane carries, for a solo (unsplit) tab whose tree is a single terminal node.
+ *
+ * Review 109 H3: for a renderer-created tab this equals `tab.id`, but for an
+ * API-created tab it is the backend-minted `tm-*` root leaf — NOT `tab.id`.
+ * Callers that need "the terminal this tab is currently showing" (process
+ * lookup for Copy Tab Info / rename) must resolve through this rather than
+ * assuming `tab.id` is a live leaf. Returns `null` for a split tree (no single
+ * root pane) or a missing tree, in which case callers should keep their
+ * existing `tab.id` fallback — unchanged behavior for that case.
+ */
+export function soloRootLeafId(tree: PaneNode | null): string | null {
+  if (!tree) return null;
+  if (tree.type === 'terminal') return tree.terminalId ?? null;
+  return null;
+}
+
 /** Id of the first terminal leaf in the tree (depth-first), or null. */
 export function firstLeafId(tree: PaneNode | null): string | null {
   if (!tree) return null;

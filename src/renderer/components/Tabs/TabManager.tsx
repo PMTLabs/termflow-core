@@ -18,7 +18,7 @@ import {
   collectTabCloseTerminalIds,
 } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
-import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
+import { getAllTerminalIds, soloRootLeafId } from '../../store/slices/paneTreeOps';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
@@ -292,8 +292,12 @@ const TabItem: React.FC<TabItemProps> = ({
     onOpenContextMenu(e.clientX, e.clientY);
   };
 
-  // Get process ID from terminal service
-  const processId = terminalService.getProcessIdForTerminal(tab.id);
+  // Get process ID from terminal service. Review 109 H3: an API-created tab's
+  // process is registered under its real `tm-*` root leaf, not `tab.id` — so
+  // resolve the tab's own root leaf from its tree first (solo/root pane only;
+  // a split tree has no single "the" leaf and falls back to `tab.id` as before).
+  const tabTree = useSelector((state: RootState) => state.panes.treesByTabId[tab.id] ?? null);
+  const processId = terminalService.getProcessIdForTerminal(soloRootLeafId(tabTree) ?? tab.id);
 
   return (
     <>
@@ -638,8 +642,12 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     console.log(`TabManager: handleEditTitle - id: ${id}, new title: "${title}"`);
     dispatch(updateTabTitle({ id, title }));
 
-    // Also update the terminal name in the backend
-    const processId = terminalService.getProcessIdForTerminal(id);
+    // Also update the terminal name in the backend. Review 109 H3: resolve the
+    // tab's own root leaf first (an API-created tab's process lives under its
+    // `tm-*` leaf, not `id`), falling back to `id` for a split tree or a tab
+    // with no tree yet — unchanged behavior for those cases.
+    const tabTree = store.getState().panes.treesByTabId[id] ?? null;
+    const processId = terminalService.getProcessIdForTerminal(soloRootLeafId(tabTree) ?? id);
     console.log(`TabManager: Found processId: ${processId} for tab ${id}`);
     if (processId) {
       try {
