@@ -563,6 +563,16 @@ export class TerminalEngine {
   // that never call setActive (mirror/grid) keep today's behavior.
   private paneActive = true;
 
+  // Host-reported SURFACE visibility, orthogonal to paneActive above. True while
+  // this terminal's rendered surface is displayed somewhere other than its pane —
+  // a Canvas Mode node (design 012 D15). A background tab's terminal shown on
+  // canvas has paneActive === false but is GENUINELY VISIBLE, so every geometry
+  // path must run. Written ONLY by setSurfaceDisplayed, whose only caller in this
+  // design is relocateTo (R3, §5.4) — putting the transition inside the operation
+  // is what makes an aborted relocation incapable of leaving eligibility raised
+  // (reviews 093 B2 / 094 B4).
+  private surfaceDisplayed = false;
+
   // Debounce for backend PTY resizes (see BACKEND_RESIZE_DEBOUNCE_MS). xterm's
   // own resize is immediate; only the bridge.resize() call is coalesced. Cleared
   // on unmount so it can't fire against a torn-down mount.
@@ -852,7 +862,7 @@ export class TerminalEngine {
             // Hidden pane (background tab): don't follow layout changes — no
             // xterm resize, no backend SIGWINCH (codex ED3 wipe). The
             // setActive(true) fit flushes the final geometry on activation.
-            if (!this.paneActive) return;
+            if (!this.geometryEligible()) return;
             const el = this.container;
             if (el && el.offsetWidth > 50 && el.offsetHeight > 50) {
               try {
@@ -2431,31 +2441,86 @@ export class TerminalEngine {
     this.paneActive = active;
     // Deactivation: cancel any armed fit so it can't resize a now-hidden pane
     // (e.g. an activation fit scheduled 50ms before a quick tab switch away).
+    //
+    // THE ONE CANCEL the FT rule permits (design 012 §5.3 / D10), and only while
+    // the surface is NOT displayed elsewhere: hiding the TAB must never kill the
+    // settle fit a canvas display armed. A tab hide is not a move — nothing is
+    // racing to replace this timer — which is exactly why setSurfaceDisplayed
+    // (always part of a move) must NOT mirror it.
     if (!active) {
-      if (this.fitTimer) {
+      if (!this.surfaceDisplayed && this.fitTimer) {
         clearTimeout(this.fitTimer);
         this.fitTimer = null;
       }
       return;
     }
-    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Also the
-    // FLUSH point for geometry changes deferred while hidden (paneActive above):
-    // fit() re-measures the container, and an actual size change flows through
-    // xterm onResize -> scheduleBackendResize (deduped when nothing changed).
-    if (active && this.fitAddon) {
-      if (this.fitTimer) clearTimeout(this.fitTimer);
-      this.fitTimer = setTimeout(() => {
-        this.fitTimer = null;
-        try {
-          this.fitAddon?.fit();
-        } catch (error) {
-          console.warn('terminal-core/engine: Failed to fit terminal on activation:', error);
-        }
-        // Deliver geometry deferred while hidden (parked pending, or a stale
-        // backend size the no-op fit above didn't correct). MUST run after fit().
-        this.flushDeferredResizeOnActivation();
-      }, 50);
-    }
+    // Re-fit on activation with a 50ms settle (source 228-240 / R7). Unconditional
+    // even when surfaceDisplayed already made us eligible: that asymmetry with
+    // setSurfaceDisplayed(true) is DELIBERATE (design 012 §7.2). This is shipped
+    // tab-switch behaviour exercised on every activation; narrowing it to save one
+    // no-op FitAddon.fit() would change a hot, well-tested path for no benefit.
+    // Do not "fix" it.
+    this.armActivationFit();
+  }
+
+  /**
+   * Arm the 50ms settle fit and the deferred-resize flush that follows it —
+   * the body of the old setActive(true) branch, MINUS its `active` test, so it
+   * can also be driven by setSurfaceDisplayed (design 012 §7.2).
+   */
+  private armActivationFit(): void {
+    if (!this.fitAddon) return;
+    if (this.fitTimer) clearTimeout(this.fitTimer);
+    this.fitTimer = setTimeout(() => {
+      this.fitTimer = null;
+      try {
+        this.fitAddon?.fit();
+      } catch (error) {
+        console.warn('terminal-core/engine: Failed to fit terminal on activation:', error);
+      }
+      // Deliver geometry deferred while hidden (parked pending, or a stale
+      // backend size the no-op fit above didn't correct). MUST run after fit().
+      this.flushDeferredResizeOnActivation();
+    }, 50);
+  }
+
+  /**
+   * Host tells the engine its surface is (or is no longer) displayed somewhere
+   * other than its pane — a Canvas Mode node (design 012 D15).
+   *
+   * Public because design/010 and design/013 need the concept, but in THIS design
+   * `relocateTo` is its only caller: the transition lives inside the operation so
+   * that every abort path can restore it from the R0 snapshot (§5.4).
+   *
+   * It NEVER touches focus, and it NEVER cancels fitTimer — in either direction
+   * (the FT rule, design 012 §5.3 / D10 / §7.2 row 4). On the return trip R3
+   * lowers eligibility BEFORE R6 moves the element and BEFORE R7 re-arms the
+   * observer, whose initial callback is gated on geometryEligible() — so on a
+   * background pane the timer this method would have cancelled is the ONLY fit
+   * that will measure the pane after the return.
+   */
+  setSurfaceDisplayed(displayed: boolean): void {
+    const wasEligible = this.geometryEligible();
+    this.surfaceDisplayed = displayed;
+    // A false->true ELIGIBILITY transition arms the settle fit — identical
+    // semantics to setActive(true), minus focus. Already eligible => record and
+    // return; a second settle fit is churn.
+    if (displayed && !wasEligible) this.armActivationFit();
+  }
+
+  /**
+   * "Is this terminal's geometry live?" — the single predicate the six sites in
+   * design 012 §7.1 gate on, replacing a bare `this.paneActive` read at each:
+   * the ResizeObserver rAF callback, flushDeferredResizeOnActivation, setFontSize,
+   * flushBackendResize's park, and healOnce (entry + post-await recheck).
+   *
+   * Leaving any of them on the old flag alone silently breaks a canvas-displayed
+   * background tab: the observer ignores its resize, the parked flush never fires,
+   * a font change never refits, the PTY never learns its size, and the dimension
+   * heal aborts AFTER paying for getSize().
+   */
+  private geometryEligible(): boolean {
+    return this.paneActive || this.surfaceDisplayed;
   }
 
   // Called by the setActive(true) settle fit. The fit() above re-measures the
@@ -2464,7 +2529,7 @@ export class TerminalEngine {
   // resize was PARKED by flushBackendResize while hidden, or a hidden hydration
   // deferred its size — so reconcile the PTY to xterm's real size exactly once.
   private flushDeferredResizeOnActivation(): void {
-    if (this.opts.mirror || !this.paneActive) return;
+    if (this.opts.mirror || !this.geometryEligible()) return;
     const term = this.term;
     if (!term || term.cols <= 0 || term.rows <= 0 || this.resizeInFlight) return;
     // ED3 resize-wipe repair: this function only ever runs as part of the
@@ -2595,7 +2660,7 @@ export class TerminalEngine {
     this.term.options.fontSize = px;
     // Hidden pane: apply the render option but defer the geometry refit to the
     // setActive(true) fit — a refit here would SIGWINCH a background PTY.
-    if (!this.paneActive) return;
+    if (!this.geometryEligible()) return;
     // Re-fit after font size change with a 50ms settle (source 217-225 / R7).
     if (this.fitAddon) {
       if (this.fitTimer) clearTimeout(this.fitTimer);
@@ -2675,7 +2740,7 @@ export class TerminalEngine {
       this.resizeTimer = null;
     }
     // Park: keep pendingResize (do NOT null it) so activation can deliver it.
-    if (!this.paneActive && !force) return;
+    if (!this.geometryEligible() && !force) return;
     const pending = this.pendingResize;
     this.pendingResize = null;
     if (!pending || !this.attachedProcessId) return;
@@ -2720,7 +2785,7 @@ export class TerminalEngine {
     // via `visibility:hidden` (offsetParent stays non-null), so the offsetParent
     // check below never catches them — the host's setActive signal does. A heal
     // resize against a hidden codex pane wipes its scrollback (ED3 re-emit).
-    if (!this.paneActive) return;
+    if (!this.geometryEligible()) return;
     const c = this.container;
     if (!c || c.offsetParent === null || c.offsetWidth <= 50) return; // pane visible
     if (Date.now() < TerminalEngine.suppressHealUntil) return;        // post-jiggle
@@ -2733,7 +2798,7 @@ export class TerminalEngine {
       const size = await this.getBackendSize(pid);
       if (!size || size.cols <= 0 || size.rows <= 0) return;
       // Re-validate after the await.
-      if (!this.paneActive) return; // pane hidden while getSize was in flight
+      if (!this.geometryEligible()) return; // pane hidden while getSize was in flight
       if (this.attachedProcessId !== pid) return;
       const e2 = terminalCache.get(this.cacheKey);
       if (!e2 || e2.terminal !== term || e2.hydrating) return;
