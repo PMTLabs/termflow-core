@@ -239,6 +239,42 @@ it('never evicts an entry whose element is still in the DOM', () => {
   expect(terminalCache.size).toBeLessThanOrEqual(MAX_TERMINAL_CACHE_ENTRIES);
 });
 
+// --- mount()-end cache rebuild must not drop fields it doesn't explicitly list -----
+//
+// TerminalEngine's mount()-end rebuild (the delete-then-set that reorders the Map key
+// for LRU) used to copy the cache entry field-by-field into a fresh object literal.
+// Any TerminalCacheEntry field NOT named in that literal was silently dropped on every
+// remount. agentColorLocked/lastSnapshot/lastDataAt/lastInputAt were the four fields
+// missing from the literal (see terminal-cache-drops-fields-on-mount memory note).
+
+it('a remount preserves agentColorLocked, lastSnapshot, lastDataAt and lastInputAt', () => {
+  const cacheKey = 'field-preserve';
+
+  const engine1 = new TerminalEngine(makeFakeBridge(), { cacheKey });
+  engine1.mount(makeContainer());
+
+  const beforeRemount = terminalCache.get(cacheKey)!;
+  beforeRemount.agentColorLocked = true;
+  beforeRemount.lastSnapshot = 'snapshot-marker';
+  beforeRemount.lastDataAt = 111;
+  beforeRemount.lastInputAt = 222;
+
+  engine1.unmount();
+
+  // A fresh engine on the SAME cacheKey (e.g. a tab switch) takes the reattach
+  // path, which ends in the delete-then-set rebuild under test.
+  const engine2 = new TerminalEngine(makeFakeBridge(), { cacheKey });
+  engine2.mount(makeContainer());
+
+  const afterRemount = terminalCache.get(cacheKey)!;
+  expect(afterRemount.agentColorLocked).toBe(true);
+  expect(afterRemount.lastSnapshot).toBe('snapshot-marker');
+  expect(afterRemount.lastDataAt).toBe(111);
+  expect(afterRemount.lastInputAt).toBe(222);
+
+  engine2.unmount();
+});
+
 // --- refreshGlyphAtlases (standby/resume blank-text repair) ---------------------
 
 function webglEntry(onClear: () => void) {
