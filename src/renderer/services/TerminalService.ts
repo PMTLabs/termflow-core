@@ -20,6 +20,13 @@ class TerminalServiceClass {
   // webview reload). Consumed once by TerminalDisplay as `initialWin32InputMode`;
   // see markReattachedSession.
   private win32InputModeHandoff: Set<string> = new Set();
+  // Single-flight guard keyed by leaf (terminalId): a re-entrant restart/create
+  // for the same leaf (e.g. a double Restart click or Ctrl+R key-repeat while
+  // `closedInfo` is still set — review 109 H1) must not reach the backend twice,
+  // since two spawns for one leaf register two `Terminal` rows under the same
+  // `renderer_terminal_id`, breaking the PRIMARY KEY invariant. Cleared in a
+  // `finally` so a failed create does not permanently poison the leaf.
+  private inFlightCreates: Map<string, Promise<string>> = new Map();
 
   constructor() {
     // Initialize listeners immediately and synchronously
@@ -96,6 +103,36 @@ class TerminalServiceClass {
     /** The tab that owns this pane. Equal to `terminalId` for a tab root; the
      *  owning `tb-` id for a split (`tm-`) pane. Design 011 §6: the backend
      *  cannot derive it — ownership lives only in `panes.treesByTabId`. */
+    owningTabId?: string,
+  ): Promise<string> {
+    // Re-entrant call for the same leaf while a create is already pending:
+    // return the SAME in-flight promise instead of starting a second spawn.
+    const pending = this.inFlightCreates.get(terminalId);
+    if (pending) {
+      console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
+      return pending;
+    }
+    const createPromise = this.createTerminalInner(terminalId, shellType, name, cwd, cols, rows, owningTabId);
+    this.inFlightCreates.set(terminalId, createPromise);
+    try {
+      return await createPromise;
+    } finally {
+      // Only clear if we're still the current entry (guards against a later
+      // caller having already replaced it, though callers always await before
+      // starting a new one so this is effectively always true).
+      if (this.inFlightCreates.get(terminalId) === createPromise) {
+        this.inFlightCreates.delete(terminalId);
+      }
+    }
+  }
+
+  private async createTerminalInner(
+    terminalId: string,
+    shellType: string = 'default',
+    name?: string,
+    cwd?: string,
+    cols?: number,
+    rows?: number,
     owningTabId?: string,
   ): Promise<string> {
     try {

@@ -84,6 +84,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // Set when THIS pane's process exits but the pane is kept open (tab terminals
   // with closeTabOnProcessExit off, and all split panes). Drives the bottom banner.
   const [closedInfo, setClosedInfo] = useState<{ exitCode: number | null } | null>(null);
+  // UI-level guard so the Restart button/Ctrl+R don't re-enter handleRestart
+  // while a restart is already in flight. Belt-and-suspenders on top of
+  // TerminalService's leaf-keyed single-flight (review 109 H1) — that is the
+  // actual fix; this just keeps the visible affordance from looking broken.
+  const isRestartingRef = useRef(false);
 
   // Sync editName when name prop changes (e.g., after successful rename)
   useEffect(() => {
@@ -463,6 +468,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // process with an empty snapshot (see TerminalEngine.hydrate).
   const handleRestart = useCallback(async () => {
     if (!terminalId) return;
+    if (isRestartingRef.current) return;
+    isRestartingRef.current = true;
     const isSplitPane =
       terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
     const finalShellType =
@@ -507,6 +514,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       dispatch(clearTabExited(ownerTabId));
     } catch (error) {
       console.error('TerminalPane: Failed to restart session:', error);
+    } finally {
+      isRestartingRef.current = false;
     }
   }, [terminalId, shellType, defaultProfile, tab?.shellType, tab?.title, shellProfiles, name, dispatch]);
 

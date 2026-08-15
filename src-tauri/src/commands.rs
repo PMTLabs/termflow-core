@@ -95,7 +95,10 @@ pub async fn create_terminal(
     cwd: Option<String>,
     tab_id: Option<String>,
     // The tab that owns the pane `tab_id` names. Equal to `tab_id` for a
-    // root/solo pane. Optional so a renderer that predates P0-A still works.
+    // RENDERER-created root/solo pane (this command's own caller). NOT equal
+    // for an API-created tab's root — its pane leaf is a `tm-*` minted by
+    // `resolve_api_spawn_identity`, distinct from `owning_tab_id` (option A).
+    // Optional so a renderer that predates P0-A still works.
     owning_tab_id: Option<String>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
@@ -145,10 +148,17 @@ pub async fn create_terminal(
     // construction (design 011, option A): `resolve_api_spawn_identity` never takes
     // a caller-supplied tab's root leaf at all, it always mints a `tm-`. So this is
     // the only path that can ever claim a `tb-` root leaf, and there is nobody left
-    // to contend with. The claim is kept anyway — it costs one DashMap insert, it
-    // still serialises this path against itself, and the warning below turns any
-    // future re-opening of that window into a log line rather than a silent
-    // duplicate-leaf registration.
+    // to contend with.
+    //
+    // The claim is NOT a lock: `try_claim` returning `None` on contention only
+    // logs the warning below and this call still proceeds to spawn. It does not
+    // serialise this path against itself, and a re-entrant renderer call (e.g. a
+    // double Restart click) still reaches `spawn_terminal` twice. Review 109 H1:
+    // the real fix for that is a single-flight guard on the RENDERER side, keyed
+    // by leaf id (see `TerminalService.createTerminal`), which this call trusts
+    // to have already prevented a second in-flight create for the same leaf from
+    // reaching here. This claim remains a tripwire that turns a contested
+    // ordering into an observable log line, not an enforcement mechanism.
     let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
     // Held to the end of this command (and dropped on the sidecar path's early
     // return) — releasing it before `spawn_terminal` has registered would reopen
@@ -2454,17 +2464,22 @@ mod root_leaf_reservation_tests {
     }
 
     #[test]
-    fn the_renderer_and_the_rest_path_cannot_both_hold_one_owner() {
-        // The whole point of F1's fix: these two paths now contend for the SAME
-        // map, so whichever gets there first excludes the other. Before the fix
-        // the renderer path never touched this map at all, so both could commit
-        // to the same live leaf.
+    fn a_second_claim_on_the_same_owner_is_refused_until_the_first_is_released() {
+        // Review 109 LOW: this proves only what `RootLeafClaims` itself does —
+        // the SECOND `try_claim` for a live owner returns `None` until the first
+        // is dropped. It is NOT a proof that `commands::create_terminal` refuses
+        // or coalesces a second spawn on `None` — it does not; see the comment
+        // there. And since option A, the REST/API path never calls `try_claim`
+        // at all (`resolve_api_spawn_identity` mints a fresh `tm-` unconditionally),
+        // so this is exclusively a renderer-vs-renderer scenario now (e.g. two
+        // re-entrant restarts of the same tab root — review 109 H1), not a
+        // renderer-vs-REST one.
         let claims: Arc<RootLeafClaims> = Arc::new(RootLeafClaims::default());
         let renderer = claims.try_claim("tb-a1b2c3");
         assert!(renderer.is_some(), "the first creator reserves the owner");
         assert!(
             claims.try_claim("tb-a1b2c3").is_none(),
-            "a concurrent REST create must be refused and mint a tm- split leaf",
+            "a concurrent claim on the same owner is refused",
         );
         drop(renderer);
         assert!(
