@@ -311,10 +311,25 @@ describe('design/012 §5.3 — the FT rule and the PARK invariant under relocati
       engine.unmount();
       await jest.runAllTimersAsync();
 
-      // THE ASSERTION: nothing reached the PTY. The geometry is not lost — the next
-      // mount's reattach fit re-measures the same pane and sends it with the ED3
-      // detector armed.
+      // THE ASSERTION: nothing reached the PTY.
       expect(resizeCalls).toEqual([]);
+
+      // …and the geometry is DROPPED, not LOST. That distinction is the whole
+      // justification for suppressing the force flush, so assert it rather than
+      // asserting the drop alone: a new mount on the same cache key reattaches,
+      // re-measures the same pane, and delivers the size — this time with the
+      // per-mount ED3 detector armed to repair a ratatui/codex wipe.
+      const engine2 = new TerminalEngine(
+        makeFakeBridge({ resize: (_pid, c, r) => { resizeCalls.push([c, r]); } }),
+        { cacheKey: 'rel-ft-t10f', isMac: false },
+      );
+      fit.setNextFit(80, 24);
+      engine2.mount(pane);
+      engine2.attach('pid-1');
+      engine2.setActive(true);
+      await jest.runAllTimersAsync();
+
+      expect(resizeCalls).toEqual([[80, 24]]);
     });
 
   // The other half of that rule, so the fix cannot be "solved" by disabling the force
