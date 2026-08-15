@@ -245,10 +245,20 @@ describe('design/012 §13 T11 — the paneActive tripwire', () => {
     const eligibleReads = (src.match(/this\.geometryEligible\(\)/g) ?? []).length;
     expect(eligibleReads).toBeGreaterThanOrEqual(6);
 
-    // `paneActive` survives ONLY as: its declaration, the constructor seed
-    // (:684), its write in setActive (:2342), and the predicate's own read.
-    const paneActiveOccurrences = (src.match(/paneActive/g) ?? []).length;
-    expect(paneActiveOccurrences).toBeLessThanOrEqual(8);
+    // Count gate reads in CODE only. §13 T11 is explicit — "count gate READS, or
+    // drop the count" — because a raw substring count over the whole file also
+    // counts prose. That version of this test made a doc comment able to fail the
+    // suite, and the first thing it did was make someone reword a comment to
+    // satisfy a test, which is the tail wagging the dog. Comments are stripped
+    // first so the assertion tracks the thing it is actually guarding.
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')  // block comments, including JSDoc
+      .replace(/(^|[^:])\/\/.*$/gm, '$1'); // line comments, but not the // in a URL
+    // `this.paneActive` survives in code ONLY as: the constructor seed, its write
+    // in `setActive`, and `geometryEligible()`'s own read. Everything else must
+    // have moved to the predicate.
+    const paneActiveReads = (code.match(/this\.paneActive/g) ?? []).length;
+    expect(paneActiveReads).toBeLessThanOrEqual(4);
 
     // And specifically: no `!this.paneActive` early-return survives anywhere.
     expect(src).not.toContain('if (!this.paneActive) return');
