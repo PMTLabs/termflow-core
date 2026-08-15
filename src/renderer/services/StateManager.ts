@@ -1,7 +1,7 @@
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs } from '../store/slices/tabsSlice';
-import { setPaneTree, addTabTree, focusPane } from '../store/slices/panesSlice';
+import { setPaneTree, addTabTree, focusPane, setActiveTabId } from '../store/slices/panesSlice';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
@@ -390,6 +390,14 @@ class StateManagerClass {
         activeTabId: state.tabs.activeTabId,
         paneTree: state.panes.paneTree,
         activePaneId: state.panes.activePaneId,
+        // Must mirror saveLayout: a layout updated in place has to carry the
+        // per-tab trees too. Without this the spread above preserves the OLD
+        // treesByTabId (or `undefined`, for a layout saved before the field
+        // existed), so a tab added since the last save has no entry. loadLayout
+        // then skips its addTabTree, TerminalContainer's default seed effect
+        // fires, and an API tab's `tm-*` root leaf is replaced by `tb-*` —
+        // orphaning its PTY. Same bug H2 fixed on the save path.
+        treesByTabId: { ...state.panes.treesByTabId },
         updatedAt: Date.now(),
       };
       
@@ -469,10 +477,15 @@ class StateManagerClass {
       // a `terminalId: tab.id` root and can spawn a PTY the real tree later
       // orphans. So each tab's tree — when the layout carries one — is
       // dispatched in the SAME synchronous block as its `addTab`, with no
-      // `await`/timeout between them. An OLD-format layout (saved before
-      // `treesByTabId` existed) has no per-tab tree; those tabs fall back to
-      // today's behavior (seeded by TerminalContainer, corrected by the
-      // deferred setPaneTree/setActiveTab below for the active tab only).
+      // `await`/timeout between them.
+      //
+      // Re-review 111 finding 2: a tree is NEVER restored through the
+      // active-tab mirror (`setPaneTree`). That reducer runs `syncActive`,
+      // which writes its payload into `treesByTabId[activeTabId]` as of
+      // DISPATCH time — so a deferred `setPaneTree` could land after the user
+      // (or a second, overlapping layout load) had switched tabs, writing tab
+      // A's tree into tab B and orphaning B's PTYs. Every write here is keyed
+      // by its real owner via `addTabTree`, and the activation is synchronous.
       if (sanitizedLayout.tabs?.length > 0) {
         console.log(`Loading ${sanitizedLayout.tabs.length} tabs`);
         for (const tab of sanitizedLayout.tabs) {
@@ -486,29 +499,31 @@ class StateManagerClass {
           }
         }
 
-        // Set active tab after all tabs are added
+        // OLD-format layout (saved before `treesByTabId` existed): its single
+        // `paneTree` belongs to the SAVED active tab. Install it explicitly
+        // under that owner. Other tabs of such a layout keep today's behavior
+        // (seeded by TerminalContainer).
+        if (
+          sanitizedLayout.paneTree &&
+          sanitizedLayout.activeTabId &&
+          !sanitizedLayout.treesByTabId?.[sanitizedLayout.activeTabId]
+        ) {
+          dispatch(addTabTree({
+            tabId: sanitizedLayout.activeTabId,
+            tree: sanitizedLayout.paneTree,
+          }));
+        }
+
+        // Activate synchronously, in the same pass as the keyed tree writes.
         if (sanitizedLayout.activeTabId) {
           console.log(`Setting active tab: ${sanitizedLayout.activeTabId}`);
-          setTimeout(() => {
-            dispatch(setActiveTab(sanitizedLayout.activeTabId!));
-          }, 100);
-        }
-      }
-
-      // Load the active tab's pane tree after tabs. When treesByTabId already
-      // carried the active tab's tree above, this re-dispatches the identical
-      // tree (harmless) — it exists mainly for OLD-format layouts, whose only
-      // tree lives in `paneTree` and needs this deferred path to land after
-      // `setActiveTab` mirrors it correctly.
-      if (sanitizedLayout.paneTree) {
-        console.log(`Loading pane tree`);
-        setTimeout(() => {
-          dispatch(setPaneTree(sanitizedLayout.paneTree));
+          dispatch(setActiveTab(sanitizedLayout.activeTabId));
+          dispatch(setActiveTabId(sanitizedLayout.activeTabId));
 
           if (sanitizedLayout.activePaneId) {
             dispatch(focusPane(sanitizedLayout.activePaneId));
           }
-        }, 200);
+        }
       }
 
       // Update the layout's last used timestamp

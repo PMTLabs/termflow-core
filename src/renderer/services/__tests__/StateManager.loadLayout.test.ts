@@ -96,3 +96,138 @@ describe('StateManager.loadLayout (review 109 H2)', () => {
     expect(state.tabs.tabs.map((t: any) => t.id).sort()).toEqual(['tb-old1', 'tb-old2']);
   });
 });
+
+/**
+ * Re-review of the H2 fix (report 111, agy). The H2 fix taught `saveLayout` to
+ * persist `treesByTabId`, but `updateLayout` — the OTHER writer, used by the
+ * Layout Manager's "Update" button — kept spreading the stored layout and so
+ * carried the STALE trees forward (or `undefined`, for a layout first saved
+ * before the field existed). A tab created since the last save then has no
+ * entry, `loadLayout` skips its `addTabTree`, and the seed effect replaces an
+ * API tab's `tm-*` root leaf exactly as in H2.
+ *
+ * The invariant under test is about the WRITERS, not one call site: every path
+ * that persists a layout must persist the per-tab trees with it.
+ */
+describe('StateManager.updateLayout (re-review 111 finding 1)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('persists treesByTabId, so a tab added since the last save survives a later load', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    // A layout saved BEFORE tab C existed — and before treesByTabId existed at
+    // all, which is the worst case: the spread would carry `undefined`.
+    const staleLayout = {
+      id: 'layout-2',
+      name: 'stale',
+      tabs: [{ id: 'tb-a', title: 'A' }],
+      activeTabId: 'tb-a',
+      paneTree: { id: 'pn-a', type: 'terminal' as const, terminalId: 'tb-a' },
+      activePaneId: 'pn-a',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([staleLayout]));
+
+    // Current live state has since gained an API-created tab whose root leaf is
+    // `tm-*` — the identity that must not be lost.
+    const apiTree = { id: 'pn-c', type: 'terminal' as const, terminalId: 'tm-api-leaf-2' };
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-a', title: 'A' } });
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-c', title: 'C' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-a', tree: staleLayout.paneTree },
+    });
+    store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-c', tree: apiTree } });
+
+    const ok = await StateManager.updateLayout('layout-2');
+    expect(ok).toBe(true);
+
+    const stored = JSON.parse(localStorage.getItem('auto-terminal-layouts') || '[]');
+    const updated = stored.find((l: any) => l.id === 'layout-2');
+
+    // The whole point: the updated layout carries tab C's tree, with its real
+    // tm- leaf. Before the fix this was `undefined`.
+    expect(updated.treesByTabId).toBeTruthy();
+    expect(updated.treesByTabId['tb-c']).toBeTruthy();
+    expect(updated.treesByTabId['tb-c'].terminalId).toBe('tm-api-leaf-2');
+  });
+});
+
+/**
+ * Re-review 111 finding 2. `loadLayout` used to schedule `setActiveTab(A)` at
+ * 100ms and an UNTARGETED `setPaneTree(A-tree)` at 200ms. `setPaneTree` runs
+ * `syncActive`, which writes its payload into `treesByTabId[activeTabId]` as of
+ * CALLBACK time — so selecting tab B in between wrote A's tree into B,
+ * replacing B's panes and orphaning its PTYs (two overlapping loads corrupt each
+ * other the same way). The fix: no timers, and every tree write keyed by its
+ * real owner via `addTabTree`.
+ */
+describe('StateManager.loadLayout deferred-write safety (re-review 111 finding 2)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    jest.useRealTimers();
+  });
+
+  it("never writes the loaded active tab's tree into a tab the user switched to", async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    const treeA = { id: 'pn-a', type: 'terminal' as const, terminalId: 'tb-a' };
+    const treeB = { id: 'pn-b', type: 'terminal' as const, terminalId: 'tm-b-leaf' };
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-x',
+      name: 'x',
+      tabs: [{ id: 'tb-a', title: 'A' }, { id: 'tb-b', title: 'B' }],
+      activeTabId: 'tb-a',
+      paneTree: treeA,
+      activePaneId: 'pn-a',
+      treesByTabId: { 'tb-a': treeA, 'tb-b': treeB },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]));
+
+    await StateManager.loadLayout('layout-x', store.dispatch);
+
+    // The user switches to B immediately after the load resolves — under the old
+    // code the 200ms setPaneTree callback had not fired yet.
+    store.dispatch({ type: 'panes/setActiveTabId', payload: 'tb-b' });
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    const state = store.getState() as any;
+    expect(state.panes.treesByTabId['tb-b'].terminalId).toBe('tm-b-leaf');
+    expect(state.panes.treesByTabId['tb-a'].terminalId).toBe('tb-a');
+  });
+
+  it('installs an OLD-format layout tree under the saved active tab id, not through the mirror', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-old2',
+      name: 'old2',
+      tabs: [{ id: 'tb-old-a', title: 'A' }, { id: 'tb-old-b', title: 'B' }],
+      activeTabId: 'tb-old-a',
+      paneTree: { id: 'pn-old-a', type: 'terminal' as const, terminalId: 'tb-old-a' },
+      activePaneId: 'pn-old-a',
+      // No treesByTabId — pre-review-109 format.
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]));
+
+    await StateManager.loadLayout('layout-old2', store.dispatch);
+    store.dispatch({ type: 'panes/setActiveTabId', payload: 'tb-old-b' });
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    const state = store.getState() as any;
+    expect(state.panes.treesByTabId['tb-old-a']).toBeTruthy();
+    expect(state.panes.treesByTabId['tb-old-a'].terminalId).toBe('tb-old-a');
+    // And it was never leaked into the tab the user switched to.
+    expect(state.panes.treesByTabId['tb-old-b']).toBeUndefined();
+  });
+});
+
