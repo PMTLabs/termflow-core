@@ -5,6 +5,8 @@ import type { WebglAddon } from '@xterm/addon-webgl';
 import type { Disposable, PromptGate } from './types';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { setWebGLGloballyDisabled } from './webgl';
+// same rule: renderPolicy.ts imports this module back, but only for call-time use
+import { fitIfLaidOut } from './renderPolicy';
 
 // Cap on bytes buffered in pendingOutput while a hydration is in flight. The
 // snapshot that ends hydration supersedes older output, so beyond the cap we
@@ -255,13 +257,17 @@ export const resetTerminalRendering = (terminalId: string): boolean => {
     cached.useWebGL = false;
   }
 
-  // Force a refresh by clearing and re-fitting
+  // Force a refresh, then re-fit. The FIT is conditional (design/013 §5.3,
+  // invariant LB): under a display:none ancestor proposeDimensions() returns a
+  // bogus grid rather than an error, so fitting blind here would resize the PTY
+  // to garbage. The refresh itself is always safe and is what makes the renderer
+  // swap visible.
   try {
     cached.terminal.refresh(0, cached.terminal.rows - 1);
-    cached.fitAddon.fit();
   } catch (e) {
     console.warn(`terminal-core/cache: Error during rendering reset:`, e);
   }
+  fitIfLaidOut(cached);
 
   return true;
 };

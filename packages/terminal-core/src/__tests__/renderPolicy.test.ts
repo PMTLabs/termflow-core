@@ -19,7 +19,7 @@ import {
   countActiveWebGLAddons,
   setTerminalRenderPolicy,
 } from '../renderPolicy';
-import { terminalCache } from '../cache';
+import { terminalCache, resetTerminalRendering } from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -193,5 +193,22 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     const { fitAddon } = makeEntry('nobox-policy', { box: false });
     setTerminalRenderPolicy('nobox-policy', 'webgl');
     expect(fitAddon.fitCount).toBe(0);
+  });
+});
+
+describe('design/013 §5.3 LB — resetTerminalRendering must not fit blind', () => {
+  it('refreshes but does NOT fit when the host has no layout box', () => {
+    const { fitAddon, entry } = makeEntry('reset-nobox', { box: false });
+    entry.webglAddon = { dispose() {} } as never;
+    entry.useWebGL = true;
+    expect(resetTerminalRendering('reset-nobox')).toBe(true);
+    expect(entry.webglAddon).toBeNull();   // still demotes
+    expect(fitAddon.fitCount).toBe(0);     // but does not resize to a bogus grid
+  });
+
+  it('still fits when the host has a box', () => {
+    const { fitAddon } = makeEntry('reset-box');
+    resetTerminalRendering('reset-box');
+    expect(fitAddon.fitCount).toBe(1);
   });
 });
