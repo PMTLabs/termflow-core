@@ -586,21 +586,32 @@ async fn create_terminal(
     let rows = payload.rows.unwrap_or(24);
     log::info!("Creating terminal with size {}x{}, profile: {}", cols, rows, shell_name);
 
-    // Resolve or generate a proper tb- prefixed tab ID. Computed BEFORE the spawn
-    // so the Terminal registers with it up front (review 062 F-01: patching
-    // tab_id in after spawn races a fast-exiting shell's exit-path persist).
-    let tab_id = match payload.tab_id.as_ref() {
-        Some(tid) if !tid.is_empty() => {
-            if tid.starts_with("tb-") {
-                tid.clone()
-            } else {
-                let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-                format!("tb-{}", &raw_uuid[..9])
-            }
-        }
-        _ => {
-            let raw_uuid = uuid::Uuid::new_v4().to_string().replace("-", "");
-            format!("tb-{}", &raw_uuid[..9])
+    // Resolve BOTH renderer identities BEFORE the spawn, so the Terminal
+    // registers with them up front (review 062 F-01: patching an id in after
+    // spawn returns races a fast-exiting shell's exit-path persist, which then
+    // files the final scrollback under the ephemeral pc- id).
+    let identity = match resolve_api_spawn_identity(
+        payload.tab_id.as_deref(),
+        payload.owning_tab_id.as_deref(),
+        payload.pane_id.as_deref(),
+        // D7 / review 095 B1: a create that lands in an already-occupied tab is a
+        // SPLIT even with no `paneId` (App.tsx Mode 2), so the leaf must be fresh.
+        // A terminal claims a tab either as its owner or — for a tab root, and for
+        // anything registered before P0-A — as its own renderer leaf.
+        // Read-only iteration that completes before the spawn: no shard guard is
+        // held across `spawn_terminal`, and nothing inside takes another lock.
+        |owner: &str| {
+            state.terminals.iter().any(|e| {
+                let t = e.value();
+                t.owning_tab_id.as_deref() == Some(owner)
+                    || t.renderer_terminal_id.as_deref() == Some(owner)
+            })
+        },
+        mint_renderer_id,
+    ) {
+        Ok(i) => i,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response()
         }
     };
 
@@ -613,7 +624,8 @@ async fn create_terminal(
         shell_cwd,
         shell_name.clone(),
         terminal_name.clone(),
-        Some(tab_id.clone()),
+        Some(identity.renderer_terminal_id.clone()),
+        Some(identity.owning_tab_id.clone()),
         None, // API-created terminal: fresh session, no restored scrollback
     ) {
         Ok(id) => {
@@ -626,8 +638,15 @@ async fn create_terminal(
             if let Err(e) = state.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": terminal_name,
                 "profile": shell_name,
-                "terminalId": id, // Pass the actual backend ID
-                "tabId": Some(tab_id.clone()),
+                // UNCHANGED: this key has always carried the backend PROCESS id
+                // here (unlike a REST response, where `terminalId` is the leaf).
+                // Mode 0 in App.tsx reads it as the process id.
+                "terminalId": id,
+                "tabId": Some(identity.owning_tab_id.clone()),
+                // NEW, unambiguous names — see App.tsx Modes 0/1.
+                "processId": id,
+                "rendererTerminalId": identity.renderer_terminal_id.clone(),
+                "owningTabId": identity.owning_tab_id.clone(),
                 "paneId": payload.pane_id,
                 "direction": payload.direction,
                 "targetWindow": target_window
@@ -3480,6 +3499,59 @@ mod tests {
         .expect("explicit owner");
         assert_eq!(r.owning_tab_id, "tb-explicit");
         assert!(r.renderer_terminal_id.starts_with("tm-"));
+    }
+
+    fn identity_temp_db() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "termflow_identity_{}_{}.db",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// Design 011 §7 test 2 — history isolation, end to end at the storage
+    /// layer. Two API splits in one tab must occupy two rows, and closing one
+    /// (`commands.rs:1028-1030` deletes by the renderer id) must leave the
+    /// other's scrollback intact. Before P0-A both ids were `tb-shared01`, so
+    /// the second upsert clobbered the first and the delete wiped both.
+    #[test]
+    fn two_api_splits_no_longer_share_one_history_row() {
+        let mut mint = counting_mint();
+        // `no_live_terminals` (Task 4's helper): with a `pane_id` present the
+        // occupancy probe is not even needed to force distinct leaves.
+        let a = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-a"), no_live_terminals, &mut mint,
+        )
+        .expect("split a");
+        let b = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-b"), no_live_terminals, &mut mint,
+        )
+        .expect("split b");
+
+        let store = crate::history_store::HistoryStore::new();
+        store.init(&identity_temp_db());
+        store.upsert(&a.renderer_terminal_id, &["pane A scrollback".to_string()], 1);
+        store.upsert(&b.renderer_terminal_id, &["pane B scrollback".to_string()], 2);
+
+        assert_eq!(
+            store.get(&a.renderer_terminal_id),
+            Some(vec!["pane A scrollback".to_string()]),
+            "pane A's history must not be overwritten by pane B's flush"
+        );
+
+        // Closing pane A.
+        store.delete(&a.renderer_terminal_id);
+        assert_eq!(store.get(&a.renderer_terminal_id), None);
+        assert_eq!(
+            store.get(&b.renderer_terminal_id),
+            Some(vec!["pane B scrollback".to_string()]),
+            "closing one split must not delete the other's scrollback"
+        );
     }
 
     #[test]
