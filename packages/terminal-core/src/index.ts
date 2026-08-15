@@ -40,3 +40,24 @@ export {
   registerEndedRegionTracker,
   unregisterEndedRegionTracker,
 } from './endedRegions';
+
+// design/013 (P0-C) — the render-policy surface Canvas Mode consumes.
+export {
+  setTerminalRenderPolicy,
+  getTerminalRenderPolicy,
+  countActiveWebGLAddons,
+  setCanvasWebGLBudget,
+  releaseCanvasWebGLBudget,
+  getCanvasWebGLBudget,
+  webglAllowedAtCreation,
+  disposeOrphanedWebGLAddon,
+  hasLayoutBox,
+  fitIfLaidOut,
+} from './renderPolicy';
+export type { RenderPolicy } from './renderPolicy';
+export {
+  reconcileRenderPolicies,
+  snapshotRenderPolicies,
+  restoreRenderPolicies,
+} from './renderPolicyReconciler';
+export type { RenderPolicySnapshot, ReconcileInput } from './renderPolicyReconciler';
