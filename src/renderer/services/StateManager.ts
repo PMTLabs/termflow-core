@@ -1,7 +1,7 @@
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs } from '../store/slices/tabsSlice';
-import { setPaneTree, addTabTree, focusPane, setActiveTabId } from '../store/slices/panesSlice';
+import { addTabTree, focusPane, setActiveTabId, resetPanes } from '../store/slices/panesSlice';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
@@ -627,8 +627,11 @@ class StateManagerClass {
     clearTabPanes();
     // Clear all tabs first
     dispatch(clearAllTabs());
-    // Clear pane tree
-    dispatch(setPaneTree(null));
+    // Clear EVERY tab's tree, not just the active one's. `setPaneTree(null)`
+    // only deleted `treesByTabId[activeTabId]` (via syncActive) and left every
+    // background tab's tree live in Redux with no tab able to render or close
+    // it — re-review 111 finding 4.
+    dispatch(resetPanes());
   }
 
   /**

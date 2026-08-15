@@ -440,6 +440,28 @@ const panesSlice = createSlice({
           : firstLeafId(state.paneTree);
     },
 
+    /**
+     * Full teardown of the panes slice (re-review 111 finding 4).
+     *
+     * Layout load / reset-to-default used to tear down by dispatching
+     * `setPaneTree(null)`, which reaches `syncActive` and deletes ONLY
+     * `treesByTabId[activeTabId]`. Every BACKGROUND tab's tree survived; and
+     * because the window-side tab-panes map was cleared first,
+     * TerminalContainer's cleanup effect had no keys left to enumerate and
+     * could never dispatch `removeTabTree` for them. The stale trees were then
+     * re-serialized by the next `saveLayout` and made keep-logic believe their
+     * terminals were still present. Clearing every per-tab map in ONE
+     * synchronous action removes that whole class of leak.
+     */
+    resetPanes: (state) => {
+      state.paneTree = null;
+      state.activePaneId = null;
+      state.activeTabId = null;
+      state.treesByTabId = {};
+      state.activePaneByTabId = {};
+      state.maximizedPaneByTabId = {};
+    },
+
     /** Store/overwrite a tab's authoritative tree (background or active). */
     addTabTree: (state, action: PayloadAction<{ tabId: string; tree: PaneNode }>) => {
       const { tabId, tree } = action.payload;
@@ -648,6 +670,7 @@ export const {
   focusPane,
   renamePanes,
   setPaneTree,
+  resetPanes,
   setActiveTabId,
   addTabTree,
   removeTabTree,

@@ -231,3 +231,52 @@ describe('StateManager.loadLayout deferred-write safety (re-review 111 finding 2
   });
 });
 
+/**
+ * Re-review 111 finding 4. Layout teardown dispatched `setPaneTree(null)`,
+ * which deletes only the ACTIVE tab's tree; background trees stayed in Redux
+ * forever (the window map was already cleared, so TerminalContainer's cleanup
+ * effect had no keys to enumerate).
+ */
+describe('StateManager teardown clears background trees (re-review 111 finding 4)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("drops a background tab's tree when a new layout is loaded", async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    // Live state: active tab A plus a BACKGROUND API tab B with a tm- leaf.
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-live-a', title: 'A' } });
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-live-b', title: 'B' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-live-a', tree: { id: 'pn-la', type: 'terminal', terminalId: 'tb-live-a' } },
+    });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-live-b', tree: { id: 'pn-lb', type: 'terminal', terminalId: 'tm-live-b' } },
+    });
+    store.dispatch({ type: 'panes/setActiveTabId', payload: 'tb-live-a' });
+
+    const treeN = { id: 'pn-n', type: 'terminal' as const, terminalId: 'tb-new' };
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-n',
+      name: 'n',
+      tabs: [{ id: 'tb-new', title: 'New' }],
+      activeTabId: 'tb-new',
+      paneTree: treeN,
+      activePaneId: 'pn-n',
+      treesByTabId: { 'tb-new': treeN },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]));
+
+    await StateManager.loadLayout('layout-n', store.dispatch);
+
+    const state = store.getState() as any;
+    expect(state.panes.treesByTabId['tb-live-b']).toBeUndefined();
+    expect(state.panes.treesByTabId['tb-live-a']).toBeUndefined();
+    expect(state.panes.treesByTabId['tb-new']).toBeTruthy();
+  });
+});
