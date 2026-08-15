@@ -240,6 +240,9 @@ export const cleanupTerminalCache = (terminalId: string) => {
 
 // Function to reset WebGL for a terminal (recreates without WebGL).
 // Behavior ported from the legacy renderer terminal component.
+//
+// Returns whether the reset SUCCEEDED. `false` means either the id is not cached or
+// the addon's dispose() threw — see the retention comment below.
 export const resetTerminalRendering = (terminalId: string): boolean => {
   const cached = terminalCache.get(terminalId);
   if (!cached) return false;
@@ -251,7 +254,14 @@ export const resetTerminalRendering = (terminalId: string): boolean => {
     try {
       cached.webglAddon.dispose();
     } catch (e) {
+      // RETAIN the reference (review 120): dispose() may have thrown BEFORE releasing
+      // the GPU context, and nulling the field anyway erases the only reference
+      // countActiveWebGLAddons() can see — after which a caller is free to allocate a
+      // replacement on top of a context that is still held. Under-counting is the one
+      // direction a hard budget must never fail in, so report the failure instead and
+      // let the caller abort the demotion.
       console.warn(`terminal-core/cache: Error disposing WebGL during reset:`, e);
+      return false;
     }
     cached.webglAddon = null;
     cached.useWebGL = false;

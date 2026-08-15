@@ -32,7 +32,7 @@ import type { TerminalBridge, Disposable } from '../types';
 
 /** One mock instance. `disposed` does not exist on the real addon; it records that
  *  our dispose() was CALLED, which is all jsdom can show (§6.1 item 1). */
-type MockWebglInstance = { disposed: boolean; clearTextureAtlas: () => void };
+type MockWebglInstance = { disposed: boolean; dispose: () => void; clearTextureAtlas: () => void };
 
 /** The jsdom WebglAddon mock (src/__mocks__/addon-webgl.ts) adds three statics the
  *  real addon has no equivalent of: a one-shot construction-failure switch, the last
@@ -249,6 +249,54 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     expect(countActiveWebGLAddons()).toBe(0);
   });
 
+  // Review 120 HIGH (b) — a DEMOTION whose dispose() throws. If dispose() failed
+  // before releasing the GPU resource, claiming 'dom' erases the only countable
+  // reference to a context that may still be held, and the caller is then free to
+  // allocate a replacement. The achieved policy is still 'webgl': the demotion did
+  // not happen, and this function's contract is to report what was ACHIEVED (D3).
+  it('reports webgl when the demotion disposal throws, and keeps the reference', () => {
+    const { entry } = makeEntry('demote-fail');
+    setTerminalRenderPolicy('demote-fail', 'webgl');
+    const addon = asMock(entry.webglAddon);
+    addon.dispose = () => {
+      throw new Error('test: dispose failed before releasing the context');
+    };
+
+    expect(setTerminalRenderPolicy('demote-fail', 'dom')).toBe('webgl');
+    expect(entry.webglAddon).toBe(addon);          // still countable
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(getTerminalRenderPolicy('demote-fail')).toBe('webgl');
+  });
+
+  it('resetTerminalRendering returns false when the disposal throws', () => {
+    const { entry } = makeEntry('reset-fail');
+    setTerminalRenderPolicy('reset-fail', 'webgl');
+    asMock(entry.webglAddon).dispose = () => {
+      throw new Error('test: dispose failed before releasing the context');
+    };
+    expect(resetTerminalRendering('reset-fail')).toBe(false);
+    expect(entry.webglAddon).not.toBeNull();
+  });
+
+  // Review 120 HIGH (b) — promotion failing AFTER construction. The failNextConstruction
+  // switch throws before an instance exists, so it cannot see this: here the addon is
+  // built (and may already hold GPU resources) and then activation throws. Returning
+  // null without disposing it leaks a live, unreachable context.
+  it('disposes the constructed addon when activation throws after construction', () => {
+    const { entry } = makeEntry('activate-fail');
+    (entry.terminal as unknown as { loadAddon: (a: unknown) => void }).loadAddon = () => {
+      throw new Error('test: activation failed');
+    };
+
+    expect(setTerminalRenderPolicy('activate-fail', 'webgl')).toBe('dom');
+    expect(MockWebgl.instances).toHaveLength(1);   // it WAS constructed…
+    expect(MockWebgl.instances[0].disposed).toBe(true); // …and must not survive
+    const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
+    const live = MockWebgl.instances.filter((a) => !a.disposed).length;
+    expect(live).toBe(reachable);
+    expect(countActiveWebGLAddons()).toBe(0);
+  });
+
   it('returns dom for an unknown terminal id rather than throwing', () => {
     expect(setTerminalRenderPolicy('ghost', 'webgl')).toBe('dom');
   });
@@ -332,8 +380,7 @@ describe('design/013 §5.2 BUDGET-OWNER — the creation budget survives no tear
     expect(webglAllowedAtCreation()).toBe(true);
   });
 
-  // Re-arming after a teardown must still work, and must not stack a second
-  // listener per arm — a leak that grows with every canvas entry.
+  // Re-arming after a teardown must still work.
   it('re-arms cleanly after a teardown release', () => {
     setCanvasWebGLBudget(3);
     window.dispatchEvent(new Event('pagehide'));
@@ -342,6 +389,7 @@ describe('design/013 §5.2 BUDGET-OWNER — the creation budget survives no tear
     window.dispatchEvent(new Event('pagehide'));
     expect(getCanvasWebGLBudget()).toBeNull();
   });
+
 });
 
 describe('design/013 §4.2 FA — promotion always constructs a fresh addon', () => {

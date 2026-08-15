@@ -31,13 +31,21 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
     return null;
   }
 
-  try {
-    const webgl = new WebglAddon();
+  // Hoisted so the catch below can dispose an addon that was CONSTRUCTED and then
+  // failed during onContextLoss registration or loadAddon/activate. Construction is
+  // where a real WebglAddon acquires its GPU context, so returning null without
+  // disposing here leaves a live context that is reachable from nothing and counted
+  // by nothing (design/013 §5.2 ORPHAN, review 120).
+  let webgl: WebglAddon | null = null;
 
-    webgl.onContextLoss(() => {
+  try {
+    const addon = new WebglAddon();
+    webgl = addon;
+
+    addon.onContextLoss(() => {
       console.warn(`terminal-core/webgl: WebGL context lost for ${terminalId}, disposing addon`);
       try {
-        webgl.dispose();
+        addon.dispose();
       } catch (e) {
         // Ignore disposal errors
       }
@@ -50,11 +58,23 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
       }
     });
 
-    term.loadAddon(webgl);
+    term.loadAddon(addon);
     console.log(`terminal-core/webgl: WebGL addon loaded for ${terminalId}`);
-    return webgl;
+    return addon;
   } catch (e) {
     console.warn(`terminal-core/webgl: WebGL addon could not be loaded for ${terminalId}:`, e);
+    // `webgl` is null when the CONSTRUCTOR threw (nothing to release); non-null when a
+    // later step did, and then this is the only reference that will ever exist to it.
+    if (webgl) {
+      try {
+        webgl.dispose();
+      } catch (disposeErr) {
+        console.warn(
+          `terminal-core/webgl: error disposing the addon that failed to load for ${terminalId}:`,
+          disposeErr,
+        );
+      }
+    }
     return null;
   }
 };

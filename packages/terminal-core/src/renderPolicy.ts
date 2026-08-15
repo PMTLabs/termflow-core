@@ -86,7 +86,12 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
   if (want === 'dom') {
     // Reuse before reinvent: the existing demotion primitive already disposes the
     // addon and nulls both fields. Task 4 makes its fit conditional (LB).
-    resetTerminalRendering(terminalId);
+    //
+    // It returns false when the disposal THREW, in which case it deliberately keeps
+    // the addon on the entry (review 120): the context may still be held, so the
+    // demotion has NOT been achieved and reporting 'dom' would both lie and free a
+    // budget slot that is not free. D3 says report what was achieved.
+    if (!resetTerminalRendering(terminalId)) return entry.webglAddon ? 'webgl' : 'dom';
     return 'dom';
   }
 
@@ -187,15 +192,23 @@ export function webglAllowedAtCreation(): boolean {
  * under-counts, which is the one direction a budget must never fail in.
  *
  * Idempotent and total: unknown ids and addon-less entries are no-ops.
+ *
+ * Returns whether the caller may now allocate a replacement. `true` covers both
+ * "disposed it" and "there was nothing to dispose". `false` means dispose() THREW:
+ * the addon is left ON THE ENTRY rather than nulled, because it may still hold its
+ * context and the entry field is the only thing countActiveWebGLAddons() can see.
+ * The caller must not build a replacement on top of it (review 120).
  */
-export function disposeOrphanedWebGLAddon(terminalId: string): void {
+export function disposeOrphanedWebGLAddon(terminalId: string): boolean {
   const entry = terminalCache.get(terminalId);
-  if (!entry?.webglAddon) return;
+  if (!entry?.webglAddon) return true;
   try {
     entry.webglAddon.dispose();
   } catch (e) {
     console.warn('terminal-core/renderPolicy: error disposing orphaned WebGL addon:', e);
+    return false;
   }
   entry.webglAddon = null;
   entry.useWebGL = false; // advisory field kept in step (D8)
+  return true;
 }
