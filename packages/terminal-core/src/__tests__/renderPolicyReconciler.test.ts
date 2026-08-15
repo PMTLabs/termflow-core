@@ -121,3 +121,51 @@ describe('design/013 §5 — the reconciler', () => {
     expect(fake.calls).toEqual([['a', 'webgl']]);
   });
 });
+
+describe('design/013 §5 / spec test 12 — `order` under a numeric id set', () => {
+  // The trap: Object.keys puts integer-like keys FIRST, in ascending numeric
+  // order, before insertion-ordered string keys. Every ordering test above uses
+  // 'a'/'b'/'c', which are NON-integer-like and therefore come back in insertion
+  // order — so none of them can catch an implementation that ignores `order` and
+  // walks Object.keys(desired). This one can. Building `desired` with '20'
+  // inserted FIRST proves the reconciler is not reading insertion order either.
+  it('promotes the focused id first even when its key sorts numerically last', () => {
+    const desired: Record<string, RenderPolicy> = {};
+    desired['20'] = 'webgl';                       // the FOCUSED terminal
+    for (let i = 1; i <= 19; i++) desired[String(i)] = 'webgl';
+
+    // Sanity-pin the trap itself, so a future JS-engine or transpiler change that
+    // altered key ordering would surface here rather than silently weakening the
+    // test below into a tautology.
+    expect(Object.keys(desired)[0]).toBe('1');
+    expect(Object.keys(desired)[19]).toBe('20');
+
+    const fake = makeFake();
+    const { applied, webglCount } = reconcileRenderPolicies({
+      desired,
+      budget: 12,
+      order: ['20', ...Array.from({ length: 19 }, (_, i) => String(i + 1))],
+      ...fake,
+    });
+
+    // Under an Object.keys walk, '20' is the 20th promotion attempt and the
+    // budget is spent by then, so this would report 'dom'.
+    expect(applied['20']).toBe('webgl');
+    expect(fake.calls[0]).toEqual(['20', 'webgl']);
+    expect(webglCount).toBe(12);
+    // ...and the 12-slot budget went to '20' plus '1'..'11', not '1'..'12'.
+    expect(applied['11']).toBe('webgl');
+    expect(applied['12']).toBe('dom');
+  });
+
+  // The same trap on the RETURN value: `applied` must be keyed by the ids given,
+  // and a numeric-looking id must not be coerced anywhere on the path.
+  it('keys `applied` by the exact id strings it was given', () => {
+    const fake = makeFake();
+    const { applied } = reconcileRenderPolicies({
+      desired: { '007': 'webgl' }, budget: 1, order: ['007'], ...fake,
+    });
+    expect(applied).toEqual({ '007': 'webgl' });
+    expect(fake.calls).toEqual([['007', 'webgl']]);
+  });
+});
