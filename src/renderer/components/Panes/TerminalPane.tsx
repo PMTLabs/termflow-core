@@ -263,9 +263,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const terminalName = name || tab?.title || 'Terminal';
     console.log(`TerminalPane: Determining name - pane name: "${name}", tab title: "${tab?.title}", final: "${terminalName}"`);
 
-    // Ownership lives only in the pane tree, so resolve it here. A tab root's
-    // leaf id IS its tab id, so the `|| terminalId` fallback is correct for a
-    // solo pane and for a pane whose tree has not been committed yet.
+    // Ownership lives only in the pane tree, so resolve it here. For a
+    // RENDERER-created tab root, the leaf id IS its tab id, so the
+    // `|| terminalId` fallback is correct for a solo pane and for a pane
+    // whose tree has not been committed yet. It does NOT hold for an
+    // API-created root (a `tm-*` leaf owned by a different `tb-*` id) —
+    // that case is resolved by the `findTabIdByTerminalId` lookup instead.
     const owningTabId =
       findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
 

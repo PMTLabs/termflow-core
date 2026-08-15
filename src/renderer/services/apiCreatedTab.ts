@@ -191,10 +191,10 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
   };
 
-  // Seed the window map (API/persistence) AND the authoritative Redux store
-  // (which TerminalContainer renders from) so the tab shows immediately —
-  // BEFORE the tab itself enters the `tabs` slice, so a tree-less window
-  // never exists for this tab.
+  // Seed the window map (API/persistence) BEFORE the tab enters the `tabs`
+  // slice below. The authoritative Redux tree (`addTabTree`) is dispatched
+  // AFTER `addTab`, not before — TerminalContainer only ever observes both
+  // in the same synchronous turn, so no render sees the tab without a tree.
   deps.tabPanes[targetTabId] = paneTree;
 
   const shouldActivate = deps.activateOnApiCreate || deps.tabCount === 0;

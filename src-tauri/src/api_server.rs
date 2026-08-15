@@ -3281,9 +3281,11 @@ mod tests {
         assert_eq!(v["promptHook"], json!(true));
     }
 
-    /// Root-pane invariant (design 011 §7 test 5): leaf == owner.
+    /// design 011 §7 test 5: leaf == owner for a RENDERER-created tab root.
+    /// Not a general root-pane invariant — an API-created root's leaf is a
+    /// `tm-*` owned by a different `tb-*` id, so leaf != owner there.
     #[test]
-    fn a_root_pane_reports_the_same_value_for_leaf_and_owner() {
+    fn a_renderer_created_root_reports_the_same_value_for_leaf_and_owner() {
         let mut t = identity_sample();
         t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
         let v = terminal_identity_json(&t, "ui");

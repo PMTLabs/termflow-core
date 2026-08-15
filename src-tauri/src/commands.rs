@@ -77,7 +77,10 @@ pub fn get_os_build_number() -> u32 {
 /// decision can be tested without a `tauri::State`.
 fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
     match (tab_id, owning_tab_id) {
-        // A tab root: the leaf IS the owner (design 011 §3).
+        // A renderer-created tab root: the leaf IS the owner (design 011 §3).
+        // Does NOT hold for an API-created root, whose leaf is a `tm-*` owned
+        // by a different `tb-*` id — that case has no `tab_id`/`owning_tab_id`
+        // pair equal to each other and falls through to the arms below.
         (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
         // A renderer that predates P0-A sends no owner; a `tb-` leaf is a root.
         (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
