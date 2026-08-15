@@ -39,7 +39,10 @@ interface TabContextMenuProps {
   y: number;
   tabId: string;
   tabTitle: string;
-  processId?: string;
+  /** Backend process id per LIVE terminal leaf of this tab. A solo tab has one;
+   *  a split tab has one per pane (re-review 111 finding 3 — the old single
+   *  `processId` silently resolved to nothing for a split API-created tab). */
+  processIds?: string[];
   /** Hide "Move to New Window" when this is the only tab in the window. */
   canDetach?: boolean;
   /** Route a close action (single/right/left/others) into the confirm flow. */
@@ -52,7 +55,7 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
   y,
   tabId,
   tabTitle,
-  processId,
+  processIds = [],
   canDetach = true,
   onCloseKind,
   onClose,
@@ -155,7 +158,15 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
   };
 
   const handleCopyInfo = () => {
-    const info = `Tab: ${tabTitle}\nTab ID: ${tabId}${processId ? `\nProcess ID: ${processId}` : ''}`;
+    // Solo tab keeps the exact single-value shape it always had; a split tab
+    // lists every live pane process instead of dropping them.
+    const processLines =
+      processIds.length === 0
+        ? ''
+        : processIds.length === 1
+          ? `\nProcess ID: ${processIds[0]}`
+          : `\nProcess IDs: ${processIds.join(', ')}`;
+    const info = `Tab: ${tabTitle}\nTab ID: ${tabId}${processLines}`;
     navigator.clipboard.writeText(info).then(() => {
       console.log('Tab info copied to clipboard');
       onClose();
@@ -178,7 +189,13 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       </div>
       <div className="context-menu-info">
         <CopyableInfoRow label="Tab ID:" value={tabId} />
-        {processId && <CopyableInfoRow label="Process ID:" value={processId} />}
+        {processIds.map((pid, i) => (
+          <CopyableInfoRow
+            key={pid}
+            label={processIds.length === 1 ? 'Process ID:' : `Process ID ${i + 1}:`}
+            value={pid}
+          />
+        ))}
       </div>
       <div className="context-menu-divider" />
       <button

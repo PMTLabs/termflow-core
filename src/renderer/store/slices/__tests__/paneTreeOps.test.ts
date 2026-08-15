@@ -10,6 +10,7 @@ import {
   isTerminalMuted,
   resolveExitedTabId,
   soloRootLeafId,
+  tabLeafIds,
 } from '../paneTreeOps';
 
 const leaf = (id: string, tid: string): PaneNode => ({ id, type: 'terminal', terminalId: tid });
@@ -36,6 +37,28 @@ describe('soloRootLeafId', () => {
 
   it('returns null for a missing tree', () => {
     expect(soloRootLeafId(null)).toBeNull();
+  });
+});
+
+// Re-review 111 finding 3: a SPLIT API-created tab made soloRootLeafId return
+// null, and the `tab.id` fallback then resolved to a terminal that never
+// existed — Copy Tab Info dropped the process and rename hit no backend at all.
+describe('tabLeafIds', () => {
+  it('returns the single leaf of a solo renderer-created tab', () => {
+    expect(tabLeafIds(leaf('pn-r1', 'tb-renderer1'), 'tb-renderer1')).toEqual(['tb-renderer1']);
+  });
+
+  it('returns the tm- leaf (never tab.id) for a solo API-created tab', () => {
+    expect(tabLeafIds(leaf('pn-api1', 'tm-api-leaf-1'), 'tb-api1')).toEqual(['tm-api-leaf-1']);
+  });
+
+  it('returns EVERY leaf of a split tab, not the tab id', () => {
+    const tree = hsplit('s1', leaf('p1', 'tm-api-leaf-1'), leaf('p2', 'tm-api-leaf-2'));
+    expect(tabLeafIds(tree, 'tb-api1')).toEqual(['tm-api-leaf-1', 'tm-api-leaf-2']);
+  });
+
+  it('falls back to tab.id only when there is no tree at all', () => {
+    expect(tabLeafIds(null, 'tb-x')).toEqual(['tb-x']);
   });
 });
 

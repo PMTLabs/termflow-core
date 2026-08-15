@@ -27,13 +27,32 @@ export function findLeaf(tree: PaneNode | null, paneId: string): PaneNode | null
  * Callers that need "the terminal this tab is currently showing" (process
  * lookup for Copy Tab Info / rename) must resolve through this rather than
  * assuming `tab.id` is a live leaf. Returns `null` for a split tree (no single
- * root pane) or a missing tree, in which case callers should keep their
- * existing `tab.id` fallback — unchanged behavior for that case.
+ * root pane) or a missing tree.
+ *
+ * NOTE: callers that need "the terminal(s) this tab owns" should prefer
+ * `tabLeafIds` — falling back to `tab.id` merely because this returned `null`
+ * is what re-review 111 finding 3 flagged: for a SPLIT API-created tab `tab.id`
+ * is not a terminal at all, so the process lookup silently misses.
  */
 export function soloRootLeafId(tree: PaneNode | null): string | null {
   if (!tree) return null;
   if (tree.type === 'terminal') return tree.terminalId ?? null;
   return null;
+}
+
+/**
+ * Every renderer terminal id a tab owns, for tab-level lookups (Copy Tab Info,
+ * rename).
+ *
+ * Re-review 111 finding 3: `tab.id` is only coincidentally a terminal id — true
+ * for a renderer-created tab, false for an API-created one whose root leaf is a
+ * backend-minted `tm-*`. So `tab.id` is used ONLY when the tab has no tree at
+ * all (nothing better exists). Whenever a tree exists it is authoritative, even
+ * if it is a split with several leaves, and even if it yields no terminal at all.
+ */
+export function tabLeafIds(tree: PaneNode | null, tabId: string): string[] {
+  if (!tree) return [tabId];
+  return getAllTerminalIds(tree);
 }
 
 /** Id of the first terminal leaf in the tree (depth-first), or null. */
