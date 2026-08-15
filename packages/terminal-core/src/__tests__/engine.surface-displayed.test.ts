@@ -204,8 +204,7 @@ describe('design/012 §7 — surfaceDisplayed gates every geometry path paneActi
     expect((engine as any).fitTimer).toBeNull();
   });
 
-  // §7.2 rows 3 AND 4 / the FT rule: setSurfaceDisplayed(false) never cancels, in
-  // either direction. Rev 5 cancelled in row 4 "to mirror setActive(false)", which
+  // §7.2 rows 3 AND 4a. Rev 5 CANCELLED in row 4 "to mirror setActive(false)", which
   // contradicted D10 outright (review 099 T1-F1 + 098 B1, found independently).
   // The FT rule as rev 7 states it: a property of the END STATE, not a prohibition
   // on clearTimeout. setSurfaceDisplayed(false) must never leave the engine with no

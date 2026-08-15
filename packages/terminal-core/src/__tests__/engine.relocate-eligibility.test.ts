@@ -275,4 +275,64 @@ describe('design/012 §5.3 — the FT rule and the PARK invariant under relocati
       await jest.runAllTimersAsync();
       expect(resizeCalls).toEqual([[80, 24]]);
     });
+
+  // §13 T10f — external review 105 (the CRITICAL). T10e's return-leg fit creates a
+  // parked pendingResize where rev 6 created none, and unmount()'s force bypass sent
+  // it to the still-hidden PTY. That is the one SIGWINCH §6.2 exists to prevent, and
+  // it is worse than an ordinary one: the ED3 detector that repairs a ESC[2J ESC[3J
+  // wipe is a per-mount disposable, disposed immediately after the flush, while the
+  // subscription that receives the wipe is cache-lifetime. So the answer lands with
+  // nothing armed to repair it.
+  //
+  // The fix keys on the VALUE's provenance, not the engine's state at teardown —
+  // the engine is ineligible at teardown in the shipped force case too.
+  it('unmount does NOT force a resize that was measured while the pane was ineligible',
+    async () => {
+      jest.useFakeTimers();
+      const { engine, pane, term, fit, resizeCalls } = await mountAttached('rel-ft-t10f');
+      engine.setActive(false);
+
+      const host = makeHost();
+      engine.relocateTo(host, { paneChrome: false });
+      fit.setNextFit(200, 50);
+      await jest.runAllTimersAsync();
+      resizeCalls.length = 0;
+
+      // Home again, still hidden. The return-leg fit parks the pane's grid.
+      fit.setNextFit(80, 24);
+      engine.relocateTo(pane, { paneChrome: true });
+      await jest.runAllTimersAsync();
+      expect(term.cols).toBe(80);
+      expect((engine as any).pendingResize).not.toBeNull();
+      expect(resizeCalls).toEqual([]);
+
+      // Teardown BEFORE any activation — a pane collapse, an in-place terminalId
+      // swap, a tab close.
+      engine.unmount();
+      await jest.runAllTimersAsync();
+
+      // THE ASSERTION: nothing reached the PTY. The geometry is not lost — the next
+      // mount's reattach fit re-measures the same pane and sends it with the ED3
+      // detector armed.
+      expect(resizeCalls).toEqual([]);
+    });
+
+  // The other half of that rule, so the fix cannot be "solved" by disabling the force
+  // bypass altogether. This is the SHIPPED case the pane-collapse fix depends on:
+  // the value was measured while the pane was VISIBLE and merely interrupted
+  // mid-debounce by the hide + teardown. Teardown must still deliver it.
+  it('unmount DOES still force a resize that was measured while the pane was visible',
+    async () => {
+      jest.useFakeTimers();
+      const { engine, fit, resizeCalls } = await mountAttached('rel-ft-t10f-visible');
+
+      fit.setNextFit(170, 40);
+      fit.fit();                       // measured while ACTIVE and eligible
+      jest.advanceTimersByTime(20);    // not yet past the 120ms debounce
+      engine.setActive(false);
+      engine.unmount();
+      await jest.runAllTimersAsync();
+
+      expect(resizeCalls).toEqual([[170, 40]]);
+    });
 });

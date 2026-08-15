@@ -616,6 +616,11 @@ export class TerminalEngine {
   // on unmount so it can't fire against a torn-down mount.
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingResize: { cols: number; rows: number } | null = null;
+  // Was `pendingResize` measured while the engine was INELIGIBLE? Decides whether
+  // unmount()'s force bypass may send it (see flushBackendResize). Set per scheduled
+  // value: the engine is ineligible at teardown in both the shipped force case and
+  // the parked one, so only the value's own provenance separates them.
+  private pendingResizeMeasuredWhileIneligible = false;
   // True while a bridge.resize() round-trip is outstanding (set by flushBackendResize
   // and the hydrate pre-resize, cleared when it settles). The heal skips while set —
   // flushBackendResize nulls pendingResize BEFORE awaiting, so pendingResize alone
@@ -2886,6 +2891,11 @@ export class TerminalEngine {
     this.stampConvergenceIfArmed();
     this.resizeEpoch++;
     this.pendingResize = { cols, rows };
+    // Provenance, for unmount()'s force bypass (external review 105). Recorded per
+    // scheduled value, because it is the VALUE's history that decides whether
+    // teardown may send it — not the engine's state at teardown time, which is
+    // ineligible in both cases.
+    this.pendingResizeMeasuredWhileIneligible = !this.geometryEligible();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => this.flushBackendResize(), BACKEND_RESIZE_DEBOUNCE_MS);
   }
@@ -2901,13 +2911,32 @@ export class TerminalEngine {
   // pane is inactive we PARK the pending geometry here instead of sending it — the
   // setActive(true) activation reconcile flushes it. `force` (unmount teardown)
   // bypasses the park so the PTY still ends at the correct final size.
+  //
+  // …but ONLY for geometry that was MEASURED while eligible (external review 105).
+  // The shipped force case is an interrupted in-flight resize: the pane was visible,
+  // a real resize was measured and debounced, and the pane was hidden and torn down
+  // before the 120 ms elapsed — teardown must still deliver it, which is what the
+  // pane-collapse fix relies on. That value was always allowed to be sent; only the
+  // timing was interrupted.
+  //
+  // Geometry measured while INELIGIBLE is the opposite case. The park is not a delay
+  // there, it is a refusal: §6.2 says this engine may not SIGWINCH its PTY at all
+  // right now. Forcing such a value out at teardown is strictly worse than dropping
+  // it, because the ED3 detector that repairs a wipe is a PER-MOUNT disposable
+  // (disposed a few lines below this call) while the data subscription that receives
+  // the wipe is CACHE-LIFETIME — so the PTY's ESC[2J ESC[3J answer lands
+  // asynchronously, after the only thing that could repair it is gone.
+  //
+  // Dropping it costs nothing: the geometry is not lost, because the next mount's
+  // reattach fit re-measures the same container and re-sends it — with the detector
+  // armed. Same SIGWINCH, same final size, delivered where it can be repaired.
   private flushBackendResize(force = false): void {
     if (this.resizeTimer) {
       clearTimeout(this.resizeTimer);
       this.resizeTimer = null;
     }
     // Park: keep pendingResize (do NOT null it) so activation can deliver it.
-    if (!this.geometryEligible() && !force) return;
+    if (!this.geometryEligible() && !(force && !this.pendingResizeMeasuredWhileIneligible)) return;
     const pending = this.pendingResize;
     this.pendingResize = null;
     if (!pending || !this.attachedProcessId) return;
@@ -3714,7 +3743,10 @@ export class TerminalEngine {
     // what fills it. Raising eligibility on the way home instead would defeat the
     // hidden-pane SIGWINCH park §6.2 exists to arm.
     //
-    // Under the FT rule this call cannot cancel a fitTimer in either direction.
+    // Under the FT rule this call can never leave the engine with NO pending fit,
+    // in either direction: outbound it arms one (§7.2 row 2), on the return leg onto
+    // a background pane it arms one (row 4a), and on the return leg onto a visible
+    // pane eligibility never drops so R7's observer fits on its own.
     this.setSurfaceDisplayed(!paneChrome);
 
     // --- R4: dispose the PREVIOUS container's disposables (§5.5) ---
