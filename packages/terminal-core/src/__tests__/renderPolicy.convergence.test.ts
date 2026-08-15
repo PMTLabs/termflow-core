@@ -90,10 +90,18 @@ async function mountAttached(cacheKey: string, getFullScrollback?: jest.Mock, re
   engine.attach('pid-1');
   await jest.runAllTimersAsync();
   const entry = terminalCache.get(cacheKey)!;
-  // hasLayoutBox reads term.element, which jsdom reports as 0x0 — the policy fit
-  // would otherwise be skipped by LB and this test would prove nothing.
-  Object.defineProperty(entry.terminal.element!, 'offsetWidth', { value: 800, configurable: true });
-  Object.defineProperty(entry.terminal.element!, 'offsetHeight', { value: 600, configurable: true });
+  // LB measures the HOST — `term.element.parentElement`, the element FitAddon
+  // measures — not the xterm child. jsdom reports 0x0 for everything, so the host
+  // needs a faked box or the policy fit is skipped and this test proves nothing.
+  //
+  // `makeContainer()` already fakes one, and today the host IS that container, so
+  // this is belt-and-braces rather than load-bearing. It is written against
+  // `parentElement` anyway so it stays correct if xterm ever inserts a wrapper
+  // between them. (An earlier version faked the CHILD and said so in a comment;
+  // that comment survived the fix to hasLayoutBox and was false — review 122 agy.)
+  const hostEl = entry.terminal.element!.parentElement!;
+  Object.defineProperty(hostEl, 'offsetWidth', { value: 800, configurable: true });
+  Object.defineProperty(hostEl, 'offsetHeight', { value: 600, configurable: true });
   return {
     engine: engine as unknown as {
       convergenceArmUntil: number;
