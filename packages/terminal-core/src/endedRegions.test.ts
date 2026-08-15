@@ -616,3 +616,103 @@ describe('reflow', () => {
     expect(t.regionCount()).toBe(2);
   });
 });
+
+describe('design/012 §5.9 — retargetRail after the xterm element moves', () => {
+  /** A wrapper > display pair, matching TerminalDisplay's real structure. */
+  function makeHost(): { wrapper: HTMLElement; display: HTMLElement } {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'terminal-display-wrapper';
+    const display = document.createElement('div');
+    display.className = 'terminal-display';
+    wrapper.appendChild(display);
+    document.body.appendChild(wrapper);
+    return { wrapper, display };
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  // §13 T6, first clause. Moving the memoised layer carries every child railEl
+  // with it in ONE DOM operation. Rebuilding it would leak the old layer and — via
+  // each Region's memoised railEl (:126) plus ensureRail's early return (:569-570)
+  // — stop existing rails ever reappearing.
+  it('moves the SAME rail-layer node into the new wrapper', () => {
+    const a = makeHost();
+    const b = makeHost();
+    const term = newTerm(80);
+    term.open(a.display);
+
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    t.onPrompt();
+    t.markProgramActive();
+    term.__setCursorLine(5);
+    t.onPrompt();
+
+    const layer = a.wrapper.querySelector('.ended-rail-layer');
+    expect(layer).not.toBeNull();
+    const railsBefore = layer!.children.length;
+    expect(railsBefore).toBeGreaterThan(0);
+
+    // The move relocateTo's R6 performs, then R8.
+    b.display.appendChild(term.element!);
+    t.retargetRail();
+
+    expect(b.wrapper.querySelector('.ended-rail-layer')).toBe(layer);
+    expect(a.wrapper.querySelector('.ended-rail-layer')).toBeNull();
+    expect(layer!.children.length).toBe(railsBefore);
+    expect(t.regionCount()).toBe(1);
+  });
+
+  // Lazy creation: ensureRailLayer() has not run yet, so there is nothing to move
+  // and retargetRail must be a silent no-op — the layer resolves the new wrapper
+  // on first paint instead.
+  it('does nothing when no rail layer has been created yet', () => {
+    const a = makeHost();
+    const b = makeHost();
+    const term = newTerm(80);
+    term.open(a.display);
+
+    const t = new EndedRegionTracker(term);   // no colours => no rail => no layer
+    b.display.appendChild(term.element!);
+    expect(() => t.retargetRail()).not.toThrow();
+    expect(document.querySelectorAll('.ended-rail-layer').length).toBe(0);
+  });
+
+  // §13 T6, second clause / design 012 correction 0.3.10: rev 4 specified a bare
+  // requestAnimationFrame with no cancellation. The handle is stored and cancelled
+  // by dispose(), so a torn-down tracker cannot repaint on the next frame.
+  it('cancels its follow-up rAF on dispose()', () => {
+    const a = makeHost();
+    const b = makeHost();
+    const term = newTerm(80);
+    term.open(a.display);
+
+    const cancelled: number[] = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    const realCancel = globalThis.cancelAnimationFrame;
+    (globalThis as any).requestAnimationFrame = (_cb: FrameRequestCallback) => 4242;
+    (globalThis as any).cancelAnimationFrame = (h: number) => { cancelled.push(h); };
+
+    try {
+      const t = new EndedRegionTracker(term);
+      t.setColors('#2a2a2a', '#7aa2f7');
+      t.onPrompt();
+      t.markProgramActive();
+      term.__setCursorLine(5);
+      t.onPrompt();
+
+      b.display.appendChild(term.element!);
+      t.retargetRail();
+      expect((t as any).retargetRaf).toBe(4242);
+
+      t.dispose();
+      expect(cancelled).toContain(4242);
+      expect((t as any).retargetRaf).toBeUndefined();
+    } finally {
+      (globalThis as any).requestAnimationFrame = realRaf;
+      (globalThis as any).cancelAnimationFrame = realCancel;
+    }
+  });
+});
