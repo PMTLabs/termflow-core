@@ -944,9 +944,23 @@ export class TerminalEngine {
 
   // ---------------------------------------------------------------------------
   /**
-   * Remove any OTHER cached terminal's render element from `container` before this
-   * mount attaches its own (design 012 §14 criterion 7 — external review 103
+   * Remove any OTHER cached terminal's render element from `container` once this
+   * mount has attached its own (design 012 §14 criterion 7 — external review 103
    * finding 2).
+   *
+   * CALL IT ONLY FROM BELOW `beginMountWiring()`, and from nowhere else (review
+   * 134). This is the one mutation in `mount()` that touches state belonging to a
+   * DIFFERENT engine, so `this.container = previousContainer` — the restoration
+   * every abort path performs — cannot undo it, and it deliberately records nothing
+   * that would let it be undone. Run before the commit point, as it was, it made
+   * every refusal destructive: it blanked engine A's pane, A went on believing it
+   * was mounted and visible, and B's caller saw only `false`.
+   *
+   * Running it after the commit point is not merely safe but strictly better
+   * ordered. Ours is in the container first, the foreign element leaves in the same
+   * synchronous block, and nothing can observe the instant both were present:
+   * ResizeObserver delivers at end-of-frame and MutationObserver on a microtask, so
+   * neither can interleave. The end state is identical to the pre-commit ordering.
    *
    * `mount()` is append-only and `unmount()` deliberately leaves `term.element` in
    * the DOM, because the cache still owns the live Terminal and a later mount
@@ -1062,10 +1076,14 @@ export class TerminalEngine {
   //
   // Exactly ONE thing changes before it: `this.container`, which every abort
   // restores. It is unconditional rather than a rule with a list of exceptions —
-  // review 132 found the previous list incomplete twice over, so the two remaining
-  // pre-commit mutations were MOVED below the commit point instead of documented:
-  //   - the cached terminal's font sync, which reverted a live zoom on a refusal;
-  //   - the protocol-state adoption (`kbState` / `win32State`).
+  // that list was found incomplete three separate times, so each remaining
+  // pre-commit mutation was MOVED below the commit point instead of documented:
+  //   - the cached terminal's font sync, which reverted a live zoom on a refusal
+  //     (review 132);
+  //   - the protocol-state adoption (`kbState` / `win32State`) (review 132);
+  //   - `detachForeignSurfaces()`, which evicted ANOTHER engine's live surface and
+  //     was the one mutation `this.container`'s restoration could never have
+  //     covered (review 134).
   // Nothing may be added above `beginMountWiring()` that a refusal cannot undo.
   // ---------------------------------------------------------------------------
   mount(container: HTMLElement): boolean {
@@ -1076,9 +1094,6 @@ export class TerminalEngine {
     this.container = container;
 
     let cached = terminalCache.get(this.cacheKey);
-    // Evict ANOTHER terminal's surface from this container before we put ours in
-    // (design 012 §14 criterion 7, external review 103 finding 2).
-    this.detachForeignSurfaces(container, cached?.terminal.element ?? null);
 
     let term: Terminal | undefined;
     let fit: FitAddon | undefined;
@@ -1174,6 +1189,11 @@ export class TerminalEngine {
       // The move succeeded, so the mount is committed: from here on nothing can
       // refuse, and this engine's own wiring may be replaced (review 129).
       this.beginMountWiring();
+
+      // Only NOW evict any other engine's surface from this container (review 134).
+      // Ours is already in place, the foreign one leaves in the same synchronous
+      // block, and no observer can run between the two — see detachForeignSurfaces.
+      this.detachForeignSurfaces(container, existingElement);
 
       // Keep font size in sync when reusing. BELOW the commit point (review 132
       // MEDIUM 1): this mutates the CACHED, VISIBLE terminal, and it reads
@@ -1376,6 +1396,10 @@ export class TerminalEngine {
       // open() succeeded, so the mount is committed — same rule as the reattach
       // path's move above (review 129).
       this.beginMountWiring();
+
+      // …and the same post-commit eviction as the reattach path (review 134).
+      // `term.element` is the surface open() just appended.
+      this.detachForeignSurfaces(container, term.element ?? null);
 
       // Backlog 003 (protocol-state-lost-while-unmounted): register the
       // STATE-MUTATING Kitty/Win32-Input-Mode CSI/OSC handlers ONCE per cache

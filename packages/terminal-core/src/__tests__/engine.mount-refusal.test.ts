@@ -371,3 +371,94 @@ describe('review 132 — a refusal must not mutate the cached terminal either', 
     expect(entry.containerDisposables).toHaveLength(containersBefore);
   });
 });
+
+describe('review 134 — a refusal must not evict ANOTHER engine\'s surface', () => {
+  // The third uncatalogued pre-commit mutation, and the only one restoring
+  // `this.container` could never have covered: `detachForeignSurfaces()` ran
+  // unconditionally at the very top of mount(), ahead of EVERY refusal check, and
+  // called `element.remove()` on a different engine's live surface while recording
+  // nothing. A refused mount therefore blanked a pane belonging to an engine that
+  // still believed it was mounted, and the refusing caller — which sees only
+  // `false` — could neither detect nor repair it.
+  //
+  // Both tests also assert that a SUCCEEDING mount still evicts. Without that half
+  // they would pass just as well with detachForeignSurfaces deleted outright, which
+  // would reopen the two-`.xterm` pane leak of design/012 §14 criterion 7.
+
+  it('leaves a foreign surface alone when the REATTACH is refused', () => {
+    const pane = makeContainer();
+
+    // X is live in the pane.
+    const x = new TerminalEngine(makeBridge(), { cacheKey: 'foreign-refuse-x' });
+    expect(x.mount(pane)).toBe(true);
+    const xElement = terminalCache.get('foreign-refuse-x')!.terminal.element!;
+    expect(xElement.parentElement).toBe(pane);
+
+    // Y is live somewhere else, so its move into the pane takes the reattach path.
+    const y = new TerminalEngine(makeBridge(), { cacheKey: 'foreign-refuse-y' });
+    const elsewhere = makeContainer();
+    expect(y.mount(elsewhere)).toBe(true);
+    const yElement = terminalCache.get('foreign-refuse-y')!.terminal.element!;
+
+    // Refuse Y's move into X's pane. Note `remove()` does not go through
+    // `appendChild`, so the eviction still fires while the move cannot.
+    (pane as unknown as { appendChild: unknown }).appendChild = () => {
+      throw new Error('test: HierarchyRequestError');
+    };
+    expect(y.mount(pane)).toBe(false);
+    delete (pane as unknown as { appendChild?: unknown }).appendChild;
+
+    // THE ASSERTION: X is untouched — still placed, still connected, still usable.
+    expect(xElement.parentElement).toBe(pane);
+    expect(xElement.isConnected).toBe(true);
+    expect(() => x.terminal).not.toThrow();
+    expect((x as unknown as { container: unknown }).container).toBe(pane);
+    // …and Y really did refuse, rather than quietly succeeding.
+    expect(yElement.parentElement).toBe(elsewhere);
+
+    // The eviction is not disabled: a mount that COMMITS still takes the pane over.
+    expect(y.mount(pane)).toBe(true);
+    expect(yElement.parentElement).toBe(pane);
+    expect(xElement.isConnected).toBe(false);
+    expect(pane.querySelectorAll('.xterm')).toHaveLength(1);
+  });
+
+  it('leaves a foreign surface alone when a CREATE is refused', () => {
+    const pane = makeContainer();
+
+    const x = new TerminalEngine(makeBridge(), { cacheKey: 'foreign-create-x' });
+    expect(x.mount(pane)).toBe(true);
+    const xElement = terminalCache.get('foreign-create-x')!.terminal.element!;
+
+    const proto = Terminal.prototype as unknown as { open(container: HTMLElement): void };
+    const realOpen = proto.open;
+    let failNextOpen = true;
+    proto.open = function patchedOpen(container: HTMLElement) {
+      realOpen.call(this, container);
+      if (failNextOpen) {
+        failNextOpen = false;
+        throw new Error('test: renderer initialization failed after append');
+      }
+    };
+
+    try {
+      // Y has no cache entry, so this is the CREATE path.
+      const y = new TerminalEngine(makeBridge(), { cacheKey: 'foreign-create-y' });
+      expect(y.mount(pane)).toBe(false);
+
+      // X survived the refusal, and the abandoned surface took itself with it.
+      expect(xElement.parentElement).toBe(pane);
+      expect(() => x.terminal).not.toThrow();
+      expect(pane.querySelectorAll('.xterm')).toHaveLength(1);
+
+      // The retry commits, and NOW X is evicted.
+      const y2 = new TerminalEngine(makeBridge(), { cacheKey: 'foreign-create-y' });
+      expect(y2.mount(pane)).toBe(true);
+      expect(xElement.isConnected).toBe(false);
+      expect(pane.querySelectorAll('.xterm')).toHaveLength(1);
+      expect(terminalCache.get('foreign-create-y')!.terminal.element!.parentElement).toBe(pane);
+    } finally {
+      proto.open = realOpen;
+    }
+  });
+});
