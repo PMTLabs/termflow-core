@@ -1035,6 +1035,9 @@ export class TerminalEngine {
 
     // --- Reattach path (TerminalDisplay.tsx:251-289) ---
     if (cached && cached.terminal.element) {
+      // Stable alias: the else-branch below reassigns `cached` to undefined, which
+      // costs the narrowing the catch clause needs.
+      const cachedEntry = cached;
       term = cached.terminal;
       fit = cached.fitAddon;
       search = cached.searchAddon;
@@ -1066,11 +1069,23 @@ export class TerminalEngine {
           fit = undefined;
         }
       } catch (e) {
-        console.warn('terminal-core/engine: Could not reattach terminal:', e);
-        terminalCache.delete(this.cacheKey);
-        cached = undefined;
-        term = undefined;
-        fit = undefined;
+        // ABORT the mount; do NOT delete-and-recreate (review 120 HIGH).
+        //
+        // Deleting the entry here fell through to the create branch, whose
+        // disposeOrphanedWebGLAddon() then looked this id up in terminalCache, found
+        // nothing, and could not dispose the outgoing addon — a live GPU context that
+        // is reachable from nothing and counted by nothing, so the creation gate could
+        // allocate beyond the real budget (design/013 §5.2 ORPHAN). It also threw away
+        // the terminal's scrollback for what is usually a transient layout failure.
+        //
+        // The entry stays exactly as it was, so a later mount() can reattach it.
+        console.warn('terminal-core/engine: Could not reattach terminal, aborting mount:', e);
+        // The two disposable sets were already run above, before the re-wiring that
+        // never happened. Clear them so the next mount() does not run them a second
+        // time; the end of mount() would otherwise have replaced both arrays.
+        cachedEntry.disposables = [];
+        cachedEntry.containerDisposables = [];
+        return;
       }
     }
 
@@ -1306,14 +1321,22 @@ export class TerminalEngine {
       // here. This must stay BEFORE webglAllowedAtCreation(): the slot it frees is
       // one the new terminal is entitled to, and reversing the two makes a remount
       // under a full budget silently drop to the DOM renderer.
-      disposeOrphanedWebGLAddon(this.cacheKey);
+      // It returns false when the outgoing addon's dispose() threw, i.e. the context
+      // may still be held (review 120). Then we allocate NOTHING here: the new
+      // terminal opens on the DOM renderer, so a failed disposal can never increase
+      // the number of live contexts. The old addon does stop being reachable once the
+      // entry below replaces it — we cannot dispose what refuses to be disposed — but
+      // the count only ever under-states by contexts we already failed to free, never
+      // by ones we chose to add on top of them.
+      const orphanReleased = disposeOrphanedWebGLAddon(this.cacheKey);
 
       // Load WebGL addon AFTER open (respects the global-disabled flag), and only
       // if the canvas budget has room — design/013 §5.1. Without this gate a
       // terminal created during a canvas session opens on the GPU regardless of
       // the budget, and the reconciler cannot un-spend a context it never approved.
       // Outside a canvas session no budget is armed and this is always true.
-      const webglAddon = webglAllowedAtCreation() ? loadWebGLAddon(term, this.cacheKey) : null;
+      const webglAddon =
+        orphanReleased && webglAllowedAtCreation() ? loadWebGLAddon(term, this.cacheKey) : null;
 
       // Store a fresh cache entry. Preserve Task-4 fields' shape.
       terminalCache.set(this.cacheKey, {

@@ -480,6 +480,67 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     expect(countActiveWebGLAddons()).toBe(reachable);
   });
 
+  // Review 120 HIGH — the reattach FAILURE route. The reattach path used to answer an
+  // appendChild/fit throw by deleting the cache entry and falling through to create.
+  // disposeOrphanedWebGLAddon then looked the id up, found nothing, and could not
+  // dispose the outgoing addon: a live, uncounted context, i.e. ORPHAN false on a
+  // route neither test above reaches (both force the create branch with the entry
+  // still present). The fix aborts the mount and keeps the entry.
+  it('a reattach whose fit throws keeps the entry rather than orphaning its addon', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'orphan-reattach-fail' });
+    engine.mount(makeLaidOutContainer());
+    const entryBefore = terminalCache.get('orphan-reattach-fail')!;
+    const first = asMock(entryBefore.webglAddon);
+    expect(first).toBeTruthy();
+
+    // The reattach path is entered because `terminal.element` is set; its re-fit
+    // is the throw this finding is about.
+    (entryBefore.fitAddon as unknown as { fit: () => void }).fit = () => {
+      throw new Error('test: reattach fit failed');
+    };
+
+    engine.mount(makeLaidOutContainer());          // still no unmount()
+
+    // The entry object itself survives — nothing was deleted and re-created, so the
+    // scrollback and the addon are both still owned by the cache.
+    expect(terminalCache.get('orphan-reattach-fail')).toBe(entryBefore);
+    expect(terminalCache.get('orphan-reattach-fail')!.webglAddon).toBe(first);
+    expect(first.disposed).toBe(false);
+    // No second addon was constructed to replace it.
+    expect(MockWebgl.instances).toHaveLength(1);
+    // ORPHAN as the end-state property: live addons == addons reachable from the cache.
+    const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
+    const live = MockWebgl.instances.filter((a) => !a.disposed).length;
+    expect(live).toBe(reachable);
+  });
+
+  // Review 120 HIGH (b) — disposal that THROWS on the create path. Nulling the entry
+  // fields anyway erases the only countable reference to a context that may still be
+  // held; allocating a replacement on top of it is the unsafe direction for a hard
+  // budget. Retaining the reference and refusing the replacement is the safe one.
+  it('a create-path disposal that throws allocates no replacement context', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'orphan-dispose-fail' });
+    engine.mount(makeLaidOutContainer());
+    const first = asMock(terminalCache.get('orphan-dispose-fail')!.webglAddon);
+    first.dispose = () => {
+      throw new Error('test: dispose failed before releasing the context');
+    };
+
+    // Force the create branch, exactly as the two tests above do.
+    (terminalCache.get('orphan-dispose-fail')!.terminal as { element?: unknown }).element =
+      undefined;
+    engine.mount(makeLaidOutContainer());
+
+    // No second context was allocated on top of one that may still be held: the
+    // replacing terminal opens on the DOM renderer instead.
+    expect(MockWebgl.instances).toHaveLength(1);
+    expect(getTerminalRenderPolicy('orphan-dispose-fail')).toBe('dom');
+    // The addon that refused to be disposed is the only live one, and it is exactly
+    // as live as it was before the remount — the count never grows past a failure.
+    expect(first.disposed).toBe(false);
+    expect(MockWebgl.instances.filter((a) => !a.disposed)).toHaveLength(1);
+  });
+
   // The ordering the fix depends on: the dispose frees a slot the NEW terminal is
   // entitled to, so it must run BEFORE webglAllowedAtCreation(). Reversed, a
   // remount under a full budget silently drops to the DOM renderer.
