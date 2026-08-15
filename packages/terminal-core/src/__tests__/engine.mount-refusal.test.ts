@@ -1,8 +1,14 @@
 /**
  * engine.mount-refusal.test.ts
  *
- * design/013 §5 / rev 6 — what `mount()` is allowed to have done when it returns
+ * design/013 §5 / rev 7 — what `mount()` is allowed to have done when it returns
  * `false`, and what it must survive on its way to returning `true`.
+ *
+ * Review 132 then found that "left the engine exactly as it was" was still not true
+ * of the code: the cached terminal's font sync ran before the fatal move (reverting
+ * a live zoom), a malformed cache entry was refused only AFTER both commit points,
+ * and `unmount()`'s own sweeps were still unguarded. Those are the last three tests
+ * in this file.
  *
  * Review 129 found three ways the round-5 shape still broke that contract:
  *
@@ -248,6 +254,38 @@ describe('review 129 finding 3 — a throwing cached disposer must not abort the
     expect((engine2 as any).resizeObserver).not.toBeNull();
   });
 
+  it('continues unmount() past a throwing disposer in EITHER array', () => {
+    // Review 132 MEDIUM 3. unmount() splices the SHARED cache arrays before running
+    // them, so a thrower that escapes strands every later disposer FOREVER: the
+    // entry is already empty, and the reattach sweeps have nothing left to retry.
+    // The pre-existing no-double-dispose test uses only non-throwing callbacks and
+    // cannot reach this.
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'unmount-throws' });
+    expect(engine.mount(makeContainer())).toBe(true);
+    const entry = terminalCache.get('unmount-throws')!;
+
+    let localSentinel = 0;
+    let containerSentinel = 0;
+    // Each sentinel sits AFTER a thrower in its own array, so it runs only if that
+    // array's sweep isolated the failure; the CONTAINER sentinel additionally proves
+    // the second sweep ran at all after the first array threw.
+    entry.disposables.push(() => { throw new Error('test: local disposer'); });
+    entry.disposables.push(() => { localSentinel += 1; });
+    entry.containerDisposables.push(() => { throw new Error('test: container disposer'); });
+    entry.containerDisposables.push(() => { containerSentinel += 1; });
+
+    expect(() => engine.unmount()).not.toThrow();
+
+    expect(localSentinel).toBe(1);
+    expect(containerSentinel).toBe(1);
+    expect(entry.disposables).toHaveLength(0);
+    expect(entry.containerDisposables).toHaveLength(0);
+    // …and the teardown AFTER the sweeps completed too — the throw used to exit
+    // unmount() before any of this.
+    expect((engine as any).container).toBeNull();
+    expect((engine as any).endedRegions).toBeUndefined();
+  });
+
   it('does not run a disposer twice when unmount() already consumed it', () => {
     const engine = new TerminalEngine(makeBridge(), { cacheKey: 'disposer-twice' });
     expect(engine.mount(makeContainer())).toBe(true);
@@ -270,5 +308,66 @@ describe('review 129 finding 3 — a throwing cached disposer must not abort the
     expect(engine2.mount(makeContainer())).toBe(true);
     expect(localRuns).toBe(1);
     expect(containerRuns).toBe(1);
+  });
+});
+
+describe('review 132 — a refusal must not mutate the cached terminal either', () => {
+  it('keeps a live zoom when the move is refused (MEDIUM 1)', () => {
+    // The font sync used to run BEFORE the fatal appendChild, reading
+    // `opts.fontSize` — which setFontSize() never updates. A refused move therefore
+    // silently reverted a user's zoom on a terminal that stayed exactly where it was.
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'refuse-font', fontSize: 14 });
+    const paneA = makeContainer();
+    expect(engine.mount(paneA)).toBe(true);
+    const entry = terminalCache.get('refuse-font')!;
+    expect(entry.terminal.options.fontSize).toBe(14);
+
+    engine.setFontSize(20);
+    expect(entry.terminal.options.fontSize).toBe(20);
+
+    const bad = makeContainer();
+    bad.appendChild = () => { throw new Error('test: HierarchyRequestError'); };
+    expect(engine.mount(bad)).toBe(false);
+
+    // The visible terminal never moved, so it must not have been re-sized either.
+    expect(entry.terminal.options.fontSize).toBe(20);
+    expect(entry.terminal.element!.parentElement).toBe(paneA);
+  });
+
+  it('refuses a malformed cache entry BEFORE moving the surface (MEDIUM 2)', () => {
+    // A cached entry with a render element but no fitAddon reached the surface move,
+    // the observer disconnect, the array replacement and both cached disposal sweeps
+    // — and only THEN returned false, restoring nothing but `this.container`.
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'malformed' });
+    const paneA = makeContainer();
+    expect(engine.mount(paneA)).toBe(true);
+    const entry = terminalCache.get('malformed')!;
+    const observer = CapturingResizeObserver.instances[
+      CapturingResizeObserver.instances.length - 1
+    ];
+
+    let sweptLocal = 0;
+    let sweptContainer = 0;
+    entry.disposables.push(() => { sweptLocal += 1; });
+    entry.containerDisposables.push(() => { sweptContainer += 1; });
+    const localsBefore = entry.disposables.length;
+    const containersBefore = entry.containerDisposables.length;
+
+    // The skew this models: a cache entry written by another runtime/version.
+    (entry as unknown as { fitAddon: unknown }).fitAddon = undefined;
+
+    const paneB = makeContainer();
+    expect(engine.mount(paneB)).toBe(false);
+
+    // DOM placement, observer identity and disposer ownership are all untouched.
+    expect(entry.terminal.element!.parentElement).toBe(paneA);
+    expect(paneB.querySelectorAll('.xterm')).toHaveLength(0);
+    expect(observer.disconnected).toBe(false);
+    expect((engine as any).resizeObserver).toBe(observer);
+    expect((engine as any).container).toBe(paneA);
+    expect(sweptLocal).toBe(0);
+    expect(sweptContainer).toBe(0);
+    expect(entry.disposables).toHaveLength(localsBefore);
+    expect(entry.containerDisposables).toHaveLength(containersBefore);
   });
 });

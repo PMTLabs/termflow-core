@@ -94,9 +94,24 @@ type DisposableAddon = { dispose(): void };
  *
  *     live === reachable + quarantined === countActiveWebGLAddons()
  *
- * A Set, so re-quarantining the same addon cannot double-count it.
+ * Keyed by addon, so re-quarantining the same addon cannot double-count it. The
+ * value is per-addon RETRY STATE (review 132 LOW): `failures` is how many drains
+ * have tried this addon and had `dispose()` throw again, and `drainWebGLQuarantine`
+ * uses it to keep a degraded session's per-pass cost constant. See that function.
  */
-const webglQuarantine = new Set<DisposableAddon>();
+const webglQuarantine = new Map<DisposableAddon, { failures: number }>();
+
+/**
+ * Round-robin cursor over the KNOWN-WEDGED addons, so the per-pass cap below does
+ * not retry the same two forever while the rest are never revisited.
+ */
+let quarantineCursor = 0;
+
+/**
+ * The per-pass cap on retries of addons that have ALREADY failed at least one drain.
+ * Newly quarantined addons are exempt — see `drainWebGLQuarantine`.
+ */
+const QUARANTINE_RETRIES_PER_DRAIN = 2;
 
 /**
  * Not an eviction threshold — evicting would silently reintroduce exactly the
@@ -112,7 +127,7 @@ const QUARANTINE_LOG_THRESHOLD = 8;
 export function quarantineWebGLAddon(addon: DisposableAddon | null | undefined): void {
   if (!addon) return;
   if (webglQuarantine.has(addon)) return;
-  webglQuarantine.add(addon);
+  webglQuarantine.set(addon, { failures: 0 });
   if (webglQuarantine.size >= QUARANTINE_LOG_THRESHOLD) {
     console.error(
       `terminal-core/renderPolicy: ${webglQuarantine.size} WebGL addons have refused ` +
@@ -157,14 +172,45 @@ export function releaseFromWebGLQuarantine(addon: DisposableAddon | null | undef
  * `reconcileRenderPolicies` (review 126 LOW — the path the quarantine BLOCKS). The
  * first alone was not enough: a canvas session need never create a terminal, so a
  * recovered addon could go on refusing every promotion for the rest of the session.
+ *
+ * BOUNDED per pass (review 132 LOW). Retrying every held addon every time was
+ * justified by a bound that does not exist: the quarantine is NOT bounded by the GPU
+ * budget — the registry deliberately grows past its warning threshold (see
+ * QUARANTINE_LOG_THRESHOLD), the entries it holds are no longer cache-bounded, and
+ * outside canvas mode no budget is armed at all. With `reconcileRenderPolicies`
+ * draining on every pass, N permanently wedged addons meant N throwing `dispose()`
+ * calls per reconciliation, growing with the damage.
+ *
+ * The split preserves the guarantee that justified the unthrottled version:
+ *   - an addon that has NEVER been retried is always retried, so the drain on the
+ *     very next reconciliation still gives a recovered slot straight back;
+ *   - known-wedged addons are retried at most QUARANTINE_RETRIES_PER_DRAIN per pass,
+ *     round-robin, so per-pass cost is constant in N and every one of them is still
+ *     revisited within a bounded number of passes.
  */
 export function drainWebGLQuarantine(): number {
-  for (const addon of [...webglQuarantine]) {
+  const fresh: DisposableAddon[] = [];
+  const wedged: DisposableAddon[] = [];
+  for (const [addon, state] of webglQuarantine) {
+    (state.failures === 0 ? fresh : wedged).push(addon);
+  }
+
+  const picks = fresh;
+  const take = Math.min(QUARANTINE_RETRIES_PER_DRAIN, wedged.length);
+  for (let i = 0; i < take; i += 1) {
+    picks.push(wedged[(quarantineCursor + i) % wedged.length]);
+  }
+  // Advance past what this pass took, so the next one continues round the ring.
+  if (wedged.length > 0) quarantineCursor = (quarantineCursor + take) % wedged.length;
+
+  for (const addon of picks) {
     try {
       addon.dispose();
       webglQuarantine.delete(addon);
     } catch {
       // Still wedged. Keep holding it — and keep counting it.
+      const state = webglQuarantine.get(addon);
+      if (state) state.failures += 1;
     }
   }
   return webglQuarantine.size;
@@ -173,6 +219,7 @@ export function drainWebGLQuarantine(): number {
 /** Test hygiene only: the quarantine outlives terminalCache.clear() by design. */
 export function clearWebGLQuarantine(): void {
   webglQuarantine.clear();
+  quarantineCursor = 0;
 }
 
 /**

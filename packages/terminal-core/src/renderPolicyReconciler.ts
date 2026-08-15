@@ -23,7 +23,12 @@ export interface ReconcileInput {
    * budget. design/010 D8 makes the focused node's promotion unconditional.
    */
   order: string[];
-  /** Injection seams for tests; production omits all three. */
+  /**
+   * Injection seams for tests; production omits ALL FOUR — `setPolicy`, `count`,
+   * `getPolicy` and `drain` (design/013 §5). The count was stale at "three" once
+   * `drain` was added, and a caller following it supplied the advertised three and
+   * still mutated the real quarantine — the exact failure `drain` exists to prevent.
+   */
   setPolicy?: (id: string, want: RenderPolicy) => RenderPolicy;
   count?: () => number;
   /**
@@ -66,10 +71,14 @@ export function reconcileRenderPolicies(
   // the driver recovered. This is the path the quarantine BLOCKS, so it is the
   // path that must give it a chance to clear.
   //
-  // Unthrottled on purpose: `drainWebGLQuarantine` iterates an empty Set — the
-  // only state this has in a healthy session — so the ordinary cost is one
-  // iterator allocation per reconciliation, and a non-empty quarantine is already
-  // a logged, session-degrading condition worth one dispose() retry per pass.
+  // Called on every pass, but its COST is bounded by the drain itself, not by this
+  // caller: in a healthy session the quarantine is empty, and in a degraded one
+  // `drainWebGLQuarantine` retries every newly quarantined addon plus a constant
+  // number of known-wedged ones (review 132 LOW). The earlier justification here —
+  // "bounded by the quarantine's size, itself bounded by the GPU budget" — was
+  // false: the quarantine holds objects that are no longer in the cache and grows
+  // past its own warning threshold on purpose, and outside canvas mode no budget is
+  // armed at all, so N wedged addons meant N throwing dispose() calls per pass.
   //
   // Behind its OWN `drain` seam (review 129 LOW) rather than none at all. Making it
   // unconditional was the mistake: a caller that fakes all three policy/count seams
@@ -80,14 +89,12 @@ export function reconcileRenderPolicies(
   // read, and a caller that fakes the count still usually wants the production
   // drain (that is why the default is the production function).
   //
-  // Unthrottled on purpose: `drainWebGLQuarantine` iterates an empty Set — the only
-  // state this has in a healthy session — so the ordinary cost is one iterator
-  // allocation per reconciliation, and a non-empty quarantine is already a logged,
-  // session-degrading condition worth one dispose() retry per pass. A permanently
-  // wedged addon is retried on every pass, bounded by the quarantine's size (itself
-  // bounded by the GPU budget); no backoff clock is kept, because the recovery test
-  // above depends on the very next reconciliation retrying and a time-based skip
-  // would trade a real recovery guarantee for a handful of try/catch calls.
+  // The throttle lives in the drain rather than here — a per-ADDON retry count, not
+  // a clock — precisely so this call site keeps the guarantee it was added for: a
+  // newly quarantined addon is retried on the very next reconciliation, which is
+  // what "the next pass gives the slot back" means and what the recovery test above
+  // asserts. Only repeat failures are rate-limited, and a clock is still refused:
+  // it would skip the first retry too.
   drain();
 
   // `ids` is Object.keys order. Note it is NOT insertion order for integer-like

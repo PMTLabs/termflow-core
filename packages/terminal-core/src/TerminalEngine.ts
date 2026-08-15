@@ -1060,21 +1060,13 @@ export class TerminalEngine {
   // after the single fatal step of each path (the surface move for a reattach,
   // `term.open()` for a create).
   //
-  // Two exact exceptions before it, both deliberate and neither wiring:
-  //   - `this.container`, which every abort restores;
-  //   - the protocol-state adoption at :1096-1104 (`kbState` / `win32State`).
-  //
-  // The adoption is NOT restored on a refusal, so "exactly as it was" is precise
-  // about wiring and about the cache entry, not literally about every field. It is
-  // benign in both refusal shapes and the reasons differ, so neither is an accident:
-  //   - an ALREADY-MOUNTED engine adopted the very same cached objects at its first
-  //     successful mount, so re-adopting them is an idempotent self-assignment;
-  //   - a FRESH engine only reaches the `win32State.enable()` branch when there is
-  //     no cached state to adopt, and a refused fresh engine is discarded by both
-  //     production callers, so the mutated state dies with it.
-  // If a caller is ever added that RETRIES on the same fresh engine, this stops
-  // being benign — the retry would start with win32 input mode already enabled —
-  // and the adoption must move below the commit point.
+  // Exactly ONE thing changes before it: `this.container`, which every abort
+  // restores. It is unconditional rather than a rule with a list of exceptions —
+  // review 132 found the previous list incomplete twice over, so the two remaining
+  // pre-commit mutations were MOVED below the commit point instead of documented:
+  //   - the cached terminal's font sync, which reverted a live zoom on a refusal;
+  //   - the protocol-state adoption (`kbState` / `win32State`).
+  // Nothing may be added above `beginMountWiring()` that a refusal cannot undo.
   // ---------------------------------------------------------------------------
   mount(container: HTMLElement): boolean {
     // Restored by every abort path below, so a refused mount leaves this engine
@@ -1101,24 +1093,6 @@ export class TerminalEngine {
     // catch below and the reconciliation at the end of mount().
     let reattachFitThrew = false;
 
-    // Adopt enhanced-keyboard-protocol state from a prior mount on this same
-    // cacheKey (review 046/047: TerminalEngine is a fresh JS object per React
-    // mount, so without this a remount permanently loses Kitty/Win32-Input-Mode
-    // state the underlying PTY session already negotiated — ConPTY sends
-    // ?9001h exactly once per session, it never repeats). Must happen before
-    // the CSI handlers below reassign kbState.getScreen, which is safe on an
-    // adopted (pre-existing) instance — it just rebinds the closure.
-    if (cached?.kbState) this.kbState = cached.kbState;
-    if (cached?.win32State) this.win32State = cached.win32State;
-    // …and when there is NO prior mount to adopt from because the whole renderer
-    // restarted (hot-swap update / webview reload) while the PTY session lived
-    // on, seed it from the host instead: that session's ?9001h is long gone from
-    // every stream we can still read (see initialWin32InputMode). Strictly a
-    // first-ever-mount fallback — the adopted state above is first-hand and wins.
-    else if (this.opts.initialWin32InputMode && this.isWindowsPlatform()) {
-      this.win32State.enable();
-    }
-
     const fontSize = this.opts.fontSize ?? DEFAULT_FONT_SIZE;
 
     // --- Reattach path (TerminalDisplay.tsx:251-289) ---
@@ -1127,9 +1101,21 @@ export class TerminalEngine {
       fit = cached.fitAddon;
       search = cached.searchAddon;
 
-      // Keep font size in sync when reusing.
-      if (fontSize) {
-        term.options.fontSize = fontSize;
+      // Validate the whole entry BEFORE the fatal move (review 132 MEDIUM 2). A
+      // malformed entry — a render element but no fitAddon/searchAddon, e.g. one
+      // written by a skewed runtime — used to reach the tail guard at the end of
+      // mount(), which refuses AFTER the commit point: the surface had already been
+      // moved, the old observer disconnected, the disposer arrays emptied and both
+      // cached sweeps consumed, and the refusal restored only `this.container`.
+      // Static typing makes this state abnormal, but the code handles it as a
+      // refusal, so the refusal must honor REFUSAL's contract like every other one.
+      if (!fit || !search) {
+        console.warn(
+          'terminal-core/engine: cached entry is missing its fit/search addon; ' +
+            'refusing the reattach before moving the surface (review 132).',
+        );
+        this.container = previousContainer;
+        return false;
       }
 
       const existingElement = term.element;
@@ -1188,6 +1174,16 @@ export class TerminalEngine {
       // The move succeeded, so the mount is committed: from here on nothing can
       // refuse, and this engine's own wiring may be replaced (review 129).
       this.beginMountWiring();
+
+      // Keep font size in sync when reusing. BELOW the commit point (review 132
+      // MEDIUM 1): this mutates the CACHED, VISIBLE terminal, and it reads
+      // `opts.fontSize`, which `setFontSize()` never updates — so run before the
+      // move it reverted a live 20px zoom to the engine's original 14px on a
+      // terminal that then refused to move at all. Still ahead of the fit below,
+      // whose cell metrics depend on it.
+      if (fontSize) {
+        term.options.fontSize = fontSize;
+      }
 
       // Only now dispose the previous mount's local event handlers, before
       // re-wiring. Guarded per disposer — see runDisposers.
@@ -1568,15 +1564,47 @@ export class TerminalEngine {
       }
     }
 
+    // UNREACHABLE, and TypeScript narrowing only (review 132 MEDIUM 2). Both paths
+    // above now guarantee all three before their commit point: the reattach path
+    // validates the cached entry ahead of the move, and the create path assigns all
+    // three (or refuses in the `term.open()` catch). It THROWS rather than returning
+    // `false` because it sits past both commit points, where a `false` return would
+    // be exactly the post-commit half-mount REFUSAL forbids — a throw at least does
+    // not lie to the caller about what happened.
     if (!term || !fit || !search) {
-      console.error('terminal-core/engine: Failed to create or reuse terminal');
-      this.container = previousContainer;
-      return false;
+      throw new Error(
+        'terminal-core/engine: unreachable — mount() reached its commit point ' +
+          'without a terminal/fit/search addon',
+      );
     }
 
     this.term = term;
     this.fitAddon = fit;
     this.searchAddon = search;
+
+    // Adopt enhanced-keyboard-protocol state from a prior mount on this same
+    // cacheKey (review 046/047: TerminalEngine is a fresh JS object per React
+    // mount, so without this a remount permanently loses Kitty/Win32-Input-Mode
+    // state the underlying PTY session already negotiated — ConPTY sends
+    // ?9001h exactly once per session, it never repeats).
+    //
+    // BELOW both commit points (review 132 MEDIUM 1). It used to run at the top of
+    // mount(), which made it a second pre-commit mutation a refusal did not undo,
+    // and the contract had to be documented with exceptions instead of holding. It
+    // is safe here: nothing between the old position and this line reads either
+    // object, `kbState.getScreen` is (re)assigned further down, and the create
+    // path's CSI handlers read `this.kbState`/`this.win32State` at CALL time — no
+    // byte can be parsed between their registration and this line.
+    if (cached?.kbState) this.kbState = cached.kbState;
+    if (cached?.win32State) this.win32State = cached.win32State;
+    // …and when there is NO prior mount to adopt from because the whole renderer
+    // restarted (hot-swap update / webview reload) while the PTY session lived
+    // on, seed it from the host instead: that session's ?9001h is long gone from
+    // every stream we can still read (see initialWin32InputMode). Strictly a
+    // first-ever-mount fallback — the adopted state above is first-hand and wins.
+    else if (this.opts.initialWin32InputMode && this.isWindowsPlatform()) {
+      this.win32State.enable();
+    }
 
     // --- Event wiring (TerminalDisplay.tsx:425-510) ---
     // Capture into locals so the closures don't depend on `this.term` being
@@ -3870,8 +3898,14 @@ export class TerminalEngine {
     // design 012 §5.5 site 7: the container listeners are a separate array now.
     const containerDisposers = this.containerDisposables.splice(0);
     this.containerDisposables = [];
-    localDisposers.forEach((dispose) => dispose());
-    containerDisposers.forEach((dispose) => dispose());
+    // Guarded per disposer, like the reattach sweeps (review 132 MEDIUM 3). An
+    // unguarded `forEach` let the FIRST thrower skip every later local disposer,
+    // both container disposers, and the rest of this teardown — and because the
+    // arrays were spliced empty in place above, the cache entry no longer holds the
+    // skipped functions, so no later reattach can retry them. They would leak for
+    // the life of the session.
+    TerminalEngine.runDisposers(localDisposers, 'unmount local');
+    TerminalEngine.runDisposers(containerDisposers, 'unmount container');
     this.container = null;
     // Clear the active query AND its decorations. The SearchAddon lives on the
     // cached terminal, so highlights drawn before this unmount would otherwise stay

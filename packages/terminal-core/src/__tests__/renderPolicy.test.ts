@@ -940,3 +940,53 @@ describe('design/013 §5.2 — a stale context-loss handler must not clear a rep
     expect(countActiveWebGLAddons()).toBe(reachable + getQuarantinedWebGLAddonCount());
   });
 });
+
+/**
+ * Review 132 LOW 1 — the drain's synchronous cost per pass must be bounded by a
+ * constant, not by the quarantine's size.
+ *
+ * The declined-backoff rationale claimed the quarantine was bounded by the GPU
+ * budget. It is not: §5.2 says the registry deliberately grows past its warning
+ * threshold, and outside canvas mode no budget is armed at all. N permanently wedged
+ * addons therefore made every reconciliation perform N throwing `dispose()` calls.
+ */
+describe('design/013 §5.2 — bounded quarantine retries (review 132)', () => {
+  const makeWedged = () => {
+    const a = { attempts: 0, dispose() { a.attempts += 1; throw new Error('test: wedged'); } };
+    return a;
+  };
+
+  it('retries a NEWLY quarantined addon on the very next drain, then bounds the work', () => {
+    const wedged = Array.from({ length: 6 }, makeWedged);
+    wedged.forEach((a) => quarantineWebGLAddon(a));
+
+    // Pass 1: every addon is fresh, so every one is retried immediately — this is
+    // the "the very next reconciliation gives the slot back" guarantee.
+    drainWebGLQuarantine();
+    expect(wedged.map((a) => a.attempts)).toEqual([1, 1, 1, 1, 1, 1]);
+
+    // Pass 2+: all six are known-wedged, so the pass does a CONSTANT amount of work
+    // regardless of how many have accumulated.
+    const before = wedged.reduce((n, a) => n + a.attempts, 0);
+    drainWebGLQuarantine();
+    const afterOne = wedged.reduce((n, a) => n + a.attempts, 0);
+    expect(afterOne - before).toBeLessThanOrEqual(2);
+    expect(afterOne - before).toBeGreaterThan(0);
+
+    // …and it is round-robin, not the same two forever: every addon is retried
+    // again within a bounded number of passes.
+    for (let i = 0; i < 6; i += 1) drainWebGLQuarantine();
+    expect(wedged.every((a) => a.attempts >= 2)).toBe(true);
+    expect(getQuarantinedWebGLAddonCount()).toBe(6);
+  });
+
+  it('still releases an addon that recovers, on the pass that reaches it', () => {
+    const stuck = makeWedged();
+    quarantineWebGLAddon(stuck);
+    drainWebGLQuarantine();
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+
+    (stuck as unknown as { dispose: () => void }).dispose = () => {};
+    expect(drainWebGLQuarantine()).toBe(0);
+  });
+});
