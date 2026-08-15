@@ -10,6 +10,16 @@
  * effects ever see the new tab, so the default-seed branch never fires for an
  * API tab. That ordering is load-bearing under option A: this pins it.
  *
+ * Review 109 MEDIUM: the previous version of this test manually wrote
+ * `window.tabPanes` and manually dispatched `addTabTree` BEFORE `addTab` —
+ * the reverse of what App.tsx actually does — so it proved only its own
+ * hand-assembled setup, not Mode 0 itself. It would still have passed if
+ * Mode 0 regressed its tree or its registration key. This version drives the
+ * REAL Mode 0 path via `runApiCreateMode0` (extracted from
+ * `App.tsx handleAPICreateTerminalTab` for exactly this reason) and asserts
+ * both the resulting tree AND that `registerExistingTerminal` was called with
+ * the backend's `tm-` leaf.
+ *
  * Mirrors the repo's RTL-free pattern (react-dom/client + React.act) used by
  * GlobalPeerRequests.test.tsx / SplitPane.test.tsx. PaneManager is mocked out —
  * this test is only about what TREE TerminalContainer hands it, not rendering.
@@ -18,8 +28,9 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
-import tabsReducer, { addTab } from '../../store/slices/tabsSlice';
-import panesReducer, { addTabTree } from '../../store/slices/panesSlice';
+import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
+import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
+import { runApiCreateMode0 } from '../../services/apiCreatedTab';
 
 jest.mock('../TerminalContainer.css', () => ({}));
 jest.mock('../Settings/SettingsPage', () => ({
@@ -57,6 +68,8 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     const existing = (window as any).tabPanes;
     if (existing) {
       Object.keys(existing).forEach((k) => delete existing[k]);
+    } else {
+      (window as any).tabPanes = {};
     }
   });
 
@@ -76,25 +89,47 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     });
   }
 
-  it('renders the backend-minted tm- leaf, not tab.id, for an API-created tab', async () => {
+  it('renders the backend-minted tm- leaf, not tab.id, for an API-created tab — via the REAL Mode 0 path', async () => {
     const store = makeStore();
     const tabId = 'tb-apitab01';
+    const processId = 'pc-proc0001';
     const leafId = 'tm-leaf0001';
-    const seedTree = {
-      id: 'pn-seed01',
-      type: 'terminal' as const,
-      terminalId: leafId,
-      name: 'Terminal',
-      shellType: 'bash',
-    };
 
-    // Mirror App.tsx Mode 0's synchronous sequence: seed window.tabPanes AND
-    // dispatch addTabTree BEFORE the tab itself enters the `tabs` slice, so by
-    // the time TerminalContainer's tab-iterating effects run, both maps are
-    // already populated with the tm- leaf.
-    (window as any).tabPanes[tabId] = seedTree;
-    store.dispatch(addTabTree({ tabId, tree: seedTree }));
-    store.dispatch(addTab({ id: tabId, title: 'Terminal', shellType: 'bash', icon: '🖥️' } as any));
+    const registerExistingTerminal = jest.fn();
+
+    // Drive App.tsx's actual Mode 0 handler (extracted as runApiCreateMode0),
+    // with the SAME dependency shape and ordering App.tsx uses: window map
+    // seeded via `deps.tabPanes`, `addTab` and `addTabTree` dispatched in the
+    // same synchronous call, in that order.
+    const result = runApiCreateMode0(
+      {
+        name: 'Terminal',
+        profile: 'bash',
+        processId,
+        rendererTerminalId: leafId,
+        owningTabId: tabId,
+      },
+      {
+        dispatch: store.dispatch,
+        generateId: (prefix: string) => `${prefix}-generated`,
+        defaultProfile: 'default',
+        registerExistingTerminal,
+        tabPanes: (window as any).tabPanes,
+        tabExists: () => false,
+        activateOnApiCreate: false,
+        tabCount: 1, // non-zero + activateOnApiCreate:false => background tab
+        addTab,
+        addTabTree,
+        setActiveTab,
+        setActiveTabId,
+      },
+    );
+
+    expect(result.targetTabId).toBe(tabId);
+    expect(result.leafId).toBe(leafId);
+    // The registration App.tsx relies on for TerminalPane to reuse the PTY
+    // instead of spawning a duplicate one.
+    expect(registerExistingTerminal).toHaveBeenCalledWith(leafId, processId);
 
     await mount(store);
 
