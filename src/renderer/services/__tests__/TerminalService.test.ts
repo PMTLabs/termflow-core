@@ -83,6 +83,62 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
   });
 });
 
+// Review 109 H1: a re-entrant restart/create for the SAME leaf (double Restart
+// click, Ctrl+R key-repeat while the banner is still up) must not reach the
+// backend twice — two spawns for one leaf register two Terminal rows under
+// the same renderer_terminal_id, breaking the terminal_history PRIMARY KEY.
+describe('TerminalService.createTerminal single-flight per leaf', () => {
+  let createTerminal: jest.Mock;
+  let resolveSpawn: (id: string) => void;
+
+  beforeEach(() => {
+    createTerminal = jest.fn().mockImplementation(
+      () => new Promise<string>((resolve) => { resolveSpawn = resolve; }),
+    );
+    (window as any).electronAPI = {
+      createTerminal,
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  it('coalesces two concurrent creates for the same leaf into one backend spawn', async () => {
+    const p1 = terminalService.createTerminal('tm-singleflight-1', 'default');
+    const p2 = terminalService.createTerminal('tm-singleflight-1', 'default');
+
+    expect(createTerminal).toHaveBeenCalledTimes(1);
+
+    resolveSpawn('pc-singleflight-1');
+    const [id1, id2] = await Promise.all([p1, p2]);
+
+    expect(id1).toBe('pc-singleflight-1');
+    expect(id2).toBe('pc-singleflight-1');
+  });
+
+  it('allows a new create for the same leaf after the prior one settles', async () => {
+    const p1 = terminalService.createTerminal('tm-singleflight-2', 'default');
+    resolveSpawn('pc-singleflight-2a');
+    await p1;
+
+    createTerminal.mockImplementation(
+      () => new Promise<string>((resolve) => { resolveSpawn = resolve; }),
+    );
+    const p2 = terminalService.createTerminal('tm-singleflight-2', 'default');
+    resolveSpawn('pc-singleflight-2b');
+    await p2;
+
+    expect(createTerminal).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the in-flight entry on failure so a retry is not poisoned forever', async () => {
+    createTerminal.mockRejectedValueOnce(new Error('spawn failed'));
+    await expect(terminalService.createTerminal('tm-singleflight-3', 'default')).rejects.toThrow('spawn failed');
+
+    createTerminal.mockResolvedValueOnce('pc-singleflight-3');
+    await expect(terminalService.createTerminal('tm-singleflight-3', 'default')).resolves.toBe('pc-singleflight-3');
+    expect(createTerminal).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('TerminalService.stashPromptGate (backlog 011 hot-swap reattach seed)', () => {
   it('stashes a gate that takePromptGateHandoff drains exactly once', () => {
     terminalService.stashPromptGate('tb-seed-1', { seen: true, armed: false });

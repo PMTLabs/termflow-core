@@ -73,15 +73,46 @@ pub fn get_os_build_number() -> u32 {
 ///
 /// `Some(owner)` exactly when the spawn will register a terminal whose renderer
 /// leaf IS a tab id — the only case that can collide with another creator, since
-/// a `tm-` split leaf is freshly minted and unique by construction. Pure so the
+/// a `tm-*` leaf is freshly minted and unique by construction. Pure so the
 /// decision can be tested without a `tauri::State`.
+///
+/// `tb-*` and `tm-*` are leaf-id FORMS, not tree shapes: `tb-*` is minted for a
+/// renderer-created tab root (leaf == owner), `tm-*` for split panes AND for
+/// every API-created terminal, including one that is the solo root of its tab.
+/// Nothing here infers root/solo/split from a prefix — the reservation turns
+/// only on whether the leaf equals its owner. The one prefix test below is a
+/// best-effort tripwire for owner-less LEGACY payloads, not a shape or owner
+/// derivation; see the comment on that arm.
 fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
     match (tab_id, owning_tab_id) {
-        // A tab root: the leaf IS the owner (design 011 §3).
+        // A renderer-created tab root: the leaf IS the owner (design 011 §3).
+        // Does NOT hold for an API-created root, whose leaf is a `tm-*` owned
+        // by a different `tb-*` id — that case has no `tab_id`/`owning_tab_id`
+        // pair equal to each other and falls through to the arms below.
         (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
-        // A renderer that predates P0-A sends no owner; a `tb-` leaf is a root.
+        // A renderer that predates P0-A sends no owner, so there is nothing to
+        // test `leaf == owner` against. This arm is a BEST-EFFORT LEAF-COLLISION
+        // TRIPWIRE, not an owner derivation: it reserves under the leaf id itself
+        // purely so two creates racing on the SAME `tb-*` leaf are noticed.
+        //
+        // It does NOT establish that the leaf is a root, is solo, or equals its
+        // owner. A `tb-*` leaf keeps its id when its pane is MOVED into another
+        // tab (see `services/__tests__/externalActivity.test.ts` — `tb-source001`
+        // living as a child under `tb-target007`), and an owner-less legacy
+        // payload cannot tell a moved leaf from an unmoved root. So this can
+        // reserve `tb-source001` while the real owner is `tb-target007` — a
+        // FALSE reservation.
+        //
+        // That is tolerable ONLY because the claim is non-enforcing today: it
+        // just logs, and since option A the REST/API path does not take claims at
+        // all, so the worst outcome is a spurious contention warning.
+        //
+        // WARNING: if the claim is ever made ENFORCING (blocking or coalescing a
+        // spawn), THIS ARM MUST BE REVISITED FIRST — a false reservation would
+        // then stall or misroute an unrelated create.
         (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
-        // A split leaf, or no leaf at all — nothing to reserve.
+        // A `tm-*` leaf (split pane or API-created terminal, root or not), or no
+        // leaf at all — freshly minted and unique, so nothing to reserve.
         _ => None,
     }
 }
@@ -95,7 +126,10 @@ pub async fn create_terminal(
     cwd: Option<String>,
     tab_id: Option<String>,
     // The tab that owns the pane `tab_id` names. Equal to `tab_id` for a
-    // root/solo pane. Optional so a renderer that predates P0-A still works.
+    // RENDERER-created root/solo pane (this command's own caller). NOT equal
+    // for an API-created tab's root — its pane leaf is a `tm-*` minted by
+    // `resolve_api_spawn_identity`, distinct from `owning_tab_id` (option A).
+    // Optional so a renderer that predates P0-A still works.
     owning_tab_id: Option<String>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
@@ -138,12 +172,24 @@ pub async fn create_terminal(
     // returns `None` and it correctly mints a `tm-` split leaf instead.
     //
     // We claim but never REFUSE on contention: this call is a user action on a
-    // pane that already exists and owns its leaf, so it must not fail. The
-    // reverse ordering — a REST create winning the claim and committing to `tb-a`
-    // before this spawn registers — is therefore still open, and closing it is a
-    // design question (which creator wins a contested root leaf), not a lock:
-    // see docs/progress/010 for the options. The warning below is what makes that
-    // window observable instead of silent.
+    // pane that already exists and owns its leaf, so it must not fail.
+    //
+    // The reverse ordering — a REST create winning the claim and committing to
+    // `tb-a` before this spawn registers — used to be open, and is now CLOSED by
+    // construction (design 011, option A): `resolve_api_spawn_identity` never takes
+    // a caller-supplied tab's root leaf at all, it always mints a `tm-`. So this is
+    // the only path that can ever claim a `tb-` root leaf, and there is nobody left
+    // to contend with.
+    //
+    // The claim is NOT a lock: `try_claim` returning `None` on contention only
+    // logs the warning below and this call still proceeds to spawn. It does not
+    // serialise this path against itself, and a re-entrant renderer call (e.g. a
+    // double Restart click) still reaches `spawn_terminal` twice. Review 109 H1:
+    // the real fix for that is a single-flight guard on the RENDERER side, keyed
+    // by leaf id (see `TerminalService.createTerminal`), which this call trusts
+    // to have already prevented a second in-flight create for the same leaf from
+    // reaching here. This claim remains a tripwire that turns a contested
+    // ordering into an observable log line, not an enforcement mechanism.
     let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
     // Held to the end of this command (and dropped on the sidecar path's early
     // return) — releasing it before `spawn_terminal` has registered would reopen
@@ -251,9 +297,13 @@ pub fn adopt_console_window(
 /// covers every reparent path — same-window drag, cross-window drop, detached
 /// window boot — rather than only fresh process binding.
 ///
-/// `renderer_terminal_id` is the LEAF (`tb-*` root, `tm-*` split), not the
-/// process id: the leaf is what the pane tree holds and it is unique per live
-/// pane (design 011 §3, D7). Best-effort like `adopt_console_window` — an
+/// `renderer_terminal_id` is the LEAF, not the process id: the leaf is what the
+/// pane tree holds and it is unique per live pane (design 011 §3, D7). It comes
+/// in two id FORMS, describing who minted the leaf and NOT the pane's shape:
+/// `tb-*` for a renderer-created tab root, `tm-*` for split panes AND for every
+/// API-created terminal, including a solo root. Root/solo/split is determined
+/// only by the pane-tree structure, never by the prefix — and a leaf keeps its
+/// id when moved, which is exactly why this command exists. Best-effort like `adopt_console_window` — an
 /// unmatched leaf is not an error, since the renderer fires this off its own
 /// tree lifecycle and a pane's PTY may not exist (yet, or any more).
 #[tauri::command]
@@ -2418,8 +2468,11 @@ mod root_leaf_reservation_tests {
 
     #[test]
     fn a_tab_root_reserves_its_own_id() {
-        // leaf == owner is the definition of a tab root (design 011 §3), and it
-        // is the only shape the REST path can also decide to take.
+        // `leaf == owner` is the shape a RENDERER-created tab root takes (it
+        // reuses the tab id as its root leaf), which is all this reservation
+        // covers. It says nothing about root-vs-split in general — that is the
+        // renderer pane tree's structure — and the REST path can never produce
+        // this shape: option A always mints a fresh `tm-*` leaf.
         assert_eq!(
             root_leaf_owner_to_reserve(Some("tb-a1b2c3"), Some("tb-a1b2c3")),
             Some("tb-a1b2c3".to_string()),
@@ -2439,7 +2492,9 @@ mod root_leaf_reservation_tests {
     #[test]
     fn a_pre_p0a_renderer_sending_no_owner_still_reserves_a_tb_leaf() {
         // `owning_tab_id` is Optional precisely so an older renderer keeps
-        // working; a `tb-` leaf from one of those IS a tab root.
+        // working. With no owner to compare against, the `tb-` prefix is used as
+        // a best-effort LEAF-COLLISION tripwire — it does NOT prove the leaf is a
+        // root, is solo, or equals its owner. See the moved-leaf test below.
         assert_eq!(
             root_leaf_owner_to_reserve(Some("tb-a1b2c3"), None),
             Some("tb-a1b2c3".to_string()),
@@ -2449,17 +2504,45 @@ mod root_leaf_reservation_tests {
     }
 
     #[test]
-    fn the_renderer_and_the_rest_path_cannot_both_hold_one_owner() {
-        // The whole point of F1's fix: these two paths now contend for the SAME
-        // map, so whichever gets there first excludes the other. Before the fix
-        // the renderer path never touched this map at all, so both could commit
-        // to the same live leaf.
+    fn a_moved_tb_leaf_without_an_owner_reserves_the_wrong_id_by_design() {
+        // PINS KNOWN-IMPRECISE BEHAVIOUR, NOT A DESIRED INVARIANT (review LOW).
+        //
+        // A renderer-created root leaf keeps its `tb-*` id when its pane is moved
+        // into another tab (`services/__tests__/externalActivity.test.ts` has
+        // `tb-source001` living as a child under `tb-target007`). An owner-less
+        // legacy payload carries no way to tell that moved leaf from an unmoved
+        // root, so the tripwire arm reserves the LEAF id even though the true
+        // owner is a different tab.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-source001"), None),
+            Some("tb-source001".to_string()),
+            "documented false reservation: the real owner is tb-target007",
+        );
+        // Contrast: once the owner IS supplied, the mismatch is visible and
+        // nothing is reserved — the modern payload has no such imprecision.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-source001"), Some("tb-target007")),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_second_claim_on_the_same_owner_is_refused_until_the_first_is_released() {
+        // Review 109 LOW: this proves only what `RootLeafClaims` itself does —
+        // the SECOND `try_claim` for a live owner returns `None` until the first
+        // is dropped. It is NOT a proof that `commands::create_terminal` refuses
+        // or coalesces a second spawn on `None` — it does not; see the comment
+        // there. And since option A, the REST/API path never calls `try_claim`
+        // at all (`resolve_api_spawn_identity` mints a fresh `tm-` unconditionally),
+        // so this is exclusively a renderer-vs-renderer scenario now (e.g. two
+        // re-entrant restarts of the same tab root — review 109 H1), not a
+        // renderer-vs-REST one.
         let claims: Arc<RootLeafClaims> = Arc::new(RootLeafClaims::default());
         let renderer = claims.try_claim("tb-a1b2c3");
         assert!(renderer.is_some(), "the first creator reserves the owner");
         assert!(
             claims.try_claim("tb-a1b2c3").is_none(),
-            "a concurrent REST create must be refused and mint a tm- split leaf",
+            "a concurrent claim on the same owner is refused",
         );
         drop(renderer);
         assert!(

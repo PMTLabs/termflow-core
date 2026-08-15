@@ -66,7 +66,13 @@ module.exports = {
   // Ignore patterns
   testPathIgnorePatterns: [
     '/node_modules/',
-    '/\\.claude/',  // worktrees — see modulePathIgnorePatterns above
+    // Worktrees — see modulePathIgnorePatterns above. MUST be <rootDir>-anchored:
+    // a bare '/\\.claude/' is matched against the ABSOLUTE path, so running jest
+    // from INSIDE a worktree (whose own path contains /.claude/) ignored every one
+    // of its tests and reported "No tests found". Anchored, it excludes a nested
+    // worktree when run from the main repo and excludes nothing when run from
+    // within the worktree itself, which is what both callers need.
+    '<rootDir>/\\.claude/',
     '/dist/',
     '/build/',
     '/tests/e2e/',
