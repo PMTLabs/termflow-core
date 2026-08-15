@@ -2433,8 +2433,11 @@ mod root_leaf_reservation_tests {
 
     #[test]
     fn a_tab_root_reserves_its_own_id() {
-        // leaf == owner is the definition of a tab root (design 011 §3), and it
-        // is the only shape the REST path can also decide to take.
+        // `leaf == owner` is the shape a RENDERER-created tab root takes (it
+        // reuses the tab id as its root leaf), which is all this reservation
+        // covers. It says nothing about root-vs-split in general — that is the
+        // renderer pane tree's structure — and the REST path can never produce
+        // this shape: option A always mints a fresh `tm-*` leaf.
         assert_eq!(
             root_leaf_owner_to_reserve(Some("tb-a1b2c3"), Some("tb-a1b2c3")),
             Some("tb-a1b2c3".to_string()),

@@ -100,9 +100,13 @@ class TerminalServiceClass {
     cwd?: string,
     cols?: number,
     rows?: number,
-    /** The tab that owns this pane. Equal to `terminalId` for a tab root; the
-     *  owning `tb-` id for a split (`tm-`) pane. Design 011 §6: the backend
-     *  cannot derive it — ownership lives only in `panes.treesByTabId`. */
+    /** The `tb-` id of the tab that owns this pane — always a SEPARATE identity
+     *  from `terminalId`, never assumed equal to it. It coincides only for a
+     *  renderer-created tab whose root leaf reuses the tab id; an API-created
+     *  tab's root leaf is a minted `tm-*`, so its owner differs even though the
+     *  pane IS that tab's root. Root-vs-split is tree structure, not an id
+     *  relationship. Design 011 §6: the backend cannot derive this — ownership
+     *  lives only in `panes.treesByTabId`. */
     owningTabId?: string,
   ): Promise<string> {
     // Re-entrant call for the same leaf while a create is already pending:

@@ -67,9 +67,14 @@ pub struct Terminal {
     /// preserves `tab_id` in both directions (design 011 §6).
     #[serde(rename = "tab_id")]
     pub renderer_terminal_id: Option<String>,
-    /// The **tab** that owns the pane above. Equal to `renderer_terminal_id`
-    /// for a root/solo pane; different for a split. `None` when unknown (a
-    /// headless spawn, or a client that predates P0-A).
+    /// The **tab** that owns the pane above. This is a SEPARATE identity from
+    /// `renderer_terminal_id` and must never be assumed equal to it: it happens
+    /// to match only for a renderer-created tab whose root leaf reuses the tab
+    /// id, and is different for every API-created tab (option A always mints a
+    /// fresh `tm-*` leaf) and for a detached pane. Never resolve a terminal
+    /// through `owning_tab_id` — only the renderer's pane TREE says which leaf
+    /// a tab currently shows. `None` when unknown (a headless spawn, or a
+    /// client that predates P0-A).
     ///
     /// NEW in P0-A: the backend had no notion of tab ownership at all before —
     /// it lived only in the renderer's `panesSlice.treesByTabId`.
@@ -121,17 +126,17 @@ fn default_terminal_rows() -> u16 {
 pub struct RootLeafClaims(DashMap<String, ()>);
 
 impl RootLeafClaims {
-    /// Reserve `owner` for this create, or return `None` because another create
-    /// is already mid-flight for it (that one is the tab root; this one is a
-    /// split and must mint a fresh `tm-` leaf).
+    /// Record that a create is in flight for `owner`, or return `None` because
+    /// one already is.
     ///
-    /// ORDER MATTERS: callers must claim FIRST and scan `terminals` SECOND.
-    /// Scanning first would leave the same hole one notch narrower — A scans
-    /// empty, A registers, A releases, B claims (now free) and B still believes
-    /// the tab is empty from its stale scan. Claiming first closes it: a claim
-    /// only becomes free again *after* the winner's `Terminal` is visible in
-    /// `terminals`, so whoever claims next either sees it and splits, or is
-    /// genuinely first.
+    /// NON-ENFORCING: `None` does not block, redirect, or change the shape of
+    /// the create. The only caller (the RENDERER path in
+    /// `commands::create_terminal`) logs a warning and proceeds. Nothing here
+    /// decides root-vs-split — that is purely the renderer pane tree's
+    /// structure — and there is no accompanying `terminals` scan any more.
+    /// Treat this as a diagnostic tripwire for concurrent renderer creates into
+    /// one tab; the actual serialization is the renderer-side single-flight
+    /// guard in `TerminalService.createTerminal`.
     pub fn try_claim(self: &Arc<Self>, owner: &str) -> Option<RootLeafClaim> {
         // `insert` returns the PREVIOUS value: `None` means we are the ones who
         // put it there. One atomic shard operation — a `contains_key` followed
@@ -151,10 +156,10 @@ impl RootLeafClaims {
 /// RAII release for a `RootLeafClaims` reservation.
 ///
 /// Drop, not an explicit release call, so an early `return`/`?` on any spawn
-/// failure path cannot leak the claim. A leaked claim is degraded-but-safe
-/// (every later create into that tab mints a `tm-` leaf instead of reusing the
-/// tab id); releasing it too EARLY is the unsafe direction, so hold it until
-/// `spawn_terminal` has returned.
+/// failure path cannot leak the claim. A leaked claim is harmless — the claim
+/// never gates anything, so the worst case is a spurious contention warning on
+/// the next create into that tab. Held until `spawn_terminal` has returned so
+/// the tripwire covers the whole in-flight window.
 pub struct RootLeafClaim {
     owner: String,
     claims: Arc<RootLeafClaims>,
