@@ -87,6 +87,72 @@ fn default_terminal_rows() -> u16 {
     24
 }
 
+/// Owners (`tb-*` tab ids) with an **in-flight root-leaf claim**: an API create
+/// has decided to take that tab id as its pane leaf but has not registered its
+/// `Terminal` yet.
+///
+/// This exists because the leaf-uniqueness rule (design 011 §3, D7) is decided
+/// from a READ of `terminals` while the write that would make it true happens
+/// much later: `spawn_terminal` registers the `Terminal` LAST, after the PTY,
+/// writer and screen parser are in place (`pty_manager.rs:862-871` — that order
+/// is load-bearing for the close/delete existence gate and must not be moved).
+/// Axum serves requests in parallel, so two POSTs naming the same empty tab both
+/// scanned "unoccupied" and both took the tab id as their leaf — the exact
+/// collision P0-A removes (external review 099, T2-F1).
+///
+/// The fix reserves the OWNER, not the leaf, for that window: the claim is taken
+/// ATOMICALLY (a single `DashMap::insert`, never contains-then-insert) BEFORE
+/// the `terminals` scan, and released only once registration has happened or the
+/// spawn has failed. See `try_claim` for the ordering argument.
+#[derive(Default)]
+pub struct RootLeafClaims(DashMap<String, ()>);
+
+impl RootLeafClaims {
+    /// Reserve `owner` for this create, or return `None` because another create
+    /// is already mid-flight for it (that one is the tab root; this one is a
+    /// split and must mint a fresh `tm-` leaf).
+    ///
+    /// ORDER MATTERS: callers must claim FIRST and scan `terminals` SECOND.
+    /// Scanning first would leave the same hole one notch narrower — A scans
+    /// empty, A registers, A releases, B claims (now free) and B still believes
+    /// the tab is empty from its stale scan. Claiming first closes it: a claim
+    /// only becomes free again *after* the winner's `Terminal` is visible in
+    /// `terminals`, so whoever claims next either sees it and splits, or is
+    /// genuinely first.
+    pub fn try_claim(self: &Arc<Self>, owner: &str) -> Option<RootLeafClaim> {
+        // `insert` returns the PREVIOUS value: `None` means we are the ones who
+        // put it there. One atomic shard operation — a `contains_key` followed
+        // by an `insert` would reintroduce the very race this closes.
+        self.0.insert(owner.to_string(), ()).is_none().then(|| RootLeafClaim {
+            owner: owner.to_string(),
+            claims: Arc::clone(self),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn is_claimed(&self, owner: &str) -> bool {
+        self.0.contains_key(owner)
+    }
+}
+
+/// RAII release for a `RootLeafClaims` reservation.
+///
+/// Drop, not an explicit release call, so an early `return`/`?` on any spawn
+/// failure path cannot leak the claim. A leaked claim is degraded-but-safe
+/// (every later create into that tab mints a `tm-` leaf instead of reusing the
+/// tab id); releasing it too EARLY is the unsafe direction, so hold it until
+/// `spawn_terminal` has returned.
+pub struct RootLeafClaim {
+    owner: String,
+    claims: Arc<RootLeafClaims>,
+}
+
+impl Drop for RootLeafClaim {
+    fn drop(&mut self) {
+        self.claims.0.remove(&self.owner);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ChannelPayload {
     pub id: String,
@@ -127,6 +193,11 @@ pub struct AppState<R: Runtime = Wry> {
     // managed state and all task clones see the same value.
     pub pending_open_path: Arc<std::sync::Mutex<Option<String>>>,
     pub terminals: Arc<DashMap<String, Terminal>>,
+    // Tabs whose root leaf is claimed by an API create that has not registered
+    // its `Terminal` yet. Closes the decision→registration window in which two
+    // concurrent creates could both take a tab's id as their pane leaf (review
+    // 099 T2-F1). See `RootLeafClaims`.
+    pub root_leaf_claims: Arc<RootLeafClaims>,
     // Values are Arc'd so PTY write paths clone the Arc and DROP the DashMap
     // shard guard before locking the inner Mutex. Holding a shard guard across
     // the send/probe `.await` sleeps (up to ~48 s) blocked any insert/remove on
@@ -298,6 +369,7 @@ impl<R: Runtime> Clone for AppState<R> {
         Self {
             pending_open_path: self.pending_open_path.clone(),
             terminals: self.terminals.clone(),
+            root_leaf_claims: self.root_leaf_claims.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
             ptys: self.ptys.clone(),
             output_tx: self.output_tx.clone(),
@@ -385,6 +457,7 @@ impl<R: Runtime> AppState<R> {
         Self {
             pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
+            root_leaf_claims: Arc::new(RootLeafClaims::default()),
             shell_writer_channels: Arc::new(DashMap::new()),
             ptys: Arc::new(DashMap::new()),
             output_tx,
