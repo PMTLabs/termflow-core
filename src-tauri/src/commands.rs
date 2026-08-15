@@ -80,7 +80,9 @@ pub fn get_os_build_number() -> u32 {
 /// renderer-created tab root (leaf == owner), `tm-*` for split panes AND for
 /// every API-created terminal, including one that is the solo root of its tab.
 /// Nothing here infers root/solo/split from a prefix — the reservation turns
-/// only on whether the leaf equals its owner.
+/// only on whether the leaf equals its owner. The one prefix test below is a
+/// best-effort tripwire for owner-less LEGACY payloads, not a shape or owner
+/// derivation; see the comment on that arm.
 fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
     match (tab_id, owning_tab_id) {
         // A renderer-created tab root: the leaf IS the owner (design 011 §3).
@@ -88,9 +90,26 @@ fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>)
         // by a different `tb-*` id — that case has no `tab_id`/`owning_tab_id`
         // pair equal to each other and falls through to the arms below.
         (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
-        // A renderer that predates P0-A sends no owner. Such a renderer only
-        // ever minted `tb-*` for a tab root it also owns, so the prefix is a
-        // sound proxy for leaf == owner in that legacy payload shape alone.
+        // A renderer that predates P0-A sends no owner, so there is nothing to
+        // test `leaf == owner` against. This arm is a BEST-EFFORT LEAF-COLLISION
+        // TRIPWIRE, not an owner derivation: it reserves under the leaf id itself
+        // purely so two creates racing on the SAME `tb-*` leaf are noticed.
+        //
+        // It does NOT establish that the leaf is a root, is solo, or equals its
+        // owner. A `tb-*` leaf keeps its id when its pane is MOVED into another
+        // tab (see `services/__tests__/externalActivity.test.ts` — `tb-source001`
+        // living as a child under `tb-target007`), and an owner-less legacy
+        // payload cannot tell a moved leaf from an unmoved root. So this can
+        // reserve `tb-source001` while the real owner is `tb-target007` — a
+        // FALSE reservation.
+        //
+        // That is tolerable ONLY because the claim is non-enforcing today: it
+        // just logs, and since option A the REST/API path does not take claims at
+        // all, so the worst outcome is a spurious contention warning.
+        //
+        // WARNING: if the claim is ever made ENFORCING (blocking or coalescing a
+        // spawn), THIS ARM MUST BE REVISITED FIRST — a false reservation would
+        // then stall or misroute an unrelated create.
         (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
         // A `tm-*` leaf (split pane or API-created terminal, root or not), or no
         // leaf at all — freshly minted and unique, so nothing to reserve.
@@ -2469,13 +2488,38 @@ mod root_leaf_reservation_tests {
     #[test]
     fn a_pre_p0a_renderer_sending_no_owner_still_reserves_a_tb_leaf() {
         // `owning_tab_id` is Optional precisely so an older renderer keeps
-        // working; a `tb-` leaf from one of those IS a tab root.
+        // working. With no owner to compare against, the `tb-` prefix is used as
+        // a best-effort LEAF-COLLISION tripwire — it does NOT prove the leaf is a
+        // root, is solo, or equals its owner. See the moved-leaf test below.
         assert_eq!(
             root_leaf_owner_to_reserve(Some("tb-a1b2c3"), None),
             Some("tb-a1b2c3".to_string()),
         );
         assert_eq!(root_leaf_owner_to_reserve(Some("tm-9f2c1a4"), None), None);
         assert_eq!(root_leaf_owner_to_reserve(None, None), None);
+    }
+
+    #[test]
+    fn a_moved_tb_leaf_without_an_owner_reserves_the_wrong_id_by_design() {
+        // PINS KNOWN-IMPRECISE BEHAVIOUR, NOT A DESIRED INVARIANT (review LOW).
+        //
+        // A renderer-created root leaf keeps its `tb-*` id when its pane is moved
+        // into another tab (`services/__tests__/externalActivity.test.ts` has
+        // `tb-source001` living as a child under `tb-target007`). An owner-less
+        // legacy payload carries no way to tell that moved leaf from an unmoved
+        // root, so the tripwire arm reserves the LEAF id even though the true
+        // owner is a different tab.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-source001"), None),
+            Some("tb-source001".to_string()),
+            "documented false reservation: the real owner is tb-target007",
+        );
+        // Contrast: once the owner IS supplied, the mismatch is visible and
+        // nothing is reserved — the modern payload has no such imprecision.
+        assert_eq!(
+            root_leaf_owner_to_reserve(Some("tb-source001"), Some("tb-target007")),
+            None,
+        );
     }
 
     #[test]
