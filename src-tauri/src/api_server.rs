@@ -351,7 +351,12 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 ///
 /// Key contract (design 011 §4), all of it load-bearing for existing clients:
 ///   `id` / `processId` — the PTY routing key. Unchanged.
-///   `terminalId`       — the renderer LEAF (`tb-*` root, `tm-*` split).
+///   `terminalId`       — the renderer LEAF. Two id FORMS, describing who minted
+///                        the leaf and NOT the pane's shape: `tb-*` for a
+///                        renderer-created tab root (leaf == owner), `tm-*` for
+///                        split panes AND for every API-created terminal,
+///                        including a solo root. Root/solo/split is determined
+///                        only by the pane-tree structure, never by the prefix.
 ///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
 ///                        so no existing API/MCP client breaks. Removing it is
 ///                        a major-version change, explicitly not done here.

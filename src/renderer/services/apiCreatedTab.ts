@@ -54,7 +54,12 @@ export function buildApiCreatedTab(options: ApiCreatedTabOptions): ApiCreatedTab
 export interface ApiCreateIds {
   /** Backend PTY id (`pc-*`) to bind the pane to. */
   processId?: string;
-  /** Renderer pane-tree leaf (`tb-*` root, `tm-*` split). */
+  /**
+   * Renderer pane-tree leaf. Two id FORMS, describing who minted the leaf and
+   * NOT the pane's shape: `tb-*` for a renderer-created tab root (leaf ==
+   * owner), `tm-*` for split panes AND for every API-created terminal,
+   * including a solo root. Root/solo/split comes only from the pane tree.
+   */
   leafId?: string;
   /** The tab that owns the leaf (`tb-*`). */
   owningTabId?: string;

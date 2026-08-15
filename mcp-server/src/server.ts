@@ -60,8 +60,13 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 "Spawn a new terminal process (supports split panel layout). Terminal ids come " +
                 "in three flavours and are NOT interchangeable: `terminalId`/`processId` (`pc-…`) " +
                 "addresses the PTY for every other tool; `owningTabId` (`tb-…`) names a TAB; and " +
-                "the `terminalId` field of a terminal-detail response is the renderer PANE " +
-                "(`tb-…` for a solo pane, `tm-…` for a split).",
+                "the `terminalId` field of a terminal-detail response is the renderer PANE leaf. " +
+                "That leaf id has two FORMS, which describe who minted it, NOT the pane's shape: " +
+                "`tb-…` is minted for a renderer-created tab root (leaf == owning tab), `tm-…` is " +
+                "minted for split panes AND for every API-created terminal, including one that is " +
+                "the solo root of its own tab. Never infer root/solo/split from the prefix — a " +
+                "`tm-…` leaf is very often a solo root. Use `owningTabId` for tab identity and the " +
+                "pane-tree structure for shape.",
             inputSchema: {
                 name: z.string().optional().describe("Name of the terminal session"),
                 profile: z.string().optional().describe("Shell profile ID (e.g., 'powershell', 'cmd', 'git-bash'). Defaults to system default."),

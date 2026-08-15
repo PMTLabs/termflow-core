@@ -73,8 +73,14 @@ pub fn get_os_build_number() -> u32 {
 ///
 /// `Some(owner)` exactly when the spawn will register a terminal whose renderer
 /// leaf IS a tab id — the only case that can collide with another creator, since
-/// a `tm-` split leaf is freshly minted and unique by construction. Pure so the
+/// a `tm-*` leaf is freshly minted and unique by construction. Pure so the
 /// decision can be tested without a `tauri::State`.
+///
+/// `tb-*` and `tm-*` are leaf-id FORMS, not tree shapes: `tb-*` is minted for a
+/// renderer-created tab root (leaf == owner), `tm-*` for split panes AND for
+/// every API-created terminal, including one that is the solo root of its tab.
+/// Nothing here infers root/solo/split from a prefix — the reservation turns
+/// only on whether the leaf equals its owner.
 fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
     match (tab_id, owning_tab_id) {
         // A renderer-created tab root: the leaf IS the owner (design 011 §3).
@@ -82,9 +88,12 @@ fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>)
         // by a different `tb-*` id — that case has no `tab_id`/`owning_tab_id`
         // pair equal to each other and falls through to the arms below.
         (Some(leaf), Some(owner)) if leaf == owner => Some(owner.to_string()),
-        // A renderer that predates P0-A sends no owner; a `tb-` leaf is a root.
+        // A renderer that predates P0-A sends no owner. Such a renderer only
+        // ever minted `tb-*` for a tab root it also owns, so the prefix is a
+        // sound proxy for leaf == owner in that legacy payload shape alone.
         (Some(leaf), None) if leaf.starts_with("tb-") => Some(leaf.to_string()),
-        // A split leaf, or no leaf at all — nothing to reserve.
+        // A `tm-*` leaf (split pane or API-created terminal, root or not), or no
+        // leaf at all — freshly minted and unique, so nothing to reserve.
         _ => None,
     }
 }
