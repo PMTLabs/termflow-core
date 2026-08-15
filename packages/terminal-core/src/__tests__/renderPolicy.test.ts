@@ -25,6 +25,7 @@ import {
   getQuarantinedWebGLAddonCount,
   drainWebGLQuarantine,
   clearWebGLQuarantine,
+  quarantineWebGLAddon,
 } from '../renderPolicy';
 import {
   terminalCache,
@@ -819,5 +820,55 @@ describe('design/013 D4 — global disable must not erase a possibly-live addon'
     expect(countActiveWebGLAddons()).toBe(0);
 
     setWebGLGloballyDisabled(false);
+  });
+});
+
+/**
+ * Review 126 HIGH — a quarantined addon's context-loss handler must not mutate its
+ * REPLACEMENT. The handler closes over `terminalId`, not over cache ownership, so
+ * it outlives the addon's tenure. The quarantine made that reachable by design: A
+ * fails to dispose and is quarantined, the same terminal is later promoted onto B,
+ * then A reports context loss. Unguarded, A's handler cleared B from the cache and
+ * bumped B's generation — B live but unreachable — and a later drain of A dropped
+ * the count to zero while B still held a context.
+ */
+describe('design/013 §5.2 — a stale context-loss handler must not clear a replacement', () => {
+  it('leaves the replacement addon reachable and keeps live == reachable + quarantined', () => {
+    const { entry } = makeEntry('stale-ctxloss');
+
+    // Promote onto addon A, capturing A's handler and making its dispose throw so
+    // the create/demote path has to quarantine it.
+    setTerminalRenderPolicy('stale-ctxloss', 'webgl');
+    const addonA = asMock(entry.webglAddon);
+    const handlerA = MockWebgl.lastContextLossHandler!;
+    expect(handlerA).toBeTruthy();
+    addonA.dispose = () => { throw new Error('test: A refuses disposal'); };
+
+    // Demotion fails, so A stays owned and counted.
+    setTerminalRenderPolicy('stale-ctxloss', 'dom');
+    quarantineWebGLAddon(addonA as never);
+    entry.webglAddon = null;
+    entry.useWebGL = false;
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+
+    // The same terminal is promoted again — onto a fresh addon B.
+    setTerminalRenderPolicy('stale-ctxloss', 'webgl');
+    const addonB = asMock(entry.webglAddon);
+    expect(addonB).not.toBe(addonA);
+    const genBefore = entry.nonCanvasPolicyGeneration ?? 0;
+
+    // Now A's context is lost, long after A stopped owning the cache slot.
+    handlerA();
+
+    // B must survive untouched: still cached, still counted, generation not bumped.
+    expect(entry.webglAddon).toBe(addonB as never);
+    expect(entry.nonCanvasPolicyGeneration ?? 0).toBe(genBefore);
+    // A is released from quarantine — the GPU took its context back, so counting it
+    // any longer would permanently shrink the budget.
+    expect(getQuarantinedWebGLAddonCount()).toBe(0);
+
+    const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
+    expect(reachable).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(reachable + getQuarantinedWebGLAddonCount());
   });
 });

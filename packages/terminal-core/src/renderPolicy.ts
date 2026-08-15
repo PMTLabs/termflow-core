@@ -133,6 +133,21 @@ export function getQuarantinedWebGLAddonCount(): number {
 }
 
 /**
+ * Release ONE addon, for the case where its context is known to be gone by other
+ * means than our dispose() succeeding — today, the addon reporting context loss.
+ * The GPU has taken the context back, so continuing to count it would permanently
+ * overstate usage and shrink the budget for the rest of the session.
+ *
+ * Deliberately not a general "forget this" escape hatch: everything else must go
+ * through `drainWebGLQuarantine`, which only releases on a dispose() that actually
+ * succeeded. Releasing on anything weaker is how the under-count comes back.
+ */
+export function releaseFromWebGLQuarantine(addon: DisposableAddon | null | undefined): void {
+  if (!addon) return;
+  webglQuarantine.delete(addon);
+}
+
+/**
  * Retry every quarantined addon and release the ones that finally dispose — a driver
  * hiccup must not tax the budget for the life of the session. Returns how many are
  * still held. Called opportunistically from disposeOrphanedWebGLAddon (the one path

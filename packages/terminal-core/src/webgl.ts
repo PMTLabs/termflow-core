@@ -2,7 +2,7 @@ import type { Terminal } from '@xterm/xterm';
 import { WebglAddon } from '@xterm/addon-webgl';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { terminalCache } from './cache';
-import { quarantineWebGLAddon } from './renderPolicy';
+import { quarantineWebGLAddon, releaseFromWebGLQuarantine } from './renderPolicy';
 
 // Track global WebGL failure - if one terminal fails, disable for all new terminals.
 // WebGL is the default renderer: it draws box-drawing/block glyphs as CUSTOM GLYPHS
@@ -51,9 +51,22 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
         // Ignore disposal errors
       }
 
-      // Update cache to reflect WebGL is no longer active
+      // Update cache to reflect WebGL is no longer active — but ONLY if the cache
+      // still holds THIS addon.
+      //
+      // The handler closes over `terminalId`, not over cache ownership, so it can
+      // outlive the addon's tenure. That became reachable by design once the
+      // quarantine let a failed-disposal addon survive its entry (review 126):
+      // addon A is quarantined, the same terminal is later promoted onto addon B,
+      // then A reports context loss. Without this check A's handler would clear B
+      // from the cache and bump B's generation, leaving B live but unreachable —
+      // and a later drain of A would then drop the count to zero while B still
+      // holds a context, letting the next allocation exceed the real budget.
+      //
+      // A stale handler must never mutate a replacement. Disposing A above is
+      // still correct: that is A's own context, and dispose() is idempotent.
       const cached = terminalCache.get(terminalId);
-      if (cached) {
+      if (cached && cached.webglAddon === addon) {
         cached.webglAddon = null;
         cached.useWebGL = false;
         // design/013 D6: a NON-Canvas policy change. Bumping this invalidates any
@@ -61,6 +74,10 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
         // this terminal back onto a context the GPU just took away (review 124).
         cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
       }
+      // The context is gone, so whatever we were unable to free before is now moot
+      // for THIS addon: release it from quarantine so a driver hiccup does not tax
+      // the budget forever. Only this addon — never the whole registry.
+      releaseFromWebGLQuarantine(addon);
     });
 
     term.loadAddon(addon);
