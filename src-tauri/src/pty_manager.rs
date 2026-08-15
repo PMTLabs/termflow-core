@@ -862,7 +862,8 @@ pub fn spawn_terminal(
         cols,
         rows,
         backend: TerminalBackend::PortablePty,
-        tab_id: Some(tab_id.unwrap_or_else(|| id.clone())),
+        renderer_terminal_id: Some(tab_id.unwrap_or_else(|| id.clone())),
+        owning_tab_id: None,
         last_input_source: None,
         last_input_at: None,
         // Mirrors the injected-hook decision above, so reattach can re-arm the

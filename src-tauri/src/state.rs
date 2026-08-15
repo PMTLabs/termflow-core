@@ -39,7 +39,30 @@ pub struct Terminal {
     pub rows: u16,
     #[serde(default)]
     pub backend: TerminalBackend,
-    pub tab_id: Option<String>,
+    /// The **stable renderer LEAF id** that owns this PTY: `tb-*` for a tab's
+    /// root/solo pane, `tm-*` for a split pane. Unique per UI pane. It is the
+    /// PRIMARY KEY of `terminal_history` (`history_store.rs:93-98`) and the
+    /// `terminalId` of every API identity response.
+    ///
+    /// `None` when **no renderer pane owns this terminal** (a headless API or
+    /// fleet spawn). Such a terminal is deliberately kept OUT of the history
+    /// table — see `history_key`. Before P0-A this was never `None` at runtime;
+    /// it fell back to the ephemeral `pc-*` process id, which cannot survive a
+    /// restart (design 011 §5, corrected after review 086).
+    ///
+    /// `#[serde(rename)]`, NOT `alias`: `alias` accepts the old key inbound but
+    /// EMITS the Rust field name, silently changing the wire contract. `rename`
+    /// preserves `tab_id` in both directions (design 011 §6).
+    #[serde(rename = "tab_id")]
+    pub renderer_terminal_id: Option<String>,
+    /// The **tab** that owns the pane above. Equal to `renderer_terminal_id`
+    /// for a root/solo pane; different for a split. `None` when unknown (a
+    /// headless spawn, or a client that predates P0-A).
+    ///
+    /// NEW in P0-A: the backend had no notion of tab ownership at all before —
+    /// it lived only in the renderer's `panesSlice.treesByTabId`.
+    #[serde(default)]
+    pub owning_tab_id: Option<String>,
     /// Source of the most recent PTY write: "user" (Tauri invoke = keystrokes/
     /// paste) or "api" (REST/MCP input/execute). Drives the per-agent color-scheme
     /// revert-vs-sticky decision (see docs/plan/007-agent-color-schemes-plan.md).
@@ -633,7 +656,7 @@ impl<R: Runtime> AppState<R> {
         // since a dead terminal is never persisted again.
         let guard_arc = self.history_persist_guard(id);
         let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(tab_id) = self.terminals.get(id).and_then(|t| t.tab_id.clone()) else { return };
+        let Some(tab_id) = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone()) else { return };
         // Skip when the parser is absent or the whole buffer is blank (brand-new or
         // already-cleared terminal) so we never persist a blank blob that would replay as
         // an empty "session restored" divider with nothing above it.
@@ -1691,5 +1714,83 @@ mod reattach_plan_tests {
         let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
         assert_eq!(reattach.len(), 1);
         assert!(teardown.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod terminal_identity_serde_tests {
+    use super::{Terminal, TerminalBackend};
+
+    fn sample() -> Terminal {
+        Terminal {
+            id: "pc-abc123def".into(),
+            pid: 4242,
+            shell: "pwsh".into(),
+            name: "Terminal-pwsh".into(),
+            created_at: "2026-08-14T10:00:00+07:00".into(),
+            cols: 120,
+            rows: 40,
+            backend: TerminalBackend::PortablePty,
+            renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
+            owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            last_input_source: None,
+            last_input_at: None,
+            prompt_hook: false,
+        }
+    }
+
+    /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
+    /// accept the old key inbound but emit `renderer_terminal_id`, silently
+    /// changing the output contract — `rename` preserves the key in BOTH
+    /// directions (design 011 §6). This repo has already shipped one silent
+    /// serde-key misroute (fleet MCP `targetOS`), so assert the emitted key
+    /// itself, not merely that a round-trip survives.
+    #[test]
+    fn the_emitted_renderer_id_key_is_still_tab_id() {
+        let v = serde_json::to_value(sample()).expect("serialize");
+        let obj = v.as_object().expect("object");
+        assert!(
+            obj.contains_key("tab_id"),
+            "emitted keys were {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !obj.contains_key("renderer_terminal_id"),
+            "the Rust field name must NOT leak onto the wire"
+        );
+        assert_eq!(obj["tab_id"], serde_json::json!("tm-9f2c1a4b7"));
+    }
+
+    /// The new field is additive and emits under its own key.
+    #[test]
+    fn owning_tab_id_is_emitted_alongside() {
+        let v = serde_json::to_value(sample()).expect("serialize");
+        assert_eq!(v["owning_tab_id"], serde_json::json!("tb-4e8d0c2f1"));
+    }
+
+    /// A payload written by a build that predates P0-A has `tab_id` and no
+    /// owner. It must still deserialise (success criterion 6).
+    #[test]
+    fn a_legacy_payload_without_an_owner_still_deserialises() {
+        let legacy = serde_json::json!({
+            "id": "pc-abc123def",
+            "pid": 4242,
+            "shell": "pwsh",
+            "name": "Terminal-pwsh",
+            "created_at": "2026-08-14T10:00:00+07:00",
+            "tab_id": "tb-4e8d0c2f1"
+        });
+        let t: Terminal = serde_json::from_value(legacy).expect("legacy payload");
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tb-4e8d0c2f1"));
+        assert_eq!(t.owning_tab_id, None);
+    }
+
+    #[test]
+    fn a_round_trip_preserves_all_three_identities() {
+        let json = serde_json::to_string(&sample()).expect("serialize");
+        let back: Terminal = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.id, "pc-abc123def");
+        assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
+        assert_eq!(back.owning_tab_id.as_deref(), Some("tb-4e8d0c2f1"));
     }
 }

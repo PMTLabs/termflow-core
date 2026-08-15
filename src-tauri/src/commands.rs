@@ -305,7 +305,8 @@ fn register_host_terminal(
             cols,
             rows,
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
-            tab_id: Some(id.to_string()),
+            renderer_terminal_id: Some(id.to_string()),
+            owning_tab_id: None,
             last_input_source: None,
             last_input_at: None,
             prompt_hook,
@@ -998,7 +999,7 @@ pub async fn close_terminal(
 ) -> Result<(), String> {
     // Get the terminal info to retrieve the PID + renderer id.
     let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
-        (terminal.pid, terminal.tab_id.clone())
+        (terminal.pid, terminal.renderer_terminal_id.clone())
     } else {
         return Err("Terminal not found".to_string());
     };
@@ -2110,7 +2111,8 @@ mod scrollback_restore_tests {
                 cols: 80,
                 rows: 24,
                 backend: crate::tmux_manager::TerminalBackend::PortablePty,
-                tab_id: Some(id.to_string()),
+                renderer_terminal_id: Some(id.to_string()),
+                owning_tab_id: Some(id.to_string()),
                 last_input_source: None,
                 last_input_at: None,
                 prompt_hook: false,

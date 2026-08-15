@@ -351,14 +351,14 @@ async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
             "processId": t.id,
             // Stable renderer id: `tm-` for a split pane, `tb-` for a root/solo
             // pane (where it equals the tabId). This is the UI-level terminal id.
-            "terminalId": t.tab_id,
+            "terminalId": t.renderer_terminal_id,
             "name": t.name,
             "profile": t.shell,
             "status": "running",
             "pid": t.pid,
             "createdAt": t.created_at,
             "mode": "ui",
-            "tabId": t.tab_id,
+            "tabId": t.renderer_terminal_id,
             // Command-suggest reads this on reload-reattach to re-seed its prompt
             // gate DISARMED; the ARMED decision is sampled pre-mount via the
             // probe_reattach_prompt_gate command, NOT here — a fetch-time sample
@@ -541,14 +541,14 @@ async fn create_terminal(
                     "id": t.id,
                     "processId": t.id,
                     // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-                    "terminalId": t.tab_id,
+                    "terminalId": t.renderer_terminal_id,
                     "name": t.name,
                     "profile": t.shell,
                     "status": "running",
                     "pid": t.pid,
                     "createdAt": t.created_at,
                     "mode": "ui",
-                    "tabId": t.tab_id,
+                    "tabId": t.renderer_terminal_id,
                     "promptHook": t.prompt_hook
                 }))).into_response()
             } else {
@@ -658,7 +658,7 @@ fn emit_external_activity<R: tauri::Runtime>(state: &AppState<R>, terminal_id: &
     let tab_id = state
         .terminals
         .get(terminal_id)
-        .and_then(|t| t.tab_id.clone());
+        .and_then(|t| t.renderer_terminal_id.clone());
     if let Err(e) = state.app_handle.emit(
         "terminal:external-activity",
         json!({ "terminalId": terminal_id, "tabId": tab_id }),
@@ -981,14 +981,14 @@ async fn get_terminal(
             "id": t.id,
             "processId": t.id,
             // Stable renderer id (`tm-` split / `tb-` root) — the UI terminal id.
-            "terminalId": t.tab_id,
+            "terminalId": t.renderer_terminal_id,
             "name": t.name,
             "profile": t.shell,
             "status": "running",
             "pid": t.pid,
             "createdAt": t.created_at,
             "mode": "default",
-            "tabId": t.tab_id
+            "tabId": t.renderer_terminal_id
         })))
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" })))
@@ -2052,7 +2052,7 @@ async fn fleet_local_run(
                 log::warn!("Failed to emit api:createTerminalTab for fleet terminal: {}", e);
             }
             if let Some(mut entry) = state.terminals.get_mut(&new_id) {
-                entry.tab_id = Some(tab_id);
+                entry.renderer_terminal_id = Some(tab_id);
             }
             new_id
         }
