@@ -452,9 +452,96 @@ struct CreateTerminalReq {
     cwd: Option<String>,
     #[serde(alias = "tabId")]
     tab_id: Option<String>,
+    /// The tab that should own the new pane. Preferred over `tab_id`, which is
+    /// ambiguous for a split (a client reading `tabId` back off a split pane
+    /// gets a `tm-` LEAF, not a tab).
+    #[serde(alias = "owningTabId")]
+    owning_tab_id: Option<String>,
     #[serde(alias = "paneId")]
     pane_id: Option<String>,
     direction: Option<String>,
+}
+
+/// The two renderer identities an API-created terminal registers.
+#[derive(Debug, PartialEq, Eq)]
+struct ApiSpawnIdentity {
+    /// Unique per UI pane. The `terminal_history` PRIMARY KEY and the
+    /// `terminalId` of every response.
+    renderer_terminal_id: String,
+    /// The tab the pane belongs to.
+    owning_tab_id: String,
+}
+
+/// Mint a renderer id: `<prefix>-<9 hex chars of a v4 uuid>`, matching the
+/// format the renderer's own generator produces (`utils/id.ts:1-8`).
+fn mint_renderer_id(prefix: &str) -> String {
+    let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
+    format!("{prefix}-{}", &raw[..9])
+}
+
+/// Decide both renderer identities for `POST /api/terminals`.
+///
+/// `mint` supplies the id so the decision is deterministically testable;
+/// production passes `mint_renderer_id`.
+///
+/// Rules (design 011 §5 "The corrected write"):
+///   * An explicit `owningTabId`, else `tabId`, is the OWNER — accepted verbatim
+///     when it starts with `tb-`, exactly as `api_server.rs:494` did before.
+///   * A `tm-` value in either field is a PANE id, not a tab id. Before P0-A it
+///     was silently discarded and replaced with an unrelated fresh `tb-`
+///     (ground-truth correction C3), so the pane appeared in the wrong tab. Fail
+///     closed with a message naming the right field. The spec's §5 snippet does
+///     not cover this case; this is a GAP FILL, flagged in the plan header.
+///   * The leaf must be a fresh `tm-` whenever this create lands in a tab that
+///     **already holds a live terminal** — only a tab's FIRST pane may use the
+///     tab's own id as its leaf (design 011 §3, D7). `pane_id.is_some()` is one
+///     way to know that, but NOT the only one: `paneId` is optional in the MCP
+///     tool and `App.tsx` Mode 2 splits a populated tab without it, so keying
+///     off `pane_id` alone re-registers the tab root's leaf onto a second live
+///     terminal — the `terminal_history` PRIMARY KEY collision P0-A exists to
+///     remove (review 095 B1).
+///   * Otherwise this is the tab's first/solo pane and leaf == owner, as before.
+///
+/// `owner_has_live_terminal` is injected rather than read from `AppState` so this
+/// stays a pure unit-testable decision (the Windows test binary cannot build the
+/// `integration-tests` feature that `mock_app` needs). A freshly minted owner
+/// trivially has no live terminal, so the extra probe cannot disturb the
+/// new-tab path.
+fn resolve_api_spawn_identity(
+    tab_id: Option<&str>,
+    owning_tab_id: Option<&str>,
+    pane_id: Option<&str>,
+    owner_has_live_terminal: impl Fn(&str) -> bool,
+    mut mint: impl FnMut(&str) -> String,
+) -> Result<ApiSpawnIdentity, String> {
+    let owner_hint = owning_tab_id
+        .or(tab_id)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let owning_tab_id = match owner_hint {
+        Some(id) if id.starts_with("tb-") => id.to_string(),
+        Some(id) if id.starts_with("tm-") => {
+            return Err(format!(
+                "'{id}' is a pane (leaf) id, not a tab id — pass the owning tab id \
+                 (the `owningTabId` field of GET /api/terminals/{{id}})"
+            ))
+        }
+        // Absent, blank, or an unrecognised format: mint one, as before.
+        _ => mint("tb"),
+    };
+
+    // D7: the trigger is "this tab is already occupied", not "the caller named a
+    // pane". `pane_id` is kept as a signal because a caller that DOES name a pane
+    // is telling us it wants a split even if the tab's live set is momentarily
+    // empty (e.g. its only PTY just exited).
+    let renderer_terminal_id = if pane_id.is_some() || owner_has_live_terminal(&owning_tab_id) {
+        mint("tm")
+    } else {
+        owning_tab_id.clone()
+    };
+
+    Ok(ApiSpawnIdentity { renderer_terminal_id, owning_tab_id })
 }
 
 async fn create_terminal(
@@ -3237,6 +3324,162 @@ mod tests {
         assert_eq!(v["rendererTerminalId"], json!(null));
         assert_eq!(v["owningTabId"], json!(null));
         assert_eq!(v["terminalId"], json!("pc-gone"));
+    }
+
+    /// Deterministic id minting so the tests assert values, not shapes.
+    fn counting_mint() -> impl FnMut(&str) -> String {
+        let mut n = 0u32;
+        move |prefix: &str| {
+            n += 1;
+            format!("{prefix}-{n:09}")
+        }
+    }
+
+    /// An EMPTY tab: no live terminal is registered against any owner yet.
+    /// Production passes a closure over `state.terminals` (Task 5 Step 3).
+    fn no_live_terminals(_owner: &str) -> bool {
+        false
+    }
+
+    /// THE REGRESSION TEST (design 011 §7 test 1). Two API creates targeting the
+    /// same tab with a pane_id — the split-a-pane flow — must produce DISTINCT
+    /// leaves and the SAME owner. Before P0-A both stored `tb-shared01` as
+    /// `tab_id`, which is the `terminal_history` PRIMARY KEY: one PTY got reaped
+    /// by StateManager's reconcile, and closing either pane deleted the other's
+    /// scrollback.
+    #[test]
+    fn spawn_identity_two_api_splits_get_distinct_leaves_and_one_owner() {
+        let mut mint = counting_mint();
+        let a = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-a"), no_live_terminals, &mut mint,
+        )
+        .expect("split a");
+        // By the time split b arrives, split a is live in that tab — so BOTH
+        // signals are true here, and either alone must be enough (see D7).
+        let b = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, Some("pn-b"), |owner| owner == "tb-shared01", &mut mint,
+        )
+        .expect("split b");
+
+        assert_ne!(a.renderer_terminal_id, b.renderer_terminal_id);
+        assert!(a.renderer_terminal_id.starts_with("tm-"));
+        assert!(b.renderer_terminal_id.starts_with("tm-"));
+        assert_eq!(a.owning_tab_id, "tb-shared01");
+        assert_eq!(b.owning_tab_id, "tb-shared01");
+    }
+
+    /// Root-pane invariant (design 011 §7 test 5), stated the way it is actually
+    /// true: the leaf equals the owner for a tab's FIRST live terminal. The
+    /// earlier revision of this test asserted `pane_id == None ⇒ leaf == owner`
+    /// unconditionally, which locked in the review-095 B1 gap as correct.
+    #[test]
+    fn spawn_identity_first_create_into_an_empty_tab_keeps_leaf_equal_to_owner() {
+        let mut mint = counting_mint();
+        let r = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None, no_live_terminals, &mut mint,
+        )
+        .expect("root");
+        assert_eq!(r.renderer_terminal_id, "tb-shared01");
+        assert_eq!(r.owning_tab_id, "tb-shared01");
+    }
+
+    /// Design 011 §7 test 9 / D7 — the gap review 095 B1 found, which the suite
+    /// previously asserted as CORRECT. `paneId` is OPTIONAL in the MCP tool
+    /// (`mcp-server/src/server.ts:67`), and `App.tsx` Mode 2
+    /// (`:1085` `else if (tabId && !paneId)`) serves exactly this shape: it
+    /// picks a pane in the named tab and splits it (`:1305-1335`). Mode 0 cannot
+    /// claim it — that branch requires `!tabExists(tabId)` (`:904`). Deciding on
+    /// `pane_id` alone therefore hands this terminal the leaf the tab's root
+    /// pane already holds (`TerminalContainer.tsx:108-113`): two live terminals
+    /// on one `terminal_history` PRIMARY KEY, i.e. the bug in the test above,
+    /// reached without a `pane_id`.
+    #[test]
+    fn spawn_identity_second_create_into_a_populated_tab_gets_a_distinct_leaf() {
+        let mut mint = counting_mint();
+        let root = resolve_api_spawn_identity(
+            Some("tb-shared01"), None, None, no_live_terminals, &mut mint,
+        )
+        .expect("first create");
+        assert_eq!(root.renderer_terminal_id, "tb-shared01");
+
+        // The identical call, with the tab now occupied by `root`.
+        let second = resolve_api_spawn_identity(
+            Some("tb-shared01"),
+            None,
+            None, // NO pane_id — the Mode 2 call shape
+            |owner| owner == "tb-shared01",
+            &mut mint,
+        )
+        .expect("second create");
+
+        assert_ne!(
+            second.renderer_terminal_id, root.renderer_terminal_id,
+            "a renderer leaf id must be unique per live terminal"
+        );
+        assert!(
+            second.renderer_terminal_id.starts_with("tm-"),
+            "a tab's second pane is a split whatever the caller sent, got {}",
+            second.renderer_terminal_id
+        );
+        assert_eq!(second.owning_tab_id, "tb-shared01", "and it stays in that tab");
+    }
+
+    #[test]
+    fn spawn_identity_no_caller_id_mints_a_tab_exactly_as_before() {
+        let mut mint = counting_mint();
+        let r = resolve_api_spawn_identity(None, None, None, no_live_terminals, &mut mint)
+            .expect("minted");
+        assert_eq!(r.owning_tab_id, "tb-000000001");
+        assert_eq!(r.renderer_terminal_id, "tb-000000001");
+    }
+
+    #[test]
+    fn spawn_identity_an_empty_or_unrecognised_tab_id_still_mints_rather_than_failing() {
+        let mut mint = counting_mint();
+        assert!(
+            resolve_api_spawn_identity(Some("   "), None, None, no_live_terminals, &mut mint)
+                .expect("blank")
+                .owning_tab_id
+                .starts_with("tb-")
+        );
+        assert!(resolve_api_spawn_identity(
+            Some("legacy-monitor-id"), None, None, no_live_terminals, &mut mint,
+        )
+        .expect("junk")
+        .owning_tab_id
+        .starts_with("tb-"));
+    }
+
+    /// Correction C3. `api_server.rs:494` recognised `tb-` ONLY: a caller that
+    /// did the "right" thing and sent a genuine `tm-` id had it silently thrown
+    /// away and replaced by an unrelated fresh `tb-`, so the pane landed in the
+    /// WRONG tab with no diagnostic. Fail closed instead, and name the field
+    /// that carries the correct value.
+    #[test]
+    fn spawn_identity_a_pane_leaf_id_in_the_tab_field_is_rejected_not_silently_replaced() {
+        let mut mint = counting_mint();
+        let err = resolve_api_spawn_identity(
+            Some("tm-9f2c1a4b7"), None, Some("pn-a"), no_live_terminals, &mut mint,
+        )
+        .expect_err("a tm- id is a pane id, not a tab id");
+        assert!(err.contains("tm-9f2c1a4b7"), "the message must name the offending id: {err}");
+        assert!(err.contains("owningTabId"), "the message must name the right field: {err}");
+    }
+
+    /// An explicit `owningTabId` wins over `tabId` — it is the unambiguous field.
+    #[test]
+    fn spawn_identity_an_explicit_owning_tab_id_takes_precedence() {
+        let mut mint = counting_mint();
+        let r = resolve_api_spawn_identity(
+            Some("tb-ignored1"),
+            Some("tb-explicit"),
+            Some("pn-a"),
+            no_live_terminals,
+            &mut mint,
+        )
+        .expect("explicit owner");
+        assert_eq!(r.owning_tab_id, "tb-explicit");
+        assert!(r.renderer_terminal_id.starts_with("tm-"));
     }
 
     #[test]
