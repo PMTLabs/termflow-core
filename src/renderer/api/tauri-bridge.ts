@@ -718,7 +718,7 @@ if (typeof window !== 'undefined') {
   // Flash the owning tab when an external MCP/API call interacts with a terminal.
   trackUnlisten(listen('terminal:external-activity', (event: any) => {
     window.dispatchEvent(new CustomEvent('terminal:external-activity', {
-      detail: event.payload, // { terminalId, tabId }
+      detail: event.payload, // { terminalId, processId, tabId, rendererTerminalId, owningTabId }
     }));
   }));
 

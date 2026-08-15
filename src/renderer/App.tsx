@@ -45,7 +45,8 @@ import { refreshGlyphAtlases } from '@termflow/terminal-core';
 import { addTab, markTabExited, flagTabActivity, setActiveTab } from './store/slices/tabsSlice';
 import { RootState, store } from './store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { findTabIdByTerminalId, getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
+import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
+import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
 import { buildApiCreatedTab } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
@@ -670,11 +671,13 @@ const App: React.FC = () => {
   };
 
   const handleExternalActivity = (event: CustomEvent) => {
-    const detail = (event.detail || {}) as { terminalId?: string; tabId?: string | null };
-    let tabId: string | null = detail.tabId ?? null;
-    if (!tabId && detail.terminalId) {
-      tabId = findTabIdByTerminalId(store.getState().panes.treesByTabId, detail.terminalId);
-    }
+    const detail = (event.detail || {}) as ExternalActivityDetail;
+    const state = store.getState();
+    const tabId = resolveActivityTabId(
+      detail,
+      state.panes.treesByTabId,
+      new Set(state.tabs.tabs.map(t => t.id)),
+    );
     if (tabId) {
       dispatch(flagTabActivity({ tabId }));
     }
