@@ -101,7 +101,13 @@ function Harness({
     if (!pane) return;
     const engine = engineFor(terminalId);
     engineRef.current = engine;
-    pane.appendChild(engine.element);  // stands in for engine.mount(pane)
+    // Stands in for engine.mount(pane). Mirrors mount()'s two DOM steps in order:
+    // evict any OTHER engine's surface from this container (detachForeignSurfaces,
+    // review 103 F2), then attach ours.
+    for (const other of engines.values()) {
+      if (other !== engine && other.element.parentElement === pane) other.element.remove();
+    }
+    pane.appendChild(engine.element);
     engine.container = pane;
     engineMounted();                   // ADDED — the relocation dep (§4.2.1)
     return () => {
@@ -368,22 +374,27 @@ describe('design/012 §4.2.2 — cleanup identity (H13)', () => {
     const b = engines.get('tb-B')!;
     const pane = container.querySelector('.terminal-display') as HTMLElement;
 
-    // B owns the pane, and B's element is the last thing appended to it.
+    // B owns the pane, B's element is the last thing appended to it, and it is the
+    // ONLY surface there.
     //
-    // PLAN CORRECTION (015 Task 12). The plan asserted here that the pane holds
-    // exactly ONE `.xterm` and that A's element has left it. Neither is reachable,
-    // in this harness or in the real component: `unmount()` never removes
-    // `term.element` from the DOM, and `mount()` is append-only on BOTH paths
-    // (`term.open(container)` at TerminalEngine.ts:1129 on the create path,
-    // `container.appendChild(existingElement)` on the reattach path) — it never
-    // clears the container first. So a superseded engine's element staying in the
-    // pane div is a PRE-EXISTING property of the codebase that P0-B neither
-    // creates nor repairs; H13's "two xterm elements in one host" is about the
-    // guard-less cleanup dragging an element BACK from a canvas host, which the
-    // assertion below is what actually pins.
+    // HISTORY (015 Task 12). An earlier revision of this comment said the plan's
+    // "exactly one `.xterm`, A's element gone" assertion was unreachable "in this
+    // harness or in the real component", because `unmount()` never removes
+    // `term.element` and `mount()` was append-only on both paths. That was an
+    // accurate reading of the code and the wrong conclusion to draw from it: it
+    // recorded a real defect as a fixed property of the world. External review 103
+    // finding 2 pushed back, and `mount()` now evicts a foreign surface before
+    // attaching its own (`detachForeignSurfaces`), so the plan's assertion is
+    // reachable after all — restored below.
+    //
+    // The engines here are fakes, so what this pins is the CLEANUP GUARD; the DOM
+    // hygiene itself is pinned against the real `mount()` in terminal-core's
+    // engine.mount-foreign-surface.test.ts.
     expect(b.container).toBe(pane);
     expect(pane.contains(b.element)).toBe(true);
     expect(pane.lastElementChild).toBe(b.element);
+    expect(pane.querySelectorAll('.xterm')).toHaveLength(1);
+    expect(pane.contains(a.element)).toBe(false);
 
     // A's relocations all happened while A was still the live engine (its own
     // engine-effect cleanup, which runs BEFORE B is created). Nothing relocated A

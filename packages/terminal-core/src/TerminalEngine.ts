@@ -937,6 +937,49 @@ export class TerminalEngine {
   }
 
   // ---------------------------------------------------------------------------
+  /**
+   * Remove any OTHER cached terminal's render element from `container` before this
+   * mount attaches its own (design 012 §14 criterion 7 — external review 103
+   * finding 2).
+   *
+   * `mount()` is append-only and `unmount()` deliberately leaves `term.element` in
+   * the DOM, because the cache still owns the live Terminal and a later mount
+   * reattaches it (see the closing comment of unmount()). Both are correct on their
+   * own. Together they leak whenever a pane node is REUSED for a different terminal
+   * id: `TerminalPane` renders an unkeyed `TerminalDisplay`, so changing
+   * `terminalId` in place keeps the same DOM node, and engine A's surface is still
+   * sitting in it when engine B appends its own. The pane then hosts both — both
+   * full-height, with A still painting through its cache-lifetime bridge
+   * subscription while its input wiring is gone.
+   *
+   * It also pins A's cache entry: `enforceCacheCap` skips any entry whose element
+   * is still `isConnected` (`cache.ts:142`), so a connected orphan is never evicted
+   * and holds its Terminal, scrollback and two bridge subscriptions forever.
+   *
+   * Keyed on ELEMENT IDENTITY via the cache, not on a `.xterm` class sweep: the
+   * only nodes we may remove are ones we can positively identify as some other
+   * engine's surface. Anything else in the container — overlays, the WebGL scratch
+   * canvas, future chrome — is none of this method's business.
+   *
+   * Removing is safe and non-destructive. The element stays owned by its cache
+   * entry, and A's own `mount()` reattaches it with `container.appendChild`, which
+   * works just as well from a detached node.
+   *
+   * NOTE this is not a P0-B defect — the bare mount/unmount/mount sequence
+   * reproduces it with no canvas involved, which is why the repair belongs here
+   * rather than in the relocation cleanup that made it reachable.
+   */
+  private detachForeignSurfaces(container: HTMLElement, ours: HTMLElement | null): void {
+    for (const [key, entry] of terminalCache) {
+      if (key === this.cacheKey) continue;
+      const element = entry.terminal.element;
+      if (element && element !== ours && element.parentElement === container) {
+        element.remove();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // mount — create-or-reattach the xterm instance into `container`.
   // Ports TerminalDisplay.tsx:242-630 (minus the hydration effect / Task 4).
   // ---------------------------------------------------------------------------
@@ -952,6 +995,10 @@ export class TerminalEngine {
     this.containerDisposables = [];
 
     let cached = terminalCache.get(this.cacheKey);
+    // Evict ANOTHER terminal's surface from this container before we put ours in
+    // (design 012 §14 criterion 7, external review 103 finding 2).
+    this.detachForeignSurfaces(container, cached?.terminal.element ?? null);
+
     let term: Terminal | undefined;
     let fit: FitAddon | undefined;
     let search: SearchAddon | undefined;

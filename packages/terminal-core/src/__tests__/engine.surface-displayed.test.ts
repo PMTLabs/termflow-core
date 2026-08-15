@@ -207,7 +207,13 @@ describe('design/012 §7 — surfaceDisplayed gates every geometry path paneActi
   // §7.2 rows 3 AND 4 / the FT rule: setSurfaceDisplayed(false) never cancels, in
   // either direction. Rev 5 cancelled in row 4 "to mirror setActive(false)", which
   // contradicted D10 outright (review 099 T1-F1 + 098 B1, found independently).
-  it('setSurfaceDisplayed(false) never cancels fitTimer, visible tab or not', async () => {
+  // The FT rule as rev 7 states it: a property of the END STATE, not a prohibition
+  // on clearTimeout. setSurfaceDisplayed(false) must never leave the engine with no
+  // pending fit — by preserving one (visible pane) or by arming a fresh one
+  // (background pane, §7.2 row 4a). Rev 6 phrased this as "never cancels", which a
+  // bare record-and-return satisfies while producing exactly the state the rule
+  // forbids; that phrasing is what let review 103 finding 1 through.
+  it('setSurfaceDisplayed(false) always leaves a fit pending, visible tab or not', async () => {
     jest.useFakeTimers();
 
     const visible = await mountAttached('sd-ft-nocancel-visible');
@@ -220,7 +226,16 @@ describe('design/012 §7 — surfaceDisplayed gates every geometry path paneActi
     hidden.engine.setActive(false);
     hidden.engine.setSurfaceDisplayed(true);       // arms the fit
     expect((hidden.engine as any).fitTimer).not.toBeNull();
-    hidden.engine.setSurfaceDisplayed(false);      // paneActive is false — still no cancel
+    hidden.engine.setSurfaceDisplayed(false);      // paneActive false — row 4a re-arms
+    expect((hidden.engine as any).fitTimer).not.toBeNull();
+
+    // …and it is still armed after the outbound one would have expired, which is
+    // the half rev 6 could not deliver.
+    await jest.advanceTimersByTimeAsync(200);
+    hidden.engine.setSurfaceDisplayed(true);
+    await jest.advanceTimersByTimeAsync(200);
+    expect((hidden.engine as any).fitTimer).toBeNull();   // fired and cleared itself
+    hidden.engine.setSurfaceDisplayed(false);
     expect((hidden.engine as any).fitTimer).not.toBeNull();
   });
 });
