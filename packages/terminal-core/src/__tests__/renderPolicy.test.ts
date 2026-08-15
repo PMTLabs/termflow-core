@@ -390,6 +390,35 @@ describe('design/013 §5.2 BUDGET-OWNER — the creation budget survives no tear
     expect(getCanvasWebGLBudget()).toBeNull();
   });
 
+  // Review 120 LOW. The test above cannot see listener STACKING: every stacked
+  // listener performs the same idempotent `canvasWebGLBudget = null`, so an
+  // implementation that registers one per arm passes it unchanged. Counting the
+  // registrations is the only thing that proves the `budgetReleaseArmed` guard.
+  //
+  // A fresh module registry is required: `budgetReleaseArmed` is module state and
+  // the suites above have already armed it, so the spy would see zero calls on the
+  // shared instance rather than the one this asserts.
+  it('registers exactly ONE pagehide listener across repeated arms', () => {
+    const addSpy = jest.spyOn(window, 'addEventListener');
+    try {
+      let mod!: typeof import('../renderPolicy');
+      jest.isolateModules(() => {
+        mod = require('../renderPolicy') as typeof import('../renderPolicy');
+      });
+      mod.setCanvasWebGLBudget(1);
+      mod.setCanvasWebGLBudget(null);
+      mod.setCanvasWebGLBudget(2);
+      window.dispatchEvent(new Event('pagehide'));
+      mod.setCanvasWebGLBudget(3);
+      mod.releaseCanvasWebGLBudget();
+      mod.setCanvasWebGLBudget(4);
+
+      const pagehideRegistrations = addSpy.mock.calls.filter((c) => c[0] === 'pagehide');
+      expect(pagehideRegistrations).toHaveLength(1);
+    } finally {
+      addSpy.mockRestore();
+    }
+  });
 });
 
 describe('design/013 §4.2 FA — promotion always constructs a fresh addon', () => {
