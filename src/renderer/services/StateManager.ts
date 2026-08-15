@@ -55,6 +55,14 @@ class StateManagerClass {
   private get STATE_KEY(): string { return stateKey(); }
   private get LAYOUTS_KEY(): string { return layoutsKey(); }
 
+  /**
+   * Monotonic token identifying the newest `loadLayout` call. `loadLayout`
+   * clears the current state and then yields before populating; anything that
+   * resumes after that yield with a stale token must not commit. See
+   * `loadLayout`.
+   */
+  private loadGeneration = 0;
+
   /** Every terminal id currently present in any tab's pane tree. */
   private collectLiveTerminalIds(state: RootState): Set<string> {
     const keep = new Set<string>();
@@ -450,9 +458,20 @@ class StateManagerClass {
   }
 
   /**
-   * Load a saved layout
+   * Load a saved layout.
+   *
+   * Returns `true` when this call committed the layout, `false` when a NEWER
+   * `loadLayout` started before this one reached its populate phase and this
+   * call therefore abandoned without touching Redux or localStorage.
    */
   async loadLayout(layoutId: string, dispatch: Dispatch): Promise<boolean> {
+    // Round-6 HIGH (report 114). Everything below the `await` must be guarded:
+    // two loads entering during the yield below BOTH clear the current state,
+    // then the later one appends its tabs/trees on top of the earlier one's
+    // freshly populated state (duplicate tabs when the layouts share tab ids,
+    // and a stale localStorage write). Only the newest generation may commit.
+    const generation = ++this.loadGeneration;
+
     try {
       console.log(`Loading layout with ID: ${layoutId}`);
       const layouts = this.getSavedLayouts();
@@ -469,8 +488,20 @@ class StateManagerClass {
       // Clear current state first
       this.clearCurrentState(dispatch);
 
-      // Wait a bit for the clear to complete
+      // Wait a bit for the clear to complete — this yield lets React unmount
+      // the previous layout's terminals before new ones mount, so it must NOT
+      // be removed just because the dispatches around it are synchronous.
       await new Promise(resolve => setTimeout(resolve, 100));
+
+      // A newer load started during that yield. It has already re-cleared the
+      // state and will populate itself; committing now would append this
+      // layout on top of (or underneath) the newer one. Abandon: no populate,
+      // no localStorage write, no last-used timestamp bump. The clear this
+      // call performed is harmless — the winner cleared again after it.
+      if (generation !== this.loadGeneration) {
+        console.log(`Layout load superseded, abandoning: ${layoutId}`);
+        return false;
+      }
 
       // Load layout tabs. Review 109 H2: a tab must never be renderable without
       // its authoritative tree, or TerminalContainer's seed effects manufacture
@@ -483,9 +514,14 @@ class StateManagerClass {
       // active-tab mirror (`setPaneTree`). That reducer runs `syncActive`,
       // which writes its payload into `treesByTabId[activeTabId]` as of
       // DISPATCH time — so a deferred `setPaneTree` could land after the user
-      // (or a second, overlapping layout load) had switched tabs, writing tab
-      // A's tree into tab B and orphaning B's PTYs. Every write here is keyed
-      // by its real owner via `addTabTree`, and the activation is synchronous.
+      // had switched tabs, writing tab A's tree into tab B and orphaning B's
+      // PTYs. Every write here is keyed by its real owner via `addTabTree`,
+      // and the activation is synchronous.
+      //
+      // Scope of that guarantee: keying by owner removes the MIS-TARGETING of
+      // a tree write. It does NOT by itself make two overlapping layout loads
+      // safe — that is what the `loadGeneration` check above provides, by
+      // letting only the newest load reach this block at all.
       if (sanitizedLayout.tabs?.length > 0) {
         console.log(`Loading ${sanitizedLayout.tabs.length} tabs`);
         for (const tab of sanitizedLayout.tabs) {

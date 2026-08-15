@@ -232,6 +232,128 @@ describe('StateManager.loadLayout deferred-write safety (re-review 111 finding 2
 });
 
 /**
+ * Round-6 HIGH (report 114). `loadLayout` clears the current state and then
+ * awaits ~100ms before populating anything, with no generation check anywhere
+ * in `StateManager` or the `layouts/loadLayout` thunk. Two loads entering
+ * during that window BOTH clear first; the second no longer clears when it
+ * resumes, so it appends its tabs and keyed trees on top of the first load's
+ * freshly installed state. Final state contains both layouts — duplicate tab
+ * entries (duplicate React keys, ambiguous rendered owner) when the two share
+ * tab ids — and the later localStorage write carries a stale snapshot.
+ *
+ * The fix is a load-generation token: the yield stays (it exists so React can
+ * unmount the previous layout's terminals before new ones mount), but only the
+ * newest load may commit anything after the await.
+ */
+describe('StateManager.loadLayout overlapping loads (round-6 HIGH, report 114)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    jest.useRealTimers();
+  });
+
+  const treeA1 = { id: 'pn-a1', type: 'terminal' as const, terminalId: 'tm-a1' };
+  const treeB1 = { id: 'pn-b1', type: 'terminal' as const, terminalId: 'tm-b1' };
+
+  function seedTwoLayouts(sharedTabIds: boolean) {
+    const layoutA = {
+      id: 'layout-A',
+      name: 'A',
+      tabs: [{ id: sharedTabIds ? 'tb-shared' : 'tb-a1', title: 'A1' }],
+      activeTabId: sharedTabIds ? 'tb-shared' : 'tb-a1',
+      paneTree: treeA1,
+      activePaneId: 'pn-a1',
+      treesByTabId: { [sharedTabIds ? 'tb-shared' : 'tb-a1']: treeA1 },
+      createdAt: 1,
+      updatedAt: 1000,
+    };
+    const layoutB = {
+      id: 'layout-B',
+      name: 'B',
+      tabs: [{ id: sharedTabIds ? 'tb-shared' : 'tb-b1', title: 'B1' }],
+      activeTabId: sharedTabIds ? 'tb-shared' : 'tb-b1',
+      paneTree: treeB1,
+      activePaneId: 'pn-b1',
+      treesByTabId: { [sharedTabIds ? 'tb-shared' : 'tb-b1']: treeB1 },
+      createdAt: 2,
+      updatedAt: 2000,
+    };
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([layoutA, layoutB]));
+  }
+
+  it('leaves ONLY the newest load\'s tabs and trees in state when two loads overlap', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(false);
+
+    // A enters, clears, and parks on its 100ms yield. B enters 50ms later —
+    // inside that window — clears again and parks on its own yield. A resumes
+    // first (t=100), B second (t=150).
+    const pA = StateManager.loadLayout('layout-A', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const pB = StateManager.loadLayout('layout-B', store.dispatch);
+    await Promise.all([pA, pB]);
+
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-b1']);
+    expect(state.panes.treesByTabId['tb-a1']).toBeUndefined();
+    expect(state.panes.treesByTabId['tb-b1'].terminalId).toBe('tm-b1');
+  });
+
+  it('never creates duplicate tab entries when the two overlapping layouts reuse a tab id', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(true);
+
+    const pA = StateManager.loadLayout('layout-A', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const pB = StateManager.loadLayout('layout-B', store.dispatch);
+    await Promise.all([pA, pB]);
+
+    const state = store.getState() as any;
+    const ids = state.tabs.tabs.map((t: any) => t.id);
+    // One entry, not two: duplicate ids mean duplicate React keys and an
+    // ambiguous owner for the single `treesByTabId['tb-shared']` value.
+    expect(ids).toEqual(['tb-shared']);
+    expect(state.panes.treesByTabId['tb-shared'].terminalId).toBe('tm-b1');
+  });
+
+  it('does not persist anything for the superseded load (its updatedAt stays untouched)', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(false);
+
+    const pA = StateManager.loadLayout('layout-A', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const pB = StateManager.loadLayout('layout-B', store.dispatch);
+    const [resultA] = await Promise.all([pA, pB]);
+
+    // The superseded load reports that it did not commit.
+    expect(resultA).toBe(false);
+
+    const stored = JSON.parse(localStorage.getItem('auto-terminal-layouts') || '[]');
+    const a = stored.find((l: any) => l.id === 'layout-A');
+    const b = stored.find((l: any) => l.id === 'layout-B');
+    expect(a.updatedAt).toBe(1000);
+    expect(b.updatedAt).toBeGreaterThan(2000);
+  });
+
+  it('a single, non-overlapping load still commits normally', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(false);
+
+    await expect(StateManager.loadLayout('layout-A', store.dispatch)).resolves.toBe(true);
+
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-a1']);
+    expect(state.panes.treesByTabId['tb-a1'].terminalId).toBe('tm-a1');
+
+    const stored = JSON.parse(localStorage.getItem('auto-terminal-layouts') || '[]');
+    expect(stored.find((l: any) => l.id === 'layout-A').updatedAt).toBeGreaterThan(1000);
+  });
+});
+
+/**
  * Re-review 111 finding 4. Layout teardown dispatched `setPaneTree(null)`,
  * which deletes only the ACTIVE tab's tree; background trees stayed in Redux
  * forever (the window map was already cleared, so TerminalContainer's cleanup
