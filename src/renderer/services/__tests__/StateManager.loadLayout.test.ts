@@ -337,6 +337,58 @@ describe('StateManager.loadLayout overlapping loads (round-6 HIGH, report 114)',
     expect(b.updatedAt).toBeGreaterThan(2000);
   });
 
+  // The generation token must only ever be held by a request that can actually
+  // enter the replacement transaction. A call that throws during lookup or
+  // sanitization never clears and never populates — if it bumped the
+  // generation at method entry it would invalidate a valid in-flight load that
+  // had ALREADY cleared, and neither request would supply the replacement,
+  // leaving the app empty.
+  it('still commits a valid in-flight load when a later loadLayout rejects with "Layout not found"', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(false);
+
+    const pA = StateManager.loadLayout('layout-A', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    // Arrives while A is parked on its yield, having already cleared.
+    await expect(StateManager.loadLayout('missing-id', store.dispatch)).rejects.toThrow('Layout not found');
+    await expect(pA).resolves.toBe(true);
+
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-a1']);
+    expect(state.panes.treesByTabId['tb-a1'].terminalId).toBe('tm-a1');
+  });
+
+  it('still commits a valid in-flight load when a later loadLayout throws inside sanitize', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    seedTwoLayouts(false);
+
+    // A malformed (e.g. hand-imported) layout whose `tabs` is truthy but not an
+    // array: `sanitizeLayoutData` throws on `.map`, before any clear.
+    const stored = JSON.parse(localStorage.getItem('auto-terminal-layouts') || '[]');
+    stored.push({
+      id: 'layout-bad',
+      name: 'bad',
+      tabs: { notAnArray: true },
+      activeTabId: null,
+      paneTree: null,
+      activePaneId: null,
+      createdAt: 3,
+      updatedAt: 3000,
+    });
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify(stored));
+
+    const pA = StateManager.loadLayout('layout-A', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await expect(StateManager.loadLayout('layout-bad', store.dispatch)).rejects.toThrow();
+    await expect(pA).resolves.toBe(true);
+
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-a1']);
+    expect(state.panes.treesByTabId['tb-a1'].terminalId).toBe('tm-a1');
+  });
+
   it('a single, non-overlapping load still commits normally', async () => {
     const store = makeStore();
     (window as any).__REDUX_STORE__ = store;

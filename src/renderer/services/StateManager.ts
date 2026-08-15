@@ -460,23 +460,25 @@ class StateManagerClass {
   /**
    * Load a saved layout.
    *
-   * Returns `true` when this call committed the layout, `false` when a NEWER
-   * `loadLayout` started before this one reached its populate phase and this
-   * call therefore abandoned without touching Redux or localStorage.
+   * Returns `true` when this call committed the layout.
+   *
+   * Returns `false` when a NEWER `loadLayout` started before this one reached
+   * its populate phase, so this call did NOT populate Redux, did NOT write
+   * `lastUsed` to localStorage, and left the newer call to supply the
+   * replacement state. It does NOT mean the call was side-effect free: an
+   * abandoning call has already run `clearCurrentState`, tearing down the tabs
+   * and pane trees that were present when it started. The only reason that is
+   * safe is that the newer call (which must, by construction, have passed
+   * lookup and sanitization before taking its generation token) clears again
+   * and then populates. A `false` return therefore guarantees "some newer load
+   * owns the state", never "nothing was touched".
    */
   async loadLayout(layoutId: string, dispatch: Dispatch): Promise<boolean> {
-    // Round-6 HIGH (report 114). Everything below the `await` must be guarded:
-    // two loads entering during the yield below BOTH clear the current state,
-    // then the later one appends its tabs/trees on top of the earlier one's
-    // freshly populated state (duplicate tabs when the layouts share tab ids,
-    // and a stale localStorage write). Only the newest generation may commit.
-    const generation = ++this.loadGeneration;
-
     try {
       console.log(`Loading layout with ID: ${layoutId}`);
       const layouts = this.getSavedLayouts();
       const layout = layouts.find(l => l.id === layoutId);
-      
+
       if (!layout) {
         console.error(`Layout not found with ID: ${layoutId}`);
         throw new Error('Layout not found');
@@ -484,6 +486,25 @@ class StateManagerClass {
 
       const sanitizedLayout = this.sanitizeLayoutData(layout);
       console.log(`Found layout: ${sanitizedLayout.name} with ${sanitizedLayout.tabs?.length || 0} tabs`);
+
+      // Round-6 HIGH (report 114). Everything below the `await` must be
+      // guarded: two loads entering during the yield below BOTH clear the
+      // current state, then the later one appends its tabs/trees on top of the
+      // earlier one's freshly populated state (duplicate tabs when the layouts
+      // share tab ids, and a stale localStorage write). Only the newest
+      // generation may commit.
+      //
+      // The token is taken HERE, not at method entry: it must only ever be
+      // held by a request that is actually able to enter the replacement
+      // transaction. Lookup (`Layout not found`) and `sanitizeLayoutData` can
+      // both throw, and a call that throws never clears and never populates —
+      // if it had already bumped the generation it would silently invalidate a
+      // valid in-flight load that was sitting in the yield below, having
+      // ALREADY cleared. Neither request would then supply the replacement and
+      // the app would be left empty. Acquiring the token immediately before
+      // `clearCurrentState` makes "holds the generation" equivalent to "has
+      // cleared and intends to populate".
+      const generation = ++this.loadGeneration;
 
       // Clear current state first
       this.clearCurrentState(dispatch);
