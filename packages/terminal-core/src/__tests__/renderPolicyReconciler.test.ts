@@ -19,7 +19,12 @@ import {
   setTerminalRenderPolicy,
   type RenderPolicy,
 } from '../renderPolicy';
-import { terminalCache, resetTerminalRendering } from '../cache';
+import {
+  terminalCache,
+  resetTerminalRendering,
+  disableWebGLGlobally,
+  enableWebGLGlobally,
+} from '../cache';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -530,5 +535,56 @@ describe('restoreRenderPolicies vs same-Terminal invalidation (review 124)', () 
 
     expect(restored['snap-canvas-only']).toBe('webgl');
     expect(getTerminalRenderPolicy('snap-canvas-only')).toBe('webgl');
+  });
+});
+
+/**
+ * Review 126 MEDIUM — the same invalidation, on the sequence canvas actually
+ * produces. The tests above call the invalidating operation while the terminal is
+ * still on WebGL, so that operation performs the demotion itself and reaches the
+ * generation bump. In a real canvas session canvas has ALREADY demoted the
+ * terminal (its own demotion is deliberately non-bumping), so the user's Reset
+ * Rendering and the global toggle both arrive at a DOM entry with nothing left to
+ * dispose — and, while the bump lived inside the addon-present branch, changed no
+ * generation at all. Canvas exit then restored WebGL over the top of them.
+ */
+describe('non-canvas invalidation after canvas already demoted (review 126)', () => {
+  it('does NOT restore after canvas demoted and the user then reset rendering', () => {
+    const { entry } = makeEntry('snap-canvas-then-reset');
+    setTerminalRenderPolicy('snap-canvas-then-reset', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-then-reset']);
+
+    // Canvas's own demotion — non-bumping by design (D6).
+    setTerminalRenderPolicy('snap-canvas-then-reset', 'dom');
+    expect(getTerminalRenderPolicy('snap-canvas-then-reset')).toBe('dom');
+
+    // The user invokes Reset Rendering while canvas is still active. There is no
+    // addon left to dispose, but this is still an explicit non-canvas decision.
+    expect(resetTerminalRendering('snap-canvas-then-reset')).toBe(true);
+    expect(terminalCache.get('snap-canvas-then-reset')!.terminal).toBe(entry.terminal);
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-then-reset']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-canvas-then-reset')).toBe('dom');
+  });
+
+  it('does NOT restore after canvas demoted and WebGL was globally toggled', () => {
+    makeEntry('snap-canvas-then-global');
+    setTerminalRenderPolicy('snap-canvas-then-global', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-then-global']);
+
+    setTerminalRenderPolicy('snap-canvas-then-global', 'dom');   // canvas demotion
+
+    // The user turns WebGL off and back on again while canvas is active. The
+    // re-enable only affects NEW addons, so the terminal must stay on DOM — but
+    // without the bump the snapshot survived and canvas exit re-promoted it.
+    disableWebGLGlobally();
+    enableWebGLGlobally();
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-then-global']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-canvas-then-global')).toBe('dom');
   });
 });

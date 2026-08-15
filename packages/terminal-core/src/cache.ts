@@ -292,14 +292,25 @@ export const resetTerminalRendering = (
     }
     cached.webglAddon = null;
     cached.useWebGL = false;
-    // design/013 D6 — a NON-Canvas policy change (Reset Rendering, or the engine's
-    // own reset). Bumping invalidates any canvas snapshot taken before it, so
-    // exiting canvas mode cannot silently undo the reset the user explicitly asked
-    // for (review 124). Only bumped when a demotion ACTUALLY happened, and never
-    // for canvas's own demotion — see the canvasOwned note on the signature.
-    if (!opts.canvasOwned) {
-      cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
-    }
+  }
+
+  // design/013 D6 — a NON-Canvas policy change (Reset Rendering, or the engine's
+  // own reset). Bumping invalidates any canvas snapshot taken before it, so
+  // exiting canvas mode cannot silently undo the reset the user explicitly asked
+  // for (review 124). Never bumped for canvas's own demotion — see the canvasOwned
+  // note on the signature.
+  //
+  // OUTSIDE the addon branch (review 126). Bumping only when THIS call disposed an
+  // addon missed the sequence that actually matters: canvas snapshots a WebGL
+  // policy, canvas's own (non-bumping) demotion removes the addon, and the user
+  // then invokes Reset Rendering. The terminal is already on DOM, so the reset had
+  // no addon to dispose, did not bump, and canvas exit restored WebGL over the top
+  // of the explicit reset. The reset is a user decision about the terminal's
+  // renderer whether or not it had anything left to tear down, so it invalidates
+  // the snapshot either way. (The dispose-failure path returns above without
+  // reaching here: nothing changed, so there is nothing to invalidate.)
+  if (!opts.canvasOwned) {
+    cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
   }
 
   // Force a refresh, then re-fit. The FIT is conditional (design/013 §5.3,
@@ -325,6 +336,14 @@ export const disableWebGLGlobally = () => {
 
   // Reset all cached terminals
   terminalCache.forEach((cached, _terminalId) => {
+    // design/013 D6 — the global toggle is a NON-Canvas policy change, so it
+    // invalidates any canvas snapshot (review 124). Bumped for EVERY entry, not
+    // only the ones that still hold an addon (review 126): a terminal canvas has
+    // already demoted has no addon left, yet the toggle is exactly the kind of
+    // global decision that must survive canvas exit — without the bump, exit
+    // restores it straight back to WebGL. The one entry NOT bumped is one whose
+    // dispose() threw: it is still on WebGL, so no policy change happened.
+    let bump = true;
     if (cached.webglAddon) {
       // design/013 D4 + review 120: the addon REFERENCE is the source of truth for
       // countActiveWebGLAddons, so it may only be nulled once the context is known
@@ -347,9 +366,8 @@ export const disableWebGLGlobally = () => {
       if (disposed) {
         cached.webglAddon = null;
         cached.useWebGL = false;
-        // design/013 D6 — the global toggle is a NON-Canvas policy change, so it
-        // invalidates any canvas snapshot (review 124).
-        cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
+      } else {
+        bump = false;
       }
 
       // Refresh the terminal
@@ -358,6 +376,10 @@ export const disableWebGLGlobally = () => {
       } catch (e) {
         // Ignore
       }
+    }
+
+    if (bump) {
+      cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
     }
   });
 };
