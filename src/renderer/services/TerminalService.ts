@@ -1,5 +1,6 @@
 import { termDiag } from '../utils/diag';
 import { clearZoom } from '../store/slices/zoomSlice';
+import { reassertOwnerAfterSpawn } from './paneOwnership';
 import type { PromptGate } from '@termflow/terminal-core';
 
 export interface TerminalProcess {
@@ -120,6 +121,15 @@ class TerminalServiceClass {
       // Store the mapping
       this.bindProcess(terminalId, processId);
       console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
+
+      // The spawn carried the owner resolved BEFORE the await, and the backend
+      // only registers the terminal at the very end of it — so a pane dragged to
+      // another tab while this create was in flight had its ownership update
+      // land on a terminal that did not exist yet, and nothing re-sends it
+      // (external review 101, F2). This is the first moment the leaf is
+      // registered, so it is where that correction belongs. No-ops unless the
+      // tree moved under us.
+      reassertOwnerAfterSpawn(terminalId, owningTabId);
 
       return processId;
     } catch (error) {

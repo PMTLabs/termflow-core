@@ -97,3 +97,51 @@ describe('TerminalService.stashPromptGate (backlog 011 hot-swap reattach seed)',
     expect(terminalService.takePromptGateHandoff('tb-seed-2')).toBeUndefined();
   });
 });
+
+/**
+ * External review 101, F2 — the WIRING, not the rule.
+ *
+ * `paneOwnershipSync.test.ts` covers what `reassertOwnerAfterSpawn` decides.
+ * This covers the part that regressed the last time around: nobody calling it.
+ * `createTerminal` is the single choke point every renderer create passes
+ * through, and the moment it returns is the first moment the backend has the
+ * terminal registered — which is exactly what a mid-spawn pane move needs.
+ */
+describe('TerminalService.createTerminal re-asserts pane ownership after the spawn', () => {
+  const { attachPaneOwnershipSync } = require('../paneOwnership');
+  const panesReducer = require('../../store/slices/panesSlice').default;
+  const { addTabTree, insertPaneIntoTab } = require('../../store/slices/panesSlice');
+  const { configureStore } = require('@reduxjs/toolkit');
+
+  let setTerminalOwningTab: jest.Mock;
+  let unsubscribe: () => void;
+
+  beforeEach(() => {
+    setTerminalOwningTab = jest.fn().mockResolvedValue(undefined);
+    (window as any).electronAPI = {
+      createTerminal: jest.fn().mockResolvedValue('pc-reassert-1'),
+      setTerminalOwningTab,
+    };
+    const store = configureStore({ reducer: { panes: panesReducer } });
+    unsubscribe = attachPaneOwnershipSync(store);
+    // The pane is born under tb-src, then dragged to tb-dst while its create is
+    // still in flight — so the owner the spawn carries is already stale by the
+    // time the backend registers the terminal.
+    store.dispatch(addTabTree({ tabId: 'tb-src', tree: { id: 'pn-a', type: 'terminal', terminalId: 'tm-reassert' } }));
+    store.dispatch(addTabTree({ tabId: 'tb-dst', tree: { id: 'pn-b', type: 'terminal', terminalId: 'tb-dst' } }));
+    store.dispatch(insertPaneIntoTab({
+      tabId: 'tb-dst',
+      targetPaneId: 'pn-b',
+      zone: 'right',
+      node: { id: 'pn-a', type: 'terminal', terminalId: 'tm-reassert' },
+    }));
+    setTerminalOwningTab.mockClear();
+  });
+
+  afterEach(() => unsubscribe());
+
+  it('pushes the tree\'s current owner, not the one the spawn carried', async () => {
+    await terminalService.createTerminal('tm-reassert', 'default', undefined, undefined, undefined, undefined, 'tb-src');
+    expect(setTerminalOwningTab).toHaveBeenCalledWith('tm-reassert', 'tb-dst');
+  });
+});

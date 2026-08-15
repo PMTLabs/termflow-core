@@ -92,6 +92,51 @@ interface PaneOwnershipStore {
 }
 
 /**
+ * The store `attachPaneOwnershipSync` was given, so `reassertOwnerAfterSpawn`
+ * can read the tree without taking an import edge into the store graph — the
+ * same constraint the module header states. Null until bootstrap has run, which
+ * makes the re-assert a safe no-op for anything created before then.
+ */
+let ownershipStore: PaneOwnershipStore | null = null;
+
+/**
+ * Push a leaf's CURRENT owner once its PTY is actually registered.
+ *
+ * Closes the window external review 101 F2 describes. The subscription above
+ * fires on the tree change, but the backend can only retarget a terminal it has
+ * already registered, and `spawn_terminal` registers LAST — so a pane dragged
+ * between tabs while its own spawn is still in flight gets an update that hits
+ * nothing. `set_terminal_owning_tab` treats an unmatched leaf as a successful
+ * no-op (it must: the renderer fires off its own tree lifecycle, and a pane's
+ * PTY may legitimately not exist), and the subscription has already advanced
+ * `lastOwners`, so no later tree change re-sends it. The move is then lost for
+ * the rest of the session: the pane sits visibly in the new tab while
+ * `get_terminal_detail` keeps naming the old one.
+ *
+ * Called at the one moment that race resolves — the create has returned, so the
+ * terminal IS registered. Sends nothing in the common case, where the owner the
+ * spawn carried is still the owner the tree holds.
+ */
+export function reassertOwnerAfterSpawn(
+  rendererTerminalId: string,
+  ownerSentAtSpawn: string | undefined,
+): void {
+  if (!ownershipStore) return;
+  const current = collectLeafOwners(ownershipStore.getState().panes.treesByTabId).get(
+    rendererTerminalId,
+  );
+  // No entry means the pane left this window (or the tree has not been committed
+  // yet); either way this window has no correction to offer.
+  if (!current || current === ownerSentAtSpawn) return;
+  window.electronAPI?.setTerminalOwningTab?.(rendererTerminalId, current)?.catch((e: unknown) => {
+    console.warn(
+      `Failed to re-assert owner ${current} for terminal ${rendererTerminalId} after spawn`,
+      e,
+    );
+  });
+}
+
+/**
  * Watch `panes.treesByTabId` and push every ownership change to the backend.
  * Returns the store's unsubscribe.
  *
@@ -99,6 +144,7 @@ interface PaneOwnershipStore {
  * a later API/MCP call, never the move itself.
  */
 export function attachPaneOwnershipSync(store: PaneOwnershipStore): () => void {
+  ownershipStore = store;
   // Trees are immutable per change (RTK/immer), so an identity check keeps every
   // unrelated dispatch — every keystroke-driven action — down to one comparison.
   let lastTrees: Record<string, PaneNode> | null = null;
