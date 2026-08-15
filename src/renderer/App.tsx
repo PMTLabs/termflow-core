@@ -47,7 +47,7 @@ import { RootState, store } from './store';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
-import { buildApiCreatedTab } from './services/apiCreatedTab';
+import { buildApiCreatedTab, resolveApiCreateIds } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
 import { resolveActivation } from './services/notificationRouting';
@@ -891,10 +891,19 @@ const App: React.FC = () => {
 
   const handleAPICreateTerminalTab = async (event: CustomEvent) => {
     try {
-      const options = event.detail as { name: string; profile: string; tabId?: string; paneId?: string; direction?: 'horizontal' | 'vertical'; terminalId?: string };
+      const options = event.detail as {
+        name: string; profile: string; tabId?: string; paneId?: string;
+        direction?: 'horizontal' | 'vertical'; terminalId?: string;
+        // P0-A (Task 5's emit): the unambiguous ids. `terminalId`/`tabId` above
+        // are the legacy pair this event has always carried.
+        processId?: string; rendererTerminalId?: string; owningTabId?: string;
+      };
       console.log('API: Creating terminal tab', options);
 
-      const { name, profile, tabId, paneId, direction, terminalId } = options;
+      const { name, profile, paneId, direction } = options;
+      const { processId, leafId, owningTabId } = resolveApiCreateIds(options);
+      const tabId = owningTabId;
+      const terminalId = processId;
 
       // `store` is the file-scoped Redux store import (the same instance as
       // window.__REDUX_STORE__) — always defined, so no local alias/shadow.
@@ -964,14 +973,23 @@ const App: React.FC = () => {
 
       if (tabId && paneId) {
         // Mode 1: Split an existing pane in a specific tab
-        console.log(`API: Splitting pane ${paneId} in tab ${tabId} with existing terminalId: ${terminalId}`);
+        // `terminalId` here is the resolved backend PROCESS id (see the
+        // resolveApiCreateIds destructure above) — used, not the block-scoped
+        // `processId` this branch later re-derives from the split's own pane
+        // tree, to avoid shadowing it.
+        console.log(`API: Splitting pane ${paneId} in tab ${tabId} with leaf ${leafId} / process ${terminalId}`);
 
-        // Register terminalId with terminalService first if we have one
-        if (terminalId) {
+        // Bind the backend PTY to the LEAF id, not to itself. Before P0-A this
+        // was `registerExistingTerminal(terminalId, terminalId)` with a `pc-*`
+        // value on both sides, so the pane tree carried a process id as its
+        // leaf — which StateManager.sanitizeLayoutData then rewrote to a fresh
+        // `tm-*` on the next restore, orphaning the binding (design 011 §6).
+        // TerminalPane's mount effect checks `getProcessId(terminalId)` FIRST
+        // (TerminalPane.tsx:174-176), so this binding is what stops it spawning
+        // a second PTY on top of the API-created one.
+        if (leafId && terminalId) {
           const terminalService = (window as any).terminalService;
-          if (terminalService) {
-            terminalService.registerExistingTerminal(terminalId, terminalId);
-          }
+          terminalService?.registerExistingTerminal(leafId, terminalId);
         }
 
         // Get the pane tree before the split to find existing terminal IDs.
@@ -1000,7 +1018,7 @@ const App: React.FC = () => {
           direction: direction || 'vertical', // Default to vertical if not specified
           shellType: profile || defaultProfile || 'cmd',
           name: name,
-          terminalId: terminalId // Reuse the existing backend process
+          terminalId: leafId, // the tm- leaf the backend minted
         }));
 
         // The new terminal will be created automatically by TerminalPane
@@ -1098,10 +1116,14 @@ const App: React.FC = () => {
         }
 
         // The backend already spawned the process; register it so the new pane
-        // reuses it (identity map: pane terminalId === backend processId) instead
-        // of spawning a second, orphaned terminal.
-        if (terminalId) {
-          (window as any).terminalService?.registerExistingTerminal(terminalId, terminalId);
+        // reuses it (identity map: pane terminalId === LEAF, bound to the
+        // backend process) instead of spawning a second, orphaned terminal.
+        // `terminalId` here is the resolved process id (see the
+        // resolveApiCreateIds destructure above), used rather than the
+        // block-scoped `processId` this branch later re-derives, to avoid
+        // shadowing it.
+        if (leafId && terminalId) {
+          (window as any).terminalService?.registerExistingTerminal(leafId, terminalId);
         }
 
         // Inspect THIS tab's tree from the authoritative per-tab store (not the
@@ -1132,7 +1154,7 @@ const App: React.FC = () => {
 
           // Seed a single terminal in THIS tab without activating it.
           const { splitPaneInTab } = await import('./store/slices/panesSlice');
-          const newTerminalId = terminalId || generateId('tm');
+          const newTerminalId = leafId || generateId('tm');
           dispatch(splitPaneInTab({
             tabId: tabId,
             direction: direction || 'vertical',
@@ -1334,7 +1356,7 @@ const App: React.FC = () => {
           direction: autoDirection,
           shellType: profile || defaultProfile || 'cmd',
           name: name,
-          terminalId: terminalId // Reuse the backend-created process (avoids orphaning it)
+          terminalId: leafId // the leaf the backend minted for this pane
         }));
 
         console.log('API: Dispatched splitPaneInTab action');

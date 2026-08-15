@@ -1,4 +1,4 @@
-import { buildApiCreatedTab } from '../apiCreatedTab';
+import { buildApiCreatedTab, resolveApiCreateIds } from '../apiCreatedTab';
 
 describe('buildApiCreatedTab', () => {
   it('pins the title (titleIsCustom: true) when the caller supplies a name', () => {
@@ -56,6 +56,48 @@ describe('buildApiCreatedTab', () => {
 
       expect(tab.title).toBe('My Agent');
       expect(tab.titleIsCustom).toBe(true);
+    });
+  });
+});
+
+describe('resolveApiCreateIds', () => {
+  it('reads the explicit P0-A keys for a split', () => {
+    expect(
+      resolveApiCreateIds({
+        terminalId: 'pc-abc123def',
+        tabId: 'tb-4e8d0c2f1',
+        processId: 'pc-abc123def',
+        rendererTerminalId: 'tm-9f2c1a4b7',
+        owningTabId: 'tb-4e8d0c2f1',
+      }),
+    ).toEqual({
+      processId: 'pc-abc123def',
+      leafId: 'tm-9f2c1a4b7',
+      owningTabId: 'tb-4e8d0c2f1',
+    });
+  });
+
+  it('gives a root create the same leaf and owner', () => {
+    expect(
+      resolveApiCreateIds({
+        processId: 'pc-root1',
+        rendererTerminalId: 'tb-4e8d0c2f1',
+        owningTabId: 'tb-4e8d0c2f1',
+      }),
+    ).toEqual({ processId: 'pc-root1', leafId: 'tb-4e8d0c2f1', owningTabId: 'tb-4e8d0c2f1' });
+  });
+
+  // A payload from a build that predates P0-A: `terminalId` was the process id
+  // and `tabId` the owning tab, with no leaf at all.
+  it('falls back to the legacy keys', () => {
+    expect(
+      resolveApiCreateIds({ terminalId: 'pc-legacy', tabId: 'tb-legacy1' }),
+    ).toEqual({ processId: 'pc-legacy', leafId: 'tb-legacy1', owningTabId: 'tb-legacy1' });
+  });
+
+  it('reports missing ids as undefined rather than inventing them', () => {
+    expect(resolveApiCreateIds({})).toEqual({
+      processId: undefined, leafId: undefined, owningTabId: undefined,
     });
   });
 });
