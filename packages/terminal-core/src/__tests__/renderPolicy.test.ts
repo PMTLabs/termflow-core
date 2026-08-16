@@ -44,7 +44,14 @@ import type { TerminalBridge, Disposable } from '../types';
 
 /** One mock instance. `disposed` does not exist on the real addon; it records that
  *  our dispose() was CALLED, which is all jsdom can show (§6.1 item 1). */
-type MockWebglInstance = { disposed: boolean; dispose: () => void; clearTextureAtlas: () => void };
+type MockWebglInstance = {
+  disposed: boolean;
+  dispose: () => void;
+  clearTextureAtlas: () => void;
+  /** The mock's real emission path — a no-op once disposed, like the addon's own
+   *  emitter, which its DisposableStore tears down (rev 15). */
+  fireContextLoss: () => void;
+};
 
 /** The jsdom WebglAddon mock (src/__mocks__/addon-webgl.ts) adds three statics the
  *  real addon has no equivalent of: a one-shot construction-failure switch, the last
@@ -349,21 +356,38 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
 
   // Review 120 HIGH (b) — promotion failing AFTER construction. The failNextConstruction
   // switch throws before an instance exists, so it cannot see this: here the addon is
-  // built (and may already hold GPU resources) and then activation throws. Returning
-  // null without disposing it leaks a live, unreachable context.
-  it('disposes the constructed addon when activation throws after construction', () => {
+  // built and then activation throws.
+  //
+  // AN ACTIVATION FAILURE IS NOW CHARGED TO THE BUDGET (round 8 CRITICAL). This test used
+  // to assert `countActiveWebGLAddons()` fell to 0 — that our dispose() succeeding proved
+  // nothing leaked. Against the real dependency that inference is false:
+  // `WebglAddon.activate()` evaluates `new WebglRenderer(...)` BEFORE `_register` captures
+  // it, and the renderer acquires the context and appends its canvas to the live screen
+  // element BEFORE registering the disposable that removes it again. A throw from
+  // `_initializeWebGLState()` therefore leaves a DOM-attached canvas holding a real
+  // context that the addon never owned — so `dispose()` succeeds precisely BECAUSE it has
+  // nothing to dispose.
+  //
+  // Note this test still cannot reach that path: it replaces `loadAddon` wholesale, so no
+  // renderer is ever constructed. That is the reality gap codex named, and it is why the
+  // production fix keys on "did we enter loadAddon" rather than on what dispose() returned.
+  it('charges an activation failure to the budget, because dispose() proves nothing there', () => {
     const { entry } = makeEntry('activate-fail');
     (entry.terminal as unknown as { loadAddon: (a: unknown) => void }).loadAddon = () => {
       throw new Error('test: activation failed');
     };
 
     expect(setTerminalRenderPolicy('activate-fail', 'webgl')).toBe('dom');
-    expect(MockWebgl.instances).toHaveLength(1);   // it WAS constructed…
-    expect(MockWebgl.instances[0].disposed).toBe(true); // …and must not survive
+    expect(MockWebgl.instances).toHaveLength(1);        // it WAS constructed…
+    expect(MockWebgl.instances[0].disposed).toBe(true); // …and we still tried to release it
+    // Not reachable from the cache — the promotion reported 'dom'.
     const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
-    const live = MockWebgl.instances.filter((a) => !a.disposed).length;
-    expect(live).toBe(reachable);
-    expect(countActiveWebGLAddons()).toBe(0);
+    expect(reachable).toBe(0);
+    // …but STILL COUNTED, via the quarantine. A slot held for a context that may not
+    // exist is the safe direction; an uncounted context that does exist is not, and
+    // repeated failures would accumulate those without bound.
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 
   it('returns dom for an unknown terminal id rather than throwing', () => {
@@ -1072,19 +1096,70 @@ describe('design/013 §5.2 — a stale context-loss handler must not clear a rep
     expect(addonB).not.toBe(addonA);
     const genBefore = entry.nonCanvasPolicyGeneration ?? 0;
 
-    // Now A's context is lost, long after A stopped owning the cache slot.
+    // Now A's saved handler is invoked directly, long after A stopped owning the slot.
+    //
+    // WHAT THIS IS, PRECISELY (corrected, round 8 MEDIUM): a DEFENCE-IN-DEPTH check on a
+    // call production can no longer make. Invoking `handlerA()` bypasses xterm's disposal
+    // wrapper and the mock's own `fireContextLoss()`, and A's emitter died inside
+    // `DisposableStore.clear()` when its `dispose()` threw — so nothing can deliver this.
+    // The earlier version of this test asserted the quarantine fell 1 -> 0 here and called
+    // it real GPU recovery, which contradicted rev 15's own §5 text: quarantine is
+    // PERMANENT for the renderer's lifetime.
+    //
+    // The guard being pinned is the review-126 HIGH — a stale handler must not mutate its
+    // REPLACEMENT — and that is worth keeping precisely because it is cheap and the
+    // consequence (B live but unreachable) is severe.
     handlerA();
 
     // B must survive untouched: still cached, still counted, generation not bumped.
     expect(entry.webglAddon).toBe(addonB as never);
     expect(entry.nonCanvasPolicyGeneration ?? 0).toBe(genBefore);
-    // A is released from quarantine — the GPU took its context back, so counting it
-    // any longer would permanently shrink the budget.
+    // A leaves the SET, because that is what this direct call does — but note it is the
+    // impossible path. The reachable-path assertion is the sibling test below.
     expect(getQuarantinedWebGLAddonCount()).toBe(0);
 
     const reachable = [...terminalCache.values()].filter((e) => e.webglAddon).length;
     expect(reachable).toBe(1);
     expect(countActiveWebGLAddons()).toBe(reachable + getQuarantinedWebGLAddonCount());
+  });
+
+  // The REACHABLE path, which no test covered until round 8 pointed out that the one
+  // above only ever exercised the impossible one.
+  //
+  // Delivered through the addon's real emission path instead of a saved callback: a
+  // quarantined addon's emitter was torn down by the very `dispose()` that quarantined it,
+  // so no listener runs and the count MUST hold at 1 for the renderer's lifetime. This is
+  // the assertion that would catch someone "restoring" opportunistic release.
+  it('a quarantined addon stays quarantined when context loss is delivered for real', () => {
+    const { entry } = makeEntry('ctxloss-reachable');
+
+    setTerminalRenderPolicy('ctxloss-reachable', 'webgl');
+    const addonA = asMock(entry.webglAddon);
+
+    // TEAR DOWN FIRST, THEN THROW — the order `DisposableStore.clear()` actually has:
+    // `try { dispose(children) } finally { this._toDispose.clear() }`. The emitter dies
+    // even though the disposal fails, which is the entire reason quarantine is permanent.
+    //
+    // Writing this as a bare `dispose = () => { throw }` (the shape used elsewhere in this
+    // file) skips the mock's own teardown, leaves the listener alive, and makes the
+    // release below reachable — so the test would have asserted the opposite of reality.
+    // That mistake was made HERE first, on the test written to prove this very point.
+    const realDispose = addonA.dispose.bind(addonA);
+    addonA.dispose = () => {
+      realDispose();
+      throw new Error('test: A refuses disposal');
+    };
+
+    setTerminalRenderPolicy('ctxloss-reachable', 'dom');
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // The real emission path. The mock models the emitter dying with dispose(), so this
+    // reaches nobody — exactly as the production addon behaves.
+    addonA.fireContextLoss();
+
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Terminal } from '@xterm/xterm';
 import {
   countActiveWebGLAddons,
+  getCanvasWebGLBudget,
   getTerminalRenderPolicy,
   setTerminalRenderPolicy,
   type RenderPolicy,
@@ -329,15 +330,55 @@ export function snapshotRenderPolicies(ids: string[]): RenderPolicySnapshot {
  */
 export function restoreRenderPolicies(snap: RenderPolicySnapshot): Record<string, RenderPolicy> {
   const restored: Record<string, RenderPolicy> = {};
+
+  // VALIDATE EVERYTHING FIRST, then DEMOTE, then PROMOTE — the same demote-before-promote
+  // discipline RULE 1 imposes on the reconciler, and for exactly the same reason
+  // (round 8 CRITICAL).
+  //
+  // A single insertion-order loop breaches the budget TRANSIENTLY on the most ordinary
+  // input there is. Snapshot A=webgl, B=dom; while canvas is active the two swap, so B
+  // holds the context. On exit the loop reaches A first and promotes it while B is still
+  // holding: 12 -> 13 -> 12 at the production budget. The FINAL state is correct, which is
+  // why every test passed — they all asserted the end state and never sampled the maximum.
+  // The 13th allocation is real, and at the boundary the browser may evict an arbitrary
+  // existing context to satisfy it.
+  const valid: Array<[string, RenderPolicy]> = [];
   for (const [id, want] of snap) {
     const entry = terminalCache.get(id);
     if (!entry || entry.terminal !== want.terminal) continue;
     if ((entry.nonCanvasPolicyGeneration ?? 0) !== want.generation) continue;
-    if (getTerminalRenderPolicy(id) === want.policy) {
-      restored[id] = want.policy;
+    valid.push([id, want.policy]);
+  }
+
+  // Phase 1 — every demotion, freeing capacity before anything asks for it.
+  for (const [id, policy] of valid) {
+    if (policy !== 'dom') continue;
+    restored[id] = getTerminalRenderPolicy(id) === 'dom' ? 'dom' : setTerminalRenderPolicy(id, 'dom');
+  }
+
+  // Phase 2 — promotions, under the budget that is still armed.
+  //
+  // Demote-first alone is NOT sufficient: while canvas was active the quarantine may have
+  // grown, or a terminal outside this snapshot may have taken a context, so the capacity
+  // that existed when the snapshot was taken is not guaranteed to exist now.
+  //
+  // CALLER ORDERING, and it is load-bearing: restore BEFORE releasing the canvas budget.
+  // `getCanvasWebGLBudget()` is the only authority available here, and once it is released
+  // this function has nothing to enforce against and must promote unconditionally — which
+  // is the pre-canvas state being reinstated, but without a cap.
+  const budget = getCanvasWebGLBudget();
+  for (const [id, policy] of valid) {
+    if (policy !== 'webgl') continue;
+    if (getTerminalRenderPolicy(id) === 'webgl') {
+      restored[id] = 'webgl';
       continue;
     }
-    restored[id] = setTerminalRenderPolicy(id, want.policy);
+    if (budget !== null && countActiveWebGLAddons() >= budget) {
+      restored[id] = 'dom';
+      continue;
+    }
+    restored[id] = setTerminalRenderPolicy(id, 'webgl');
   }
+
   return restored;
 }

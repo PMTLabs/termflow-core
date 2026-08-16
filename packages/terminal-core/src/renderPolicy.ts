@@ -180,19 +180,30 @@ export function getQuarantinedWebGLAddonCount(): number {
 }
 
 /**
- * Release ONE addon — the ONLY way out of quarantine (rev 10).
+ * Remove ONE addon from the quarantine set.
  *
- * Used for the case where the context is known to be gone by means other than our
- * `dispose()` succeeding: today, the addon reporting context loss. The GPU has taken
- * the context back, so continuing to count it would permanently overstate usage and
- * shrink the budget for the rest of the session.
+ * READ THIS BEFORE TREATING IT AS A RELEASE MECHANISM: for an addon that is actually
+ * IN the quarantine, this is UNREACHABLE, and quarantine is therefore permanent for the
+ * renderer's lifetime (rev 15; the earlier text here promised the opposite and was the
+ * LOW of codex round 7 and a MEDIUM of round 8).
  *
- * This used to be described as the narrow exception, with everything else going
- * through `drainWebGLQuarantine`, "which only releases on a dispose() that actually
- * succeeded". That drain is gone: a `dispose()` that does not throw is NOT evidence
- * of release for any addon xterm has wrapped (see the registry's own comment above),
- * so it released addons whose contexts were never freed. Context loss is now the only
- * proof we accept, because it is the only one we actually have.
+ * The only caller is the context-loss handler installed in `webgl.ts`. An addon enters
+ * the quarantine exclusively BECAUSE its `dispose()` threw — and `WebglAddon`'s
+ * `onContextLoss` is an `Emitter` created with `this._register(...)`, so it belongs to
+ * the addon's own `DisposableStore`, whose `clear()` is
+ * `try { dispose(children) } finally { this._toDispose.clear() }`. The store empties even
+ * when a child throws. So by the time an addon is quarantined its emitter is already
+ * gone, and no context loss it might suffer can ever call this.
+ *
+ * What the call IS for is the opposite ordering: context loss arriving while the addon is
+ * still healthy and un-quarantined. There it is a harmless no-op on the set (the addon is
+ * not a member) and the handler's real work is clearing the cache field.
+ *
+ * The consequence is deliberate and it fails SAFE — a wedged context holds a budget slot
+ * for the session rather than being handed out twice. Do not "fix" it by accepting a
+ * non-throwing `dispose()` as proof of release: that is false for every addon xterm has
+ * wrapped (see the registry's own comment above), and it is what the deleted
+ * `drainWebGLQuarantine` got wrong.
  */
 export function releaseFromWebGLQuarantine(addon: DisposableAddon | null | undefined): void {
   if (!addon) return;

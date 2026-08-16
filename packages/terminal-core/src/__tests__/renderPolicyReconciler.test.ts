@@ -22,6 +22,7 @@ import {
   releaseFromWebGLQuarantine,
   getQuarantinedWebGLAddonCount,
   clearWebGLQuarantine,
+  setCanvasWebGLBudget,
   type RenderPolicy,
 } from '../renderPolicy';
 import {
@@ -33,6 +34,16 @@ import {
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+
+/**
+ * The jest moduleNameMapper resolves `@xterm/addon-webgl` to `__mocks__/addon-webgl.ts`
+ * at runtime, but TypeScript still sees the REAL class here — so the mock-only test
+ * switches need this cast, the same pattern renderPolicy.test.ts uses.
+ */
+const MockWebgl = WebglAddon as unknown as {
+  maxLiveContexts: number;
+  liveCount: () => number;
+};
 
 /** A fake policy setter with a hard context cap, so budget behaviour is asserted
  *  against COUNTS rather than tier strings — review 084's point. */
@@ -271,6 +282,48 @@ describe('design/013 D6 — snapshot and restore', () => {
     const restored = restoreRenderPolicies(snap);
     expect(restored['snap-a']).toBe('webgl');
     expect(restored['snap-b']).toBe('dom');
+  });
+
+  // ROUND 8 CRITICAL. The test above builds this EXACT swap and asserts only the final
+  // policies — so it passed while restoration transiently allocated a 13th context at a
+  // budget of 12. The end state was right; the path to it was not.
+  //
+  // The lesson generalises past this test: for a HARD budget, the invariant is over the
+  // MAXIMUM concurrent count, and a final-state assertion cannot see a maximum. Sample it.
+  it('never exceeds the budget DURING restoration, not merely at the end', () => {
+    setCanvasWebGLBudget(1);
+
+    makeEntry('max-a');
+    makeEntry('max-b');
+    setTerminalRenderPolicy('max-a', 'webgl');
+    const snap = snapshotRenderPolicies(['max-a', 'max-b']);
+
+    // Canvas swaps them: a is demoted, b promoted. Live count is still 1.
+    setTerminalRenderPolicy('max-a', 'dom');
+    setTerminalRenderPolicy('max-b', 'webgl');
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // The ceiling makes the transient VISIBLE. Pin it to the live count AT ENTRY rather
+    // than to a literal: this is a pure SWAP, so a correct restoration never needs to
+    // exceed the contexts already alive, while an allocate-before-free one exceeds it by
+    // exactly 1. (A literal would also be wrong here — `MockWebgl.instances` is
+    // file-scoped and never reset, so undisposed addons from earlier tests are still
+    // counted.)
+    //
+    // Under the old single-loop restore, `snap` iterates a -> b, so a is promoted while b
+    // still holds: construction throws, the promotion reports 'dom', and the final state
+    // is wrong — which is how a final-state assertion finally catches a mid-flight breach.
+    MockWebgl.maxLiveContexts = MockWebgl.liveCount();
+    try {
+      const restored = restoreRenderPolicies(snap);
+      expect(restored['max-a']).toBe('webgl');
+      expect(restored['max-b']).toBe('dom');
+    } finally {
+      MockWebgl.maxLiveContexts = Infinity;
+      setCanvasWebGLBudget(null);
+    }
+
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 
   // Spec test 11 — the entry can be REPLACED without the policy having changed

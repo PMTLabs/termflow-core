@@ -45,10 +45,34 @@ export class WebglAddon {
    */
   contextLossListeners: Array<() => void> = [];
 
+  /**
+   * A HARD ceiling on LIVE (constructed, not yet disposed) instances — the browser's
+   * own limit, which our budget is supposed to stay under. `Infinity` by default, so
+   * this changes nothing for suites that do not opt in.
+   *
+   * Exists because every budget test asserted the FINAL count, and a final count cannot
+   * see a transient breach. Restoration allocated a 13th context at a budget of 12 and
+   * then immediately dropped back to 12; the end state was right, every test passed, and
+   * a real browser could have evicted an arbitrary live context in between (round 8
+   * CRITICAL). With a cap set, a transient breach stops being invisible — it throws, the
+   * promotion fails, and the final state is wrong in a way an ordinary assertion catches.
+   */
+  static maxLiveContexts = Infinity;
+
+  static liveCount(): number {
+    return WebglAddon.instances.filter((i) => !i.disposed).length;
+  }
+
   constructor() {
     if (WebglAddon.failNextConstruction) {
       WebglAddon.failNextConstruction = false;
       throw new Error('mock: WebGL context limit reached');
+    }
+    if (WebglAddon.liveCount() >= WebglAddon.maxLiveContexts) {
+      throw new Error(
+        `mock: hard context ceiling of ${WebglAddon.maxLiveContexts} exceeded — a caller ` +
+          'allocated before it freed',
+      );
     }
     WebglAddon.instances.push(this);
   }

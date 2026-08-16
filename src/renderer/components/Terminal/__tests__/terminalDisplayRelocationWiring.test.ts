@@ -75,7 +75,25 @@ describe('TerminalDisplay relocation wiring', () => {
       }
     }
     expect(end).toBeGreaterThan(from);
-    const body = SOURCE.slice(from + 1, end);
+
+    // STRIP COMMENTS BEFORE MATCHING (round 8 LOW). Raw `toContain` on source counts text
+    // inside comments, so prefixing the real statements with `//` left every required
+    // substring present and the test green while the refusal branch did nothing at
+    // runtime. That is the same "asserts presence, not behaviour" defect one level down —
+    // found on the correction written to fix the previous instance of it.
+    //
+    // This still cannot prove EXECUTION (a body wrapped in `if (false)` would pass), which
+    // is stated plainly rather than papered over: the real fix is an executable refusal
+    // helper, recorded in `153` as the follow-up.
+    // `[^\n]*` and NO `$` anchor, deliberately. This file is CRLF, and in JavaScript `.`
+    // does not match `\r` — it is a line terminator — so `.*$` never reaches end-of-string
+    // on a CRLF line and the strip silently does nothing. The first version of this fix
+    // had exactly that bug and passed the mutation test it was written to fail.
+    const body = SOURCE.slice(from + 1, end)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((l) => l.replace(/(^|[^:])\/\/[^\n]*/, '$1'))
+      .join('\n');
 
     // Drops the never-wired engine. Without this the next reader of
     // `engineRef.current!.terminal` hits a getter that throws.
