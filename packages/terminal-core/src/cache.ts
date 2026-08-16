@@ -308,6 +308,10 @@ export const resetTerminalRendering = (
   terminalId: string,
   opts: { canvasOwned?: boolean } = {},
 ): boolean => {
+  // Set when the addon's dispose() threw. The reset still HAPPENS — the entry is
+  // cleared, the quarantine takes ownership, the terminal is repainted — but the
+  // caller is told the disposal did not succeed.
+  let disposeFailed = false;
   const cached = terminalCache.get(terminalId);
   if (!cached) return false;
 
@@ -338,26 +342,20 @@ export const resetTerminalRendering = (
       // the entry, now owns the addon.
       console.warn(`terminal-core/cache: Error disposing WebGL during reset:`, e);
       quarantineWebGLAddon(cached.webglAddon);
-      cached.webglAddon = null;
-      cached.useWebGL = false;
-      // BUMP HERE TOO (rev 11, pre-review `140`). This branch now CHANGES THE
-      // POLICY — clearing `webglAddon` is exactly what `getTerminalRenderPolicy`
-      // reads — so it is a non-canvas policy change like any other and must
-      // invalidate a canvas snapshot.
-      //
-      // It did not have to before rev 10, because the failure path RETAINED the
-      // addon and genuinely changed nothing. Rev 10 made this path mutate state and
-      // did not revisit the consumer downstream of it, so a Reset Rendering whose
-      // dispose threw left the generation untouched while the reported policy moved
-      // webgl -> dom. `restoreRenderPolicies` then saw a matching Terminal AND a
-      // matching generation, neither guard fired, and canvas exit silently
-      // re-promoted — reversing an explicit user action and stacking a FRESH GPU
-      // context on one whose release was never proven. One fault was enough.
-      if (!opts.canvasOwned) {
-        cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
-      }
-      return false;
+      disposeFailed = true;
     }
+    // Cleared either way, and the function CONTINUES either way (rev 12, pre-review
+    // `142`). Rev 10 added an early `return false` here, which quietly skipped the
+    // generation bump, the refresh and the fit at the tail — on the one path most
+    // likely to need the repaint, since the renderer really did just change. The
+    // sibling site `disableWebGLGlobally` was written to fall through and was
+    // therefore correct; these two performed the same operation with opposite
+    // control flow. `origin/develop` also always fell through: the early return was
+    // introduced by this branch, so this is a regression, not a pre-existing gap.
+    //
+    // Falling through also removes the duplicated bump the early return required.
+    // Bump exactly once, in the tail, for both outcomes — the policy changed either
+    // way, which is what rev 11 established.
     cached.webglAddon = null;
     cached.useWebGL = false;
   }
@@ -377,8 +375,8 @@ export const resetTerminalRendering = (
   // renderer whether or not it had anything left to tear down, so it invalidates
   // the snapshot either way. (The dispose-failure path returns above, and does its
   // OWN bump before returning — it clears the addon, so it changes the policy too.
-  // This parenthetical used to say "nothing changed, so there is nothing to
-  // invalidate", which was true only while that path retained the addon.)
+  // Reached on BOTH outcomes since rev 12 — a dispose that threw still cleared the
+  // addon, so it changed the policy too.)
   if (!opts.canvasOwned) {
     cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
   }
@@ -395,7 +393,7 @@ export const resetTerminalRendering = (
   }
   fitIfLaidOut(cached);
 
-  return true;
+  return !disposeFailed;
 };
 
 // Function to disable WebGL globally and reset all terminals.

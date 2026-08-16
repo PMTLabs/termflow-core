@@ -121,7 +121,24 @@ export function reconcileRenderPolicies(
 
   // PROVISIONAL winners, used ONLY to decide which live candidates must be freed.
   // It is deliberately not used to gate promotion: see the promotion pass below.
-  const provisionalWinners = new Set(wantWebgl.slice(0, slots));
+  //
+  // FILTERED to ids that can actually hold a context (rev 12, pre-review `142`).
+  // An id absent from the cache — production `getPolicy` returns `null` and
+  // `setTerminalRenderPolicy` returns 'dom' — can never consume a slot, so letting
+  // it occupy one here makes a REAL, currently-holding, lower-priority terminal a
+  // "loser" and demotes it. The promotion pass below then finds the slot still free
+  // and re-promotes that terminal, which per D9/FA builds a BRAND-NEW WebglAddon.
+  // Net: `applied` and `webglCount` are correct — which is why the existing tests
+  // pass — but a live GPU context was disposed and rebuilt for nothing, with the
+  // glyph-atlas rebuild and visible flicker that implies. That is exactly the
+  // thrash the steady-state contract forbids.
+  //
+  // The comment on the promotion pass already identified this hazard and closed it
+  // for promotion only; `provisionalWinners` still gated the DEMOTE decision and
+  // was never revisited. Same hole, other side.
+  const provisionalWinners = new Set(
+    wantWebgl.filter((id) => getPolicy(id) !== null).slice(0, slots),
+  );
 
   // RULE 1: demote first — every requested demotion, PLUS every priority loser that
   // is currently holding a context. Freeing before requesting is what makes the

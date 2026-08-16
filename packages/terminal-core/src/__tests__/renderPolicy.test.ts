@@ -388,6 +388,50 @@ describe('design/013 §5.3 LB — resetTerminalRendering must not fit blind', ()
     resetTerminalRendering('reset-box');
     expect(fitAddon.fitCount).toBe(1);
   });
+
+  // rev 12 (pre-review `142`) — the repaint must happen on the FAILURE path too.
+  // Rev 10 added an early `return false` in the dispose catch, which skipped the
+  // refresh and the fit at the tail — on the one path most likely to need them,
+  // since the renderer really did just change. `origin/develop` always fell
+  // through, and the sibling site disableWebGLGlobally still does, so the two
+  // performed the same operation with opposite control flow.
+  it('still refreshes and fits when the disposal THREW', () => {
+    const { fitAddon, entry, term } = makeEntry('reset-throw-repaint');
+    let refreshes = 0;
+    (term as unknown as { refresh: (a: number, b: number) => void }).refresh = () => {
+      refreshes += 1;
+    };
+    entry.webglAddon = {
+      dispose() { throw new Error('test: driver refused'); },
+    } as never;
+    entry.useWebGL = true;
+
+    // Still reports the disposal failure to the caller...
+    expect(resetTerminalRendering('reset-throw-repaint')).toBe(false);
+    // ...but the reset itself HAPPENED, and is visible.
+    expect(entry.webglAddon).toBeNull();
+    expect(refreshes).toBe(1);
+    expect(fitAddon.fitCount).toBe(1);
+    // The addon is still counted, via the quarantine (ORPHAN).
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
+  // …and the bump is emitted exactly ONCE on that path, not twice. The early return
+  // required its own duplicate bump; falling through would double-count it, which
+  // would spuriously invalidate a snapshot taken between the two increments.
+  it('bumps the generation exactly once when the disposal THREW', () => {
+    const { entry } = makeEntry('reset-throw-bump');
+    entry.webglAddon = {
+      dispose() { throw new Error('test: driver refused'); },
+    } as never;
+    entry.useWebGL = true;
+    const before = entry.nonCanvasPolicyGeneration ?? 0;
+
+    expect(resetTerminalRendering('reset-throw-bump')).toBe(false);
+
+    expect((entry.nonCanvasPolicyGeneration ?? 0) - before).toBe(1);
+  });
 });
 
 describe('design/013 §5.1 — creation under an active budget', () => {

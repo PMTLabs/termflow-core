@@ -766,3 +766,53 @@ describe('a THROWING dispose still invalidates a live canvas snapshot (rev 11)',
 function asMockDispose(entry: { webglAddon: unknown }): { dispose: () => void } {
   return entry.webglAddon as { dispose: () => void };
 }
+
+/**
+ * rev 12 (pre-review `142`) — H2. An id that can NEVER hold a context must not
+ * occupy a provisional winner slot.
+ *
+ * `applied` and `webglCount` came out correct without this fix, which is precisely
+ * why every existing test passed: the damage is the CHURN, not the end state. So the
+ * assertion has to be on the CALLS.
+ */
+describe('an uncached candidate must not churn a live context (rev 12)', () => {
+  it('emits no setPolicy calls when the top-priority id is uncached', () => {
+    // `ghost` is uncached (getPolicy -> null, can never hold a context); `real` is
+    // cached and already holding. Budget 1.
+    const fake = makeFake({ cap: 4, preloaded: ['real'], uncached: ['ghost'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { ghost: 'webgl', real: 'webgl' },
+      budget: 1,
+      order: ['ghost', 'real'],
+      ...fake,
+    });
+
+    // THE ASSERTION. Before the fix: ['real','dom'], ['ghost','webgl'], ['real','webgl']
+    // — a live WebglAddon disposed and rebuilt from scratch (D9/FA) for no reason.
+    expect(fake.calls).toEqual([]);
+
+    // …and the end state is the same one the old code also reached, so this test is
+    // only meaningful because of the assertion above.
+    expect(out.applied.real).toBe('webgl');
+    expect(out.applied.ghost).toBe('dom');
+    expect(out.webglCount).toBe(1);
+  });
+
+  it('still demotes a genuine priority loser', () => {
+    // The guard must not over-apply: a CACHED lower-priority holder really does lose
+    // to a CACHED higher-priority candidate, and must be demoted to free the slot.
+    const fake = makeFake({ cap: 1, preloaded: ['old'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { fresh: 'webgl', old: 'webgl' },
+      budget: 1,
+      order: ['fresh', 'old'],
+      ...fake,
+    });
+
+    expect(fake.calls).toEqual([['old', 'dom'], ['fresh', 'webgl']]);
+    expect(out.applied.fresh).toBe('webgl');
+    expect(out.applied.old).toBe('dom');
+  });
+});
