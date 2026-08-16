@@ -28,20 +28,35 @@ jobs:
       with:
         node-version: '18'
 
-    # This job runs on the self-hosted Windows box, where bun is already
-    # installed and usually already RUNNING — oven-sh/setup-bun then fails
-    # trying to overwrite the in-use bun.exe with `EBUSY: resource busy or
-    # locked`, which surfaces as a random red X on an otherwise green PR.
-    # rust-tests.yml has carried this workaround for a while; e2e-tests.yml
-    # was missed. Same two-step shape, so the jobs stay comparable and a
-    # future move to a GitHub-hosted runner still installs bun.
+    # oven-sh/setup-bun DOWNLOADS bun and overwrites the shared install. On any
+    # self-hosted runner that binary is already there and may be in use, so the
+    # copy fails and the job dies before any of our code runs — a random red X on
+    # an otherwise green PR:
+    #
+    #   Windows, overwriting the in-use exe:
+    #     EBUSY: resource busy or locked, copyfile '...bun.exe' -> 'C:\...\bun.exe'
+    #   Linux, two jobs sharing /home/ubuntu/.bun:
+    #     ETXTBSY: text file is busy, copyfile '.../bun' -> '/home/ubuntu/.bun/bin/bun'
+    #
+    # This used to be guarded with `runner.os != 'Windows'`, copied from
+    # rust-tests.yml — where it is correct, because that job pins
+    # `runs-on: [self-hosted, windows]`. THIS job is bare `[self-hosted]` and can
+    # land on the Linux boxes, where that guard lets setup-bun run and hit the
+    # ETXTBSY form instead. Gate on the runner ENVIRONMENT so both are covered and
+    # a GitHub-hosted runner still installs bun. (ci.yml, PR #37, same change.)
     - name: Setup Bun (GitHub-hosted)
-      if: runner.os != 'Windows'
+      if: runner.environment == 'github-hosted'
       uses: oven-sh/setup-bun@v2
 
-    - name: Verify Bun (Windows)
-      if: runner.os == 'Windows'
-      run: bun --version
+    - name: Verify Bun (self-hosted)
+      if: runner.environment != 'github-hosted'
+      shell: bash
+      run: |
+        # Where the preinstalled bun lives; a no-op when the runner's profile
+        # already has it on PATH.
+        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.bun/bin:$PATH"
+        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -107,14 +122,18 @@ jobs:
       with:
         node-version: '18'
 
-    # Same EBUSY workaround as the e2e job above — see the comment there.
+    # Same shared-install race as the e2e job above — see the comment there.
     - name: Setup Bun (GitHub-hosted)
-      if: runner.os != 'Windows'
+      if: runner.environment == 'github-hosted'
       uses: oven-sh/setup-bun@v2
 
-    - name: Verify Bun (Windows)
-      if: runner.os == 'Windows'
-      run: bun --version
+    - name: Verify Bun (self-hosted)
+      if: runner.environment != 'github-hosted'
+      shell: bash
+      run: |
+        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.bun/bin:$PATH"
+        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
