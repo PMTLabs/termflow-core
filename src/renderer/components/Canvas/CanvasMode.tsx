@@ -3,10 +3,11 @@ import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { RootState } from '../../store';
-import { focusNode, selectNode, setOverlayNode } from '../../store/slices/canvasSlice';
+import { focusNode, selectNode, setOverlayNode, setSidebarOpen } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
 import { setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
+import { CanvasSidebar } from './CanvasSidebar';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
@@ -71,6 +72,7 @@ export const CanvasMode: React.FC = () => {
   const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
   const overlayId = useSelector((s: RootState) => s.canvas.overlayId);
   const recent = useSelector((s: RootState) => s.canvas.recent);
+  const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
   // FROZEN FOR THE SESSION, and the two things about that are both load-bearing.
@@ -272,6 +274,10 @@ export const CanvasMode: React.FC = () => {
   return (
     <CanvasMetricsContext.Provider value={metrics}>
     <div className="canvas-mode" data-testid="canvas-mode" style={geometryVars(metrics, vp.z)}>
+      {/* Before the viewport, so it takes the left edge — Task 15's resize handle goes between
+          them. `size` is measured from `.canvas-viewport` itself, so the fly-to targets the
+          space the canvas actually has rather than the whole window. */}
+      {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} />}
       <CanvasViewport onSize={onSize} onBackgroundPointerDown={clearSelection}>
         {model.groups.map((g) => (
           <CanvasGroupFrame
@@ -349,6 +355,17 @@ export const CanvasMode: React.FC = () => {
           does not dismiss the overlay, acting on a layout the user cannot see. */}
       {!overlayId && model.groups.length > 0 && (
         <div className="canvas-toolbar">
+          {/* `sidebarOpen` is in `canvasSlice` and persisted by Task 22; without a control it
+              would be a stored field permanently stuck at its initial value. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            aria-pressed={sidebarOpen}
+            onClick={() => dispatch(setSidebarOpen(!sidebarOpen))}
+            title={sidebarOpen ? 'Hide the terminal list' : 'Show the terminal list'}
+          >
+            List
+          </button>
           <button
             type="button"
             className="canvas-tbtn"

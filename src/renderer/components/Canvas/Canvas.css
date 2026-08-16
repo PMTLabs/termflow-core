@@ -222,8 +222,17 @@
 
    So the band is sized as a fraction of the header and translated across it exactly once per
    period. The gradient peaks at 50%, so its head and tail ramps are the same length and the
-   band reads as symmetrical however wide the node is. */
-.canvas-node.running .canvas-node-head::after {
+   band reads as symmetrical however wide the node is.
+
+   Task 14's sidebar rows join this selector list rather than getting a copy — a row is the
+   third surface to want the sweep, and a third copy is how the three drift. They are NOT folded
+   into a shared `.tf-sweep` class, because that would mean editing `CanvasNode`'s markup to
+   swap one class for another with no behavioural difference, and the sweep's tuning is
+   attached to the selector it was tuned against. A row gets it by carrying the same three
+   properties the header does — `position: relative`, `isolation: isolate`, `overflow: hidden` —
+   which is what makes the band's `z-index: -1` land above the background and below the text. */
+.canvas-node.running .canvas-node-head::after,
+.canvas-srow.running::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: 0;
   width: 55%; z-index: -1; pointer-events: none;
   opacity: .42;
@@ -237,7 +246,8 @@
   to   { transform: translateX(182%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .canvas-node.running .canvas-node-head::after { animation-duration: 3.2s; opacity: .14; }
+  .canvas-node.running .canvas-node-head::after,
+  .canvas-srow.running::after { animation-duration: 3.2s; opacity: .14; }
 }
 
 /* ---- The full-screen overlay -------------------------------------------- */
@@ -316,6 +326,87 @@
 .canvas-port.s { bottom: var(--port-offset); left: var(--port-centre); }
 .canvas-port.w { left: var(--port-offset); top: var(--port-centre); }
 
+/* ---- Sidebar (Task 14) --------------------------------------------------- */
+
+/* A flex sibling of `.canvas-viewport`, before it, so it takes the left edge and the viewport
+   keeps `flex: 1`. Its width is inline from `canvasSlice`, which Task 15 makes draggable. */
+.canvas-sidebar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border-color, #3e3e42);
+  background: var(--bg-secondary, #2d2d30);
+}
+.canvas-ssearch {
+  flex: none;
+  margin: 9px 9px 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 4px;
+  background: var(--bg-primary, #141414);
+  color: var(--text-primary, #cccccc);
+  font-size: 12px;
+  min-width: 0;
+}
+.canvas-ssearch::placeholder { color: var(--text-tertiary, #666666); }
+.canvas-ssearch:focus-visible { outline: 1px solid var(--accent-color, #007acc); outline-offset: 0; }
+
+.canvas-stree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 0 9px; }
+.canvas-sempty { padding: 14px 11px; color: var(--text-tertiary, #666666); font-size: 12px; }
+.canvas-sgroup { margin-top: 5px; }
+.canvas-sghead {
+  margin: 0;
+  padding: 5px 11px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--text-secondary, #969696);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.canvas-sgempty { margin: 0; padding: 2px 11px 4px 19px; font-size: 11px; font-style: italic; color: var(--text-tertiary, #666666); }
+.canvas-srows { margin: 0; padding: 0; list-style: none; }
+
+/* `position: relative` + `isolation: isolate` are what let the running sweep's `z-index: -1`
+   sit above the row's background and below its text — the same three properties
+   `.canvas-node-head` carries, and the reason the shared sweep rule works on both. */
+.canvas-srow {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px 4px 19px;
+  font-size: 12px;
+  color: var(--text-primary, #cccccc);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.canvas-srow:hover { background: var(--bg-tertiary, #3e3e42); }
+.canvas-srow.selected { background: var(--bg-tertiary, #3e3e42); box-shadow: inset 2px 0 0 var(--accent-color, #007acc); }
+.canvas-srow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
+.canvas-srow-title mark { background: rgba(240,160,32,.28); color: inherit; border-radius: 2px; }
+.canvas-srow-dis {
+  flex: none; position: relative; z-index: 1;
+  max-width: 45%; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; color: var(--text-tertiary, #666666);
+}
+.canvas-srow.editing { padding: 2px 9px 2px 17px; }
+.canvas-srename {
+  width: 100%;
+  padding: 2px 5px;
+  border: 1px solid var(--accent-color, #007acc);
+  border-radius: 3px;
+  background: var(--bg-primary, #141414);
+  color: var(--text-primary, #cccccc);
+  font-size: 12px;
+  min-width: 0;
+}
+
 /* ---- Canvas chrome: the Arrange control (Task 13) ------------------------ */
 
 /* Screen space, not world space. It is a sibling of `.canvas-viewport` inside `.canvas-mode`,
@@ -355,6 +446,11 @@
 .canvas-tbtn:focus-visible {
   outline: 2px solid var(--accent-color, #007acc);
   outline-offset: 1px;
+}
+/* A toggle has to look different when it is on, or it reads as a button that did nothing. */
+.canvas-tbtn[aria-pressed="true"] {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--accent-color, #007acc);
 }
 
 /* ---- Space-to-pan (the hand tool) --------------------------------------- */

@@ -190,6 +190,43 @@ describe('the running sweep runs once at a time', () => {
     expect(stops[2].colour).toBe('transparent');
     expect(stops[1].colour).not.toBe('transparent');
   });
+
+  /**
+   * Task 14's sidebar rows are the THIRD surface to want this, so they join the selector list
+   * rather than taking a copy — everything above then holds for a row for free, which is the
+   * whole point of not pasting it a third time.
+   *
+   * Asserted as identity of the rule BODY, not as "the row has a sweep": two rules that happen
+   * to agree today is exactly the state this is meant to prevent.
+   */
+  const ROW_SWEEP = '.canvas-srow.running::after';
+
+  it('a sidebar row shares the rule rather than owning a copy of it', () => {
+    expect(ruleFor(ROW_SWEEP)).toBe(ruleFor(SWEEP));
+  });
+
+  /**
+   * ...and the band only lands correctly because the row reproduces the three properties the
+   * node header carries. `z-index: -1` is resolved against the nearest stacking context, so
+   * without `isolation: isolate` on the row the band would sink behind the sidebar's own
+   * background and vanish — visible nowhere, and passing every test that only reads the sweep
+   * rule itself.
+   */
+  it('a sidebar row establishes the stacking context the band needs', () => {
+    const row = ruleFor('.canvas-srow');
+    expect(row).toMatch(/position:\s*relative/);
+    expect(row).toMatch(/isolation:\s*isolate/);
+    expect(row).toMatch(/overflow:\s*hidden/);
+  });
+
+  it('the reduced-motion override reaches the row too', () => {
+    // Design 010 §9. Two entries in one media rule, so they cannot fall out of step.
+    const reduced = rules().filter((r) => r.selector === ROW_SWEEP && /animation-duration/.test(r.body));
+    expect(reduced).toHaveLength(1);
+    expect(reduced[0].body).toBe(
+      rules().find((r) => r.selector === SWEEP && /animation-duration/.test(r.body))!.body,
+    );
+  });
 });
 
 /**
