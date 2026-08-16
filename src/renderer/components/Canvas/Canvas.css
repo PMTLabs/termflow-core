@@ -85,11 +85,15 @@
    reads as a heavy border around a full-screen terminal, and the state it marks is already
    unmistakable — a focused node is the one taking your keystrokes.
 
+   TWO screen pixels, not one. A single pixel is a hairline on a 4K panel, where CSS pixels are
+   physically small; two reads as a deliberate edge at every density without reading as a
+   frame. This is the whole width budget — there is no second ring to add to it.
+
    One radius, not three. The outline consumes no layout, so the header and body corners sit
    exactly on the node's; giving them their own value is what produced a wedge of node
    background between two arcs that did not share a centre. */
 .canvas-node {
-  --node-chrome-w: calc(1px * var(--node-chrome-k, 1));
+  --node-chrome-w: calc(2px * var(--node-chrome-k, 1));
   --node-radius: calc(7px * var(--node-k, 1));
   position: absolute; z-index: 2; display: flex; flex-direction: column;
   outline: var(--node-chrome-w) solid var(--border-color, #3e3e42);
@@ -235,11 +239,17 @@
 
 /* ---- Connection ports --------------------------------------------------- */
 
-/* Sized through `--node-k` for the same reason as the border above: at the working zoom an
-   uncapped 13px port is a 55px disc, four of which swamp the terminal they belong to. Every
-   length here is one of two numbers — the port's own size and half of it — so they are derived
-   from a single custom property rather than restated four times with the halving done by hand. */
-.canvas-port { --port-size: calc(13px * var(--node-chrome-k, 1)); position: absolute; width: var(--port-size); height: var(--port-size); border-radius: 50%; background: var(--bg-primary, #141414); border: calc(2px * var(--node-chrome-k, 1)) solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
+/* Sized through `--node-chrome-k` for the same reason as the frame above: at the working zoom
+   an uncapped 13px port is a 55px disc, four of which swamp the terminal they belong to.
+
+   10px with a 1.5px ring, not 13 with 2. These are connection handles for Task 18 and they are
+   only visible on hover or selection, so they should read as small targets rather than as
+   decoration — at 13/2 the ring was heavy enough to draw the eye away from the terminal.
+
+   Every length here is one of two numbers — the port's own size and half of it — so they are
+   derived from a single custom property rather than restated four times with the halving done
+   by hand. */
+.canvas-port { --port-size: calc(10px * var(--node-chrome-k, 1)); position: absolute; width: var(--port-size); height: var(--port-size); border-radius: 50%; background: var(--bg-primary, #141414); border: calc(1.5px * var(--node-chrome-k, 1)) solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
 .canvas-node:hover .canvas-port, .canvas-node.selected .canvas-port { opacity: 1; }
 .canvas-port:hover { transform: scale(1.42); background: var(--tab-running-accent, #3aa6ff); }
 /* Centred on the border's CENTRE LINE, not on its inner edge.

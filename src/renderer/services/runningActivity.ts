@@ -4,6 +4,14 @@ export const EVAL_INTERVAL_MS = 400;  // how often the tracker re-evaluates
 export const MIN_CHUNKS = 3;          // >= this many output chunks in the window → running
 export const MIN_BYTES = 512;         // OR >= this many output bytes in the window → running
 export const RESIZE_COOLDOWN_MS = 700; // after a window resize, ignore output this long
+/**
+ * After a Canvas Mode relocation. Deliberately much longer than a window resize, because the
+ * chain is longer: relocate -> DEBOUNCED fit -> backend resize round-trip -> SIGWINCH -> the
+ * TUI redraws -> the data comes back. A window resize skips the first two of those, and 700ms
+ * was short enough that the repaint landed AFTER the window closed — which is exactly the case
+ * this is for, so it suppressed nothing and the notification fired anyway.
+ */
+export const RELOCATION_COOLDOWN_MS = 2500;
                                        // (SIGWINCH makes every TUI redraw at once — a
                                        // synchronized burst that otherwise reads as
                                        // "all tabs running")

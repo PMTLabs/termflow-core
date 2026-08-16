@@ -13,6 +13,7 @@ import {
   MIN_CHUNKS,
   MIN_BYTES,
   RESIZE_COOLDOWN_MS,
+  RELOCATION_COOLDOWN_MS,
   RECONNECT_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
   UNSEEN_DEBOUNCE_MS,
@@ -138,7 +139,11 @@ class RunningActivityTrackerClass {
    * That is the same event class as `handleResize` below — a synchronized redraw burst that
    * nobody typed — and without this it reads as "every tab just started running": the sweep
    * animation fires across the strip and a notification pops for output the user caused by
-   * switching tabs. Same cooldown, for the same reason.
+   * switching tabs.
+   *
+   * A LONGER window than a window resize, though, because the chain is longer: a resize is
+   * measured and sent immediately, while this one waits on a debounced fit and a backend
+   * round-trip before the TUI even starts redrawing. See `RELOCATION_COOLDOWN_MS`.
    *
    * This suppresses the ATTRIBUTION of that output, not the output itself. The repaint still
    * lands in the buffer, so a TUI's previous frame remains in scrollback — that is a property
@@ -146,7 +151,7 @@ class RunningActivityTrackerClass {
    * question, not one this tracker can answer.
    */
   notifyRelocationBurst(): void {
-    this.resetForBurst(RESIZE_COOLDOWN_MS);
+    this.resetForBurst(RELOCATION_COOLDOWN_MS);
   }
 
   private handleResize(): void {

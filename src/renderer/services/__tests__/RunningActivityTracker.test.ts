@@ -4,6 +4,7 @@
 import {
   EVAL_INTERVAL_MS,
   RESIZE_COOLDOWN_MS,
+  RELOCATION_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
   UNSEEN_DEBOUNCE_MS,
 } from '../runningActivity';
@@ -264,11 +265,25 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     expect(unseenTabIds()).toEqual([]);
   });
 
+  // The window has to outlast the whole chain, not just the fit. A relocation waits on a
+  // DEBOUNCED resize and a backend round-trip before the TUI starts redrawing, so a
+  // window-resize-length window closes before the output it exists to swallow arrives —
+  // which is the shape of the bug Tam reported: suppression that suppressed nothing.
+  it('outlasts a plain window-resize cooldown', () => {
+    expect(RELOCATION_COOLDOWN_MS).toBeGreaterThan(RESIZE_COOLDOWN_MS * 2);
+
+    runningActivityTracker.notifyRelocationBurst();
+    jest.advanceTimersByTime(RESIZE_COOLDOWN_MS + 1);   // a resize window would be over here
+    burstAllTerminals();
+    jest.advanceTimersByTime(SETTLE_MS);
+    expect(unseenTabIds()).toEqual([]);
+  });
+
   // The pair that stops the case above from being satisfiable by a tracker that suppresses
   // everything forever: real output AFTER the burst window must still be seen.
   it('resumes marking once the relocation burst has settled', () => {
     runningActivityTracker.notifyRelocationBurst();
-    jest.advanceTimersByTime(RESIZE_COOLDOWN_MS + 1);
+    jest.advanceTimersByTime(RELOCATION_COOLDOWN_MS + 1);
     emitData('p2', 4);
     jest.advanceTimersByTime(SETTLE_MS);
     expect(unseenTabIds()).not.toEqual([]);
