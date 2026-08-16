@@ -19,6 +19,7 @@ import {
   setTerminalRenderPolicy,
   countActiveWebGLAddons,
   quarantineWebGLAddon,
+  releaseFromWebGLQuarantine,
   getQuarantinedWebGLAddonCount,
   clearWebGLQuarantine,
   type RenderPolicy,
@@ -596,21 +597,37 @@ describe('non-canvas invalidation after canvas already demoted (review 126)', ()
 });
 
 /**
- * Review 126 LOW — the path BLOCKED by the quarantine must be a path that can also
- * clear it. `drainWebGLQuarantine()` was reachable only from the create-path
- * disposal helper, so a transient driver failure taxed the budget until the next
- * terminal creation: reconciliation read the count, refused every promotion, and
- * never retried the disposal that would have given the slot back. In a canvas
- * session with no new terminals that is the rest of the session.
+ * Review 126 LOW, RETRACTED at rev 10 (pre-review `138`).
+ *
+ * The old property here was: a quarantined addon whose driver recovers gets its slot
+ * back on the next reconciliation, with no mount or create event. It was implemented
+ * by draining the quarantine at the top of every pass and releasing any addon whose
+ * `dispose()` did not throw.
+ *
+ * That release is unsound, and the test only passed because its fixture was a plain
+ * object. Every real quarantined addon went through `term.loadAddon()`, and xterm's
+ * AddonManager latches `isDisposed` BEFORE calling the real dispose — so after the
+ * first throwing call, every retry returns silently having done nothing. "Recovery"
+ * was indistinguishable from the latch, and the drain handed out a budget slot for a
+ * context that was never freed.
+ *
+ * The honest property is the inverse: quarantine is TERMINAL. A wedged context keeps
+ * its slot for the rest of the session, and is released only by its own
+ * onContextLoss — the one signal that actually proves the GPU took it back. That
+ * costs a slot in a degraded session, which is the safe direction; the old behaviour
+ * over-allocated, which is not.
  */
-describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
-  it('gives the slot back on a later reconciliation, with no mount or create event', () => {
+describe('the quarantine is terminal (rev 10, retracting review 126 LOW)', () => {
+  it('does NOT give the slot back, however many passes run (rev 10)', () => {
     makeEntry('q-recon');
 
-    // A wedged addon: dispose() throws, so it is held and counted.
+    // A wedged addon. `wedged` is flipped below to model the ONLY way the old test
+    // could ever have "recovered" — a fixture that is not a loaded addon.
     let wedged = true;
+    let disposeCalls = 0;
     const stuck = {
       dispose() {
+        disposeCalls += 1;
         if (wedged) throw new Error('test: dispose failed before releasing the context');
       },
     };
@@ -622,17 +639,207 @@ describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
     expect(reconcileRenderPolicies(input).applied['q-recon']).toBe('dom');
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
 
-    // The driver recovers. Nothing mounts, nothing is created — the only event in
-    // the session is a second reconciliation.
     wedged = false;
-
+    reconcileRenderPolicies(input);
+    reconcileRenderPolicies(input);
     const out = reconcileRenderPolicies(input);
 
+    // The slot is NOT returned, and — the load-bearing assertion — reconciliation
+    // never even attempted a dispose. A drain that called dispose() and released on
+    // "it did not throw" is exactly what handed out budget on no evidence.
+    expect(disposeCalls).toBe(0);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(out.applied['q-recon']).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Context loss is the one thing that DOES return it: the GPU has taken the
+    // context back, so counting it would overstate usage for the rest of the session.
+    releaseFromWebGLQuarantine(stuck);
     expect(getQuarantinedWebGLAddonCount()).toBe(0);
-    expect(out.applied['q-recon']).toBe('webgl');
-    expect(out.webglCount).toBe(1);
+    expect(reconcileRenderPolicies(input).applied['q-recon']).toBe('webgl');
   });
 
+  it('offers the slot to the next candidate when the top choice is not in the cache', () => {
+    // Production getPolicy returns null for an uncached id and the promotion
+    // returns 'dom'; it must not reserve a slot it can never use.
+    const fake = makeFake({ cap: 4, uncached: ['ghost'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { ghost: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['ghost', 'b'],
+      ...fake,
+    });
+
+    expect(out.applied.ghost).toBe('dom');
+    expect(out.applied.b).toBe('webgl');
+    expect(out.webglCount).toBe(1);
+  });
+});
+
+describe('reconcileRenderPolicies is call-idempotent (review 122 MEDIUM)', () => {
+  it('emits no calls on a second identical pass over a MIXED set', () => {
+    const fake = makeFake({ cap: 4, preloaded: ['old'] });
+    const input = {
+      desired: { old: 'dom' as RenderPolicy, focused: 'webgl' as RenderPolicy },
+      budget: 1,
+      order: ['focused', 'old'],
+      ...fake,
+    };
+
+    const first = reconcileRenderPolicies(input);
+    expect(first.applied).toEqual({ old: 'dom', focused: 'webgl' });
+    expect(fake.calls).toEqual([['old', 'dom'], ['focused', 'webgl']]);
+
+    fake.calls.length = 0;
+    const second = reconcileRenderPolicies(input);
+
+    // Before the fix the demote pass called setPolicy('old', 'dom') unconditionally,
+    // so a steady state kept emitting calls forever.
+    expect(second.applied).toEqual({ old: 'dom', focused: 'webgl' });
+    expect(fake.calls).toEqual([]);
+    expect(second.webglCount).toBe(1);
+  });
+});
+
+/**
+ * Review 124 MEDIUM. `order` is documented as highest-priority-first and is NOT
+ * required to be duplicate-free, so a repeated id must not demote itself: building
+ * the rank map with `new Map(order.map(...))` let the LAST occurrence win.
+ */
+describe('reconcileRenderPolicies with duplicate ids in `order` (review 124)', () => {
+  it('ranks a duplicated id by its FIRST occurrence, so focus still wins', () => {
+    const fake = makeFake({ cap: 4 });
+
+    const out = reconcileRenderPolicies({
+      desired: { focused: 'webgl', other: 'webgl' },
+      budget: 1,
+      order: ['focused', 'other', 'focused'],
+      ...fake,
+    });
+
+    // Before the fix `focused` was ranked 2 and `other` 1, so `other` took the only
+    // context — the exact inversion design/010 D8 forbids.
+    expect(out.applied.focused).toBe('webgl');
+    expect(out.applied.other).toBe('dom');
+    expect(out.webglCount).toBe(1);
+  });
+});
+
+/**
+ * Review 124 MEDIUM — snapshot invalidation must survive a SAME-Terminal policy
+ * change. Terminal identity is not enough: Reset Rendering, the global WebGL
+ * toggle and a context loss all mutate the policy of the same Terminal object, so
+ * they passed the identity check and canvas exit promoted the terminal straight
+ * back to WebGL — undoing the explicit action or re-promoting onto a context the
+ * GPU had just taken away.
+ */
+describe('restoreRenderPolicies vs same-Terminal invalidation (review 124)', () => {
+  it('does NOT restore after Reset Rendering demoted the same Terminal', () => {
+    const { entry } = makeEntry('snap-reset');
+    // Canvas entry: the terminal is on WebGL and gets snapshotted.
+    setTerminalRenderPolicy('snap-reset', 'webgl');
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('webgl');
+    const snap = snapshotRenderPolicies(['snap-reset']);
+
+    // While canvas is active the user invokes Reset Rendering. Same Terminal object.
+    const before = entry.terminal;
+    resetTerminalRendering('snap-reset');
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('dom');
+    expect(terminalCache.get('snap-reset')!.terminal).toBe(before);
+
+    const restored = restoreRenderPolicies(snap);
+
+    // The reset must win. Before the fix this re-promoted to 'webgl'.
+    expect(restored['snap-reset']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-reset')).toBe('dom');
+  });
+
+  it('does NOT restore after a context loss on the same Terminal', () => {
+    makeEntry('snap-ctxloss');
+    setTerminalRenderPolicy('snap-ctxloss', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-ctxloss']);
+
+    // The GPU takes the context away; loadWebGLAddon's handler nulls the addon and
+    // bumps the generation.
+    const onLoss = (WebglAddon as unknown as { lastContextLossHandler: (() => void) | null })
+      .lastContextLossHandler;
+    expect(onLoss).toBeTruthy();
+    onLoss!();
+    expect(getTerminalRenderPolicy('snap-ctxloss')).toBe('dom');
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-ctxloss']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-ctxloss')).toBe('dom');
+  });
+
+  it('DOES restore when only canvas itself changed the policy', () => {
+    makeEntry('snap-canvas-only');
+    setTerminalRenderPolicy('snap-canvas-only', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-only']);
+
+    // Canvas demotes it — its own reconciliation must NOT invalidate the snapshot.
+    setTerminalRenderPolicy('snap-canvas-only', 'dom');
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-only']).toBe('webgl');
+    expect(getTerminalRenderPolicy('snap-canvas-only')).toBe('webgl');
+  });
+});
+
+/**
+ * Review 126 MEDIUM — the same invalidation, on the sequence canvas actually
+ * produces. The tests above call the invalidating operation while the terminal is
+ * still on WebGL, so that operation performs the demotion itself and reaches the
+ * generation bump. In a real canvas session canvas has ALREADY demoted the
+ * terminal (its own demotion is deliberately non-bumping), so the user's Reset
+ * Rendering and the global toggle both arrive at a DOM entry with nothing left to
+ * dispose — and, while the bump lived inside the addon-present branch, changed no
+ * generation at all. Canvas exit then restored WebGL over the top of them.
+ */
+describe('non-canvas invalidation after canvas already demoted (review 126)', () => {
+  it('does NOT restore after canvas demoted and the user then reset rendering', () => {
+    const { entry } = makeEntry('snap-canvas-then-reset');
+    setTerminalRenderPolicy('snap-canvas-then-reset', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-then-reset']);
+
+    // Canvas's own demotion — non-bumping by design (D6).
+    setTerminalRenderPolicy('snap-canvas-then-reset', 'dom');
+    expect(getTerminalRenderPolicy('snap-canvas-then-reset')).toBe('dom');
+
+    // The user invokes Reset Rendering while canvas is still active. There is no
+    // addon left to dispose, but this is still an explicit non-canvas decision.
+    expect(resetTerminalRendering('snap-canvas-then-reset')).toBe(true);
+    expect(terminalCache.get('snap-canvas-then-reset')!.terminal).toBe(entry.terminal);
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-then-reset']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-canvas-then-reset')).toBe('dom');
+  });
+
+  it('does NOT restore after canvas demoted and WebGL was globally toggled', () => {
+    makeEntry('snap-canvas-then-global');
+    setTerminalRenderPolicy('snap-canvas-then-global', 'webgl');
+    const snap = snapshotRenderPolicies(['snap-canvas-then-global']);
+
+    setTerminalRenderPolicy('snap-canvas-then-global', 'dom');   // canvas demotion
+
+    // The user turns WebGL off and back on again while canvas is active. The
+    // re-enable only affects NEW addons, so the terminal must stay on DOM — but
+    // without the bump the snapshot survived and canvas exit re-promoted it.
+    disableWebGLGlobally();
+    enableWebGLGlobally();
+
+    const restored = restoreRenderPolicies(snap);
+
+    expect(restored['snap-canvas-then-global']).toBeUndefined();
+    expect(getTerminalRenderPolicy('snap-canvas-then-global')).toBe('dom');
+  });
+});
+describe('the quarantine is inert across reconciliation (rev 10)', () => {
   /**
    * Review 129 LOW — the drain must sit on the SAME injection boundary as the rest
    * of the reconciler. `ReconcileInput` advertises `setPolicy`/`count`/`getPolicy`
@@ -642,7 +849,16 @@ describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
    * prevent — it disposed a REAL quarantined addon during what was supposed to be an
    * isolated pass.
    */
-  it('drains through the injected seam, leaving real module state alone', () => {
+  it('never touches the quarantine at all (rev 10)', () => {
+    // Was: "drains through the injected seam". The seam existed because this function
+    // called drainWebGLQuarantine() unconditionally, mutating real module state a
+    // caller faking the other three seams could neither observe nor prevent.
+    //
+    // The DRAIN itself is now gone — retrying dispose() on an xterm-wrapped addon
+    // returns silently whether or not the context was freed, so the retry could not
+    // prove release and its release path handed out budget on no evidence. With no
+    // drain there is nothing to inject, and the property to pin flips from "the fake
+    // drain ran" to "the quarantine is inert across a reconciliation".
     let stuckDisposeCalls = 0;
     const stuck = {
       dispose() {
@@ -652,7 +868,6 @@ describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
     quarantineWebGLAddon(stuck);
     expect(countActiveWebGLAddons()).toBe(1);
 
-    let drainCalls = 0;
     const out = reconcileRenderPolicies({
       desired: { fake: 'webgl' as RenderPolicy },
       budget: 4,
@@ -660,16 +875,20 @@ describe('reconcileRenderPolicies retries the quarantine (review 126)', () => {
       setPolicy: () => 'webgl' as RenderPolicy,
       count: () => 0,
       getPolicy: () => 'dom' as RenderPolicy,
-      drain: () => {
-        drainCalls += 1;
-        return 0;
-      },
     });
 
-    expect(drainCalls).toBe(1);
-    // The real quarantine was never touched: no dispose attempt, still held.
+    // No dispose attempt, still held, still counted — across as many passes as you like.
+    reconcileRenderPolicies({
+      desired: { fake: 'dom' as RenderPolicy },
+      budget: 4,
+      order: ['fake'],
+      setPolicy: () => 'dom' as RenderPolicy,
+      count: () => 0,
+      getPolicy: () => 'dom' as RenderPolicy,
+    });
     expect(stuckDisposeCalls).toBe(0);
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
     expect(out.applied['fake']).toBe('webgl');
   });
 });

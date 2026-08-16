@@ -1,7 +1,6 @@
 import type { Terminal } from '@xterm/xterm';
 import {
   countActiveWebGLAddons,
-  drainWebGLQuarantine,
   getTerminalRenderPolicy,
   setTerminalRenderPolicy,
   type RenderPolicy,
@@ -24,10 +23,16 @@ export interface ReconcileInput {
    */
   order: string[];
   /**
-   * Injection seams for tests; production omits ALL FOUR — `setPolicy`, `count`,
-   * `getPolicy` and `drain` (design/013 §5). The count was stale at "three" once
-   * `drain` was added, and a caller following it supplied the advertised three and
-   * still mutated the real quarantine — the exact failure `drain` exists to prevent.
+   * Injection seams for tests; production omits ALL THREE — `setPolicy`, `count` and
+   * `getPolicy` (design/013 §5).
+   *
+   * Back to three (rev 10). A fourth, `drain`, was added in rev 7 because this
+   * function called `drainWebGLQuarantine()` unconditionally, so a caller faking the
+   * other three still had a REAL quarantined addon disposed underneath it. The drain
+   * itself is now gone — a retried dispose() cannot prove release — so there is
+   * nothing left to inject and no module state left for this function to reach past
+   * its seams. Keep this count honest: it was stale at "three" once before, and a
+   * caller following it supplied the advertised three and still mutated real state.
    */
   setPolicy?: (id: string, want: RenderPolicy) => RenderPolicy;
   count?: () => number;
@@ -37,16 +42,6 @@ export interface ReconcileInput {
    * it. `null` (id not cached) is treated as not holding a context.
    */
   getPolicy?: (id: string) => RenderPolicy | null;
-  /**
-   * Retry the failed-disposal quarantine. Defaults to `drainWebGLQuarantine`.
-   *
-   * A seam like the other three (review 129 LOW): §5 calls this function pure
-   * orchestration over the injected API, and an unconditional module-level drain
-   * broke that claim — a caller supplying all three policy/count fakes still had a
-   * REAL quarantined addon disposed underneath it, with no seam able to observe or
-   * prevent it. Production omits it, exactly as it omits the other three.
-   */
-  drain?: () => number;
 }
 
 /**
@@ -60,42 +55,18 @@ export function reconcileRenderPolicies(
   const setPolicy = input.setPolicy ?? setTerminalRenderPolicy;
   const count = input.count ?? countActiveWebGLAddons;
   const getPolicy = input.getPolicy ?? getTerminalRenderPolicy;
-  const drain = input.drain ?? drainWebGLQuarantine;
   const applied: Record<string, RenderPolicy> = {};
 
-  // Retry the quarantine BEFORE any budget arithmetic (review 126 LOW). A
-  // quarantined addon is counted against the budget, so it can refuse every
-  // promotion in this pass — and until now the only automatic drain lived on the
-  // terminal create path, which a canvas session need never reach. A transient
-  // driver failure therefore taxed a slot for the rest of the session even after
-  // the driver recovered. This is the path the quarantine BLOCKS, so it is the
-  // path that must give it a chance to clear.
-  //
-  // Called on every pass, but its COST is bounded by the drain itself, not by this
-  // caller: in a healthy session the quarantine is empty, and in a degraded one
-  // `drainWebGLQuarantine` retries every newly quarantined addon plus a constant
-  // number of known-wedged ones (review 132 LOW). The earlier justification here —
-  // "bounded by the quarantine's size, itself bounded by the GPU budget" — was
-  // false: the quarantine holds objects that are no longer in the cache and grows
-  // past its own warning threshold on purpose, and outside canvas mode no budget is
-  // armed at all, so N wedged addons meant N throwing dispose() calls per pass.
-  //
-  // Behind its OWN `drain` seam (review 129 LOW) rather than none at all. Making it
-  // unconditional was the mistake: a caller that fakes all three policy/count seams
-  // is asking for an isolated pass, and this still reached into the real quarantine
-  // and disposed an addon none of those seams could see.
-  //
-  // Not folded into the `count` seam — the drain is a MUTATION and the count is a
-  // read, and a caller that fakes the count still usually wants the production
-  // drain (that is why the default is the production function).
-  //
-  // The throttle lives in the drain rather than here — a per-ADDON retry count, not
-  // a clock — precisely so this call site keeps the guarantee it was added for: a
-  // newly quarantined addon is retried on the very next reconciliation, which is
-  // what "the next pass gives the slot back" means and what the recovery test above
-  // asserts. Only repeat failures are rate-limited, and a clock is still refused:
-  // it would skip the first retry too.
-  drain();
+  // NO QUARANTINE DRAIN HERE (rev 10, pre-review `138`). Earlier revisions retried
+  // the quarantine before the budget arithmetic, so a transient driver failure would
+  // not tax a slot for the rest of the session. That retry could never work: an addon
+  // xterm has wrapped latches `isDisposed` before its real dispose runs, so a retried
+  // dispose() returns silently whether or not the context was freed — and the drain
+  // then RELEASED it, converting a safe over-count into the under-count the quarantine
+  // exists to prevent. A quarantined addon is now released only by its own
+  // onContextLoss. The `drain` seam (review 129 LOW) went with the drain: there is
+  // nothing left to inject.
+
 
   // `ids` is Object.keys order. Note it is NOT insertion order for integer-like
   // keys — that is precisely why `order` exists and is required (§5).

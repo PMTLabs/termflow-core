@@ -23,16 +23,18 @@ import {
   getCanvasWebGLBudget,
   webglAllowedAtCreation,
   getQuarantinedWebGLAddonCount,
-  drainWebGLQuarantine,
   clearWebGLQuarantine,
   quarantineWebGLAddon,
+  releaseFromWebGLQuarantine,
 } from '../renderPolicy';
 import {
   terminalCache,
   resetTerminalRendering,
   refreshGlyphAtlases,
   disableWebGLGlobally,
+  cleanupTerminalCache,
 } from '../cache';
+import { reconcileRenderPolicies } from '../renderPolicyReconciler';
 import { setWebGLGloballyDisabled } from '../webgl';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -277,7 +279,18 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
   // reference to a context that may still be held, and the caller is then free to
   // allocate a replacement. The achieved policy is still 'webgl': the demotion did
   // not happen, and this function's contract is to report what was ACHIEVED (D3).
-  it('reports webgl when the demotion disposal throws, and keeps the reference', () => {
+  it('quarantines and reports dom when the demotion disposal throws (rev 10)', () => {
+    // WAS: "reports webgl and keeps the reference". Review 120 chose retention so the
+    // addon stayed countable. That was unsafe for a reason nobody traced until rev 10:
+    // retention leaves getTerminalRenderPolicy() reporting 'webgl', and the reconciler
+    // re-derives that on EVERY pass with no memory of the failure — so the next
+    // ordinary reconciliation called straight back in on the SAME addon, whose
+    // dispose() was now latched by xterm and returned silently. It fell past the catch,
+    // nulled the field and reported success, freeing a slot on no evidence at all.
+    //
+    // Ownership now moves to the quarantine instead: the count is unchanged (ORPHAN),
+    // nothing retries it, and 'dom' is the honest achieved policy because the entry no
+    // longer holds an addon.
     const { entry } = makeEntry('demote-fail');
     setTerminalRenderPolicy('demote-fail', 'webgl');
     const addon = asMock(entry.webglAddon);
@@ -285,20 +298,35 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
       throw new Error('test: dispose failed before releasing the context');
     };
 
-    expect(setTerminalRenderPolicy('demote-fail', 'dom')).toBe('webgl');
-    expect(entry.webglAddon).toBe(addon);          // still countable
+    expect(setTerminalRenderPolicy('demote-fail', 'dom')).toBe('dom');
+    expect(entry.webglAddon).toBeNull();
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    // Still counted — the budget must not gain a slot from a context we never freed.
     expect(countActiveWebGLAddons()).toBe(1);
-    expect(getTerminalRenderPolicy('demote-fail')).toBe('webgl');
+    expect(getTerminalRenderPolicy('demote-fail')).toBe('dom');
+
+    // The load-bearing half: a SECOND pass cannot manufacture a success, because
+    // there is nothing left on the entry to "dispose" and the count does not move.
+    expect(setTerminalRenderPolicy('demote-fail', 'dom')).toBe('dom');
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
   });
 
-  it('resetTerminalRendering returns false when the disposal throws', () => {
+  it('resetTerminalRendering returns false and quarantines when the disposal throws', () => {
     const { entry } = makeEntry('reset-fail');
     setTerminalRenderPolicy('reset-fail', 'webgl');
+    const addon = entry.webglAddon;
     asMock(entry.webglAddon).dispose = () => {
       throw new Error('test: dispose failed before releasing the context');
     };
+    // Still `false` — the disposal really did fail — but the addon is no longer left
+    // on the entry for a later pass to falsely dispose (rev 10).
     expect(resetTerminalRendering('reset-fail')).toBe(false);
-    expect(entry.webglAddon).not.toBeNull();
+    expect(entry.webglAddon).toBeNull();
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+    releaseFromWebGLQuarantine(addon);
+    expect(countActiveWebGLAddons()).toBe(0);
   });
 
   // Review 120 HIGH (b) — promotion failing AFTER construction. The failNextConstruction
@@ -804,26 +832,75 @@ describe('design/013 §5.2 ORPHAN — the failed-disposal quarantine', () => {
     expect(liveAddons()).toBe(1);
   });
 
-  // The quarantine is a holding pen, not a graveyard: a context that later frees
-  // must give its slot back, or one transient driver hiccup permanently taxes the
-  // budget for the life of the session.
-  it('releases the slot when a retry finally disposes the addon', () => {
+  // RETRACTED at rev 10. Was: "the quarantine is a holding pen, not a graveyard —
+  // a context that later frees must give its slot back". It is a graveyard, because
+  // nothing can tell us a context freed. The fixture below is what hid that: it
+  // restored `first.dispose = realDispose`, overwriting the wrapper xterm installed
+  // and manufacturing a recovery that cannot occur for a loaded addon.
+  it('keeps holding the slot even after the underlying driver recovers', () => {
     const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-drain' });
     engine.mount(makeLaidOutContainer());
     const first = asMock(terminalCache.get('q-drain')!.webglAddon);
-    const realDispose = first.dispose.bind(first);
     throwOnDispose(first);
     dropElement('q-drain');
     engine.mount(makeLaidOutContainer());
     expect(countActiveWebGLAddons()).toBe(1);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
 
-    first.dispose = realDispose;                 // the driver recovers
-    expect(drainWebGLQuarantine()).toBe(0);      // nothing left held
-
-    expect(first.disposed).toBe(true);
-    expect(getQuarantinedWebGLAddonCount()).toBe(0);
+    // No amount of ordinary activity releases it: there is no drain to run, and the
+    // addon's own dispose() is latched, so a caller retrying it would get silence.
+    engine.mount(makeLaidOutContainer());
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    // ORPHAN itself: live === reachable + quarantined. The wedged addon is still
+    // LIVE (never disposed), and the count still sees it — which is the whole point.
+    // The old drain would have deleted it here and broken this equality downward.
     expect(countActiveWebGLAddons()).toBe(liveAddons());
   });
+
+  // The UNBOUNDED half of the finding: one failure is a rounding error, N failures
+  // are a budget that has silently stopped meaning anything. Each iteration wedges a
+  // fresh addon and replaces its entry, so the drift — if any — accumulates.
+  it('never lets the count drift below the live addons across repeated failures', () => {
+    for (let i = 0; i < 5; i++) {
+      const key = `q-repeat-${i}`;
+      const engine = new TerminalEngine(makeBridge(), { cacheKey: key });
+      engine.mount(makeLaidOutContainer());
+      const addon = asMock(terminalCache.get(key)!.webglAddon);
+      throwOnDispose(addon);
+      dropElement(key);
+      engine.mount(makeLaidOutContainer());
+
+      // Asserted INSIDE the loop: the drift is per-iteration, so a check only at the
+      // end cannot tell "never drifted" from "drifted and recovered".
+      expect(countActiveWebGLAddons()).toBe(liveAddons());
+      expect(countActiveWebGLAddons()).toBeGreaterThanOrEqual(i + 1);
+    }
+    expect(getQuarantinedWebGLAddonCount()).toBe(5);
+    expect(liveAddons()).toBe(reachableAddons() + getQuarantinedWebGLAddonCount());
+  });
+
+  // The concrete failure the reviewer described: a free-looking slot. The budget is
+  // the only thing standing between a wedged context and a second context allocated
+  // on top of it, and the budget can only see what the count reports.
+  it('does not free a budget slot for a terminal created after the failure', () => {
+    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget' });
+    engine.mount(makeLaidOutContainer());
+    throwOnDispose(asMock(terminalCache.get('q-budget')!.webglAddon));
+
+    setCanvasWebGLBudget(1);
+    dropElement('q-budget');
+    engine.mount(makeLaidOutContainer());
+
+    // One context is wedged and uncollectable; the budget of 1 is therefore SPENT.
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(webglAllowedAtCreation()).toBe(false);
+
+    const other = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget-2' });
+    other.mount(makeLaidOutContainer());
+    expect(getTerminalRenderPolicy('q-budget-2')).toBe('dom');
+    expect(liveAddons()).toBe(1);
+  });
+
 
   // webgl.ts's last hole: activation fails, and the cleanup dispose ALSO throws. The
   // addon was constructed — so it may hold a context — and `loadWebGLAddon` returns
@@ -858,7 +935,14 @@ describe('design/013 §5.2 ORPHAN — the failed-disposal quarantine', () => {
  * implementer of `fd860c1`; no reviewer had examined it.
  */
 describe('design/013 D4 — global disable must not erase a possibly-live addon', () => {
-  it('retains the reference (and the count) when dispose() throws', () => {
+  it('quarantines (and keeps counting) the addon when dispose() throws', () => {
+    // WAS: "retains the reference (and the count)". Retention kept the count right
+    // but left the addon on the entry — and this path is RE-DRIVABLE: `toggleWebGL`
+    // in the context menu lets a user disable, re-enable and disable again. The
+    // second pass's dispose() hits xterm's already-set `isDisposed` latch, returns
+    // silently, and the old code then took its `disposed === true` branch and nulled
+    // the field — freeing a budget slot for a call that did no work whatsoever.
+    // This is the same root cause as the demotion path, at a third site (rev 10).
     const { entry } = makeEntry('gd-throws');
     const addon = { dispose: () => { throw new Error('gpu wedged'); }, clearTextureAtlas: () => {} };
     entry.webglAddon = addon as never;
@@ -867,9 +951,17 @@ describe('design/013 D4 — global disable must not erase a possibly-live addon'
 
     disableWebGLGlobally();
 
-    // The context may still be held, so it must still be counted.
-    expect(entry.webglAddon).toBe(addon);
+    // The context may still be held, so it must still be counted — but by the
+    // QUARANTINE, which nothing can talk into a false success.
+    expect(entry.webglAddon).toBeNull();
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
     expect(countActiveWebGLAddons()).toBe(1);
+
+    // The load-bearing half: toggling again cannot manufacture a release.
+    setWebGLGloballyDisabled(false);
+    disableWebGLGlobally();
+    expect(countActiveWebGLAddons()).toBe(1);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
 
     setWebGLGloballyDisabled(false);
   });
@@ -950,43 +1042,151 @@ describe('design/013 §5.2 — a stale context-loss handler must not clear a rep
  * threshold, and outside canvas mode no budget is armed at all. N permanently wedged
  * addons therefore made every reconciliation perform N throwing `dispose()` calls.
  */
-describe('design/013 §5.2 — bounded quarantine retries (review 132)', () => {
-  const makeWedged = () => {
-    const a = { attempts: 0, dispose() { a.attempts += 1; throw new Error('test: wedged'); } };
-    return a;
-  };
+describe('design/013 §5.2 — quarantine is TERMINAL (rev 10, retracting review 132 LOW)', () => {
+  /**
+   * Rev 7 added a bounded round-robin retry so a driver hiccup would not tax the
+   * budget for the session. Rev 10 deletes it, and these tests record why rather
+   * than vanishing quietly.
+   *
+   * The retry could never have fired in production. Its per-addon `failures` counter
+   * could not exceed 0, because xterm's AddonManager latches `isDisposed` BEFORE
+   * calling the real dispose — so a wrapped addon can throw at most ONCE, and every
+   * later dispose() returns silently. The old tests passed only because `makeWedged`
+   * built a plain object that had never been through `term.loadAddon`, i.e. a
+   * contract no real addon has. Worse, the drain RELEASED on a non-throwing dispose,
+   * so in production it would have freed a budget slot for a context that was never
+   * released — the exact under-count the quarantine exists to prevent.
+   */
+  it('holds a wedged addon forever, and never retries dispose()', () => {
+    const term = new Terminal();
+    const addon = new WebglAddon();
+    let realDisposeCalls = 0;
+    (addon as unknown as { dispose: () => void }).dispose = () => {
+      realDisposeCalls += 1;
+      throw new Error('test: driver refused to release the context');
+    };
+    // THROUGH loadAddon — this is the whole point. The mock now installs xterm's
+    // real wrapper, so the latch behaves as it does in production.
+    term.loadAddon(addon as never);
 
-  it('retries a NEWLY quarantined addon on the very next drain, then bounds the work', () => {
-    const wedged = Array.from({ length: 6 }, makeWedged);
-    wedged.forEach((a) => quarantineWebGLAddon(a));
+    expect(() => addon.dispose()).toThrow();
+    expect(realDisposeCalls).toBe(1);
+    quarantineWebGLAddon(addon);
+    expect(countActiveWebGLAddons()).toBe(1);
 
-    // Pass 1: every addon is fresh, so every one is retried immediately — this is
-    // the "the very next reconciliation gives the slot back" guarantee.
-    drainWebGLQuarantine();
-    expect(wedged.map((a) => a.attempts)).toEqual([1, 1, 1, 1, 1, 1]);
+    // The latch is set: a retry does no work and throws nothing. This is what made
+    // "dispose() did not throw" worthless as evidence of release.
+    expect(() => addon.dispose()).not.toThrow();
+    expect(realDisposeCalls).toBe(1);
 
-    // Pass 2+: all six are known-wedged, so the pass does a CONSTANT amount of work
-    // regardless of how many have accumulated.
-    const before = wedged.reduce((n, a) => n + a.attempts, 0);
-    drainWebGLQuarantine();
-    const afterOne = wedged.reduce((n, a) => n + a.attempts, 0);
-    expect(afterOne - before).toBeLessThanOrEqual(2);
-    expect(afterOne - before).toBeGreaterThan(0);
-
-    // …and it is round-robin, not the same two forever: every addon is retried
-    // again within a bounded number of passes.
-    for (let i = 0; i < 6; i += 1) drainWebGLQuarantine();
-    expect(wedged.every((a) => a.attempts >= 2)).toBe(true);
-    expect(getQuarantinedWebGLAddonCount()).toBe(6);
+    // …and nothing in the module retries or releases it.
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
   });
 
-  it('still releases an addon that recovers, on the pass that reaches it', () => {
-    const stuck = makeWedged();
+  it('releases only on context loss, the one proof we actually have', () => {
+    const stuck = { dispose() { throw new Error('test: wedged'); } };
     quarantineWebGLAddon(stuck);
-    drainWebGLQuarantine();
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
 
-    (stuck as unknown as { dispose: () => void }).dispose = () => {};
-    expect(drainWebGLQuarantine()).toBe(0);
+    releaseFromWebGLQuarantine(stuck);
+    expect(getQuarantinedWebGLAddonCount()).toBe(0);
+    expect(countActiveWebGLAddons()).toBe(0);
+  });
+});
+
+/**
+ * THE TEST WHOSE ABSENCE LET BOTH CRITICALS THROUGH (rev 10, pre-review `138`).
+ *
+ * Every pre-existing quarantine/demotion test built its failing addon as a plain
+ * object, or overwrote `.dispose` on a loaded one. Both produce an addon that throws
+ * on EVERY call — a contract no real addon has. xterm's AddonManager replaces the
+ * instance's `.dispose` at `loadAddon` time and latches `isDisposed` BEFORE invoking
+ * the original, so a real addon throws at most ONCE and every retry returns silently.
+ *
+ * These tests route an addon through the REAL `term.loadAddon` wrapper first, and
+ * only then make its underlying dispose throw — which is the production shape, and
+ * the one shape nothing in this suite covered.
+ */
+describe('a REAL loadAddon-wrapped addon whose dispose throws (rev 10)', () => {
+  /** Wrap like production, then make the UNDERLYING dispose throw once. */
+  function wrappedThrower() {
+    const term = new Terminal();
+    let underlyingCalls = 0;
+    const addon = {
+      dispose() {
+        underlyingCalls += 1;
+        throw new Error('test: driver refused to release the context');
+      },
+      activate() {},
+      clearTextureAtlas() {},
+    };
+    term.loadAddon(addon as never);
+    return { addon, calls: () => underlyingCalls };
+  }
+
+  it('throws exactly ONCE, then returns silently forever — the latch', () => {
+    const { addon, calls } = wrappedThrower();
+
+    expect(() => addon.dispose()).toThrow();
+    expect(calls()).toBe(1);
+
+    // THE MECHANISM. Not "it recovered" — the underlying dispose was never reached.
+    expect(() => addon.dispose()).not.toThrow();
+    expect(() => addon.dispose()).not.toThrow();
+    expect(calls()).toBe(1);
+  });
+
+  it('a demotion that fails does not become a success on the next pass', () => {
+    const { entry } = makeEntry('wrapped-demote');
+    const { addon, calls } = wrappedThrower();
+    entry.webglAddon = addon as never;
+    entry.useWebGL = true;
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Pass 1: the real dispose throws. Ownership moves to the quarantine.
+    expect(setTerminalRenderPolicy('wrapped-demote', 'dom')).toBe('dom');
+    expect(calls()).toBe(1);
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Pass 2 and 3 — the reconciler re-derives policy every pass, so this is an
+    // ORDINARY occurrence, not a special retry. Under the old retention the entry
+    // still held the addon here, its latched dispose() returned silently, and the
+    // code nulled the field and freed a slot for a context nobody released.
+    setTerminalRenderPolicy('wrapped-demote', 'dom');
+    setTerminalRenderPolicy('wrapped-demote', 'dom');
+    expect(calls()).toBe(1);                       // never re-attempted
+    expect(countActiveWebGLAddons()).toBe(1);      // and never falsely freed
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+  });
+
+  it('a cleanup that fails does not become a success on any later activity', () => {
+    const { addon, calls } = wrappedThrower();
+    terminalCache.set('wrapped-cleanup', {
+      terminal: { dispose() {} },
+      fitAddon: {},
+      webglAddon: addon,
+      useWebGL: true,
+      disposables: [],
+      containerDisposables: [],
+    } as never);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    cleanupTerminalCache('wrapped-cleanup');
+    expect(calls()).toBe(1);
+    expect(terminalCache.has('wrapped-cleanup')).toBe(false);
+    // The entry is gone, so the quarantine is the ONLY thing keeping this counted.
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Reconciliation used to drain here and release it on the silent return.
+    reconcileRenderPolicies({ desired: {}, budget: 4, order: [] });
+    expect(calls()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Only context loss releases it.
+    releaseFromWebGLQuarantine(addon);
+    expect(countActiveWebGLAddons()).toBe(0);
   });
 });

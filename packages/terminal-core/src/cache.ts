@@ -296,13 +296,28 @@ export const resetTerminalRendering = (
     try {
       cached.webglAddon.dispose();
     } catch (e) {
-      // RETAIN the reference (review 120): dispose() may have thrown BEFORE releasing
-      // the GPU context, and nulling the field anyway erases the only reference
-      // countActiveWebGLAddons() can see — after which a caller is free to allocate a
-      // replacement on top of a context that is still held. Under-counting is the one
-      // direction a hard budget must never fail in, so report the failure instead and
-      // let the caller abort the demotion.
+      // QUARANTINE, do not retain (rev 10, pre-review `138`). dispose() may have
+      // thrown BEFORE releasing the GPU context, so the addon must stay counted —
+      // but review 120's remedy of keeping it ON THE ENTRY was actively unsafe here.
+      //
+      // Retaining leaves `getTerminalRenderPolicy()` reporting 'webgl', and the
+      // reconciler re-derives that on EVERY pass (renderPolicyReconciler's RULE 1
+      // loop) with no memory of the failed attempt. So the very next ordinary
+      // reconciliation called straight back into this function on the SAME addon —
+      // and xterm's AddonManager had already latched `isDisposed` on the first,
+      // throwing call, so the second `dispose()` returned silently. Execution fell
+      // past this catch, nulled the field and reported success, freeing a budget slot
+      // with zero evidence the context was released. The retention comment this
+      // replaces was defeated exactly one pass after it took effect.
+      //
+      // Moving it to the quarantine keeps the count exact (ORPHAN:
+      // `live === reachable + quarantined`), makes the demotion terminal so nothing
+      // retries it, and lets these fields be cleared honestly — the quarantine, not
+      // the entry, now owns the addon.
       console.warn(`terminal-core/cache: Error disposing WebGL during reset:`, e);
+      quarantineWebGLAddon(cached.webglAddon);
+      cached.webglAddon = null;
+      cached.useWebGL = false;
       return false;
     }
     cached.webglAddon = null;
@@ -377,13 +392,21 @@ export const disableWebGLGlobally = () => {
       } catch (e) {
         disposed = false;
         console.warn('terminal-core/cache: WebGL dispose failed during global disable:', e);
+        // Same treatment as resetTerminalRendering above, and for the same reason
+        // (rev 10, pre-review `138`): this is the THIRD site of the one root cause,
+        // and it is re-drivable. `toggleWebGL` in the context menu means a user can
+        // disable, re-enable and disable again; the retained addon's second
+        // `dispose()` hits xterm's already-set `isDisposed` latch, returns silently,
+        // and this loop would then take the `disposed === true` branch and null the
+        // field — freeing a budget slot on a call that did no work at all.
+        quarantineWebGLAddon(cached.webglAddon);
       }
-      if (disposed) {
-        cached.webglAddon = null;
-        cached.useWebGL = false;
-      } else {
-        bump = false;
-      }
+      // Cleared either way: on success the addon is gone, on failure the quarantine
+      // now owns it and still counts it. What must never happen is the field staying
+      // populated for a later pass to "dispose" successfully by doing nothing.
+      cached.webglAddon = null;
+      cached.useWebGL = false;
+      if (!disposed) bump = false;
 
       // Refresh the terminal
       try {

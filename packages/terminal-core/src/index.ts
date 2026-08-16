@@ -55,7 +55,6 @@ export {
   // surface can report contexts we failed to free — an under-count here is the
   // one direction the WebGL budget must never fail in, so it must be observable.
   getQuarantinedWebGLAddonCount,
-  drainWebGLQuarantine,
   hasLayoutBox,
   fitIfLaidOut,
 } from './renderPolicy';

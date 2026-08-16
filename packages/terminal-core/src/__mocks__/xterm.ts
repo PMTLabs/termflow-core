@@ -150,6 +150,36 @@ export class Terminal {
 
   loadAddon(addon: unknown): void {
     this.loadedAddons.push(addon);
+
+    // FAITHFUL TO xterm 6.0.0's AddonManager (pre-review `138`). The real
+    // implementation REPLACES the addon instance's own `.dispose` with a wrapper and
+    // latches `isDisposed` BEFORE invoking the original:
+    //
+    //   loadAddon(e,t){const i={instance:t,dispose:t.dispose,isDisposed:!1};
+    //     this._addons.push(i), t.dispose=()=>this._wrappedAddonDispose(i), t.activate(e)}
+    //   _wrappedAddonDispose(e){ if(e.isDisposed) return;
+    //     ...; e.isDisposed=!0, e.dispose.apply(e.instance), this._addons.splice(t,1) }
+    //
+    // The consequence is the whole point: if the original dispose THROWS, the latch is
+    // already set, so every later dispose() on that instance returns silently — no
+    // work, no exception. Two CRITICALs lived in that gap for nine spec revisions and
+    // six external review rounds precisely because this mock did not model it: every
+    // quarantine/demotion test built plain objects that could throw forever, a
+    // contract no real addon has. A mock that is kinder than reality certifies
+    // behaviour that does not exist.
+    const rec = {
+      instance: addon as { dispose?: () => void },
+      dispose: (addon as { dispose?: () => void }).dispose,
+      isDisposed: false,
+    };
+    if (typeof rec.dispose === 'function') {
+      (addon as { dispose: () => void }).dispose = () => {
+        if (rec.isDisposed) return;
+        rec.isDisposed = true;
+        rec.dispose!.apply(rec.instance);
+      };
+    }
+
     // Real xterm activates the addon with the terminal on load. The search-addon
     // mock uses this to capture the terminal so its findNext can simulate the
     // scroll-to-match side effect that refreshSearch's restore counteracts.

@@ -94,24 +94,41 @@ type DisposableAddon = { dispose(): void };
  *
  *     live === reachable + quarantined === countActiveWebGLAddons()
  *
- * Keyed by addon, so re-quarantining the same addon cannot double-count it. The
- * value is per-addon RETRY STATE (review 132 LOW): `failures` is how many drains
- * have tried this addon and had `dispose()` throw again, and `drainWebGLQuarantine`
- * uses it to keep a degraded session's per-pass cost constant. See that function.
+ * Keyed by addon, so re-quarantining the same addon cannot double-count it.
+ *
+ * A SET, not a retry queue (rev 10, pre-review `138`). Quarantine is TERMINAL: an
+ * addon lands here and is charged to the budget until something proves its context
+ * is gone, and retrying `dispose()` is not, and cannot be, such a proof.
+ *
+ * WHY — xterm 6.0.0's `AddonManager.loadAddon` replaces the addon instance's own
+ * `.dispose` with a wrapper, and `_wrappedAddonDispose` latches `isDisposed = true`
+ * BEFORE invoking the real one:
+ *
+ *     loadAddon(term, addon) { const rec = {instance: addon, dispose: addon.dispose,
+ *       isDisposed: false}; ...; addon.dispose = () => this._wrappedAddonDispose(rec) }
+ *     _wrappedAddonDispose(rec) { if (rec.isDisposed) return;
+ *       ...; rec.isDisposed = true; rec.dispose.apply(rec.instance); ... }
+ *
+ * Every addon this module quarantines was loaded that way (`webgl.ts` calls
+ * `term.loadAddon`), so once the real dispose has thrown once, the latch is set and
+ * EVERY later `dispose()` returns immediately — silently, doing no work and throwing
+ * nothing. A retry that "succeeds" proves only that the latch is set.
+ *
+ * Wrapping `dispose` ourselves before `loadAddon` does NOT fix this: xterm captures
+ * our wrapper as `rec.dispose` and reassigns `addon.dispose` to its own, so ours ends
+ * up INSIDE the latch and is never reached on a retry either. Reaching the real
+ * dispose again would mean bypassing the AddonManager entirely — and there is no
+ * reason to think re-running a teardown that threw partway through freeing GL
+ * resources succeeds the second time.
+ *
+ * So the release rule is: `releaseFromWebGLQuarantine`, from the addon's own
+ * `onContextLoss` — the one signal that actually proves the GPU took the context
+ * back. Rev 7's bounded round-robin retry (review `132` LOW) is RETRACTED: it could
+ * never have fired in production, because `failures` could not exceed 0 for a
+ * latched addon, and its release path converted a safe over-count into the unsafe
+ * under-count this registry exists to prevent.
  */
-const webglQuarantine = new Map<DisposableAddon, { failures: number }>();
-
-/**
- * Round-robin cursor over the KNOWN-WEDGED addons, so the per-pass cap below does
- * not retry the same two forever while the rest are never revisited.
- */
-let quarantineCursor = 0;
-
-/**
- * The per-pass cap on retries of addons that have ALREADY failed at least one drain.
- * Newly quarantined addons are exempt — see `drainWebGLQuarantine`.
- */
-const QUARANTINE_RETRIES_PER_DRAIN = 2;
+const webglQuarantine = new Set<DisposableAddon>();
 
 /**
  * Not an eviction threshold — evicting would silently reintroduce exactly the
@@ -127,7 +144,7 @@ const QUARANTINE_LOG_THRESHOLD = 8;
 export function quarantineWebGLAddon(addon: DisposableAddon | null | undefined): void {
   if (!addon) return;
   if (webglQuarantine.has(addon)) return;
-  webglQuarantine.set(addon, { failures: 0 });
+  webglQuarantine.add(addon);
   if (webglQuarantine.size >= QUARANTINE_LOG_THRESHOLD) {
     console.error(
       `terminal-core/renderPolicy: ${webglQuarantine.size} WebGL addons have refused ` +
@@ -148,78 +165,28 @@ export function getQuarantinedWebGLAddonCount(): number {
 }
 
 /**
- * Release ONE addon, for the case where its context is known to be gone by other
- * means than our dispose() succeeding — today, the addon reporting context loss.
- * The GPU has taken the context back, so continuing to count it would permanently
- * overstate usage and shrink the budget for the rest of the session.
+ * Release ONE addon — the ONLY way out of quarantine (rev 10).
  *
- * Deliberately not a general "forget this" escape hatch: everything else must go
- * through `drainWebGLQuarantine`, which only releases on a dispose() that actually
- * succeeded. Releasing on anything weaker is how the under-count comes back.
+ * Used for the case where the context is known to be gone by means other than our
+ * `dispose()` succeeding: today, the addon reporting context loss. The GPU has taken
+ * the context back, so continuing to count it would permanently overstate usage and
+ * shrink the budget for the rest of the session.
+ *
+ * This used to be described as the narrow exception, with everything else going
+ * through `drainWebGLQuarantine`, "which only releases on a dispose() that actually
+ * succeeded". That drain is gone: a `dispose()` that does not throw is NOT evidence
+ * of release for any addon xterm has wrapped (see the registry's own comment above),
+ * so it released addons whose contexts were never freed. Context loss is now the only
+ * proof we accept, because it is the only one we actually have.
  */
 export function releaseFromWebGLQuarantine(addon: DisposableAddon | null | undefined): void {
   if (!addon) return;
   webglQuarantine.delete(addon);
 }
 
-/**
- * Retry every quarantined addon and release the ones that finally dispose — a driver
- * hiccup must not tax the budget for the life of the session. Returns how many are
- * still held.
- *
- * Called opportunistically from two places, so no caller has to remember to drain:
- * `disposeOrphanedWebGLAddon` (the path already doing disposal work) and
- * `reconcileRenderPolicies` (review 126 LOW — the path the quarantine BLOCKS). The
- * first alone was not enough: a canvas session need never create a terminal, so a
- * recovered addon could go on refusing every promotion for the rest of the session.
- *
- * BOUNDED per pass (review 132 LOW). Retrying every held addon every time was
- * justified by a bound that does not exist: the quarantine is NOT bounded by the GPU
- * budget — the registry deliberately grows past its warning threshold (see
- * QUARANTINE_LOG_THRESHOLD), the entries it holds are no longer cache-bounded, and
- * outside canvas mode no budget is armed at all. With `reconcileRenderPolicies`
- * draining on every pass, N permanently wedged addons meant N throwing `dispose()`
- * calls per reconciliation, growing with the damage.
- *
- * The split preserves the guarantee that justified the unthrottled version:
- *   - an addon that has NEVER been retried is always retried, so the drain on the
- *     very next reconciliation still gives a recovered slot straight back;
- *   - known-wedged addons are retried at most QUARANTINE_RETRIES_PER_DRAIN per pass,
- *     round-robin, so per-pass cost is constant in N and every one of them is still
- *     revisited within a bounded number of passes.
- */
-export function drainWebGLQuarantine(): number {
-  const fresh: DisposableAddon[] = [];
-  const wedged: DisposableAddon[] = [];
-  for (const [addon, state] of webglQuarantine) {
-    (state.failures === 0 ? fresh : wedged).push(addon);
-  }
-
-  const picks = fresh;
-  const take = Math.min(QUARANTINE_RETRIES_PER_DRAIN, wedged.length);
-  for (let i = 0; i < take; i += 1) {
-    picks.push(wedged[(quarantineCursor + i) % wedged.length]);
-  }
-  // Advance past what this pass took, so the next one continues round the ring.
-  if (wedged.length > 0) quarantineCursor = (quarantineCursor + take) % wedged.length;
-
-  for (const addon of picks) {
-    try {
-      addon.dispose();
-      webglQuarantine.delete(addon);
-    } catch {
-      // Still wedged. Keep holding it — and keep counting it.
-      const state = webglQuarantine.get(addon);
-      if (state) state.failures += 1;
-    }
-  }
-  return webglQuarantine.size;
-}
-
 /** Test hygiene only: the quarantine outlives terminalCache.clear() by design. */
 export function clearWebGLQuarantine(): void {
   webglQuarantine.clear();
-  quarantineCursor = 0;
 }
 
 /**
@@ -366,9 +333,9 @@ export function webglAllowedAtCreation(): boolean {
  * direction for a hard budget.
  */
 export function disposeOrphanedWebGLAddon(terminalId: string): boolean {
-  // Opportunistic retry: this is the path already doing disposal work, so it is the
-  // natural place to give previously-wedged contexts a chance to come back.
-  drainWebGLQuarantine();
+  // No opportunistic drain here any more (rev 10): quarantine is terminal, because a
+  // retried dispose() on an xterm-wrapped addon returns silently whether or not the
+  // context was ever freed. See the quarantine registry's comment.
   const entry = terminalCache.get(terminalId);
   if (!entry?.webglAddon) return true;
   try {
