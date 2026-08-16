@@ -1,4 +1,6 @@
-import { desiredPolicies, promotionOrder, nextSuppressed } from '../canvasRenderPolicy';
+import {
+  desiredPolicies, promotionOrder, nextSuppressed, policySignature,
+} from '../canvasRenderPolicy';
 import {
   assignTiers, priorityOrder, LodTier, Rect, Viewport, NODE_W, NODE_H, MAX_GPU,
 } from '../canvasGeometry';
@@ -73,6 +75,43 @@ describe('promotionOrder', () => {
     expect(order[0]).toBe(focusedId);
     const budgetWindow = new Set(order.slice(0, MAX_GPU));
     for (const id of gpuIds) expect(budgetWindow.has(id)).toBe(true);
+  });
+});
+
+describe('policySignature', () => {
+  // The reason this exists: a pan produces a fresh tier object per pointer-move, and
+  // almost all of them want identical policies. Without an equality that survives the
+  // new object identity, the reconciler runs at frame rate and flips real GPU contexts.
+  it('is equal for maps that differ only in object identity or key order', () => {
+    expect(policySignature({ a: 'webgl', b: 'dom' }))
+      .toBe(policySignature({ b: 'dom', a: 'webgl' }));
+  });
+
+  it('differs when the set of webgl ids changes', () => {
+    expect(policySignature({ a: 'webgl', b: 'dom' }))
+      .not.toBe(policySignature({ a: 'dom', b: 'webgl' }));
+    expect(policySignature({ a: 'webgl' }))
+      .not.toBe(policySignature({ a: 'webgl', b: 'webgl' }));
+  });
+
+  // A tier map is total over the workspace, so a node leaving the canvas changes the
+  // 'dom' set without changing the 'webgl' set. Reconciling for that would be pointless
+  // work — but pin it, because it is a deliberate blind spot rather than an oversight.
+  it('ignores changes confined to the dom ids', () => {
+    expect(policySignature({ a: 'webgl', b: 'dom' }))
+      .toBe(policySignature({ a: 'webgl', c: 'dom', d: 'dom' }));
+  });
+
+  it('is empty when nothing wants a context', () => {
+    expect(policySignature({ a: 'dom', b: 'dom' })).toBe('');
+    expect(policySignature({})).toBe('');
+  });
+
+  // Ids are compared as a set, so the signature must not depend on how they sort into
+  // the map — `Object.keys` puts integer-like keys first, in numeric order.
+  it('is stable for integer-like ids', () => {
+    expect(policySignature({ '10': 'webgl', '9': 'webgl' }))
+      .toBe(policySignature({ '9': 'webgl', '10': 'webgl' }));
   });
 });
 
