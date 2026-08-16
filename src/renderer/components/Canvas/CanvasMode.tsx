@@ -1,4 +1,5 @@
 import React from 'react';
+import { CanvasViewport } from './CanvasViewport';
 import './Canvas.css';
 
 /**
@@ -8,9 +9,7 @@ import './Canvas.css';
  */
 export const CanvasMode: React.FC = () => (
   <div className="canvas-mode" data-testid="canvas-mode">
-    <div className="canvas-viewport">
-      <div className="canvas-empty">Canvas Mode</div>
-    </div>
+    <CanvasViewport />
   </div>
 );
 

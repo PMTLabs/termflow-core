@@ -45,6 +45,8 @@
   cursor: grab;
 }
 .canvas-viewport.panning { cursor: grabbing; }
+.canvas-grid { position: absolute; inset: 0; pointer-events: none; }
+.canvas-world { position: absolute; top: 0; left: 0; will-change: transform; }
 .canvas-empty {
   position: absolute;
   inset: 0;
