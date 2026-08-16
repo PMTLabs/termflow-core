@@ -208,15 +208,23 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
     // Reuse before reinvent: the existing demotion primitive already disposes the
     // addon and nulls both fields. Task 4 makes its fit conditional (LB).
     //
-    // It returns false when the disposal THREW, in which case it deliberately keeps
-    // the addon on the entry (review 120): the context may still be held, so the
-    // demotion has NOT been achieved and reporting 'dom' would both lie and free a
-    // budget slot that is not free. D3 says report what was achieved.
+    // It returns false when the disposal THREW. Since rev 10 that no longer means
+    // "still on WebGL": the failure path hands the addon to the QUARANTINE and
+    // clears the entry's fields, so the terminal really is off WebGL and 'dom' is
+    // the honest achieved policy (D3). The budget is not falsely freed either —
+    // countActiveWebGLAddons() counts the quarantine.
+    //
+    // Rev 9 and earlier said the opposite here ("deliberately keeps the addon on
+    // the entry (review 120) … reporting 'dom' would both lie and free a budget
+    // slot that is not free"), and left an `entry.webglAddon ? 'webgl' : 'dom'`
+    // ternary to express it. That ternary was already dead — `entry` is the same
+    // object `resetTerminalRendering` just cleared — and the stale rationale is
+    // part of what let rev 10's regression through. Reduced to the value it always
+    // returned (rev 11, pre-review `140`).
+    //
     // canvasOwned: this IS the canvas policy layer, so the demotion must not
     // invalidate canvas's own snapshot (review 124 / D6).
-    if (!resetTerminalRendering(terminalId, { canvasOwned: true })) {
-      return entry.webglAddon ? 'webgl' : 'dom';
-    }
+    resetTerminalRendering(terminalId, { canvasOwned: true });
     return 'dom';
   }
 

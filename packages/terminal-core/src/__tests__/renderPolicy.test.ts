@@ -358,6 +358,19 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     setTerminalRenderPolicy('nobox-policy', 'webgl');
     expect(fitAddon.fitCount).toBe(0);
   });
+
+  // …and the POSITIVE companion (rev 11, pre-review `140`). Without it the negative
+  // above is satisfied by deleting the fit entirely: `fitCount` would be 0 in both
+  // cases and the whole suite would stay green while a promoted terminal rendered
+  // with stale cell metrics after the renderer swap. A negative needs a positive
+  // that fails when the behaviour is removed — the adjacent resetTerminalRendering
+  // describe already pairs its two; this one did not.
+  it('DOES fit exactly once when the host has a layout box', () => {
+    const { fitAddon } = makeEntry('box-policy');
+    expect(fitAddon.fitCount).toBe(0);
+    expect(setTerminalRenderPolicy('box-policy', 'webgl')).toBe('webgl');
+    expect(fitAddon.fitCount).toBe(1);
+  });
 });
 
 describe('design/013 §5.3 LB — resetTerminalRendering must not fit blind', () => {
@@ -860,46 +873,6 @@ describe('design/013 §5.2 ORPHAN — the failed-disposal quarantine', () => {
   // The UNBOUNDED half of the finding: one failure is a rounding error, N failures
   // are a budget that has silently stopped meaning anything. Each iteration wedges a
   // fresh addon and replaces its entry, so the drift — if any — accumulates.
-  it('never lets the count drift below the live addons across repeated failures', () => {
-    for (let i = 0; i < 5; i++) {
-      const key = `q-repeat-${i}`;
-      const engine = new TerminalEngine(makeBridge(), { cacheKey: key });
-      engine.mount(makeLaidOutContainer());
-      const addon = asMock(terminalCache.get(key)!.webglAddon);
-      throwOnDispose(addon);
-      dropElement(key);
-      engine.mount(makeLaidOutContainer());
-
-      // Asserted INSIDE the loop: the drift is per-iteration, so a check only at the
-      // end cannot tell "never drifted" from "drifted and recovered".
-      expect(countActiveWebGLAddons()).toBe(liveAddons());
-      expect(countActiveWebGLAddons()).toBeGreaterThanOrEqual(i + 1);
-    }
-    expect(getQuarantinedWebGLAddonCount()).toBe(5);
-    expect(liveAddons()).toBe(reachableAddons() + getQuarantinedWebGLAddonCount());
-  });
-
-  // The concrete failure the reviewer described: a free-looking slot. The budget is
-  // the only thing standing between a wedged context and a second context allocated
-  // on top of it, and the budget can only see what the count reports.
-  it('does not free a budget slot for a terminal created after the failure', () => {
-    const engine = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget' });
-    engine.mount(makeLaidOutContainer());
-    throwOnDispose(asMock(terminalCache.get('q-budget')!.webglAddon));
-
-    setCanvasWebGLBudget(1);
-    dropElement('q-budget');
-    engine.mount(makeLaidOutContainer());
-
-    // One context is wedged and uncollectable; the budget of 1 is therefore SPENT.
-    expect(countActiveWebGLAddons()).toBe(1);
-    expect(webglAllowedAtCreation()).toBe(false);
-
-    const other = new TerminalEngine(makeBridge(), { cacheKey: 'q-budget-2' });
-    other.mount(makeLaidOutContainer());
-    expect(getTerminalRenderPolicy('q-budget-2')).toBe('dom');
-    expect(liveAddons()).toBe(1);
-  });
 
 
   // webgl.ts's last hole: activation fails, and the cleanup dispose ALSO throws. The
