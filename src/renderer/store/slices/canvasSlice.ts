@@ -121,6 +121,14 @@ const canvasSlice = createSlice({
     removeEdge: (state, action: PayloadAction<string>) => {
       state.edges = state.edges.filter((e) => e.id !== action.payload);
     },
+    /** Replace one edge with the row the server stored — the label edit path (Task 18).
+     *  Ignores an id it does not hold rather than inserting: an edge this window has never
+     *  seen arrives through `setEdges`/`addEdge`, and appending here would let a PATCH
+     *  response resurrect an edge deleted in the meantime. */
+    updateEdge: (state, action: PayloadAction<CanvasEdge>) => {
+      const i = state.edges.findIndex((e) => e.id === action.payload.id);
+      if (i >= 0) state.edges[i] = action.payload;
+    },
     setSidebarOpen: (state, action: PayloadAction<boolean>) => {
       state.sidebarOpen = action.payload;
     },
@@ -159,6 +167,7 @@ const canvasSlice = createSlice({
 export const {
   setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
+  updateEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 

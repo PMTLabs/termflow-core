@@ -1,6 +1,7 @@
 import canvasReducer, {
   setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
+  updateEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -90,6 +91,22 @@ describe('canvasSlice', () => {
     expect(s.edges).toHaveLength(2); // reverse direction is a distinct edge
     s = canvasReducer(s, removeEdge('ce-1'));
     expect(s.edges.map((e) => e.id)).toEqual(['ce-3']);
+  });
+
+  it('updates an edge in place, preserving order', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b'), edge('ce-2', 'c', 'd')]));
+    s = canvasReducer(s, updateEdge({ ...edge('ce-1', 'a', 'b'), label: 'deploys to' }));
+    expect(s.edges.map((e) => e.id)).toEqual(['ce-1', 'ce-2']);
+    expect(s.edges[0].label).toBe('deploys to');
+  });
+
+  it('ignores an update for an edge it does not hold, rather than inserting it', () => {
+    // A PATCH response racing a delete would otherwise resurrect the wire: the label edit
+    // succeeds server-side, the delete lands first here, and appending on update puts it back
+    // with no row behind it.
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b')]));
+    s = canvasReducer(s, updateEdge({ ...edge('ce-9', 'x', 'y'), label: 'ghost' }));
+    expect(s.edges.map((e) => e.id)).toEqual(['ce-1']);
   });
 
   it('clamps sidebar width', () => {

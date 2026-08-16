@@ -11,6 +11,7 @@ import {
 } from './canvasGeometry';
 import { fitGroupFrame, seedNodePosition, PAD, PAD_TOP, GROUP_GAP } from './canvasLayout';
 import { isVirtualTab } from '../../services/tabKinds';
+import type { NodeInfoPayload } from '../../services/canvasGraph';
 
 export interface CanvasNodeModel {
   terminalId: string;
@@ -217,6 +218,27 @@ export function buildCanvasModel(state: RootState): CanvasModel {
  * PTY on the canvas. This set gates work — snapshot polling, edge mask rects, chrome —
  * and `visibility`, nothing else.
  */
+/**
+ * The node→group registry this window publishes to `PUT /api/canvas/nodes` (Task 18 Step 7).
+ *
+ * The backend knows every terminal's id and owning tab after P0-A, but **only the renderer knows
+ * the TITLES** — `PaneNode.name` and `Tab.title` never leave it — and those are what make an
+ * agent's answer to "what am I connected to" readable rather than a list of `tm-` ids
+ * (design 010 §7.4.1).
+ *
+ * A group lookup map rather than a `find` per node: a workspace with many tabs turns the obvious
+ * nested scan into O(nodes x groups) on a path that runs on every model change.
+ */
+export function nodeRegistryPayload(model: CanvasModel): NodeInfoPayload[] {
+  const titles = new Map(model.groups.map((g) => [g.tabId, g.title]));
+  return model.nodes.map((n) => ({
+    nodeId: n.terminalId,
+    title: n.title,
+    groupId: n.tabId,
+    groupTitle: titles.get(n.tabId) ?? null,
+  }));
+}
+
 export function visibleNodeIds(
   nodes: CanvasNodeModel[],
   vp: Viewport,

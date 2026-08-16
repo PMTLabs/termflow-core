@@ -3,7 +3,9 @@ import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { RootState } from '../../store';
-import { focusNode, selectNode, setOverlayNode, setSidebarOpen } from '../../store/slices/canvasSlice';
+import {
+  CanvasEdge, focusNode, selectNode, setEdges, setOverlayNode, setSidebarOpen,
+} from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
 import { setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
@@ -21,13 +23,22 @@ import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
 import { useCanvasDrag } from './useCanvasDrag';
 import { useArrange } from './useArrange';
+import { useWireDrag } from './useWireDrag';
+import { CanvasWires } from './CanvasWires';
+import { CanvasWireMenu } from './CanvasWireMenu';
+import { neighbourhood } from './wireGeometry';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
-  selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds,
+  selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
+import { fetchGraph, putNodes } from '../../services/canvasGraph';
 import './Canvas.css';
+
+/** How long the node registry waits for the model to settle. A group drag would otherwise
+ *  publish once per `pointermove`. */
+const PUBLISH_DEBOUNCE_MS = 250;
 
 /** The node geometry the stylesheet needs, as CSS variables rather than numbers repeated in
  *  Canvas.css. The host half is per-session — see `canvasMetrics` — so this is built from the
@@ -73,7 +84,10 @@ export const CanvasMode: React.FC = () => {
   const overlayId = useSelector((s: RootState) => s.canvas.overlayId);
   const recent = useSelector((s: RootState) => s.canvas.recent);
   const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
+  const edges = useSelector((s: RootState) => s.canvas.edges);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
 
   // FROZEN FOR THE SESSION, and the two things about that are both load-bearing.
   //
@@ -119,6 +133,26 @@ export const CanvasMode: React.FC = () => {
   );
 
   const collapsed = allCollapsed(model.nodes, tiers);
+
+  // Whether a node PAINTS. Extracted because the wire mask and the node's own `hidden` prop
+  // must agree exactly — a mask hole for a node that is not there shows the 30% ghost against
+  // open canvas, in the shape of a node.
+  const isHidden = useCallback(
+    (id: string) => collapsed || (tiers[id] ?? 'group') === 'group' || !visible.has(id),
+    [collapsed, tiers, visible],
+  );
+
+  // TWO rect maps, and the split is load-bearing (see `CanvasWiresProps`): geometry needs every
+  // node so a wire to an off-screen one still draws, the mask needs only the ones that paint.
+  const { wireRects, maskRects } = useMemo(() => {
+    const all: Record<string, Rect> = {};
+    const painted: Record<string, Rect> = {};
+    for (const n of model.nodes) {
+      all[n.terminalId] = n.rect;
+      if (!isHidden(n.terminalId) && n.terminalId !== overlayId) painted[n.terminalId] = n.rect;
+    }
+    return { wireRects: all, maskRects: painted };
+  }, [model.nodes, isHidden, overlayId]);
 
   // At the snapshot tier, on screen, and not swallowed by a whole-canvas collapse. The rule
   // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
@@ -180,6 +214,56 @@ export const CanvasMode: React.FC = () => {
   // rearranges itself while you are looking away destroys the spatial memory the whole
   // feature exists to build.
   const arrange = useArrange(model);
+
+  // Draw a connection out of a node port (Task 18).
+  const wire = useWireDrag(model);
+
+  // The graph is backend-owned; `canvasSlice.edges` is a mirror and is never persisted
+  // renderer-side. Fetched once per canvas session — every later change goes through an
+  // endpoint that returns the authoritative row, so there is nothing to poll for.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchGraph().then((graph) => {
+      if (!cancelled && graph) dispatch(setEdges(graph.edges));
+    });
+    return () => { cancelled = true; };
+  }, [dispatch]);
+
+  // Publish the node→group registry — the half Task 17 could not own, because only the renderer
+  // holds the titles. Until something publishes, `get_my_connections` and `get_my_terminal.node`
+  // return null for every title and group, silently, which is what design §7.4.1 exists to
+  // prevent. Debounced so a group drag does not publish per `pointermove`.
+  const publishTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (publishTimer.current) clearTimeout(publishTimer.current);
+    publishTimer.current = setTimeout(() => {
+      publishTimer.current = null;
+      void putNodes(nodeRegistryPayload(model));
+    }, PUBLISH_DEBOUNCE_MS);
+    return () => {
+      if (publishTimer.current) clearTimeout(publishTimer.current);
+      publishTimer.current = null;
+    };
+  }, [model]);
+
+  // Hover focus (design §5): dim everything more than one hop from the hovered node.
+  //
+  // Suppressed while a link is being dragged — that gesture has its own highlight, and dimming
+  // the canvas underneath it would hide the very nodes the user is aiming at.
+  const near = useMemo(
+    () => (wire.linking ? null : neighbourhood(edges, hoveredId)),
+    [edges, hoveredId, wire.linking],
+  );
+
+  // `pointerover`, not `pointerenter`: enter/leave do not bubble, so a delegated handler
+  // never sees them. `over` fires on every crossing INCLUDING node → background, where the
+  // target has no `.canvas-node` ancestor and this correctly resolves to null — one handler
+  // for both directions, and no props threaded through `CanvasNode`.
+  const onPointerOver = useCallback((e: React.PointerEvent) => {
+    const id = (e.target as HTMLElement | null)
+      ?.closest('.canvas-node')?.getAttribute('data-terminal-id') ?? null;
+    setHoveredId(id);
+  }, []);
 
   // Both edges of the canvas session relocate every terminal between two differently-sized
   // boxes, which SIGWINCHes every PTY and makes every TUI repaint. Without this the repaint
@@ -273,12 +357,39 @@ export const CanvasMode: React.FC = () => {
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
-    <div className="canvas-mode" data-testid="canvas-mode" style={geometryVars(metrics, vp.z)}>
+    <div
+      className={`canvas-mode${wire.linking ? ' linking' : ''}`}
+      data-testid="canvas-mode"
+      style={geometryVars(metrics, vp.z)}
+      // Capture, so a press on a port becomes a link drag before the node's own pointerdown
+      // selects it or the viewport starts a pan.
+      onPointerDownCapture={wire.onPointerDownCapture}
+      onPointerOver={onPointerOver}
+      onPointerLeave={() => setHoveredId(null)}
+    >
       {/* Before the viewport, so it takes the left edge — Task 15's resize handle goes between
           them. `size` is measured from `.canvas-viewport` itself, so the fly-to targets the
           space the canvas actually has rather than the whole window. */}
       {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} />}
       <CanvasViewport onSize={onSize} onBackgroundPointerDown={clearSelection}>
+        {/* Before the frames and nodes in document order; the two layers place themselves
+            around them by z-index (1 under, 8 over), not by where they sit here. */}
+        <CanvasWires
+          edges={edges}
+          rects={wireRects}
+          masked={maskRects}
+          hoveredId={near ? hoveredId : null}
+          onWireContextMenu={(edge, e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setWireMenu({ edge, x: e.clientX, y: e.clientY });
+          }}
+        />
+        {wire.ghost && (
+          <svg className="canvas-wires under" width={1} height={1} style={{ overflow: 'visible' }}>
+            <path className="canvas-ghostwire" d={wire.ghost} />
+          </svg>
+        )}
         {model.groups.map((g) => (
           <CanvasGroupFrame
             key={g.tabId}
@@ -318,11 +429,13 @@ export const CanvasMode: React.FC = () => {
               zoom={vp.z}
               selected={selectedId === n.terminalId}
               focused={focusedId === n.terminalId}
-              // Fed in Task 18, once edges exist to compute a neighbourhood from.
-              dimmed={false}
+              // Hover focus (design §5). The other half of `CanvasWires`'s heat: without it the
+              // wires brighten against a canvas where nothing else changed.
+              dimmed={near !== null && !near.has(n.terminalId)}
+              linkTarget={wire.targetId === n.terminalId}
               // Culling reads the node's ORIGINAL rect, which for an overlaid node can be far
               // off screen — the overlay would then be hidden the moment you opened it.
-              hidden={!isOverlaid && (collapsed || tier === 'group' || !visible.has(n.terminalId))}
+              hidden={!isOverlaid && isHidden(n.terminalId)}
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
@@ -378,6 +491,16 @@ export const CanvasMode: React.FC = () => {
       )}
       {!model.nodes.length && !model.groups.length && (
         <div className="canvas-empty">No terminals yet</div>
+      )}
+      {wireMenu && (
+        <CanvasWireMenu
+          x={wireMenu.x}
+          y={wireMenu.y}
+          edge={wireMenu.edge}
+          fromTitle={model.nodes.find((n) => n.terminalId === wireMenu.edge.from)?.title ?? 'gone'}
+          toTitle={model.nodes.find((n) => n.terminalId === wireMenu.edge.to)?.title ?? 'gone'}
+          onClose={() => setWireMenu(null)}
+        />
       )}
     </div>
     </CanvasMetricsContext.Provider>

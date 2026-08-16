@@ -95,6 +95,31 @@ export function worldDelta(dxScreen: number, dyScreen: number, z: number): { dx:
   return { dx: dxScreen * k, dy: dyScreen * k };
 }
 
+/**
+ * Convert an absolute pointer POSITION to world coordinates.
+ *
+ * The inverse of `worldStyle`'s `translate(x, y) scale(z)` with `transform-origin: 0 0`, which
+ * applies the scale first and then the translation — so the translation is in SCREEN units and
+ * must come off before the divide, not after. Doing it the other way round is exact at pan
+ * (0, 0) and wrong everywhere else, which is the same shape of bug as multiplying by the zoom
+ * in `worldDelta`: correct in precisely the state you are most likely to test in.
+ *
+ * `viewportRect` is the box of `.canvas-viewport`, because `.canvas-world` is positioned at its
+ * origin — the sidebar makes that differ from the window.
+ */
+export function worldPoint(
+  clientX: number,
+  clientY: number,
+  viewportRect: { left: number; top: number },
+  vp: { x: number; y: number; z: number },
+): { x: number; y: number } {
+  const k = 1 / Math.max(vp.z, Number.EPSILON);
+  return {
+    x: (clientX - viewportRect.left - vp.x) * k,
+    y: (clientY - viewportRect.top - vp.y) * k,
+  };
+}
+
 export interface DropCandidate { tabId: string; rect: Rect }
 
 /**

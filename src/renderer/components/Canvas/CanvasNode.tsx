@@ -30,6 +30,9 @@ export const CanvasNode: React.FC<{
   selected: boolean;
   focused: boolean;
   dimmed: boolean;
+  /** A link drag is in flight and would land here. Purely feedback — the drop itself is
+   *  decided by `linkTargetId`, so the highlight and the effect share one rule. */
+  linkTarget?: boolean;
   /** Paint-culled, or below the chip tier. Hides the node — never unmounts it. */
   hidden: boolean;
   onPointerDown?: (e: React.PointerEvent) => void;
@@ -49,7 +52,7 @@ export const CanvasNode: React.FC<{
   hostBox?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
-  node, tier, zoom, selected, focused, dimmed, hidden,
+  node, tier, zoom, selected, focused, dimmed, linkTarget, hidden,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
   overlaid, hostBox, children,
 }) => {
@@ -81,6 +84,7 @@ export const CanvasNode: React.FC<{
         selected ? 'selected' : '',
         focused ? 'focused' : '',
         dimmed ? 'dimmed' : '',
+        linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
         node.isRunning ? 'running' : '',
       ].filter(Boolean).join(' ')}
