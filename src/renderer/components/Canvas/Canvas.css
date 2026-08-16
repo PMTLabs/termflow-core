@@ -49,6 +49,12 @@
    `.canvas-mode`, which is why that variable lives at the root: a frame is a SIBLING of the
    nodes, never a child, so a node-level variable could never have reached it. */
 .canvas-gframe { position: absolute; border: calc(1px * var(--node-chrome-k, 1)) solid var(--border-color, #3e3e42); border-radius: calc(9px * var(--node-k, 1)); background: rgba(255,255,255,.018); }
+/* Drag feedback (Tasks 11 + 12). Colour only — never a width change: the frame's border is
+   counter-scaled to a hairline, and thickening it on hover would undo that at the one moment the
+   user is looking closely. `.drop` is the frame a dragged node would re-home INTO; `.moving` is a
+   frame being dragged as a whole. */
+.canvas-gframe.drop { border-color: var(--tab-running-accent, #3aa6ff); background: rgba(58,166,255,.09); }
+.canvas-gframe.moving { border-color: var(--accent-color, #007acc); background: rgba(0,122,204,.07); }
 .canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; }
 .canvas-gchip { position: absolute; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--border-color, #3e3e42); border-radius: 8px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); white-space: nowrap; cursor: zoom-in; }
 .canvas-gchip-title { font-size: 13px; font-weight: 600; }

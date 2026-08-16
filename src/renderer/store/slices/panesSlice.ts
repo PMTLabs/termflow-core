@@ -529,8 +529,19 @@ const panesSlice = createSlice({
       const edge: EdgeZone = zone === 'center' ? 'right' : zone;
       const next = insertByZone(tree, targetPaneId, node, edge);
       state.treesByTabId[tabId] = next;
-      if (state.activeTabId === tabId) state.paneTree = next;
-      state.activePaneId = node.id;
+      // `activePaneByTabId` is per tab, so it is always the arriving pane's. `paneTree` and
+      // `activePaneId` belong to the ACTIVE tab only (see `removePaneFromTab` below, which
+      // states the same invariant) — writing them for an insert into a BACKGROUND tab points
+      // the active tab's cursor at a pane that is not in it.
+      //
+      // This guard used to cover `paneTree` but not `activePaneId`. Unreachable until now: the
+      // only production caller was the cross-window drop in `dnd/detach.ts`, which always
+      // targets the receiving window's active tab. Canvas re-homing (`plan/013` Task 11) is the
+      // first caller that inserts into a background tab, and it fails without this.
+      if (state.activeTabId === tabId) {
+        state.paneTree = next;
+        state.activePaneId = node.id;
+      }
       state.activePaneByTabId[tabId] = node.id;
       // A newly inserted pane must be visible — drop any maximize on this tab.
       delete state.maximizedPaneByTabId[tabId];

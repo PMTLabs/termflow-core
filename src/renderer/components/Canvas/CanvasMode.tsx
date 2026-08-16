@@ -18,6 +18,7 @@ import {
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
+import { useCanvasDrag } from './useCanvasDrag';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -169,6 +170,9 @@ export const CanvasMode: React.FC = () => {
 
   useCanvasRenderPolicy(tiers, focusedId, recent);
 
+  // Node drag, group drag and cross-group re-homing (Tasks 11 + 12).
+  const drag = useCanvasDrag(model);
+
   // Both edges of the canvas session relocate every terminal between two differently-sized
   // boxes, which SIGWINCHes every PTY and makes every TUI repaint. Without this the repaint
   // reads as real activity: the running sweep fires across the whole tab strip and a
@@ -269,6 +273,9 @@ export const CanvasMode: React.FC = () => {
             group={g}
             zoom={vp.z}
             collapsed={collapsed}
+            dropTarget={drag.dropTabId === g.tabId}
+            moving={drag.movingTabId === g.tabId}
+            onLabelPointerDown={drag.onGroupLabelPointerDown(g.tabId)}
             onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax))}
           />
         ))}
@@ -307,6 +314,9 @@ export const CanvasMode: React.FC = () => {
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
+              // The ORIGINAL rect, never the overlay's: dragging an overlaid node would
+              // otherwise start from a screen-filling box and fling it across the world.
+              onHeaderPointerDown={isOverlaid ? undefined : drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)}
               onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}

@@ -14,9 +14,13 @@ export const CanvasGroupFrame: React.FC<{
   group: CanvasGroupModel;
   zoom: number;
   collapsed: boolean;
+  /** A node is being dragged over this frame and would re-home into it on release. */
+  dropTarget?: boolean;
+  /** This frame is itself being dragged, with its terminals. */
+  moving?: boolean;
   onLabelPointerDown?: (e: React.PointerEvent) => void;
   onChipClick?: () => void;
-}> = ({ group, zoom, collapsed, onLabelPointerDown, onChipClick }) => {
+}> = ({ group, zoom, collapsed, dropTarget, moving, onLabelPointerDown, onChipClick }) => {
   const { x, y, w, h } = group.rect;
   const { zMax } = useCanvasMetrics();
 
@@ -39,7 +43,12 @@ export const CanvasGroupFrame: React.FC<{
   }
 
   return (
-    <div className="canvas-gframe" data-tab-id={group.tabId} style={{ left: x, top: y, width: w, height: h }}>
+    <div
+      className={['canvas-gframe', dropTarget ? 'drop' : '', moving ? 'moving' : '']
+        .filter(Boolean).join(' ')}
+      data-tab-id={group.tabId}
+      style={{ left: x, top: y, width: w, height: h }}
+    >
       <span
         className="canvas-glabel"
         style={{ transform: `scale(${counterScale(zoom, zMax)})` }}
