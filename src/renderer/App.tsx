@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
 import { TerminalContainer } from './components/TerminalContainer';
+import { CanvasMode } from './components/Canvas/CanvasMode';
 import { PaneDragProvider } from './components/Panes/dnd/PaneDragController';
 import { isDetachWindow, reconstructDetachedWindow, applyReattachByToken } from './components/Panes/dnd/detach';
 import { LayoutManager } from './components/LayoutManager';
@@ -65,6 +66,7 @@ import { generateId } from './utils/id';
 const App: React.FC = () => {
   const dispatch = useDispatch();
   const tabs = useSelector((state: RootState) => state.tabs.tabs);
+  const canvasEnabled = useSelector((state: RootState) => state.canvas.enabled);
   const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
   // Single chokepoint: broadcast each tab's EFFECTIVE color schema (its own
@@ -1650,6 +1652,10 @@ const App: React.FC = () => {
         <TitleBar />
         <div className="app-body">
           <TerminalContainer />
+          {/* Rendered AFTER TerminalContainer, not instead of it: Task 9
+              re-parents live terminals out of that container and has to be able
+              to hand them back, so it must stay mounted underneath. */}
+          {canvasEnabled && <CanvasMode />}
         </div>
       </PaneDragProvider>
       <LayoutManager />

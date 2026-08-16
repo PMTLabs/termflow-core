@@ -1,5 +1,5 @@
 /**
- * Single source of truth for the 13 user-customizable keyboard shortcuts.
+ * Single source of truth for the 14 user-customizable keyboard shortcuts.
  * Consumed by InputHandler (registration/rebinding) and the Settings >
  * Shortcuts UI (rendering + reset-to-default). Kept free of React/Redux so
  * findConflict can be tested in isolation.
@@ -29,7 +29,30 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'clearTerminal', label: 'Clear Terminal', defaultCombo: 'Ctrl+Shift+X' },
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },
   { id: 'toggleFullScreen', label: 'Toggle Fullscreen', defaultCombo: 'F11' },
+  { id: 'toggleCanvasMode', label: 'Toggle Canvas Mode', defaultCombo: 'Ctrl+Shift+Alt+Space' },
 ];
+
+/**
+ * Map a KeyboardEvent's `key` to the token a combo string uses for it.
+ *
+ * Two keys cannot appear raw in a `+`-delimited, whitespace-trimmed combo
+ * string, and both lose their identity silently rather than failing loudly:
+ *
+ *  - `'+'` IS the delimiter, so "Ctrl++" splits into an empty trailing segment.
+ *  - `' '` is trimmed to `''` and then dropped by `.filter(Boolean)`, so
+ *    "Ctrl+Shift+Alt+ " canonicalizes to "control+alt+shift+" — a registered
+ *    Space shortcut can never match a real Space keypress.
+ *
+ * Both the live matching path (InputHandler) and the recording UI (Settings)
+ * go through here, so the two can no longer disagree about what a keypress is
+ * called. They previously each carried their own copy of the `'+'` case, and
+ * the recorder's copy landed one review round after the matcher's.
+ */
+export function comboKeyToken(key: string): string {
+  if (key === '+') return 'Plus';
+  if (key === ' ') return 'Space';
+  return key;
+}
 
 /**
  * Single source of truth for combo normalization — parses a `+`-delimited

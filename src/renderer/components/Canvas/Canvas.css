@@ -1,0 +1,33 @@
+/* `.app-body` is `flex:1; overflow:hidden` with NO position, so an absolutely
+   positioned child would anchor to `.app` and cover the title bar — burying the
+   tab strip and the window controls. The tab strip must stay visible in Canvas
+   Mode (design 010 D9), so establish the containing block here. */
+.app-body { position: relative; }
+
+/* Canvas Mode — overlays the tab-mode terminal container without unmounting it,
+   so terminals can be handed back and forth (design 010 §4.3). */
+.canvas-mode {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  background: var(--bg-primary, #141414);
+  z-index: 5;
+}
+.canvas-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+}
+.canvas-viewport.panning { cursor: grabbing; }
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary, #666666);
+  font-size: 13px;
+  pointer-events: none;
+}

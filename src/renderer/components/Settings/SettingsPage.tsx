@@ -4,7 +4,7 @@ import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
 import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
-import { SHORTCUT_ACTIONS, findConflict } from '../../services/shortcutActions';
+import { SHORTCUT_ACTIONS, findConflict, comboKeyToken } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
 import { ShellProfile } from '../../store/slices/settingsSlice';
@@ -711,15 +711,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const isModifierOnly = ['Control', 'Meta', 'Alt', 'Shift'].includes(e.key);
         if (isModifierOnly) return; // keep waiting for a real key
 
-        if (e.key === ' ') {
-            // The Space key cannot round-trip through a '+'-delimited combo
-            // string (whitespace-stripping during normalization loses it
-            // entirely) — reject outright rather than special-casing
-            // space-as-key into the shared canonicalizeCombo parser for one
-            // rarely-wanted binding.
-            setRecordError({ actionId, message: "Space can't be used in a shortcut." });
-            return; // stay in recording state so the user can retry
-        }
+        // Space used to be rejected here because it could not round-trip
+        // through a '+'-delimited, whitespace-trimmed combo string. It now
+        // does: `comboKeyToken` captures it as the word "Space", the same
+        // treatment "Plus" already had, and InputHandler's live matching path
+        // uses that same helper. Canvas Mode's default binding
+        // (Ctrl+Shift+Alt+Space) depends on this, so rejecting it here would
+        // have left a default the user could see but never re-record.
 
         const isFunctionKey = /^F([1-9]|1[0-9]|2[0-4])$/.test(e.key);
         const hasModifier = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
@@ -733,13 +731,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
         if (e.altKey) parts.push('Alt');
         if (e.shiftKey) parts.push('Shift');
-        // '+' is also the combo-string delimiter, so the literal Plus key must be
-        // captured as the word "Plus" rather than the raw character — otherwise
-        // "Ctrl++" is ambiguous to canonicalizeCombo (the trailing '+' is
-        // consumed as an empty split segment and the key identity is lost).
-        // "Plus" round-trips correctly with no changes needed to the parser,
-        // the same way "Tab" or "Enter" already do.
-        const mainKey = e.key === '+' ? 'Plus' : isFunctionKey ? e.key : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+        // '+' and Space cannot be captured as raw characters — the first IS the
+        // combo delimiter and the second is trimmed away entirely, and in both
+        // cases canonicalizeCombo silently loses the key rather than failing.
+        // `comboKeyToken` gives each its word form ("Plus"/"Space"), which
+        // round-trips the same way "Tab" or "Enter" already do. InputHandler's
+        // live matching calls the SAME helper, so recording and matching cannot
+        // drift apart — they did twice before it existed.
+        const mainKey = comboKeyToken(
+            isFunctionKey || e.key.length !== 1 ? e.key : e.key.toUpperCase()
+        );
         parts.push(mainKey);
         const combo = parts.join('+');
 

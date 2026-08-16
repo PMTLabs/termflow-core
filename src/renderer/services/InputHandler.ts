@@ -9,7 +9,8 @@ import { isEditableNonTerminalTarget } from './inputTargets';
 import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
-import { SHORTCUT_ACTIONS, canonicalizeCombo } from './shortcutActions';
+import { SHORTCUT_ACTIONS, canonicalizeCombo, comboKeyToken } from './shortcutActions';
+import { toggleCanvasMode } from '../store/slices/canvasSlice';
 
 export class InputHandler {
   private shortcuts: Map<string, () => void | Promise<void>>;
@@ -88,6 +89,7 @@ export class InputHandler {
     // Cmd+, on macOS — matching every other shortcut in this app.
     this.registerShortcut(this.defaultComboFor('openSettings'), openSettingsTab);
     this.registerShortcut(this.defaultComboFor('toggleFullScreen'), this.handleToggleFullScreen);
+    this.registerShortcut(this.defaultComboFor('toggleCanvasMode'), this.handleToggleCanvasMode);
     // Note: Ctrl/Cmd +/-/0 zoom is intentionally NOT bound here. Zoom is per-surface
     // (each terminal pane and the Settings screen own their level — see
     // TerminalEngine.onZoom / useSurfaceZoom). A global binding here would change
@@ -151,6 +153,7 @@ export class InputHandler {
       clearTerminal: this.handleClearTerminal,
       openSettings: openSettingsTab,
       toggleFullScreen: this.handleToggleFullScreen,
+      toggleCanvasMode: this.handleToggleCanvasMode,
     };
     return handlers[actionId];
   }
@@ -280,14 +283,11 @@ export class InputHandler {
     if (event.ctrlKey || event.metaKey) rawParts.push('Ctrl');
     if (event.altKey) rawParts.push('Alt');
     if (event.shiftKey) rawParts.push('Shift');
-    // '+' is also the combo-string delimiter, so the literal Plus key must be
-    // mapped to the word "Plus" here too, mirroring the same mapping the
-    // Settings recording UI applies when capturing it — otherwise a Plus-key
-    // shortcut registers correctly but this live path builds "Ctrl++",
-    // canonicalizes to "control+" (key lost, split as an empty segment), and
-    // never matches "control+plus". Found in final PR review (agy): the
-    // recording-side fix alone was incomplete without this counterpart.
-    rawParts.push(event.key === '+' ? 'Plus' : event.key);
+    // Keys that cannot survive a '+'-delimited, whitespace-trimmed combo string
+    // ('+' itself, and Space) become their word form here. This is the SAME
+    // helper the Settings recording UI uses, so registration and live matching
+    // cannot drift — they did twice before it existed.
+    rawParts.push(comboKeyToken(event.key));
 
     const keyCombo = canonicalizeCombo(rawParts.join('+'));
     const handler = this.shortcuts.get(keyCombo);
@@ -509,6 +509,10 @@ export class InputHandler {
     } else {
       document.documentElement.requestFullscreen();
     }
+  };
+
+  private handleToggleCanvasMode = (): void => {
+    store.dispatch(toggleCanvasMode());
   };
 
   // Public methods
