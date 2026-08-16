@@ -7,6 +7,7 @@ pub mod profile;
 pub mod instance_lock;
 pub mod net_ports;
 mod history_store;
+pub mod canvas_store;
 pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
@@ -1236,6 +1237,10 @@ pub fn run() {
         // Open the scrollback DB and start the 30s throttled flush task.
         if let Some(db) = history_db_path(&app.handle()) {
             state.history_store.init(&db);
+            // Same file, its own connection. Inside the `if let` because `history_db_path`
+            // returns an Option — there is no path to hand it when the DB is unavailable,
+            // and the store stays disabled, reporting Err rather than an empty graph.
+            state.canvas_store.init(&db);
             // Backlog 011: cap the global command history at startup.
             state.history_store.prune_commands(5000);
             // Stream 4: per-directory usage has higher (command,dir) cardinality; cap larger.

@@ -318,6 +318,10 @@ pub struct AppState<R: Runtime = Wry> {
     pub terminal_cwds: Arc<DashMap<String, String>>,
     // Per-terminal scrollback persisted to disk, keyed by renderer id (tab_id).
     pub history_store: Arc<crate::history_store::HistoryStore>,
+    // Canvas connection graph. Its OWN connection to the same `history.db` rather than a
+    // share of the one above: SQLite allows several connections to one file, and a
+    // standalone store can be tested against an in-memory database with no AppHandle.
+    pub canvas_store: Arc<crate::canvas_store::CanvasStore>,
     // Terminal ids (processId) whose in-memory history changed since the last flush.
     // The 30s flush task drains this; idle terminals are never re-written.
     pub history_dirty: Arc<DashMap<String, ()>>,
@@ -426,6 +430,7 @@ impl<R: Runtime> Clone for AppState<R> {
             window_titles: self.window_titles.clone(),
             terminal_cwds: self.terminal_cwds.clone(),
             history_store: self.history_store.clone(),
+            canvas_store: self.canvas_store.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
             history_persist_locks: self.history_persist_locks.clone(),
@@ -588,6 +593,7 @@ impl<R: Runtime> AppState<R> {
             window_titles: Arc::new(DashMap::new()),
             terminal_cwds: Arc::new(DashMap::new()),
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
+            canvas_store: Arc::new(crate::canvas_store::CanvasStore::new()),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
             history_persist_locks: Arc::new(DashMap::new()),
