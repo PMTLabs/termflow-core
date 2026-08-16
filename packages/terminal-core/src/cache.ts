@@ -373,10 +373,16 @@ export const resetTerminalRendering = (
   // no addon to dispose, did not bump, and canvas exit restored WebGL over the top
   // of the explicit reset. The reset is a user decision about the terminal's
   // renderer whether or not it had anything left to tear down, so it invalidates
-  // the snapshot either way. (The dispose-failure path returns above, and does its
-  // OWN bump before returning — it clears the addon, so it changes the policy too.
-  // Reached on BOTH outcomes since rev 12 — a dispose that threw still cleared the
-  // addon, so it changed the policy too.)
+  // the snapshot either way. Reached on BOTH outcomes since rev 12: a dispose that
+  // THREW still clears the addon, so it changes the policy too, and it falls through
+  // to this single bump rather than returning early with one of its own.
+  //
+  // (Rev 12 removed that early return; the sentence describing it survived the edit
+  // and contradicted itself in one breath — "returns above" beside "reached on both
+  // outcomes". False comment #14, and the same shape as the twelve before it: a
+  // correction appended without deleting the claim it corrected. Its live hazard was
+  // that a maintainer trusting it would re-add the early return and reintroduce the
+  // rev-10 regression verbatim.)
   if (!opts.canvasOwned) {
     cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
   }

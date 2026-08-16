@@ -175,6 +175,10 @@ export function reconcileRenderPolicies(
     if (isLoser) demotedForRoom.add(id);
   }
 
+  // Set once the loop reaches a demoted-for-room id: everything after it in
+  // `wantWebgl` is lower-ranked, so nothing further may take the freed slot.
+  let slotWithheld = false;
+
   // RULE 2/3: promote in priority order, over ALL WebGL candidates — not over a
   // fixed winners set.
   //
@@ -197,18 +201,31 @@ export function reconcileRenderPolicies(
       continue;
     }
     // Never hand a freed slot back to the terminal that was demoted to create it
-    // (rev 13, pre-review `144`). Reaching here means every higher-priority winner
-    // either succeeded (so there is no spare slot) or FAILED — and in the failure
-    // case re-promoting this id is a pure dispose-then-rebuild of a context it was
-    // already holding when the pass began. Leaving it on DOM for this pass costs one
-    // pass of degraded rendering and self-corrects: on the next reconciliation it is
-    // no longer demoted-for-room, so it promotes from DOM with a single construction
-    // and no teardown.
+    // (rev 13, pre-review `144`), AND do not hand it to anyone ranked below that
+    // terminal either (rev 14, pre-review `146`).
+    //
+    // Reaching a demoted-for-room id means every higher-priority winner either
+    // succeeded (so there is no spare slot) or FAILED. In the failure case the slot
+    // this id gave up is sitting free — and rev 13 only stopped THIS id reclaiming
+    // it, so the loop simply handed it to the next candidate. Since `wantWebgl` is
+    // in priority order, every candidate after this point is ranked BELOW the
+    // terminal that was torn down: giving one of them the context is a priority
+    // inversion, and across passes it is worse than that. The winner-set is
+    // recomputed from `order` each pass, so the lower-ranked holder becomes the next
+    // pass's loser, is torn down, and the first one is rebuilt — a permanent
+    // oscillation, one dispose plus one construction per pass, for as long as the
+    // top candidate keeps failing.
+    //
+    // So the slot stays genuinely UNUSED for the rest of this pass. That is what the
+    // "costs one pass of degraded rendering and self-corrects" promise actually
+    // requires: on the next pass nothing is demoted-for-room, and the highest-ranked
+    // viable candidate takes the slot with a single construction and no teardown.
     if (demotedForRoom.has(id)) {
       applied[id] = 'dom';
+      slotWithheld = true;
       continue;
     }
-    if (count() >= input.budget) {
+    if (slotWithheld || count() >= input.budget) {
       applied[id] = 'dom';           // RULE 4: report what happened, not the request
       continue;
     }

@@ -927,3 +927,94 @@ describe('a failed promotion must not churn the loser it displaced (rev 13)', ()
     expect(out.webglCount).toBe(1);
   });
 });
+
+/**
+ * rev 14 (pre-review `146`) — H1. The anti-churn guard leaked the freed slot.
+ *
+ * rev 13 stopped the DEMOTED id reclaiming its own slot, but did not withhold that
+ * slot from the pass. So a candidate ranked BELOW the demoted one simply took it —
+ * which is both a priority inversion and, across passes, a permanent oscillation.
+ */
+describe('a freed slot is not leaked to a lower-priority candidate (rev 14)', () => {
+  it('does not hand C’s slot to lower-ranked D when the winner fails', () => {
+    // A outranks C outranks D. C holds. D is cached on DOM. A always fails to promote.
+    const fake = makeFake({ cap: 4, preloaded: ['C'], failOn: ['A'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { A: 'webgl', C: 'webgl', D: 'webgl' },
+      budget: 1,
+      order: ['A', 'C', 'D'],
+      ...fake,
+    });
+
+    // Before the fix: [['C','dom'], ['A','webgl'], ['D','webgl']] — D, the LOWEST
+    // priority candidate, ends up holding the context that C gave up.
+    expect(fake.calls).toEqual([['C', 'dom'], ['A', 'webgl']]);
+    expect(out.applied.D).toBe('dom');
+    expect(out.applied.C).toBe('dom');
+    expect(out.webglCount).toBe(0);
+  });
+
+  it('never thrashes the LOWER-ranked terminal across passes', () => {
+    // The compounding version of the leak. Before the fix, each pass tore down
+    // whichever of C/D held the context and built the other — so D, which never had
+    // any claim to the slot, was constructed and destroyed on alternating passes.
+    const fake = makeFake({ cap: 4, preloaded: ['C'], failOn: ['A'] });
+    const input = {
+      desired: { A: 'webgl' as RenderPolicy, C: 'webgl' as RenderPolicy, D: 'webgl' as RenderPolicy },
+      budget: 1,
+      order: ['A', 'C', 'D'],
+      ...fake,
+    };
+
+    for (let i = 0; i < 6; i += 1) reconcileRenderPolicies(input);
+
+    // D is never promoted and never demoted — it is not a claimant to this slot.
+    expect(fake.calls.filter(([id]) => id === 'D')).toEqual([]);
+  });
+
+  /**
+   * THE RESIDUAL, stated honestly rather than papered over.
+   *
+   * A top-priority candidate that fails FOREVER keeps its provisional winner slot
+   * forever, because the winner set is recomputed from `order` on every pass and
+   * this layer is stateless. So the incumbent is displaced, the winner fails, the
+   * slot is withheld, and on the next pass the incumbent takes it back — a two-pass
+   * demote/promote cycle for as long as the caller keeps asking.
+   *
+   * The two ways to remove it are both worse HERE:
+   *   - promote-then-demote would let the reconciler learn the winner fails before
+   *     tearing anything down, but it transiently exceeds the GPU budget by one, and
+   *     the browser's own context cap is exactly what that budget exists to respect;
+   *   - never displacing an incumbent would make the focused terminal unable to take
+   *     a slot, contradicting design/010 D8, which is the reason `order` exists.
+   *
+   * So the fix belongs to the CALLER, and this test pins that contract: a consumer
+   * that stops asking for a candidate which reported 'dom' reaches a stable, silent
+   * steady state. Canvas Mode (Task 9) must do this.
+   */
+  it('is stable and silent once the caller drops a candidate that reported dom', () => {
+    const fake = makeFake({ cap: 4, preloaded: ['C'], failOn: ['A'] });
+    const first = reconcileRenderPolicies({
+      desired: { A: 'webgl', C: 'webgl', D: 'webgl' },
+      budget: 1,
+      order: ['A', 'C', 'D'],
+      ...fake,
+    });
+    expect(first.applied.A).toBe('dom');       // the caller's signal to drop A
+
+    const dropped = {
+      desired: { C: 'webgl' as RenderPolicy, D: 'webgl' as RenderPolicy },
+      budget: 1,
+      order: ['C', 'D'],
+      ...fake,
+    };
+    reconcileRenderPolicies(dropped);          // C reclaims the slot
+    fake.calls.length = 0;
+
+    // …and from here nothing moves, however many passes run.
+    for (let i = 0; i < 5; i += 1) reconcileRenderPolicies(dropped);
+    expect(fake.calls).toEqual([]);
+    expect(reconcileRenderPolicies(dropped).applied.C).toBe('webgl');
+  });
+});
