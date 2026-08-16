@@ -29,6 +29,7 @@ use crate::search_endpoints::{
     search, get_suggestions, clear_index, get_search_history
 };
 use crate::layout_endpoints::{get_layout, save_layout};
+use crate::canvas_endpoints;
 use futures::{sink::SinkExt, stream::StreamExt};
 use tauri::Emitter;
 use tokio::sync::broadcast;
@@ -127,6 +128,7 @@ fn cors_layer() -> CorsLayer {
             Method::GET,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])
@@ -228,6 +230,11 @@ pub async fn start_api_server(
         .route("/api/search/index", delete(clear_index))
         // Layout endpoints
         .route("/api/layout", get(get_layout).post(save_layout))
+        .route("/api/canvas/graph", get(canvas_endpoints::get_graph))
+        .route("/api/canvas/edges", post(canvas_endpoints::create_edge))
+        .route("/api/canvas/edges/:id", delete(canvas_endpoints::delete_edge).patch(canvas_endpoints::patch_edge))
+        .route("/api/canvas/nodes", put(canvas_endpoints::put_nodes))
+        .route("/api/terminals/:id/connections", get(canvas_endpoints::get_connections))
         // Test capture endpoints
         .route("/api/test/start", post(start_test_capture))
         .route("/api/test/stop", post(stop_test_capture))

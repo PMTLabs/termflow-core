@@ -180,6 +180,19 @@ impl CanvasStore {
         Ok(conn.execute("DELETE FROM canvas_edges WHERE id = ?1", [id])? > 0)
     }
 
+    /// Update one edge label in place. `None` deliberately writes SQL NULL so a
+    /// client can clear an existing label; it is not a "leave unchanged" sentinel.
+    /// `Ok(false)` means the id was absent, while `Err` means the store could not
+    /// answer and must not be collapsed into a missing-edge response.
+    pub fn update_label(&self, id: &str, label: Option<&str>) -> Result<bool, CanvasStoreError> {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(CanvasStoreError::Disabled)?;
+        Ok(conn.execute(
+            "UPDATE canvas_edges SET label = ?1 WHERE id = ?2",
+            rusqlite::params![label, id],
+        )? > 0)
+    }
+
     fn query(
         &self,
         sql: &str,
@@ -477,6 +490,54 @@ mod tests {
             CanvasStore::new().delete_edge("ce-1").is_err(),
             "a dead store is Err"
         );
+    }
+
+    #[test]
+    fn updates_an_existing_edge_label_in_place() {
+        let s = CanvasStore::new_in_memory();
+        s.insert_edge(&edge("ce-1", "tm-a", "tm-b", "user", 100)).unwrap();
+        assert!(s.update_label("ce-1", Some("deploys")).unwrap());
+        assert_eq!(s.get_by_pair("tm-a", "tm-b").unwrap().unwrap().label.as_deref(), Some("deploys"));
+    }
+
+    #[test]
+    fn clearing_a_label_with_none_writes_null() {
+        let s = CanvasStore::new_in_memory();
+        let mut e = edge("ce-1", "tm-a", "tm-b", "user", 100);
+        e.label = Some("deploys".into());
+        s.insert_edge(&e).unwrap();
+        assert!(s.update_label("ce-1", None).unwrap());
+        assert!(s.get_by_pair("tm-a", "tm-b").unwrap().unwrap().label.is_none());
+    }
+
+    #[test]
+    fn updating_an_unknown_id_is_a_confirmed_miss() {
+        assert!(!CanvasStore::new_in_memory().update_label("ce-gone", Some("x")).unwrap());
+    }
+
+    #[test]
+    fn updating_a_disabled_store_is_an_error() {
+        assert!(CanvasStore::new().update_label("ce-1", Some("x")).is_err());
+    }
+
+    #[test]
+    fn updating_a_label_preserves_all_other_edge_fields_and_pair_index() {
+        let s = CanvasStore::new_in_memory();
+        let mut e = edge("ce-1", "tm-a", "tm-b", "agent", 1234);
+        e.label = Some("before".into());
+        s.insert_edge(&e).unwrap();
+        assert!(s.update_label("ce-1", Some("after")).unwrap());
+        let updated = s.get_by_pair("tm-a", "tm-b").unwrap().unwrap();
+        assert_eq!(updated.id, "ce-1");
+        assert_eq!(updated.from_id, "tm-a");
+        assert_eq!(updated.to_id, "tm-b");
+        assert_eq!(updated.origin, "agent");
+        assert_eq!(updated.created_at, 1234);
+        assert_eq!(updated.label.as_deref(), Some("after"));
+        assert!(matches!(
+            s.insert_edge(&edge("ce-2", "tm-a", "tm-b", "user", 9)),
+            Ok(InsertOutcome::Existing(existing)) if existing.id == "ce-1"
+        ));
     }
 
     /// Deleting a pair must free it, or a re-drawn connection would come back as

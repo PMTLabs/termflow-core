@@ -8,6 +8,7 @@ pub mod instance_lock;
 pub mod net_ports;
 mod history_store;
 pub mod canvas_store;
+pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
@@ -1395,6 +1396,8 @@ pub fn run() {
             let app = window.app_handle();
             if let Some(state) = app.try_state::<AppState>() {
                 state.window_titles.remove(window.label());
+                // Registry data is a per-window renderer projection, never durable.
+                state.canvas_nodes.write().remove(window.label());
                 // If the window that just closed was the API/MCP target, re-point the
                 // active window at a still-live window and notify every window so their
                 // titlebar indicators don't strand on a dead label.
