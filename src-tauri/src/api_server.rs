@@ -1116,7 +1116,19 @@ async fn get_terminal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(terminal) = state.terminals.get(&id) {
-        (StatusCode::OK, Json(terminal_identity_json(terminal.value(), "default")))
+        let mut body = terminal_identity_json(terminal.value(), "default");
+        // Canvas identity, so an agent learns which node and group it is in one call
+        // (`plan/013` Task 19). Merged HERE rather than inside `terminal_identity_json`,
+        // which has three call sites: adding it there would put a canvas-registry lock and a
+        // SQLite query on EVERY entry of `list_terminals`, for a field that endpoint was never
+        // asked to carry.
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "node".to_string(),
+                crate::canvas_endpoints::canvas_node_json(&state, &id),
+            );
+        }
+        (StatusCode::OK, Json(body))
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" })))
     }
@@ -3276,6 +3288,23 @@ mod tests {
             last_input_at: None,
             prompt_hook: true,
         }
+    }
+
+    /// The canvas `node` block belongs to `GET /api/terminals/:id` ALONE.
+    ///
+    /// `terminal_identity_json` has three call sites, and `list_terminals` is one of them. If
+    /// the block were built in here it would take the canvas-registry read lock and run a
+    /// SQLite query once PER TERMINAL on every list call — for a field that endpoint was never
+    /// asked to carry, and that no client reads from it. `plan/013` Task 19 described the
+    /// change as "after building the existing JSON", which reads as though the handler builds
+    /// its own object; it does not.
+    #[test]
+    fn the_shared_identity_payload_carries_no_canvas_node_block() {
+        let v = terminal_identity_json(&identity_sample(), "ui");
+        assert!(
+            v.get("node").is_none(),
+            "the node block must be merged at the get_terminal call site, not here —              otherwise list_terminals pays for it on every entry"
+        );
     }
 
     /// Exact key names, asserted (design 011 §7 test 4). `tabId` stays a

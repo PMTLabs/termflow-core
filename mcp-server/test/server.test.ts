@@ -9,11 +9,14 @@ interface Call {
     body?: unknown;
 }
 
-function makeFakeApi() {
+/** `responses` overrides the default body for specific GET urls; anything unlisted keeps the
+ *  generic identity payload the existing tests rely on. */
+function makeFakeApi(responses: Record<string, unknown> = {}) {
     const calls: Call[] = [];
     const api: ApiLike = {
         get: async (url: string) => {
             calls.push({ method: "get", url });
+            if (Object.prototype.hasOwnProperty.call(responses, url)) return { data: responses[url] };
             return { data: { id: "pc-self", pid: 123, tabId: "tb-1", name: "demo", url, terminals: [] } };
         },
         post: async (url: string, body?: unknown) => {
@@ -309,5 +312,59 @@ describe("get_terminal_screen tool", () => {
         expect(call).toBeTruthy();
         expect((call!.body as any).machineId).toBe("mac-123");
         expect((call!.body as any).terminalId).toBe("pc-remote");
+    });
+});
+
+describe("get_my_connections", () => {
+    it("proxies GET /terminals/<callerId>/connections", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "get_my_connections", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(called(calls, "get", "/terminals/pc-self/connections")).toBe(true);
+    });
+
+    it("errors actionably when the identity header was never received", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        const res: any = await client.callTool({ name: "get_my_connections", arguments: {} });
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain("TERMFLOW_TERMINAL_ID");
+        expect(calls.length).toBe(0);
+    });
+
+    it("passes an empty connection list through as success, not an error", async () => {
+        // An agent that reads "error" here will conclude the canvas is broken rather than that
+        // nothing is connected to it yet — the two are completely different next actions.
+        const { api } = makeFakeApi({ "/terminals/pc-self/connections": { nodeId: "tm-1", connections: [] } });
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "get_my_connections", arguments: {} });
+        expect(res.isError).toBeFalsy();
+        expect(JSON.parse(res.content[0].text).connections).toEqual([]);
+    });
+
+    it("returns the neighbours verbatim, including direction and titles", async () => {
+        const body = {
+            nodeId: "tm-1",
+            connections: [
+                { nodeId: "tm-2", title: "build", groupId: "tb-a", groupTitle: "API", direction: "outgoing", origin: "user", label: "deploys to", createdAt: 7 },
+                { nodeId: "tm-3", title: null, groupId: null, groupTitle: null, direction: "incoming", origin: "agent", label: null, createdAt: 9 },
+            ],
+        };
+        const { api } = makeFakeApi({ "/terminals/pc-self/connections": body });
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "get_my_connections", arguments: {} });
+        // The tool is a proxy: anything it drops or renames is a field an agent cannot ask for
+        // again, because there is no second endpoint that carries it.
+        expect(JSON.parse(res.content[0].text)).toEqual(body);
+    });
+
+    it("takes no arguments, so an agent cannot query another terminal by mistake", async () => {
+        const { api } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const tools = await client.listTools();
+        const tool = tools.tools.find((t: any) => t.name === "get_my_connections");
+        expect(tool).toBeDefined();
+        expect(tool!.inputSchema?.properties ?? {}).toEqual({});
     });
 });

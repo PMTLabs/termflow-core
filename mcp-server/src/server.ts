@@ -282,6 +282,32 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         }
     );
 
+    // Tool: get_my_connections — the caller's own neighbours on the canvas.
+    server.registerTool(
+        "get_my_connections",
+        {
+            description:
+                "Get the terminals connected to YOUR OWN terminal on the TermFlow canvas — " +
+                "both connections you point at (outgoing) and connections pointing at you " +
+                "(incoming). Resolved from the X-Termflow-Terminal-Id header, like " +
+                "get_my_terminal. Each neighbour carries its nodeId, title, groupId, groupTitle, " +
+                "direction, origin (user or agent), optional label and createdAt. An empty " +
+                "`connections` array is a SUCCESSFUL result meaning nothing is connected to this " +
+                "terminal yet, not an error. Title and group fields are null until Canvas Mode " +
+                "has been opened at least once in this session — that is what publishes them.",
+        },
+        async () => {
+            try {
+                const id = resolveTerminalId("me", getCallerId());
+                const response = await api.get(`/terminals/${id}/connections`);
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
     // Tool: close_terminal
     server.registerTool(
         "close_terminal",

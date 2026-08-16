@@ -168,7 +168,7 @@ pub fn to_connections(
         .collect()
 }
 
-fn live_renderer_ids(state: &AppState) -> HashSet<String> {
+pub(crate) fn live_renderer_ids(state: &AppState) -> HashSet<String> {
     state
         .terminals
         .iter()
@@ -396,6 +396,53 @@ pub async fn put_nodes(
     (StatusCode::OK, Json(json!({ "status": "updated" }))).into_response()
 }
 
+/// The `node` block on `GET /api/terminals/:id` — `plan/013` Task 19.
+///
+/// Pure, so the two things that are easy to get wrong here are testable without a live
+/// `AppState`:
+///
+/// 1. **`connection_count` counts the SAME edges `/connections` returns.** `edges_for` is
+///    unfiltered; `/connections` drops edges whose other endpoint is dead. Counting the raw rows
+///    makes `get_my_terminal` report a number that `get_my_connections` then contradicts — the
+///    same "two read paths disagree about whether a connection exists" defect that all three of
+///    Task 17's review findings were.
+/// 2. **A store error is not "no connections".** `edges` is `None` when the store could not
+///    answer, and that becomes a JSON `null` rather than a `0` an agent would read as fact.
+pub fn node_block(
+    renderer_id: &str,
+    edges: Option<Vec<CanvasEdge>>,
+    live: &HashSet<String>,
+    info: Option<&NodeInfo>,
+) -> serde_json::Value {
+    let count = edges.map(|edges| {
+        filter_live(edges, live)
+            .into_iter()
+            .filter(|edge| edge.from_id != edge.to_id)
+            .count()
+    });
+    json!({
+        "nodeId": renderer_id,
+        // Never `Terminal.name`: that is the terminal's own name, not its tab's title, and a
+        // plausible wrong answer is worse than a null the agent can detect.
+        "title": info.and_then(|node| node.title.clone()),
+        "groupId": info.and_then(|node| node.group_id.clone()),
+        "groupTitle": info.and_then(|node| node.group_title.clone()),
+        "connectionCount": count,
+    })
+}
+
+/// Resolve and build the `node` block for an incoming terminal id, or `null`.
+pub fn canvas_node_json(state: &AppState, id: &str) -> serde_json::Value {
+    let Some(renderer_id) = state.resolve_renderer_id(id) else {
+        return serde_json::Value::Null;
+    };
+    let edges = state.canvas_store.edges_for(&renderer_id).ok();
+    let live = live_renderer_ids(state);
+    let registries = state.canvas_nodes.read();
+    let registry = merged_registry(&registries);
+    node_block(&renderer_id, edges, &live, registry.get(&renderer_id))
+}
+
 pub async fn get_connections(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let Some(node_id) = state.resolve_renderer_id(&id) else {
         return error(StatusCode::NOT_FOUND, "terminal not found");
@@ -426,6 +473,79 @@ mod tests {
             origin: "user".into(),
             created_at: 1,
         }
+    }
+
+    fn info(title: &str, group: &str, group_title: &str) -> NodeInfo {
+        NodeInfo {
+            node_id: "tm-1".into(),
+            title: Some(title.into()),
+            group_id: Some(group.into()),
+            group_title: Some(group_title.into()),
+        }
+    }
+
+    #[test]
+    fn node_block_counts_only_the_edges_connections_would_return() {
+        // The defect this pins. `edges_for` is unfiltered; `/connections` drops edges whose
+        // other endpoint is dead. Counting the raw rows makes `get_my_terminal` report 3 while
+        // `get_my_connections` returns 1 — two read paths disagreeing about whether a
+        // connection exists, which is what every Task 17 review finding was.
+        let edges = vec![
+            edge("ce-1", "tm-1", "tm-2"),
+            edge("ce-2", "tm-3", "tm-1"),
+            edge("ce-3", "tm-1", "tm-dead"),
+        ];
+        let live = live_set(&["tm-1", "tm-2", "tm-3"]);
+        let block = node_block("tm-1", Some(edges.clone()), &live, None);
+        assert_eq!(block["connectionCount"], serde_json::json!(2));
+
+        // And it agrees with `/connections` itself, computed the same way from the same input.
+        let registry = HashMap::new();
+        let connections = to_connections("tm-1", filter_live(edges, &live), &registry);
+        assert_eq!(block["connectionCount"], serde_json::json!(connections.len()));
+    }
+
+    #[test]
+    fn node_block_reports_null_rather_than_zero_when_the_store_failed() {
+        // `0` is a fact an agent will act on; `null` is a gap it can report. A store that could
+        // not answer must not be rendered as an empty neighbourhood.
+        let block = node_block("tm-1", None, &live_set(&["tm-1"]), None);
+        assert!(block["connectionCount"].is_null());
+    }
+
+    #[test]
+    fn node_block_does_not_count_a_self_edge_twice() {
+        // `to_connections` drops a self-edge entirely (it would otherwise appear as both an
+        // incoming and an outgoing neighbour), so the count must drop it too.
+        let edges = vec![edge("ce-1", "tm-1", "tm-1")];
+        let live = live_set(&["tm-1"]);
+        let block = node_block("tm-1", Some(edges.clone()), &live, None);
+        let connections = to_connections("tm-1", filter_live(edges, &live), &HashMap::new());
+        assert_eq!(block["connectionCount"], serde_json::json!(connections.len()));
+        assert_eq!(block["connectionCount"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn node_block_carries_the_published_titles() {
+        let registered = info("build", "tb-a", "API");
+        let block = node_block("tm-1", Some(vec![]), &live_set(&["tm-1"]), Some(&registered));
+        assert_eq!(block["nodeId"], "tm-1");
+        assert_eq!(block["title"], "build");
+        assert_eq!(block["groupId"], "tb-a");
+        assert_eq!(block["groupTitle"], "API");
+    }
+
+    #[test]
+    fn node_block_is_explicitly_null_for_an_unregistered_node() {
+        // Canvas Mode has never been opened, so nothing published a registry. Every title field
+        // is a detectable null rather than a guess.
+        let block = node_block("tm-1", Some(vec![]), &live_set(&["tm-1"]), None);
+        assert_eq!(block["nodeId"], "tm-1");
+        assert!(block["title"].is_null());
+        assert!(block["groupId"].is_null());
+        assert!(block["groupTitle"].is_null());
+        // A missing registry is not a missing count: the store answered, and the answer is 0.
+        assert_eq!(block["connectionCount"], serde_json::json!(0));
     }
 
     fn live_set(ids: &[&str]) -> HashSet<String> {
