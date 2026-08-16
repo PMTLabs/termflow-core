@@ -51,7 +51,20 @@ export interface ReconcileInput {
  */
 export function reconcileRenderPolicies(
   input: ReconcileInput,
-): { applied: Record<string, RenderPolicy>; webglCount: number } {
+): {
+  applied: Record<string, RenderPolicy>;
+  webglCount: number;
+  /**
+   * Ids whose promotion this pass ATTEMPTED and the renderer REFUSED (D7): the driver
+   * declined, the global WebGL toggle is off, or construction threw.
+   *
+   * This is the CALLER-DROP signal, and the ONLY one. Do not infer it from
+   * `applied[id] === 'dom'`, which is also returned for an incumbent demoted to make
+   * room and for a lower-ranked candidate whose slot was deliberately withheld —
+   * suppressing those would strand the slot permanently.
+   */
+  failedPromotions: string[];
+} {
   const setPolicy = input.setPolicy ?? setTerminalRenderPolicy;
   const count = input.count ?? countActiveWebGLAddons;
   const getPolicy = input.getPolicy ?? getTerminalRenderPolicy;
@@ -179,6 +192,17 @@ export function reconcileRenderPolicies(
   // `wantWebgl` is lower-ranked, so nothing further may take the freed slot.
   let slotWithheld = false;
 
+  /**
+   * Ids whose promotion was ATTEMPTED and REFUSED this pass — see CALLER-DROP.
+   *
+   * `applied[id] === 'dom'` is NOT this signal, and shipping CALLER-DROP against it was
+   * wrong (rev 14): the same value is returned for an incumbent demoted to make room and
+   * for a lower-ranked candidate whose slot was withheld. A consumer applying the rule
+   * literally would drop all three and leave the freed slot unused forever. Only this
+   * list distinguishes "the GPU refused it" from "it lost on priority this pass".
+   */
+  const failedPromotions: string[] = [];
+
   // RULE 2/3: promote in priority order, over ALL WebGL candidates — not over a
   // fixed winners set.
   //
@@ -230,10 +254,15 @@ export function reconcileRenderPolicies(
       continue;
     }
     // RULE 3: a failed promotion records 'dom' and the pass continues (D7).
-    applied[id] = setPolicy(id, 'webgl');
+    const got = setPolicy(id, 'webgl');
+    applied[id] = got;
+    // ATTEMPTED AND REFUSED — the only outcome CALLER-DROP may act on (rev 15, codex
+    // round 7 HIGH). Recorded here and nowhere else, because this is the one branch
+    // where `setPolicy(id,'webgl')` was actually CALLED and came back 'dom'.
+    if (got === 'dom') failedPromotions.push(id);
   }
 
-  return { applied, webglCount: count() };
+  return { applied, webglCount: count(), failedPromotions };
 }
 
 export type RenderPolicySnapshot = Map<

@@ -99,7 +99,9 @@ export const loadWebGLAddon = (term: Terminal, terminalId: string): WebglAddon |
         // was CONSTRUCTED (so it may hold a context) and refused to be disposed, and
         // we are about to return null, dropping the only reference that will ever
         // exist to it. Hand it to the quarantine instead, which keeps it counted
-        // against the budget until a retry can confirm it is gone.
+        // against the budget PERMANENTLY (rev 15: there is no retry, and the
+        // context-loss release cannot reach a quarantined addon — see the quarantine
+        // registry's comment in renderPolicy.ts).
         quarantineWebGLAddon(webgl);
       }
     }

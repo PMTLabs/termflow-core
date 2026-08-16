@@ -9,7 +9,8 @@ export class WebglAddon {
    */
   static failNextConstruction = false;
 
-  /** Captured so a test can fire a context loss without a real GPU. */
+  /** Captured so a test can fire a context loss without a real GPU. Cleared on
+   *  dispose — see `contextLossListeners`. */
   static lastContextLossHandler: (() => void) | null = null;
 
   /**
@@ -26,6 +27,24 @@ export class WebglAddon {
    *  context was released — the mock has no context to release. */
   disposed = false;
 
+  /**
+   * The instance's own context-loss listeners, and the reason they are per-instance
+   * and CLEARED BY dispose() (rev 15, codex round 7 MEDIUM).
+   *
+   * In the real `@xterm/addon-webgl@0.19.0`, `onContextLoss` is an `Emitter` created
+   * with `this._register(...)` — it belongs to the addon's own `DisposableStore`. So
+   * `dispose()` tears the emitter down, and xterm's `DisposableStore.clear()` does
+   * `try { dispose(children) } finally { this._toDispose.clear() }` — meaning the
+   * store is emptied EVEN WHEN A CHILD THROWS.
+   *
+   * The consequence is the whole point: once `dispose()` has been attempted, no
+   * later GPU context loss can ever deliver our callback. An addon only ever reaches
+   * the quarantine BY a dispose() that threw — so for a quarantined addon the
+   * context-loss release path is already dead. The mock previously left the callback
+   * callable forever, which let two tests certify a recovery path that cannot happen.
+   */
+  contextLossListeners: Array<() => void> = [];
+
   constructor() {
     if (WebglAddon.failNextConstruction) {
       WebglAddon.failNextConstruction = false;
@@ -37,9 +56,26 @@ export class WebglAddon {
   activate(_term: unknown): void {}
   dispose(): void {
     this.disposed = true;
+    // Model the real DisposableStore teardown: the emitter goes with the addon, and
+    // it goes even if some other child of the store throws on the way out.
+    this.contextLossListeners.length = 0;
+    if (WebglAddon.lastContextLossHandler && this.ownsLastHandler) {
+      WebglAddon.lastContextLossHandler = null;
+    }
   }
+
+  /** True when the most recently registered handler belongs to THIS instance. */
+  private ownsLastHandler = false;
+
   onContextLoss(cb: () => void): void {
+    this.contextLossListeners.push(cb);
     WebglAddon.lastContextLossHandler = cb;
+    this.ownsLastHandler = true;
+  }
+
+  /** Fire a context loss the way the real addon would — a no-op once disposed. */
+  fireContextLoss(): void {
+    for (const cb of [...this.contextLossListeners]) cb();
   }
   clearTextureAtlas(): void {}
 }

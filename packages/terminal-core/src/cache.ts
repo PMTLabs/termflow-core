@@ -383,7 +383,20 @@ export const resetTerminalRendering = (
   // correction appended without deleting the claim it corrected. Its live hazard was
   // that a maintainer trusting it would re-add the early return and reintroduce the
   // rev-10 regression verbatim.)
-  if (!opts.canvasOwned) {
+  //
+  // …OR when a canvas-owned demotion FAILED to dispose (rev 15, codex round 7
+  // CRITICAL). `canvasOwned` exists so canvas's own demotion does not invalidate
+  // canvas's own snapshot — correct while the demotion actually released the
+  // context. When the dispose THREW, it did not: the addon is alive in the
+  // quarantine, still counted, and the entry now reports 'dom'. Restoring that
+  // snapshot on canvas exit passes both guards (same Terminal, same generation) and
+  // builds a SECOND addon on top of the first, taking the count 1 -> 2, or 12 -> 13
+  // at the production budget. One disposal fault is enough.
+  //
+  // The generation's real meaning is therefore not "a non-canvas caller changed the
+  // policy" but "restoring this snapshot would now be wrong". A failed canvas-owned
+  // demotion satisfies that, so it bumps too.
+  if (!opts.canvasOwned || disposeFailed) {
     cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
   }
 

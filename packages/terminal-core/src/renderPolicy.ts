@@ -121,12 +121,27 @@ type DisposableAddon = { dispose(): void };
  * reason to think re-running a teardown that threw partway through freeing GL
  * resources succeeds the second time.
  *
- * So the release rule is: `releaseFromWebGLQuarantine`, from the addon's own
- * `onContextLoss` — the one signal that actually proves the GPU took the context
- * back. Rev 7's bounded round-robin retry (review `132` LOW) is RETRACTED: it could
- * never have fired in production, because `failures` could not exceed 0 for a
- * latched addon, and its release path converted a safe over-count into the unsafe
- * under-count this registry exists to prevent.
+ * Rev 7's bounded round-robin retry (review `132` LOW) is RETRACTED: it could never
+ * have fired in production, because `failures` could not exceed 0 for a latched
+ * addon, and its release path converted a safe over-count into the unsafe under-count
+ * this registry exists to prevent.
+ *
+ * QUARANTINE IS PERMANENT FOR THE RENDERER'S LIFETIME (rev 15, codex round 7 MEDIUM).
+ * Rev 10 said an addon leaves "on that addon reporting context loss". That signal is
+ * unreachable for anything actually in here. In `@xterm/addon-webgl@0.19.0`,
+ * `onContextLoss` is an `Emitter` created via `this._register(...)`, so it belongs to
+ * the addon's own `DisposableStore`; and xterm's `DisposableStore.clear()` is
+ * `try { dispose(children) } finally { this._toDispose.clear() }` — the store empties
+ * EVEN WHEN A CHILD THROWS. Every path into this registry arrives *because* a
+ * `dispose()` threw, so by then the emitter is already gone and our handler can never
+ * fire again.
+ *
+ * `releaseFromWebGLQuarantine` is therefore NOT a recovery path. It is retained for
+ * the opposite ordering — a healthy addon losing its context *before* anything tried
+ * to dispose it, where the handler does fire and the addon was never quarantined; the
+ * call is a no-op there. Do not describe it as automatic recovery, and do not add one:
+ * this fails SAFE (a wedged context holds a budget slot rather than being handed out
+ * twice), which is the only direction a hard budget may fail in.
  */
 const webglQuarantine = new Set<DisposableAddon>();
 

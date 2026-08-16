@@ -993,7 +993,15 @@ describe('a freed slot is not leaked to a lower-priority candidate (rev 14)', ()
    * that stops asking for a candidate which reported 'dom' reaches a stable, silent
    * steady state. Canvas Mode (Task 9) must do this.
    */
-  it('is stable and silent once the caller drops a candidate that reported dom', () => {
+  it('is stable and silent once the caller drops what failedPromotions names', () => {
+    // rev 15 (codex round 7 HIGH). This test used to hard-code the drop set to ['A'] —
+    // the fixture's known-failing id — so it certified a contract a real consumer could
+    // not derive. `applied[id] === 'dom'` is returned for THREE different reasons here:
+    // A was attempted and refused, C was demoted to make room, and D's slot was
+    // withheld. A consumer applying the old rule literally would drop all three and
+    // strand the slot forever.
+    //
+    // So the drop set is now COMPUTED from `failedPromotions`, exactly as Task 9 must.
     const fake = makeFake({ cap: 4, preloaded: ['C'], failOn: ['A'] });
     const first = reconcileRenderPolicies({
       desired: { A: 'webgl', C: 'webgl', D: 'webgl' },
@@ -1001,20 +1009,80 @@ describe('a freed slot is not leaked to a lower-priority candidate (rev 14)', ()
       order: ['A', 'C', 'D'],
       ...fake,
     });
-    expect(first.applied.A).toBe('dom');       // the caller's signal to drop A
 
-    const dropped = {
-      desired: { C: 'webgl' as RenderPolicy, D: 'webgl' as RenderPolicy },
-      budget: 1,
-      order: ['C', 'D'],
-      ...fake,
-    };
-    reconcileRenderPolicies(dropped);          // C reclaims the slot
+    // The load-bearing assertion: the contract names ONLY the attempted-and-refused id.
+    expect(first.failedPromotions).toEqual(['A']);
+    expect(first.applied.C).toBe('dom');           // demoted for room — NOT droppable
+    expect(first.applied.D).toBe('dom');           // slot withheld — NOT droppable
+
+    // Drop exactly what the contract named, keeping everything else.
+    const suppressed = new Set(first.failedPromotions);
+    const desired: Record<string, RenderPolicy> = {};
+    const order: string[] = [];
+    for (const id of ['A', 'C', 'D']) {
+      if (suppressed.has(id)) continue;
+      desired[id] = 'webgl';
+      order.push(id);
+    }
+    const dropped = { desired, budget: 1, order, ...fake };
+
+    reconcileRenderPolicies(dropped);              // C reclaims the slot
     fake.calls.length = 0;
 
-    // …and from here nothing moves, however many passes run.
     for (let i = 0; i < 5; i += 1) reconcileRenderPolicies(dropped);
     expect(fake.calls).toEqual([]);
-    expect(reconcileRenderPolicies(dropped).applied.C).toBe('webgl');
+    const settled = reconcileRenderPolicies(dropped);
+    expect(settled.applied.C).toBe('webgl');
+    expect(settled.failedPromotions).toEqual([]);
+  });
+});
+
+/**
+ * rev 15 (codex round 7, CRITICAL) — a CANVAS-OWNED demotion whose dispose throws must
+ * invalidate the snapshot too.
+ *
+ * `canvasOwned` suppresses the generation bump so canvas's own demotion does not
+ * invalidate canvas's own snapshot. That is right only while the demotion actually
+ * released the context. When the dispose THREW, the addon is alive in the quarantine and
+ * still counted, but the entry reports 'dom' — so restoring the snapshot passes both
+ * guards and stacks a SECOND live context on the first.
+ *
+ * rev 11 fixed exactly this for the NON-canvas callers and stopped there. Another partial
+ * fix of a class, in the most-revised lifecycle path in the package.
+ */
+describe('a failed CANVAS-OWNED demotion invalidates the snapshot (rev 15)', () => {
+  it('does not build a second addon on canvas exit', () => {
+    const { entry } = makeEntry('canvas-owned-throw');
+    expect(setTerminalRenderPolicy('canvas-owned-throw', 'webgl')).toBe('webgl');
+    const snap = snapshotRenderPolicies(['canvas-owned-throw']);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // Canvas's OWN demotion — canvasOwned: true — and its dispose throws.
+    asMockDispose(entry).dispose = () => { throw new Error('test: driver refused'); };
+    expect(setTerminalRenderPolicy('canvas-owned-throw', 'dom')).toBe('dom');
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);      // still counted, in quarantine
+
+    // Canvas exits. The snapshot must be REFUSED.
+    const restored = restoreRenderPolicies(snap);
+    expect(restored['canvas-owned-throw']).toBeUndefined();
+    expect(getTerminalRenderPolicy('canvas-owned-throw')).toBe('dom');
+    // THE ASSERTION: no second context. Before the fix this was 2.
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+
+  it('still restores a canvas-owned demotion that SUCCEEDED', () => {
+    // The guard must not over-apply: the whole point of canvasOwned is that a clean
+    // canvas demotion is restorable on exit.
+    makeEntry('canvas-owned-ok');
+    expect(setTerminalRenderPolicy('canvas-owned-ok', 'webgl')).toBe('webgl');
+    const snap = snapshotRenderPolicies(['canvas-owned-ok']);
+
+    expect(setTerminalRenderPolicy('canvas-owned-ok', 'dom')).toBe('dom');
+    expect(getTerminalRenderPolicy('canvas-owned-ok')).toBe('dom');
+
+    const restored = restoreRenderPolicies(snap);
+    expect(restored['canvas-owned-ok']).toBe('webgl');
+    expect(getTerminalRenderPolicy('canvas-owned-ok')).toBe('webgl');
   });
 });

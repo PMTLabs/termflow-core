@@ -1207,3 +1207,48 @@ describe('a REAL loadAddon-wrapped addon whose dispose throws (rev 10)', () => {
     expect(countActiveWebGLAddons()).toBe(0);
   });
 });
+
+/**
+ * rev 15 (codex round 7, MEDIUM) — the quarantine's advertised release signal is
+ * UNREACHABLE for anything actually quarantined, and the mock used to hide that.
+ *
+ * `onContextLoss` is an Emitter owned by the real addon's own DisposableStore, and
+ * xterm's `DisposableStore.clear()` empties the store in a `finally` — so it goes even
+ * when a child throws. Since an addon only ever reaches the quarantine BY a dispose()
+ * that threw, its emitter is already torn down by then.
+ *
+ * The mock now models that teardown. These tests pin the real contract so nobody
+ * re-adds a recovery claim the dependency cannot honour.
+ */
+describe('quarantine is permanent, because the release signal is already gone (rev 15)', () => {
+  it('a disposed addon can no longer deliver a context loss', () => {
+    const addon = new (WebglAddon as unknown as new () => {
+      onContextLoss(cb: () => void): void;
+      dispose(): void;
+      fireContextLoss(): void;
+    })();
+    let fired = 0;
+    addon.onContextLoss(() => { fired += 1; });
+
+    addon.fireContextLoss();
+    expect(fired).toBe(1);          // healthy addon: the handler works
+
+    addon.dispose();
+    addon.fireContextLoss();
+    expect(fired).toBe(1);          // …and after dispose it is gone, not merely idle
+  });
+
+  it('a quarantined addon stays counted forever', () => {
+    // The production shape: dispose() throws, so the addon is quarantined — and that
+    // very dispose() is what removed its ability to ever report a context loss.
+    const wedged = { dispose() { throw new Error('test: driver refused'); } };
+    quarantineWebGLAddon(wedged);
+    expect(countActiveWebGLAddons()).toBe(1);
+
+    // There is no drain, no retry, and no signal it can still emit. It is charged to
+    // the budget for the life of the renderer. That is the SAFE direction: a wedged
+    // context holds a slot rather than being handed out a second time.
+    expect(getQuarantinedWebGLAddonCount()).toBe(1);
+    expect(countActiveWebGLAddons()).toBe(1);
+  });
+});
