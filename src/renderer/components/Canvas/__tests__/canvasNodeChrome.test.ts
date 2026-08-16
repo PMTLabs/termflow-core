@@ -47,7 +47,7 @@ function ruleFor(selector: string): string {
 const BARE_PX = /(?<![\w-])(\d*\.?\d+)px/g;
 
 /** Custom properties that are themselves defined from `--node-k`, so using one is enough. */
-const COUNTER_SCALED = ['--node-k', '--port-size', '--node-border-w', '--node-radius', '--node-inner-radius'];
+const COUNTER_SCALED = ['--node-k', '--node-chrome-k', '--node-chrome-w', '--port-size', '--node-radius'];
 
 /**
  * Remove every `calc(...)` / `var(...)` call satisfying `drop`, matching parentheses by
@@ -111,7 +111,7 @@ describe('node chrome is counter-scaled', () => {
     expect(unscaledLengths('border: calc(1px * var(--node-k, 1)) solid red;')).toEqual([]);
     expect(unscaledLengths('width: var(--port-size);')).toEqual([]);
     expect(unscaledLengths('border-radius: 0 0 6px 6px;')).toEqual(['6px', '6px']);
-    expect(unscaledLengths('border-radius: 0 0 var(--node-inner-radius) var(--node-inner-radius);')).toEqual([]);
+    expect(unscaledLengths('border-radius: 0 0 var(--node-radius) var(--node-radius);')).toEqual([]);
     // A zero has no size to scale, and `0px` is not a defect.
     expect(unscaledLengths('inset: 0px;')).toEqual([]);
     // A variable fallback is a default, not a drawn length.
@@ -186,22 +186,21 @@ describe('the running sweep runs once at a time', () => {
 });
 
 /**
- * The corners agree.
+ * The frame is one screen pixel at every zoom, and it costs no layout.
  *
- * A node draws three nested boxes — the node, its header and its body — and each has its own
- * radius. They only look like one shape if the inner radii are the outer radius MINUS the
- * border they sit inside; give them independent values and the node's background appears as a
- * wedge between two arcs that do not share a centre.
+ * Two properties, and they are load-bearing together rather than separately:
  *
- * Asserted as the relationship rather than as three numbers, because three numbers is what it
- * was: `7px` outside and `6px` inside, correct only while the border happened to be 1px and
- * only while nothing counter-scaled.
+ *  - **`outline`, never `border`.** `box-sizing: border-box` is global, so a world-space border
+ *    eats the body's height — at the overview `1px / 0.05` is twenty world pixels, a tenth of
+ *    the body — and the box the surface scales into would move with the zoom. An outline is
+ *    free, which is what lets the width be counter-scaled honestly instead of clamped to
+ *    something that looks wrong at one end.
+ *  - **`--node-chrome-k`, not `--node-k`.** The frame's counter-scale is UNCLAMPED `1/z`. The
+ *    title bar's is clamped at 1, because a label on a 96px node has to grow with it. Using
+ *    the header's scale for the frame is the bug this pins: it leaves the outline at `1px * z`
+ *    below zoom 1, which is a third of a pixel at the overview.
  */
-describe('node corner radii share a centre', () => {
-  // Split on `;` and match the property name exactly, rather than building a regex around it:
-  // `border-radius` is a prefix of nothing here, but `border` IS a prefix of `border-radius`,
-  // and a substring match would quietly return the wrong declaration the first time someone
-  // asks for one.
+describe('the node frame is screen-space', () => {
   const declaration = (selector: string, prop: string) => {
     for (const decl of ruleFor(selector).split(';')) {
       const [name, ...rest] = decl.split(':');
@@ -210,19 +209,49 @@ describe('node corner radii share a centre', () => {
     return null;
   };
 
-  it('derives the inner radius from the outer one and the border', () => {
+  it('draws the frame with an outline that consumes no layout', () => {
     const node = ruleFor('.canvas-node');
-    expect(node).toMatch(/--node-radius:\s*calc\(/);
-    // The subtraction is the whole point — an inner radius that merely also scales would still
-    // be a second independent number.
-    expect(node).toMatch(/--node-inner-radius:\s*calc\(\s*var\(--node-radius\)\s*-\s*var\(--node-border-w\)\s*\)/);
+    expect(declaration('.canvas-node', 'outline')).toContain('var(--node-chrome-w)');
+    // A `border` shorthand here would silently reintroduce the layout cost. `border-radius`
+    // is a different property and is expected.
+    expect(node).not.toMatch(/(?:^|;)\s*border(?:-(?:top|right|bottom|left|width))?\s*:/);
   });
 
-  it('uses that one value for every inner corner', () => {
-    expect(declaration('.canvas-node', 'border-radius')).toBe('var(--node-radius)');
+  it('counter-scales the frame with the UNCLAMPED scale, not the header one', () => {
+    expect(declaration('.canvas-node', '--node-chrome-w')).toContain('var(--node-chrome-k');
+    expect(declaration('.canvas-node', '--node-chrome-w')).not.toContain('--node-k,');
+    // The ports are frame, not content, and share its scale.
+    expect(declaration('.canvas-port', '--port-size')).toContain('var(--node-chrome-k');
+  });
+
+  // The header keeps the CLAMPED scale, and mixing the two up is the easiest mistake here.
+  it('keeps the corner radius on the header scale', () => {
+    expect(declaration('.canvas-node', '--node-radius')).toContain('var(--node-k');
+  });
+});
+
+/**
+ * All three corners are one radius.
+ *
+ * The node, its header and its body each draw a corner. They only read as one shape if they
+ * share a value — an earlier version had `7px` outside and `6px` inside, which lined up only
+ * because the border happened to be 1px, and produced a visible wedge of node background as
+ * soon as the outer radius counter-scaled and the inner one did not.
+ *
+ * With the frame an outline, nothing consumes layout between them, so there is no inner/outer
+ * distinction left to get wrong: one variable, used three times.
+ */
+describe('node corners are one radius', () => {
+  const radius = (selector: string) => {
+    const m = ruleFor(selector).match(/border-radius:([^;]+)/);
+    return m ? m[1].trim() : null;
+  };
+
+  it('uses the same variable for the node, the header and the body', () => {
+    expect(radius('.canvas-node')).toBe('var(--node-radius)');
     for (const s of ['.canvas-node-head', '.canvas-node-body']) {
-      expect(declaration(s, 'border-radius')).toContain('var(--node-inner-radius)');
-      expect(declaration(s, 'border-radius')).not.toMatch(/\d+px/);
+      expect(radius(s)).toContain('var(--node-radius)');
+      expect(radius(s)).not.toMatch(/\d+px/);
     }
   });
 

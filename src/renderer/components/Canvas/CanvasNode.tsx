@@ -1,5 +1,5 @@
 import React from 'react';
-import { LodTier, CHIP_H, HEAD_H, HOST_W, headScale } from './canvasGeometry';
+import { LodTier, CHIP_H, HEAD_H, HOST_W, headScale, chromeScale } from './canvasGeometry';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 
 /**
@@ -86,10 +86,13 @@ export const CanvasNode: React.FC<{
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
         ['--node-surface-scale' as string]: `${w / HOST_W}`,
-        // Every piece of node CHROME is expressed through this in Canvas.css — border,
-        // selection and focus rings, corner radius, connector ports — so all of it holds a
-        // constant on-screen size above zoom 1 instead of growing into a cartoon of itself.
+        // The title bar's counter-scale: capped at 1, so a small node's label still grows
+        // with it. Also drives the corner radius, which follows the header's corners.
         ['--node-k' as string]: `${k}`,
+        // The FRAME's counter-scale: uncapped, so the outline and the connector ports are one
+        // screen pixel and 13 screen pixels at EVERY zoom. A hairline is a hairline whether
+        // the node is 96 pixels wide or 1440.
+        ['--node-chrome-k' as string]: `${chromeScale(zoom)}`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}

@@ -12,7 +12,6 @@ import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
 import {
   Rect, assignTiers, overlayGeometry, NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H, SURFACE_SCALE,
-  FOCUS_ZOOM,
 } from './canvasGeometry';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
@@ -107,31 +106,31 @@ export const CanvasMode: React.FC = () => {
     dispatch(focusNode(null));
   }, [dispatch]);
 
-  // Double-click a node BODY to hand keystrokes to its terminal. Single click is
-  // selection (gesture-precedence row 4), and nothing else focuses a terminal on canvas —
-  // the engine's own click-to-focus is not wired in chromeless mode, and D19's pointer
-  // gate keeps xterm's always-on mousedown from reaching `term.element`.
-  const focusRaf = useRef<number | null>(null);
-  const focusTerminal = useCallback((terminalId: string, rect: Rect) => (e: React.MouseEvent) => {
+  // Double-click a node BODY to open it as the full-screen overlay.
+  //
+  // It used to fly the viewport to `FOCUS_ZOOM` and hand over the keyboard in place. That is
+  // gone with the zoom ladder (see `FOCUS_ZOOM`): the canvas now stops short of 1:1, so there
+  // is no longer a canvas zoom at which a click lands on the right cell — xterm 6 does not
+  // divide pointer deltas by an ancestor transform. The overlay renders at exactly 1:1, so it
+  // is both the bigger rung and the only one where input is correct. Nothing was lost:
+  // typing in place was only ever accurate at that single zoom.
+  const focusTerminal = useCallback((terminalId: string) => (e: React.MouseEvent) => {
     if (!(e.target as HTMLElement).closest('.canvas-node-body')) return;
-    // Fly to the 1:1 scale and hand over input only ON ARRIVAL. xterm 6 does not divide
-    // pointer deltas by an ancestor transform, so a click during the flight lands on the
-    // wrong cell — and lifting the gate early is what makes that reachable.
-    //
-    // FOCUS_ZOOM, not 1: the surface is scaled DOWN into the node, so the zoom at which the
-    // terminal renders 1:1 is HOST_W / NODE_W, not unity.
-    flyTo(centreOn(rect, size.w, size.h, FOCUS_ZOOM), () => {
-      dispatch(focusNode(terminalId));
-      // A frame later, so the gate has lifted with `focused` and the textarea is
-      // reachable. Tracked, because leaving Canvas Mode inside that frame would
-      // otherwise pull focus into a terminal that is already back in its pane.
-      if (focusRaf.current) cancelAnimationFrame(focusRaf.current);
-      focusRaf.current = requestAnimationFrame(() => {
-        focusRaf.current = null;
-        terminalCache.get(terminalId)?.terminal.focus();
-      });
+    dispatch(setOverlayNode(terminalId));
+  }, [dispatch]);
+
+  // A frame after the overlay opens, so the pointer gate has lifted with `focused` and the
+  // textarea is reachable. Tracked, because leaving Canvas Mode inside that frame would
+  // otherwise pull focus into a terminal that is already back in its pane.
+  const focusRaf = useRef<number | null>(null);
+  useEffect(() => {
+    if (!overlayId) return;
+    if (focusRaf.current) cancelAnimationFrame(focusRaf.current);
+    focusRaf.current = requestAnimationFrame(() => {
+      focusRaf.current = null;
+      terminalCache.get(overlayId)?.terminal.focus();
     });
-  }, [dispatch, flyTo, size]);
+  }, [overlayId]);
 
   // Leaving the canvas hands input back. This used to be a side effect of
   // `setCanvasEnabled(false)`; with the canvas a tab, the mode can be left in ways that
@@ -226,7 +225,7 @@ export const CanvasMode: React.FC = () => {
               hidden={!isOverlaid && (collapsed || tier === 'group' || !visible.has(n.terminalId))}
               overlaid={isOverlaid}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
-              onDoubleClick={focusTerminal(n.terminalId, n.rect)}
+              onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}

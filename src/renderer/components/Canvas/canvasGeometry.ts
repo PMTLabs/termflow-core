@@ -49,6 +49,24 @@ export function headScale(z: number): number {
 }
 
 /**
+ * The counter-scale for a node's FRAME — its outline, and its connector ports.
+ *
+ * Unclamped `1 / z`, unlike `headScale`. The title bar wants to grow with its node while the
+ * node is small, because a 3px title on a 96px node is not a label. A hairline is a hairline
+ * at every size: at the overview a `1px * z` border is a third of a pixel and the node has no
+ * visible edge at all, and at the working zoom it is four pixels of picture frame around a
+ * terminal. Both ends are the same mistake.
+ *
+ * Everything this scales is drawn with `outline` and `position: absolute`, so nothing it
+ * returns can affect layout. That matters at the deep end: at `Z_MIN` this is 20, and a
+ * 20-world-pixel BORDER would eat a tenth of the node's body and change the box the surface
+ * scales into. An outline of the same width costs nothing and paints one screen pixel.
+ */
+export function chromeScale(z: number): number {
+  return 1 / Math.max(z, Number.EPSILON);
+}
+
+/**
  * The terminal host's CSS-pixel box — the grid the PTY actually gets.
  *
  * DELIBERATELY MUCH LARGER THAN THE NODE'S WORLD BOX, and scaled into it by a CSS transform
@@ -62,11 +80,12 @@ export function headScale(z: number): number {
  *
  * **900 was still too small**, for a reason the first fix did not anticipate: this box is also
  * the box the full-screen overlay renders at 1:1, because RC2 allows the session exactly ONE
- * host size. So it has to be sized for the largest thing that shows it, not the smallest.
- * 1440 x 767 is roughly a 175 x 45 grid — a real working terminal, and about three quarters of
- * a 1920-wide display, which leaves the overlay looking framed rather than cropped.
+ * host size. So it has to be sized for the largest thing that shows it, not the smallest — and
+ * the overlay is the rung of the ladder that has to be BIGGER than the whole canvas zoomed in
+ * (see `FOCUS_ZOOM`). 1600 x 852 is roughly a 195 x 50 grid, and it sets the ladder on a
+ * 1920-wide display at about 1440 -> 1600 -> 1900 screen pixels of terminal.
  *
- * **The cost is real and worth stating.** Area per host is 2.6x what it was, and every node
+ * **The cost is real and worth stating.** Area per host is 3.2x the original, and every node
  * holds one for the whole canvas session. `MAX_GPU = 12` is unchanged and is what bounds the
  * expensive half; the tier ladder keeps everything else off the paint path. If GPU memory
  * turns out to be the binding constraint on a real machine, this constant is the dial —
@@ -77,7 +96,7 @@ export function headScale(z: number): number {
  * varies, and `getComputedStyle`, `ResizeObserver` and `FitAddon` are all transform-insensitive,
  * so there is still no `fit()`, no `term.resize()` and no SIGWINCH.
  */
-export const HOST_W = 1440;
+export const HOST_W = 1600;
 export const HOST_H = Math.round(HOST_W * BODY_H / NODE_W);
 
 /**
@@ -90,12 +109,22 @@ export const HOST_H = Math.round(HOST_W * BODY_H / NODE_W);
 export const SURFACE_SCALE = NODE_W / HOST_W;
 
 /**
- * The canvas zoom at which the surface renders 1:1 — a real terminal at the user's configured
- * font size, which is what a focused node flies to.
+ * The zoom at which the surface would render 1:1 — a real terminal at the user's configured
+ * font size.
  *
- * It is a derived value, not a constant: xterm 6 does not divide pointer deltas by an ancestor
- * `transform: scale()`, so input is only correct at exactly this zoom. `Z_MAX` must stay above
- * it or focusing a node could never reach a usable state.
+ * **The canvas deliberately stops short of this**, and that is the whole shape of the feature.
+ * There are four sizes a terminal can be seen at, and each is bigger than the last:
+ *
+ *     overview  ->  max canvas zoom  ->  the overlay  ->  its own tab
+ *
+ * The canvas is a PREVIEW; 1:1 lives in the overlay, which is near-full-screen and therefore
+ * bigger than any node the canvas can show. Letting the canvas reach 1:1 collapsed two rungs
+ * of that ladder into one and put the third below the second — zooming all the way in gave a
+ * LARGER terminal than opening the overlay, which is backwards.
+ *
+ * It also happens to be the only zoom at which clicks land on the right cell: xterm 6 does not
+ * divide pointer deltas by an ancestor `transform: scale()`. So the two facts agree — the rung
+ * you work at is the rung where input is correct, and it is the overlay.
  */
 export const FOCUS_ZOOM = HOST_W / NODE_W;
 
@@ -140,16 +169,17 @@ export const MAX_INTERACTIVE = 48;
  *  so whole-group collapse could never happen through normal zooming. */
 export const Z_MIN = 0.05;
 /**
- * DERIVED, not chosen. It has to stay above `FOCUS_ZOOM` or a focused node could never reach
- * the 1:1 scale at which xterm's pointer maths is correct — and that used to be a hand-kept
- * relationship with a comment asking someone to remember it, which is exactly the kind of
- * pairing that goes stale the first time `HOST_W` moves.
+ * DERIVED, and deliberately BELOW `FOCUS_ZOOM` — see the ladder described there.
  *
- * The 5 % is headroom, not a feature. Past `FOCUS_ZOOM` the terminal's font grows beyond the
- * user's configured size, which is the thing they asked not to happen; a little slack keeps
- * the ceiling from feeling like a wall when you are already at it.
+ * The canvas tops out just short of a real terminal, so the overlay is always the bigger,
+ * sharper thing to open rather than a step backwards from where you already were. 10 % is
+ * enough to be a rung without making the top of the canvas feel small.
+ *
+ * Derived rather than written down because the relationship is what matters: the first version
+ * of this was a hand-kept constant with a comment asking someone to remember it, and it went
+ * stale the first time `HOST_W` moved.
  */
-export const Z_MAX = Math.round(FOCUS_ZOOM * 1.05 * 100) / 100;
+export const Z_MAX = Math.round(FOCUS_ZOOM * 0.9 * 100) / 100;
 
 export function baseTier(effectiveWidth: number): LodTier {
   if (effectiveWidth >= T_GPU) return 'gpu';

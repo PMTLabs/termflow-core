@@ -63,12 +63,12 @@ describe('terminal host box', () => {
     expect(FOCUS_ZOOM * SURFACE_SCALE).toBeCloseTo(1, 9);
   });
 
-  // Without this the focus gesture is unreachable: clampZoom would cap the fly-to below
-  // 1:1 and every click in a focused terminal would land on the wrong cell, forever.
-  it('leaves FOCUS_ZOOM inside the legal zoom range', () => {
-    expect(FOCUS_ZOOM).toBeLessThanOrEqual(Z_MAX);
-    expect(FOCUS_ZOOM).toBeGreaterThanOrEqual(Z_MIN);
-    expect(clampZoom(FOCUS_ZOOM)).toBe(FOCUS_ZOOM);
+  // FOCUS_ZOOM is deliberately OUTSIDE the legal range. The canvas is a preview and stops
+  // short of 1:1 so the overlay is always the bigger rung — see the ladder suite below.
+  it('keeps the canvas ceiling below the 1:1 zoom', () => {
+    expect(Z_MAX).toBeLessThan(FOCUS_ZOOM);
+    expect(clampZoom(FOCUS_ZOOM)).toBe(Z_MAX);
+    expect(Z_MAX).toBeGreaterThan(Z_MIN);
   });
 
   // The size complaint this whole box exists to fix. At the old 340px the grid was ~40
@@ -411,5 +411,60 @@ describe('overlayGeometry', () => {
     expect(y0).toBeLessThanOrEqual(0);
     expect(x0 + backdrop.w * vp.z).toBeGreaterThanOrEqual(VW);
     expect(y0 + backdrop.h * vp.z).toBeGreaterThanOrEqual(VH);
+  });
+});
+
+/**
+ * The size ladder, in Tam's words: "small zoom -> max zoom -> overlay -> regular tab", each one
+ * bigger than the last.
+ *
+ * It was broken in the obvious way and for an unobvious reason. `Z_MAX` sat just ABOVE
+ * `FOCUS_ZOOM` so that a focused node could reach the one zoom where xterm's pointer maths is
+ * correct — which meant zooming all the way in gave a terminal LARGER than opening the overlay,
+ * because the overlay is capped at 1:1. Two rungs collapsed into one and the third fell below
+ * the second.
+ *
+ * These assertions are about apparent SIZE, reconstructed the way the DOM reconstructs it, and
+ * they are what stops the two constants drifting back into that arrangement.
+ */
+describe('the zoom ladder is monotonic', () => {
+  // A 1920x1040 canvas viewport: an ordinary maximised window on an ordinary display.
+  const VW = 1920;
+  const VH = 1040;
+
+  /** Screen width of a default node at the canvas ceiling. */
+  const maxZoomWidth = NODE_W * Z_MAX;
+  /** ...and the scale its terminal renders at, which is what "how big is the text" means. */
+  const maxZoomScale = SURFACE_SCALE * Z_MAX;
+
+  it('makes the overlay bigger than the canvas can zoom', () => {
+    const overlay = overlayGeometry({ x: 0, y: 0, z: Z_MAX }, VW, VH);
+    expect(HOST_W * overlay.scale).toBeGreaterThan(maxZoomWidth);
+    expect(overlay.scale).toBeGreaterThan(maxZoomScale);
+  });
+
+  // The rung above the overlay is the terminal's own tab, which is the viewport minus the tab
+  // strip — no margin, no frame. The overlay must stay under it or it is not a rung either.
+  it('leaves the overlay smaller than a full tab', () => {
+    const overlay = overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH);
+    expect(HOST_W * overlay.scale).toBeLessThan(VW);
+  });
+
+  it('holds at every canvas zoom, not just the ceiling', () => {
+    for (const z of [Z_MIN, 0.5, 1, 2.5, Z_MAX]) {
+      const overlay = overlayGeometry({ x: 0, y: 0, z }, VW, VH);
+      expect(overlay.scale).toBeGreaterThanOrEqual(SURFACE_SCALE * z);
+    }
+  });
+
+  // The reason the ceiling is below 1:1 at all, stated so that raising `Z_MAX` back over
+  // `FOCUS_ZOOM` fails here with the ladder rather than somewhere visual.
+  it('never lets the canvas reach the configured font size', () => {
+    expect(maxZoomScale).toBeLessThan(1);
+    expect(maxZoomScale).toBeGreaterThan(0.8);   // ...but close enough to be a working preview
+  });
+
+  it('reaches exactly the configured font size in the overlay', () => {
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH).scale).toBe(1);
   });
 });
