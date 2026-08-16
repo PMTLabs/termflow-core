@@ -127,10 +127,16 @@ export function useFlyTo() {
     raf.current = null;
   }, []);
 
-  return useCallback((to: Viewport) => {
+  // `onDone` fires when the viewport has ARRIVED — including immediately under reduced
+  // motion. Task 9 needs it: xterm 6 does not divide pointer deltas by an ancestor
+  // `transform: scale()`, so input handed over mid-flight lands on the wrong cells.
+  // A caller counting FLY_MS on its own timer would get the reduced-motion case wrong
+  // and would have to keep its own copy of the duration.
+  return useCallback((to: Viewport, onDone?: () => void) => {
     if (raf.current) cancelAnimationFrame(raf.current);
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(setViewport(to));
+      onDone?.();
       return;
     }
     const from = vpRef.current;
@@ -138,7 +144,14 @@ export function useFlyTo() {
     const step = (now: number) => {
       const k = Math.min(1, (now - t0) / FLY_MS);
       dispatch(setViewport(lerpViewport(from, to, k)));
-      raf.current = k < 1 ? requestAnimationFrame(step) : null;
+      if (k < 1) {
+        raf.current = requestAnimationFrame(step);
+        return;
+      }
+      // Cleared BEFORE the callback: `onDone` may start another flight, and clearing
+      // after would null out the handle that flight just stored.
+      raf.current = null;
+      onDone?.();
     };
     raf.current = requestAnimationFrame(step);
   }, [dispatch]);

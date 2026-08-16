@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { NODE_W, NODE_H, HEAD_H } from '../canvasGeometry';
 
 /**
  * Task 9 mounts the live terminal host inside `.canvas-node-body`. Under a
@@ -101,5 +102,72 @@ describe('canvas node layout box', () => {
     const canvas = path.join(RENDERER, 'components/Canvas/Canvas.css');
     const selectors = rulesIn(canvas).map((r) => r.selector);
     expect(selectors).toContain('.canvas-node.running .canvas-node-head::after');
+  });
+});
+
+/**
+ * RC2 — the host keeps a CONSTANT CSS-pixel box for the whole canvas session, so pan,
+ * zoom and tier changes produce no `fit()`, no `term.resize()` and no SIGWINCH.
+ *
+ * The trap this guards is specific and easy to reintroduce: `.canvas-node-body` SHRINKS
+ * to nothing at the chip tier, so sizing the host as a percentage of it — the obvious
+ * thing to write, and what the plan's draft said — resizes a live terminal on a zoom-out.
+ */
+const CANVAS_CSS = path.join(RENDERER, 'components/Canvas/Canvas.css');
+
+function declarationsOf(selector: string): string {
+  const rule = rulesIn(CANVAS_CSS).find((r) => r.selector === selector);
+  if (!rule) throw new Error(`no rule for ${selector} — the test's subject moved or was renamed`);
+  return rule.body;
+}
+
+describe('terminal host box is constant', () => {
+  it('sizes the host from the shared geometry variables, never a percentage', () => {
+    const body = declarationsOf('.canvas-surface');
+    expect(body).toMatch(/position:\s*absolute/);
+    const width = body.match(/[^-]width:\s*([^;]+)/)![1];
+    const height = body.match(/[^-]height:\s*([^;]+)/)![1];
+    for (const value of [width, height]) {
+      expect(value).toContain('var(--canvas-node-');
+      // A percentage resolves against `.canvas-node-body`, whose height is zero at the
+      // chip tier. A bare px literal is a second copy of NODE_W/NODE_H.
+      expect(value).not.toMatch(/%/);
+      expect(value).not.toMatch(/\b\d+px/);
+    }
+  });
+
+  // Cross-file: a variable the stylesheet consumes but nothing provides resolves to an
+  // invalid value, the host collapses to a zero box, `hasLayoutBox` goes false — and the
+  // terminal silently never fits. Check the DESTINATION of the handoff, not just the
+  // source, because an absent declaration is invisible from the CSS side.
+  it('has every geometry variable it consumes supplied by CanvasMode', () => {
+    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    const consumed = new Set(
+      [...css.matchAll(/var\((--canvas-(?:node|head)-[a-z]+)/g)].map((m) => m[1]),
+    );
+    expect(consumed.size).toBeGreaterThan(0);
+
+    const tsx = fs.readFileSync(path.join(RENDERER, 'components/Canvas/CanvasMode.tsx'), 'utf8');
+    const provided = new Set(
+      [...tsx.matchAll(/'(--canvas-[a-z-]+)':/g)].map((m) => m[1]),
+    );
+    expect([...consumed].filter((v) => !provided.has(v))).toEqual([]);
+  });
+
+  // The `var(..., 29px)` style fallbacks are dead code while CanvasMode supplies the
+  // variables — but a stale one is a wrong number sitting in the file waiting to be read
+  // as authoritative. Derive them from the TypeScript constants instead of trusting them.
+  it('keeps its variable fallbacks equal to the TypeScript constants', () => {
+    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    const fallbacks: Record<string, number> = {
+      '--canvas-node-w': NODE_W,
+      '--canvas-node-h': NODE_H,
+      '--canvas-head-h': HEAD_H,
+    };
+    for (const [name, expected] of Object.entries(fallbacks)) {
+      for (const m of css.matchAll(new RegExp(`var\\(${name},\\s*(\\d+)px\\)`, 'g'))) {
+        expect({ name, px: Number(m[1]) }).toEqual({ name, px: expected });
+      }
+    }
   });
 });

@@ -33,11 +33,12 @@ export const CanvasNode: React.FC<{
   hidden: boolean;
   onPointerDown?: (e: React.PointerEvent) => void;
   onHeaderPointerDown?: (e: React.PointerEvent) => void;
+  onDoubleClick?: (e: React.MouseEvent) => void;
   onChipClick?: () => void;
   children?: React.ReactNode;
 }> = ({
   node, tier, zoom, selected, focused, dimmed, hidden,
-  onPointerDown, onHeaderPointerDown, onChipClick, children,
+  onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, children,
 }) => {
   const isChip = tier === 'chip';
   const { x, y, w, h } = node.rect;
@@ -58,6 +59,7 @@ export const CanvasNode: React.FC<{
       style={{ left: x, top: y, width: w, height: isChip ? CHIP_H : h, visibility: hidden ? 'hidden' : undefined }}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}
+      onDoubleClick={isChip ? undefined : onDoubleClick}
     >
       <div
         className="canvas-node-head"

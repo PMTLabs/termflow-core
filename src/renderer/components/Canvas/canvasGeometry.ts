@@ -15,6 +15,11 @@ export interface Rect { x: number; y: number; w: number; h: number }
 export const NODE_W = 340;
 export const NODE_H = 210;
 export const CHIP_H = 58;
+/** Height of a node's title bar. Shared with the stylesheet as a CSS variable, because
+ *  the terminal host's box is `NODE_W × (NODE_H - HEAD_H)` and that box must be a
+ *  CONSTANT for the whole canvas session (`012` §6.5 RC2) — two independent copies of
+ *  this number would let a style tweak silently resize a live PTY. */
+export const HEAD_H = 29;
 
 export const T_GPU = 190;
 export const T_LIVE = 105;
@@ -109,16 +114,28 @@ export interface TierInput {
   recent: string[];
 }
 
-export function assignTiers(input: TierInput): Record<string, LodTier> {
-  const { ids, rects, vp, vw, vh, focusedId, recent } = input;
-  const out: Record<string, LodTier> = {};
-
-  // Priority: focused, then recent, then declaration order. `recent` and
-  // `focusedId` come from state that can lag behind the node set, so both are
-  // filtered against `ids` — a stale id must not reach the output.
-  //
-  // Set-backed rather than Array.includes: this runs on every viewport change,
-  // and the array form is O(n^2) in the node count.
+/**
+ * Rank ids by claim on a scarce resource: focused first, then most-recently-touched,
+ * then declaration order.
+ *
+ * Exported because TWO things must rank identically — this function's tier budget, and
+ * the `order` that `reconcileRenderPolicies` promotes by. If they disagreed, a node
+ * could be assigned the `gpu` tier here and then promoted last over there, landing
+ * outside the GPU budget: design 010 D8 makes the focused node's promotion
+ * unconditional, and that guarantee spans both. Sharing the function is what makes them
+ * agree structurally rather than by a comment asking someone to keep them in step.
+ *
+ * `recent` and `focusedId` come from state that can lag behind the node set, so both are
+ * filtered against `ids` — a stale id must not reach the output.
+ *
+ * Set-backed rather than `Array.includes`: this runs on every viewport change, and the
+ * array form is O(n^2) in the node count.
+ */
+export function priorityOrder(
+  ids: readonly string[],
+  focusedId: string | null,
+  recent: readonly string[],
+): string[] {
   const known = new Set(ids);
   const seen = new Set<string>();
   const order: string[] = [];
@@ -130,6 +147,14 @@ export function assignTiers(input: TierInput): Record<string, LodTier> {
   if (focusedId) push(focusedId);
   recent.forEach(push);
   ids.forEach(push);
+  return order;
+}
+
+export function assignTiers(input: TierInput): Record<string, LodTier> {
+  const { ids, rects, vp, vw, vh, focusedId, recent } = input;
+  const out: Record<string, LodTier> = {};
+
+  const order = priorityOrder(ids, focusedId, recent);
 
   let gpu = 0;
   let interactive = 0;
