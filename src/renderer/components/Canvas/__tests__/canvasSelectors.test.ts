@@ -1,5 +1,5 @@
 import {
-  buildCanvasModel, counterScale, chipFontSize, visibleNodeIds, allCollapsed,
+  buildCanvasModel, counterScale, chipFontSize, visibleNodeIds, allCollapsed, snapshotNodeIds,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM, CanvasNodeModel,
 } from '../canvasSelectors';
 import {
@@ -255,6 +255,65 @@ describe('allCollapsed', () => {
 
   it('is false for an empty workspace', () => {
     expect(allCollapsed([], tiers({}))).toBe(false);
+  });
+});
+
+/**
+ * `snapshotNodeIds` — the culling rule for the snapshot tier (`plan/013` Task 10).
+ *
+ * Extracted from `CanvasMode`'s JSX precisely so it can be tested: `CanvasMode` cannot be
+ * mounted under the root Jest config, so a rule expressed only there is a rule nothing checks.
+ * What it protects is a resource leak rather than a wrong pixel — every id this returns mounts a
+ * component owning a 500 ms timer, for as long as it keeps returning it.
+ */
+describe('snapshotNodeIds', () => {
+  const n = (id: string): CanvasNodeModel => ({
+    terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+  });
+  const nodes = [n('a'), n('b'), n('c')];
+  const all = new Set(['a', 'b', 'c']);
+
+  it('picks the nodes at the snapshot tier', () => {
+    const got = snapshotNodeIds(nodes, { a: 'snapshot', b: 'gpu', c: 'snapshot' }, all, false);
+    expect([...got].sort()).toEqual(['a', 'c']);
+  });
+
+  // THE one that matters. `assignTiers` labels an OFF-SCREEN node `snapshot` rather than
+  // omitting it, so tier alone would mount a polling loop for every terminal in the workspace
+  // for the whole session -- and `evictAllBut` cannot undo it, because a mounted component
+  // refills the cache on its next tick.
+  it('excludes off-screen nodes, even though their tier says snapshot', () => {
+    const visible = new Set(['a']);
+    const got = snapshotNodeIds(nodes, { a: 'snapshot', b: 'snapshot', c: 'snapshot' }, visible, false);
+    expect([...got]).toEqual(['a']);
+  });
+
+  it('returns nothing when the whole workspace has collapsed to chips', () => {
+    expect(snapshotNodeIds(nodes, { a: 'snapshot', b: 'snapshot', c: 'snapshot' }, all, true).size)
+      .toBe(0);
+  });
+
+  // The paired positive for each negative above: without these, a function that returned the
+  // empty set unconditionally would satisfy every exclusion test here.
+  it('does return something when nothing excludes it', () => {
+    expect(snapshotNodeIds(nodes, { a: 'snapshot', b: 'snapshot', c: 'snapshot' }, all, false).size)
+      .toBe(3);
+  });
+
+  it('excludes every tier that is not snapshot', () => {
+    for (const tier of ['gpu', 'live', 'chip', 'group'] as LodTier[]) {
+      expect(snapshotNodeIds([n('a')], { a: tier }, new Set(['a']), false).size).toBe(0);
+    }
+    expect(snapshotNodeIds([n('a')], { a: 'snapshot' }, new Set(['a']), false).size).toBe(1);
+  });
+
+  it('tolerates a node with no tier assigned', () => {
+    expect(snapshotNodeIds([n('a')], {}, new Set(['a']), false).size).toBe(0);
+  });
+
+  it('returns nothing for an empty workspace rather than throwing', () => {
+    expect(snapshotNodeIds([], {}, new Set(), false).size).toBe(0);
   });
 });
 

@@ -10,6 +10,8 @@ import { CanvasViewport, useFlyTo } from './CanvasViewport';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
+import { NodeSnapshot } from './NodeSnapshot';
+import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale,
   NODE_W, NODE_H, HEAD_H,
@@ -19,7 +21,7 @@ import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
-  selectCanvasModel, visibleNodeIds, allCollapsed,
+  selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
 import './Canvas.css';
@@ -113,6 +115,20 @@ export const CanvasMode: React.FC = () => {
   );
 
   const collapsed = allCollapsed(model.nodes, tiers);
+
+  // At the snapshot tier, on screen, and not swallowed by a whole-canvas collapse. The rule
+  // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
+  // intersection with `visible` is load-bearing rather than an optimisation.
+  const snapshotIds = useMemo(
+    () => snapshotNodeIds(model.nodes, tiers, visible, collapsed),
+    [model.nodes, tiers, visible, collapsed],
+  );
+
+  // Keep the cache to what is actually on screen. Snapshots are cheap to refetch, and an entry
+  // per terminal in a large workspace is a screen's worth of ANSI each.
+  useEffect(() => {
+    snapshotCache.evictAllBut(Array.from(snapshotIds));
+  }, [snapshotIds]);
 
   // Each terminal's own host box, captured from its PANE (`plan/017`).
   //
@@ -300,6 +316,9 @@ export const CanvasMode: React.FC = () => {
                   session. The tier ladder and the cull margin decide what a node
                   PAINTS; they never decide where `term.element` lives. */}
               <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId} />
+              {/* The exact opposite rule, and for the exact opposite reason: this one is
+                  culled hard, because what it owns is a timer rather than a terminal. */}
+              {snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}
             </CanvasNode>
           );
         })}

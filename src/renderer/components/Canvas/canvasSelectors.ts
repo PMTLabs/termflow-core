@@ -234,3 +234,37 @@ export function visibleNodeIds(
 export function allCollapsed(nodes: CanvasNodeModel[], tiers: Record<string, LodTier>): boolean {
   return nodes.length > 0 && nodes.every((n) => tiers[n.terminalId] === 'group');
 }
+
+/**
+ * Which nodes get a POLLING snapshot (`plan/013` Task 10).
+ *
+ * A rule rather than three conditions inlined in `CanvasMode`, because `CanvasMode` cannot be
+ * mounted under the root Jest config — so anything expressed only in its JSX is untestable, and
+ * this is the one part of the snapshot tier with real consequences if it drifts.
+ *
+ * **The intersection with `visible` is load-bearing, not an optimisation.** `assignTiers` labels
+ * an off-screen node `snapshot`; it does not omit it (see its `isVisible` branch). So the tier
+ * alone would mount `NodeSnapshot` for every terminal in the workspace and leave a 500ms loop
+ * running for each, for the whole session. `snapshotCache.evictAllBut` cannot clean up after
+ * that either — a still-mounted component refills the cache on its next tick, so the eviction
+ * and the loop would simply fight.
+ *
+ * Note this culls the SNAPSHOT, never the node: `CanvasNode` mounts for every terminal all
+ * session (`012` §6.5 RC4), because unmounting it would relocate a live terminal at pan
+ * frequency. The two rules point opposite ways because what they own is different — a timer
+ * versus a terminal.
+ */
+export function snapshotNodeIds(
+  nodes: CanvasNodeModel[],
+  tiers: Record<string, LodTier>,
+  visible: Set<string>,
+  collapsed: boolean,
+): Set<string> {
+  const out = new Set<string>();
+  // Nothing is showing a screen when the whole workspace is group chips.
+  if (collapsed) return out;
+  for (const n of nodes) {
+    if (tiers[n.terminalId] === 'snapshot' && visible.has(n.terminalId)) out.add(n.terminalId);
+  }
+  return out;
+}

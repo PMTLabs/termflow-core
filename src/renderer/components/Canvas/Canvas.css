@@ -171,7 +171,33 @@
 }
 .canvas-surface > .terminal-display { width: 100%; height: 100%; }
 
-/* Below `live` the terminal is not painted — Task 10 paints a snapshot raster over it.
+/* ---- Snapshot tier (Task 10) -------------------------------------------- */
+
+/* A frozen picture of the screen, shown where a live engine would be wasted. It sits INSIDE
+   `.canvas-node-body` alongside the (hidden) live surface rather than replacing it — the host
+   must stay mounted and keep its box at every tier (`012` §6.5 RC2/RC4), so the two overlap and
+   the rule below is what makes the surface invisible underneath.
+
+   Not counter-scaled. This is content, not chrome: it stands in for the terminal, so it should
+   grow and shrink with the node exactly as the terminal it replaces would. */
+.canvas-node-snapshot {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--terminal-background, #0a0a0a);
+  pointer-events: none;
+}
+.canvas-node-snapshot pre {
+  margin: 0;
+  padding: 7px 9px;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: #c8c8c8;
+  white-space: pre;
+}
+
+/* Below `live` the terminal is not painted — the snapshot above stands in for it.
    `visibility`, never `display`, and never a size change: the host must keep its box. */
 .canvas-node[data-lod="snapshot"] .canvas-surface,
 .canvas-node[data-lod="chip"] .canvas-surface,
