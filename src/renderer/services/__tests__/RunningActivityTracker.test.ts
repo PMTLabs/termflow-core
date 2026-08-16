@@ -4,7 +4,7 @@
 import {
   EVAL_INTERVAL_MS,
   RESIZE_COOLDOWN_MS,
-  RELOCATION_COOLDOWN_MS,
+  VIEW_CHANGE_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
   UNSEEN_DEBOUNCE_MS,
 } from '../runningActivity';
@@ -259,7 +259,7 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     // boxes, SIGWINCHing every PTY at once. Tam reported the visible half of this: switching
     // to the canvas tab lit the running sweep across the strip and popped a notification, for
     // output nobody typed. Same event class as a window resize, same suppression.
-    runningActivityTracker.notifyRelocationBurst();
+    runningActivityTracker.notifyViewChangeBurst();
     burstAllTerminals();
     jest.advanceTimersByTime(SETTLE_MS);
     expect(unseenTabIds()).toEqual([]);
@@ -270,9 +270,9 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
   // window-resize-length window closes before the output it exists to swallow arrives —
   // which is the shape of the bug Tam reported: suppression that suppressed nothing.
   it('outlasts a plain window-resize cooldown', () => {
-    expect(RELOCATION_COOLDOWN_MS).toBeGreaterThan(RESIZE_COOLDOWN_MS * 2);
+    expect(VIEW_CHANGE_COOLDOWN_MS).toBeGreaterThan(RESIZE_COOLDOWN_MS * 2);
 
-    runningActivityTracker.notifyRelocationBurst();
+    runningActivityTracker.notifyViewChangeBurst();
     jest.advanceTimersByTime(RESIZE_COOLDOWN_MS + 1);   // a resize window would be over here
     burstAllTerminals();
     jest.advanceTimersByTime(SETTLE_MS);
@@ -282,8 +282,29 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
   // The pair that stops the case above from being satisfiable by a tracker that suppresses
   // everything forever: real output AFTER the burst window must still be seen.
   it('resumes marking once the relocation burst has settled', () => {
-    runningActivityTracker.notifyRelocationBurst();
-    jest.advanceTimersByTime(RELOCATION_COOLDOWN_MS + 1);
+    runningActivityTracker.notifyViewChangeBurst();
+    jest.advanceTimersByTime(VIEW_CHANGE_COOLDOWN_MS + 1);
+    emitData('p2', 4);
+    jest.advanceTimersByTime(SETTLE_MS);
+    expect(unseenTabIds()).not.toEqual([]);
+  });
+
+  // The general rule, and the one that covers causes nobody has enumerated: EVERY renderer
+  // resize goes through TerminalService, which publishes this. Tam hit it by font-zooming a
+  // terminal inside the canvas overlay — a resize the relocation hooks knew nothing about.
+  it('does NOT mark unseen after a PTY resize announced by TerminalService', () => {
+    window.dispatchEvent(new CustomEvent('pty:resize', {
+      detail: { processId: 'p2', terminalId: 'tm-2', cols: 120, rows: 40 },
+    }));
+    burstAllTerminals();
+    jest.advanceTimersByTime(SETTLE_MS);
+    expect(unseenTabIds()).toEqual([]);
+  });
+
+  // Pairs with it: the listener must be attached to the event the service actually sends, not
+  // to a name this test invented. A typo either side passes the case above only because
+  // nothing was suppressed AND nothing was emitted — so emit first, then check it is seen.
+  it('still marks unseen for output with no resize before it', () => {
     emitData('p2', 4);
     jest.advanceTimersByTime(SETTLE_MS);
     expect(unseenTabIds()).not.toEqual([]);

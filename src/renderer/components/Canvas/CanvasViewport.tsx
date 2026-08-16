@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewport } from '../../store/slices/canvasSlice';
 import { Viewport, zoomAt } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
+import { shouldArmSpacePan, shouldDisarmSpacePan } from './canvasGestures';
 
 /**
  * Pan/zoom host. Plain wheel zooms the canvas; Ctrl+wheel is deliberately NOT
@@ -74,15 +75,78 @@ export const CanvasViewport: React.FC<{
     return () => ro.disconnect();
   }, [onSize]);
 
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // `.canvas-gchip` is in this list because it is a click target, not background —
-    // omitting it would start a pan on the one gesture that is supposed to fly in.
-    if ((e.target as HTMLElement).closest('.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port')) return;
-    onBackgroundPointerDown?.();
+  /**
+   * Hold Space to pan from anywhere — the hand tool every canvas app has, Photoshop included.
+   *
+   * Without it, a node covers its own patch of canvas: press on one and you select it, so
+   * there is nothing to drag and a dense workspace has no background left to grab.
+   *
+   * The RULES live in `canvasGestures` so they can be tested without a DOM; this owns only the
+   * wiring — capture phase, pointer capture, the `.space-pan` class.
+   *
+   * Cleared on blur as well as keyup: a keyup that lands on another window never arrives, and
+   * the state would stick until the next press. Alt+Tab away mid-pan and back, and the canvas
+   * would be permanently in hand mode with no key held.
+   */
+  const [spacePan, setSpacePan] = useState(false);
+  const spacePanRef = useRef(false);
+  spacePanRef.current = spacePan;
+  const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
+
+  useEffect(() => {
+    const arm = (e: KeyboardEvent) => {
+      if (!shouldArmSpacePan(e as unknown as Parameters<typeof shouldArmSpacePan>[0], focusedId)) return;
+      e.preventDefault();                          // Space also scrolls a page by default
+      setSpacePan(true);
+    };
+    const disarm = (e: KeyboardEvent) => {
+      if (!shouldDisarmSpacePan(e)) return;
+      setSpacePan(false);
+    };
+    const clear = () => setSpacePan(false);
+    // Capture phase, matching InputHandler's ownership of global keys.
+    window.addEventListener('keydown', arm, true);
+    window.addEventListener('keyup', disarm, true);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.removeEventListener('keydown', arm, true);
+      window.removeEventListener('keyup', disarm, true);
+      window.removeEventListener('blur', clear);
+    };
+  }, [focusedId]);
+
+  // Releasing Space mid-drag must not leave the pointer captured and the canvas following the
+  // mouse with nothing held.
+  useEffect(() => {
+    if (!spacePan && pan.current) endPanRef.current();
+  }, [spacePan]);
+
+  const startPan = useCallback((e: React.PointerEvent) => {
     pan.current = { x: e.clientX - vpRef.current.x, y: e.clientY - vpRef.current.y };
     ref.current?.setPointerCapture(e.pointerId);
     ref.current?.classList.add('panning');
-  }, [onBackgroundPointerDown]);
+  }, []);
+
+  /**
+   * CAPTURE phase, which is the whole point: a node's own `pointerdown` is on a DESCENDANT, so
+   * a bubble-phase handler here would run after the node had already selected itself. This
+   * runs first and stops the event before it reaches anything.
+   */
+  const onPointerDownCapture = useCallback((e: React.PointerEvent) => {
+    if (!spacePanRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startPan(e);
+  }, [startPan]);
+
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    // `.canvas-gchip` is in this list because it is a click target, not background —
+    // omitting it would start a pan on the one gesture that is supposed to fly in.
+    if (pan.current) return;                     // already panning, via Space
+    if ((e.target as HTMLElement).closest('.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port')) return;
+    onBackgroundPointerDown?.();
+    startPan(e);
+  }, [onBackgroundPointerDown, startPan]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pan.current) return;
@@ -97,11 +161,16 @@ export const CanvasViewport: React.FC<{
     pan.current = null;
     ref.current?.classList.remove('panning');
   }, []);
+  // Read through a ref by the Space effect above, which must not re-register on every
+  // re-creation of `endPan`.
+  const endPanRef = useRef(endPan);
+  endPanRef.current = endPan;
 
   return (
     <div
       ref={ref}
-      className="canvas-viewport"
+      className={`canvas-viewport${spacePan ? ' space-pan' : ''}`}
+      onPointerDownCapture={onPointerDownCapture}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endPan}

@@ -13,7 +13,7 @@ import {
   MIN_CHUNKS,
   MIN_BYTES,
   RESIZE_COOLDOWN_MS,
-  RELOCATION_COOLDOWN_MS,
+  VIEW_CHANGE_COOLDOWN_MS,
   RECONNECT_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
   UNSEEN_DEBOUNCE_MS,
@@ -59,6 +59,7 @@ class RunningActivityTrackerClass {
   private onInput = (e: Event) => this.handleInput(e as CustomEvent);
   private onExit = (e: Event) => this.handleExit(e as CustomEvent);
   private onResize = () => this.handleResize();
+  private onPtyResize = () => this.notifyViewChangeBurst();
   private onVisibility = () => this.handleVisibility();
 
   start(startupGraceMs: number = STARTUP_COOLDOWN_MS): void {
@@ -73,6 +74,7 @@ class RunningActivityTrackerClass {
     window.addEventListener('pty:input', this.onInput);
     window.addEventListener('pty:exit', this.onExit);
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('pty:resize', this.onPtyResize);
     document.addEventListener('visibilitychange', this.onVisibility);
     this.lastActiveTabId = store.getState().tabs.activeTabId;
     this.unsubscribe = store.subscribe(() => this.handleActiveTabChange());
@@ -84,6 +86,7 @@ class RunningActivityTrackerClass {
     window.removeEventListener('pty:input', this.onInput);
     window.removeEventListener('pty:exit', this.onExit);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('pty:resize', this.onPtyResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -133,25 +136,33 @@ class RunningActivityTrackerClass {
   }
 
   /**
-   * Entering or leaving Canvas Mode moves every terminal between two differently-sized boxes,
-   * which SIGWINCHes every PTY at once and makes every TUI repaint its whole screen.
+   * The user changed how they are LOOKING at a terminal, so a repaint is coming that nobody
+   * asked the program for.
    *
-   * That is the same event class as `handleResize` below — a synchronized redraw burst that
-   * nobody typed — and without this it reads as "every tab just started running": the sweep
-   * animation fires across the strip and a notification pops for output the user caused by
-   * switching tabs.
+   * A resize is the one output cause that is never work: a TUI repaints its whole screen
+   * because the geometry changed, and the geometry changed because of a font zoom, a Canvas
+   * Mode relocation, a pane split, a window drag. Counting that as activity is what made
+   * switching to the canvas — and zooming inside it — light the running sweep across the whole
+   * tab strip and pop a notification.
    *
-   * A LONGER window than a window resize, though, because the chain is longer: a resize is
-   * measured and sent immediately, while this one waits on a debounced fit and a backend
-   * round-trip before the TUI even starts redrawing. See `RELOCATION_COOLDOWN_MS`.
+   * Armed from TWO places, deliberately:
+   *
+   *  - the `pty:resize` event, which `TerminalService` publishes at the single choke point
+   *    every renderer-caused resize goes through. That is the general rule, and it covers
+   *    causes nobody has thought of yet.
+   *  - `CanvasMode`'s mount and unmount, which is EARLIER — the relocation's fit is debounced,
+   *    so arming at the edge covers the window before any resize has been decided on.
+   *
+   * A LONGER window than a plain window resize, because the chain is longer. See
+   * `VIEW_CHANGE_COOLDOWN_MS`.
    *
    * This suppresses the ATTRIBUTION of that output, not the output itself. The repaint still
    * lands in the buffer, so a TUI's previous frame remains in scrollback — that is a property
    * of the canvas host having a different grid than the pane, and it is a `design/012`
    * question, not one this tracker can answer.
    */
-  notifyRelocationBurst(): void {
-    this.resetForBurst(RELOCATION_COOLDOWN_MS);
+  notifyViewChangeBurst(): void {
+    this.resetForBurst(VIEW_CHANGE_COOLDOWN_MS);
   }
 
   private handleResize(): void {

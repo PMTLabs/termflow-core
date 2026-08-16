@@ -5,13 +5,15 @@ export const MIN_CHUNKS = 3;          // >= this many output chunks in the windo
 export const MIN_BYTES = 512;         // OR >= this many output bytes in the window → running
 export const RESIZE_COOLDOWN_MS = 700; // after a window resize, ignore output this long
 /**
- * After a Canvas Mode relocation. Deliberately much longer than a window resize, because the
- * chain is longer: relocate -> DEBOUNCED fit -> backend resize round-trip -> SIGWINCH -> the
- * TUI redraws -> the data comes back. A window resize skips the first two of those, and 700ms
- * was short enough that the repaint landed AFTER the window closed — which is exactly the case
- * this is for, so it suppressed nothing and the notification fired anyway.
+ * After the user changes how they are LOOKING at a terminal — a Canvas Mode relocation, a
+ * font zoom, a pane split, anything that resizes the PTY.
+ *
+ * Deliberately much longer than a plain window resize, because the chain is longer: the
+ * geometry change waits on a DEBOUNCED fit and a backend round-trip before the TUI even starts
+ * redrawing. 700ms was short enough that the repaint landed AFTER the window closed — which is
+ * exactly the case this is for, so it suppressed nothing and the notification fired anyway.
  */
-export const RELOCATION_COOLDOWN_MS = 2500;
+export const VIEW_CHANGE_COOLDOWN_MS = 2500;
                                        // (SIGWINCH makes every TUI redraw at once — a
                                        // synchronized burst that otherwise reads as
                                        // "all tabs running")

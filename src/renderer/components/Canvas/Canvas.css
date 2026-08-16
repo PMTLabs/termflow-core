@@ -266,3 +266,19 @@
 .canvas-port.e { right: var(--port-offset); top: var(--port-centre); }
 .canvas-port.s { bottom: var(--port-offset); left: var(--port-centre); }
 .canvas-port.w { left: var(--port-offset); top: var(--port-centre); }
+
+/* ---- Space-to-pan (the hand tool) --------------------------------------- */
+
+/* While Space is held the whole surface is a drag handle, so EVERY descendant has to say so —
+   a node header says `cursor: move`, a chip says `zoom-in`, a port says `crosshair`, and any
+   one of them left alone makes the mode look broken exactly where it is most useful.
+
+   The universal selector is (0,2,0) specific, which already beats every single-class rule it
+   overrides. It sits at the end of the file so it also wins the ties, against `.canvas-port:hover`
+   and friends — placement is doing real work here, not tidiness. */
+.canvas-viewport.space-pan,
+.canvas-viewport.space-pan * { cursor: grab; }
+.canvas-viewport.space-pan.panning,
+.canvas-viewport.space-pan.panning * { cursor: grabbing; }
+/* Text selection would otherwise start inside a node the moment the drag crosses it. */
+.canvas-viewport.space-pan * { user-select: none; }

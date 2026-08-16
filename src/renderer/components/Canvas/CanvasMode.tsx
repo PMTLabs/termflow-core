@@ -119,8 +119,8 @@ export const CanvasMode: React.FC = () => {
   // A layout effect, so the window is armed before the relocation the child hosts trigger can
   // produce anything; the cleanup covers the return trip the same way.
   useLayoutEffect(() => {
-    runningActivityTracker.notifyRelocationBurst();
-    return () => runningActivityTracker.notifyRelocationBurst();
+    runningActivityTracker.notifyViewChangeBurst();
+    return () => runningActivityTracker.notifyViewChangeBurst();
   }, []);
 
   const clearSelection = useCallback(() => {
