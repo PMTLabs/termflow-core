@@ -66,7 +66,12 @@
    2px selection ring 8.5px, and the 13px connector ports 55px across — a node that should look
    like a terminal ends up looking like a cartoon of one. They are listed together here rather
    than fixed one at a time because they are one property, not four coincidences. */
-.canvas-node { --node-border-w: calc(1px * var(--node-k, 1)); position: absolute; z-index: 2; display: flex; flex-direction: column; border: var(--node-border-w) solid var(--border-color, #3e3e42); border-radius: calc(7px * var(--node-k, 1)); background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); }
+/* The radii are ONE number, not three. An inner corner has to be the outer corner minus the
+   border it sits inside, or the two arcs do not share a centre and the node's own background
+   shows through as a wedge between them. That is invisible while everything is ~6px and
+   glaring once the outer radius counter-scales and the inner one does not — which is exactly
+   what happened: at the working zoom the terminal kept a 25px corner inside a 2px one. */
+.canvas-node { --node-border-w: calc(1px * var(--node-k, 1)); --node-radius: calc(7px * var(--node-k, 1)); --node-inner-radius: calc(var(--node-radius) - var(--node-border-w)); position: absolute; z-index: 2; display: flex; flex-direction: column; border: var(--node-border-w) solid var(--border-color, #3e3e42); border-radius: var(--node-radius); background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); }
 /* Selection and focus are told apart by COLOUR, not by thickness. A ring that doubles the
    border reads as a heavy frame around a full-screen terminal — and the state it marks is
    already unmistakable, because a focused node is the one taking your keystrokes. */
@@ -78,13 +83,13 @@
    size. The inner one holds the contents at their natural size and is scaled as a single
    element — scaling title, badge, buttons, padding and gap individually would be six numbers
    to keep in step, and the first one forgotten is the one that looks wrong. */
-.canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: 1px solid var(--border-color, #3e3e42); border-radius: 6px 6px 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
+.canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: var(--node-border-w) solid var(--border-color, #3e3e42); border-radius: var(--node-inner-radius) var(--node-inner-radius) 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
 .canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
 .canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
 /* `min-height: 0` so the chip tier can squeeze this to zero height without the flex
    auto-minimum forcing the node taller than CHIP_H. */
-.canvas-node-body { flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 6px 6px; background: var(--terminal-background, #0a0a0a); position: relative; }
+.canvas-node-body { flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 var(--node-inner-radius) var(--node-inner-radius); background: var(--terminal-background, #0a0a0a); position: relative; }
 
 /* ---- The live terminal host --------------------------------------------- */
 
@@ -130,7 +135,7 @@
 
 /* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
    not removed, so the terminal host inside it keeps a resolvable layout box. */
-.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: 6px; cursor: zoom-in; }
+.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: var(--node-inner-radius); cursor: zoom-in; }
 .canvas-node[data-lod="chip"] .canvas-node-head-inner { justify-content: center; }
 .canvas-node[data-lod="chip"] .canvas-port { display: none; }
 

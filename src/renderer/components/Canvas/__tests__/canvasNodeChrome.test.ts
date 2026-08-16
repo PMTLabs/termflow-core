@@ -46,13 +46,42 @@ function ruleFor(selector: string): string {
 /** Lengths that draw chrome. Excludes `0px`, which has no size to scale. */
 const BARE_PX = /(?<![\w-])(\d*\.?\d+)px/g;
 
+/** Custom properties that are themselves defined from `--node-k`, so using one is enough. */
+const COUNTER_SCALED = ['--node-k', '--port-size', '--node-border-w', '--node-radius', '--node-inner-radius'];
+
+/**
+ * Remove every `calc(...)` / `var(...)` call satisfying `drop`, matching parentheses by
+ * counting rather than by regex.
+ *
+ * `calc(1px * var(--node-k, 1))` nests, and a regex written to skip one level silently stops
+ * matching at two — which reads as "no unscaled lengths here" and passes. A scanner cannot
+ * make that mistake, and getting this wrong makes the whole suite vacuous.
+ */
+function stripCalls(css: string, drop: (call: string) => boolean): string {
+  let out = '';
+  for (let i = 0; i < css.length;) {
+    const m = /^(calc|var)\(/.exec(css.slice(i));
+    if (!m) { out += css[i]; i += 1; continue; }
+    let depth = 0;
+    let j = i + m[0].length - 1;
+    for (; j < css.length; j += 1) {
+      if (css[j] === '(') depth += 1;
+      else if (css[j] === ')' && (depth -= 1) === 0) break;
+    }
+    const call = css.slice(i, j + 1);
+    if (!drop(call)) out += call;
+    i = j + 1;
+  }
+  return out;
+}
+
 function unscaledLengths(body: string): string[] {
-  // Everything already routed through a counter-scaled custom property is fine, whether that
-  // is `--node-k` directly or `--port-size`, which is itself defined from it.
-  const stripped = body
-    .replace(/calc\([^()]*var\(--node-k[^)]*\)[^)]*\)/g, '')
-    .replace(/var\(--port-size[^)]*\)/g, '')
-    .replace(/calc\([^()]*var\(--port-size[^)]*\)[^)]*\)/g, '');
+  const stripped = stripCalls(body, (call) =>
+    // Anything routed through a counter-scaled custom property is fine...
+    COUNTER_SCALED.some((name) => call.includes(name))
+    // ...and a `var(--x, 29px)` FALLBACK is a default for a value the component always
+    // supplies, not a length this stylesheet draws.
+    || /^var\(--[\w-]+,/.test(call));
   return [...stripped.matchAll(BARE_PX)].map((m) => m[0]).filter((v) => parseFloat(v) !== 0);
 }
 
@@ -60,7 +89,15 @@ describe('node chrome is counter-scaled', () => {
   // The chrome that sits OUTSIDE the header's own counter-scale wrapper. Listed because each
   // is a distinct visual failure, then checked structurally below so the list cannot go stale
   // without the sweep test noticing.
-  const CHROME = ['.canvas-node', '.canvas-node.selected', '.canvas-node.focused', '.canvas-port'];
+  const CHROME = [
+    '.canvas-node', '.canvas-node.selected', '.canvas-node.focused', '.canvas-port',
+    // Added after a real miss. These two kept a hard-coded `6px` radius while the node's own
+    // corner counter-scaled, so at the working zoom the terminal had a ~25px corner inside a
+    // ~2px one and the node's background showed through the gap as a wedge. The list was the
+    // bug: the rule was right, the set it ran over was too small.
+    '.canvas-node-head', '.canvas-node-body',
+    '.canvas-node[data-lod="chip"] .canvas-node-head',
+  ];
 
   it.each(CHROME)('%s uses no unscaled pixel length', (selector) => {
     expect(unscaledLengths(ruleFor(selector))).toEqual([]);
@@ -73,8 +110,12 @@ describe('node chrome is counter-scaled', () => {
     expect(unscaledLengths('width: 13px; height: 13px;')).toEqual(['13px', '13px']);
     expect(unscaledLengths('border: calc(1px * var(--node-k, 1)) solid red;')).toEqual([]);
     expect(unscaledLengths('width: var(--port-size);')).toEqual([]);
+    expect(unscaledLengths('border-radius: 0 0 6px 6px;')).toEqual(['6px', '6px']);
+    expect(unscaledLengths('border-radius: 0 0 var(--node-inner-radius) var(--node-inner-radius);')).toEqual([]);
     // A zero has no size to scale, and `0px` is not a defect.
     expect(unscaledLengths('inset: 0px;')).toEqual([]);
+    // A variable fallback is a default, not a drawn length.
+    expect(unscaledLengths('height: var(--canvas-head-h, 29px);')).toEqual([]);
   });
 
   it('finds every chrome rule it names', () => {
@@ -141,5 +182,53 @@ describe('the running sweep runs once at a time', () => {
     expect(stops[0].colour).toBe('transparent');
     expect(stops[2].colour).toBe('transparent');
     expect(stops[1].colour).not.toBe('transparent');
+  });
+});
+
+/**
+ * The corners agree.
+ *
+ * A node draws three nested boxes — the node, its header and its body — and each has its own
+ * radius. They only look like one shape if the inner radii are the outer radius MINUS the
+ * border they sit inside; give them independent values and the node's background appears as a
+ * wedge between two arcs that do not share a centre.
+ *
+ * Asserted as the relationship rather than as three numbers, because three numbers is what it
+ * was: `7px` outside and `6px` inside, correct only while the border happened to be 1px and
+ * only while nothing counter-scaled.
+ */
+describe('node corner radii share a centre', () => {
+  // Split on `;` and match the property name exactly, rather than building a regex around it:
+  // `border-radius` is a prefix of nothing here, but `border` IS a prefix of `border-radius`,
+  // and a substring match would quietly return the wrong declaration the first time someone
+  // asks for one.
+  const declaration = (selector: string, prop: string) => {
+    for (const decl of ruleFor(selector).split(';')) {
+      const [name, ...rest] = decl.split(':');
+      if (name.trim() === prop) return rest.join(':').trim();
+    }
+    return null;
+  };
+
+  it('derives the inner radius from the outer one and the border', () => {
+    const node = ruleFor('.canvas-node');
+    expect(node).toMatch(/--node-radius:\s*calc\(/);
+    // The subtraction is the whole point — an inner radius that merely also scales would still
+    // be a second independent number.
+    expect(node).toMatch(/--node-inner-radius:\s*calc\(\s*var\(--node-radius\)\s*-\s*var\(--node-border-w\)\s*\)/);
+  });
+
+  it('uses that one value for every inner corner', () => {
+    expect(declaration('.canvas-node', 'border-radius')).toBe('var(--node-radius)');
+    for (const s of ['.canvas-node-head', '.canvas-node-body']) {
+      expect(declaration(s, 'border-radius')).toContain('var(--node-inner-radius)');
+      expect(declaration(s, 'border-radius')).not.toMatch(/\d+px/);
+    }
+  });
+
+  // The body is what clips the terminal to the node's shape. Without the clip, xterm's own
+  // square background paints over the rounded corner and the node has no corner at all.
+  it('clips the terminal to that corner', () => {
+    expect(ruleFor('.canvas-node-body')).toMatch(/overflow:\s*hidden/);
   });
 });
