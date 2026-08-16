@@ -90,14 +90,60 @@ describe('.canvas-mode z-index', () => {
     const tooLow: string[] = [];
     for (const f of files) {
       for (const z of zIndexesIn(f)) {
-        // Only the 1000+ popup/overlay tier is in scope. These files also style
-        // in-flow chrome — `.title-bar-tabs` is z-index 100 — which lives inside the
-        // title bar's own box and is geometrically disjoint from `.app-body`, so it
-        // never overlaps the canvas and its z-index is not comparable.
+        // Only the 1000+ popup/overlay tier is in scope. These files also style in-flow
+        // chrome — `.title-bar-tabs` is z-index 100 — which lives inside the title bar's
+        // own box and does not itself overlap the canvas.
+        //
+        // That exemption is about the CHROME ONLY, and reading it as "sub-1000 rules here
+        // are harmless" is what let a real bug through: `.title-bar-tabs` is
+        // `position: relative; z-index: 100`, so it is a STACKING CONTEXT, and a modal
+        // rendered inside it is capped at an effective 100 no matter what its own z-index
+        // says. Closing a tab from the canvas showed no confirmation at all. The z-index
+        // comparison below cannot see that class of bug — the suite that follows can.
         if (z < 1000) continue;
         if (z <= canvasZ) tooLow.push(`${path.basename(f)}: ${z}`);
       }
     }
     expect(tooLow).toEqual([]);
+  });
+});
+
+/**
+ * A modal cannot escape an ancestor stacking context, so its z-index is only worth what its
+ * ancestors allow. `ConfirmDialog` declares `z-index: 9999` and still painted behind Canvas
+ * Mode's overlay at 900, because `TabManager` renders it inside `.title-bar-tabs`
+ * (`position: relative; z-index: 100`).
+ *
+ * The fix is structural, not numeric: an app-level modal must be a child of `<body>`. This
+ * derives the rule from the real files rather than listing the components by hand — a new
+ * dialog is covered the day its stylesheet is written.
+ */
+describe('app-level modals escape their caller', () => {
+  const UI = path.join(RENDERER, 'components/UI');
+
+  /** Stylesheets declaring a full-viewport overlay in the 1000+ tier. */
+  function overlayStylesheets(): string[] {
+    return fs.readdirSync(UI)
+      .filter((n) => n.endsWith('.css'))
+      .filter((n) => {
+        const css = fs.readFileSync(path.join(UI, n), 'utf8');
+        return /position:\s*fixed/.test(css) && zIndexesIn(path.join(UI, n)).some((z) => z >= 1000);
+      });
+  }
+
+  it('found the overlay stylesheets it is meant to police', () => {
+    const found = overlayStylesheets();
+    expect(found.length).toBeGreaterThan(0);
+    expect(found).toContain('ConfirmDialog.css');
+  });
+
+  it('renders every one of them through a portal', () => {
+    const offenders: string[] = [];
+    for (const css of overlayStylesheets()) {
+      const tsx = path.join(UI, css.replace(/\.css$/, '.tsx'));
+      if (!fs.existsSync(tsx)) continue;
+      if (!/createPortal/.test(fs.readFileSync(tsx, 'utf8'))) offenders.push(path.basename(tsx));
+    }
+    expect(offenders).toEqual([]);
   });
 });

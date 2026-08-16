@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import React, { useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
@@ -39,11 +40,17 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
 export const ToastContainer: React.FC = () => {
     const toasts = useSelector((state: RootState) => state.ui.toasts);
 
-    return (
+  // Portalled to <body> for the same reason ConfirmDialog is: an overlay cannot escape an
+  // ancestor stacking context, so rendering in place makes its z-index worth only whatever
+  // its caller's ancestors allow. Found by the derived test in
+  // components/Canvas/__tests__/canvasZIndex.test.ts after exactly that trapped the tab-close
+  // confirmation behind Canvas Mode.
+    return createPortal(
         <div className="toast-container">
             {toasts.map(toast => (
                 <ToastItem key={toast.id} toast={toast} />
             ))}
-        </div>
+        </div>,
+        document.body,
     );
 };
