@@ -121,10 +121,12 @@ describe('isUsableSnapshot', () => {
 /**
  * `stripAnsi` — and the reason it is tested at all.
  *
- * `plan/013`'s sample for this shipped the regex as `/\[[0-9;?]*[ -/]*[@-~]/g`: the literal ESC
- * had been eaten somewhere between the editor and the document, so the pattern matched a bare
- * `[` and would have chewed ordinary text (`arr[0]` -> `arr`) while leaving every real escape
- * sequence in place, ESC and all. Written with `\x1b` here, and asserted rather than assumed.
+ * `plan/013`'s sample carried the ESC as a raw 0x1b control BYTE rather than the text `\x1b`.
+ * The byte is invisible — in an editor, in a diff, and to any file-reading tool — so the pattern
+ * reads as `/\[[0-9;?]*[ -/]*[@-~]/`, which matches a bare `[` and would chew ordinary text
+ * (`arr[0]` -> `arr`) while leaving every real escape sequence in place. Copy it and it works;
+ * retype what you can see and it does not. These assert the behaviour so neither form can be
+ * mistaken for the other, and the `arr[0]` case below is the one that tells them apart.
  */
 describe('stripAnsi', () => {
   const ESC = '\x1b';

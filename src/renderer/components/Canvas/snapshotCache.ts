@@ -54,11 +54,13 @@ export function isUsableSnapshot(r: SnapshotResponse | null | undefined): boolea
  * colour runs from `contents_formatted()` and the private-mode sets `input_modes_snapshot`
  * appends; and OSC (`ESC ] … BEL` or `ESC ] … ESC \`), which carries titles and OSC-8 hyperlinks.
  *
- * **The ESC is not optional and its absence is not loud.** `plan/013`'s sample for this task
- * lost the literal ESC somewhere between editor and document and shipped `/\[[0-9;?]*…/`, which
- * matches a bare `[` — it would have left every real escape sequence intact while eating
- * ordinary text like `arr[0]`. Written with `\x1b` and covered by tests, including that exact
- * case.
+ * **Write the ESC as `\x1b`, never as the byte itself.** `plan/013`'s sample for this task had
+ * it as a raw 0x1b control character, which is invisible in an editor, in a diff, and to any
+ * file-reading tool: what you see is `/\[[0-9;?]*…/`, a pattern that matches a bare `[` and
+ * would eat ordinary text like `arr[0]` while leaving every real escape sequence intact. Copy
+ * that line and it works; retype what you can see and it does not, and any tool that strips
+ * control characters converts the working form into the broken one silently. Covered by tests,
+ * including the `arr[0]` case.
  */
 export function stripAnsi(s: string): string {
   return s
