@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewport } from '../../store/slices/canvasSlice';
 import { Viewport, zoomAt } from './canvasGeometry';
+import { useCanvasMetrics } from './canvasMetricsContext';
 import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
 
 /**
@@ -30,6 +31,11 @@ export const CanvasViewport: React.FC<{
   const vpRef = useRef(vp);
   vpRef.current = vp;
 
+  // Same reason as `vpRef`: the wheel listener is attached natively, once, and must not be
+  // torn down and re-registered to learn the session's zoom ceiling. The ceiling is frozen for
+  // the session anyway (see `canvasMetrics`), so a ref is exact rather than merely convenient.
+  const zMaxRef = useRef(useCanvasMetrics().zMax);
+
   // React attaches wheel listeners at the root PASSIVELY, so preventDefault() inside
   // a synthetic onWheel is a no-op and logs a console error. Attach natively instead —
   // the same thing `useSurfaceZoom` already does for the existing font-zoom gesture.
@@ -41,7 +47,7 @@ export const CanvasViewport: React.FC<{
       e.preventDefault();
       const r = el.getBoundingClientRect();
       dispatch(setViewport(
-        zoomAt(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top)
+        zoomAt(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top, zMaxRef.current)
       ));
     };
     el.addEventListener('wheel', onWheel, { passive: false });

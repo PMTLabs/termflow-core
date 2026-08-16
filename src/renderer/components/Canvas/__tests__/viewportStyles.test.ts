@@ -1,5 +1,8 @@
 import { gridStyle, worldStyle, fitViewport, boundsOf, centreOn, FLY_MS, DOT_SPACING, easeOutCubic, lerpViewport } from '../viewportStyles';
-import { Viewport, Rect, Z_MIN, Z_MAX, NODE_W, NODE_H } from '../canvasGeometry';
+import { Viewport, Rect, Z_MIN, NODE_W, NODE_H, DEFAULT_METRICS } from '../canvasGeometry';
+
+// Per-session now — an ordinary 1080p display's ceiling.
+const { zMax: Z_MAX } = DEFAULT_METRICS;
 
 describe('worldStyle', () => {
   it('emits a translate-then-scale transform anchored at the origin', () => {
@@ -61,20 +64,20 @@ describe('boundsOf', () => {
 
 describe('centreOn', () => {
   it('puts the target rect dead centre at the requested zoom', () => {
-    const vp = centreOn({ x: 500, y: 300, w: NODE_W, h: NODE_H }, 800, 600, 1.2);
+    const vp = centreOn({ x: 500, y: 300, w: NODE_W, h: NODE_H }, 800, 600, 1.2, Z_MAX);
     expect((500 + NODE_W / 2) * vp.z + vp.x).toBeCloseTo(400, 6);
     expect((300 + NODE_H / 2) * vp.z + vp.y).toBeCloseTo(300, 6);
     expect(vp.z).toBeCloseTo(1.2, 6);
   });
   it('clamps the requested zoom', () => {
-    expect(centreOn({ x: 0, y: 0, w: 10, h: 10 }, 800, 600, 99).z).toBe(Z_MAX);
-    expect(centreOn({ x: 0, y: 0, w: 10, h: 10 }, 800, 600, 0.0001).z).toBe(Z_MIN);
+    expect(centreOn({ x: 0, y: 0, w: 10, h: 10 }, 800, 600, 99, Z_MAX).z).toBe(Z_MAX);
+    expect(centreOn({ x: 0, y: 0, w: 10, h: 10 }, 800, 600, 0.0001, Z_MAX).z).toBe(Z_MIN);
   });
   // Centring must still centre after the clamp bites, or a fly-to to a clamped
   // zoom lands off-target.
   it('still centres the target when the zoom was clamped', () => {
     const target: Rect = { x: 900, y: -400, w: NODE_W, h: NODE_H };
-    const vp = centreOn(target, 800, 600, 99);
+    const vp = centreOn(target, 800, 600, 99, Z_MAX);
     expect((target.x + target.w / 2) * vp.z + vp.x).toBeCloseTo(400, 6);
     expect((target.y + target.h / 2) * vp.z + vp.y).toBeCloseTo(300, 6);
   });
@@ -91,7 +94,7 @@ describe('fitViewport', () => {
   const bounds: Rect = { x: 100, y: 100, w: 1000, h: 500 };
 
   it('centres the bounds in the viewport', () => {
-    const vp = fitViewport(bounds, 800, 600);
+    const vp = fitViewport(bounds, 800, 600, Z_MAX);
     const cx = (bounds.x + bounds.w / 2) * vp.z + vp.x;
     const cy = (bounds.y + bounds.h / 2) * vp.z + vp.y;
     expect(cx).toBeCloseTo(400, 6);
@@ -99,34 +102,34 @@ describe('fitViewport', () => {
   });
 
   it('fits entirely within the viewport', () => {
-    const vp = fitViewport(bounds, 800, 600);
+    const vp = fitViewport(bounds, 800, 600, Z_MAX);
     expect(bounds.w * vp.z).toBeLessThanOrEqual(800);
     expect(bounds.h * vp.z).toBeLessThanOrEqual(600);
   });
 
   it('respects the zoom clamp for an enormous workspace', () => {
-    const vp = fitViewport({ x: 0, y: 0, w: 500000, h: 500000 }, 800, 600);
+    const vp = fitViewport({ x: 0, y: 0, w: 500000, h: 500000 }, 800, 600, Z_MAX);
     expect(vp.z).toBe(Z_MIN);
   });
 
   it('never zooms past the maximum for a tiny workspace', () => {
-    const vp = fitViewport({ x: 0, y: 0, w: 10, h: 10 }, 800, 600);
+    const vp = fitViewport({ x: 0, y: 0, w: 10, h: 10 }, 800, 600, Z_MAX);
     expect(vp.z).toBeLessThanOrEqual(Z_MAX);
   });
 
   // Fitting a tall-and-narrow set must be driven by the constraining axis. With
   // only the wide case tested, a fit that used width alone would pass.
   it('fits the constraining axis, whichever it is', () => {
-    const tall = fitViewport({ x: 0, y: 0, w: 100, h: 4000 }, 800, 600);
+    const tall = fitViewport({ x: 0, y: 0, w: 100, h: 4000 }, 800, 600, Z_MAX);
     expect(4000 * tall.z).toBeLessThanOrEqual(600);
-    const wide = fitViewport({ x: 0, y: 0, w: 4000, h: 100 }, 800, 600);
+    const wide = fitViewport({ x: 0, y: 0, w: 4000, h: 100 }, 800, 600, Z_MAX);
     expect(4000 * wide.z).toBeLessThanOrEqual(800);
   });
 
   // A canvas with a single node still has to be fittable — the margin must not
   // invert the arithmetic or push the zoom to the floor.
   it('produces a sane zoom for one node', () => {
-    const vp = fitViewport({ x: 0, y: 0, w: NODE_W, h: NODE_H }, 1200, 800);
+    const vp = fitViewport({ x: 0, y: 0, w: NODE_W, h: NODE_H }, 1200, 800, Z_MAX);
     expect(vp.z).toBeGreaterThan(Z_MIN);
     expect(vp.z).toBeLessThanOrEqual(Z_MAX);
   });

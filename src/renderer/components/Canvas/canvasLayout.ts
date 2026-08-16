@@ -1,8 +1,20 @@
 import { NODE_W, NODE_H, Rect } from './canvasGeometry';
 
-/** Padding inside a group frame; PAD_TOP leaves room for the frame label. */
-export const PAD = 30;
-export const PAD_TOP = 46;
+/**
+ * Padding inside a group frame.
+ *
+ * `PAD_TOP` used to be 46 against a `PAD` of 30, on the assumption that the frame label sits
+ * INSIDE the frame and needs a band cleared for it. It does not: `.canvas-glabel` is
+ * `position: absolute; top: -11px`, so it straddles the top border like a fieldset legend and
+ * only its lower half hangs into the interior. The extra 16px was reserved for nothing, and it
+ * read as a group that had been pushed away from its own terminals.
+ *
+ * So the top is now the ordinary padding plus exactly the overhang it has to clear, which also
+ * means the two numbers can no longer drift apart for no reason.
+ */
+const LABEL_OVERHANG = 7;
+export const PAD = 16;
+export const PAD_TOP = PAD + LABEL_OVERHANG;
 /** Gutter between terminals inside a frame. */
 export const GAP = 28;
 /** Gutter between frames. */

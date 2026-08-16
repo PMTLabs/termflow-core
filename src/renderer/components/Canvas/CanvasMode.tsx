@@ -11,8 +11,9 @@ import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
 import {
-  Rect, assignTiers, overlayGeometry, NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H, SURFACE_SCALE,
+  Rect, assignTiers, overlayGeometry, canvasMetrics, NODE_W, NODE_H, HEAD_H,
 } from './canvasGeometry';
+import { CanvasMetricsContext } from './canvasMetricsContext';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -21,17 +22,17 @@ import {
 } from './canvasSelectors';
 import './Canvas.css';
 
-/** The node geometry the stylesheet needs. Passed as CSS variables rather than repeated
- *  in Canvas.css: the terminal host's box is derived from these and must stay in step
- *  with the world box the nodes are laid out on. */
-const GEOMETRY_VARS = {
+/** The node geometry the stylesheet needs, as CSS variables rather than numbers repeated in
+ *  Canvas.css. The host half is per-session — see `canvasMetrics` — so this is built from the
+ *  frozen metrics rather than being a module constant. */
+const geometryVars = (m: { hostW: number; hostH: number; surfaceScale: number }) => ({
   '--canvas-node-w': `${NODE_W}px`,
   '--canvas-node-h': `${NODE_H}px`,
   '--canvas-head-h': `${HEAD_H}px`,
-  '--canvas-host-w': `${HOST_W}px`,
-  '--canvas-host-h': `${HOST_H}px`,
-  '--canvas-surface-scale': `${SURFACE_SCALE}`,
-} as React.CSSProperties;
+  '--canvas-host-w': `${m.hostW}px`,
+  '--canvas-host-h': `${m.hostH}px`,
+  '--canvas-surface-scale': `${m.surfaceScale}`,
+}) as React.CSSProperties;
 
 /**
  * Canvas Mode surface — the body of the canvas TAB.
@@ -55,6 +56,27 @@ export const CanvasMode: React.FC = () => {
   const overlayId = useSelector((s: RootState) => s.canvas.overlayId);
   const recent = useSelector((s: RootState) => s.canvas.recent);
   const [size, setSize] = useState({ w: 0, h: 0 });
+
+  // FROZEN FOR THE SESSION, and the two things about that are both load-bearing.
+  //
+  // WHY it is per-session: the host box is also the box the overlay renders at 1:1, and one
+  // constant cannot serve a 1366-wide laptop and a 4K panel — sized for one, the other gets
+  // either a half-empty overlay or a half-size font. `canvasMetrics` sizes it from the display.
+  //
+  // WHY it is frozen: it IS the CSS box a live terminal is fitted to. Changing it while
+  // terminals are relocated in is a `fit()`, a `term.resize()` and a SIGWINCH into every
+  // ratatui/codex PTY on the canvas (`012` §6.5 RC2). A `useState` initialiser runs ONCE per
+  // mount, during the first render — before any child registers a host — which is exactly the
+  // window this has to land in. Do not turn this into a `useMemo` on `size`: that is the same
+  // code with the guarantee removed, and it would re-evaluate on every window resize.
+  //
+  // Measured from the window rather than the canvas element because the element has not been
+  // laid out yet at this point. It only picks the box; the overlay's own fit uses the real
+  // measured viewport, so an approximation here costs nothing.
+  const [metrics] = useState(() => canvasMetrics(
+    typeof window === 'undefined' ? 1920 : window.innerWidth,
+    typeof window === 'undefined' ? 1040 : window.innerHeight,
+  ));
   const flyTo = useFlyTo();
 
   const onSize = useCallback((w: number, h: number) => setSize({ w, h }), []);
@@ -83,8 +105,8 @@ export const CanvasMode: React.FC = () => {
   // Recomputed from the viewport, so the overlay stays screen-centred while the canvas pans
   // and zooms underneath it rather than sliding away with the world.
   const overlay = useMemo(
-    () => (overlayId ? overlayGeometry(vp, size.w, size.h) : null),
-    [overlayId, vp, size],
+    () => (overlayId ? overlayGeometry(vp, size.w, size.h, metrics) : null),
+    [overlayId, vp, size, metrics],
   );
 
   useCanvasRenderPolicy(tiers, focusedId, recent);
@@ -180,7 +202,8 @@ export const CanvasMode: React.FC = () => {
   overlayIdRef.current = overlayId;
 
   return (
-    <div className="canvas-mode" data-testid="canvas-mode" style={GEOMETRY_VARS}>
+    <CanvasMetricsContext.Provider value={metrics}>
+    <div className="canvas-mode" data-testid="canvas-mode" style={geometryVars(metrics)}>
       <CanvasViewport onSize={onSize} onBackgroundPointerDown={clearSelection}>
         {model.groups.map((g) => (
           <CanvasGroupFrame
@@ -188,7 +211,7 @@ export const CanvasMode: React.FC = () => {
             group={g}
             zoom={vp.z}
             collapsed={collapsed}
-            onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM))}
+            onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax))}
           />
         ))}
         {overlay && (
@@ -226,7 +249,7 @@ export const CanvasMode: React.FC = () => {
               overlaid={isOverlaid}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               onDoubleClick={focusTerminal(n.terminalId)}
-              onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM))}
+              onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}
             >
@@ -242,6 +265,7 @@ export const CanvasMode: React.FC = () => {
         <div className="canvas-empty">No terminals yet</div>
       )}
     </div>
+    </CanvasMetricsContext.Provider>
   );
 };
 

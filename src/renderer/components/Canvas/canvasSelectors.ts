@@ -6,7 +6,7 @@ import type { RootState } from '../../store';
 import type { PaneNode } from '../../store/slices/panesSlice';
 import type { Tab } from '../../store/slices/tabsSlice';
 import {
-  NODE_W, NODE_H, CHIP_H, CULL_MARGIN, T_GPU, T_SNAP, Z_MIN, Z_MAX,
+  NODE_W, NODE_H, CHIP_H, CULL_MARGIN, T_GPU, T_SNAP, Z_MIN,
   LodTier, Rect, Viewport, isVisible,
 } from './canvasGeometry';
 import { fitGroupFrame, seedNodePosition, PAD, PAD_TOP, GROUP_GAP } from './canvasLayout';
@@ -52,14 +52,15 @@ function leaves(node: PaneNode | null | undefined): PaneNode[] {
  * scaling the label by `1/z` makes the two cancel exactly.
  *
  * The clamp is a guard against a degenerate `z`, NOT a style choice, so it is
- * derived from the legal zoom range rather than picked. An arbitrary tighter ceiling
+ * derived from the legal zoom range rather than picked — and the top of that range is now a
+ * property of the display the session opened on, so it is passed in. An arbitrary tighter ceiling
  * would quietly break the promise in the sentence above: at the group-collapse end of
  * the range `1/z` reaches 20, so a ceiling of (say) 3 would leave every frame label
  * rendering at under 3 real pixels across the whole chip band — present in the DOM,
  * invisible on screen, and passing any test that only probes zooms near 1.
  */
-export function counterScale(z: number): number {
-  return Math.min(1 / Z_MIN, Math.max(1 / Z_MAX, 1 / z));
+export function counterScale(z: number, zMax: number): number {
+  return Math.min(1 / Z_MIN, Math.max(1 / zMax, 1 / z));
 }
 
 /**

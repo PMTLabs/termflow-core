@@ -3,10 +3,14 @@ import {
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM, CanvasNodeModel,
 } from '../canvasSelectors';
 import {
-  NODE_W, NODE_H, CHIP_H, Z_MIN, Z_MAX, T_CHIP, LodTier, Viewport,
+  NODE_W, NODE_H, CHIP_H, Z_MIN, T_CHIP, LodTier, Viewport, DEFAULT_METRICS,
   baseTier, clampZoom,
 } from '../canvasGeometry';
+
 import { PAD, PAD_TOP } from '../canvasLayout';
+
+// Per-session now — these are an ordinary 1080p display's metrics.
+const { zMax: Z_MAX } = DEFAULT_METRICS;
 
 const stateWith = (overrides: any = {}) => ({
   tabs: {
@@ -155,25 +159,25 @@ describe('counterScale', () => {
   // which is what a clamp too tight to cover the range would sail through.
   it('holds a constant on-screen size at every legal zoom', () => {
     for (let z = Z_MIN; z <= Z_MAX; z += 0.017) {
-      expect(counterScale(z) * z).toBeCloseTo(1, 9);
+      expect(counterScale(z, Z_MAX) * z).toBeCloseTo(1, 9);
     }
-    expect(counterScale(Z_MAX) * Z_MAX).toBeCloseTo(1, 9);
+    expect(counterScale(Z_MAX, Z_MAX) * Z_MAX).toBeCloseTo(1, 9);
   });
 
   // Both probes must be zooms `clampZoom` can actually produce. z = 2 is NOT one —
-  // it is above Z_MAX, so asserting counterScale(2) === 0.5 only measures the guard.
+  // it is above Z_MAX, so asserting counterScale(2, Z_MAX) === 0.5 only measures the guard.
   it('inverts the zoom at concrete legal values', () => {
-    expect(counterScale(0.5)).toBeCloseTo(2, 6);
-    expect(counterScale(1.6)).toBeCloseTo(0.625, 6);
+    expect(counterScale(0.5, Z_MAX)).toBeCloseTo(2, 6);
+    expect(counterScale(1.6, Z_MAX)).toBeCloseTo(0.625, 6);
   });
 
   // The clamp guards a degenerate zoom, so it must only bite OUTSIDE the range
   // `clampZoom` can produce — never inside it.
   it('clamps only what the viewport can never reach', () => {
-    expect(counterScale(0)).toBe(1 / Z_MIN);
-    expect(counterScale(0.001)).toBe(counterScale(Z_MIN));
-    expect(counterScale(1000)).toBe(counterScale(Z_MAX));
-    expect(counterScale(clampZoom(0.001))).toBe(1 / Z_MIN);
+    expect(counterScale(0, Z_MAX)).toBe(1 / Z_MIN);
+    expect(counterScale(0.001, Z_MAX)).toBe(counterScale(Z_MIN, Z_MAX));
+    expect(counterScale(1000, Z_MAX)).toBe(counterScale(Z_MAX, Z_MAX));
+    expect(counterScale(clampZoom(0.001, Z_MAX), Z_MAX)).toBe(1 / Z_MIN);
   });
 });
 
@@ -198,12 +202,12 @@ describe('chip fly-to zooms', () => {
   // A cursor that promises an interaction has to deliver one. If either target
   // landed in the tier it flew FROM, clicking a chip would leave it a chip.
   it('lands a group chip\'s terminals in the snapshot tier', () => {
-    expect(clampZoom(GROUP_CHIP_ZOOM)).toBe(GROUP_CHIP_ZOOM);
+    expect(clampZoom(GROUP_CHIP_ZOOM, Z_MAX)).toBe(GROUP_CHIP_ZOOM);
     expect(baseTier(NODE_W * GROUP_CHIP_ZOOM)).toBe('snapshot');
   });
 
   it('lands a node chip in the gpu tier', () => {
-    expect(clampZoom(NODE_CHIP_ZOOM)).toBe(NODE_CHIP_ZOOM);
+    expect(clampZoom(NODE_CHIP_ZOOM, Z_MAX)).toBe(NODE_CHIP_ZOOM);
     expect(baseTier(NODE_W * NODE_CHIP_ZOOM)).toBe('gpu');
   });
 

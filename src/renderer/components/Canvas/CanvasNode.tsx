@@ -1,5 +1,6 @@
 import React from 'react';
-import { LodTier, CHIP_H, HEAD_H, HOST_W, headScale, chromeScale } from './canvasGeometry';
+import { LodTier, CHIP_H, HEAD_H, headScale, chromeScale } from './canvasGeometry';
+import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 
 /**
@@ -51,6 +52,10 @@ export const CanvasNode: React.FC<{
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
+  // The SESSION's host box, frozen when the canvas opened. Read here rather than imported:
+  // it is sized for the display (see `canvasMetrics`), and a stale copy would scale this
+  // node's surface against a host box its terminal was never fitted to.
+  const { hostW } = useCanvasMetrics();
 
   // The title bar stops growing once it has reached its natural size — see `headScale`.
   // Above zoom 1 it counter-scales, so the header holds a constant HEAD_H on screen and every
@@ -85,7 +90,7 @@ export const CanvasNode: React.FC<{
         // Per node rather than global, so a node of any width scales its host correctly.
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
-        ['--node-surface-scale' as string]: `${w / HOST_W}`,
+        ['--node-surface-scale' as string]: `${w / hostW}`,
         // The title bar's counter-scale: capped at 1, so a small node's label still grows
         // with it. Also drives the corner radius, which follows the header's corners.
         ['--node-k' as string]: `${k}`,

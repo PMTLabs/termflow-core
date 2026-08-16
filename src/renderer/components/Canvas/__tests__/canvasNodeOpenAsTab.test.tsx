@@ -15,7 +15,8 @@
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { CanvasNode } from '../CanvasNode';
-import { LodTier, HEAD_H, HOST_W } from '../canvasGeometry';
+import { LodTier, HEAD_H, DEFAULT_METRICS } from '../canvasGeometry';
+import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { CanvasNodeModel } from '../canvasSelectors';
 
 let container: HTMLDivElement;
@@ -55,9 +56,16 @@ interface Handlers {
   onChipClick?: () => void;
 }
 
+/** CanvasNode reads the session's host box from context (see `canvasMetrics`), so every
+ *  render here goes through a provider — there is deliberately no fallback for a node
+ *  rendered outside one. */
+const withMetrics = (node: React.ReactNode) => (
+  <CanvasMetricsContext.Provider value={DEFAULT_METRICS}>{node}</CanvasMetricsContext.Provider>
+);
+
 function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
   act(() => {
-    root.render(
+    root.render(withMetrics(
       <CanvasNode
         node={node0}
         tier={tier}
@@ -69,7 +77,7 @@ function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
         overlaid={overlaid}
         {...handlers}
       />,
-    );
+    ));
   });
 }
 
@@ -231,24 +239,24 @@ describe('counter-scale custom properties', () => {
 
   it('publishes --node-k as 1 at and below zoom 1', () => {
     act(() => {
-      root.render(
+      root.render(withMetrics(
         <CanvasNode node={node0} tier="gpu" zoom={0.4} selected={false} focused={false}
           dimmed={false} hidden={false} />,
-      );
+      ));
     });
     expect(node().style.getPropertyValue('--node-k')).toBe('1');
   });
 
   it('publishes the reciprocal above zoom 1, and a surface scale from the node width', () => {
     act(() => {
-      root.render(
+      root.render(withMetrics(
         <CanvasNode node={node0} tier="gpu" zoom={4} selected={false} focused={false}
           dimmed={false} hidden={false} />,
-      );
+      ));
     });
     expect(Number(node().style.getPropertyValue('--node-k'))).toBeCloseTo(0.25, 9);
     expect(Number(node().style.getPropertyValue('--node-surface-scale')))
-      .toBeCloseTo(node0.rect.w / HOST_W, 9);
+      .toBeCloseTo(node0.rect.w / DEFAULT_METRICS.hostW, 9);
   });
 
   // The header gives up its slack so the BODY never changes world height — the invariant the
@@ -257,10 +265,10 @@ describe('counter-scale custom properties', () => {
     const heights: number[] = [];
     for (const zoom of [1, 4]) {
       act(() => {
-        root.render(
-          <CanvasNode node={node0} tier="gpu" zoom={zoom} selected={false} focused={false}
+        root.render(withMetrics(
+        <CanvasNode node={node0} tier="gpu" zoom={zoom} selected={false} focused={false}
             dimmed={false} hidden={false} />,
-        );
+      ));
       });
       heights.push(parseFloat(node().style.height));
     }

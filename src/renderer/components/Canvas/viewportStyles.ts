@@ -42,9 +42,10 @@ export function boundsOf(rects: Rect[]): Rect | null {
   return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 }
 
-/** Zoom and pan so `bounds` sits centred and entirely visible. */
-export function fitViewport(bounds: Rect, vw: number, vh: number): Viewport {
-  const z = clampZoom(Math.min(vw / (bounds.w + FIT_MARGIN), vh / (bounds.h + FIT_MARGIN)));
+/** Zoom and pan so `bounds` sits centred and entirely visible. `zMax` is the SESSION ceiling
+ *  (see `canvasMetrics`), passed rather than read, so this stays a pure function. */
+export function fitViewport(bounds: Rect, vw: number, vh: number, zMax: number): Viewport {
+  const z = clampZoom(Math.min(vw / (bounds.w + FIT_MARGIN), vh / (bounds.h + FIT_MARGIN)), zMax);
   return {
     z,
     x: vw / 2 - (bounds.x + bounds.w / 2) * z,
@@ -54,8 +55,8 @@ export function fitViewport(bounds: Rect, vw: number, vh: number): Viewport {
 
 /** Centre a target at a chosen zoom, without fitting it. The destination for every
  *  fly-to: sidebar row click, tab click, chip click, beacon click. */
-export function centreOn(target: Rect, vw: number, vh: number, z: number): Viewport {
-  const zz = clampZoom(z);
+export function centreOn(target: Rect, vw: number, vh: number, z: number, zMax: number): Viewport {
+  const zz = clampZoom(z, zMax);
   return {
     z: zz,
     x: vw / 2 - (target.x + target.w / 2) * zz,

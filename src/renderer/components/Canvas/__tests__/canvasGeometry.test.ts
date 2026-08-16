@@ -1,10 +1,14 @@
 import {
   baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, assignTiers,
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
-  Z_MIN, Z_MAX, Viewport, Rect,
-  HEAD_H, BODY_H, HOST_W, HOST_H, SURFACE_SCALE, FOCUS_ZOOM,
-  headScale, overlayGeometry, OVERLAY_MARGIN,
+  Z_MIN, Viewport, Rect,
+  HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
+  canvasMetrics, DEFAULT_METRICS, MIN_HOST_W, MAX_HOST_W, HOST_ASPECT,
 } from '../canvasGeometry';
+
+// The host box is per-session now (see `canvasMetrics`), so these are the metrics of an
+// ordinary maximised window on an ordinary 1080p display — not global constants.
+const { hostW: HOST_W, hostH: HOST_H, surfaceScale: SURFACE_SCALE, focusZoom: FOCUS_ZOOM, zMax: Z_MAX } = DEFAULT_METRICS;
 
 const rectFor = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
 
@@ -24,9 +28,9 @@ describe('baseTier', () => {
 
 describe('clampZoom', () => {
   it('clamps to the configured range', () => {
-    expect(clampZoom(0.001)).toBe(Z_MIN);
-    expect(clampZoom(99)).toBe(Z_MAX);
-    expect(clampZoom(1)).toBe(1);
+    expect(clampZoom(0.001, Z_MAX)).toBe(Z_MIN);
+    expect(clampZoom(99, Z_MAX)).toBe(Z_MAX);
+    expect(clampZoom(1, Z_MAX)).toBe(1);
   });
 });
 
@@ -67,7 +71,7 @@ describe('terminal host box', () => {
   // short of 1:1 so the overlay is always the bigger rung — see the ladder suite below.
   it('keeps the canvas ceiling below the 1:1 zoom', () => {
     expect(Z_MAX).toBeLessThan(FOCUS_ZOOM);
-    expect(clampZoom(FOCUS_ZOOM)).toBe(Z_MAX);
+    expect(clampZoom(FOCUS_ZOOM, Z_MAX)).toBe(Z_MAX);
     expect(Z_MAX).toBeGreaterThan(Z_MIN);
   });
 
@@ -84,14 +88,14 @@ describe('zoomAt', () => {
     const vp: Viewport = { x: 40, y: -25, z: 0.7 };
     const cx = 320, cy = 180;
     const before = screenToWorld(vp, cx, cy);
-    const after = screenToWorld(zoomAt(vp, 1.4, cx, cy), cx, cy);
+    const after = screenToWorld(zoomAt(vp, 1.4, cx, cy, Z_MAX), cx, cy);
     expect(after.x).toBeCloseTo(before.x, 6);
     expect(after.y).toBeCloseTo(before.y, 6);
   });
 
   it('does not move the viewport when the zoom is already clamped', () => {
     const vp: Viewport = { x: 10, y: 10, z: Z_MAX };
-    expect(zoomAt(vp, 2, 100, 100)).toEqual(vp);
+    expect(zoomAt(vp, 2, 100, 100, Z_MAX)).toEqual(vp);
   });
 
   // A factor that overshoots the clamp must still land ON the clamp, not be
@@ -99,8 +103,8 @@ describe('zoomAt', () => {
   // would refuse to reach Z_MAX at all.
   it('lands exactly on the clamp when the factor overshoots it', () => {
     const vp: Viewport = { x: 10, y: 10, z: 1.5 };
-    expect(zoomAt(vp, 100, 100, 100).z).toBe(Z_MAX);
-    expect(zoomAt(vp, 0.0001, 100, 100).z).toBe(Z_MIN);
+    expect(zoomAt(vp, 100, 100, 100, Z_MAX).z).toBe(Z_MAX);
+    expect(zoomAt(vp, 0.0001, 100, 100, Z_MAX).z).toBe(Z_MIN);
   });
 });
 
@@ -326,7 +330,7 @@ describe('overlayGeometry', () => {
   const VH = 1040;
   /** Exactly what `CanvasNode` + `.canvas-surface` do with the rect, in screen pixels. */
   const rendered = (vp: Viewport, vw: number, vh: number) => {
-    const g = overlayGeometry(vp, vw, vh);
+    const g = overlayGeometry(vp, vw, vh, DEFAULT_METRICS);
     const surfaceScale = g.rect.w / HOST_W;              // --node-surface-scale
     const bodyWorldH = g.rect.h - HEAD_H;
     const headWorldH = HEAD_H * headScale(vp.z);
@@ -361,19 +365,19 @@ describe('overlayGeometry', () => {
 
   it('never magnifies past the configured font size', () => {
     for (const vw of [800, 1280, 1920, 5120]) {
-      expect(overlayGeometry({ x: 0, y: 0, z: 1 }, vw, 2880).scale).toBeLessThanOrEqual(1);
+      expect(overlayGeometry({ x: 0, y: 0, z: 1 }, vw, 2880, DEFAULT_METRICS).scale).toBeLessThanOrEqual(1);
     }
   });
 
   it('reaches exactly 1:1 on a display with room for the host', () => {
-    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH).scale).toBe(1);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH, DEFAULT_METRICS).scale).toBe(1);
   });
 
   it('shrinks to fit a viewport too small for the host, on either axis', () => {
-    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, 900, VH).scale).toBeLessThan(1);
-    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, 420).scale).toBeLessThan(1);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, 900, VH, DEFAULT_METRICS).scale).toBeLessThan(1);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, 420, DEFAULT_METRICS).scale).toBeLessThan(1);
     // Still positive — a degenerate viewport must not produce a negative or NaN box.
-    const tiny = overlayGeometry({ x: 0, y: 0, z: 1 }, 10, 10);
+    const tiny = overlayGeometry({ x: 0, y: 0, z: 1 }, 10, 10, DEFAULT_METRICS);
     expect(Number.isFinite(tiny.scale)).toBe(true);
     expect(tiny.rect.w).toBeGreaterThan(0);
   });
@@ -404,7 +408,7 @@ describe('overlayGeometry', () => {
 
   it('covers the whole viewport with the backdrop', () => {
     const vp: Viewport = { x: 133, y: -71, z: 1.7 };
-    const { backdrop } = overlayGeometry(vp, VW, VH);
+    const { backdrop } = overlayGeometry(vp, VW, VH, DEFAULT_METRICS);
     const x0 = backdrop.x * vp.z + vp.x;
     const y0 = backdrop.y * vp.z + vp.y;
     expect(x0).toBeLessThanOrEqual(0);
@@ -438,7 +442,7 @@ describe('the zoom ladder is monotonic', () => {
   const maxZoomScale = SURFACE_SCALE * Z_MAX;
 
   it('makes the overlay bigger than the canvas can zoom', () => {
-    const overlay = overlayGeometry({ x: 0, y: 0, z: Z_MAX }, VW, VH);
+    const overlay = overlayGeometry({ x: 0, y: 0, z: Z_MAX }, VW, VH, DEFAULT_METRICS);
     expect(HOST_W * overlay.scale).toBeGreaterThan(maxZoomWidth);
     expect(overlay.scale).toBeGreaterThan(maxZoomScale);
   });
@@ -446,13 +450,13 @@ describe('the zoom ladder is monotonic', () => {
   // The rung above the overlay is the terminal's own tab, which is the viewport minus the tab
   // strip — no margin, no frame. The overlay must stay under it or it is not a rung either.
   it('leaves the overlay smaller than a full tab', () => {
-    const overlay = overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH);
+    const overlay = overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH, DEFAULT_METRICS);
     expect(HOST_W * overlay.scale).toBeLessThan(VW);
   });
 
   it('holds at every canvas zoom, not just the ceiling', () => {
     for (const z of [Z_MIN, 0.5, 1, 2.5, Z_MAX]) {
-      const overlay = overlayGeometry({ x: 0, y: 0, z }, VW, VH);
+      const overlay = overlayGeometry({ x: 0, y: 0, z }, VW, VH, DEFAULT_METRICS);
       expect(overlay.scale).toBeGreaterThanOrEqual(SURFACE_SCALE * z);
     }
   });
@@ -465,6 +469,111 @@ describe('the zoom ladder is monotonic', () => {
   });
 
   it('reaches exactly the configured font size in the overlay', () => {
-    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH).scale).toBe(1);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH, DEFAULT_METRICS).scale).toBe(1);
+  });
+});
+
+/**
+ * The host box is sized for the display the canvas opened on.
+ *
+ * It could not stay a constant. The same number is the grid the PTY gets AND the box the
+ * overlay renders at 1:1, because `012` §6.5 RC2 allows a session exactly one host size — so
+ * one value has to serve a 1366-wide laptop and a 4K panel at once, and it cannot. A fixed
+ * 1600 left 2240 pixels unused on a 3840-wide display and broke the size ladder outright below
+ * about 1500.
+ *
+ * These cases are DISPLAYS, not numbers: each one is a machine someone actually uses, and the
+ * properties asserted are the ones that have to hold on all of them at once.
+ */
+describe('canvasMetrics', () => {
+  // Real machines. A viewport smaller than a single node is covered by the degenerate case at
+  // the end instead: there the host floor and the zoom floor both collapse to `NODE_W`, so the
+  // ladder's rungs coincide rather than invert, and asserting a strict `>` there would be
+  // asserting something the geometry cannot mean.
+  const DISPLAYS: Array<[string, number, number]> = [
+    ['13" laptop', 1366, 700],
+    ['1080p maximised', 1920, 1040],
+    ['1440p', 2560, 1400],
+    ['4K at 150%', 2560, 1400],
+    ['4K at 100%', 3840, 2120],
+    ['ultrawide', 3440, 1400],
+    ['a small window', 900, 600],
+  ];
+
+  /** What the overlay actually shows at scale 1 on this display, reconstructed. */
+  const overlayWidth = (vw: number, vh: number) => {
+    const m = canvasMetrics(vw, vh);
+    return m.hostW * overlayGeometry({ x: 0, y: 0, z: 1 }, vw, vh, m).scale;
+  };
+
+  it.each(DISPLAYS)('%s: the overlay is bigger than the canvas can zoom', (_label, vw, vh) => {
+    const m = canvasMetrics(vw, vh);
+    // The ladder, on every display rather than on the one the constants were tuned for.
+    // This is the property a fixed host box could not hold: below ~1500 wide the old ceiling
+    // let a node zoom PAST the overlay, so "max zoom -> overlay" ran backwards.
+    expect(overlayWidth(vw, vh)).toBeGreaterThan(NODE_W * m.zMax);
+  });
+
+  it.each(DISPLAYS)('%s: never magnifies past the configured font size', (_label, vw, vh) => {
+    const m = canvasMetrics(vw, vh);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, vw, vh, m).scale).toBeLessThanOrEqual(1);
+    // ...and the canvas itself stops short of it, so the overlay is a real rung.
+    expect(m.surfaceScale * m.zMax).toBeLessThan(1);
+  });
+
+  it.each(DISPLAYS)('%s: keeps the host box within its bounds and its aspect', (_label, vw, vh) => {
+    const m = canvasMetrics(vw, vh);
+    expect(m.hostW).toBeGreaterThanOrEqual(MIN_HOST_W);
+    expect(m.hostW).toBeLessThanOrEqual(MAX_HOST_W);
+    // A different aspect letterboxes every node — the host scales into the body by width.
+    expect(m.hostH / m.hostW).toBeCloseTo(HOST_ASPECT, 2);
+    expect(m.surfaceScale * m.focusZoom).toBeCloseTo(1, 9);
+  });
+
+  // The point of the change, stated as the comparison that motivated it.
+  it('gives a 4K display a materially bigger host than a laptop', () => {
+    expect(canvasMetrics(3840, 2120).hostW).toBeGreaterThan(canvasMetrics(1366, 700).hostW * 1.5);
+  });
+
+  it('fills a 1080p display at exactly 1:1', () => {
+    const m = canvasMetrics(1920, 1040);
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, 1920, 1040, m).scale).toBe(1);
+  });
+
+  // The upper bound is a MEMORY budget, not a taste call: every node holds a host for the
+  // session and up to MAX_GPU of them back it with a 4-byte-per-pixel WebGL canvas.
+  it('caps the host on a very large display', () => {
+    expect(canvasMetrics(7680, 4000).hostW).toBe(MAX_HOST_W);
+  });
+
+  // Below the floor the ceiling has to follow the OVERLAY down, not the clamped host — this
+  // is the case where deriving zMax from `hostW` would silently reintroduce the inversion.
+  it('lowers the zoom ceiling when the host box is clamped UP on a small window', () => {
+    const m = canvasMetrics(900, 600);
+    expect(m.hostW).toBe(MIN_HOST_W);                     // clamped up...
+    expect(NODE_W * m.zMax).toBeLessThan(m.hostW);        // ...but the ceiling did not follow
+    expect(overlayWidth(900, 600)).toBeGreaterThan(NODE_W * m.zMax);
+  });
+
+  it('is deterministic — the same display always gives the same box', () => {
+    expect(canvasMetrics(1920, 1040)).toEqual(canvasMetrics(1920, 1040));
+    expect(canvasMetrics(1920, 1040)).toEqual(DEFAULT_METRICS);
+  });
+
+  // A degenerate viewport must not produce a negative or NaN box: CanvasMode evaluates this
+  // during its first render, before layout, so it can legitimately see nonsense.
+  it('survives a degenerate viewport', () => {
+    for (const [w0, h0] of [[0, 0], [-100, -100], [1, 1], [200, 150]]) {
+      const m = canvasMetrics(w0, h0);
+      expect(Number.isFinite(m.hostW)).toBe(true);
+      expect(m.hostW).toBeGreaterThan(0);
+      // At least 1, so a node is always reachable at its natural world size. Rounded from the
+      // fit alone this is 0, and a zero ceiling does not fail loudly — `clampZoom` just pins
+      // the canvas at `Z_MIN` forever, with no way to zoom in.
+      expect(m.zMax).toBeGreaterThanOrEqual(1);
+      // The ladder cannot invert even here, though its rungs may coincide.
+      const w = m.hostW * overlayGeometry({ x: 0, y: 0, z: 1 }, w0, h0, m).scale;
+      expect(w).toBeGreaterThanOrEqual(NODE_W * m.zMax);
+    }
   });
 });

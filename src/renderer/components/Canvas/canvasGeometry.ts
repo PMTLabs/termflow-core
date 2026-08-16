@@ -66,67 +66,97 @@ export function chromeScale(z: number): number {
   return 1 / Math.max(z, Number.EPSILON);
 }
 
-/**
- * The terminal host's CSS-pixel box — the grid the PTY actually gets.
- *
- * DELIBERATELY MUCH LARGER THAN THE NODE'S WORLD BOX, and scaled into it by a CSS transform
- * on the surface alone. The first build sized the host at the node's own
- * `NODE_W x (NODE_H - HEAD_H)` = 340x181, which is about a 40-column grid: the font was not
- * "too big", there was simply almost no terminal beside it, scrollback came back wrapped at
- * 40 columns, and even `Z_MAX` could not reach a usable size. All three were the same fact.
- *
- * `HOST_H` is derived rather than chosen, so the host has the SAME aspect as the node body and
- * scales into it exactly — a mismatch would letterbox every node.
- *
- * **900 was still too small**, for a reason the first fix did not anticipate: this box is also
- * the box the full-screen overlay renders at 1:1, because RC2 allows the session exactly ONE
- * host size. So it has to be sized for the largest thing that shows it, not the smallest — and
- * the overlay is the rung of the ladder that has to be BIGGER than the whole canvas zoomed in
- * (see `FOCUS_ZOOM`). 1600 x 852 is roughly a 195 x 50 grid, and it sets the ladder on a
- * 1920-wide display at about 1440 -> 1600 -> 1900 screen pixels of terminal.
- *
- * **The cost is real and worth stating.** Area per host is 3.2x the original, and every node
- * holds one for the whole canvas session. `MAX_GPU = 12` is unchanged and is what bounds the
- * expensive half; the tier ladder keeps everything else off the paint path. If GPU memory
- * turns out to be the binding constraint on a real machine, this constant is the dial —
- * `tf.check13()` and `tf.check17()` are the measurements that would say so.
- *
- * This does not weaken `012` 6.5 RC2. RC2 requires the host's CSS box to be constant for the
- * session, and it is — constant AND independent of the node's geometry. Only a transform
- * varies, and `getComputedStyle`, `ResizeObserver` and `FitAddon` are all transform-insensitive,
- * so there is still no `fit()`, no `term.resize()` and no SIGWINCH.
- */
-export const HOST_W = 1600;
-export const HOST_H = Math.round(HOST_W * BODY_H / NODE_W);
+/** How much of the canvas the full-screen overlay leaves as a margin, in screen px.
+ *  Declared here rather than beside `overlayGeometry` because `canvasMetrics` sizes the host
+ *  from it, and `DEFAULT_METRICS` runs at module load — a later declaration is a TDZ crash. */
+export const OVERLAY_MARGIN = 28;
+
+/** The host's aspect, fixed by the node body it scales into. A mismatch letterboxes every
+ *  node, so `hostH` is always derived from `hostW` through this and never chosen. */
+export const HOST_ASPECT = BODY_H / NODE_W;
 
 /**
- * What the surface is scaled by to sit inside a node of the DEFAULT width. Nodes set their
- * own `--node-surface-scale` from `rect.w / HOST_W`, which is the same number for an ordinary
- * node and the thing that makes the full-screen overlay fall out for free: an overlaid node
- * is just a node with a much larger world rect, so its surface lands at screen scale 1
- * without a second host, a second engine, or moving any DOM.
+ * Bounds on the host box.
+ *
+ * The lower one keeps a small laptop from getting a terminal too narrow to work in. The upper
+ * one is a MEMORY budget, and it is the reason this is clamped at all: every canvas node holds
+ * a host for the whole session, and up to `MAX_GPU` of them back it with a WebGL canvas whose
+ * backing store is four bytes a pixel. At 2400 x 1277 that is ~12 MB each; letting it track a
+ * 3840-wide display unclamped would be ~30 MB each, ~360 MB of GPU memory for twelve nodes.
  */
-export const SURFACE_SCALE = NODE_W / HOST_W;
+export const MIN_HOST_W = 1100;
+export const MAX_HOST_W = 2400;
+
+/** Everything about a canvas session that depends on the display it opened on. */
+export interface CanvasMetrics {
+  /** The terminal host's CSS-pixel box — the grid the PTY actually gets. */
+  hostW: number;
+  hostH: number;
+  /** What the surface is scaled by to sit inside a DEFAULT-width node at zoom 1. */
+  surfaceScale: number;
+  /** The zoom at which the surface would render 1:1. The canvas stops short of it. */
+  focusZoom: number;
+  /** The canvas zoom ceiling. */
+  zMax: number;
+}
 
 /**
- * The zoom at which the surface would render 1:1 — a real terminal at the user's configured
- * font size.
+ * Size the host box, and the zoom ceiling with it, for the display the canvas opened on.
  *
- * **The canvas deliberately stops short of this**, and that is the whole shape of the feature.
- * There are four sizes a terminal can be seen at, and each is bigger than the last:
+ * **Why this is not a constant.** The host box is also the box the full-screen overlay renders
+ * at 1:1, because `012` §6.5 RC2 allows a session exactly ONE host size. So one number has to
+ * serve a 1366-wide laptop and a 4K panel at once, and it cannot: sized for the 4K, the overlay
+ * renders at half the configured font size on the laptop; sized for the laptop, it uses a
+ * quarter of the 4K and the zoom ceiling with it. A fixed 1600 left 2240 pixels unused on a
+ * 3840-wide display, and broke the size ladder outright below about 1500.
  *
- *     overview  ->  max canvas zoom  ->  the overlay  ->  its own tab
+ * **RC2 still holds**, because "constant" there means constant for the SESSION. This is
+ * evaluated once, before any host is registered, and never again while terminals are relocated
+ * in. Calling it mid-session would change a live terminal's CSS box — a fit, a `term.resize()`
+ * and a SIGWINCH into every ratatui/codex PTY on the canvas. `CanvasMode` freezes it in a
+ * `useState` initialiser for exactly that reason.
  *
- * The canvas is a PREVIEW; 1:1 lives in the overlay, which is near-full-screen and therefore
- * bigger than any node the canvas can show. Letting the canvas reach 1:1 collapsed two rungs
- * of that ladder into one and put the third below the second — zooming all the way in gave a
- * LARGER terminal than opening the overlay, which is backwards.
- *
- * It also happens to be the only zoom at which clicks land on the right cell: xterm 6 does not
- * divide pointer deltas by an ancestor `transform: scale()`. So the two facts agree — the rung
- * you work at is the rung where input is correct, and it is the overlay.
+ * **The ladder falls out rather than being tuned.** `zMax` is 90 % of the zoom at which a node
+ * would render 1:1, and it is derived from what the overlay can ACTUALLY show at scale 1
+ * (`fitW`), not from `hostW` — so when the clamps bite, the ceiling follows the overlay down
+ * and `max canvas zoom < overlay` stays true on every display rather than only on the one this
+ * was tuned for.
  */
-export const FOCUS_ZOOM = HOST_W / NODE_W;
+export function canvasMetrics(vw: number, vh: number): CanvasMetrics {
+  // The largest host that the overlay could show at EXACTLY scale 1 on this display, fitting
+  // both axes — the header is capped at HEAD_H screen pixels up at those zooms.
+  const fitW = Math.max(
+    1,
+    Math.min(vw - OVERLAY_MARGIN * 2, (vh - OVERLAY_MARGIN * 2 - HEAD_H) / HOST_ASPECT),
+  );
+  const hostW = Math.round(Math.min(MAX_HOST_W, Math.max(MIN_HOST_W, fitW)));
+  const hostH = Math.round(hostW * HOST_ASPECT);
+
+  // Derived from the overlay's REAL width, so a clamped host cannot lift the ceiling above
+  // what the overlay can show.
+  const overlayW = Math.min(hostW, fitW);
+  // Floored at 1 so a node can always be reached at its natural world size. `CanvasMode`
+  // evaluates this during its FIRST render, before layout, so it can legitimately be handed a
+  // viewport of nothing — and an unfloored ceiling rounds to 0 there, which does not fail
+  // loudly: `clampZoom` simply returns `Z_MIN` forever and the canvas is frozen at the
+  // overview with no way to zoom in.
+  return {
+    hostW,
+    hostH,
+    surfaceScale: NODE_W / hostW,
+    focusZoom: hostW / NODE_W,
+    zMax: Math.max(1, Math.round((overlayW / NODE_W) * 0.9 * 100) / 100),
+  };
+}
+
+/**
+ * The metrics for an ordinary maximised window on an ordinary 1080p display.
+ *
+ * Exists so pure tests and non-React callers have something to reason about — NOT as a
+ * fallback for a component that forgot to read the session's own metrics. Nothing in the
+ * render path may import this.
+ */
+export const DEFAULT_METRICS = canvasMetrics(1920, 1040);
 
 /* Tier thresholds, in real screen pixels of node width. Raised from 190/105/64/26 after the
    first manual run: the chip tier in particular was small enough to be unreadable. */
@@ -168,19 +198,6 @@ export const MAX_INTERACTIVE = 48;
  *  T_CHIP. At the old 0.08 the smallest legal width was 27.2px — above T_CHIP —
  *  so whole-group collapse could never happen through normal zooming. */
 export const Z_MIN = 0.05;
-/**
- * DERIVED, and deliberately BELOW `FOCUS_ZOOM` — see the ladder described there.
- *
- * The canvas tops out just short of a real terminal, so the overlay is always the bigger,
- * sharper thing to open rather than a step backwards from where you already were. 10 % is
- * enough to be a rung without making the top of the canvas feel small.
- *
- * Derived rather than written down because the relationship is what matters: the first version
- * of this was a hand-kept constant with a comment asking someone to remember it, and it went
- * stale the first time `HOST_W` moved.
- */
-export const Z_MAX = Math.round(FOCUS_ZOOM * 0.9 * 100) / 100;
-
 export function baseTier(effectiveWidth: number): LodTier {
   if (effectiveWidth >= T_GPU) return 'gpu';
   if (effectiveWidth >= T_LIVE) return 'live';
@@ -189,13 +206,22 @@ export function baseTier(effectiveWidth: number): LodTier {
   return 'group';
 }
 
-export function clampZoom(z: number): number {
-  return Math.max(Z_MIN, Math.min(Z_MAX, z));
+/**
+ * `zMax` is REQUIRED, deliberately.
+ *
+ * It used to be a module constant, and became per-session when the host box started being
+ * sized for the display (see `canvasMetrics`). A default here would let any call site keep
+ * compiling while silently clamping to some other display's ceiling — the failure would be a
+ * zoom that stops early on a 4K panel, which looks like a preference rather than a bug. Making
+ * it required means the compiler names every site that has to be told.
+ */
+export function clampZoom(z: number, zMax: number): number {
+  return Math.max(Z_MIN, Math.min(zMax, z));
 }
 
 /** Zoom about a screen point, keeping the world point under it fixed. */
-export function zoomAt(vp: Viewport, factor: number, cx: number, cy: number): Viewport {
-  const z = clampZoom(vp.z * factor);
+export function zoomAt(vp: Viewport, factor: number, cx: number, cy: number, zMax: number): Viewport {
+  const z = clampZoom(vp.z * factor, zMax);
   if (z === vp.z) return vp;
   const k = z / vp.z;
   return { x: cx - (cx - vp.x) * k, y: cy - (cy - vp.y) * k, z };
@@ -213,9 +239,6 @@ export function worldToScreen(vp: Viewport, wx: number, wy: number): { x: number
  *  culling, snapshot polling (Task 10) and the edge mask (Task 18) all agree —
  *  three different answers to "is this on screen?" would flicker against each other. */
 export const CULL_MARGIN = 80;
-
-/** How much of the canvas the full-screen overlay leaves as a margin, in screen px. */
-export const OVERLAY_MARGIN = 28;
 
 export interface OverlayGeometry {
   /** World rect for the overlaid node. Its surface scale is `rect.w / HOST_W` like any
@@ -247,7 +270,7 @@ export interface OverlayGeometry {
  * `will-change: transform` and is therefore a stacking context — a backdrop outside it could
  * never sit between the ordinary nodes and the overlaid one.
  */
-export function overlayGeometry(vp: Viewport, vw: number, vh: number): OverlayGeometry {
+export function overlayGeometry(vp: Viewport, vw: number, vh: number, m: CanvasMetrics): OverlayGeometry {
   const availW = Math.max(1, vw - OVERLAY_MARGIN * 2);
   const availH = Math.max(1, vh - OVERLAY_MARGIN * 2);
   // The header's SCREEN height, which is `HEAD_H` wherever the cap is in force and shrinks
@@ -258,12 +281,12 @@ export function overlayGeometry(vp: Viewport, vw: number, vh: number): OverlayGe
   // without the floor a viewport shorter than the header alone drives the fit term NEGATIVE
   // and hands the node a negative width.
   const scale = Math.max(
-    SURFACE_SCALE,
-    Math.min(1, availW / HOST_W, (availH - headScreenH) / HOST_H),
+    m.surfaceScale,
+    Math.min(1, availW / m.hostW, (availH - headScreenH) / m.hostH),
   );
 
-  const screenW = HOST_W * scale;
-  const screenH = HOST_H * scale + headScreenH;
+  const screenW = m.hostW * scale;
+  const screenH = m.hostH * scale + headScreenH;
   const left = (vw - screenW) / 2;
   const top = (vh - screenH) / 2;
 
@@ -278,7 +301,7 @@ export function overlayGeometry(vp: Viewport, vw: number, vh: number): OverlayGe
     // the CAPPED header back, so the height it is given has to be expressed in those terms or
     // the node renders shorter than the box this function measured — the first version of
     // this did exactly that and the overlay came out ~11% short at high zoom.
-    rect: { x: origin.x, y: origin.y, w: worldW, h: HOST_H * worldW / HOST_W + HEAD_H },
+    rect: { x: origin.x, y: origin.y, w: worldW, h: m.hostH * worldW / m.hostW + HEAD_H },
     backdrop: (() => {
       const a = toWorld(-CULL_MARGIN, -CULL_MARGIN);
       const b = toWorld(vw + CULL_MARGIN, vh + CULL_MARGIN);

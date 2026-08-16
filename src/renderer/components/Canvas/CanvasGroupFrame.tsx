@@ -1,5 +1,6 @@
 import React from 'react';
 import { CanvasGroupModel, counterScale } from './canvasSelectors';
+import { useCanvasMetrics } from './canvasMetricsContext';
 
 /**
  * A tab, drawn as a frame around its terminals — or, once the whole workspace has
@@ -17,13 +18,14 @@ export const CanvasGroupFrame: React.FC<{
   onChipClick?: () => void;
 }> = ({ group, zoom, collapsed, onLabelPointerDown, onChipClick }) => {
   const { x, y, w, h } = group.rect;
+  const { zMax } = useCanvasMetrics();
 
   if (collapsed) {
     return (
       <div
         className="canvas-gchip"
         data-tab-id={group.tabId}
-        style={{ left: x, top: y, transform: `scale(${counterScale(zoom)})`, transformOrigin: '0 0' }}
+        style={{ left: x, top: y, transform: `scale(${counterScale(zoom, zMax)})`, transformOrigin: '0 0' }}
         onClick={onChipClick}
         title={`Zoom in to ${group.title}`}
       >
@@ -40,7 +42,7 @@ export const CanvasGroupFrame: React.FC<{
     <div className="canvas-gframe" data-tab-id={group.tabId} style={{ left: x, top: y, width: w, height: h }}>
       <span
         className="canvas-glabel"
-        style={{ transform: `scale(${counterScale(zoom)})` }}
+        style={{ transform: `scale(${counterScale(zoom, zMax)})` }}
         onPointerDown={onLabelPointerDown}
         title="Drag to move this group and all its terminals"
       >

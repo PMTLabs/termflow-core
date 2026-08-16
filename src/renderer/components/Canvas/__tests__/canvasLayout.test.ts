@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
 import {
   fitGroupFrame, groupAt, arrange, seedNodePosition,
@@ -183,5 +185,65 @@ describe('seedNodePosition', () => {
   it('falls back to the first slot when every candidate is occupied', () => {
     const everything: Rect = { x: -10000, y: -10000, w: 20000, h: 20000 };
     expect(seedNodePosition(frame, [everything])).toEqual({ x: PAD, y: PAD_TOP });
+  });
+});
+
+/**
+ * The frame's top padding only has to clear the part of the label that hangs INSIDE it.
+ *
+ * `.canvas-glabel` straddles the top border like a fieldset legend — `position: absolute;
+ * top: -11px` — so most of it is outside the frame entirely. `PAD_TOP` was 46 against a `PAD`
+ * of 30 on the assumption that a whole label-height band had to be reserved, and the extra
+ * 16px of empty space read as a group pushed away from its own terminals.
+ *
+ * The relationship spans a `.ts` file and a `.css` file, so neither can state it alone: the
+ * stylesheet does not know what `PAD_TOP` is, and the layout module does not know where the
+ * label sits. Restyling the label without revisiting the padding is what this catches.
+ */
+describe('group frame top padding clears the label, and no more', () => {
+  const CSS = fs.readFileSync(
+    path.resolve(__dirname, '../Canvas.css'),
+    'utf8',
+  ).replace(/\/\*[\s\S]*?\*\//g, '');
+
+  const label = (() => {
+    const m = CSS.match(/\.canvas-glabel\s*\{([^}]*)\}/);
+    if (!m) throw new Error('no .canvas-glabel rule — the label moved or was renamed');
+    return m[1];
+  })();
+
+  /** A pixel declaration, matched on the WHOLE property name.
+   *
+   *  Split rather than a built regex: a mis-escaped dynamic pattern matches nothing and the
+   *  assertion around it passes while checking nothing, which has now happened three times in
+   *  this suite's siblings. A split cannot fail that way — it either finds the property or
+   *  returns null, and null is asserted against below. */
+  const px = (prop: string) => {
+    for (const decl of label.split(';')) {
+      const [name, ...rest] = decl.split(':');
+      if (name.trim() !== prop) continue;
+      const m = rest.join(':').trim().match(/^(-?\d+(?:\.\d+)?)px/);
+      return m ? Number(m[1]) : null;
+    }
+    return null;
+  };
+
+  it('reads the label rule it depends on', () => {
+    expect(px('top')).not.toBeNull();
+    expect(px('font-size')).not.toBeNull();
+    // It really is hung on the border, not laid out inside the frame — the whole premise.
+    expect(px('top')!).toBeLessThan(0);
+  });
+
+  it('reserves enough for the half that hangs inside', () => {
+    // Line box ~1.2x the font size, centred on `top`; what intrudes is everything below y=0.
+    const overhang = px('font-size')! * 1.2 + px('top')!;
+    expect(PAD_TOP - PAD).toBeGreaterThanOrEqual(overhang);
+  });
+
+  it('reserves no more than that — the top is not a second, wider margin', () => {
+    // The 46-vs-30 case fails here: it reserved 16px for a ~2px overhang.
+    expect(PAD_TOP - PAD).toBeLessThanOrEqual(px('font-size')!);
+    expect(PAD_TOP).toBeGreaterThan(PAD);
   });
 });

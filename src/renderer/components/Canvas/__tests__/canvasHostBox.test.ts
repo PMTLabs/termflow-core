@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H } from '../canvasGeometry';
+import { NODE_W, NODE_H, HEAD_H } from '../canvasGeometry';
 
 /**
  * Task 9 mounts the live terminal host inside `.canvas-node-body`. Under a
@@ -163,13 +163,43 @@ describe('terminal host box is constant', () => {
       '--canvas-node-w': NODE_W,
       '--canvas-node-h': NODE_H,
       '--canvas-head-h': HEAD_H,
-      '--canvas-host-w': HOST_W,
-      '--canvas-host-h': HOST_H,
     };
+    // ONE static regex over every fallback in the file, then looked up by name. Building a
+    // regex per name reads more naturally and was how this started, but `--canvas-node-w`
+    // is full of regex metacharacters and the escaping went wrong in a way that still
+    // *ran*: the pattern matched nothing, every loop body was skipped, and the assertion
+    // passed while checking nothing at all.
+    const found = [...css.matchAll(/var\((--canvas-[a-z-]+),\s*(\d+)px\)/g)];
+    expect(found.length).toBeGreaterThan(0);
+
     for (const [name, expected] of Object.entries(fallbacks)) {
-      for (const m of css.matchAll(new RegExp(`var\\(${name},\\s*(\\d+)px\\)`, 'g'))) {
-        expect({ name, px: Number(m[1]) }).toEqual({ name, px: expected });
+      // Guards the guard: an entry whose constant went away would compare against
+      // `undefined` and quietly assert nothing. This suite used to carry two such entries
+      // — `--canvas-host-w` and `--canvas-host-h` — and passed for exactly that reason.
+      expect(typeof expected).toBe('number');
+      for (const m of found.filter((x) => x[1] === name)) {
+        expect({ name, px: Number(m[2]) }).toEqual({ name, px: expected });
       }
+    }
+  });
+
+  /**
+   * The HOST variables must carry no literal fallback at all.
+   *
+   * They are the one part of this geometry that is per-SESSION rather than per-app: the host
+   * box is sized for the display the canvas opened on (see `canvasMetrics`), because the same
+   * box is also what the overlay renders at 1:1 and one number cannot serve a 1366-wide laptop
+   * and a 4K panel. A `var(--canvas-host-w, 1600px)` fallback would freeze one display's answer
+   * into the stylesheet — and it would only ever be *used* when the provider was missing, which
+   * is the case where being plausibly wrong is worse than failing.
+   */
+  it('gives the per-session host variables no literal fallback', () => {
+    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    for (const name of ['--canvas-host-w', '--canvas-host-h', '--canvas-surface-scale']) {
+      expect(css).toContain(`var(${name})`);
+      // Substring, not a built regex: the name is full of metacharacters, and a mis-escaped
+      // pattern here would match nothing and pass — the failure mode this suite just had.
+      expect(css).not.toContain(`var(${name},`);
     }
   });
 });
