@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewport } from '../../store/slices/canvasSlice';
@@ -10,7 +10,15 @@ import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
  * intercepted so it keeps its existing meaning (font zoom inside a focused
  * terminal) — see design 010 §4.1.
  */
-export const CanvasViewport: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+export const CanvasViewport: React.FC<{
+  children?: React.ReactNode;
+  /** Reports the viewport's size in CSS pixels. LOD tiers and paint culling are both
+   *  computed against it, so it has to be the real measured box, not the window. */
+  onSize?: (w: number, h: number) => void;
+  /** A pointerdown that landed on the canvas background rather than on any node,
+   *  chip, port or group label. */
+  onBackgroundPointerDown?: () => void;
+}> = ({ children, onSize, onBackgroundPointerDown }) => {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const ref = useRef<HTMLDivElement>(null);
@@ -40,12 +48,35 @@ export const CanvasViewport: React.FC<{ children?: React.ReactNode }> = ({ child
     return () => el.removeEventListener('wheel', onWheel);
   }, [dispatch]);
 
+  // Measure the real box rather than the window: a sidebar (Task 15) makes the two
+  // differ, and every tier decision is keyed on this. `useLayoutEffect` so the first
+  // measurement lands BEFORE paint — a frame reported at 0x0 would put every node
+  // off-screen and briefly demote the whole canvas to `snapshot`.
+  const lastSize = useRef({ w: -1, h: -1 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !onSize) return;
+    const report = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width === lastSize.current.w && r.height === lastSize.current.h) return;
+      lastSize.current = { w: r.width, h: r.height };
+      onSize(r.width, r.height);
+    };
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onSize]);
+
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    if ((e.target as HTMLElement).closest('.canvas-node, .canvas-glabel, .canvas-port')) return;
+    // `.canvas-gchip` is in this list because it is a click target, not background —
+    // omitting it would start a pan on the one gesture that is supposed to fly in.
+    if ((e.target as HTMLElement).closest('.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port')) return;
+    onBackgroundPointerDown?.();
     pan.current = { x: e.clientX - vpRef.current.x, y: e.clientY - vpRef.current.y };
     ref.current?.setPointerCapture(e.pointerId);
     ref.current?.classList.add('panning');
-  }, []);
+  }, [onBackgroundPointerDown]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pan.current) return;

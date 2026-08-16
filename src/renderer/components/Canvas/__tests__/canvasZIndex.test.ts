@@ -38,10 +38,15 @@ function cssFilesUnder(...dirs: string[]): string[] {
   return out;
 }
 
+/** The z-index of `.canvas-mode` specifically. Read out of that rule's own block
+ *  rather than taken as the first declaration in the file — Canvas.css now also
+ *  styles nodes, ports and frames, and "first in the file" would silently start
+ *  measuring one of those the moment a rule is inserted above. */
 const canvasZ = (() => {
-  const z = zIndexesIn(path.join(RENDERER, 'components/Canvas/Canvas.css'));
-  const mode = z[0];
-  return mode;
+  const css = fs.readFileSync(path.join(RENDERER, 'components/Canvas/Canvas.css'), 'utf8');
+  const block = css.match(/\.canvas-mode\s*\{([^}]*)\}/);
+  const z = block?.[1].match(/z-index:\s*(-?\d+)/);
+  return z ? Number(z[1]) : NaN;
 })();
 
 describe('.canvas-mode z-index', () => {

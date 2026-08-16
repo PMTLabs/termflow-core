@@ -57,3 +57,59 @@
   font-size: 13px;
   pointer-events: none;
 }
+
+/* ---- Group frames ------------------------------------------------------- */
+
+.canvas-gframe { position: absolute; border: 1px solid var(--border-color, #3e3e42); border-radius: 9px; background: rgba(255,255,255,.018); }
+.canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; }
+.canvas-gchip { position: absolute; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--border-color, #3e3e42); border-radius: 8px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); white-space: nowrap; cursor: zoom-in; }
+.canvas-gchip-title { font-size: 13px; font-weight: 600; }
+.canvas-gchip-count { font-size: 11px; color: var(--text-secondary, #969696); }
+.canvas-gchip-run { width: 7px; height: 7px; border-radius: 50%; background: var(--tab-running-accent, #3aa6ff); }
+
+/* ---- Nodes -------------------------------------------------------------- */
+
+/* NEVER use `display: none` on .canvas-node or .canvas-node-body. Task 9 mounts the
+   live terminal host inside the body, and under a `display:none` ancestor
+   FitAddon.proposeDimensions() returns a plausible, WRONG {cols:12, rows:6} instead
+   of erroring — three unguarded fit() call sites would then resize the PTY to a
+   bogus grid (`012` §6.5 RC3). Hiding is `visibility`, applied inline by CanvasNode.
+   Ports are exempt: they are siblings of the body, never ancestors of a terminal. */
+.canvas-node { position: absolute; z-index: 2; display: flex; flex-direction: column; border: 1px solid var(--border-color, #3e3e42); border-radius: 7px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); }
+.canvas-node.selected { border-color: var(--accent-color, #007acc); box-shadow: 0 0 0 1px var(--accent-color, #007acc); }
+.canvas-node.focused { border-color: var(--tab-running-accent, #3aa6ff); box-shadow: 0 0 0 2px var(--tab-running-accent, #3aa6ff); z-index: 7; }
+.canvas-node.dimmed { opacity: .26; }
+.canvas-node-head { height: 29px; flex: none; display: flex; align-items: center; gap: 7px; padding: 0 8px; border-bottom: 1px solid var(--border-color, #3e3e42); border-radius: 6px 6px 0 0; background: var(--bg-primary, #141414); font-size: 12px; cursor: move; position: relative; isolation: isolate; overflow: hidden; }
+.canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
+.canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
+/* `min-height: 0` so the chip tier can squeeze this to zero height without the flex
+   auto-minimum forcing the node taller than CHIP_H. */
+.canvas-node-body { flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 6px 6px; background: var(--terminal-background, #0a0a0a); }
+
+/* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
+   not removed, so the terminal host inside it keeps a resolvable layout box. */
+.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: 6px; justify-content: center; cursor: zoom-in; }
+.canvas-node[data-lod="chip"] .canvas-port { display: none; }
+
+/* Identical sweep to the tab strip (TabManager.css:264-324). @keyframes
+   tab-running-sweep is defined there and is global — do not redefine it. */
+.canvas-node.running .canvas-node-head::after {
+  content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  opacity: .42;
+  background-image: linear-gradient(90deg, transparent 0%, transparent 55%, var(--tab-running-accent, #3aa6ff) 78%, transparent 100%);
+  background-size: 160px 100%; background-repeat: repeat-x;
+  animation: tab-running-sweep 1.2s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-node.running .canvas-node-head::after { animation-duration: 2.4s; opacity: .14; }
+}
+
+/* ---- Connection ports --------------------------------------------------- */
+
+.canvas-port { position: absolute; width: 13px; height: 13px; border-radius: 50%; background: var(--bg-primary, #141414); border: 2px solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
+.canvas-node:hover .canvas-port, .canvas-node.selected .canvas-port { opacity: 1; }
+.canvas-port:hover { transform: scale(1.42); background: var(--tab-running-accent, #3aa6ff); }
+.canvas-port.n { top: -7px; left: calc(50% - 6.5px); }
+.canvas-port.e { right: -7px; top: calc(50% - 6.5px); }
+.canvas-port.s { bottom: -7px; left: calc(50% - 6.5px); }
+.canvas-port.w { left: -7px; top: calc(50% - 6.5px); }

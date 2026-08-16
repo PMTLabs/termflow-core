@@ -84,7 +84,12 @@ export function worldToScreen(vp: Viewport, wx: number, wy: number): { x: number
   return { x: wx * vp.z + vp.x, y: wy * vp.z + vp.y };
 }
 
-export function isVisible(vp: Viewport, r: Rect, vw: number, vh: number, margin = 80): boolean {
+/** How far outside the viewport a node still counts as visible. Shared so paint
+ *  culling, snapshot polling (Task 10) and the edge mask (Task 18) all agree —
+ *  three different answers to "is this on screen?" would flicker against each other. */
+export const CULL_MARGIN = 80;
+
+export function isVisible(vp: Viewport, r: Rect, vw: number, vh: number, margin = CULL_MARGIN): boolean {
   const sx = r.x * vp.z + vp.x;
   const sy = r.y * vp.z + vp.y;
   const sw = r.w * vp.z;
