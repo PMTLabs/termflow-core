@@ -6,6 +6,11 @@ import {
   refreshGlyphAtlases,
 } from '../cache';
 import type { TerminalCacheEntry } from '../cache';
+import {
+  countActiveWebGLAddons,
+  getQuarantinedWebGLAddonCount,
+  releaseFromWebGLQuarantine,
+} from '../renderPolicy';
 import { TerminalEngine } from '../TerminalEngine';
 import type { TerminalBridge, Disposable } from '../types';
 
@@ -104,6 +109,20 @@ test('cleanupTerminalCache: a throwing webglAddon.dispose() still tears down the
 
   expect(disposed).toContain('term');
   expect(terminalCache.has('t3')).toBe(false);
+
+  // ...and the addon it could not dispose is QUARANTINED, not dropped (review 136).
+  // This test already arranged the exact failure it needed; up to rev 8 it asserted
+  // only that cleanup survived it, and was blind to the invariant that matters.
+  // Retention — the remedy resetTerminalRendering and disableWebGLGlobally use — is
+  // not available here, because the entry is deleted three statements later.
+  expect(getQuarantinedWebGLAddonCount()).toBe(1);
+  // The COUNT, not the call: a spy on quarantineWebGLAddon would repeat the same
+  // blindness. This is what ORPHAN's `live === reachable + quarantined` asserts, and
+  // it is what a later webglAllowedAtCreation() actually consults.
+  expect(countActiveWebGLAddons()).toBe(1);
+
+  releaseFromWebGLQuarantine(entry.webglAddon);
+  expect(countActiveWebGLAddons()).toBe(0);
 });
 
 test('cleanupTerminalCache disposes protocolDisposables (backlog 003)', () => {

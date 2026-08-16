@@ -6,7 +6,7 @@ import type { Disposable, PromptGate } from './types';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { setWebGLGloballyDisabled } from './webgl';
 // same rule: renderPolicy.ts imports this module back, but only for call-time use
-import { fitIfLaidOut } from './renderPolicy';
+import { fitIfLaidOut, quarantineWebGLAddon } from './renderPolicy';
 
 // Cap on bytes buffered in pendingOutput while a hydration is in flight. The
 // snapshot that ends hydration supersedes older output, so beyond the cap we
@@ -198,7 +198,22 @@ export const cleanupTerminalCache = (terminalId: string) => {
       try {
         cached.webglAddon.dispose();
       } catch (e) {
+        // QUARANTINE, do not drop (review 136, design/013 §5.2 ORPHAN). The addon may
+        // still hold its GPU context, and `terminalCache.delete()` at the end of this
+        // function erases the only reference countActiveWebGLAddons() can see — after
+        // which the context is live, unreachable and uncounted, and the creation gate
+        // is free to allocate on top of it. Every repetition adds another, so the
+        // under-count is UNBOUNDED, not off-by-one: neither the cache cap nor the
+        // budget bounds objects that are no longer in the cache.
+        //
+        // RETENTION — what resetTerminalRendering and disableWebGLGlobally do on the
+        // same failure — is not available here precisely because the entry does not
+        // survive. Transferring ownership to the quarantine is the same remedy
+        // disposeOrphanedWebGLAddon uses for the other entry-destroying path
+        // (mount()'s create-branch replacement), and it keeps ORPHAN's
+        // `live === reachable + quarantined` true across this teardown.
         console.warn(`terminal-core/cache: Error disposing WebGL addon for ${terminalId}:`, e);
+        quarantineWebGLAddon(cached.webglAddon);
       }
     }
 
