@@ -36,10 +36,79 @@ describe('TerminalDisplay relocation wiring', () => {
   // renders EVERY tab, so it would move N xterm constructions onto the pre-paint
   // critical path at app start (§15.2).
   it('keeps the engine effect passive and keyed on terminalId alone', () => {
-    expect(SOURCE).toContain('engine.mount(pane);');
+    // The mount call is now RESULT-CHECKED (review 126): mount() returns whether
+    // it mounted, and a refused mount must not reach attach()/engine.terminal.
+    expect(SOURCE).toContain('if (!engine.mount(pane)) {');
     expect(SOURCE).not.toContain('useLayoutEffect(() => {\n    if (!terminalRef.current)');
     // The engine effect's dep array, unchanged.
     expect(SOURCE).toContain('}, [terminalId]);');
+  });
+
+  // The refusal BODY, not just its guard line (review 153 finding 2).
+  //
+  // `expect(SOURCE).toContain('if (!engine.mount(pane)) {')` above asserts that an `if`
+  // statement's OPENING LINE exists. It asserts nothing about what is inside it: emptying
+  // the block entirely — falling through to engineMounted() and engine.terminal on a mount
+  // that wired nothing — leaves that substring, and both assertions, untouched.
+  //
+  // jsdom cannot mount the real component (CSS imports, @tauri-apps/api/event, a Redux
+  // store, a canvas-backed Terminal.open()), so a source assertion is the ONLY mechanism
+  // that can pin this file's own refusal behaviour. That is a reason to make it assert the
+  // body, not a reason to accept a tripwire that a regression walks straight through.
+  it('handles a refused mount in the block BODY, not just at the guard line', () => {
+    const open = SOURCE.indexOf('if (!engine.mount(pane)) {');
+    expect(open).toBeGreaterThan(-1);
+
+    // Walk to the matching brace, so these assertions cannot silently drift into
+    // code that follows the block.
+    const from = SOURCE.indexOf('{', open);
+    let depth = 0;
+    let end = -1;
+    for (let i = from; i < SOURCE.length; i += 1) {
+      if (SOURCE[i] === '{') depth += 1;
+      else if (SOURCE[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(from);
+
+    // STRIP COMMENTS BEFORE MATCHING (round 8 LOW). Raw `toContain` on source counts text
+    // inside comments, so prefixing the real statements with `//` left every required
+    // substring present and the test green while the refusal branch did nothing at
+    // runtime. That is the same "asserts presence, not behaviour" defect one level down —
+    // found on the correction written to fix the previous instance of it.
+    //
+    // This still cannot prove EXECUTION (a body wrapped in `if (false)` would pass), which
+    // is stated plainly rather than papered over: the real fix is an executable refusal
+    // helper, recorded in `153` as the follow-up.
+    // `[^\n]*` and NO `$` anchor, deliberately. This file is CRLF, and in JavaScript `.`
+    // does not match `\r` — it is a line terminator — so `.*$` never reaches end-of-string
+    // on a CRLF line and the strip silently does nothing. The first version of this fix
+    // had exactly that bug and passed the mutation test it was written to fail.
+    const body = SOURCE.slice(from + 1, end)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((l) => l.replace(/(^|[^:])\/\/[^\n]*/, '$1'))
+      .join('\n');
+
+    // Drops the never-wired engine. Without this the next reader of
+    // `engineRef.current!.terminal` hits a getter that throws.
+    expect(body).toContain('engineRef.current = null');
+    // And returns a cleanup that tears down nothing it never set up.
+    expect(body).toContain('return () => {}');
+    // Hands back the two SINGLE-USE handoffs consumed while the options object was
+    // built, before mount() could refuse. Neither survives being dropped, and a
+    // create-branch refusal is exactly the first-ever-mount case where they are
+    // non-empty (review 153 finding 1).
+    expect(body).toContain('stashPromptGate(terminalId, promptGateHandoff)');
+    expect(body).toContain('markReattachedSession(terminalId)');
+    // The post-mount path must not run on a refusal.
+    expect(body).not.toContain('engineMounted()');
+    expect(body).not.toContain('engine.terminal');
   });
 
   // §4.2.1: the pane is CAPTURED in the effect body and the cleanup uses the
@@ -66,7 +135,7 @@ describe('TerminalDisplay relocation wiring', () => {
   it('bumps the engine generation right after mount()', () => {
     expect(SOURCE).toContain('useSurfaceRelocation');
     expect(SOURCE).toContain('engineMounted();');
-    const mountAt = SOURCE.indexOf('engine.mount(pane);');
+    const mountAt = SOURCE.indexOf('if (!engine.mount(pane)) {');
     const bumpAt = SOURCE.indexOf('engineMounted();');
     expect(mountAt).toBeGreaterThan(-1);
     expect(bumpAt).toBeGreaterThan(mountAt);

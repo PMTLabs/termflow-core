@@ -5,6 +5,8 @@ import type { WebglAddon } from '@xterm/addon-webgl';
 import type { Disposable, PromptGate } from './types';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { setWebGLGloballyDisabled } from './webgl';
+// same rule: renderPolicy.ts imports this module back, but only for call-time use
+import { fitIfLaidOut, quarantineWebGLAddon } from './renderPolicy';
 
 // Cap on bytes buffered in pendingOutput while a hydration is in flight. The
 // snapshot that ends hydration supersedes older output, so beyond the cap we
@@ -31,6 +33,21 @@ export interface TerminalCacheEntry {
   searchAddon: SearchAddon;
   webglAddon: WebglAddon | null;
   useWebGL: boolean;
+  /**
+   * design/013 D6 — bumped by every NON-Canvas write to this terminal's render
+   * policy: Reset Rendering, the global WebGL toggle, and context loss. Canvas's
+   * own reconciliation deliberately does NOT bump it.
+   *
+   * Snapshot/restore records this alongside the Terminal, and restores only when
+   * BOTH still match. Terminal identity alone is not enough (review 124): all
+   * three of those events mutate the policy of the SAME Terminal object, so they
+   * passed an identity check and canvas exit silently promoted a terminal back to
+   * WebGL, undoing the explicit action the snapshot-conflict contract says wins.
+   *
+   * Optional so entries built before this field (and test fixtures) still load;
+   * `?? 0` at both ends makes absent-vs-absent compare equal.
+   */
+  nonCanvasPolicyGeneration?: number;
   hydrating: boolean;
   pendingOutput: string[];
   // Running byte total of pendingOutput (kept in sync by the onData cap logic).
@@ -181,7 +198,33 @@ export const cleanupTerminalCache = (terminalId: string) => {
       try {
         cached.webglAddon.dispose();
       } catch (e) {
+        // QUARANTINE, do not drop (review 136, design/013 §5.2 ORPHAN). The addon may
+        // still hold its GPU context, and `terminalCache.delete()` at the end of this
+        // function erases the only reference countActiveWebGLAddons() can see — after
+        // which the context is live, unreachable and uncounted, and the creation gate
+        // is free to allocate on top of it. Every repetition adds another, so the
+        // under-count is UNBOUNDED, not off-by-one: neither the cache cap nor the
+        // budget bounds objects that are no longer in the cache.
+        //
+        // Quarantine transfer is what EVERY dispose-failure site in this package
+        // does (rev 10): resetTerminalRendering, disableWebGLGlobally,
+        // disposeOrphanedWebGLAddon and loadWebGLAddon's activation cleanup all hand
+        // the addon over and clear their own fields. An earlier version of this
+        // comment described retention as the siblings' behaviour and this site as
+        // the exception; that contrast was inverted after rev 10, and it is what
+        // made the missing null below look intentional. It keeps ORPHAN's
+        // `live === reachable + quarantined` true across this teardown.
         console.warn(`terminal-core/cache: Error disposing WebGL addon for ${terminalId}:`, e);
+        quarantineWebGLAddon(cached.webglAddon);
+        // NULL IT TOO (rev 11, pre-review `140`). Every sibling site does; this one
+        // relied on the `terminalCache.delete()` below to make the field moot. That
+        // is only true if the delete is REACHED — and `cached.terminal.dispose()`
+        // below can throw for real (xterm's AddonManager.dispose() is a bare loop and
+        // the base Disposable re-throws), which would leave the entry alive with a
+        // `webglAddon` that is ALSO in the quarantine. `countActiveWebGLAddons()`
+        // would then count the same addon twice and ORPHAN would break upward.
+        cached.webglAddon = null;
+        cached.useWebGL = false;
       }
     }
 
@@ -231,14 +274,44 @@ export const cleanupTerminalCache = (terminalId: string) => {
       });
     }
 
-    cached.terminal.dispose();
+    // GUARDED like every other teardown step in this function (rev 11, pre-review
+    // `140`). It was the only unguarded one, and it is not merely theoretical:
+    // xterm's AddonManager.dispose() runs a bare loop over the loaded addons and the
+    // base Disposable re-throws, so one failing addon or core disposable propagates
+    // out of here — skipping the delete below and leaving a zombie entry whose
+    // Terminal is disposed but which terminalCache.get() still returns.
+    try {
+      cached.terminal.dispose();
+    } catch (e) {
+      console.warn(`terminal-core/cache: Error disposing terminal for ${terminalId}:`, e);
+    }
+    // Must always run: an entry that survives its own teardown is worse than a leak.
     terminalCache.delete(terminalId);
   }
 };
 
 // Function to reset WebGL for a terminal (recreates without WebGL).
 // Behavior ported from the legacy renderer terminal component.
-export const resetTerminalRendering = (terminalId: string): boolean => {
+//
+// Returns whether the reset SUCCEEDED. `false` means either the id is not cached or
+// the addon's dispose() threw — see the retention comment below.
+/**
+ * @param opts.canvasOwned  Set by Canvas Mode's own policy layer
+ *   (`setTerminalRenderPolicy`), which reuses this as its demotion primitive.
+ *   A canvas-owned demotion must NOT bump `nonCanvasPolicyGeneration`, or canvas
+ *   would invalidate its own snapshot the moment it demoted anything and could
+ *   never restore on exit. Every OTHER caller — the context menu's "Reset
+ *   Rendering", the engine's own reset — is a user/system decision that must win
+ *   over a pending restore, so it bumps (design/013 D6, review 124).
+ */
+export const resetTerminalRendering = (
+  terminalId: string,
+  opts: { canvasOwned?: boolean } = {},
+): boolean => {
+  // Set when the addon's dispose() threw. The reset still HAPPENS — the entry is
+  // cleared, the quarantine takes ownership, the terminal is repainted — but the
+  // caller is told the disposal did not succeed.
+  let disposeFailed = false;
   const cached = terminalCache.get(terminalId);
   if (!cached) return false;
 
@@ -249,21 +322,97 @@ export const resetTerminalRendering = (terminalId: string): boolean => {
     try {
       cached.webglAddon.dispose();
     } catch (e) {
+      // QUARANTINE, do not retain (rev 10, pre-review `138`). dispose() may have
+      // thrown BEFORE releasing the GPU context, so the addon must stay counted —
+      // but review 120's remedy of keeping it ON THE ENTRY was actively unsafe here.
+      //
+      // Retaining leaves `getTerminalRenderPolicy()` reporting 'webgl', and the
+      // reconciler re-derives that on EVERY pass (renderPolicyReconciler's RULE 1
+      // loop) with no memory of the failed attempt. So the very next ordinary
+      // reconciliation called straight back into this function on the SAME addon —
+      // and xterm's AddonManager had already latched `isDisposed` on the first,
+      // throwing call, so the second `dispose()` returned silently. Execution fell
+      // past this catch, nulled the field and reported success, freeing a budget slot
+      // with zero evidence the context was released. The retention comment this
+      // replaces was defeated exactly one pass after it took effect.
+      //
+      // Moving it to the quarantine keeps the count exact (ORPHAN:
+      // `live === reachable + quarantined`), makes the demotion terminal so nothing
+      // retries it, and lets these fields be cleared honestly — the quarantine, not
+      // the entry, now owns the addon.
       console.warn(`terminal-core/cache: Error disposing WebGL during reset:`, e);
+      quarantineWebGLAddon(cached.webglAddon);
+      disposeFailed = true;
     }
+    // Cleared either way, and the function CONTINUES either way (rev 12, pre-review
+    // `142`). Rev 10 added an early `return false` here, which quietly skipped the
+    // generation bump, the refresh and the fit at the tail — on the one path most
+    // likely to need the repaint, since the renderer really did just change. The
+    // sibling site `disableWebGLGlobally` was written to fall through and was
+    // therefore correct; these two performed the same operation with opposite
+    // control flow. `origin/develop` also always fell through: the early return was
+    // introduced by this branch, so this is a regression, not a pre-existing gap.
+    //
+    // Falling through also removes the duplicated bump the early return required.
+    // Bump exactly once, in the tail, for both outcomes — the policy changed either
+    // way, which is what rev 11 established.
     cached.webglAddon = null;
     cached.useWebGL = false;
   }
 
-  // Force a refresh by clearing and re-fitting
+  // design/013 D6 — a NON-Canvas policy change (Reset Rendering, or the engine's
+  // own reset). Bumping invalidates any canvas snapshot taken before it, so
+  // exiting canvas mode cannot silently undo the reset the user explicitly asked
+  // for (review 124). Never bumped for canvas's own demotion — see the canvasOwned
+  // note on the signature.
+  //
+  // OUTSIDE the addon branch (review 126). Bumping only when THIS call disposed an
+  // addon missed the sequence that actually matters: canvas snapshots a WebGL
+  // policy, canvas's own (non-bumping) demotion removes the addon, and the user
+  // then invokes Reset Rendering. The terminal is already on DOM, so the reset had
+  // no addon to dispose, did not bump, and canvas exit restored WebGL over the top
+  // of the explicit reset. The reset is a user decision about the terminal's
+  // renderer whether or not it had anything left to tear down, so it invalidates
+  // the snapshot either way. Reached on BOTH outcomes since rev 12: a dispose that
+  // THREW still clears the addon, so it changes the policy too, and it falls through
+  // to this single bump rather than returning early with one of its own.
+  //
+  // (Rev 12 removed that early return; the sentence describing it survived the edit
+  // and contradicted itself in one breath — "returns above" beside "reached on both
+  // outcomes". False comment #14, and the same shape as the twelve before it: a
+  // correction appended without deleting the claim it corrected. Its live hazard was
+  // that a maintainer trusting it would re-add the early return and reintroduce the
+  // rev-10 regression verbatim.)
+  //
+  // …OR when a canvas-owned demotion FAILED to dispose (rev 15, codex round 7
+  // CRITICAL). `canvasOwned` exists so canvas's own demotion does not invalidate
+  // canvas's own snapshot — correct while the demotion actually released the
+  // context. When the dispose THREW, it did not: the addon is alive in the
+  // quarantine, still counted, and the entry now reports 'dom'. Restoring that
+  // snapshot on canvas exit passes both guards (same Terminal, same generation) and
+  // builds a SECOND addon on top of the first, taking the count 1 -> 2, or 12 -> 13
+  // at the production budget. One disposal fault is enough.
+  //
+  // The generation's real meaning is therefore not "a non-canvas caller changed the
+  // policy" but "restoring this snapshot would now be wrong". A failed canvas-owned
+  // demotion satisfies that, so it bumps too.
+  if (!opts.canvasOwned || disposeFailed) {
+    cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
+  }
+
+  // Force a refresh, then re-fit. The FIT is conditional (design/013 §5.3,
+  // invariant LB): under a display:none ancestor proposeDimensions() returns a
+  // bogus grid rather than an error, so fitting blind here would resize the PTY
+  // to garbage. The refresh itself is always safe and is what makes the renderer
+  // swap visible.
   try {
     cached.terminal.refresh(0, cached.terminal.rows - 1);
-    cached.fitAddon.fit();
   } catch (e) {
     console.warn(`terminal-core/cache: Error during rendering reset:`, e);
   }
+  fitIfLaidOut(cached);
 
-  return true;
+  return !disposeFailed;
 };
 
 // Function to disable WebGL globally and reset all terminals.
@@ -274,12 +423,39 @@ export const disableWebGLGlobally = () => {
 
   // Reset all cached terminals
   terminalCache.forEach((cached, _terminalId) => {
+    // design/013 D6 — the global toggle is a NON-Canvas policy change, so it
+    // invalidates any canvas snapshot (review 124). Bumped for EVERY entry, not
+    // only the ones that still hold an addon (review 126): a terminal canvas has
+    // already demoted has no addon left, yet the toggle is exactly the kind of
+    // global decision that must survive canvas exit — without the bump, exit
+    // restores it straight back to WebGL. Bumped for a dispose() that THREW too
+    // (rev 11): that entry is no longer "still on WebGL" — since rev 10 the failure
+    // path quarantines the addon and clears the fields, so its policy changed like
+    // any other's.
     if (cached.webglAddon) {
+      // design/013 D4: the addon REFERENCE is the source of truth for
+      // countActiveWebGLAddons, so it may never simply be dropped while the context
+      // may still be held — that under-counts the budget in the unsafe direction.
+      // Ownership therefore moves to the QUARANTINE on failure (rev 10), which keeps
+      // it counted; the entry's own fields are cleared either way.
+      //
+      // One failed entry must not stop the rest from being reset, so the loop
+      // continues either way.
       try {
         cached.webglAddon.dispose();
       } catch (e) {
-        // Ignore
+        console.warn('terminal-core/cache: WebGL dispose failed during global disable:', e);
+        // THIRD site of the rev-10 root cause, and re-drivable: `toggleWebGL` in the
+        // context menu lets a user disable, re-enable and disable again. Retaining
+        // the addon here meant the second pass's `dispose()` hit xterm's already-set
+        // `isDisposed` latch, returned silently, and the old `disposed === true`
+        // branch nulled the field — freeing a budget slot for a call that did no
+        // work at all.
+        quarantineWebGLAddon(cached.webglAddon);
       }
+      // Cleared either way: on success the addon is gone, on failure the quarantine
+      // now owns it and still counts it. What must never happen is the field staying
+      // populated for a later pass to "dispose" successfully by doing nothing.
       cached.webglAddon = null;
       cached.useWebGL = false;
 
@@ -290,6 +466,15 @@ export const disableWebGLGlobally = () => {
         // Ignore
       }
     }
+
+    // UNCONDITIONAL (rev 11, pre-review `140`). This used to be skipped when the
+    // dispose threw, on the rationale that such an entry "is still on WebGL, so no
+    // policy change happened". That was true only while the failure path RETAINED
+    // the addon. Rev 10 made it clear the fields — which is precisely what
+    // `getTerminalRenderPolicy` reads — so the policy changes either way, and the
+    // stale skip let canvas exit restore WebGL over an explicit global disable whose
+    // dispose had thrown. Same fix as resetTerminalRendering's THREW branch.
+    cached.nonCanvasPolicyGeneration = (cached.nonCanvasPolicyGeneration ?? 0) + 1;
   });
 };
 

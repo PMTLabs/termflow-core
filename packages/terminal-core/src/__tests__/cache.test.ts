@@ -6,6 +6,11 @@ import {
   refreshGlyphAtlases,
 } from '../cache';
 import type { TerminalCacheEntry } from '../cache';
+import {
+  countActiveWebGLAddons,
+  getQuarantinedWebGLAddonCount,
+  releaseFromWebGLQuarantine,
+} from '../renderPolicy';
 import { TerminalEngine } from '../TerminalEngine';
 import type { TerminalBridge, Disposable } from '../types';
 
@@ -98,12 +103,33 @@ test('cleanupTerminalCache: a throwing webglAddon.dispose() still tears down the
     containerDisposables: [],
   } as unknown as TerminalCacheEntry;
   terminalCache.set('t3', entry);
+  // Captured BEFORE cleanup: rev 11 nulls `entry.webglAddon` on the failure path
+  // like every sibling site, so reading it afterwards would hand `release` a null.
+  const wedged = entry.webglAddon;
 
   // The defensive try/catch around webglAddon.dispose() must not abort cleanup.
   expect(() => cleanupTerminalCache('t3')).not.toThrow();
 
   expect(disposed).toContain('term');
   expect(terminalCache.has('t3')).toBe(false);
+
+  // ...and the addon it could not dispose is QUARANTINED, not dropped (review 136).
+  // This test already arranged the exact failure it needed; up to rev 8 it asserted
+  // only that cleanup survived it, and was blind to the invariant that matters.
+  // Retention — the remedy resetTerminalRendering and disableWebGLGlobally use — is
+  // not available here, because the entry is deleted three statements later.
+  expect(getQuarantinedWebGLAddonCount()).toBe(1);
+  // The COUNT, not the call: a spy on quarantineWebGLAddon would repeat the same
+  // blindness. This is what ORPHAN's `live === reachable + quarantined` asserts, and
+  // it is what a later webglAllowedAtCreation() actually consults.
+  expect(countActiveWebGLAddons()).toBe(1);
+
+  // The entry's own field is cleared too, so nothing can later "dispose" it into a
+  // false success, and a throwing terminal.dispose() cannot leave it double-counted.
+  expect(entry.webglAddon).toBeNull();
+
+  releaseFromWebGLQuarantine(wedged);
+  expect(countActiveWebGLAddons()).toBe(0);
 });
 
 test('cleanupTerminalCache disposes protocolDisposables (backlog 003)', () => {
@@ -319,4 +345,57 @@ test('refreshGlyphAtlases: a throwing addon does not stop the remaining terminal
 
   expect(() => refreshGlyphAtlases()).not.toThrow();
   expect(cleared).toEqual(['good']);
+});
+
+// ---------------------------------------------------------------------------
+// rev 11 (pre-review `140`) — H1: a throwing terminal.dispose() must not strand
+// the entry, and must not leave a quarantined addon double-counted.
+// ---------------------------------------------------------------------------
+
+test('cleanupTerminalCache: a throwing terminal.dispose() still removes the entry', () => {
+  const entry = {
+    terminal: { dispose: () => { throw new Error('test: addon manager threw'); } },
+    fitAddon: {},
+    webglAddon: null,
+    useWebGL: false,
+    hydrating: false,
+    pendingOutput: [],
+    disposables: [],
+    containerDisposables: [],
+  } as unknown as TerminalCacheEntry;
+  terminalCache.set('t-term-throws', entry);
+
+  // Every other teardown step in this function was already isolated; this one was
+  // not, so the throw propagated and skipped the delete below it.
+  expect(() => cleanupTerminalCache('t-term-throws')).not.toThrow();
+  expect(terminalCache.has('t-term-throws')).toBe(false);
+});
+
+test('cleanupTerminalCache: a quarantined addon is not double-counted when terminal.dispose() throws', () => {
+  // BOTH failures at once — the H1 scenario. Before rev 11 the entry survived (the
+  // delete was skipped) still holding `webglAddon`, while the SAME addon sat in the
+  // quarantine: countActiveWebGLAddons() counted it twice and ORPHAN broke upward.
+  const wedged = { dispose: () => { throw new Error('test: driver wedged'); } };
+  const entry = {
+    terminal: { dispose: () => { throw new Error('test: addon manager threw'); } },
+    fitAddon: {},
+    webglAddon: wedged,
+    useWebGL: true,
+    hydrating: false,
+    pendingOutput: [],
+    disposables: [],
+    containerDisposables: [],
+  } as unknown as TerminalCacheEntry;
+  terminalCache.set('t-both-throw', entry);
+  expect(countActiveWebGLAddons()).toBe(1);
+
+  expect(() => cleanupTerminalCache('t-both-throw')).not.toThrow();
+
+  expect(terminalCache.has('t-both-throw')).toBe(false);
+  expect(getQuarantinedWebGLAddonCount()).toBe(1);
+  // ONE, not two. This is the assertion the finding is about.
+  expect(countActiveWebGLAddons()).toBe(1);
+
+  releaseFromWebGLQuarantine(wedged);
+  expect(countActiveWebGLAddons()).toBe(0);
 });

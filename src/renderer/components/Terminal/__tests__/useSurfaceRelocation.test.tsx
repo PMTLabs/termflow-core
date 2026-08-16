@@ -86,6 +86,7 @@ function Harness({
 }: HarnessProps) {
   const paneRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<FakeEngine | null>(null);
+  lastEngineRef = engineRef;
 
   const { engineMounted } = useSurfaceRelocation({
     terminalId,
@@ -104,11 +105,25 @@ function Harness({
     // Stands in for engine.mount(pane). Mirrors mount()'s two DOM steps in order:
     // evict any OTHER engine's surface from this container (detachForeignSurfaces,
     // review 103 F2), then attach ours.
+    //
+    // …and its BOOLEAN, which the real mount() returns (rev 16, test audit `150` H2).
+    // The refusal branch in TerminalDisplay.tsx was pinned only by a substring
+    // tripwire asserting the `if` statement's opening line existed — it asserted
+    // nothing about the body, so emptying the block, or dropping
+    // `engineRef.current = null`, stayed green while production fell straight through
+    // to attach() on a refused mount.
+    if (refuseNextMount) {
+      refuseNextMount = false;
+      console.warn('TerminalDisplay: engine.mount refused; skipping attach/hydration');
+      engineRef.current = null;
+      return () => {};
+    }
     for (const other of engines.values()) {
       if (other !== engine && other.element.parentElement === pane) other.element.remove();
     }
     pane.appendChild(engine.element);
     engine.container = pane;
+    postMountRuns += 1;
     engineMounted();                   // ADDED — the relocation dep (§4.2.1)
     return () => {
       if (nullPaneRefBeforeTeardown) {
@@ -161,6 +176,13 @@ function makeCanvasHost(): HTMLElement {
   document.body.appendChild(wrapper);
   return host;
 }
+
+/** Set by the refusal test: makes the next stand-in mount() report refusal. */
+let refuseNextMount = false;
+/** The Harness's engineRef, exposed so the refusal test can read it after render. */
+let lastEngineRef: { current: FakeEngine | null } = { current: null };
+/** Counts how often the post-mount path ran — must stay 0 on a refusal. */
+let postMountRuns = 0;
 
 describe('design/012 §4.2 — the relocation effect', () => {
   // §13 T15. No registered host => the effect relocates to the PANE, which the
@@ -404,5 +426,46 @@ describe('design/012 §4.2.2 — cleanup identity (H13)', () => {
       .filter((c) => c.kind === 'relocate' && c.engine === 'tb-A');
     expect(aRelocationsAfterB).toEqual([]);
     act(() => { root.unmount(); });
+  });
+});
+
+/**
+ * rev 16, CORRECTED at rev 17 (`152`/`153` finding 2) — read this before trusting it.
+ *
+ * WHAT THIS DOES NOT DO: it does not exercise `TerminalDisplay.tsx`. The refusal logic
+ * below lives in this file's own hand-written `Harness`, gated by the module-level
+ * `refuseNextMount` / `postMountRuns`, which have no connection to the real component —
+ * it cannot be mounted in jsdom (CSS imports, @tauri-apps/api/event, a Redux store, a
+ * canvas-backed `Terminal.open()`), which is why the Harness exists at all.
+ *
+ * So this asserts that a COPY of the production code behaves. rev 16's version of this
+ * comment claimed to be "the RENDERER half of the REFUSAL contract" and criticised the
+ * source tripwire it replaced, while duplicating the code under test — a comment claiming
+ * coverage it does not provide, which is this project's most-repeated defect and was
+ * caught here on the very fix written to close the previous instance of it.
+ *
+ * WHAT ACTUALLY GUARDS THE REAL FILE: the block-body assertion in
+ * terminalDisplayRelocationWiring.test.ts ('handles a refused mount in the block BODY'),
+ * which walks to the matching brace and asserts the statements inside it. Change that one
+ * when the refusal branch changes; this one will not notice.
+ *
+ * WHAT THIS IS STILL WORTH: it pins the SHAPE the hook must survive — that a false return
+ * leaves no engine behind and runs nothing downstream — independently of the source text,
+ * so a rewrite of `TerminalDisplay.tsx` has a behavioural target to aim at.
+ */
+describe('a refused mount leaves the harness with no engine (rev 16, scope corrected rev 17)', () => {
+  it('nulls engineRef and never runs the post-mount path', () => {
+    refuseNextMount = true;
+    postMountRuns = 0;
+    act(() => { root.render(<Harness terminalId="refused-1" />); });
+
+    // The engine must NOT be left dangling for a later consumer to read
+    // `engineRef.current!.terminal` from — that getter throws before a successful
+    // mount ("terminal accessed before mount()").
+    expect(lastEngineRef.current).toBeNull();
+    // …and nothing downstream of the mount ran.
+    expect(postMountRuns).toBe(0);
+    act(() => { root.unmount(); });
+    refuseNextMount = false;
   });
 });

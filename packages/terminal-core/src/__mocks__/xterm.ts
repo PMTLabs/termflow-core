@@ -150,6 +150,36 @@ export class Terminal {
 
   loadAddon(addon: unknown): void {
     this.loadedAddons.push(addon);
+
+    // FAITHFUL TO xterm 6.0.0's AddonManager (pre-review `138`). The real
+    // implementation REPLACES the addon instance's own `.dispose` with a wrapper and
+    // latches `isDisposed` BEFORE invoking the original:
+    //
+    //   loadAddon(e,t){const i={instance:t,dispose:t.dispose,isDisposed:!1};
+    //     this._addons.push(i), t.dispose=()=>this._wrappedAddonDispose(i), t.activate(e)}
+    //   _wrappedAddonDispose(e){ if(e.isDisposed) return;
+    //     ...; e.isDisposed=!0, e.dispose.apply(e.instance), this._addons.splice(t,1) }
+    //
+    // The consequence is the whole point: if the original dispose THROWS, the latch is
+    // already set, so every later dispose() on that instance returns silently — no
+    // work, no exception. Two CRITICALs lived in that gap for nine spec revisions and
+    // six external review rounds precisely because this mock did not model it: every
+    // quarantine/demotion test built plain objects that could throw forever, a
+    // contract no real addon has. A mock that is kinder than reality certifies
+    // behaviour that does not exist.
+    const rec = {
+      instance: addon as { dispose?: () => void },
+      dispose: (addon as { dispose?: () => void }).dispose,
+      isDisposed: false,
+    };
+    if (typeof rec.dispose === 'function') {
+      (addon as { dispose: () => void }).dispose = () => {
+        if (rec.isDisposed) return;
+        rec.isDisposed = true;
+        rec.dispose!.apply(rec.instance);
+      };
+    }
+
     // Real xterm activates the addon with the terminal on load. The search-addon
     // mock uses this to capture the terminal so its findNext can simulate the
     // scroll-to-match side effect that refreshSearch's restore counteracts.
@@ -388,7 +418,46 @@ export class Terminal {
     this.keyHandler = handler;
   }
 
-  dispose(): void {}
+  /**
+   * Cascade to the loaded addons and RE-THROW their errors (rev 16, test audit `150`).
+   *
+   * The real `Terminal.dispose()` chains to `AddonManager.dispose()`, and xterm's
+   * lifecycle helper collects each child's error and re-throws after the sweep — so a
+   * failing addon teardown propagates out of `term.dispose()`. This mock was `{}`,
+   * which made two production guards structurally untestable:
+   *
+   *   - the `try { term.dispose() } catch` around the refused-create teardown in
+   *     `TerminalEngine.mount()`. Delete that catch and NOTHING went red, because the
+   *     mock could not throw. In production the throw would then skip
+   *     `orphanElement.remove()` and the `this.container` restore — leaving a dead
+   *     surface in the pane AND the engine pointing at a container it never committed
+   *     to, which is the exact hazard that catch was written for.
+   *   - the claim that `term.dispose()` disposes the four addons loaded with it, so
+   *     they need no separate teardown. Nothing asserted it and the mock could not
+   *     express it.
+   *
+   * FOURTH instance on this branch of a mock kinder than reality (after the loadAddon
+   * dispose latch, the LB fixture faking the box on the child, and the WebglAddon
+   * emitter surviving disposal).
+   */
+  dispose(): void {
+    const errors: unknown[] = [];
+    for (const addon of this.loadedAddons) {
+      const a = addon as { dispose?: () => void };
+      if (typeof a.dispose !== 'function') continue;
+      try {
+        a.dispose();
+      } catch (e) {
+        errors.push(e);
+      }
+    }
+    // Emptied even when a child threw — same `finally` semantics as DisposableStore.
+    this.loadedAddons.length = 0;
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new Error(`mock: ${errors.length} addon disposals failed; first: ${String(errors[0])}`);
+    }
+  }
 
   // ---- Test helpers (not part of the real xterm API) ----
 

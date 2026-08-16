@@ -54,7 +54,16 @@ const TerminalView: React.FC<TerminalViewProps> = ({ terminalId }) => {
       autoFocus: terminalId === selectedTerminalId,
     });
     engineRef.current = engine;
-    engine.mount(ref.current);
+    // Checked, like TerminalDisplay's (review 126): a refusal leaves the engine as
+    // it was before the call (review 129), and this effect builds a fresh engine
+    // just above — so nothing is wired, attach() would feed an engine with no
+    // terminal and the accessors below would throw. The cache entry survives for a
+    // later mount, and a refused create disposes its own half-built Terminal.
+    if (!engine.mount(ref.current)) {
+      console.warn('TerminalView: engine.mount refused; skipping attach');
+      engineRef.current = null;
+      return () => {};
+    }
     engine.attach(terminalId); // monitor: terminalId === backend processId
     setAtBottom(engine.isScrolledToBottom());
     const scrollPositionDisposable = engine.onScrollPosition(setAtBottom);
