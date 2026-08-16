@@ -32,6 +32,7 @@
     "publish:tauri:pro:alt": "bun run build:sidecars:pro && cross-env CARGO_TARGET_DIR=target-pro-alt tauri build --features velopack-updates --config src-tauri/tauri.pro.conf.json",
     "build:tauri:pro:arm64": "cross-env TERMFLOW_RUST_TARGET=aarch64-pc-windows-msvc bun run build:sidecars:pro && tauri build --no-bundle --features velopack-updates --target aarch64-pc-windows-msvc --config src-tauri/tauri.pro.conf.json",
     "publish:tauri:pro:arm64": "cross-env TERMFLOW_RUST_TARGET=aarch64-pc-windows-msvc bun run build:sidecars:pro && tauri build --features velopack-updates --target aarch64-pc-windows-msvc --config src-tauri/tauri.pro.conf.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest",
     "test:workspace": "bun --filter @termflow/terminal-core test",
     "test:e2e": "playwright test",
