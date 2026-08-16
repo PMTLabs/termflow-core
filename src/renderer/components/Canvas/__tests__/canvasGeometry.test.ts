@@ -1,5 +1,5 @@
 import {
-  baseTier, clampZoom, zoomAt, screenToWorld, isVisible, assignTiers,
+  baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, assignTiers,
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
   Z_MIN, Z_MAX, Viewport, Rect,
 } from '../canvasGeometry';
@@ -198,5 +198,35 @@ describe('assignTiers', () => {
     });
     expect(t['ghost']).toBe('group');
     expect(t['real']).toBe('gpu');
+  });
+});
+
+// The gate noted worldToScreen had no coverage at all — it is the algebraic
+// inverse of screenToWorld, and the pair is what keeps painting (worldStyle's
+// transform) and hit-testing agreeing. A sign error in either is invisible until
+// clicks land on the wrong node.
+describe('screenToWorld / worldToScreen', () => {
+  const viewports: Viewport[] = [
+    { x: 0, y: 0, z: 1 },
+    { x: 37, y: -14, z: 0.65 },
+    { x: -220, y: 480, z: 1.9 },
+    { x: 5, y: 5, z: Z_MIN },
+  ];
+
+  it('round-trips in both directions at every zoom', () => {
+    for (const vp of viewports) {
+      const w = screenToWorld(vp, 321, -47);
+      const s = worldToScreen(vp, w.x, w.y);
+      expect(s.x).toBeCloseTo(321, 6);
+      expect(s.y).toBeCloseTo(-47, 6);
+    }
+  });
+
+  it('matches the transform worldStyle emits: screen = world * z + pan', () => {
+    const vp: Viewport = { x: 37, y: -14, z: 0.65 };
+    expect(worldToScreen(vp, 100, 200)).toEqual({
+      x: 100 * vp.z + vp.x,
+      y: 200 * vp.z + vp.y,
+    });
   });
 });
