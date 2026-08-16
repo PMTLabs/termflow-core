@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { NODE_W, NODE_H, HEAD_H } from '../canvasGeometry';
+import { NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H } from '../canvasGeometry';
 
 /**
  * Task 9 mounts the live terminal host inside `.canvas-node-body`. Under a
@@ -128,7 +128,7 @@ describe('terminal host box is constant', () => {
     const width = body.match(/[^-]width:\s*([^;]+)/)![1];
     const height = body.match(/[^-]height:\s*([^;]+)/)![1];
     for (const value of [width, height]) {
-      expect(value).toContain('var(--canvas-node-');
+      expect(value).toContain('var(--canvas-');
       // A percentage resolves against `.canvas-node-body`, whose height is zero at the
       // chip tier. A bare px literal is a second copy of NODE_W/NODE_H.
       expect(value).not.toMatch(/%/);
@@ -143,7 +143,7 @@ describe('terminal host box is constant', () => {
   it('has every geometry variable it consumes supplied by CanvasMode', () => {
     const css = fs.readFileSync(CANVAS_CSS, 'utf8');
     const consumed = new Set(
-      [...css.matchAll(/var\((--canvas-(?:node|head)-[a-z]+)/g)].map((m) => m[1]),
+      [...css.matchAll(/var\((--canvas-[a-z-]+)/g)].map((m) => m[1]),
     );
     expect(consumed.size).toBeGreaterThan(0);
 
@@ -163,6 +163,8 @@ describe('terminal host box is constant', () => {
       '--canvas-node-w': NODE_W,
       '--canvas-node-h': NODE_H,
       '--canvas-head-h': HEAD_H,
+      '--canvas-host-w': HOST_W,
+      '--canvas-host-h': HOST_H,
     };
     for (const [name, expected] of Object.entries(fallbacks)) {
       for (const m of css.matchAll(new RegExp(`var\\(${name},\\s*(\\d+)px\\)`, 'g'))) {

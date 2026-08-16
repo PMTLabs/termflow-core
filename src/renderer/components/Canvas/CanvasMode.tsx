@@ -7,7 +7,9 @@ import { CanvasViewport, useFlyTo } from './CanvasViewport';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
-import { Rect, assignTiers, NODE_W, NODE_H, HEAD_H } from './canvasGeometry';
+import {
+  Rect, assignTiers, NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H, SURFACE_SCALE, FOCUS_ZOOM,
+} from './canvasGeometry';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -23,6 +25,9 @@ const GEOMETRY_VARS = {
   '--canvas-node-w': `${NODE_W}px`,
   '--canvas-node-h': `${NODE_H}px`,
   '--canvas-head-h': `${HEAD_H}px`,
+  '--canvas-host-w': `${HOST_W}px`,
+  '--canvas-host-h': `${HOST_H}px`,
+  '--canvas-surface-scale': `${SURFACE_SCALE}`,
 } as React.CSSProperties;
 
 /**
@@ -82,10 +87,13 @@ export const CanvasMode: React.FC = () => {
   const focusRaf = useRef<number | null>(null);
   const focusTerminal = useCallback((terminalId: string, rect: Rect) => (e: React.MouseEvent) => {
     if (!(e.target as HTMLElement).closest('.canvas-node-body')) return;
-    // Fly to scale 1 and hand over input only ON ARRIVAL. xterm 6 does not divide pointer
-    // deltas by an ancestor transform, so a click during the flight lands on the wrong
-    // cell — and lifting the gate early is what makes that reachable.
-    flyTo(centreOn(rect, size.w, size.h, 1), () => {
+    // Fly to the 1:1 scale and hand over input only ON ARRIVAL. xterm 6 does not divide
+    // pointer deltas by an ancestor transform, so a click during the flight lands on the
+    // wrong cell — and lifting the gate early is what makes that reachable.
+    //
+    // FOCUS_ZOOM, not 1: the surface is scaled DOWN into the node, so the zoom at which the
+    // terminal renders 1:1 is HOST_W / NODE_W, not unity.
+    flyTo(centreOn(rect, size.w, size.h, FOCUS_ZOOM), () => {
       dispatch(focusNode(terminalId));
       // A frame later, so the gate has lifted with `focused` and the textarea is
       // reachable. Tracked, because leaving Canvas Mode inside that frame would

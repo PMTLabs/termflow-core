@@ -2,6 +2,7 @@ import {
   baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, assignTiers,
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
   Z_MIN, Z_MAX, Viewport, Rect,
+  HEAD_H, HOST_W, HOST_H, SURFACE_SCALE, FOCUS_ZOOM,
 } from '../canvasGeometry';
 
 const rectFor = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
@@ -40,6 +41,40 @@ describe('threshold invariant', () => {
     expect(T_LIVE).toBeGreaterThan(T_SNAP);
     expect(T_SNAP).toBeGreaterThan(T_CHIP);
     expect(NODE_W * Z_MAX).toBeGreaterThan(T_GPU);
+  });
+});
+
+describe('terminal host box', () => {
+  // The host is scaled into the node body, so a different aspect would letterbox every
+  // node — visible as dead bars, and as a terminal that is not the size it claims.
+  it('has the same aspect as the node body it scales into', () => {
+    expect(HOST_H / HOST_W).toBeCloseTo((NODE_H - HEAD_H) / NODE_W, 2);
+  });
+
+  it('scales down to exactly the node body at zoom 1', () => {
+    expect(HOST_W * SURFACE_SCALE).toBeCloseTo(NODE_W, 6);
+    expect(HOST_H * SURFACE_SCALE).toBeCloseTo(NODE_H - HEAD_H, 0);
+  });
+
+  // The reason FOCUS_ZOOM exists. xterm 6 does not divide pointer deltas by an ancestor
+  // transform, so input is correct at exactly ONE zoom — the one where these cancel.
+  it('renders the terminal 1:1 at FOCUS_ZOOM', () => {
+    expect(FOCUS_ZOOM * SURFACE_SCALE).toBeCloseTo(1, 9);
+  });
+
+  // Without this the focus gesture is unreachable: clampZoom would cap the fly-to below
+  // 1:1 and every click in a focused terminal would land on the wrong cell, forever.
+  it('leaves FOCUS_ZOOM inside the legal zoom range', () => {
+    expect(FOCUS_ZOOM).toBeLessThanOrEqual(Z_MAX);
+    expect(FOCUS_ZOOM).toBeGreaterThanOrEqual(Z_MIN);
+    expect(clampZoom(FOCUS_ZOOM)).toBe(FOCUS_ZOOM);
+  });
+
+  // The size complaint this whole box exists to fix. At the old 340px the grid was ~40
+  // columns, which is what made the font look oversized and the scrollback narrow.
+  it('is wide enough to be a real terminal, not a preview', () => {
+    expect(HOST_W).toBeGreaterThanOrEqual(720); // ~85 columns at a default font
+    expect(HOST_W).toBeGreaterThan(NODE_W * 2);
   });
 });
 

@@ -15,16 +15,50 @@ export interface Rect { x: number; y: number; w: number; h: number }
 export const NODE_W = 340;
 export const NODE_H = 210;
 export const CHIP_H = 58;
-/** Height of a node's title bar. Shared with the stylesheet as a CSS variable, because
- *  the terminal host's box is `NODE_W × (NODE_H - HEAD_H)` and that box must be a
- *  CONSTANT for the whole canvas session (`012` §6.5 RC2) — two independent copies of
- *  this number would let a style tweak silently resize a live PTY. */
+/** Height of a node's title bar. Shared with the stylesheet as a CSS variable: the node
+ *  body is `NODE_H - HEAD_H` tall, and HOST_H is derived from that ratio, so a second copy
+ *  of this number in CSS would silently change the terminal's aspect. */
 export const HEAD_H = 29;
 
-export const T_GPU = 190;
-export const T_LIVE = 105;
-export const T_SNAP = 64;
-export const T_CHIP = 26;
+/**
+ * The terminal host's CSS-pixel box — the grid the PTY actually gets.
+ *
+ * DELIBERATELY MUCH LARGER THAN THE NODE'S WORLD BOX, and scaled into it by a CSS transform
+ * on the surface alone. The first build sized the host at the node's own
+ * `NODE_W x (NODE_H - HEAD_H)` = 340x181, which is about a 40-column grid: the font was not
+ * "too big", there was simply almost no terminal beside it, scrollback came back wrapped at
+ * 40 columns, and even `Z_MAX` could not reach a usable size. All three were the same fact.
+ *
+ * `HOST_H` is derived rather than chosen, so the host has the SAME aspect as the node body and
+ * scales into it exactly — a mismatch would letterbox every node.
+ *
+ * This does not weaken `012` 6.5 RC2. RC2 requires the host's CSS box to be constant for the
+ * session, and it now is — constant AND independent of the node's geometry. Only a transform
+ * varies, and `getComputedStyle`, `ResizeObserver` and `FitAddon` are all transform-insensitive,
+ * so there is still no `fit()`, no `term.resize()` and no SIGWINCH.
+ */
+export const HOST_W = 900;
+export const HOST_H = Math.round(HOST_W * (NODE_H - HEAD_H) / NODE_W);
+
+/** What the surface is scaled by to sit inside a node at zoom 1. */
+export const SURFACE_SCALE = NODE_W / HOST_W;
+
+/**
+ * The canvas zoom at which the surface renders 1:1 — a real terminal at the user's configured
+ * font size, which is what a focused node flies to.
+ *
+ * It is a derived value, not a constant: xterm 6 does not divide pointer deltas by an ancestor
+ * `transform: scale()`, so input is only correct at exactly this zoom. `Z_MAX` must stay above
+ * it or focusing a node could never reach a usable state.
+ */
+export const FOCUS_ZOOM = HOST_W / NODE_W;
+
+/* Tier thresholds, in real screen pixels of node width. Raised from 190/105/64/26 after the
+   first manual run: the chip tier in particular was small enough to be unreadable. */
+export const T_GPU = 240;
+export const T_LIVE = 150;
+export const T_SNAP = 96;
+export const T_CHIP = 40;
 
 /** Chromium caps a page near 16 WebGL contexts; stay well under it. */
 export const MAX_GPU = 12;
@@ -59,7 +93,9 @@ export const MAX_INTERACTIVE = 48;
  *  T_CHIP. At the old 0.08 the smallest legal width was 27.2px — above T_CHIP —
  *  so whole-group collapse could never happen through normal zooming. */
 export const Z_MIN = 0.05;
-export const Z_MAX = 1.9;
+/** Must stay above FOCUS_ZOOM (900/340 = 2.65), or a focused node can never reach the 1:1
+ *  scale at which xterm's pointer maths is correct. */
+export const Z_MAX = 2.8;
 
 export function baseTier(effectiveWidth: number): LodTier {
   if (effectiveWidth >= T_GPU) return 'gpu';
