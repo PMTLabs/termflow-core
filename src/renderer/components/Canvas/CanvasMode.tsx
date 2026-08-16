@@ -11,7 +11,8 @@ import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
 import {
-  Rect, assignTiers, overlayGeometry, canvasMetrics, NODE_W, NODE_H, HEAD_H,
+  Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale,
+  NODE_W, NODE_H, HEAD_H,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { centreOn } from './viewportStyles';
@@ -25,13 +26,23 @@ import './Canvas.css';
 /** The node geometry the stylesheet needs, as CSS variables rather than numbers repeated in
  *  Canvas.css. The host half is per-session — see `canvasMetrics` — so this is built from the
  *  frozen metrics rather than being a module constant. */
-const geometryVars = (m: { hostW: number; hostH: number; surfaceScale: number }) => ({
+const geometryVars = (
+  m: { hostW: number; hostH: number; surfaceScale: number },
+  zoom: number,
+) => ({
   '--canvas-node-w': `${NODE_W}px`,
   '--canvas-node-h': `${NODE_H}px`,
   '--canvas-head-h': `${HEAD_H}px`,
   '--canvas-host-w': `${m.hostW}px`,
   '--canvas-host-h': `${m.hostH}px`,
   '--canvas-surface-scale': `${m.surfaceScale}`,
+  // The two counter-scales. Published ONCE at the root rather than inline on every node,
+  // because both are functions of the zoom alone — nothing about them is per-node. That is
+  // also what lets a GROUP FRAME use `--node-chrome-k`: frames are siblings of nodes, not
+  // children, so a node-level variable could never have reached them, and the frame's border
+  // was the one piece of canvas chrome still growing with the zoom.
+  '--node-k': `${headScale(zoom)}`,
+  '--node-chrome-k': `${chromeScale(zoom)}`,
 }) as React.CSSProperties;
 
 /**
@@ -203,7 +214,7 @@ export const CanvasMode: React.FC = () => {
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
-    <div className="canvas-mode" data-testid="canvas-mode" style={geometryVars(metrics)}>
+    <div className="canvas-mode" data-testid="canvas-mode" style={geometryVars(metrics, vp.z)}>
       <CanvasViewport onSize={onSize} onBackgroundPointerDown={clearSelection}>
         {model.groups.map((g) => (
           <CanvasGroupFrame

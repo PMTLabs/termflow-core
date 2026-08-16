@@ -230,33 +230,36 @@ describe('enlarge-on-the-canvas button', () => {
 });
 
 /**
- * The counter-scaled chrome, from the component's side: `Canvas.css` expresses border, rings
- * and ports through `--node-k`, and that only works if the node actually sets it.
- * `canvasNodeChrome.test.ts` owns the stylesheet half; this owns the handoff.
+ * What the NODE still publishes, now that the two counter-scales moved to the root.
+ *
+ * `--node-k` and `--node-chrome-k` are functions of the zoom alone, so `CanvasMode` sets them
+ * once on `.canvas-mode` — which is also what lets a group FRAME read the chrome scale, since
+ * frames are siblings of nodes rather than children. What stays here is the one thing that is
+ * genuinely per-node: the surface scale, which depends on this node's own width and is the
+ * entire implementation of the overlay.
  */
-describe('counter-scale custom properties', () => {
+describe('per-node custom properties', () => {
   const node = () => container.querySelector<HTMLElement>('.canvas-node')!;
 
-  it('publishes --node-k as 1 at and below zoom 1', () => {
-    act(() => {
-      root.render(withMetrics(
-        <CanvasNode node={node0} tier="gpu" zoom={0.4} selected={false} focused={false}
-          dimmed={false} hidden={false} />,
-      ));
-    });
-    expect(node().style.getPropertyValue('--node-k')).toBe('1');
+  const renderAt = (zoom: number) => act(() => {
+    root.render(withMetrics(
+      <CanvasNode node={node0} tier="gpu" zoom={zoom} selected={false} focused={false}
+        dimmed={false} hidden={false} />,
+    ));
   });
 
-  it('publishes the reciprocal above zoom 1, and a surface scale from the node width', () => {
-    act(() => {
-      root.render(withMetrics(
-        <CanvasNode node={node0} tier="gpu" zoom={4} selected={false} focused={false}
-          dimmed={false} hidden={false} />,
-      ));
-    });
-    expect(Number(node().style.getPropertyValue('--node-k'))).toBeCloseTo(0.25, 9);
+  it('publishes a surface scale derived from its own width', () => {
+    renderAt(1);
     expect(Number(node().style.getPropertyValue('--node-surface-scale')))
       .toBeCloseTo(node0.rect.w / DEFAULT_METRICS.hostW, 9);
+  });
+
+  // The zoom-only scales must NOT be duplicated here. Two writers for one value is how they
+  // drift, and the node-level copy is the one that cannot reach a group frame.
+  it('does not also publish the zoom-only scales', () => {
+    renderAt(4);
+    expect(node().style.getPropertyValue('--node-k')).toBe('');
+    expect(node().style.getPropertyValue('--node-chrome-k')).toBe('');
   });
 
   // The header gives up its slack so the BODY never changes world height — the invariant the
@@ -264,12 +267,7 @@ describe('counter-scale custom properties', () => {
   it('shrinks the node by exactly the header slack, never the body', () => {
     const heights: number[] = [];
     for (const zoom of [1, 4]) {
-      act(() => {
-        root.render(withMetrics(
-        <CanvasNode node={node0} tier="gpu" zoom={zoom} selected={false} focused={false}
-            dimmed={false} hidden={false} />,
-      ));
-      });
+      renderAt(zoom);
       heights.push(parseFloat(node().style.height));
     }
     expect(heights[0]).toBeCloseTo(node0.rect.h, 6);

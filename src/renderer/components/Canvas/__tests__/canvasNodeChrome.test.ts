@@ -47,7 +47,9 @@ function ruleFor(selector: string): string {
 const BARE_PX = /(?<![\w-])(\d*\.?\d+)px/g;
 
 /** Custom properties that are themselves defined from `--node-k`, so using one is enough. */
-const COUNTER_SCALED = ['--node-k', '--node-chrome-k', '--node-chrome-w', '--port-size', '--node-radius'];
+const COUNTER_SCALED = [
+  '--node-k', '--node-chrome-k', '--node-chrome-w', '--node-divider-w', '--port-size', '--node-radius',
+];
 
 /**
  * Remove every `calc(...)` / `var(...)` call satisfying `drop`, matching parentheses by
@@ -97,6 +99,11 @@ describe('node chrome is counter-scaled', () => {
     // bug: the rule was right, the set it ran over was too small.
     '.canvas-node-head', '.canvas-node-body',
     '.canvas-node[data-lod="chip"] .canvas-node-head',
+    // A GROUP FRAME is chrome too, and was the last piece still growing with the zoom: at the
+    // working zoom its 1px border drew at 4.2px, so the frame outlined its terminals more
+    // heavily than they outlined themselves. It is a SIBLING of the nodes, not a child, which
+    // is why the scales had to move to `.canvas-mode` before it could read one.
+    '.canvas-gframe',
   ];
 
   it.each(CHROME)('%s uses no unscaled pixel length', (selector) => {
@@ -227,6 +234,18 @@ describe('the node frame is screen-space', () => {
   // The header keeps the CLAMPED scale, and mixing the two up is the easiest mistake here.
   it('keeps the corner radius on the header scale', () => {
     expect(declaration('.canvas-node', '--node-radius')).toContain('var(--node-k');
+  });
+
+  // The outer edge and the inner rule are different jobs and must not share a width: at the
+  // same weight the divider under the title competes with the outline that separates the whole
+  // node from the canvas.
+  it('gives the inner divider its own, lighter width', () => {
+    const outer = declaration('.canvas-node', '--node-chrome-w')!;
+    const inner = declaration('.canvas-node', '--node-divider-w')!;
+    expect(inner).not.toBe(outer);
+    const px = (v: string) => Number(v.match(/(\d+(?:\.\d+)?)px/)![1]);
+    expect(px(inner)).toBeLessThan(px(outer));
+    expect(declaration('.canvas-node-head', 'border-bottom')).toContain('var(--node-divider-w)');
   });
 });
 
