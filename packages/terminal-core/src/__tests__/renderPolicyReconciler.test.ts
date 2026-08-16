@@ -83,16 +83,30 @@ function makeFake(
  *  everything, so a real layout box has to be faked or the LB guard (§5.3) would
  *  skip every fit a promotion issues. The snapshot/restore tests below drive the
  *  REAL setTerminalRenderPolicy against the real cache, unlike the fake-setter
- *  reconciler tests above. */
+ *  reconciler tests above.
+ *
+ *  FAKE IT ON THE HOST, not on the xterm child (rev 13, pre-review `144`).
+ *  `hasLayoutBox`/`fitIfLaidOut` measure `term.element.parentElement` — the host —
+ *  because that is what `FitAddon.proposeDimensions()` reads. This helper faked the
+ *  box on `term.element` itself, so `hasLayoutBox(host)` was FALSE for every entry
+ *  it built and `fitIfLaidOut` took its early return in all ~15 tests below. The
+ *  docstring above was therefore false in the most expensive way: it described the
+ *  guard being satisfied while the code guaranteed it never was.
+ *
+ *  Both sibling files were already patched for exactly this — renderPolicy.test.ts
+ *  carries "Faking it on the xterm CHILD instead is what let review 120's HIGH
+ *  hide", and renderPolicy.convergence.test.ts's `mountAttached` credits review 122
+ *  for the same fix. This file never received it. */
 function makeEntry(key: string) {
   const term = new Terminal();
-  const fitAddon = new FitAddon();
+  const fitAddon = new FitAddon() as FitAddon & { fitCount: number };
   term.loadAddon(fitAddon as never);
   const host = document.createElement('div');
   document.body.appendChild(host);
   term.open(host);
-  Object.defineProperty(term.element!, 'offsetWidth', { value: 800, configurable: true });
-  Object.defineProperty(term.element!, 'offsetHeight', { value: 600, configurable: true });
+  const hostEl = term.element!.parentElement!;
+  Object.defineProperty(hostEl, 'offsetWidth', { value: 800, configurable: true });
+  Object.defineProperty(hostEl, 'offsetHeight', { value: 600, configurable: true });
   terminalCache.set(key, { terminal: term, fitAddon, webglAddon: null, useWebGL: false } as never);
   return { term, fitAddon, entry: terminalCache.get(key)! };
 }
@@ -814,5 +828,102 @@ describe('an uncached candidate must not churn a live context (rev 12)', () => {
     expect(fake.calls).toEqual([['old', 'dom'], ['fresh', 'webgl']]);
     expect(out.applied.fresh).toBe('webgl');
     expect(out.applied.old).toBe('dom');
+  });
+});
+
+/**
+ * rev 13 (pre-review `144`) — the assertion that makes `makeEntry` COVERAGE rather
+ * than merely honest.
+ *
+ * Its box used to be faked on the xterm child instead of the host, so every entry it
+ * built failed `hasLayoutBox` and `fitIfLaidOut` early-returned in all ~15 tests
+ * here — none of which assert on fit, so the whole file stayed green. Fixing the
+ * fixture alone would only stop it lying; without an assertion that a promotion
+ * really issues a fit, a regression that dropped the re-measure after a renderer
+ * swap would still pass this file.
+ */
+describe('the fixture actually satisfies LB (rev 13)', () => {
+  it('a real promotion through this file makeEntry issues exactly one fit', () => {
+    const { fitAddon } = makeEntry('lb-fixture');
+    const fit = fitAddon as FitAddon & { fitCount: number };
+    expect(fit.fitCount).toBe(0);
+
+    // The REAL setTerminalRenderPolicy, not the injected fake — the same path the
+    // snapshot/restore blocks below drive.
+    expect(setTerminalRenderPolicy('lb-fixture', 'webgl')).toBe('webgl');
+
+    // Red before the fixture fix: hasLayoutBox(host) was false, so fitIfLaidOut
+    // returned early and this stayed 0.
+    expect(fit.fitCount).toBe(1);
+  });
+});
+
+/**
+ * rev 13 (pre-review `144`) — H-2. A FAILED promotion must not cost a live context.
+ *
+ * Rev 12 closed this hazard for ids that can NEVER hold a context (uncached —
+ * knowable in advance, hence the getPolicy != null filter). It cannot be closed the
+ * same way for a CACHED id whose promotion fails, because promotion outcomes are not
+ * knowable until attempted. The remedy is on the other end: never hand a freed slot
+ * back to the terminal that was demoted to create it.
+ */
+describe('a failed promotion must not churn the loser it displaced (rev 13)', () => {
+  it('does not dispose-and-rebuild a live context when the winner fails', () => {
+    // `b` holds a live context; `a` outranks it and its promotion will FAIL.
+    const fake = makeFake({ cap: 4, preloaded: ['b'], failOn: ['a'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['a', 'b'],
+      ...fake,
+    });
+
+    // THE ASSERTION — on the CALLS, because the end state was already plausible.
+    // Before the fix: [['b','dom'], ['a','webgl'], ['b','webgl']] — b's working
+    // addon disposed and a brand-new one built (FA), for nothing.
+    expect(fake.calls).toEqual([['b', 'dom'], ['a', 'webgl']]);
+    expect(out.applied.a).toBe('dom');
+    expect(out.applied.b).toBe('dom');
+  });
+
+  it('self-corrects on the next pass, with a construction and no teardown', () => {
+    // The cost of the fix above is one pass of degraded rendering for `b`. Pin that
+    // it really is only one pass — otherwise "no churn" would just be "no service".
+    const fake = makeFake({ cap: 4, preloaded: ['b'], failOn: ['a'] });
+    const input = {
+      desired: { a: 'webgl' as RenderPolicy, b: 'webgl' as RenderPolicy },
+      budget: 1,
+      order: ['a', 'b'],
+      ...fake,
+    };
+
+    reconcileRenderPolicies(input);
+    fake.calls.length = 0;
+
+    const second = reconcileRenderPolicies(input);
+
+    // b is no longer demoted-for-room, the slot is free, so it promotes — ONE
+    // construction, and critically no ['b','dom'] teardown preceding it.
+    expect(fake.calls).toEqual([['a', 'webgl'], ['b', 'webgl']]);
+    expect(second.applied.b).toBe('webgl');
+    expect(second.webglCount).toBe(1);
+  });
+
+  it('still completes a genuine swap when the winner SUCCEEDS', () => {
+    // The guard must not block the case the demote-first rule exists for.
+    const fake = makeFake({ cap: 1, preloaded: ['b'] });
+
+    const out = reconcileRenderPolicies({
+      desired: { a: 'webgl', b: 'webgl' },
+      budget: 1,
+      order: ['a', 'b'],
+      ...fake,
+    });
+
+    expect(fake.calls).toEqual([['b', 'dom'], ['a', 'webgl']]);
+    expect(out.applied.a).toBe('webgl');
+    expect(out.applied.b).toBe('dom');
+    expect(out.webglCount).toBe(1);
   });
 });

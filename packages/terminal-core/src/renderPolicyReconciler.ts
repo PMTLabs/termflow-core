@@ -140,6 +140,9 @@ export function reconcileRenderPolicies(
     wantWebgl.filter((id) => getPolicy(id) !== null).slice(0, slots),
   );
 
+  // Losers demoted in THIS pass purely to free capacity. See the promotion pass.
+  const demotedForRoom = new Set<string>();
+
   // RULE 1: demote first — every requested demotion, PLUS every priority loser that
   // is currently holding a context. Freeing before requesting is what makes the
   // budget reachable at all: reversed, a swap at the boundary fails because the
@@ -161,6 +164,15 @@ export function reconcileRenderPolicies(
       continue;
     }
     applied[id] = setPolicy(id, 'dom');
+    // Remember WHY it was demoted (rev 13, pre-review `144`). A loser gives up its
+    // context only to make room for a higher-priority winner; if that winner then
+    // fails to promote (D7 — driver refusal, global toggle, construction throw), the
+    // slot falls free again and the promotion pass below would hand it straight back
+    // — rebuilding, per FA, a BRAND-NEW addon for the terminal we just tore down.
+    // Net effect: a working context disposed and reallocated for nothing, on a
+    // machine that is by definition already refusing contexts, which is the worst
+    // possible moment to ask for a fresh one.
+    if (isLoser) demotedForRoom.add(id);
   }
 
   // RULE 2/3: promote in priority order, over ALL WebGL candidates — not over a
@@ -182,6 +194,18 @@ export function reconcileRenderPolicies(
     // without the call keeps a full-budget steady state free of churn.
     if (holdsContext(id)) {
       applied[id] = 'webgl';
+      continue;
+    }
+    // Never hand a freed slot back to the terminal that was demoted to create it
+    // (rev 13, pre-review `144`). Reaching here means every higher-priority winner
+    // either succeeded (so there is no spare slot) or FAILED — and in the failure
+    // case re-promoting this id is a pure dispose-then-rebuild of a context it was
+    // already holding when the pass began. Leaving it on DOM for this pass costs one
+    // pass of degraded rendering and self-corrects: on the next reconciliation it is
+    // no longer demoted-for-room, so it promotes from DOM with a single construction
+    // and no teardown.
+    if (demotedForRoom.has(id)) {
+      applied[id] = 'dom';
       continue;
     }
     if (count() >= input.budget) {
