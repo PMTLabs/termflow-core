@@ -3,6 +3,8 @@ import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { RootState } from '../../store';
 import { focusNode, selectNode } from '../../store/slices/canvasSlice';
+import { focusPaneInTab } from '../../store/slices/panesSlice';
+import { setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
@@ -31,9 +33,12 @@ const GEOMETRY_VARS = {
 } as React.CSSProperties;
 
 /**
- * Canvas Mode surface. Rendered as a sibling of the tab-mode terminal container
- * and shown only when `canvas.enabled` — design 010 D1: this is a lens over the
- * same state, so the tab-mode DOM stays mounted underneath.
+ * Canvas Mode surface — the body of the canvas TAB.
+ *
+ * `TerminalContainer` mounts this only while that tab is active, so entering and leaving
+ * the canvas is a tab switch. Every other tab stays mounted (hidden) throughout, which is
+ * what lets terminals be handed back when you switch away. This amends design 010 D1,
+ * which specified a full-surface overlay; see `backlog/007` §4.
  *
  * Every node in the workspace is rendered, and hosts a live terminal, for the whole
  * session regardless of tier or culling — see the note on `CanvasNode` for why that is
@@ -106,10 +111,25 @@ export const CanvasMode: React.FC = () => {
     });
   }, [dispatch, flyTo, size]);
 
+  // Leaving the canvas hands input back. This used to be a side effect of
+  // `setCanvasEnabled(false)`; with the canvas a tab, the mode can be left in ways that
+  // never reach a canvas action at all — a click in the tab strip, Ctrl+Tab, closing the
+  // tab — so the unmount itself is the only reliable place to clear it. A stale
+  // `focusedId` would keep granting a node the `gpu` tier (design 010 D8) from a canvas
+  // nobody is looking at.
   useEffect(() => () => {
     if (focusRaf.current) cancelAnimationFrame(focusRaf.current);
     focusRaf.current = null;
-  }, []);
+    dispatch(focusNode(null));
+  }, [dispatch]);
+
+  // Leave the canvas for the tab this node lives in, with the cursor on its own pane.
+  // `focusPaneInTab` before `setActiveTab`, because the activation path RESTORES the
+  // tab's remembered pane — writing `activePaneId` directly would be overwritten.
+  const openAsTab = useCallback((tabId: string, paneId: string) => () => {
+    dispatch(focusPaneInTab({ tabId, paneId }));
+    dispatch(setActiveTab(tabId));
+  }, [dispatch]);
 
   useEffect(() => {
     if (!focusedId) return;
@@ -153,6 +173,7 @@ export const CanvasMode: React.FC = () => {
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               onDoubleClick={focusTerminal(n.terminalId, n.rect)}
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM))}
+              onOpenAsTab={openAsTab(n.tabId, n.paneId)}
             >
               {/* RC4: mounted for EVERY node, at every tier, for the whole canvas
                   session. The tier ladder and the cull margin decide what a node

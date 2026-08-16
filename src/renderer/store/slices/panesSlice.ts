@@ -389,6 +389,26 @@ const panesSlice = createSlice({
     },
 
     /**
+     * Focus a pane in a tab that is not necessarily the active one.
+     *
+     * `focusPane` alone cannot express this. It writes `activePaneId`, which belongs to
+     * whichever tab is active NOW — and `setActiveTabId` overwrites it on arrival from
+     * `activePaneByTabId`. So dispatching `focusPane` either side of a tab switch is
+     * clobbered: before, because the switch restores the remembered pane; after, because
+     * TerminalContainer's activation effect runs a commit later and does the same.
+     *
+     * Writing the REMEMBERED pane is what survives, in either order. Canvas Mode's
+     * "open in its tab" affordance needs exactly that — the node you clicked names a
+     * pane in a tab you are not on yet.
+     */
+    focusPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId: string }>) => {
+      const { tabId, paneId } = action.payload;
+      if (!findLeaf(state.treesByTabId[tabId] ?? null, paneId)) return;
+      state.activePaneByTabId[tabId] = paneId;
+      if (state.activeTabId === tabId) state.activePaneId = paneId;
+    },
+
+    /**
      * Rename a pane in a specific tab. `tabId` is optional and defaults to the
      * active tab, so every existing caller (TerminalPane.handleNameSave) keeps
      * working unchanged.
@@ -693,6 +713,7 @@ export const {
   resizePane,
   resizeFocusedPane,
   focusPane,
+  focusPaneInTab,
   renamePanes,
   setPaneTree,
   resetPanes,

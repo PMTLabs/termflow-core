@@ -253,3 +253,56 @@ describe('allCollapsed', () => {
     expect(allCollapsed([], tiers({}))).toBe(false);
   });
 });
+
+/**
+ * The canvas projects TABS into group frames, and not every tab is a workspace. Settings
+ * and the canvas tab itself are screens: they own no pane tree, so they fall into the
+ * leaf-less branch — and that branch keeps drawing a frame for anything with a stored
+ * rect, so a stale geometry entry puts an empty group on the canvas and the canvas draws
+ * a frame for itself.
+ */
+describe('buildCanvasModel — virtual tabs are not workspaces', () => {
+  const withScreens = () => {
+    const s = stateWith();
+    s.tabs.tabs.push(
+      { id: 'tb-settings', title: 'Settings', shellType: 'settings', isActive: false },
+      { id: 'tb-canvas', title: 'Canvas', shellType: 'canvas', isActive: false },
+    );
+    return s;
+  };
+
+  it('draws no group for a settings or canvas tab', () => {
+    const m = buildCanvasModel(withScreens());
+    expect(m.groups.map((g) => g.tabId).sort()).toEqual(['tb-a', 'tb-b']);
+    expect(m.nodes.map((n) => n.tabId)).not.toContain('tb-canvas');
+  });
+
+  // The teeth: a stored rect is exactly what the leaf-less branch acts on, so without the
+  // skip this is the case that puts a phantom frame on the canvas. Asserted separately
+  // from the case above, which would pass on the "no tree" accident alone.
+  it('draws no group even when one has a stored rect from an earlier session', () => {
+    const s = withScreens();
+    s.canvas.groups = {
+      'tb-canvas': { x: 0, y: 0, w: 400, h: 300 },
+      'tb-settings': { x: 500, y: 0, w: 400, h: 300 },
+    };
+    const m = buildCanvasModel(s);
+    expect(m.groups.map((g) => g.tabId).sort()).toEqual(['tb-a', 'tb-b']);
+  });
+});
+
+/**
+ * `paneId` is what "open in its tab" puts the cursor on. A node knows its TAB from the
+ * projection loop, but a split tab has several panes and landing on the wrong one is
+ * invisible until you type into it.
+ */
+describe('buildCanvasModel — every node carries its pane', () => {
+  it('carries the pane leaf id, distinct per node within one tab', () => {
+    const m = buildCanvasModel(stateWith());
+    const byTerminal = Object.fromEntries(m.nodes.map((n) => [n.terminalId, n.paneId]));
+    expect(byTerminal).toEqual({ 'tb-a': 'pn-2', 'tm-2': 'pn-3', 'tb-b': 'pn-4' });
+    // Not the terminalId under another name, and not the tab's id: on the solo-root tab
+    // 'tb-b' those two are equal to each other but must both differ from the pane.
+    expect(byTerminal['tb-b']).not.toBe('tb-b');
+  });
+});

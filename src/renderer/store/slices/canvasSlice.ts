@@ -20,8 +20,16 @@ export interface CanvasPersisted {
   sidebarWidth: number;
 }
 
+/**
+ * Note what is NOT here: an `enabled` flag.
+ *
+ * Canvas Mode is a tab (`shellType === 'canvas'`, see `services/openCanvas.ts`), so
+ * "is the canvas showing" is already a fact of `tabs` — `activeTab.shellType`. Keeping a
+ * second copy of it here would be two sources of truth for one boolean, and every path
+ * that switches tabs without going through the canvas helpers (a click in the strip,
+ * Ctrl+Tab, closing the tab, session restore) would be a path that could desync them.
+ */
 export interface CanvasState extends CanvasPersisted {
-  enabled: boolean;
   /** Mirror of the backend edge table; never persisted renderer-side. */
   edges: CanvasEdge[];
   selectedId: string | null;
@@ -35,7 +43,6 @@ export const SIDEBAR_MIN = 168;
 export const SIDEBAR_MAX = 480;
 
 const initialState: CanvasState = {
-  enabled: false,
   viewport: { x: 0, y: 0, z: 1 },
   nodes: {},
   groups: {},
@@ -57,15 +64,6 @@ const canvasSlice = createSlice({
   name: 'canvas',
   initialState,
   reducers: {
-    setCanvasEnabled: (state, action: PayloadAction<boolean>) => {
-      state.enabled = action.payload;
-      // Focus is a canvas-only concept; leaving the mode must hand input back.
-      if (!action.payload) state.focusedId = null;
-    },
-    toggleCanvasMode: (state) => {
-      state.enabled = !state.enabled;
-      if (!state.enabled) state.focusedId = null;
-    },
     setViewport: (state, action: PayloadAction<Viewport>) => {
       state.viewport = action.payload;
     },
@@ -121,8 +119,10 @@ const canvasSlice = createSlice({
       if (state.selectedId && !liveNodes.has(state.selectedId)) state.selectedId = null;
       if (state.focusedId && !liveNodes.has(state.focusedId)) state.focusedId = null;
     },
-    /** Restore persisted geometry. Deliberately does NOT restore `enabled` or
-     *  `focusedId` — the app always boots in tab mode. */
+    /** Restore persisted geometry. Deliberately does NOT restore `focusedId`: whether the
+     *  canvas is on screen at boot is decided by the restored TAB list, and a node that
+     *  was holding keystrokes in the last session must not silently hold them again
+     *  before the user has looked at it. */
     hydrateCanvas: (state, action: PayloadAction<Partial<CanvasPersisted>>) => {
       const p = action.payload;
       if (p.viewport) state.viewport = p.viewport;
@@ -135,7 +135,7 @@ const canvasSlice = createSlice({
 });
 
 export const {
-  setCanvasEnabled, toggleCanvasMode, setViewport, setNodeGeom, setGroupGeom,
+  setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;

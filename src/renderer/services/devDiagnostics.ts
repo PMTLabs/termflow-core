@@ -25,8 +25,7 @@ import {
   getTerminalRenderPolicy,
   getCanvasWebGLBudget,
 } from '@termflow/terminal-core';
-import { store } from '../store';
-import { setCanvasEnabled } from '../store/slices/canvasSlice';
+import { openCanvasTab, leaveCanvasTab } from './openCanvas';
 
 export interface CheckResult {
   check: string;
@@ -68,9 +67,9 @@ function contextCensus(): number {
 /** Enter and leave Canvas Mode `times` times, letting each settle. */
 async function cycleCanvas(times: number, settleMs = 400): Promise<void> {
   for (let i = 0; i < times; i++) {
-    store.dispatch(setCanvasEnabled(true));
+    openCanvasTab();
     await sleep(settleMs);
-    store.dispatch(setCanvasEnabled(false));
+    leaveCanvasTab();
     await sleep(settleMs);
   }
 }
@@ -260,12 +259,12 @@ export async function check18(terminalId?: string): Promise<CheckResult> {
   }
   const before = entry.terminal.buffer.active.length;
 
-  store.dispatch(setCanvasEnabled(true));
+  openCanvasTab();
   // Same tick as the relocation the line above triggers.
   const { setTerminalRenderPolicy } = await import('@termflow/terminal-core');
   setTerminalRenderPolicy(pick!, getTerminalRenderPolicy(pick!) === 'webgl' ? 'dom' : 'webgl');
   await sleep(1200);
-  store.dispatch(setCanvasEnabled(false));
+  leaveCanvasTab();
   await sleep(600);
 
   const after = terminalCache.get(pick!)?.terminal.buffer.active.length ?? 0;
@@ -313,12 +312,12 @@ export async function all(): Promise<CheckResult[]> {
   results.push(await check6());
   results.push(await check13());
   results.push(await check19());
-  store.dispatch(setCanvasEnabled(true));
+  openCanvasTab();
   await sleep(800);
   results.push(check15());
   results.push(check17());
   results.push(await check16());
-  store.dispatch(setCanvasEnabled(false));
+  leaveCanvasTab();
   await sleep(400);
   results.push(await check18());
 

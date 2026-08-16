@@ -4,6 +4,7 @@ import reducer, {
   splitPaneInTab,
   closePane,
   focusPane,
+  focusPaneInTab,
   resizeFocusedPane,
   setActiveTabId,
   addTabTree,
@@ -645,5 +646,70 @@ describe('renamePanes tab scoping', () => {
     expect(unknownTab.treesByTabId['tb-alpha'].name).toBe('alpha');
     const unknownPane = reducer(before, renamePanes({ paneId: 'pn-nope', name: 'x' }));
     expect(unknownPane.treesByTabId['tb-alpha'].name).toBe('alpha');
+  });
+});
+
+/**
+ * `focusPaneInTab` exists because `focusPane` cannot express "focus a pane in a tab I am
+ * not on yet", and Canvas Mode's "open in its tab" affordance needs exactly that.
+ *
+ * `activePaneId` belongs to whichever tab is active NOW, and `setActiveTabId` overwrites
+ * it on arrival from `activePaneByTabId`. So `focusPane` either side of a tab switch is
+ * clobbered: before, by that restore; after, because TerminalContainer's activation effect
+ * runs a commit later and restores again. Writing the REMEMBERED pane is what survives —
+ * which makes these tests about ORDER INDEPENDENCE, not about one write.
+ */
+describe('focusPaneInTab', () => {
+  const twoPaneTab = (): PaneNode => ({
+    id: 'pn-root', type: 'split', direction: 'horizontal', children: [
+      leaf('pn-left', 'tm-l'), leaf('pn-right', 'tm-r'),
+    ],
+  });
+
+  const seeded = () => {
+    let s = reducer(init(), addTabTree({ tabId: 'tb-target', tree: twoPaneTab() }));
+    s = reducer(s, addTabTree({ tabId: 'tb-here', tree: leaf('pn-here', 'tm-h') }));
+    return reducer(s, setActiveTabId('tb-here'));
+  };
+
+  it('survives the tab switch that follows it', () => {
+    let s = reducer(seeded(), focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-right' }));
+    // Still on the other tab: the ACTIVE pane must not have moved yet.
+    expect(s.activePaneId).toBe('pn-here');
+
+    s = reducer(s, setActiveTabId('tb-target'));
+    expect(s.activePaneId).toBe('pn-right');
+  });
+
+  // Without this, the reducer could satisfy the case above by writing `activePaneId` and
+  // getting lucky with ordering. The `firstLeafId` fallback in `setActiveTabId` would
+  // otherwise land on 'pn-left' here.
+  it('is what makes the difference — plain focusPane is discarded by the switch', () => {
+    let s = reducer(seeded(), focusPane('pn-right'));
+    s = reducer(s, setActiveTabId('tb-target'));
+    expect(s.activePaneId).toBe('pn-left');
+  });
+
+  it('also moves the cursor immediately when the tab is already active', () => {
+    let s = reducer(seeded(), setActiveTabId('tb-target'));
+    s = reducer(s, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-right' }));
+    expect(s.activePaneId).toBe('pn-right');
+    expect(s.activePaneByTabId['tb-target']).toBe('pn-right');
+  });
+
+  // A canvas node can name a pane that has just been closed — the projection is a render
+  // behind the store. Remembering a dead pane id would make the tab open on nothing,
+  // because `setActiveTabId` only falls back when the remembered pane is absent.
+  it('ignores a pane that is not in that tab', () => {
+    const base = seeded();
+    const unknownPane = reducer(base, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-gone' }));
+    expect(unknownPane.activePaneByTabId['tb-target']).toBeUndefined();
+
+    // ...including one that exists, but in a DIFFERENT tab.
+    const wrongTab = reducer(base, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-here' }));
+    expect(wrongTab.activePaneByTabId['tb-target']).toBeUndefined();
+
+    const unknownTab = reducer(base, focusPaneInTab({ tabId: 'tb-nope', paneId: 'pn-right' }));
+    expect(unknownTab.activePaneByTabId['tb-nope']).toBeUndefined();
   });
 });

@@ -48,7 +48,7 @@ export const GlobalDialog: React.FC = () => {
   // Portalled to <body> for the same reason ConfirmDialog is: an overlay cannot escape an
   // ancestor stacking context, so rendering in place makes its z-index worth only whatever
   // its caller's ancestors allow. Found by the derived test in
-  // components/Canvas/__tests__/canvasZIndex.test.ts after exactly that trapped the tab-close
+  // components/Canvas/__tests__/canvasStacking.test.ts after exactly that trapped the tab-close
   // confirmation behind Canvas Mode.
     return createPortal(
         <div className="global-dialog-overlay" onClick={handleClose}>

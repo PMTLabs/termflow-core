@@ -22,6 +22,7 @@ import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { resolveTabProcessIds, renameTabProcesses } from '../../services/tabProcessIds';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
+import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
 import { getCachedIcon, loadIcon } from '../../services/binaryIcons';
 import './TabManager.css';
@@ -571,15 +572,15 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   // Open the confirm for a close action. Computes the affected tabs, then fetches
   // their real running processes in the background.
   const handleCloseRequestKind = useCallback((tabId: string, kind: CloseKind) => {
-    // The Settings screen is a process-less tab: a clean one has nothing to
-    // confirm, so close it immediately; a dirty one is gated only by its own
-    // unsaved-changes guard (Save/Discard/Cancel). Either way it must never show
-    // the process-confirmation dialog. Single-tab close only — a batch close
-    // (others/right/left) that happens to include Settings falls through.
+    // Settings and Canvas are process-less tabs: neither can kill anything, so neither
+    // must ever show the process-confirmation dialog — it would list nothing. Settings
+    // additionally routes through its own unsaved-changes guard (Save/Discard/Cancel);
+    // the canvas has no such state, so it just closes. Single-tab close only — a batch
+    // close (others/right/left) that happens to include one of them falls through.
     if (kind === 'single') {
-      const settingsTab = store.getState().tabs.tabs.find((t) => t.id === tabId);
-      if (settingsTab?.shellType === 'settings') {
-        if (runSettingsGuard(() => closeOneTab(tabId))) return;
+      const target = store.getState().tabs.tabs.find((t) => t.id === tabId);
+      if (isVirtualTab(target?.shellType)) {
+        if (target?.shellType === SETTINGS_SHELL_TYPE && runSettingsGuard(() => closeOneTab(tabId))) return;
         closeOneTab(tabId);
         return;
       }

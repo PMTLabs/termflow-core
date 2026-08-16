@@ -35,10 +35,12 @@ export const CanvasNode: React.FC<{
   onHeaderPointerDown?: (e: React.PointerEvent) => void;
   onDoubleClick?: (e: React.MouseEvent) => void;
   onChipClick?: () => void;
+  /** Leave the canvas for this terminal's own tab. */
+  onOpenAsTab?: () => void;
   children?: React.ReactNode;
 }> = ({
   node, tier, zoom, selected, focused, dimmed, hidden,
-  onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, children,
+  onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, children,
 }) => {
   const isChip = tier === 'chip';
   const { x, y, w, h } = node.rect;
@@ -68,6 +70,23 @@ export const CanvasNode: React.FC<{
       >
         <span className="canvas-node-title">{node.title}</span>
         {!isChip && <span className="canvas-node-shell">{node.shellType}</span>}
+        {!isChip && onOpenAsTab && (
+          // Every handler here stops propagation, and each one is stopping a DIFFERENT
+          // gesture the node itself owns: pointerdown selects (and, from Task 12, starts a
+          // drag), click would bubble to the chip handler, and dblclick flies to focus.
+          // Leaving any of them un-stopped makes the button do two things at once.
+          <button
+            type="button"
+            className="canvas-node-open"
+            title="Open in its tab"
+            aria-label={`Open ${node.title} in its tab`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onOpenAsTab(); }}
+          >
+            ⧉
+          </button>
+        )}
       </div>
       <div className="canvas-node-body">{children}</div>
       <span className="canvas-port n" data-port="n" />

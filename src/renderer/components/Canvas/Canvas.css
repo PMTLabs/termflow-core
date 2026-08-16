@@ -1,41 +1,24 @@
-/* `.app-body` is `flex:1; overflow:hidden` with NO position, so an absolutely
-   positioned child would anchor to `.app` and cover the title bar — burying the
-   tab strip and the window controls. The tab strip must stay visible in Canvas
-   Mode (design 010 D9), so establish the containing block here. */
-.app-body { position: relative; }
+/* Canvas Mode is a TAB, not an overlay (backlog/007 §4). It fills `.tab-content`,
+   which is already `position: absolute; inset: 0` inside `.terminal-container`.
 
-/* Canvas Mode — overlays the tab-mode terminal container without unmounting it,
-   so terminals can be handed back and forth (design 010 §4.3).
+   NOTE WHAT IS GONE: the z-index. As an overlay this element sat at 900 and that number
+   was a genuine cross-file invariant — the tab-mode DOM stayed mounted and painting
+   underneath, so every floating widget a terminal owns (ScrollToBottomButton at 6,
+   TerminalSearchBar at 10, CommandSuggestPopup at 30) competed with the canvas directly,
+   and `.terminal-display`'s `isolation: isolate` did not contain them because they are
+   its SIBLINGS.
 
-   THE Z-INDEX IS AN INVARIANT, NOT A PREFERENCE. Because the tab-mode DOM stays
-   mounted underneath, every floating widget it owns competes with this overlay
-   directly: .terminal-display's `isolation: isolate` does NOT contain them, since
-   ScrollToBottomButton (6), TerminalSearchBar (10) and CommandSuggestPopup (30)
-   are SIBLINGS of .terminal-display inside .terminal-display-wrapper — which is
-   `position: relative` with no z-index, as is .terminal-pane-content (whose own
-   comment says it is deliberately not a stacking context). At the original
-   z-index 5 a scroll-to-bottom button left over from tab mode painted on top of
-   the canvas and stayed clickable.
-
-   So this sits ABOVE every floating widget the terminal subtree owns (the three
-   above, plus the pane header at 8 and the agent chip at 5 — all <= 30) and BELOW
-   the 1000-level menu/popup tier. Below is deliberate: the tab strip stays live in
-   Canvas Mode (design 010 D9) and TitleBar/TabContextMenu/TabRenamePopup/
-   ShellSelector/SplitButton all open at 1000 into the body area. Raising this into
-   the low thousands would fix the leak and bury those instead.
-
-   900 leaves 31-899 free for canvas-owned chrome. This element creates a stacking
-   context, so canvas descendants stack INSIDE it and cannot leak out.
-
-   The invariant is pinned by canvasZIndex.test.ts, which DERIVES both bounds from
-   the real stylesheets rather than repeating the numbers — add a widget anywhere in
-   Terminal/ or Panes/ above 900 and that test fails. */
+   None of that is reachable now. An inactive tab is `opacity: 0` — which both makes its
+   whole subtree fully transparent and gives it its own stacking context — so no widget
+   in another tab can paint over the canvas at any z-index. Adding one back here would be
+   re-solving a problem that no longer exists, and it would create a stacking context that
+   traps canvas-owned chrome. `canvasStacking.test.ts` derives the replacement invariant
+   from TerminalContainer.css. */
 .canvas-mode {
   position: absolute;
   inset: 0;
   display: flex;
   background: var(--bg-primary, #141414);
-  z-index: 900;
 }
 .canvas-viewport {
   flex: 1;
@@ -140,6 +123,26 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .canvas-node.running .canvas-node-head::after { animation-duration: 2.4s; opacity: .14; }
+}
+
+/* "Open in its tab" — the escape hatch from the overview back to a normal terminal.
+   Sized off the head height so it cannot force the header taller than HEAD_H, which the
+   node geometry depends on. */
+.canvas-node-open {
+  flex: none; position: relative; z-index: 1;
+  width: 18px; height: 18px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--text-tertiary, #666666);
+  font-size: 11px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity .13s ease, color .13s ease, border-color .13s ease;
+}
+.canvas-node:hover .canvas-node-open,
+.canvas-node.selected .canvas-node-open,
+.canvas-node-open:focus-visible { opacity: 1; }
+.canvas-node-open:hover {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--border-color, #3e3e42);
 }
 
 /* ---- Connection ports --------------------------------------------------- */

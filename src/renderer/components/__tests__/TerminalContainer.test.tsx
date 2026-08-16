@@ -36,6 +36,12 @@ jest.mock('../TerminalContainer.css', () => ({}));
 jest.mock('../Settings/SettingsPage', () => ({
   SettingsPage: () => null,
 }));
+// Stubbed for the same reason as PaneManager: this file is about which SHELL
+// TerminalContainer picks per tab, not about what the canvas draws. The stub records
+// its own mount so the canvas-tab cases below can assert on it.
+jest.mock('../Canvas/CanvasMode', () => ({
+  CanvasMode: () => <div data-testid="canvas-mode" />,
+}));
 jest.mock('../Panes/PaneManager', () => ({
   PaneManager: (props: any) => (
     <div data-testid={`pane-manager-${props.tabId}`} data-terminal-id={props.paneTree?.terminalId} />
@@ -153,5 +159,95 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     const el = container.querySelector(`[data-testid="pane-manager-${tabId}"]`);
     expect(el).not.toBeNull();
     expect(el?.getAttribute('data-terminal-id')).toBe(tabId);
+  });
+});
+
+/**
+ * Canvas Mode is a tab (`shellType: 'canvas'`, see services/openCanvas.ts). Two things
+ * about that are load-bearing here, and neither is visible from the canvas directory:
+ *
+ *  1. It must never get a pane tree. TerminalContainer seeds one for every tab it renders,
+ *     keyed on the tab's own id — and a pane tree named after the tab is what spawns a
+ *     PTY. A canvas tab that reached that path would boot a shell called "Canvas".
+ *  2. It must mount ONLY while active, unlike every other tab, which stays mounted in the
+ *     background. Mounting CanvasMode relocates every terminal's `term.element` into a
+ *     node host; a background canvas tab would hold the whole workspace's terminals inside
+ *     an `opacity: 0` subtree while the user was reading a different tab, and every pane
+ *     would render empty.
+ */
+describe('TerminalContainer — the canvas tab', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    const existing = (window as any).tabPanes;
+    if (existing) Object.keys(existing).forEach((k) => delete existing[k]);
+    else (window as any).tabPanes = {};
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  async function mountWith(store: ReturnType<typeof makeStore>) {
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <Provider store={store}>
+          <TerminalContainer />
+        </Provider>,
+      );
+    });
+  }
+
+  const canvasTab = { id: 'tb-canvas01', title: 'Canvas', shellType: 'canvas' } as any;
+  const shellTab = { id: 'tb-shell01', title: 'Terminal', shellType: 'bash' } as any;
+
+  it('renders CanvasMode, and no pane tree, when the canvas tab is active', async () => {
+    const store = makeStore();
+    store.dispatch(addTab(shellTab));
+    store.dispatch(addTab(canvasTab)); // addTab activates by default
+
+    await mountWith(store);
+
+    expect(container.querySelector('[data-testid="canvas-mode"]')).not.toBeNull();
+    // The seeding effects run for every tab, not just the active one, so this covers
+    // point 1 above for both the window map and the authoritative Redux copy.
+    expect((window as any).tabPanes[canvasTab.id]).toBeUndefined();
+    expect(store.getState().panes.treesByTabId[canvasTab.id]).toBeUndefined();
+    // ...and the ordinary tab beside it is unaffected: it keeps its tree and stays
+    // mounted in the background, which is what makes handing terminals back possible.
+    expect(store.getState().panes.treesByTabId[shellTab.id]).toBeDefined();
+    expect(container.querySelector(`[data-testid="pane-manager-${shellTab.id}"]`)).not.toBeNull();
+  });
+
+  it('unmounts CanvasMode when another tab is activated', async () => {
+    const store = makeStore();
+    store.dispatch(addTab(shellTab));
+    store.dispatch(addTab(canvasTab));
+
+    await mountWith(store);
+    expect(container.querySelector('[data-testid="canvas-mode"]')).not.toBeNull();
+
+    await act(async () => { store.dispatch(setActiveTab(shellTab.id)); });
+
+    // Gone from the tree entirely — not merely hidden. Hiding it would leave the surface
+    // registry pointing at node hosts and the terminals stranded there.
+    expect(container.querySelector('[data-testid="canvas-mode"]')).toBeNull();
+    expect(container.querySelector(`[data-testid="pane-manager-${shellTab.id}"]`)).not.toBeNull();
+  });
+
+  it('does not mount CanvasMode for a background canvas tab', async () => {
+    const store = makeStore();
+    store.dispatch(addTab(canvasTab));
+    store.dispatch(addTab(shellTab)); // activates the shell tab, backgrounding the canvas
+
+    await mountWith(store);
+
+    expect(store.getState().tabs.activeTabId).toBe(shellTab.id);
+    expect(container.querySelector('[data-testid="canvas-mode"]')).toBeNull();
   });
 });

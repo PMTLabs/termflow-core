@@ -3,6 +3,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { addTab } from '../store/slices/tabsSlice';
 import { openSettingsTab } from '../services/openSettings';
+import { openCanvasTab } from '../services/openCanvas';
 import './NewTabDropdown.css';
 import { getCachedIcon, loadIcon } from '../services/binaryIcons';
 import { resolveDefaultProfile, buildNewTabFields } from '../services/newTabActions';
@@ -174,6 +175,18 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
           <div className="dropdown-divider" />
 
           <div className="dropdown-section">
+            <div
+              className="dropdown-item"
+              onClick={() => {
+                // Single-instance, like Settings: two canvas tabs would mount two
+                // CanvasModes and register two hosts for every terminal.
+                openCanvasTab();
+                setIsOpen(false);
+              }}
+            >
+              <span className="profile-icon">🗺️</span>
+              <span className="profile-name">Canvas</span>
+            </div>
             <div
               className="dropdown-item"
               onClick={() => {

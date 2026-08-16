@@ -53,9 +53,14 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   // Rendered in place, this dialog sits wherever its caller does — and `TabManager`'s
   // caller lives inside `.title-bar-tabs`, which is `position: relative; z-index: 100`
   // and therefore a STACKING CONTEXT. A descendant cannot escape one, so the overlay's
-  // `z-index: 9999` was capped at an effective 100 and painted BEHIND Canvas Mode's
-  // overlay at 900: closing a tab from the canvas showed no confirmation at all, and the
-  // app looked frozen until you left the mode. A modal has to be a child of <body>.
+  // `z-index: 9999` was capped at an effective 100 and painted BEHIND what Canvas Mode was
+  // then — a full-surface overlay at 900. Closing a tab from the canvas showed no
+  // confirmation at all, and the app looked frozen until you left the mode.
+  //
+  // Canvas Mode has since become a tab, so that particular overlay is gone. The fix is not:
+  // the trap is `.title-bar-tabs` being a stacking context, which is still true, and the
+  // next thing to paint above 100 would hit it identically. A modal has to be a child of
+  // <body>.
   return createPortal(
     <div className="confirm-dialog-overlay" onClick={onCancel}>
       <div

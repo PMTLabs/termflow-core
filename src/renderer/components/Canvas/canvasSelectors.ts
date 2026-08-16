@@ -10,10 +10,14 @@ import {
   LodTier, Rect, Viewport, isVisible,
 } from './canvasGeometry';
 import { fitGroupFrame, seedNodePosition, PAD, PAD_TOP, GROUP_GAP } from './canvasLayout';
+import { isVirtualTab } from '../../services/tabKinds';
 
 export interface CanvasNodeModel {
   terminalId: string;
   tabId: string;
+  /** The pane leaf this node was projected from. Carried so "open in its tab" can put the
+   *  cursor on the pane the user actually clicked, not just the tab it lives in. */
+  paneId: string;
   /** PaneNode.name — NOT Tab.title. See design 010 §2.1. */
   title: string;
   shellType: string;
@@ -97,6 +101,13 @@ function buildModel(
   }
 
   for (const tab of tabs) {
+    // Settings and the canvas tab itself are screens, not workspaces. They have no pane
+    // tree today, so they would fall through the leaf-less branch below — and that branch
+    // draws a frame for anything with a STORED rect, so a stale geometry entry (or a
+    // future screen tab that does own panes) would put an empty group on the canvas, and
+    // the canvas tab would draw a frame for itself.
+    if (isVirtualTab(tab.shellType)) continue;
+
     const paneLeaves = leaves(trees[tab.id]);
 
     // An emptied tab keeps its frame at its last size so it stays a visible drop
@@ -145,6 +156,7 @@ function buildModel(
       nodes.push({
         terminalId: id,
         tabId: tab.id,
+        paneId: leaf.id,
         title: leaf.name || tab.title || 'Terminal',
         shellType: leaf.shellType || tab.shellType || '',
         rect: rects[i],

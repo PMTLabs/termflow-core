@@ -1,5 +1,5 @@
 import canvasReducer, {
-  setCanvasEnabled, toggleCanvasMode, setViewport, setNodeGeom, setGroupGeom,
+  setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
@@ -10,36 +10,21 @@ const edge = (id: string, from: string, to: string): CanvasEdge =>
   ({ id, from, to, label: null, origin: 'user', createdAt: 1 });
 
 describe('canvasSlice', () => {
-  it('starts disabled with an identity viewport', () => {
+  it('starts at an identity viewport', () => {
     const s = init();
-    expect(s.enabled).toBe(false);
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });
-  });
-
-  it('toggles and sets mode', () => {
-    let s = canvasReducer(init(), toggleCanvasMode());
-    expect(s.enabled).toBe(true);
-    s = canvasReducer(s, toggleCanvasMode());
-    expect(s.enabled).toBe(false);
-    s = canvasReducer(s, setCanvasEnabled(true));
-    expect(s.enabled).toBe(true);
-  });
-
-  it('clears focus when leaving canvas mode', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, focusNode('tm-1'));
-    expect(s.focusedId).toBe('tm-1');
-    s = canvasReducer(s, setCanvasEnabled(false));
     expect(s.focusedId).toBeNull();
   });
 
-  // Both exits from canvas mode must hand input back, not just the explicit one.
-  it('clears focus when TOGGLING out of canvas mode too', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, focusNode('tm-1'));
-    s = canvasReducer(s, toggleCanvasMode());
-    expect(s.enabled).toBe(false);
-    expect(s.focusedId).toBeNull();
+  // Canvas Mode is a TAB, so whether it is on screen is `activeTab.shellType` and lives in
+  // the tabs slice alone. This slice used to carry an `enabled` mirror of that; keeping
+  // both would mean every tab switch that does not go through the canvas helpers — a click
+  // in the strip, Ctrl+Tab, closing the tab, session restore — is a path that can desync
+  // them. Asserted structurally, so re-adding the flag fails here rather than quietly
+  // reintroducing the second source of truth.
+  it('carries no enabled flag — the tab list is the only source of that truth', () => {
+    expect(init()).not.toHaveProperty('enabled');
+    expect(Object.keys(canvasReducer(init(), { type: '@@probe' }))).not.toContain('enabled');
   });
 
   it('stores node and group geometry', () => {
@@ -153,7 +138,7 @@ describe('canvasSlice', () => {
     expect(s.focusedId).toBe('tm-live');
   });
 
-  it('hydrates persisted geometry but never persisted enabled/focus state', () => {
+  it('hydrates persisted geometry but never persisted focus state', () => {
     const s = canvasReducer(init(), hydrateCanvas({
       viewport: { x: 5, y: 6, z: 0.5 },
       nodes: { 'tm-1': { x: 1, y: 1, w: 340, h: 210 } },
@@ -163,7 +148,6 @@ describe('canvasSlice', () => {
     }));
     expect(s.viewport.z).toBe(0.5);
     expect(s.sidebarWidth).toBe(220);
-    expect(s.enabled).toBe(false);
     expect(s.focusedId).toBeNull();
   });
 
@@ -176,10 +160,14 @@ describe('canvasSlice', () => {
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });
   });
 
-  it('hydrating over a live canvas does not re-enable it', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, hydrateCanvas({ viewport: { x: 1, y: 2, z: 1.5 } }));
-    expect(s.enabled).toBe(true); // hydrate must not touch the flag either way
+  // `focusedId` is the one piece of canvas state that grants a node an unconditional
+  // WebGL context (design 010 D8), and nothing in `hydrateCanvas` should be able to set
+  // it: a restored session must not be handing keystrokes to a node before the user has
+  // looked at the canvas.
+  it('cannot set focus through hydration, even over live focus', () => {
+    let s = canvasReducer(init(), focusNode('tm-1'));
+    s = canvasReducer(s, hydrateCanvas({ viewport: { x: 1, y: 2, z: 1.5 } } as never));
     expect(s.viewport.z).toBe(1.5);
+    expect(s.focusedId).toBe('tm-1'); // untouched either way — hydrate owns geometry only
   });
 });

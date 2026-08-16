@@ -32,10 +32,14 @@ jest.mock('@termflow/terminal-core', () => ({ pasteToTerminal: jest.fn() }));
 jest.mock('../TerminalService', () => ({ terminalService: {} }));
 jest.mock('../../utils/clipboard', () => ({ readClipboardText: jest.fn() }));
 jest.mock('../openSettings', () => ({ openSettingsTab: jest.fn() }));
+// Canvas Mode is a tab, so the shortcut calls a service rather than dispatching an action.
+// Mocked here so this file stays about the KEY PATH; openCanvas.test.ts owns the tab
+// behaviour itself.
+const toggleCanvasTab = jest.fn();
+jest.mock('../openCanvas', () => ({ toggleCanvasTab: () => toggleCanvasTab() }));
 
 import { inputHandler } from '../InputHandler';
 import { SHORTCUT_ACTIONS, findConflict } from '../shortcutActions';
-import { toggleCanvasMode } from '../../store/slices/canvasSlice';
 
 afterAll(() => inputHandler.destroy());
 
@@ -70,18 +74,18 @@ describe('canvas mode shortcut registration', () => {
 });
 
 describe('canvas mode shortcut behaviour', () => {
-  beforeEach(() => dispatch.mockClear());
+  beforeEach(() => { dispatch.mockClear(); toggleCanvasTab.mockClear(); });
 
-  it('dispatches toggleCanvasMode when the combo is pressed', () => {
+  it('toggles the canvas tab when the combo is pressed', () => {
     press(CANVAS_COMBO.key, CANVAS_COMBO);
-    expect(dispatch).toHaveBeenCalledWith(toggleCanvasMode());
+    expect(toggleCanvasTab).toHaveBeenCalledTimes(1);
   });
 
   it('does not toggle when only some modifiers are held', () => {
     press(' ', { ctrlKey: true, shiftKey: true });
     press(' ', { ctrlKey: true, altKey: true });
     press(' ', {});
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(toggleCanvasTab).not.toHaveBeenCalled();
   });
 
   // `applyKeybindingOverrides` re-registers through the action->handler map.
@@ -90,14 +94,14 @@ describe('canvas mode shortcut behaviour', () => {
   it('still works after the user rebinds it', () => {
     try {
       inputHandler.applyKeybindingOverrides({ toggleCanvasMode: 'Ctrl+Alt+K' });
-      dispatch.mockClear();
+      toggleCanvasTab.mockClear();
 
       press('k', { ctrlKey: true, altKey: true });
-      expect(dispatch).toHaveBeenCalledWith(toggleCanvasMode());
+      expect(toggleCanvasTab).toHaveBeenCalledTimes(1);
 
-      dispatch.mockClear();
+      toggleCanvasTab.mockClear();
       press(CANVAS_COMBO.key, CANVAS_COMBO); // the old default must be released
-      expect(dispatch).not.toHaveBeenCalled();
+      expect(toggleCanvasTab).not.toHaveBeenCalled();
     } finally {
       inputHandler.applyKeybindingOverrides({});
     }
@@ -106,8 +110,8 @@ describe('canvas mode shortcut behaviour', () => {
   it('returns to the default combo when the override is removed', () => {
     inputHandler.applyKeybindingOverrides({ toggleCanvasMode: 'Ctrl+Alt+K' });
     inputHandler.applyKeybindingOverrides({});
-    dispatch.mockClear();
+    toggleCanvasTab.mockClear();
     press(CANVAS_COMBO.key, CANVAS_COMBO);
-    expect(dispatch).toHaveBeenCalledWith(toggleCanvasMode());
+    expect(toggleCanvasTab).toHaveBeenCalledTimes(1);
   });
 });

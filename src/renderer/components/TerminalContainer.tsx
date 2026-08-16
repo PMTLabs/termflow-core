@@ -30,6 +30,8 @@ if (typeof window !== 'undefined') {
 }
 
 import { SettingsPage } from './Settings/SettingsPage';
+import { CanvasMode } from './Canvas/CanvasMode';
+import { isVirtualTab, SETTINGS_SHELL_TYPE, CANVAS_SHELL_TYPE } from '../services/tabKinds';
 
 export const TerminalContainer: React.FC = () => {
   const dispatch = useDispatch<AppDispatch>();
@@ -47,7 +49,7 @@ export const TerminalContainer: React.FC = () => {
     dispatch(setActiveTabId(activeTabId));
 
     const activeTab = tabs.find(t => t.id === activeTabId);
-    if (activeTab?.shellType === 'settings') return;
+    if (isVirtualTab(activeTab?.shellType)) return;
 
     if (!treesByTabId[activeTabId]) {
       const seed = tabPanes[activeTabId] || {
@@ -101,7 +103,7 @@ export const TerminalContainer: React.FC = () => {
   // authoritative Redux store treesByTabId, which background tabs now render from).
   useEffect(() => {
     tabs.forEach(tab => {
-      if (tab.shellType === 'settings') return;
+      if (isVirtualTab(tab.shellType)) return;
       if (!tabPanes[tab.id]) {
         console.log('TerminalContainer: Pre-initializing pane tree for tab', tab.id);
         const newPaneId = generateId('pn');
@@ -135,7 +137,8 @@ export const TerminalContainer: React.FC = () => {
     <div className="terminal-container">
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
-        const isSettings = tab.shellType === 'settings';
+        const isSettings = tab.shellType === SETTINGS_SHELL_TYPE;
+        const isCanvas = tab.shellType === CANVAS_SHELL_TYPE;
         // Each tab renders from its OWN authoritative tree (reducers keep it in
         // sync via syncActive). This avoids any dependency on the active-tab
         // paneTree mirror, so switching tabs can't show another tab's content.
@@ -159,7 +162,19 @@ export const TerminalContainer: React.FC = () => {
             className={`tab-content ${isActive ? 'active' : ''}`}
             data-tab-id={tab.id}
           >
-            {isSettings ? (
+            {isCanvas ? (
+              // Mounted ONLY while its tab is active, unlike every other tab here.
+              //
+              // That is the whole relocation contract, not a rendering preference:
+              // mounting CanvasMode moves every terminal's `term.element` out of its pane
+              // and into a node host, and unmounting hands them back. A background canvas
+              // tab would hold the entire workspace's terminals inside a `visibility:
+              // hidden`, `opacity: 0` subtree while the user was reading a different tab —
+              // every pane would render empty. Gating on `isActive` keeps the mount edge
+              // exactly where the old full-screen overlay had it, which is why `012`
+              // §6.5 RC1-RC5 survive this change untouched.
+              isActive ? <CanvasMode /> : null
+            ) : isSettings ? (
               <SettingsPage isActive={isActive} />
             ) : displayPaneTree ? (
               <PaneManager
