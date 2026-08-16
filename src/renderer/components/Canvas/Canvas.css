@@ -316,6 +316,47 @@
 .canvas-port.s { bottom: var(--port-offset); left: var(--port-centre); }
 .canvas-port.w { left: var(--port-offset); top: var(--port-centre); }
 
+/* ---- Canvas chrome: the Arrange control (Task 13) ------------------------ */
+
+/* Screen space, not world space. It is a sibling of `.canvas-viewport` inside `.canvas-mode`,
+   NOT a child of `.canvas-world`, so it neither pans, zooms nor needs counter-scaling — the one
+   piece of canvas UI for which that is the right answer rather than an omission.
+
+   Top-right: the sidebar (Task 14) takes the left edge and the minimap (Task 23) the
+   bottom-right corner. The z-index only has to beat `.canvas-viewport`, which sets none; it is
+   stated rather than left to document order so a later insertion cannot silently bury it. */
+.canvas-toolbar {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+}
+.canvas-tbtn {
+  display: flex;
+  align-items: center;
+  padding: 5px 11px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 5px;
+  background: var(--bg-secondary, #2d2d30);
+  color: var(--text-secondary, #969696);
+  font-size: 11px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.canvas-tbtn:hover {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--text-tertiary, #666666);
+  background: var(--bg-tertiary, #3e3e42);
+}
+.canvas-tbtn:focus-visible {
+  outline: 2px solid var(--accent-color, #007acc);
+  outline-offset: 1px;
+}
+
 /* ---- Space-to-pan (the hand tool) --------------------------------------- */
 
 /* While Space is held the whole surface is a drag handle, so EVERY descendant has to say so —

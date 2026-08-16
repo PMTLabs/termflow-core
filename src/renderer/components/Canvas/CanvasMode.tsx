@@ -19,6 +19,7 @@ import {
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
 import { useCanvasDrag } from './useCanvasDrag';
+import { useArrange } from './useArrange';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -172,6 +173,11 @@ export const CanvasMode: React.FC = () => {
 
   // Node drag, group drag and cross-group re-homing (Tasks 11 + 12).
   const drag = useCanvasDrag(model);
+
+  // Auto-arrange (Task 13). A button, never automatic — design 010 D10: a canvas that
+  // rearranges itself while you are looking away destroys the spatial memory the whole
+  // feature exists to build.
+  const arrange = useArrange(model);
 
   // Both edges of the canvas session relocate every terminal between two differently-sized
   // boxes, which SIGWINCHes every PTY and makes every TUI repaint. Without this the repaint
@@ -333,6 +339,26 @@ export const CanvasMode: React.FC = () => {
           );
         })}
       </CanvasViewport>
+      {/* Screen-space chrome, deliberately OUTSIDE `CanvasViewport`: everything passed to it as
+          a child lands inside `.canvas-world`, which pans, zooms and would need counter-scaling.
+          Top-right because the sidebar (Task 14) owns the left edge and the minimap (Task 23)
+          the bottom-right corner.
+
+          Hidden while a node is overlaid. The overlay's backdrop lives in world space, so a
+          button here paints over it — and it would then be the one spot on screen where a click
+          does not dismiss the overlay, acting on a layout the user cannot see. */}
+      {!overlayId && model.groups.length > 0 && (
+        <div className="canvas-toolbar">
+          <button
+            type="button"
+            className="canvas-tbtn"
+            onClick={arrange}
+            title="Grid each group's terminals, then the groups themselves"
+          >
+            Arrange
+          </button>
+        </div>
+      )}
       {!model.nodes.length && !model.groups.length && (
         <div className="canvas-empty">No terminals yet</div>
       )}
