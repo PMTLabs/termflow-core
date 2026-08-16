@@ -15,10 +15,38 @@ export interface Rect { x: number; y: number; w: number; h: number }
 export const NODE_W = 340;
 export const NODE_H = 210;
 export const CHIP_H = 58;
-/** Height of a node's title bar. Shared with the stylesheet as a CSS variable: the node
- *  body is `NODE_H - HEAD_H` tall, and HOST_H is derived from that ratio, so a second copy
- *  of this number in CSS would silently change the terminal's aspect. */
+/** Height of a node's title bar **at zoom 1 and below**. Shared with the stylesheet as a CSS
+ *  variable: `BODY_H` is derived from it and `HOST_H` from that, so a second copy of this
+ *  number in CSS would silently change the terminal's aspect. */
 export const HEAD_H = 29;
+/** The body's world height. CONSTANT at every zoom — see `headScale` for why that matters. */
+export const BODY_H = NODE_H - HEAD_H;
+
+/**
+ * How much the title bar is scaled down at a given zoom, so it stops growing once it has
+ * reached its natural size.
+ *
+ * The header and the body want opposite things. The body is a window onto a terminal, so it
+ * should keep growing as you zoom in — that is the whole point of zooming in. The header is
+ * a LABEL, and a label that keeps growing is just a label wasting space: at the old ceiling
+ * the node title rendered at ~34 screen px and the shell badge with it, eating a fifth of the
+ * node to say "PowerShell 7".
+ *
+ * So above zoom 1 the header counter-scales exactly, holding a constant on-screen size, and
+ * every pixel the zoom adds goes to the terminal. Below zoom 1 it scales with the world like
+ * everything else — at the snapshot and chip tiers the title has to shrink with its node or
+ * it would swamp it.
+ *
+ * The node's world height follows this (`BODY_H + HEAD_H * headScale(z)`), which is what
+ * keeps the body EXACTLY `NODE_W x BODY_H` at every zoom. That is load-bearing: the surface
+ * scales into the body by width, so a body whose height varied with zoom would either
+ * letterbox the terminal or clip its columns. The cost is that a node's drawn height falls
+ * below its `rect.h` above zoom 1, so a group frame keeps the slack — invisible at the zooms
+ * where this applies, and conservative (a frame never clips a node).
+ */
+export function headScale(z: number): number {
+  return 1 / Math.max(1, z);
+}
 
 /**
  * The terminal host's CSS-pixel box — the grid the PTY actually gets.
@@ -32,15 +60,33 @@ export const HEAD_H = 29;
  * `HOST_H` is derived rather than chosen, so the host has the SAME aspect as the node body and
  * scales into it exactly — a mismatch would letterbox every node.
  *
+ * **900 was still too small**, for a reason the first fix did not anticipate: this box is also
+ * the box the full-screen overlay renders at 1:1, because RC2 allows the session exactly ONE
+ * host size. So it has to be sized for the largest thing that shows it, not the smallest.
+ * 1440 x 767 is roughly a 175 x 45 grid — a real working terminal, and about three quarters of
+ * a 1920-wide display, which leaves the overlay looking framed rather than cropped.
+ *
+ * **The cost is real and worth stating.** Area per host is 2.6x what it was, and every node
+ * holds one for the whole canvas session. `MAX_GPU = 12` is unchanged and is what bounds the
+ * expensive half; the tier ladder keeps everything else off the paint path. If GPU memory
+ * turns out to be the binding constraint on a real machine, this constant is the dial —
+ * `tf.check13()` and `tf.check17()` are the measurements that would say so.
+ *
  * This does not weaken `012` 6.5 RC2. RC2 requires the host's CSS box to be constant for the
- * session, and it now is — constant AND independent of the node's geometry. Only a transform
+ * session, and it is — constant AND independent of the node's geometry. Only a transform
  * varies, and `getComputedStyle`, `ResizeObserver` and `FitAddon` are all transform-insensitive,
  * so there is still no `fit()`, no `term.resize()` and no SIGWINCH.
  */
-export const HOST_W = 900;
-export const HOST_H = Math.round(HOST_W * (NODE_H - HEAD_H) / NODE_W);
+export const HOST_W = 1440;
+export const HOST_H = Math.round(HOST_W * BODY_H / NODE_W);
 
-/** What the surface is scaled by to sit inside a node at zoom 1. */
+/**
+ * What the surface is scaled by to sit inside a node of the DEFAULT width. Nodes set their
+ * own `--node-surface-scale` from `rect.w / HOST_W`, which is the same number for an ordinary
+ * node and the thing that makes the full-screen overlay fall out for free: an overlaid node
+ * is just a node with a much larger world rect, so its surface lands at screen scale 1
+ * without a second host, a second engine, or moving any DOM.
+ */
 export const SURFACE_SCALE = NODE_W / HOST_W;
 
 /**
@@ -93,9 +139,17 @@ export const MAX_INTERACTIVE = 48;
  *  T_CHIP. At the old 0.08 the smallest legal width was 27.2px — above T_CHIP —
  *  so whole-group collapse could never happen through normal zooming. */
 export const Z_MIN = 0.05;
-/** Must stay above FOCUS_ZOOM (900/340 = 2.65), or a focused node can never reach the 1:1
- *  scale at which xterm's pointer maths is correct. */
-export const Z_MAX = 2.8;
+/**
+ * DERIVED, not chosen. It has to stay above `FOCUS_ZOOM` or a focused node could never reach
+ * the 1:1 scale at which xterm's pointer maths is correct — and that used to be a hand-kept
+ * relationship with a comment asking someone to remember it, which is exactly the kind of
+ * pairing that goes stale the first time `HOST_W` moves.
+ *
+ * The 5 % is headroom, not a feature. Past `FOCUS_ZOOM` the terminal's font grows beyond the
+ * user's configured size, which is the thing they asked not to happen; a little slack keeps
+ * the ceiling from feeling like a wall when you are already at it.
+ */
+export const Z_MAX = Math.round(FOCUS_ZOOM * 1.05 * 100) / 100;
 
 export function baseTier(effectiveWidth: number): LodTier {
   if (effectiveWidth >= T_GPU) return 'gpu';
@@ -129,6 +183,80 @@ export function worldToScreen(vp: Viewport, wx: number, wy: number): { x: number
  *  culling, snapshot polling (Task 10) and the edge mask (Task 18) all agree —
  *  three different answers to "is this on screen?" would flicker against each other. */
 export const CULL_MARGIN = 80;
+
+/** How much of the canvas the full-screen overlay leaves as a margin, in screen px. */
+export const OVERLAY_MARGIN = 28;
+
+export interface OverlayGeometry {
+  /** World rect for the overlaid node. Its surface scale is `rect.w / HOST_W` like any
+   *  node's, which is what puts the terminal at `scale` on screen. */
+  rect: Rect;
+  /** World rect covering the whole viewport, for the backdrop. */
+  backdrop: Rect;
+  /** Screen scale the terminal ends up rendering at. 1 means a real terminal at the user's
+   *  configured font size; below 1 the viewport was too small to fit the host. */
+  scale: number;
+}
+
+/**
+ * Place a node as a near-full-screen overlay on the canvas.
+ *
+ * The overlay is **not a second surface**. It is the same node, given a world rect big enough
+ * that `rect.w / HOST_W` puts its existing host at screen scale 1 — so nothing is mounted,
+ * moved, re-registered or re-fitted to open it, and `012` §6.5 RC1-RC5 never come into play.
+ * That is also why it cannot show a bigger grid than an ordinary node: RC2 allows the session
+ * one host box, and this is it.
+ *
+ * `scale` is capped at 1 rather than filling the viewport, because past 1 the terminal's font
+ * grows beyond the user's configured size — the thing they explicitly asked not to happen.
+ * On a viewport too narrow for `HOST_W` it drops below 1, and the caller should know: xterm 6
+ * does not divide pointer deltas by an ancestor transform, so clicks land on the wrong cell
+ * at any scale but 1. Typing is unaffected.
+ *
+ * The backdrop is in WORLD space, not screen space, because `.canvas-world` sets
+ * `will-change: transform` and is therefore a stacking context — a backdrop outside it could
+ * never sit between the ordinary nodes and the overlaid one.
+ */
+export function overlayGeometry(vp: Viewport, vw: number, vh: number): OverlayGeometry {
+  const availW = Math.max(1, vw - OVERLAY_MARGIN * 2);
+  const availH = Math.max(1, vh - OVERLAY_MARGIN * 2);
+  // The header's SCREEN height, which is `HEAD_H` wherever the cap is in force and shrinks
+  // with the world below zoom 1 — `HEAD_H * headScale(z) * z` reduced.
+  const headScreenH = HEAD_H * Math.min(1, vp.z);
+  // Floored at `SURFACE_SCALE`, which is the scale at which the host renders exactly `NODE_W`
+  // wide — an "overlay" narrower than an ordinary node is not enlarged in any sense, and
+  // without the floor a viewport shorter than the header alone drives the fit term NEGATIVE
+  // and hands the node a negative width.
+  const scale = Math.max(
+    SURFACE_SCALE,
+    Math.min(1, availW / HOST_W, (availH - headScreenH) / HOST_H),
+  );
+
+  const screenW = HOST_W * scale;
+  const screenH = HOST_H * scale + headScreenH;
+  const left = (vw - screenW) / 2;
+  const top = (vh - screenH) / 2;
+
+  // Screen -> world. The node lives inside `.canvas-world`, so everything it is given must be
+  // in world units; dividing by `z` is what makes the result render at the screen size above.
+  const toWorld = (sx: number, sy: number) => screenToWorld(vp, sx, sy);
+  const origin = toWorld(left, top);
+  const worldW = screenW / vp.z;
+
+  return {
+    // `h` is NOT `screenH / z`. `CanvasNode` derives the body from `h - HEAD_H` and then adds
+    // the CAPPED header back, so the height it is given has to be expressed in those terms or
+    // the node renders shorter than the box this function measured — the first version of
+    // this did exactly that and the overlay came out ~11% short at high zoom.
+    rect: { x: origin.x, y: origin.y, w: worldW, h: HOST_H * worldW / HOST_W + HEAD_H },
+    backdrop: (() => {
+      const a = toWorld(-CULL_MARGIN, -CULL_MARGIN);
+      const b = toWorld(vw + CULL_MARGIN, vh + CULL_MARGIN);
+      return { x: a.x, y: a.y, w: b.x - a.x, h: b.y - a.y };
+    })(),
+    scale,
+  };
+}
 
 export function isVisible(vp: Viewport, r: Rect, vw: number, vh: number, margin = CULL_MARGIN): boolean {
   const sx = r.x * vp.z + vp.x;

@@ -131,6 +131,24 @@ class RunningActivityTrackerClass {
     this.resetForBurst(RECONNECT_COOLDOWN_MS);
   }
 
+  /**
+   * Entering or leaving Canvas Mode moves every terminal between two differently-sized boxes,
+   * which SIGWINCHes every PTY at once and makes every TUI repaint its whole screen.
+   *
+   * That is the same event class as `handleResize` below — a synchronized redraw burst that
+   * nobody typed — and without this it reads as "every tab just started running": the sweep
+   * animation fires across the strip and a notification pops for output the user caused by
+   * switching tabs. Same cooldown, for the same reason.
+   *
+   * This suppresses the ATTRIBUTION of that output, not the output itself. The repaint still
+   * lands in the buffer, so a TUI's previous frame remains in scrollback — that is a property
+   * of the canvas host having a different grid than the pane, and it is a `design/012`
+   * question, not one this tracker can answer.
+   */
+  notifyRelocationBurst(): void {
+    this.resetForBurst(RESIZE_COOLDOWN_MS);
+  }
+
   private handleResize(): void {
     // A window resize sends SIGWINCH to every PTY, so every TUI app redraws its
     // whole screen at once — a synchronized output burst across all terminals that

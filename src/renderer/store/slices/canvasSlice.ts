@@ -35,6 +35,13 @@ export interface CanvasState extends CanvasPersisted {
   selectedId: string | null;
   /** The node receiving keystrokes. Always granted a live terminal (design 010 D8). */
   focusedId: string | null;
+  /** The node shown as a near-full-screen overlay on the canvas, or null.
+   *
+   *  Deliberately separate from `focusedId` even though opening an overlay also focuses:
+   *  focus is "this node has the keyboard" and survives closing the overlay onto the same
+   *  node, while this is "this node is enlarged". Folding them together would make Esc
+   *  ambiguous — it has to close the overlay first and release the keyboard second. */
+  overlayId: string | null;
   /** Most-recently-touched first; drives LOD budget priority. */
   recent: string[];
 }
@@ -51,6 +58,7 @@ const initialState: CanvasState = {
   sidebarWidth: 250,
   selectedId: null,
   focusedId: null,
+  overlayId: null,
   recent: [],
 };
 
@@ -89,6 +97,18 @@ const canvasSlice = createSlice({
       if (action.payload) touch(state, action.payload);
     },
     touchNode: (state, action: PayloadAction<string>) => { touch(state, action.payload); },
+    /** Open the full-screen overlay on a node, or close it with `null`.
+     *
+     *  Opening also focuses: an overlay you cannot type into is a screenshot. Closing does
+     *  NOT blur — you were working in that terminal a moment ago, and yanking the keyboard
+     *  away as the node shrinks back is not what anyone means by "close". */
+    setOverlayNode: (state, action: PayloadAction<string | null>) => {
+      state.overlayId = action.payload;
+      if (action.payload) {
+        state.focusedId = action.payload;
+        touch(state, action.payload);
+      }
+    },
     setEdges: (state, action: PayloadAction<CanvasEdge[]>) => {
       state.edges = action.payload;
     },
@@ -118,6 +138,8 @@ const canvasSlice = createSlice({
       state.recent = state.recent.filter((id) => liveNodes.has(id));
       if (state.selectedId && !liveNodes.has(state.selectedId)) state.selectedId = null;
       if (state.focusedId && !liveNodes.has(state.focusedId)) state.focusedId = null;
+      // A closed terminal must not leave the canvas covered by an overlay of nothing.
+      if (state.overlayId && !liveNodes.has(state.overlayId)) state.overlayId = null;
     },
     /** Restore persisted geometry. Deliberately does NOT restore `focusedId`: whether the
      *  canvas is on screen at boot is decided by the restored TAB list, and a node that
@@ -136,7 +158,7 @@ const canvasSlice = createSlice({
 
 export const {
   setViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
+  applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 

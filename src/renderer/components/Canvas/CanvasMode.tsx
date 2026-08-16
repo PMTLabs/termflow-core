@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
+import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { RootState } from '../../store';
-import { focusNode, selectNode } from '../../store/slices/canvasSlice';
+import { focusNode, selectNode, setOverlayNode } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
 import { setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
@@ -10,7 +11,8 @@ import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
 import {
-  Rect, assignTiers, NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H, SURFACE_SCALE, FOCUS_ZOOM,
+  Rect, assignTiers, overlayGeometry, NODE_W, NODE_H, HEAD_H, HOST_W, HOST_H, SURFACE_SCALE,
+  FOCUS_ZOOM,
 } from './canvasGeometry';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
@@ -51,6 +53,7 @@ export const CanvasMode: React.FC = () => {
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const selectedId = useSelector((s: RootState) => s.canvas.selectedId);
   const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
+  const overlayId = useSelector((s: RootState) => s.canvas.overlayId);
   const recent = useSelector((s: RootState) => s.canvas.recent);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const flyTo = useFlyTo();
@@ -78,7 +81,26 @@ export const CanvasMode: React.FC = () => {
 
   const collapsed = allCollapsed(model.nodes, tiers);
 
+  // Recomputed from the viewport, so the overlay stays screen-centred while the canvas pans
+  // and zooms underneath it rather than sliding away with the world.
+  const overlay = useMemo(
+    () => (overlayId ? overlayGeometry(vp, size.w, size.h) : null),
+    [overlayId, vp, size],
+  );
+
   useCanvasRenderPolicy(tiers, focusedId, recent);
+
+  // Both edges of the canvas session relocate every terminal between two differently-sized
+  // boxes, which SIGWINCHes every PTY and makes every TUI repaint. Without this the repaint
+  // reads as real activity: the running sweep fires across the whole tab strip and a
+  // notification pops, for output the user caused by switching to a tab.
+  //
+  // A layout effect, so the window is armed before the relocation the child hosts trigger can
+  // produce anything; the cleanup covers the return trip the same way.
+  useLayoutEffect(() => {
+    runningActivityTracker.notifyRelocationBurst();
+    return () => runningActivityTracker.notifyRelocationBurst();
+  }, []);
 
   const clearSelection = useCallback(() => {
     dispatch(selectNode(null));
@@ -121,6 +143,7 @@ export const CanvasMode: React.FC = () => {
     if (focusRaf.current) cancelAnimationFrame(focusRaf.current);
     focusRaf.current = null;
     dispatch(focusNode(null));
+    dispatch(setOverlayNode(null));
   }, [dispatch]);
 
   // Leave the canvas for the tab this node lives in, with the cursor on its own pane.
@@ -135,6 +158,12 @@ export const CanvasMode: React.FC = () => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      // Esc unwinds one layer at a time. Closing the overlay AND releasing the keyboard on a
+      // single press would leave no way to shrink a node and keep typing in it.
+      if (overlayIdRef.current) {
+        dispatch(setOverlayNode(null));
+        return;
+      }
       // Esc is a legitimate PTY key that xterm delivers while its textarea holds focus,
       // so blur it before restoring the gate, or the gesture never reaches the canvas.
       (document.activeElement as HTMLElement | null)?.blur();
@@ -144,6 +173,12 @@ export const CanvasMode: React.FC = () => {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [focusedId, dispatch]);
+
+  // Read through a ref inside the Esc handler above: that effect is keyed on `focusedId`, and
+  // adding `overlayId` to its deps would tear down and re-register the capture-phase listener
+  // every time the overlay opened or closed.
+  const overlayIdRef = useRef<string | null>(null);
+  overlayIdRef.current = overlayId;
 
   return (
     <div className="canvas-mode" data-testid="canvas-mode" style={GEOMETRY_VARS}>
@@ -157,23 +192,44 @@ export const CanvasMode: React.FC = () => {
             onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM))}
           />
         ))}
+        {overlay && (
+          // World-space, not screen-space: `.canvas-world` sets `will-change: transform` and
+          // is therefore a stacking context, so a backdrop outside it could never sit between
+          // the ordinary nodes and the overlaid one.
+          <div
+            className="canvas-overlay-backdrop"
+            style={{
+              left: overlay.backdrop.x, top: overlay.backdrop.y,
+              width: overlay.backdrop.w, height: overlay.backdrop.h,
+            }}
+            onPointerDown={(e) => { e.stopPropagation(); dispatch(setOverlayNode(null)); }}
+          />
+        )}
         {model.nodes.map((n) => {
-          const tier = tiers[n.terminalId] ?? 'group';
+          const isOverlaid = overlay !== null && n.terminalId === overlayId;
+          // The overlaid node is the SAME node with a different world rect — no second host,
+          // no relocation, no fit. See `overlayGeometry`.
+          const node = isOverlaid ? { ...n, rect: overlay!.rect } : n;
+          const tier = isOverlaid ? 'gpu' : (tiers[n.terminalId] ?? 'group');
           return (
             <CanvasNode
               key={n.terminalId}
-              node={n}
+              node={node}
               tier={tier}
               zoom={vp.z}
               selected={selectedId === n.terminalId}
               focused={focusedId === n.terminalId}
               // Fed in Task 18, once edges exist to compute a neighbourhood from.
               dimmed={false}
-              hidden={collapsed || tier === 'group' || !visible.has(n.terminalId)}
+              // Culling reads the node's ORIGINAL rect, which for an overlaid node can be far
+              // off screen — the overlay would then be hidden the moment you opened it.
+              hidden={!isOverlaid && (collapsed || tier === 'group' || !visible.has(n.terminalId))}
+              overlaid={isOverlaid}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               onDoubleClick={focusTerminal(n.terminalId, n.rect)}
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
+              onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}
             >
               {/* RC4: mounted for EVERY node, at every tier, for the whole canvas
                   session. The tier ladder and the cull margin decide what a node

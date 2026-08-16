@@ -1,6 +1,6 @@
 import canvasReducer, {
   setViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
+  applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -169,5 +169,47 @@ describe('canvasSlice', () => {
     s = canvasReducer(s, hydrateCanvas({ viewport: { x: 1, y: 2, z: 1.5 } } as never));
     expect(s.viewport.z).toBe(1.5);
     expect(s.focusedId).toBe('tm-1'); // untouched either way — hydrate owns geometry only
+  });
+
+  /**
+   * The full-screen overlay. Kept separate from `focusedId` on purpose: focus is "this node
+   * has the keyboard", the overlay is "this node is enlarged", and Esc has to unwind them in
+   * that order — close the overlay, then release the keyboard.
+   */
+  describe('setOverlayNode', () => {
+    it('opens the overlay and gives the node the keyboard with it', () => {
+      const s = canvasReducer(init(), setOverlayNode('tm-1'));
+      expect(s.overlayId).toBe('tm-1');
+      // An overlay you cannot type into is a screenshot.
+      expect(s.focusedId).toBe('tm-1');
+      expect(s.recent[0]).toBe('tm-1');
+    });
+
+    it('closes without taking the keyboard away', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-1'));
+      s = canvasReducer(s, setOverlayNode(null));
+      expect(s.overlayId).toBeNull();
+      // You were working in that terminal a moment ago; shrinking the node is not a reason
+      // to stop. This is also what makes Esc's two-step unwind reachable.
+      expect(s.focusedId).toBe('tm-1');
+    });
+
+    it('starts closed', () => {
+      expect(init().overlayId).toBeNull();
+    });
+
+    // A terminal can close while its node is the overlay — the tab strip is still live on the
+    // canvas. Leaving the id set would cover the canvas with an overlay of nothing.
+    it('is cleared when its terminal goes away', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-gone'));
+      s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-other'], tabIds: [] }));
+      expect(s.overlayId).toBeNull();
+    });
+
+    it('survives a prune that keeps its terminal', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-live'));
+      s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-live'], tabIds: [] }));
+      expect(s.overlayId).toBe('tm-live');
+    });
   });
 });

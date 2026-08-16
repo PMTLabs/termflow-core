@@ -58,11 +58,28 @@
    of erroring — three unguarded fit() call sites would then resize the PTY to a
    bogus grid (`012` §6.5 RC3). Hiding is `visibility`, applied inline by CanvasNode.
    Ports are exempt: they are siblings of the body, never ancestors of a terminal. */
-.canvas-node { position: absolute; z-index: 2; display: flex; flex-direction: column; border: 1px solid var(--border-color, #3e3e42); border-radius: 7px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); }
-.canvas-node.selected { border-color: var(--accent-color, #007acc); box-shadow: 0 0 0 1px var(--accent-color, #007acc); }
-.canvas-node.focused { border-color: var(--tab-running-accent, #3aa6ff); box-shadow: 0 0 0 2px var(--tab-running-accent, #3aa6ff); z-index: 7; }
+/* `--node-k` is the counter-scale from `headScale(zoom)`, set per node: 1 up to zoom 1, then
+   1/zoom. Everything CHROME on a node is expressed through it, so all of it holds a constant
+   on-screen size once the zoom passes 1, while the terminal keeps growing.
+
+   Chrome is not just the title bar. A 1px border renders 4.2px thick at the working zoom, a
+   2px selection ring 8.5px, and the 13px connector ports 55px across — a node that should look
+   like a terminal ends up looking like a cartoon of one. They are listed together here rather
+   than fixed one at a time because they are one property, not four coincidences. */
+.canvas-node { --node-border-w: calc(1px * var(--node-k, 1)); position: absolute; z-index: 2; display: flex; flex-direction: column; border: var(--node-border-w) solid var(--border-color, #3e3e42); border-radius: calc(7px * var(--node-k, 1)); background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); }
+/* Selection and focus are told apart by COLOUR, not by thickness. A ring that doubles the
+   border reads as a heavy frame around a full-screen terminal — and the state it marks is
+   already unmistakable, because a focused node is the one taking your keystrokes. */
+.canvas-node.selected { border-color: var(--accent-color, #007acc); box-shadow: 0 0 0 var(--node-border-w) var(--accent-color, #007acc); }
+.canvas-node.focused { border-color: var(--tab-running-accent, #3aa6ff); box-shadow: 0 0 0 var(--node-border-w) var(--tab-running-accent, #3aa6ff); z-index: 7; }
 .canvas-node.dimmed { opacity: .26; }
-.canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; display: flex; align-items: center; gap: 7px; padding: 0 8px; border-bottom: 1px solid var(--border-color, #3e3e42); border-radius: 6px 6px 0 0; background: var(--bg-primary, #141414); font-size: 12px; cursor: move; position: relative; isolation: isolate; overflow: hidden; }
+/* The header is TWO elements on purpose. The outer one is the layout box, and its height is
+   set per node from `headScale(zoom)` so the bar stops growing once it has reached its natural
+   size. The inner one holds the contents at their natural size and is scaled as a single
+   element — scaling title, badge, buttons, padding and gap individually would be six numbers
+   to keep in step, and the first one forgotten is the one that looks wrong. */
+.canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: 1px solid var(--border-color, #3e3e42); border-radius: 6px 6px 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
+.canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
 .canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
 /* `min-height: 0` so the chip tier can squeeze this to zero height without the flex
@@ -95,7 +112,11 @@
   left: 0;
   width: var(--canvas-host-w);
   height: var(--canvas-host-h);
-  transform: scale(var(--canvas-surface-scale));
+  /* Per node, falling back to the default-width scale. A node of any width scales its host
+     correctly from this, which is also the entire implementation of the full-screen overlay:
+     an overlaid node is a node with a big world rect, and this puts its terminal at screen
+     scale 1 without a second host, a relocation or a fit. */
+  transform: scale(var(--node-surface-scale, var(--canvas-surface-scale)));
   transform-origin: 0 0;
   overflow: hidden;
 }
@@ -109,25 +130,64 @@
 
 /* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
    not removed, so the terminal host inside it keeps a resolvable layout box. */
-.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: 6px; justify-content: center; cursor: zoom-in; }
+.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: 6px; cursor: zoom-in; }
+.canvas-node[data-lod="chip"] .canvas-node-head-inner { justify-content: center; }
 .canvas-node[data-lod="chip"] .canvas-port { display: none; }
 
-/* Identical sweep to the tab strip (TabManager.css:264-324). @keyframes
-   tab-running-sweep is defined there and is global — do not redefine it. */
+/* The running sweep. NOT the tab strip's rule, though it started as a copy of it.
+   TabManager tiles a 160px gradient with `repeat-x`, which shows exactly one band on a ~160px
+   tab and THREE on a 1440px overlaid node — three sweeps chasing each other, which is what a
+   "one thing is running" cue must never look like.
+
+   So the band is sized as a fraction of the header and translated across it exactly once per
+   period. The gradient peaks at 50%, so its head and tail ramps are the same length and the
+   band reads as symmetrical however wide the node is. */
 .canvas-node.running .canvas-node-head::after {
-  content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  content: ''; position: absolute; top: 0; bottom: 0; left: 0;
+  width: 55%; z-index: -1; pointer-events: none;
   opacity: .42;
-  background-image: linear-gradient(90deg, transparent 0%, transparent 55%, var(--tab-running-accent, #3aa6ff) 78%, transparent 100%);
-  background-size: 160px 100%; background-repeat: repeat-x;
-  animation: tab-running-sweep 1.2s linear infinite;
+  background-image: linear-gradient(90deg, transparent 0%, var(--tab-running-accent, #3aa6ff) 50%, transparent 100%);
+  animation: canvas-node-sweep 1.6s linear infinite;
+}
+@keyframes canvas-node-sweep {
+  /* Percentages here are of the BAND's own width, so -100% is fully off the left edge and
+     182% (= 100 / 0.55) is fully off the right — one crossing, no overlap with the next. */
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(182%); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .canvas-node.running .canvas-node-head::after { animation-duration: 2.4s; opacity: .14; }
+  .canvas-node.running .canvas-node-head::after { animation-duration: 3.2s; opacity: .14; }
 }
 
-/* "Open in its tab" — the escape hatch from the overview back to a normal terminal.
-   Sized off the head height so it cannot force the header taller than HEAD_H, which the
-   node geometry depends on. */
+/* ---- The full-screen overlay -------------------------------------------- */
+
+/* World-space, because `.canvas-world` sets `will-change: transform` and is a stacking
+   context — a backdrop outside it could never sit between the ordinary nodes and the
+   overlaid one. Above `.canvas-port` (6) so a neighbour's connection dots cannot punch
+   through it. */
+.canvas-overlay-backdrop {
+  position: absolute;
+  z-index: 15;
+  background: rgba(0, 0, 0, .58);
+  cursor: default;
+}
+.canvas-node.overlaid {
+  z-index: 20;
+  box-shadow: 0 18px 56px rgba(0, 0, 0, .62);
+  border-color: var(--tab-running-accent, #3aa6ff);
+}
+/* The focus ring would otherwise draw a second, thicker outline around the overlay — the node
+   is always focused while it is the overlay, so the two states always coincide here. */
+.canvas-node.overlaid.focused { box-shadow: 0 18px 56px rgba(0, 0, 0, .62); }
+.canvas-node.overlaid .canvas-node-head { cursor: default; }
+.canvas-node.overlaid .canvas-port { display: none; }
+
+/* ---- Header buttons ----------------------------------------------------- */
+
+/* "Enlarge on the canvas" and "open in its tab" — the two ways out of the overview.
+   NO `--node-k` here, deliberately: these live inside `.canvas-node-head-inner`, which is
+   already counter-scaled as a whole, so scaling them again would shrink them twice. Sized off
+   the header height so they cannot force it taller than HEAD_H. */
 .canvas-node-open {
   flex: none; position: relative; z-index: 1;
   width: 18px; height: 18px; padding: 0;
@@ -139,6 +199,7 @@
 }
 .canvas-node:hover .canvas-node-open,
 .canvas-node.selected .canvas-node-open,
+.canvas-node.overlaid .canvas-node-open,
 .canvas-node-open:focus-visible { opacity: 1; }
 .canvas-node-open:hover {
   color: var(--text-primary, #cccccc);
@@ -147,10 +208,24 @@
 
 /* ---- Connection ports --------------------------------------------------- */
 
-.canvas-port { position: absolute; width: 13px; height: 13px; border-radius: 50%; background: var(--bg-primary, #141414); border: 2px solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
+/* Sized through `--node-k` for the same reason as the border above: at the working zoom an
+   uncapped 13px port is a 55px disc, four of which swamp the terminal they belong to. Every
+   length here is one of two numbers — the port's own size and half of it — so they are derived
+   from a single custom property rather than restated four times with the halving done by hand. */
+.canvas-port { --port-size: calc(13px * var(--node-k, 1)); position: absolute; width: var(--port-size); height: var(--port-size); border-radius: 50%; background: var(--bg-primary, #141414); border: calc(2px * var(--node-k, 1)) solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
 .canvas-node:hover .canvas-port, .canvas-node.selected .canvas-port { opacity: 1; }
 .canvas-port:hover { transform: scale(1.42); background: var(--tab-running-accent, #3aa6ff); }
-.canvas-port.n { top: -7px; left: calc(50% - 6.5px); }
-.canvas-port.e { right: -7px; top: calc(50% - 6.5px); }
-.canvas-port.s { bottom: -7px; left: calc(50% - 6.5px); }
-.canvas-port.w { left: -7px; top: calc(50% - 6.5px); }
+/* Centred on the border's CENTRE LINE, not on its inner edge.
+   An absolutely positioned child resolves against the PADDING box, whose edge is the INNER
+   edge of the border — so offsetting by half the port's own size leaves it sitting half a
+   border-width inside the line it is meant to straddle. Invisible while the border is a
+   hairline, obvious once it is not, and the sign is easy to get backwards: the port has to
+   move OUT by half a border, hence the `+`. */
+.canvas-port {
+  --port-offset: calc((var(--port-size) + var(--node-border-w)) / -2);
+  --port-centre: calc(50% - var(--port-size) / 2);
+}
+.canvas-port.n { top: var(--port-offset); left: var(--port-centre); }
+.canvas-port.e { right: var(--port-offset); top: var(--port-centre); }
+.canvas-port.s { bottom: var(--port-offset); left: var(--port-centre); }
+.canvas-port.w { left: var(--port-offset); top: var(--port-centre); }

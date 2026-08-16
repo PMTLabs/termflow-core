@@ -253,6 +253,27 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     expect(unseenTabIds()).toEqual([]);
   });
 
+  it('does NOT mark unseen after a Canvas Mode relocation burst', () => {
+    // Entering or leaving Canvas Mode moves every terminal between two differently-sized
+    // boxes, SIGWINCHing every PTY at once. Tam reported the visible half of this: switching
+    // to the canvas tab lit the running sweep across the strip and popped a notification, for
+    // output nobody typed. Same event class as a window resize, same suppression.
+    runningActivityTracker.notifyRelocationBurst();
+    burstAllTerminals();
+    jest.advanceTimersByTime(SETTLE_MS);
+    expect(unseenTabIds()).toEqual([]);
+  });
+
+  // The pair that stops the case above from being satisfiable by a tracker that suppresses
+  // everything forever: real output AFTER the burst window must still be seen.
+  it('resumes marking once the relocation burst has settled', () => {
+    runningActivityTracker.notifyRelocationBurst();
+    jest.advanceTimersByTime(RESIZE_COOLDOWN_MS + 1);
+    emitData('p2', 4);
+    jest.advanceTimersByTime(SETTLE_MS);
+    expect(unseenTabIds()).not.toEqual([]);
+  });
+
   it('suppresses the bell when many tabs settle in the same tick (repaint-burst signature)', () => {
     // A desktop reattach (RDP↔console switch / un-minimize / resize) repaints every TUI
     // at once, so all inactive tabs settle together and would flag in ONE tick. Flagging
