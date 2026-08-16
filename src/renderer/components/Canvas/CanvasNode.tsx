@@ -44,18 +44,25 @@ export const CanvasNode: React.FC<{
    *  suppresses the chip/fly-to gestures, which make no sense on something already filling
    *  the screen. */
   overlaid?: boolean;
+  /** This terminal's own host box, measured from its pane before the canvas took it
+   *  (`plan/017`). Omitted only by tests and by a terminal with nothing to measure. */
+  hostBox?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
   node, tier, zoom, selected, focused, dimmed, hidden,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  overlaid, children,
+  overlaid, hostBox, children,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
-  // The SESSION's host box, frozen when the canvas opened. Read here rather than imported:
-  // it is sized for the display (see `canvasMetrics`), and a stale copy would scale this
-  // node's surface against a host box its terminal was never fitted to.
-  const { hostW } = useCanvasMetrics();
+  // THIS TERMINAL's host box (`plan/017`) — a pixel replica of the pane it came from, so the
+  // relocation fit measures an identical container and takes FitAddon's early return instead of
+  // resizing the PTY. Falls back to the session box, which is what a terminal with no rendered
+  // element to copy gets. Passed in rather than measured here: the measurement is only valid
+  // during CanvasMode's render, BEFORE this component's ref callback registers the host that
+  // `term.element` is about to move into. See `canvasHostBoxes.measureHostBox`.
+  const fallback = useCanvasMetrics();
+  const host = hostBox ?? { w: fallback.hostW, h: fallback.hostH };
 
   // The title bar stops growing once it has reached its natural size — see `headScale`.
   // Above zoom 1 it counter-scales, so the header holds a constant HEAD_H on screen and every
@@ -87,10 +94,17 @@ export const CanvasNode: React.FC<{
         width: w,
         height: isChip ? CHIP_H : nodeH,
         visibility: hidden ? 'hidden' : undefined,
+        // The host's CSS box, per node. It is a replica of this terminal's PANE box, which is
+        // what makes the relocation fit find the same cols/rows it already had (`plan/017`).
+        // These must be real pixel lengths and must never be a percentage of the node: the body
+        // collapses at the chip tier, and a percentage host would then resize a live PTY on a
+        // zoom-out (`012` §6.5 RC2).
+        ['--node-host-w' as string]: `${host.w}px`,
+        ['--node-host-h' as string]: `${host.h}px`,
         // Per node rather than global, so a node of any width scales its host correctly.
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
-        ['--node-surface-scale' as string]: `${w / hostW}`,
+        ['--node-surface-scale' as string]: `${w / host.w}`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}

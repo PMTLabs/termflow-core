@@ -141,18 +141,26 @@
 
    The box is deliberately MUCH bigger than the node and scaled down into it: sized to the node
    it was a ~40-column grid, which is why the font looked oversized, the scrollback came back
-   narrow, and no zoom reached a usable terminal. Zooming to FOCUS_ZOOM makes this scale 1 and
-   gives a real terminal at the user's own font size.
+   narrow, and no zoom reached a usable terminal. Zooming until this reaches scale 1 gives a
+   real terminal at the user's own font size.
 
-   The pixel values come from CanvasMode as CSS variables, off the same constants the layout
-   uses. Never hard-code them here — two copies of this number is two chances to resize a live
-   PTY from a style tweak. */
+   `--node-host-w/h` is PER TERMINAL since `plan/017`, and is a pixel replica of the pane that
+   terminal came from. That is the whole fix for the duplicated-content bug: `proposeDimensions()`
+   reads `getComputedStyle(parentElement).width/height`, so a host whose computed box equals the
+   pane's yields the same cols/rows, and `FitAddon.fit()` takes its early return instead of
+   calling `terminal.resize()`. No resize, no SIGWINCH, no repaint — while every existing
+   guarantee (the FT rule, D10, R3, R7's observer) is left exactly as written and simply runs to
+   a no-op.
+
+   `--canvas-host-w/h` remains as the fallback for a terminal that has never been rendered and so
+   has no pane box worth copying. The pixel values come from CanvasMode; never hard-code them
+   here — two copies of this number is two chances to resize a live PTY from a style tweak. */
 .canvas-surface {
   position: absolute;
   top: 0;
   left: 0;
-  width: var(--canvas-host-w);
-  height: var(--canvas-host-h);
+  width: var(--node-host-w, var(--canvas-host-w));
+  height: var(--node-host-h, var(--canvas-host-h));
   /* Per node, falling back to the default-width scale. A node of any width scales its host
      correctly from this, which is also the entire implementation of the full-screen overlay:
      an overlaid node is a node with a big world rect, and this puts its terminal at screen

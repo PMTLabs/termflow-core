@@ -274,3 +274,69 @@ describe('per-node custom properties', () => {
     expect(heights[1]).toBeCloseTo(node0.rect.h - HEAD_H + HEAD_H / 4, 6);
   });
 });
+
+/**
+ * The node applies ITS OWN host box (`plan/017`).
+ *
+ * This is the consumer that makes the whole fix reachable, and it had no coverage: with
+ * `canvasHostBoxes` measuring correctly and the stylesheet reading `--node-host-w` correctly, a
+ * `CanvasNode` that quietly ignored its `hostBox` prop still passed all 261 tests. The variable
+ * would simply never be set, `.canvas-surface` would take its `var(--canvas-host-w)` fallback
+ * arm, and every terminal would be re-fitted to the session box exactly as before — the bug,
+ * fully restored, behind a green suite.
+ *
+ * So these assert the DIFFERENCE from the session box rather than the value alone. A box equal
+ * to `DEFAULT_METRICS` would be satisfied by either code path and would prove nothing — see
+ * [[test-arrange-right-assert-blind]].
+ */
+describe('per-node host box', () => {
+  const node = () => container.querySelector<HTMLElement>('.canvas-node')!;
+  /** Deliberately unlike DEFAULT_METRICS on both axes — a quarter-split pane. */
+  const BOX = { w: 1263.5, h: 622.25 };
+
+  const renderWith = (hostBox?: { w: number; h: number }) => act(() => {
+    root.render(withMetrics(
+      <CanvasNode node={node0} tier="gpu" zoom={1} selected={false} focused={false}
+        dimmed={false} hidden={false} hostBox={hostBox} />,
+    ));
+  });
+
+  it('publishes its own box as pixel lengths, not the session box', () => {
+    renderWith(BOX);
+    expect(node().style.getPropertyValue('--node-host-w')).toBe(`${BOX.w}px`);
+    expect(node().style.getPropertyValue('--node-host-h')).toBe(`${BOX.h}px`);
+    // The guard on the guard: if these ever coincided, the assertions above would hold for a
+    // node that ignored its prop entirely.
+    expect(BOX.w).not.toBe(DEFAULT_METRICS.hostW);
+    expect(BOX.h).not.toBe(DEFAULT_METRICS.hostH);
+  });
+
+  it('scales the surface against its own box, so the overlay lands at 1:1', () => {
+    renderWith(BOX);
+    expect(Number(node().style.getPropertyValue('--node-surface-scale')))
+      .toBeCloseTo(node0.rect.w / BOX.w, 9);
+  });
+
+  // Decision C: the overlay is the terminal at ACTUAL size. A node given a world rect equal to
+  // its own host box must render its surface at exactly scale 1 — that is the whole contract,
+  // and it is per-terminal, so a node whose box came from a small pane reaches 1:1 at a smaller
+  // rect than one from a full-width pane.
+  it('reaches exactly 1:1 when the world rect equals its own box', () => {
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, rect: { ...node0.rect, w: BOX.w } }} tier="gpu" zoom={1}
+          selected={false} focused={false} dimmed={false} hidden={false} hostBox={BOX} />,
+      ));
+    });
+    expect(Number(node().style.getPropertyValue('--node-surface-scale'))).toBeCloseTo(1, 9);
+  });
+
+  // The documented fallback: a terminal with nothing to measure gets the session box, and is
+  // the one case that still re-fits on entry (`plan/017` §6).
+  it('falls back to the session box when it has none of its own', () => {
+    renderWith(undefined);
+    expect(node().style.getPropertyValue('--node-host-w')).toBe(`${DEFAULT_METRICS.hostW}px`);
+    expect(Number(node().style.getPropertyValue('--node-surface-scale')))
+      .toBeCloseTo(node0.rect.w / DEFAULT_METRICS.hostW, 9);
+  });
+});

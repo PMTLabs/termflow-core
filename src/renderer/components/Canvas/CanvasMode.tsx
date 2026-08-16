@@ -15,6 +15,7 @@ import {
   NODE_W, NODE_H, HEAD_H,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
+import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
 import { centreOn } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -113,12 +114,42 @@ export const CanvasMode: React.FC = () => {
 
   const collapsed = allCollapsed(model.nodes, tiers);
 
+  // Each terminal's own host box, captured from its PANE (`plan/017`).
+  //
+  // Read during RENDER, deliberately, because this is the only moment the question still has
+  // the right answer: React renders a parent before its children, `NodeTerminal` registers its
+  // host in a ref callback during the commit, and `useSurfaceRelocation`'s layout effect moves
+  // `term.element` after that. By the time any effect runs, `term.element.parentElement` is the
+  // canvas host and measuring it would measure our own replica. `measureHostBox` caches on the
+  // first call and refuses to measure a container inside `.canvas-surface`, so both the double
+  // render of StrictMode and a mistimed call are inert.
+  const hostBoxes = useMemo(() => {
+    const out: Record<string, { w: number; h: number }> = {};
+    for (const n of model.nodes) {
+      out[n.terminalId] = measureHostBox(n.terminalId, { w: metrics.hostW, h: metrics.hostH });
+    }
+    return out;
+  }, [model.nodes, metrics]);
+
+  // Frozen boxes outlive their session otherwise, and the next one may open on a different
+  // window size, split layout or font.
+  useEffect(() => () => clearHostBoxes(), []);
+
   // Recomputed from the viewport, so the overlay stays screen-centred while the canvas pans
   // and zooms underneath it rather than sliding away with the world.
-  const overlay = useMemo(
-    () => (overlayId ? overlayGeometry(vp, size.w, size.h, metrics) : null),
-    [overlayId, vp, size, metrics],
-  );
+  //
+  // Sized from the OVERLAID TERMINAL's box, not the session's: under `plan/017` decision C the
+  // overlay is that terminal at its actual size, so an unsplit tab's terminal fills the screen
+  // and a quarter-split's fills a quarter. `surfaceScale` is recomputed from the same box so the
+  // "not smaller than an ordinary node" floor inside `overlayGeometry` stays meaningful.
+  const overlay = useMemo(() => {
+    if (!overlayId) return null;
+    const b = hostBoxes[overlayId];
+    if (!b) return null;
+    return overlayGeometry(vp, size.w, size.h, {
+      hostW: b.w, hostH: b.h, surfaceScale: NODE_W / b.w,
+    });
+  }, [overlayId, vp, size, hostBoxes]);
 
   useCanvasRenderPolicy(tiers, focusedId, recent);
 
@@ -258,6 +289,7 @@ export const CanvasMode: React.FC = () => {
               // off screen — the overlay would then be hidden the moment you opened it.
               hidden={!isOverlaid && (collapsed || tier === 'group' || !visible.has(n.terminalId))}
               overlaid={isOverlaid}
+              hostBox={hostBoxes[n.terminalId]}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax))}

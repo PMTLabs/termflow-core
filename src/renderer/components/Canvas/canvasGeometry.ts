@@ -87,14 +87,32 @@ export const HOST_ASPECT = BODY_H / NODE_W;
 export const MIN_HOST_W = 1100;
 export const MAX_HOST_W = 2400;
 
-/** Everything about a canvas session that depends on the display it opened on. */
-export interface CanvasMetrics {
-  /** The terminal host's CSS-pixel box — the grid the PTY actually gets. */
+/**
+ * One terminal's host box, and the scale that fits it into a default-width node.
+ *
+ * Split out from `CanvasMetrics` by `plan/017`: the host box is now measured PER TERMINAL from
+ * the pane it came from (`canvasHostBoxes.measureHostBox`) rather than being one number for the
+ * session, because a host that matches the pane makes the relocation fit a provable no-op — no
+ * `term.resize()`, no SIGWINCH, no TUI repaint, no duplicated content.
+ *
+ * `CanvasMetrics` still satisfies this interface, and is what a terminal with no rendered
+ * element to measure falls back to.
+ */
+export interface SurfaceBox {
+  /** The terminal host's CSS-pixel box — the grid the PTY actually has. */
   hostW: number;
   hostH: number;
   /** What the surface is scaled by to sit inside a DEFAULT-width node at zoom 1. */
   surfaceScale: number;
-  /** The zoom at which the surface would render 1:1. The canvas stops short of it. */
+}
+
+/** Everything about a canvas session that depends on the display it opened on.
+ *
+ *  Since `plan/017` its host box is the FALLBACK — used for a terminal that has never been
+ *  rendered, so has no pane box worth copying — while `zMax` remains what it always was: the
+ *  canvas zoom ceiling, which is a property of the display and not of any one terminal. */
+export interface CanvasMetrics extends SurfaceBox {
+  /** The zoom at which the FALLBACK box would render 1:1. The canvas stops short of it. */
   focusZoom: number;
   /** The canvas zoom ceiling. */
   zMax: number;
@@ -255,10 +273,15 @@ export interface OverlayGeometry {
  * Place a node as a near-full-screen overlay on the canvas.
  *
  * The overlay is **not a second surface**. It is the same node, given a world rect big enough
- * that `rect.w / HOST_W` puts its existing host at screen scale 1 — so nothing is mounted,
+ * that `rect.w / m.hostW` puts its existing host at screen scale 1 — so nothing is mounted,
  * moved, re-registered or re-fitted to open it, and `012` §6.5 RC1-RC5 never come into play.
- * That is also why it cannot show a bigger grid than an ordinary node: RC2 allows the session
- * one host box, and this is it.
+ * That is also why it cannot show a bigger grid than an ordinary node: the terminal has exactly
+ * one grid, and the overlay is the zoom at which you see all of it at its true size.
+ *
+ * **`m` is now THAT TERMINAL's box, not the session's** (`plan/017`, decision C). So the
+ * overlay is the terminal at actual size: an unsplit tab's terminal fills the screen, and a
+ * quarter-split's fills a quarter. The alternative — enlarging past 1:1, or re-fitting on open —
+ * would either exceed the configured font size or put back the very resize `017` removes.
  *
  * `scale` is capped at 1 rather than filling the viewport, because past 1 the terminal's font
  * grows beyond the user's configured size — the thing they explicitly asked not to happen.
@@ -270,7 +293,7 @@ export interface OverlayGeometry {
  * `will-change: transform` and is therefore a stacking context — a backdrop outside it could
  * never sit between the ordinary nodes and the overlaid one.
  */
-export function overlayGeometry(vp: Viewport, vw: number, vh: number, m: CanvasMetrics): OverlayGeometry {
+export function overlayGeometry(vp: Viewport, vw: number, vh: number, m: SurfaceBox): OverlayGeometry {
   const availW = Math.max(1, vw - OVERLAY_MARGIN * 2);
   const availH = Math.max(1, vh - OVERLAY_MARGIN * 2);
   // The header's SCREEN height, which is `HEAD_H` wherever the cap is in force and shrinks
