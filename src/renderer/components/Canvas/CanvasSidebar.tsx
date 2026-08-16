@@ -9,6 +9,7 @@ import { useFlyTo } from './CanvasViewport';
 import { centreOn } from './viewportStyles';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
+import { useSidebarDrag } from './useSidebarDrag';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -27,6 +28,8 @@ interface RowProps {
   row: SidebarRow;
   selected: boolean;
   editing: boolean;
+  lifting: boolean;
+  onPointerDown: (e: React.PointerEvent) => void;
   onClick: () => void;
   onDoubleClick: () => void;
   onCommit: (name: string) => void;
@@ -78,7 +81,9 @@ const RenameInput: React.FC<{
   );
 };
 
-const Row: React.FC<RowProps> = ({ row, selected, editing, onClick, onDoubleClick, onCommit, onCancel }) => {
+const Row: React.FC<RowProps> = ({
+  row, selected, editing, lifting, onPointerDown, onClick, onDoubleClick, onCommit, onCancel,
+}) => {
   if (editing) {
     return (
       <li className="canvas-srow editing">
@@ -89,7 +94,13 @@ const Row: React.FC<RowProps> = ({ row, selected, editing, onClick, onDoubleClic
 
   return (
     <li
-      className={['canvas-srow', selected ? 'selected' : '', row.isRunning ? 'running' : ''].filter(Boolean).join(' ')}
+      className={[
+        'canvas-srow',
+        selected ? 'selected' : '',
+        row.isRunning ? 'running' : '',
+        lifting ? 'lifting' : '',
+      ].filter(Boolean).join(' ')}
+      onPointerDown={onPointerDown}
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       title={row.disambiguator ? `${row.title} — ${row.disambiguator}` : row.title}
@@ -112,6 +123,9 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
 
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+
+  // Row drag-to-regroup and the width handle (Task 15).
+  const drag = useSidebarDrag(model);
 
   // Named explicitly rather than passed as `{}`. Every test here still passes with an empty
   // map — and every disambiguator silently degrades to a short id, which is the least useful
@@ -151,6 +165,7 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
   }, [model, dispatch]);
 
   return (
+    <>
     <div className="canvas-sidebar" style={{ width }}>
       <input
         className="canvas-ssearch"
@@ -168,8 +183,16 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
       ) : (
         <div className="canvas-stree">
           {tree.map((g) => (
-            <section key={g.tabId} className="canvas-sgroup">
-              <h3 className="canvas-sghead" data-tab-id={g.tabId}>{g.title}</h3>
+            // `data-tab-id` on the SECTION, not the header: the drop target is read back with
+            // `elementFromPoint().closest('.canvas-sgroup')`, so the id has to live on the
+            // element that lookup lands on. Making the whole section the target is also more
+            // forgiving than a 20px-tall header to aim a drag at.
+            <section
+              key={g.tabId}
+              className={`canvas-sgroup${drag.dropTabId === g.tabId ? ' drop' : ''}`}
+              data-tab-id={g.tabId}
+            >
+              <h3 className="canvas-sghead">{g.title}</h3>
               <ul className="canvas-srows">
                 {g.rows.map((r) => (
                   <Row
@@ -177,7 +200,11 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
                     row={r}
                     selected={selectedId === r.terminalId}
                     editing={editingId === r.terminalId}
-                    onClick={() => flyToNode(r.terminalId)}
+                    lifting={drag.draggingId === r.terminalId}
+                    onPointerDown={drag.onRowPointerDown(r.terminalId, g.tabId, r.title)}
+                    // `click` fires after `pointerup`, so a completed drag would otherwise also
+                    // fly the viewport to the node that just changed groups.
+                    onClick={() => { if (!drag.consumeClick()) flyToNode(r.terminalId); }}
                     onDoubleClick={() => setEditingId(r.terminalId)}
                     onCommit={(name) => commitRename(r.terminalId, name)}
                     onCancel={() => setEditingId(null)}
@@ -185,13 +212,28 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
                 ))}
               </ul>
               {/* An emptied group keeps its place in the list because it is still a drop target
-                  (design §6.3/§10) — Task 15 drags rows onto these headers. */}
+                  (design §6.3/§10). */}
               {!g.rows.length && <p className="canvas-sgempty">Empty</p>}
             </section>
           ))}
         </div>
       )}
     </div>
+    <div
+      className={`canvas-sresize${drag.resizing ? ' active' : ''}`}
+      onPointerDown={drag.onResizePointerDown}
+      role="separator"
+      aria-orientation="vertical"
+    />
+    {drag.ghost && (
+      // `position: fixed` in CLIENT coordinates, so it follows the cursor over the canvas as
+      // well as over the list — a ghost clipped to the sidebar would disappear exactly when the
+      // drag left it.
+      <div className="canvas-sghost" style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 12 }}>
+        {drag.ghost.label}
+      </div>
+    )}
+    </>
   );
 };
 

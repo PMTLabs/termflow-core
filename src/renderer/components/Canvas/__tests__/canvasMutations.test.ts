@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import {
-  findPaneIdByTerminalId, planRegroup, moveGroupBy, worldDelta, dropTargetTabId,
+  findPaneIdByTerminalId, planRegroup, moveGroupBy, worldDelta, dropTargetTabId, regridGroup,
 } from '../canvasMutations';
+import { fitGroupFrame, PAD, PAD_TOP, GAP } from '../canvasLayout';
 import panesReducer, {
   PaneNode, removePaneFromTab, insertPaneIntoTab,
 } from '../../../store/slices/panesSlice';
@@ -321,6 +322,78 @@ describe('dropTargetTabId', () => {
 
   it('is null when there are no frames at all', () => {
     expect(dropTargetTabId([], 10, 10, 'tb-a')).toBeNull();
+  });
+});
+
+/**
+ * `regridGroup` — the sidebar drop path (`plan/013` Task 15).
+ *
+ * A list drag carries no position, so the arriving terminal is slotted into the destination's
+ * grid rather than dropped somewhere arbitrary (design 010 §6.3). This is the ONE real
+ * difference between the two re-homing entry points, and the canvas drop deliberately does not
+ * call it.
+ */
+describe('regridGroup', () => {
+  it('slots nodes into a tidy grid anchored at the frame origin', () => {
+    const r = regridGroup({ x: 500, y: 300, w: 0, h: 0 }, ['a', 'b']);
+    expect(r.nodes.a).toEqual({ x: 500 + PAD, y: 300 + PAD_TOP });
+    expect(r.nodes.b).toEqual({ x: 500 + PAD + NODE_W + GAP, y: 300 + PAD_TOP });
+  });
+
+  it('resizes the frame to fit exactly', () => {
+    const r = regridGroup({ x: 0, y: 0, w: 0, h: 0 }, ['a', 'b']);
+    expect(r.frame.w).toBe(PAD * 2 + NODE_W * 2 + GAP);
+    expect(r.frame.h).toBe(PAD_TOP + PAD + NODE_H);
+  });
+
+  it('preserves the frame origin so the group does not jump', () => {
+    const r = regridGroup({ x: 123, y: 456, w: 10, h: 10 }, ['a']);
+    expect(r.frame.x).toBe(123);
+    expect(r.frame.y).toBe(456);
+  });
+
+  it('handles an empty group', () => {
+    const r = regridGroup({ x: 0, y: 0, w: 400, h: 300 }, []);
+    expect(Object.keys(r.nodes)).toHaveLength(0);
+  });
+
+  // ...and keeps its size rather than shrinking to a one-node box. An emptied group stays a
+  // visible drop target (design §6.3/§10) — the same reason `fitGroupFrame` returns null for one
+  // instead of an empty rect.
+  it('leaves an empty group at the size it already had', () => {
+    expect(regridGroup({ x: 7, y: 9, w: 400, h: 300 }, []).frame).toEqual({ x: 7, y: 9, w: 400, h: 300 });
+  });
+
+  it('wraps every id it was given, in grid order', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e'];
+    const r = regridGroup({ x: 0, y: 0, w: 0, h: 0 }, ids);
+    expect(Object.keys(r.nodes).sort()).toEqual(ids);
+    // 5 nodes → 3 columns, so the fourth starts a second row.
+    expect(r.nodes.d.y).toBeGreaterThan(r.nodes.a.y);
+    expect(r.nodes.d.x).toBe(r.nodes.a.x);
+  });
+
+  /**
+   * The frame it returns has to BE the shrink-wrap of the nodes it just placed.
+   *
+   * `buildModel` draws a non-empty group's frame as `fitGroupFrame` of its terminals and ignores
+   * the stored rect, so a frame that disagreed would be overridden on the next render — while
+   * still being the box `seedNodePosition` places the NEXT new pane against. The disagreement
+   * would show up only as a split landing in the wrong place, one gesture later.
+   */
+  it('agrees with the shrink-wrap that will actually be drawn', () => {
+    for (const n of [1, 2, 3, 5, 8]) {
+      const ids = Array.from({ length: n }, (_, i) => `n${i}`);
+      const r = regridGroup({ x: 640, y: 480, w: 0, h: 0 }, ids);
+      const rects: Rect[] = ids.map((id) => ({ ...r.nodes[id], w: NODE_W, h: NODE_H }));
+      expect(fitGroupFrame(rects)).toEqual(r.frame);
+    }
+  });
+
+  it('does not mutate the frame it was given', () => {
+    const frame: Rect = { x: 1, y: 2, w: 3, h: 4 };
+    regridGroup(frame, ['a', 'b']);
+    expect(frame).toEqual({ x: 1, y: 2, w: 3, h: 4 });
   });
 });
 

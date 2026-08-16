@@ -13,13 +13,15 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore, EnhancedStore } from '@reduxjs/toolkit';
-import canvasReducer from '../../../store/slices/canvasSlice';
+import canvasReducer, { SIDEBAR_MIN, SIDEBAR_MAX } from '../../../store/slices/canvasSlice';
 import panesReducer, { PaneNode } from '../../../store/slices/panesSlice';
 import tabsReducer from '../../../store/slices/tabsSlice';
 import { CanvasSidebar, ROW_FLY_ZOOM } from '../CanvasSidebar';
 import { centreOn, FLY_MS } from '../viewportStyles';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { DEFAULT_METRICS, NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { fitGroupFrame, GAP } from '../canvasLayout';
+import { findPaneIdByTerminalId as findLeaf } from '../canvasMutations';
 import type { CanvasModel, CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
 
 jest.mock('../../../services/cwdSnapshot', () => ({
@@ -295,5 +297,184 @@ describe('CanvasSidebar — selection', () => {
     } finally {
       window.requestAnimationFrame = realRaf;
     }
+  });
+});
+
+/**
+ * Drag-to-regroup and the width handle — `plan/013` Task 15.
+ *
+ * The pointer sequence is driven directly: jsdom has no `PointerEvent`, and `elementFromPoint`
+ * is unimplemented, so the drop target is stubbed. What is being pinned is the wiring between
+ * the gesture and `planRegroup`/`regridGroup`, both of which are tested as pure functions in
+ * `canvasMutations.test.ts`.
+ */
+describe('CanvasSidebar — drag and resize', () => {
+  const pointer = (target: EventTarget, type: string, x: number, y: number) => {
+    act(() => { target.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX: x, clientY: y })); });
+  };
+  const sectionFor = (tabId: string) =>
+    container.querySelector(`.canvas-sgroup[data-tab-id="${tabId}"]`) as HTMLElement;
+  const overGroup = (tabId: string | null) => {
+    document.elementFromPoint = (() => (tabId ? sectionFor(tabId) : null)) as typeof document.elementFromPoint;
+  };
+  const canvas = () => (store.getState() as {
+    canvas: { nodes: Record<string, Rect>; groups: Record<string, Rect>; sidebarWidth: number; selectedId: string | null };
+  }).canvas;
+  const panes = () => (store.getState() as { panes: { treesByTabId: Record<string, PaneNode> } }).panes;
+
+  /** Drag row `index` and release it over `tabId` (null = over nothing). */
+  const dragRowTo = (index: number, tabId: string | null, dx = 40) => {
+    const row = rows()[index];
+    pointer(row, 'pointerdown', 100, 100);
+    overGroup(tabId);
+    pointer(window, 'pointermove', 100 + dx, 100 + dx);
+    pointer(window, 'pointerup', 100 + dx, 100 + dx);
+  };
+
+  it('moves the terminal into the group it was dropped on', () => {
+    render();
+    // Row 1 is `tm-2`, which lives in `tb-a`.
+    dragRowTo(1, 'tb-b');
+    expect(findLeaf(panes().treesByTabId['tb-a'], 'tm-2')).toBeNull();
+    expect(findLeaf(panes().treesByTabId['tb-b'], 'tm-2')).not.toBeNull();
+  });
+
+  /**
+   * The destination is RE-GRIDDED, which is the one real difference from a canvas drop: a list
+   * drag carries no position, so there is nothing to honour and the arrival is slotted into the
+   * grid instead (design 010 §6.3).
+   */
+  it('re-grids the destination rather than leaving the arrival where the cursor was', () => {
+    render();
+    dragRowTo(1, 'tb-b');
+    const placed = ['tm-3', 'tm-2'].map((id) => canvas().nodes[id]);
+    expect(placed.every(Boolean)).toBe(true);
+    // Side by side on one row, at the frame's own padding — a grid, not two coincidences.
+    expect(placed[0].y).toBe(placed[1].y);
+    expect(Math.abs(placed[1].x - placed[0].x)).toBe(NODE_W + GAP);
+    expect(canvas().groups['tb-b']).toEqual(fitGroupFrame(placed));
+  });
+
+  /**
+   * The source only SHRINK-WRAPS around what is left; it is not re-gridded, because that would
+   * rearrange terminals the user never touched.
+   *
+   * Compared against the surviving node's MODEL rect rather than a slice entry, and the
+   * difference is the point: nothing dispatched a position for `tm-1`, so the slice has no entry
+   * for it at all. Only the destination's members are repositioned.
+   */
+  it('shrink-wraps the source without moving what stayed behind', () => {
+    render();
+    const stayed = model.nodes.find((n) => n.terminalId === 'tm-1')!.rect;
+    dragRowTo(1, 'tb-b');
+    expect(canvas().groups['tb-a']).toEqual(fitGroupFrame([stayed]));
+    expect(canvas().nodes['tm-1']).toBeUndefined();
+  });
+
+  it('does nothing when the row is dropped on its own group', () => {
+    render();
+    const before = JSON.stringify(panes().treesByTabId);
+    dragRowTo(1, 'tb-a');
+    expect(JSON.stringify(panes().treesByTabId)).toBe(before);
+  });
+
+  /**
+   * ...and does not HIGHLIGHT it either, which is a separate claim from the one above.
+   *
+   * Two guards stop a same-group drop: the highlight refuses its own group, and the drop refuses
+   * a target equal to the source. Only the second is exercised by "nothing changed", so removing
+   * the first leaves every test passing while the frame under the cursor lights up promising a
+   * move that will not happen.
+   */
+  it('does not highlight the row\'s own group as a target', () => {
+    render();
+    const row = rows()[1];
+    pointer(row, 'pointerdown', 100, 100);
+    overGroup('tb-a');
+    pointer(window, 'pointermove', 140, 140);
+    expect(container.querySelector('.canvas-sgroup.drop')).toBeNull();
+    pointer(window, 'pointerup', 140, 140);
+  });
+
+  it('does nothing when the row is dropped on empty space', () => {
+    render();
+    const before = JSON.stringify(panes().treesByTabId);
+    dragRowTo(1, null);
+    expect(JSON.stringify(panes().treesByTabId)).toBe(before);
+  });
+
+  // Below the slop it is a press, not a drag — and the row's click and double-click both have
+  // to survive it.
+  it('a 2px wobble is still a click, not a drag', () => {
+    render();
+    const before = JSON.stringify(panes().treesByTabId);
+    const row = rows()[1];
+    pointer(row, 'pointerdown', 100, 100);
+    overGroup('tb-b');
+    pointer(window, 'pointermove', 102, 100);
+    pointer(window, 'pointerup', 102, 100);
+    expect(JSON.stringify(panes().treesByTabId)).toBe(before);
+    expect(container.querySelector('.canvas-sghost')).toBeNull();
+  });
+
+  /**
+   * `click` fires after `pointerup`, so a completed drag would otherwise ALSO fly the viewport
+   * to the terminal that just changed groups — which reads as the drop having gone somewhere
+   * unintended.
+   */
+  it('swallows the click that follows a completed drag, but only one', () => {
+    render();
+    dragRowTo(1, 'tb-b');
+    act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(canvas().selectedId).toBeNull();
+    act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(canvas().selectedId).not.toBeNull();
+  });
+
+  it('lifts the row and shows a ghost while dragging', () => {
+    render();
+    const row = rows()[1];
+    pointer(row, 'pointerdown', 100, 100);
+    overGroup('tb-b');
+    pointer(window, 'pointermove', 140, 140);
+    expect(container.querySelector('.canvas-srow.lifting')).not.toBeNull();
+    expect(container.querySelector('.canvas-sghost')?.textContent).toBe('server');
+    expect(sectionFor('tb-b').className).toContain('drop');
+    // Its own group is never a target.
+    expect(sectionFor('tb-a').className).not.toContain('drop');
+    pointer(window, 'pointerup', 140, 140);
+    expect(container.querySelector('.canvas-sghost')).toBeNull();
+  });
+
+  it('resizes by the pointer delta', () => {
+    render();
+    const before = canvas().sidebarWidth;
+    const handle = container.querySelector('.canvas-sresize') as HTMLElement;
+    pointer(handle, 'pointerdown', 300, 40);
+    pointer(window, 'pointermove', 340, 40);
+    expect(canvas().sidebarWidth).toBe(before + 40);
+    pointer(window, 'pointerup', 340, 40);
+  });
+
+  it('stops at both ends rather than following the pointer off the scale', () => {
+    render();
+    const handle = container.querySelector('.canvas-sresize') as HTMLElement;
+    pointer(handle, 'pointerdown', 300, 40);
+    pointer(window, 'pointermove', 5000, 40);
+    expect(canvas().sidebarWidth).toBe(SIDEBAR_MAX);
+    pointer(window, 'pointermove', -5000, 40);
+    expect(canvas().sidebarWidth).toBe(SIDEBAR_MIN);
+    pointer(window, 'pointerup', 0, 40);
+  });
+
+  it('stops resizing on pointerup', () => {
+    render();
+    const handle = container.querySelector('.canvas-sresize') as HTMLElement;
+    pointer(handle, 'pointerdown', 300, 40);
+    pointer(window, 'pointermove', 340, 40);
+    pointer(window, 'pointerup', 340, 40);
+    const settled = canvas().sidebarWidth;
+    pointer(window, 'pointermove', 600, 40);
+    expect(canvas().sidebarWidth).toBe(settled);
   });
 });

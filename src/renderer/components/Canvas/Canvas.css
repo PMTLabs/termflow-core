@@ -407,6 +407,16 @@
   min-width: 0;
 }
 
+/* Resize handle and drag-to-regroup (Task 15). The handle is a flex sibling AFTER the sidebar,
+   so it sits on the seam and the viewport keeps `flex: 1`. */
+.canvas-sresize { width: 5px; flex: none; cursor: col-resize; background: transparent; transition: background-color .12s ease; }
+.canvas-sresize:hover, .canvas-sresize.active { background: var(--accent-color, #007acc); }
+.canvas-sgroup.drop { background: var(--menu-hover-background, #094771); color: #fff; }
+.canvas-srow.lifting { opacity: .35; }
+/* `position: fixed` in client coordinates so the ghost follows the cursor out over the canvas;
+   clipped to the sidebar it would vanish exactly when the drag left it. */
+.canvas-sghost { position: fixed; z-index: 100000; pointer-events: none; padding: 3px 10px; border: 1px solid var(--accent-color, #007acc); border-radius: 3px; background: var(--menu-hover-background, #094771); color: #fff; font-size: 12px; white-space: nowrap; }
+
 /* ---- Canvas chrome: the Arrange control (Task 13) ------------------------ */
 
 /* Screen space, not world space. It is a sibling of `.canvas-viewport` inside `.canvas-mode`,

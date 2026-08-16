@@ -1,6 +1,7 @@
 import { PaneNode } from '../../store/slices/panesSlice';
 import { removeLeaf, insertByZone, firstLeafId } from '../../store/slices/paneTreeOps';
 import { Rect } from './canvasGeometry';
+import { arrange } from './canvasLayout';
 
 /** The pane leaf hosting a terminal, or null. Depth-first, first match wins. */
 export function findPaneIdByTerminalId(
@@ -116,6 +117,39 @@ export function dropTargetTabId(
     return g.tabId === currentTabId ? null : g.tabId;
   }
   return null;
+}
+
+/**
+ * Re-grid one group in place — `plan/013` Task 15.
+ *
+ * The sidebar drop path uses this: a list drag carries no position, so the arriving terminal is
+ * slotted into the destination's grid rather than dropped at an arbitrary point (design 010
+ * §6.3). That is the one real difference between the two re-homing entry points; a CANVAS drop
+ * honours where you let go, and deliberately does not call this.
+ *
+ * The frame ORIGIN is preserved — only the size follows the contents — so a group that gains a
+ * terminal grows in place instead of jumping to wherever `arrange`'s own grid would have put it.
+ *
+ * The frame it returns is still worth dispatching even though `buildModel` derives a non-empty
+ * group's drawn frame from its nodes: the STORED rect is what `seedNodePosition` places the next
+ * new pane against, so leaving it stale would seed the following split into the wrong box.
+ */
+export function regridGroup(
+  frame: Rect,
+  nodeIds: string[],
+): { frame: Rect; nodes: Record<string, { x: number; y: number }> } {
+  // Nothing to fit around, so the frame is left exactly as it was — an emptied group keeps its
+  // last size and stays a drop target (design §6.3/§10). Shrinking it to a one-node box here
+  // would be the same frame-vanishes bug `fitGroupFrame` returns null to avoid.
+  if (!nodeIds.length) return { frame: { ...frame }, nodes: {} };
+
+  const laid = arrange({ groups: [{ id: '__g', nodeIds }] });
+  const src = laid.groups.__g;
+  const dx = frame.x - src.x;
+  const dy = frame.y - src.y;
+  const nodes: Record<string, { x: number; y: number }> = {};
+  for (const [id, p] of Object.entries(laid.nodes)) nodes[id] = { x: p.x + dx, y: p.y + dy };
+  return { frame: { x: frame.x, y: frame.y, w: src.w, h: src.h }, nodes };
 }
 
 /** Translate a frame and its members together, preserving relative offsets exactly.
