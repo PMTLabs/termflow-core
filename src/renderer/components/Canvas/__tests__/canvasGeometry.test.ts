@@ -185,4 +185,18 @@ describe('assignTiers', () => {
     });
     expect(t['tm-b']).toBe('group');
   });
+
+  // The interaction between the two rules above. D8 exempts the focused node from
+  // the SIZE and BUDGET rules, not from existing: a node with no geometry has
+  // nowhere to paint, so promoting it would spend one of MAX_GPU's twelve WebGL
+  // contexts on nothing. `canvasSlice.focusNode` does not require geometry, so this
+  // state is reachable rather than theoretical.
+  it('does not promote a focused node that has no geometry', () => {
+    const t = assignTiers({
+      ids: ['ghost', 'real'], rects: { real: rectFor(0, 0) },
+      vp: vp1, vw: 800, vh: 600, focusedId: 'ghost', recent: [],
+    });
+    expect(t['ghost']).toBe('group');
+    expect(t['real']).toBe('gpu');
+  });
 });

@@ -130,6 +130,12 @@ export function assignTiers(input: TierInput): Record<string, LodTier> {
   let interactive = 0;
 
   for (const id of order) {
+    // A node with no geometry is not ON the canvas, so no tier applies and it
+    // cannot be painted. This is deliberately checked BEFORE the focus branch:
+    // D8 exempts the focused node from the SIZE and BUDGET rules, not from
+    // existing. Promoting it here would spend one of MAX_GPU's twelve WebGL
+    // contexts on something with no position to paint at. `focusNode` does not
+    // require geometry to exist, so this combination is reachable.
     const r = rects[id];
     if (!r) { out[id] = 'group'; continue; }
 
