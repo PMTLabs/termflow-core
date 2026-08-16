@@ -64,4 +64,4 @@ export {
   snapshotRenderPolicies,
   restoreRenderPolicies,
 } from './renderPolicyReconciler';
-export type { RenderPolicySnapshot, ReconcileInput } from './renderPolicyReconciler';
+export type { RenderPolicySnapshot, ReconcileInput, ReconcileResult } from './renderPolicyReconciler';

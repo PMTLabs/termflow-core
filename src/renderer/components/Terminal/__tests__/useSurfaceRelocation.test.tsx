@@ -430,17 +430,30 @@ describe('design/012 §4.2.2 — cleanup identity (H13)', () => {
 });
 
 /**
- * rev 16 (test audit `150` H2) — the RENDERER half of the REFUSAL contract.
+ * rev 16, CORRECTED at rev 17 (`152`/`153` finding 2) — read this before trusting it.
  *
- * `TerminalDisplay.tsx`'s refusal branch was covered only by a source-substring
- * tripwire in terminalDisplayRelocationWiring.test.ts, which asserts that the line
- * `if (!engine.mount(pane)) {` exists. It says nothing about the body: emptying the
- * block, or dropping `engineRef.current = null`, left it green while production fell
- * through to engineMounted()/attach() on a mount that wired nothing — the exact crash
- * the guard was added to prevent. A grep for `refus` across src/renderer hits only
- * TerminalDisplay.tsx itself, so nothing behavioural covered it.
+ * WHAT THIS DOES NOT DO: it does not exercise `TerminalDisplay.tsx`. The refusal logic
+ * below lives in this file's own hand-written `Harness`, gated by the module-level
+ * `refuseNextMount` / `postMountRuns`, which have no connection to the real component —
+ * it cannot be mounted in jsdom (CSS imports, @tauri-apps/api/event, a Redux store, a
+ * canvas-backed `Terminal.open()`), which is why the Harness exists at all.
+ *
+ * So this asserts that a COPY of the production code behaves. rev 16's version of this
+ * comment claimed to be "the RENDERER half of the REFUSAL contract" and criticised the
+ * source tripwire it replaced, while duplicating the code under test — a comment claiming
+ * coverage it does not provide, which is this project's most-repeated defect and was
+ * caught here on the very fix written to close the previous instance of it.
+ *
+ * WHAT ACTUALLY GUARDS THE REAL FILE: the block-body assertion in
+ * terminalDisplayRelocationWiring.test.ts ('handles a refused mount in the block BODY'),
+ * which walks to the matching brace and asserts the statements inside it. Change that one
+ * when the refusal branch changes; this one will not notice.
+ *
+ * WHAT THIS IS STILL WORTH: it pins the SHAPE the hook must survive — that a false return
+ * leaves no engine behind and runs nothing downstream — independently of the source text,
+ * so a rewrite of `TerminalDisplay.tsx` has a behavioural target to aim at.
  */
-describe('a refused mount leaves the renderer with no engine (rev 16)', () => {
+describe('a refused mount leaves the harness with no engine (rev 16, scope corrected rev 17)', () => {
   it('nulls engineRef and never runs the post-mount path', () => {
     refuseNextMount = true;
     postMountRuns = 0;

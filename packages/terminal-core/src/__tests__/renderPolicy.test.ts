@@ -293,6 +293,18 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     // longer holds an addon.
     const { entry } = makeEntry('demote-fail');
     setTerminalRenderPolicy('demote-fail', 'webgl');
+    // DELIBERATELY UN-LATCHED, and single-call-only (review `152` LOW).
+    //
+    // This addon has been through the real `loadWebGLAddon → term.loadAddon`, so its
+    // `.dispose` is already xterm's latching wrapper; assigning over it produces an addon
+    // that throws on EVERY call, which no loaded addon does. That shape hid two CRITICALs
+    // here, so it is named rather than left to be rediscovered.
+    //
+    // It is sound ONLY because dispose() is invoked exactly once below. There is no
+    // faithful alternative for an already-promoted addon — `wrappedThrower()` (foot of
+    // this file) can only wrap at construction time, and the mock exposes no hook to make
+    // an underlying dispose throw after `loadAddon` has captured it. If this test ever
+    // grows a second dispose, convert it to a wrappedThrower fixture instead.
     const addon = asMock(entry.webglAddon);
     addon.dispose = () => {
       throw new Error('test: dispose failed before releasing the context');
@@ -305,8 +317,12 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     expect(countActiveWebGLAddons()).toBe(1);
     expect(getTerminalRenderPolicy('demote-fail')).toBe('dom');
 
-    // The load-bearing half: a SECOND pass cannot manufacture a success, because
-    // there is nothing left on the entry to "dispose" and the count does not move.
+    // A second pass is a NO-OP, and that is the honest claim (review `152`). The entry
+    // now reads 'dom' (asserted above), so `setTerminalRenderPolicy` short-circuits on
+    // `current === want` at renderPolicy.ts:220 and never re-enters the dispose path at
+    // all. The rev-10 retention regression is forbidden by the UNCONDITIONAL nulling on
+    // line `expect(entry.webglAddon).toBeNull()` above, not by anything down here.
+    expect(getTerminalRenderPolicy('demote-fail')).toBe('dom'); // why pass 2 short-circuits
     expect(setTerminalRenderPolicy('demote-fail', 'dom')).toBe('dom');
     expect(countActiveWebGLAddons()).toBe(1);
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
@@ -316,6 +332,8 @@ describe('design/013 §4 — setTerminalRenderPolicy', () => {
     const { entry } = makeEntry('reset-fail');
     setTerminalRenderPolicy('reset-fail', 'webgl');
     const addon = entry.webglAddon;
+    // Un-latched and single-call-only, for the same reason as 'demote-fail' above
+    // (review `152` LOW) — dispose() is invoked exactly once here.
     asMock(entry.webglAddon).dispose = () => {
       throw new Error('test: dispose failed before releasing the context');
     };
@@ -913,6 +931,13 @@ describe('design/013 §5.2 ORPHAN — the failed-disposal quarantine', () => {
 
     // No amount of ordinary activity releases it: there is no drain to run, and the
     // addon's own dispose() is latched, so a caller retrying it would get silence.
+    //
+    // `dropElement` FIRST, and that is load-bearing (review `152`). Without it this
+    // mount takes the REATTACH branch (TerminalEngine.ts:1122) — the entry's new
+    // terminal has an element, and `disposeOrphanedWebGLAddon` exists only in the
+    // CREATE branch (:1547). The assertions below then held trivially because nothing
+    // ran, which is not the same as "ordinary activity did not release it".
+    dropElement('q-drain');
     engine.mount(makeLaidOutContainer());
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
     // ORPHAN itself: live === reachable + quarantined. The wedged addon is still
@@ -981,7 +1006,13 @@ describe('design/013 D4 — global disable must not erase a possibly-live addon'
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
     expect(countActiveWebGLAddons()).toBe(1);
 
-    // The load-bearing half: toggling again cannot manufacture a release.
+    // Toggling again is a NO-OP, and saying so is the honest version of this block
+    // (review `152`). `disableWebGLGlobally` nulls `webglAddon` on the THROW branch as
+    // well as the success branch, so the second call finds the field already falsy
+    // (cache.ts:435) and skips the dispose/quarantine block entirely — it re-exercises
+    // NOTHING. What actually forbids the rev-10 retention regression is that
+    // unconditional nulling, asserted directly above.
+    expect(entry.webglAddon).toBeNull(); // the precondition that makes pass 2 a no-op
     setWebGLGloballyDisabled(false);
     disableWebGLGlobally();
     expect(countActiveWebGLAddons()).toBe(1);
@@ -1174,13 +1205,20 @@ describe('a REAL loadAddon-wrapped addon whose dispose throws (rev 10)', () => {
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
     expect(countActiveWebGLAddons()).toBe(1);
 
-    // Pass 2 and 3 — the reconciler re-derives policy every pass, so this is an
-    // ORDINARY occurrence, not a special retry. Under the old retention the entry
-    // still held the addon here, its latched dispose() returned silently, and the
-    // code nulled the field and freed a slot for a context nobody released.
+    // Passes 2 and 3 are NO-OPS, and the honest claim is that they cannot be anything
+    // else (review `152`). `resetTerminalRendering` nulls `webglAddon` on the throw
+    // branch too, so the entry already reads 'dom' and each repeat short-circuits on
+    // `current === want` before reaching the dispose path.
+    //
+    // The retention world this comment used to describe — entry still holding the addon,
+    // its latched dispose() returning silently, the code freeing a slot for a context
+    // nobody released — is UNREACHABLE precisely because of that unconditional nulling.
+    // Reconstructing it here would take a fixture harsher than reality, which is the same
+    // defect class as one kinder than reality; the guard is the assertion above.
+    expect(getTerminalRenderPolicy('wrapped-demote')).toBe('dom'); // why they short-circuit
     setTerminalRenderPolicy('wrapped-demote', 'dom');
     setTerminalRenderPolicy('wrapped-demote', 'dom');
-    expect(calls()).toBe(1);                       // never re-attempted
+    expect(calls()).toBe(1);                       // never re-attempted — the xterm latch
     expect(countActiveWebGLAddons()).toBe(1);      // and never falsely freed
     expect(getQuarantinedWebGLAddonCount()).toBe(1);
   });

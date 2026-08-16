@@ -45,13 +45,15 @@ export interface ReconcileInput {
 }
 
 /**
- * design/013 §5 / D5. Tier ASSIGNMENT stays pure and lives in Canvas Mode; this maps
- * tiers -> policies, applies them, and reports what it achieved. That split is what
- * lets the budget be asserted against counts rather than tier strings.
+ * What a reconciliation achieved.
+ *
+ * NAMED, and exported, because design/013 §5's CALLER-DROP makes acting on
+ * `failedPromotions` a NORMATIVE obligation of the consumer (Canvas Mode Task 9). An
+ * anonymous inline return type left `ReconcileInput` exported while its counterpart was
+ * not, so the one caller the spec obliges could not name the type it must handle without
+ * `ReturnType<typeof reconcileRenderPolicies>`.
  */
-export function reconcileRenderPolicies(
-  input: ReconcileInput,
-): {
+export interface ReconcileResult {
   applied: Record<string, RenderPolicy>;
   webglCount: number;
   /**
@@ -64,7 +66,14 @@ export function reconcileRenderPolicies(
    * suppressing those would strand the slot permanently.
    */
   failedPromotions: string[];
-} {
+}
+
+/**
+ * design/013 §5 / D5. Tier ASSIGNMENT stays pure and lives in Canvas Mode; this maps
+ * tiers -> policies, applies them, and reports what it achieved. That split is what
+ * lets the budget be asserted against counts rather than tier strings.
+ */
+export function reconcileRenderPolicies(input: ReconcileInput): ReconcileResult {
   const setPolicy = input.setPolicy ?? setTerminalRenderPolicy;
   const count = input.count ?? countActiveWebGLAddons;
   const getPolicy = input.getPolicy ?? getTerminalRenderPolicy;

@@ -225,6 +225,23 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // Ensure the host-level pipeline-healed suppressor is registered once.
     ensurePipelineHealSuppression();
 
+    // SINGLE-USE HANDOFFS, TAKEN BEFORE THE MOUNT THAT CONSUMES THEM.
+    //
+    // Both `take*` calls are DESTRUCTIVE (get-then-delete; Set.delete), and they run
+    // while the options object below is built — before `engine.mount()` can refuse.
+    // Held in locals so the refusal path can hand them back.
+    //
+    // Neither is recoverable if dropped: the cross-window prompt gate exists only in
+    // the source window, which has already let go of it, and ConPTY announced `?9001h`
+    // once at session start with no stream still replaying it. And a refusal is exactly
+    // when they are non-empty — the create-branch refusal is a FIRST-EVER mount in this
+    // window, i.e. the cross-window detach and the hot-swap reattach. This effect's deps
+    // are `[terminalId]` only, so it does not re-run on its own; a later mount (tab
+    // switch away and back) would take `undefined`/`false` and the loss would be silent
+    // and permanent for the session.
+    const promptGateHandoff = terminalService.takePromptGateHandoff(terminalId);
+    const win32InputModeHandoff = terminalService.takeWin32InputModeHandoff(terminalId);
+
     const engine = new TerminalEngine(bridge, {
       cacheKey: terminalId,
       // Effective schema: per-pane agent override > per-tab override > global
@@ -279,13 +296,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // terminalId yet on first mount, so the source window's live prompt-gate
       // (stashed by attachExistingTerminal) fills the gap. Single-use — undefined
       // for a normal (non-detach) mount.
-      initialPromptGate: terminalService.takePromptGateHandoff(terminalId),
+      initialPromptGate: promptGateHandoff,
       // Reattach to a session that outlived this renderer (hot-swap update /
       // webview reload): re-seed Win32-Input-Mode, whose ?9001h handshake no
       // stream still carries. Single-use — false for a normal mount, and the
       // engine ignores it off-Windows and whenever the cache entry already
       // tracks the session itself.
-      initialWin32InputMode: terminalService.takeWin32InputModeHandoff(terminalId),
+      initialWin32InputMode: win32InputModeHandoff,
       onInputLineChanged: (text) => suggestRef.current.onInputLineChanged(text),
       onCommandSubmitted: (cmd) => commandHistoryService.record(cmd, getCwdSnapshot(terminalId)),
       onSuggestAction: (action) => suggestRef.current.onAction(action),
@@ -357,6 +374,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // mount; this effect simply has no engine to run against and drops out.
     if (!engine.mount(pane)) {
       console.warn('TerminalDisplay: engine.mount refused; skipping attach/hydration');
+      // GIVE THE SINGLE-USE HANDOFFS BACK. They were consumed above for a mount that
+      // wired nothing, and REFUSAL's whole promise is that a later mount can still
+      // succeed — so the state this effect took must be returned, not just the state
+      // `mount()` owns. The engine's contract stops at the engine boundary; this
+      // caller's does not.
+      if (promptGateHandoff) terminalService.stashPromptGate(terminalId, promptGateHandoff);
+      if (win32InputModeHandoff) terminalService.markReattachedSession(terminalId);
       engineRef.current = null;
       return () => {};
     }

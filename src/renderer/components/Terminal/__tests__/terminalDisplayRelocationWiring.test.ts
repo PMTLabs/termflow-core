@@ -44,6 +44,55 @@ describe('TerminalDisplay relocation wiring', () => {
     expect(SOURCE).toContain('}, [terminalId]);');
   });
 
+  // The refusal BODY, not just its guard line (review 153 finding 2).
+  //
+  // `expect(SOURCE).toContain('if (!engine.mount(pane)) {')` above asserts that an `if`
+  // statement's OPENING LINE exists. It asserts nothing about what is inside it: emptying
+  // the block entirely — falling through to engineMounted() and engine.terminal on a mount
+  // that wired nothing — leaves that substring, and both assertions, untouched.
+  //
+  // jsdom cannot mount the real component (CSS imports, @tauri-apps/api/event, a Redux
+  // store, a canvas-backed Terminal.open()), so a source assertion is the ONLY mechanism
+  // that can pin this file's own refusal behaviour. That is a reason to make it assert the
+  // body, not a reason to accept a tripwire that a regression walks straight through.
+  it('handles a refused mount in the block BODY, not just at the guard line', () => {
+    const open = SOURCE.indexOf('if (!engine.mount(pane)) {');
+    expect(open).toBeGreaterThan(-1);
+
+    // Walk to the matching brace, so these assertions cannot silently drift into
+    // code that follows the block.
+    const from = SOURCE.indexOf('{', open);
+    let depth = 0;
+    let end = -1;
+    for (let i = from; i < SOURCE.length; i += 1) {
+      if (SOURCE[i] === '{') depth += 1;
+      else if (SOURCE[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(from);
+    const body = SOURCE.slice(from + 1, end);
+
+    // Drops the never-wired engine. Without this the next reader of
+    // `engineRef.current!.terminal` hits a getter that throws.
+    expect(body).toContain('engineRef.current = null');
+    // And returns a cleanup that tears down nothing it never set up.
+    expect(body).toContain('return () => {}');
+    // Hands back the two SINGLE-USE handoffs consumed while the options object was
+    // built, before mount() could refuse. Neither survives being dropped, and a
+    // create-branch refusal is exactly the first-ever-mount case where they are
+    // non-empty (review 153 finding 1).
+    expect(body).toContain('stashPromptGate(terminalId, promptGateHandoff)');
+    expect(body).toContain('markReattachedSession(terminalId)');
+    // The post-mount path must not run on a refusal.
+    expect(body).not.toContain('engineMounted()');
+    expect(body).not.toContain('engine.terminal');
+  });
+
   // §4.2.1: the pane is CAPTURED in the effect body and the cleanup uses the
   // capture. Rev 5 wrote `if (terminalRef.current) { engine.relocateTo(...) }`,
   // whose guard is FALSE on whole-component deletion — React detaches host refs
