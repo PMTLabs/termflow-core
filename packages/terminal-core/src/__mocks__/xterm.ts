@@ -418,7 +418,46 @@ export class Terminal {
     this.keyHandler = handler;
   }
 
-  dispose(): void {}
+  /**
+   * Cascade to the loaded addons and RE-THROW their errors (rev 16, test audit `150`).
+   *
+   * The real `Terminal.dispose()` chains to `AddonManager.dispose()`, and xterm's
+   * lifecycle helper collects each child's error and re-throws after the sweep — so a
+   * failing addon teardown propagates out of `term.dispose()`. This mock was `{}`,
+   * which made two production guards structurally untestable:
+   *
+   *   - the `try { term.dispose() } catch` around the refused-create teardown in
+   *     `TerminalEngine.mount()`. Delete that catch and NOTHING went red, because the
+   *     mock could not throw. In production the throw would then skip
+   *     `orphanElement.remove()` and the `this.container` restore — leaving a dead
+   *     surface in the pane AND the engine pointing at a container it never committed
+   *     to, which is the exact hazard that catch was written for.
+   *   - the claim that `term.dispose()` disposes the four addons loaded with it, so
+   *     they need no separate teardown. Nothing asserted it and the mock could not
+   *     express it.
+   *
+   * FOURTH instance on this branch of a mock kinder than reality (after the loadAddon
+   * dispose latch, the LB fixture faking the box on the child, and the WebglAddon
+   * emitter surviving disposal).
+   */
+  dispose(): void {
+    const errors: unknown[] = [];
+    for (const addon of this.loadedAddons) {
+      const a = addon as { dispose?: () => void };
+      if (typeof a.dispose !== 'function') continue;
+      try {
+        a.dispose();
+      } catch (e) {
+        errors.push(e);
+      }
+    }
+    // Emptied even when a child threw — same `finally` semantics as DisposableStore.
+    this.loadedAddons.length = 0;
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new Error(`mock: ${errors.length} addon disposals failed; first: ${String(errors[0])}`);
+    }
+  }
 
   // ---- Test helpers (not part of the real xterm API) ----
 

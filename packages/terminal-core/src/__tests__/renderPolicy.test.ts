@@ -742,7 +742,14 @@ describe('design/013 §5.2 ORPHAN — no addon is replaced without being dispose
     // ALREADY mounted — stays usable where it was, which is the contract rev 6
     // states and rev 5 got backwards.
     expect(() => engine2.terminal).toThrow();
-    expect(() => engine.terminal).not.toThrow();
+    // The VALUE is the contract, not merely that the getter survives (rev 16, test
+    // audit `150` H1). design/013 §5.2 says a refused-mid-move engine "stays mounted,
+    // wired and observed on its old container — `this.term` is still assigned and
+    // still valid". A pre-commit reassignment to a truthy-but-WRONG Terminal would
+    // leave `not.toThrow()` green while the engine silently drove someone else's
+    // terminal, and this spec has recorded "another pre-commit mutation slipped past
+    // review" three separate times.
+    expect(engine.terminal).toBe(entry.terminal);
 
     // ...and a retry into a good container still works.
     const good = makeLaidOutContainer();

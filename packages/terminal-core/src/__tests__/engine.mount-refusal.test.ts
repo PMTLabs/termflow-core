@@ -411,7 +411,7 @@ describe('review 134 — a refusal must not evict ANOTHER engine\'s surface', ()
     // THE ASSERTION: X is untouched — still placed, still connected, still usable.
     expect(xElement.parentElement).toBe(pane);
     expect(xElement.isConnected).toBe(true);
-    expect(() => x.terminal).not.toThrow();
+    expect(x.terminal).toBe(terminalCache.get('foreign-refuse-x')!.terminal);
     expect((x as unknown as { container: unknown }).container).toBe(pane);
     // …and Y really did refuse, rather than quietly succeeding.
     expect(yElement.parentElement).toBe(elsewhere);
@@ -448,7 +448,10 @@ describe('review 134 — a refusal must not evict ANOTHER engine\'s surface', ()
 
       // X survived the refusal, and the abandoned surface took itself with it.
       expect(xElement.parentElement).toBe(pane);
-      expect(() => x.terminal).not.toThrow();
+      // Identity, not throwiness (rev 16, test audit `150` L1): a reassignment to a
+      // truthy-but-wrong Terminal keeps `not.toThrow()` green. This site had no
+      // container check either, so it was the weakest of the three.
+      expect(x.terminal).toBe(terminalCache.get('foreign-create-x')!.terminal);
       expect(pane.querySelectorAll('.xterm')).toHaveLength(1);
 
       // The retry commits, and NOW X is evicted.
@@ -459,6 +462,61 @@ describe('review 134 — a refusal must not evict ANOTHER engine\'s surface', ()
       expect(terminalCache.get('foreign-create-y')!.terminal.element!.parentElement).toBe(pane);
     } finally {
       proto.open = realOpen;
+    }
+  });
+});
+
+/**
+ * rev 16 (test audit `150` C1) — the refused-create teardown must survive a THROWING
+ * `term.dispose()`.
+ *
+ * This could not be written before: the xterm mock's `dispose()` was `{}`, so nothing
+ * could throw, and DELETING the production `try/catch` around it failed no test. The
+ * mock now cascades to the loaded addons and re-throws their errors, as the real
+ * `Terminal.dispose()` does via `AddonManager` + the lifecycle helper.
+ *
+ * What the guard protects: if the throw escapes, `orphanElement.remove()` and the
+ * `this.container` restore are both skipped — leaving a dead surface in the pane AND
+ * the engine pointing at a container it never committed to.
+ */
+describe('a refused create survives a throwing term.dispose() (rev 16)', () => {
+  it('still removes the orphan surface and restores the container', () => {
+    const proto = Terminal.prototype as unknown as {
+      open(container: HTMLElement): void;
+      loadAddon(addon: unknown): void;
+    };
+    const realOpen = proto.open;
+    const realLoad = proto.loadAddon;
+
+    // Poison exactly one addon so the cascading dispose() throws, as the real
+    // Terminal.dispose() would when an addon teardown fails.
+    proto.loadAddon = function patchedLoad(this: unknown, addon: unknown) {
+      realLoad.call(this, addon);
+      realLoad.call(this, { dispose() { throw new Error('test: addon teardown failed'); } });
+      proto.loadAddon = realLoad;
+    };
+    // open() appends its element and THEN throws — the documented refused-create shape.
+    proto.open = function patchedOpen(this: unknown, container: HTMLElement) {
+      realOpen.call(this, container);
+      throw new Error('test: renderer initialization failed after append');
+    };
+
+    try {
+      const previous = makeContainer();
+      const pane = makeContainer();
+      const engine = new TerminalEngine(makeBridge(), { cacheKey: 'dispose-throws' });
+      (engine as unknown as { container: HTMLElement }).container = previous;
+
+      // The refusal must not propagate, even though the cleanup's dispose() throws.
+      expect(() => engine.mount(pane)).not.toThrow();
+
+      // THE ASSERTIONS the escaping throw would have skipped.
+      expect(pane.querySelectorAll('.xterm')).toHaveLength(0);
+      expect((engine as unknown as { container: HTMLElement }).container).toBe(previous);
+      expect(terminalCache.has('dispose-throws')).toBe(false);
+    } finally {
+      proto.open = realOpen;
+      proto.loadAddon = realLoad;
     }
   });
 });
