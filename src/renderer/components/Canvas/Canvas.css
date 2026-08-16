@@ -1,0 +1,57 @@
+/* `.app-body` is `flex:1; overflow:hidden` with NO position, so an absolutely
+   positioned child would anchor to `.app` and cover the title bar — burying the
+   tab strip and the window controls. The tab strip must stay visible in Canvas
+   Mode (design 010 D9), so establish the containing block here. */
+.app-body { position: relative; }
+
+/* Canvas Mode — overlays the tab-mode terminal container without unmounting it,
+   so terminals can be handed back and forth (design 010 §4.3).
+
+   THE Z-INDEX IS AN INVARIANT, NOT A PREFERENCE. Because the tab-mode DOM stays
+   mounted underneath, every floating widget it owns competes with this overlay
+   directly: .terminal-display's `isolation: isolate` does NOT contain them, since
+   ScrollToBottomButton (6), TerminalSearchBar (10) and CommandSuggestPopup (30)
+   are SIBLINGS of .terminal-display inside .terminal-display-wrapper — which is
+   `position: relative` with no z-index, as is .terminal-pane-content (whose own
+   comment says it is deliberately not a stacking context). At the original
+   z-index 5 a scroll-to-bottom button left over from tab mode painted on top of
+   the canvas and stayed clickable.
+
+   So this sits ABOVE every floating widget the terminal subtree owns (the three
+   above, plus the pane header at 8 and the agent chip at 5 — all <= 30) and BELOW
+   the 1000-level menu/popup tier. Below is deliberate: the tab strip stays live in
+   Canvas Mode (design 010 D9) and TitleBar/TabContextMenu/TabRenamePopup/
+   ShellSelector/SplitButton all open at 1000 into the body area. Raising this into
+   the low thousands would fix the leak and bury those instead.
+
+   900 leaves 31-899 free for canvas-owned chrome. This element creates a stacking
+   context, so canvas descendants stack INSIDE it and cannot leak out.
+
+   The invariant is pinned by canvasZIndex.test.ts, which DERIVES both bounds from
+   the real stylesheets rather than repeating the numbers — add a widget anywhere in
+   Terminal/ or Panes/ above 900 and that test fails. */
+.canvas-mode {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  background: var(--bg-primary, #141414);
+  z-index: 900;
+}
+.canvas-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+}
+.canvas-viewport.panning { cursor: grabbing; }
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary, #666666);
+  font-size: 13px;
+  pointer-events: none;
+}

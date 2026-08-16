@@ -1,8 +1,8 @@
-import { SHORTCUT_ACTIONS, findConflict, canonicalizeCombo } from '../shortcutActions';
+import { SHORTCUT_ACTIONS, findConflict, canonicalizeCombo, comboKeyToken } from '../shortcutActions';
 
 describe('SHORTCUT_ACTIONS', () => {
-  it('has 13 unique action ids with unique default combos', () => {
-    expect(SHORTCUT_ACTIONS).toHaveLength(13);
+  it('has 14 unique action ids with unique default combos', () => {
+    expect(SHORTCUT_ACTIONS).toHaveLength(14);
     const ids = SHORTCUT_ACTIONS.map(a => a.id);
     const combos = SHORTCUT_ACTIONS.map(a => a.defaultCombo);
     expect(new Set(ids).size).toBe(ids.length);
@@ -110,5 +110,40 @@ describe('findConflict', () => {
 
   it('does not throw when customKeybindings is explicitly null', () => {
     expect(() => findConflict('newTab', 'Ctrl+Alt+N', null as any)).not.toThrow();
+  });
+});
+
+describe('comboKeyToken', () => {
+  // Both of these lose their identity SILENTLY in a '+'-delimited,
+  // whitespace-trimmed combo string, so a shortcut using either registers
+  // fine and then never fires. That is why the mapping exists at all.
+  it('gives the delimiter-colliding and whitespace keys a word form', () => {
+    expect(comboKeyToken('+')).toBe('Plus');
+    expect(comboKeyToken(' ')).toBe('Space');
+  });
+
+  it('leaves every other key untouched', () => {
+    for (const k of ['a', 'A', 'F5', 'Enter', 'Tab', 'ArrowLeft', ',']) {
+      expect(comboKeyToken(k)).toBe(k);
+    }
+  });
+
+  // The property that actually matters: what a keypress canonicalizes to via
+  // this helper must equal what the written combo canonicalizes to. Assert it
+  // rather than the intermediate strings.
+  it('makes a live keypress canonicalize to the same string as its written combo', () => {
+    const live = (mods: string[], key: string) =>
+      canonicalizeCombo([...mods, comboKeyToken(key)].join('+'));
+
+    expect(live(['Ctrl', 'Alt', 'Shift'], ' ')).toBe(canonicalizeCombo('Ctrl+Shift+Alt+Space'));
+    expect(live(['Ctrl'], '+')).toBe(canonicalizeCombo('Ctrl+Plus'));
+    expect(live(['Ctrl', 'Shift'], 'x')).toBe(canonicalizeCombo('Ctrl+Shift+X'));
+  });
+
+  // Without the mapping the space is trimmed to nothing and the combo
+  // collapses to modifiers only — the failure this helper exists to prevent.
+  it('is what stops a Space combo collapsing to bare modifiers', () => {
+    expect(canonicalizeCombo('Ctrl+Alt+Shift+ ')).toBe('control+alt+shift+');
+    expect(canonicalizeCombo('Ctrl+Shift+Alt+Space')).not.toBe('control+alt+shift+');
   });
 });

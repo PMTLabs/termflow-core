@@ -388,28 +388,53 @@ const panesSlice = createSlice({
       state.activePaneId = action.payload;
     },
 
-    renamePanes: (state, action: PayloadAction<{ paneId: string; name: string }>) => {
-      const { paneId, name } = action.payload;
-      
-      if (!state.paneTree) return;
-      
+    /**
+     * Rename a pane in a specific tab. `tabId` is optional and defaults to the
+     * active tab, so every existing caller (TerminalPane.handleNameSave) keeps
+     * working unchanged.
+     *
+     * This used to walk `state.paneTree` — the ACTIVE-tab mirror — so a rename
+     * aimed at any other tab silently no-opped. The canvas sidebar renames
+     * nodes across every group, so the authoritative `treesByTabId` is the
+     * thing to write.
+     */
+    renamePanes: (
+      state,
+      action: PayloadAction<{ paneId: string; name: string; tabId?: string }>
+    ) => {
+      const { paneId, name, tabId } = action.payload;
+
+      const targetTabId = tabId ?? state.activeTabId;
+      if (!targetTabId) return;
+      const tree = state.treesByTabId[targetTabId];
+      if (!tree) return;
+
       const findAndRenamePane = (node: PaneNode): boolean => {
         if (node.id === paneId) {
           node.name = name;
           return true;
         }
-        
+
         if (node.type === 'split' && node.children) {
           for (const child of node.children) {
             if (findAndRenamePane(child)) return true;
           }
         }
-        
+
         return false;
       };
-      
-      findAndRenamePane(state.paneTree);
-      syncActive(state);
+
+      if (!findAndRenamePane(tree)) return;
+
+      // Refresh the active-tab mirror FROM treesByTabId — the same direction
+      // setPaneMuted uses. Under Immer `paneTree` and `treesByTabId[tabId]` are
+      // distinct draft paths, so the write above is not visible through
+      // `paneTree`. Note this is the OPPOSITE direction to `syncActive()`,
+      // which copies paneTree INTO treesByTabId and would therefore discard
+      // the rename we just made.
+      if (state.activeTabId === targetTabId) {
+        state.paneTree = state.treesByTabId[targetTabId];
+      }
     },
 
     setPaneTree: (state, action: PayloadAction<PaneNode | null>) => {

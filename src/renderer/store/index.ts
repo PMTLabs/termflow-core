@@ -6,6 +6,7 @@ import layoutsReducer from './slices/layoutsSlice';
 import uiReducer from './slices/uiSlice';
 import zoomReducer from './slices/zoomSlice';
 import peersReducer from './slices/peersSlice';
+import canvasReducer from './slices/canvasSlice';
 import { attachPaneOwnershipSync } from '../services/paneOwnership';
 
 // Simple logging middleware for debugging
@@ -30,6 +31,7 @@ export const store = configureStore({
     ui: uiReducer,
     zoom: zoomReducer,
     peers: peersReducer,
+    canvas: canvasReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware().concat(loggingMiddleware),

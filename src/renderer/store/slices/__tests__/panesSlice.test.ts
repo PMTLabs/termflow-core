@@ -15,6 +15,7 @@ import reducer, {
   toggleMaximizePane,
   setPaneMuted,
   splitPaneWithTab,
+  renamePanes,
   PaneNode,
 } from '../panesSlice';
 import { findLeaf } from '../paneTreeOps';
@@ -571,5 +572,78 @@ describe('panesSlice setPaneMuted', () => {
     const created = root.children!.find(c => c.terminalId === 'tm-2');
     expect(original?.notifyMuted).toBe(true);
     expect(created?.notifyMuted).toBeUndefined();
+  });
+});
+
+describe('renamePanes tab scoping', () => {
+  // `addTabTree` is the real action for seeding a tab's authoritative tree.
+  // `setPaneTree` writes only the active-tab mirror, which would make the
+  // non-active-tab case below vacuous.
+  const twoTabs = () => {
+    let s = reducer(init(), addTabTree({
+      tabId: 'tb-alpha',
+      tree: { id: 'pn-a', type: 'terminal', terminalId: 'tb-alpha', name: 'alpha' },
+    }));
+    s = reducer(s, addTabTree({
+      tabId: 'tb-beta',
+      tree: { id: 'pn-b', type: 'terminal', terminalId: 'tb-beta', name: 'beta' },
+    }));
+    return reducer(s, setActiveTabId('tb-alpha'));
+  };
+
+  it('renames a pane in the ACTIVE tab when tabId is omitted', () => {
+    const s = reducer(twoTabs(), renamePanes({ paneId: 'pn-a', name: 'renamed' }));
+    expect(s.treesByTabId['tb-alpha'].name).toBe('renamed');
+  });
+
+  // The active tab has TWO readers — `treesByTabId[activeTabId]` (authoritative)
+  // and the `paneTree` mirror. Under Immer they are distinct draft paths, so a
+  // write through one does not appear in the other; both must be asserted or a
+  // half-applied rename passes.
+  it('updates the paneTree mirror too when the target IS the active tab', () => {
+    const s = reducer(twoTabs(), renamePanes({ paneId: 'pn-a', name: 'renamed' }));
+    expect(s.paneTree!.name).toBe('renamed');
+  });
+
+  it('renames a pane in a NON-active tab when tabId is given', () => {
+    const s = reducer(twoTabs(), renamePanes({ paneId: 'pn-b', name: 'renamed', tabId: 'tb-beta' }));
+    expect(s.treesByTabId['tb-beta'].name).toBe('renamed');
+    expect(s.treesByTabId['tb-alpha'].name).toBe('alpha');
+  });
+
+  it('leaves other tabs untouched', () => {
+    const s = reducer(twoTabs(), renamePanes({ paneId: 'pn-a', name: 'renamed' }));
+    expect(s.treesByTabId['tb-beta'].name).toBe('beta');
+  });
+
+  // A rename aimed at a background tab must not disturb the active tab's mirror.
+  it('does not touch paneTree when renaming a background tab', () => {
+    const s = reducer(twoTabs(), renamePanes({ paneId: 'pn-b', name: 'renamed', tabId: 'tb-beta' }));
+    expect(s.paneTree!.name).toBe('alpha');
+    expect(s.paneTree!.id).toBe('pn-a');
+  });
+
+  it('renames a nested leaf, not just a root leaf', () => {
+    let s = reducer(init(), addTabTree({
+      tabId: 'tb-split',
+      tree: {
+        id: 'pn-root',
+        type: 'split',
+        direction: 'horizontal',
+        children: [leaf('pn-l', 'tb-l'), leaf('pn-r', 'tb-r')],
+      },
+    }));
+    s = reducer(s, renamePanes({ paneId: 'pn-r', name: 'right side', tabId: 'tb-split' }));
+    const children = s.treesByTabId['tb-split'].children!;
+    expect(children.find(c => c.id === 'pn-r')!.name).toBe('right side');
+    expect(children.find(c => c.id === 'pn-l')!.name).toBeUndefined();
+  });
+
+  it('is a no-op for an unknown tab or an unknown pane', () => {
+    const before = twoTabs();
+    const unknownTab = reducer(before, renamePanes({ paneId: 'pn-a', name: 'x', tabId: 'tb-nope' }));
+    expect(unknownTab.treesByTabId['tb-alpha'].name).toBe('alpha');
+    const unknownPane = reducer(before, renamePanes({ paneId: 'pn-nope', name: 'x' }));
+    expect(unknownPane.treesByTabId['tb-alpha'].name).toBe('alpha');
   });
 });
