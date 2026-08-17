@@ -1,5 +1,5 @@
 import {
-  baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, assignTiers,
+  baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, isFullyVisible, assignTiers,
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
   Z_MIN, Viewport, Rect,
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
@@ -123,6 +123,88 @@ describe('isVisible', () => {
   });
   it('rejects a node just beyond the margin', () => {
     expect(isVisible(vp, rectFor(-NODE_W - 120, 10), 800, 600, 80)).toBe(false);
+  });
+});
+
+/**
+ * Containment, the sibling of `isVisible`'s intersection — added when a terminal created from
+ * the canvas had to be brought into view (2026-08-17).
+ *
+ * The distinction is the whole reason it exists: a node clipped by the right edge intersects
+ * the viewport and is still not something you can read, so reusing `isVisible` to decide
+ * "does this need flying to?" would decline to move and leave the new terminal half off screen.
+ */
+describe('isFullyVisible', () => {
+  const vp: Viewport = { x: 0, y: 0, z: 1 };
+
+  it('accepts a node comfortably inside', () => {
+    expect(isFullyVisible(vp, rectFor(100, 100), 800, 600)).toBe(true);
+  });
+
+  it('rejects a node entirely off screen', () => {
+    expect(isFullyVisible(vp, rectFor(5000, 5000), 800, 600)).toBe(false);
+  });
+
+  /** The case the two predicates answer differently, and the reason for the second one. */
+  it('rejects a node the intersection test accepts', () => {
+    const clipped = rectFor(800 - NODE_W / 2, 100);      // half past the right edge
+    expect(isVisible(vp, clipped, 800, 600, 0)).toBe(true);
+    expect(isFullyVisible(vp, clipped, 800, 600)).toBe(false);
+  });
+
+  it('checks all four edges', () => {
+    expect(isFullyVisible(vp, rectFor(-1, 100), 800, 600)).toBe(false);          // left
+    expect(isFullyVisible(vp, rectFor(100, -1), 800, 600)).toBe(false);          // top
+    expect(isFullyVisible(vp, rectFor(800 - NODE_W + 1, 100), 800, 600)).toBe(false);  // right
+    expect(isFullyVisible(vp, rectFor(100, 600 - NODE_H + 1), 800, 600)).toBe(false);  // bottom
+  });
+
+  it('counts a node flush against every edge as framed', () => {
+    // The boundary itself is inside. An off-by-one the other way would fly the viewport for a
+    // node that exactly fills it, which never settles.
+    expect(isFullyVisible(vp, { x: 0, y: 0, w: 800, h: 600 }, 800, 600)).toBe(true);
+  });
+
+  /** `inset` keeps a node from counting as framed while it is under the toolbar, the minimap
+   *  or a beacon — all of which paint inside the viewport's own edges. */
+  it('shrinks the frame by the inset', () => {
+    const corner = rectFor(800 - NODE_W - 10, 100);
+    expect(isFullyVisible(vp, corner, 800, 600)).toBe(true);
+    expect(isFullyVisible(vp, corner, 800, 600, 130)).toBe(false);
+  });
+
+  it('measures in SCREEN space, so the zoom changes the answer', () => {
+    // A node that fits at 0.5x does not at 2x. Testing only at z=1 would pass with the zoom
+    // term dropped entirely — the same shape of bug `worldDelta` documents.
+    const r = rectFor(0, 0);
+    expect(isFullyVisible({ x: 0, y: 0, z: 0.5 }, r, 400, 300)).toBe(true);
+    expect(isFullyVisible({ x: 0, y: 0, z: 2 }, r, 400, 300)).toBe(false);
+  });
+
+  /**
+   * Each dimension scaled INDEPENDENTLY, in a viewport where only that one can decide.
+   *
+   * The version above rejects at 2x on either axis, so it stays green with the zoom dropped
+   * from the width alone — the height term carries the assertion and the width bug rides along
+   * underneath it. A mutation survived exactly that way, which is the whole reason these two
+   * exist: pick a box where the axis under test is the ONLY one that can fail.
+   */
+  it('scales the width by the zoom', () => {
+    // 340×210 at 2x is 680×420. Height fits 600 with room; width does not fit 600.
+    expect(isFullyVisible({ x: 0, y: 0, z: 2 }, rectFor(0, 0), 600, 600)).toBe(false);
+    expect(isFullyVisible({ x: 0, y: 0, z: 2 }, rectFor(0, 0), 700, 600)).toBe(true);
+  });
+
+  it('scales the height by the zoom', () => {
+    // The mirror: width fits 900, height does not fit 400.
+    expect(isFullyVisible({ x: 0, y: 0, z: 2 }, rectFor(0, 0), 900, 400)).toBe(false);
+    expect(isFullyVisible({ x: 0, y: 0, z: 2 }, rectFor(0, 0), 900, 500)).toBe(true);
+  });
+
+  it('accounts for the pan', () => {
+    const r = rectFor(1000, 1000);
+    expect(isFullyVisible({ x: 0, y: 0, z: 1 }, r, 800, 600)).toBe(false);
+    expect(isFullyVisible({ x: -900, y: -950, z: 1 }, r, 800, 600)).toBe(true);
   });
 });
 

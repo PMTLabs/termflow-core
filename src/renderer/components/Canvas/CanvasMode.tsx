@@ -19,7 +19,7 @@ import { NodeTerminal } from './NodeTerminal';
 import { NodeSnapshot } from './NodeSnapshot';
 import { snapshotCache } from './snapshotCache';
 import {
-  Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale,
+  Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
   NODE_W, NODE_H, HEAD_H,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
@@ -33,6 +33,7 @@ import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, decideCanvasClose } from './canvasClose';
 import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
+import { connectWhenReady } from './canvasConnect';
 import { worldPoint } from './canvasMutations';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
@@ -53,6 +54,16 @@ import './Canvas.css';
 /** How long the node registry waits for the model to settle. A group drag would otherwise
  *  publish once per `pointermove`. */
 const PUBLISH_DEBOUNCE_MS = 250;
+
+/**
+ * How much of the viewport edge does NOT count as framed, when deciding whether a newly
+ * created node needs flying to.
+ *
+ * Not zero: the toolbar sits top-right, the minimap bottom-right and the beacons on every
+ * edge, so a node technically inside the viewport but flush against a side is underneath
+ * canvas chrome. Sized to clear the minimap, which is the largest of them.
+ */
+const FRAME_INSET = 130;
 
 /**
  * Does this terminal still have a process?
@@ -515,15 +526,42 @@ export const CanvasMode: React.FC = () => {
     dispatch(setNodeGeom({ id: plan.tab.id, rect: plan.rect }));
     dispatch(addTab(plan.tab));
 
+    // Select it, and bring it into view if it is not already framed — Tam's requested flow is
+    // click port → create → connect → LOOK AT IT → type. A port spawn fans a full node-width
+    // away from its parent, so at any working zoom it lands off screen about as often as not.
+    //
+    // Containment, not intersection (`isFullyVisible`): a node clipped by the right edge does
+    // reach the viewport, and is still not something you can read.
+    //
+    // Guarded rather than unconditional, because the background spawn puts the node under the
+    // cursor — flying to a node the user just placed where they were looking would yank the
+    // viewport for nothing.
+    dispatch(selectNode(plan.tab.id));
+    if (!isFullyVisible(vp, plan.rect, size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(plan.rect, size.w, size.h, vp.z, metrics.zMax));
+    }
+
     // Then the wire, if this came from a port. Server-minted id only, exactly as the drag path
     // does — an optimistic client id is never replaced, so a later delete would name a row
     // that does not exist and leave the real edge behind.
+    //
+    // NOT a bare `createEdge`: the endpoint 404s on a terminal it has not registered, and this
+    // one is several async hops from existing. See `canvasConnect`.
     if (source) {
-      void createEdge(source.terminalId, plan.tab.id).then((edge) => {
+      void connectWhenReady(
+        {
+          isReady: isTerminalAlive,
+          createEdge,
+          wait: (ms) => new Promise((r) => setTimeout(r, ms)),
+          now: () => Date.now(),
+        },
+        source.terminalId,
+        plan.tab.id,
+      ).then((edge) => {
         if (edge) dispatch(addEdge(edge));
       });
     }
-  }, [spawnMenu, model.nodes, edges, tabs, dispatch]);
+  }, [spawnMenu, model.nodes, edges, tabs, dispatch, vp, size, flyTo, metrics]);
 
   useEffect(() => {
     if (!focusedId) return;

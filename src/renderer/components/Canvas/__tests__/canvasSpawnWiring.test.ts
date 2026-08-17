@@ -70,11 +70,70 @@ describe('creating a terminal from the canvas', () => {
    *  `createEdge` would connect a background-spawned terminal to whatever `source` last held. */
   it('draws a wire only when the spawn came from a port', () => {
     expect(spawnBody).toContain('if (source) {');
-    const edge = spawnBody.indexOf('createEdge(');
+    const edge = spawnBody.indexOf('connectWhenReady(');
     expect(edge).toBeGreaterThan(spawnBody.indexOf('if (source) {'));
     // Server-minted row only, exactly as the drag path does — an optimistic client id is never
     // replaced, so a later delete would name a row that does not exist.
     expect(spawnBody).toContain('if (edge) dispatch(addEdge(edge));');
+  });
+
+  /**
+   * **The wire has to wait for the terminal to exist.**
+   *
+   * `POST /api/canvas/edges` resolves both endpoints through `resolve_renderer_id` and 404s on
+   * one it has not registered — and a terminal created here is several async hops from
+   * existing (Redux → render → `PaneManager` → `TerminalPane` → invoke → spawn). A bare
+   * `createEdge` therefore lost the edge every time, silently, because `createEdge` catches and
+   * returns `null` and `null` is also what a legitimate refusal looks like.
+   *
+   * Reported 2026-08-17 as "it needs to auto setup connection to the new terminal".
+   */
+  it('waits for the new terminal to register before posting the edge', () => {
+    expect(spawnBody).toContain('connectWhenReady(');
+    expect(spawnBody).not.toMatch(/void createEdge\(/);
+    // Readiness is the renderer's process registry — the same predicate the close path uses,
+    // and one that is true only after the backend has registered the terminal.
+    expect(spawnBody).toContain('isReady: isTerminalAlive');
+  });
+});
+
+/**
+ * Bringing the new terminal into view — the second half of Tam's requested flow: click port →
+ * create → connect → **focus** → interact.
+ */
+describe('framing what was just created', () => {
+  it('selects the new node', () => {
+    expect(spawnBody).toContain('dispatch(selectNode(plan.tab.id));');
+  });
+
+  /**
+   * Containment, not intersection. `isVisible` would call a node clipped by the right edge
+   * "visible" and decline to move, leaving the terminal the user asked for half off screen.
+   * The two predicates live side by side in `canvasGeometry`; picking the wrong one here is a
+   * one-word difference that looks correct in every test that places a node fully on or fully
+   * off screen.
+   */
+  it('flies only when the node is not already framed, and uses the containment test', () => {
+    expect(spawnBody).toContain('if (!isFullyVisible(vp, plan.rect, size.w, size.h, FRAME_INSET))');
+    expect(spawnBody).toContain('flyTo(centreOn(plan.rect, size.w, size.h, vp.z, metrics.zMax))');
+  });
+
+  /**
+   * Unconditional flight would yank the viewport for a background spawn — a node placed
+   * directly under the cursor, which is by construction already in view.
+   */
+  it('does not fly unconditionally', () => {
+    const fly = spawnBody.indexOf('flyTo(');
+    const guard = spawnBody.indexOf('if (!isFullyVisible(');
+    expect(guard).toBeGreaterThan(-1);
+    expect(fly).toBeGreaterThan(guard);
+  });
+
+  /** Keeps the zoom the user chose. Framing a new node is not a reason to change their scale —
+   *  `fitViewport` would, `centreOn` at `vp.z` does not. */
+  it('keeps the current zoom', () => {
+    expect(spawnBody).toContain('vp.z');
+    expect(spawnBody).not.toContain('fitViewport(');
   });
 
   /**

@@ -377,12 +377,41 @@ export function overlayGeometry(vp: Viewport, vw: number, vh: number, m: Surface
   };
 }
 
+/**
+ * Does any part of this rect reach the viewport (grown by `margin`)?
+ *
+ * **The one shared answer to "is this on screen?"** — paint culling, the snapshot tier and
+ * Task 23's beacons all call it rather than each re-deriving the four comparisons, and a
+ * fourth answer that disagreed with the other three is a bug nobody can see. Pass `margin: 0`
+ * for the strict question; the default grows the box by the cull margin so a node about to be
+ * panned into view is already mounted.
+ */
 export function isVisible(vp: Viewport, r: Rect, vw: number, vh: number, margin = CULL_MARGIN): boolean {
   const sx = r.x * vp.z + vp.x;
   const sy = r.y * vp.z + vp.y;
   const sw = r.w * vp.z;
   const sh = r.h * vp.z;
   return !(sx + sw < -margin || sy + sh < -margin || sx > vw + margin || sy > vh + margin);
+}
+
+/**
+ * Is this rect ENTIRELY inside the viewport (shrunk by `inset`)?
+ *
+ * A different question from `isVisible`, not a second answer to it: that one is an
+ * intersection test, this is containment. "Do I need to fly to show the user this node?" is
+ * about containment — a node half off the right edge intersects the viewport and is still not
+ * something you can work in, so the intersection test would decline to move and leave the new
+ * terminal clipped.
+ *
+ * `inset` keeps a node from counting as framed while it is flush against an edge, under the
+ * toolbar, or beneath the minimap.
+ */
+export function isFullyVisible(vp: Viewport, r: Rect, vw: number, vh: number, inset = 0): boolean {
+  const sx = r.x * vp.z + vp.x;
+  const sy = r.y * vp.z + vp.y;
+  return sx >= inset && sy >= inset
+    && sx + r.w * vp.z <= vw - inset
+    && sy + r.h * vp.z <= vh - inset;
 }
 
 export interface TierInput {
