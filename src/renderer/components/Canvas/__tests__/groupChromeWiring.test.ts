@@ -44,7 +44,10 @@ describe('the label is capped and the chip is not', () => {
   it('bounds the label\'s width as well as its scale', () => {
     // A scale ceiling cannot bound width — the text length does. Without this a long tab name
     // still reaches the frame beside it.
-    expect(FRAME).toContain('maxWidth: labelMaxWidth(w, k)');
+    // `box.w`, not `group.rect.w`: the frame is painted on `drawnFrameRect`, and a label
+    // bounded by the LAYOUT width would still overhang the border it is straddling wherever
+    // the drawn frame is the narrower of the two.
+    expect(FRAME).toContain('maxWidth: labelMaxWidth(box.w, k)');
   });
 
   /**

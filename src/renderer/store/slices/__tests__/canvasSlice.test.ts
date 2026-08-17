@@ -1,7 +1,7 @@
 import canvasReducer, {
   setViewport, panViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
-  updateEdge, setNearestGroup,
+  applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
+  removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -289,5 +289,82 @@ describe('nearestGroupId — the tab strip marker (design 010 D9, §5.1)', () =>
     let s = canvasReducer(init(), setNearestGroup('tb-a'));
     s = canvasReducer(s, hydrateCanvas({ nearestGroupId: 'tb-b' } as never));
     expect(s.nearestGroupId).toBe('tb-a');
+  });
+});
+
+/**
+ * Selecting a connection — the state behind "click the line, then delete it".
+ *
+ * The invariant that matters is that a node and a wire are never both selected. It is enforced
+ * in the reducers rather than by the callers because <kbd>Delete</kbd> has to mean exactly one
+ * thing, and `selectNode` is dispatched from a dozen places on this surface — every one of them
+ * a place the rule could be forgotten.
+ */
+describe('connection selection', () => {
+  it('starts with nothing selected', () => {
+    expect(init().selectedEdgeId).toBeNull();
+  });
+
+  it('selects and clears a connection', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    expect(s.selectedEdgeId).toBe('ce-1');
+    s = canvasReducer(s, selectEdge(null));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  it('takes the selection off a node', () => {
+    let s = canvasReducer(init(), selectNode('tm-1'));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    expect(s.selectedId).toBeNull();
+    expect(s.selectedEdgeId).toBe('ce-1');
+  });
+
+  it('takes the selection off a connection', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    s = canvasReducer(s, selectNode('tm-1'));
+    expect(s.selectedEdgeId).toBeNull();
+    expect(s.selectedId).toBe('tm-1');
+  });
+
+  /** A press on empty canvas dispatches `selectNode(null)` and nothing else. If that did not
+   *  clear the wire too, the canvas would show nothing selected while Delete still removed a
+   *  connection. */
+  it('clears the connection when the node selection is cleared', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    s = canvasReducer(s, selectNode(null));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  it('never leaves both selected, whatever the order', () => {
+    let s = init();
+    for (const action of [
+      selectNode('tm-1'), selectEdge('ce-1'), selectEdge('ce-2'), selectNode('tm-2'),
+      selectNode(null), selectEdge('ce-3'),
+    ]) {
+      s = canvasReducer(s, action);
+      expect({ node: s.selectedId, edge: s.selectedEdgeId }.node !== null
+        && s.selectedEdgeId !== null).toBe(false);
+    }
+  });
+
+  it('drops a selection whose connection was removed', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b'), edge('ce-2', 'b', 'c')]));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    s = canvasReducer(s, removeEdge('ce-2'));
+    expect(s.selectedEdgeId).toBe('ce-1');          // someone else's removal is not ours
+    s = canvasReducer(s, removeEdge('ce-1'));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  /** The graph is refetched wholesale on every canvas session. A selection that survived would
+   *  name a row that no longer exists: the handles have nowhere to draw and Delete aims at
+   *  nothing. */
+  it('drops a selection the refetched graph no longer contains', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b')]));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    s = canvasReducer(s, setEdges([edge('ce-1', 'a', 'b'), edge('ce-9', 'c', 'd')]));
+    expect(s.selectedEdgeId).toBe('ce-1');          // still there, still selected
+    s = canvasReducer(s, setEdges([edge('ce-9', 'c', 'd')]));
+    expect(s.selectedEdgeId).toBeNull();
   });
 });

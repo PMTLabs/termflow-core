@@ -20,6 +20,77 @@ export const GAP = 28;
 /** Gutter between frames. */
 export const GROUP_GAP = 90;
 
+/* ---- What the frame DRAWS, as opposed to what it reserves -----------------
+ *
+ * `PAD` is a WORLD distance, so the gap between a terminal and its frame is `PAD * z` pixels
+ * on screen — and Tam reported, with three screenshots of the same group, that this has no
+ * good value: at z≈0.62 the 10px gap read as "terminal touches the edge of the group", at
+ * z≈0.78 the 12px gap "looks good", and at z≈3.6 the 57px gap was "too much padding".
+ *
+ * That is not a number tuned wrong. Breathing room is something the eye measures in SCREEN
+ * pixels — the same instinct that already counter-scales node headers, wires, labels and
+ * chips — so a padding fixed in world units is asking one constant to be right across a 70×
+ * zoom range. The whole rest of the canvas chrome gave up on that long ago.
+ *
+ * So the frame's padding is clamped into a screen band. Inside the band nothing changes: the
+ * frame is drawn exactly on its layout rect, which is the zoom Tam already called good.
+ * Outside it the DRAWN box grows or shrinks around the terminals, which stay where they are.
+ *
+ * **Layout is untouched, deliberately.** `fitGroupFrame`, `arrange` and `seedNodePosition`
+ * keep using `PAD`, so no node moves when you zoom, `arrange` stays deterministic, and the
+ * fit-to-bounds path cannot feed its own output back into itself. This is a rendering rule,
+ * and it lives here only because it is expressed in the constants it rescales.
+ */
+
+/** The screen band the frame's side padding is kept inside, in CSS pixels. Both ends are
+ *  measured from Tam's screenshots — see the note above. */
+export const PAD_SCREEN_MIN = 13;
+export const PAD_SCREEN_MAX = 24;
+
+/**
+ * Ceiling on how far the drawn frame may push OUTSIDE its layout rect, in world units.
+ *
+ * Two neighbouring frames each grow towards the other, so an uncapped clamp would close
+ * `2 × outset` of the `GROUP_GAP` between them and, deep enough out, overlap. The cap is
+ * applied to the largest of the four outsets — the top band, which is `PAD_TOP`-sized — so a
+ * third of the gutter always survives whatever the zoom is.
+ */
+export const MAX_PAD_OUTSET = GROUP_GAP / 3;
+
+/**
+ * The multiple of its layout padding a frame is DRAWN with at this zoom.
+ *
+ * `1` means "drawn exactly on the layout rect", which is the answer throughout the band where
+ * `PAD * z` is already a comfortable screen distance.
+ */
+export function framePadScale(z: number): number {
+  if (!(z > 0)) return 1;
+  const screen = PAD * z;
+  const wanted = screen < PAD_SCREEN_MIN ? PAD_SCREEN_MIN / screen
+    : screen > PAD_SCREEN_MAX ? PAD_SCREEN_MAX / screen
+      : 1;
+  return Math.min(wanted, 1 + MAX_PAD_OUTSET / PAD_TOP);
+}
+
+/**
+ * A frame's rect as it is PAINTED: the layout rect with its padding rescaled about the
+ * terminals inside it.
+ *
+ * The two paddings are rescaled by the same factor rather than clamped separately, so the top
+ * band keeps the `LABEL_OVERHANG` of extra room it exists to give the label — a band clamped
+ * on its own would drift out of proportion with the sides at every zoom but one.
+ */
+export function drawnFrameRect(r: Rect, z: number): Rect {
+  const g = framePadScale(z) - 1;
+  if (!g) return r;
+  return {
+    x: r.x - PAD * g,
+    y: r.y - PAD_TOP * g,
+    w: r.w + PAD * 2 * g,
+    h: r.h + (PAD_TOP + PAD) * g,
+  };
+}
+
 export interface GroupBox extends Rect { id: string }
 
 /** Shrink-wrap a frame around its nodes. Null for an empty group — the caller

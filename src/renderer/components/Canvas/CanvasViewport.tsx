@@ -15,13 +15,19 @@ import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from './canvasGe
  * same reason: both are aimed at, and without this a click on either would also grab the canvas
  * and clear the selection.
  *
+ * The three wire entries are the same rule applied to a connection. `.canvas-wire-hit` is the
+ * band a click selects the wire in, and a selection cleared by the very press that made it is
+ * a wire that cannot be selected at all; `.canvas-wire-handle` and `.canvas-wire-badge` are the
+ * controls that appear once it is.
+ *
  * One constant, shared by the pan and the background context menu, because "did this land on
  * empty canvas?" has to have one answer. Two copies would drift the day a surface is added —
  * and the copy that was not updated fails silently, as a pan that starts under a new control
  * or a menu that opens on top of one.
  */
 const BACKGROUND_BAIL =
-  '.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port, .canvas-minimap, .canvas-beacon';
+  '.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port, .canvas-minimap, .canvas-beacon,'
+  + ' .canvas-wire-hit, .canvas-wire-handle, .canvas-wire-badge';
 
 const isBackground = (target: EventTarget | null): boolean =>
   !(target as HTMLElement | null)?.closest(BACKGROUND_BAIL);

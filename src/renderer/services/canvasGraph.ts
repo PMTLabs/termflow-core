@@ -114,6 +114,44 @@ export async function createEdge(
   }
 }
 
+/** What `reconnectEdge` achieved. `removedId` is null when the old row is still on the server —
+ *  the caller must then leave it in the mirror, or the wire comes back on the next restart. */
+export interface Reconnected {
+  edge: CanvasEdge;
+  removedId: string | null;
+}
+
+/**
+ * Move one end of an existing connection to another terminal.
+ *
+ * **Composed from create + delete rather than a new endpoint**, because the two it needs already
+ * exist and both already answer the hard questions: `POST` resolves the endpoints, refuses a
+ * self-edge, and returns the EXISTING row for a pair already stored — so dragging an end onto a
+ * node this one is already wired to merges instead of duplicating, for free.
+ *
+ * **The order is the safety.** Create first: a server that refuses the new pair (the node went
+ * away, the store is unavailable) leaves the old wire exactly where it was, and the user has
+ * lost nothing. Delete-then-create would spend the connection before knowing whether it could
+ * be replaced.
+ *
+ * The delete is reported rather than assumed for the same reason. If the new row is stored and
+ * the old one will not delete, the honest picture is two connections — visible, and fixable with
+ * another drag — not one connection the user can see and a second the server still holds.
+ */
+export async function reconnectEdge(
+  edge: CanvasEdge,
+  from: string,
+  to: string,
+): Promise<Reconnected | null> {
+  const created = await createEdge(from, to, edge.label);
+  if (!created) return null;
+  // The pair already existed AS this edge: nothing to delete, and deleting would remove the row
+  // just confirmed. Only reachable if a caller asks for the pair the edge already has.
+  if (created.id === edge.id) return { edge: created, removedId: null };
+  const removed = await deleteEdge(edge.id);
+  return { edge: created, removedId: removed ? edge.id : null };
+}
+
 export async function deleteEdge(id: string): Promise<boolean> {
   try {
     await request(`/canvas/edges/${encodeURIComponent(id)}`, { method: 'DELETE' });

@@ -2,7 +2,7 @@ import path from 'path';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
   openOverlayShortcut, leaveTerminalShortcut, panShortcut, PAN_STEP_PX,
-  stepShortcut, zoomShortcut, canvasKeyAction, terminalKeyAction,
+  stepShortcut, zoomShortcut, deleteShortcut, canvasKeyAction, terminalKeyAction,
   DRAG_SLOP, SpacePanKey, CanvasKey,
 } from '../canvasGestures';
 import { readSource } from '../../../utils/readSource';
@@ -427,9 +427,47 @@ describe('zoomShortcut', () => {
  * The rules above say "is this that key?"; this says "so what happens?" — the question that used
  * to be answered by an if-chain inside an effect, where nothing could reach it.
  */
+/**
+ * <kbd>Delete</kbd> / <kbd>Backspace</kbd>, the rule on its own.
+ *
+ * Whether it applies is `canvasKeyAction`'s business; this is only "is this that key?".
+ */
+describe('deleteShortcut', () => {
+  it('accepts both keys, however the layout reports them', () => {
+    expect(deleteShortcut(canvasKey({ key: 'Delete', code: 'Delete' }))).toBe(true);
+    expect(deleteShortcut(canvasKey({ key: 'Backspace', code: 'Backspace' }))).toBe(true);
+    // `code` alone, for stacks that leave `key` unidentified.
+    expect(deleteShortcut(canvasKey({ key: 'Unidentified', code: 'Delete' }))).toBe(true);
+    // `key` alone, which is what jsdom populates.
+    expect(deleteShortcut(canvasKey({ key: 'Backspace', code: '' }))).toBe(true);
+  });
+
+  it('refuses every modifier', () => {
+    for (const mod of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+      expect({ mod, got: deleteShortcut(canvasKey({ key: 'Delete', code: 'Delete', [mod]: true })) })
+        .toEqual({ mod, got: false });
+    }
+  });
+
+  /** The sidebar search and the connection-label box both live on this surface. Backspace there
+   *  is someone correcting a typo, not deleting their wire. */
+  it('leaves an editable target its own key', () => {
+    for (const target of [{ tagName: 'INPUT' }, { tagName: 'TEXTAREA' }, { isContentEditable: true }]) {
+      expect(deleteShortcut(canvasKey({ key: 'Backspace', code: 'Backspace', target }))).toBe(false);
+    }
+  });
+
+  it('is not some other key', () => {
+    for (const k of ['d', 'Escape', 'Enter', 'Del', 'ArrowLeft']) {
+      expect({ k, got: deleteShortcut(canvasKey({ key: k, code: k })) }).toEqual({ k, got: false });
+    }
+  });
+});
+
 describe('canvasKeyAction', () => {
-  const SELECTED = true;
-  const NOTHING_SELECTED = false;
+  const SELECTED = { node: true, edge: false };
+  const NOTHING_SELECTED = { node: false, edge: false };
+  const EDGE_SELECTED = { node: false, edge: true };
 
   it('routes each key to its own action', () => {
     expect(canvasKeyAction(canvasKey({ key: '!', code: 'Digit1', shiftKey: true }), SELECTED))
@@ -488,6 +526,41 @@ describe('canvasKeyAction', () => {
       expect({ k, action: canvasKeyAction(canvasKey({ key: k, code: k }), SELECTED) })
         .toEqual({ k, action: null });
     }
+  });
+
+  /**
+   * Delete removes the selected CONNECTION, and only when there is one.
+   *
+   * The two halves are one rule: Backspace is a key the rest of the app and the browser both
+   * have opinions about, so resolving it to an action with nothing selected would swallow it
+   * for a canvas that had nothing to do with it.
+   */
+  it('removes the selected connection on Delete and on Backspace', () => {
+    for (const [key, code] of [['Delete', 'Delete'], ['Backspace', 'Backspace']]) {
+      expect({ key, action: canvasKeyAction(canvasKey({ key, code }), EDGE_SELECTED) })
+        .toEqual({ key, action: { do: 'delete-edge' } });
+    }
+  });
+
+  it('leaves Delete alone when no connection is selected', () => {
+    for (const sel of [NOTHING_SELECTED, SELECTED]) {
+      expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), sel)).toBeNull();
+      expect(canvasKeyAction(canvasKey({ key: 'Backspace', code: 'Backspace' }), sel)).toBeNull();
+    }
+  });
+
+  /**
+   * A selected NODE never resolves to a delete, and a selected WIRE never resolves to an
+   * overlay. The two flags are read for different keys — swapping them at a call site is the
+   * failure `CanvasSelection` is an object to prevent, and this is what would catch it.
+   */
+  it('reads the node flag for E and the edge flag for Delete, not the other way round', () => {
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), EDGE_SELECTED)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED))
+      .toEqual({ do: 'overlay' });
+    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), SELECTED)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), EDGE_SELECTED))
+      .toEqual({ do: 'delete-edge' });
   });
 
   /** Ctrl+Tab switches app tabs and Ctrl+E is readline's end-of-line. Neither may resolve to a

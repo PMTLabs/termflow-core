@@ -1,6 +1,6 @@
 import {
   pickSides, portPoint, wirePath, wireMidpoint, neighbourhood, edgeHeat,
-  oppositeSide, linkTargetId, MIN_REACH,
+  oppositeSide, linkTargetId, wireEnds, anchorOf, reconnectPair, MIN_REACH,
 } from '../wireGeometry';
 import type { Side } from '../wireGeometry';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
@@ -235,5 +235,98 @@ describe('edgeHeat', () => {
         expect(near.has(e.to)).toBe(true);
       }
     }
+  });
+});
+
+/**
+ * Where a wire runs, as one answer.
+ *
+ * Five things now have to agree about it — the drawn path, the click band, the label, and the
+ * two endpoint handles a re-connect drag grabs. A handle that is not exactly on the end of its
+ * wire is a handle for a different wire.
+ */
+describe('wireEnds', () => {
+  it('leaves and arrives on the faces pickSides chose', () => {
+    const a = at(0, 0);
+    const b = at(900, 0);
+    const ends = wireEnds(a, b);
+    expect([ends.s1, ends.s2]).toEqual(pickSides(a, b));
+    expect(ends.p1).toEqual(portPoint(a, ends.s1));
+    expect(ends.p2).toEqual(portPoint(b, ends.s2));
+  });
+
+  it('gives the path and the handles the same two points', () => {
+    // The assertion the split into a shared helper exists for: recomputing either half
+    // independently is how they drift.
+    const a = at(0, 0);
+    const b = at(120, 700);
+    const { p1, p2, s1, s2 } = wireEnds(a, b);
+    expect(wirePath(p1, p2, s1, s2).startsWith(`M${p1[0]},${p1[1]} `)).toBe(true);
+    expect(wirePath(p1, p2, s1, s2).endsWith(` ${p2[0]},${p2[1]}`)).toBe(true);
+  });
+
+  it('swaps both ends when the arguments swap', () => {
+    const a = at(0, 0);
+    const b = at(900, 0);
+    const there = wireEnds(a, b);
+    const back = wireEnds(b, a);
+    expect(back.p1).toEqual(there.p2);
+    expect(back.p2).toEqual(there.p1);
+  });
+});
+
+/** Which node a re-endpoint drag pivots about. Getting this backwards would drag the end the
+ *  user is NOT holding, which looks identical for a symmetric layout and is wrong for every
+ *  other one. */
+describe('anchorOf', () => {
+  it('keeps the end that is not being moved', () => {
+    expect(anchorOf({ from: 'a', to: 'b' }, 'from')).toBe('b');
+    expect(anchorOf({ from: 'a', to: 'b' }, 'to')).toBe('a');
+  });
+
+  it('never returns the end being moved', () => {
+    for (const end of ['from', 'to'] as const) {
+      const edge = { from: 'a', to: 'b' };
+      expect(anchorOf(edge, end)).not.toBe(end === 'from' ? edge.from : edge.to);
+    }
+  });
+});
+
+describe('reconnectPair', () => {
+  const ab = { from: 'a', to: 'b' };
+
+  it('moves the destination and leaves the source alone', () => {
+    expect(reconnectPair(ab, 'to', 'c')).toEqual({ from: 'a', to: 'c' });
+  });
+
+  it('moves the source and leaves the destination alone', () => {
+    expect(reconnectPair(ab, 'from', 'c')).toEqual({ from: 'c', to: 'b' });
+  });
+
+  /** Dropping the destination back on the source is a self-edge — the backend answers 400 for
+   *  it after resolving both ids, and the user gets nothing but a wire that vanished. */
+  it('refuses a drop that would join a terminal to itself', () => {
+    expect(reconnectPair(ab, 'to', 'a')).toBeNull();
+    expect(reconnectPair(ab, 'from', 'b')).toBeNull();
+  });
+
+  /**
+   * Dropping an end back where it started is not an error and must not cost the connection.
+   *
+   * This is the case a naive implementation gets wrong in the most expensive way: the pair is
+   * identical, so a create returns the row that already exists, and a delete-the-old-one that
+   * ran anyway would delete the row just returned. The wire disappears from a drag that did
+   * nothing.
+   */
+  it('reports a drop that changes nothing as nothing', () => {
+    expect(reconnectPair(ab, 'to', 'b')).toBeNull();
+    expect(reconnectPair(ab, 'from', 'a')).toBeNull();
+  });
+
+  it('allows the reversal, because A→B and B→A are different connections', () => {
+    // `get_by_pair` is ordered; the two rows are distinct and both meaningful.
+    expect(reconnectPair(ab, 'from', 'b')).toBeNull();      // b→b, the self-edge above
+    expect(reconnectPair({ from: 'a', to: 'b' }, 'to', 'c')).toEqual({ from: 'a', to: 'c' });
+    expect(reconnectPair({ from: 'c', to: 'b' }, 'from', 'b')).toBeNull();
   });
 });

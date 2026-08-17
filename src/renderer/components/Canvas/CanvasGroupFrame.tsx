@@ -1,5 +1,6 @@
 import React from 'react';
 import { CanvasGroupModel, counterScale, labelScale, labelMaxWidth } from './canvasSelectors';
+import { drawnFrameRect } from './canvasLayout';
 import { useCanvasMetrics } from './canvasMetricsContext';
 
 /**
@@ -24,7 +25,7 @@ export const CanvasGroupFrame: React.FC<{
   onLabelPointerDown?: (e: React.PointerEvent) => void;
   onChipClick?: () => void;
 }> = ({ group, zoom, collapsed, chipOffset, dropTarget, moving, onLabelPointerDown, onChipClick }) => {
-  const { x, y, w, h } = group.rect;
+  const { x, y } = group.rect;
   const { zMax } = useCanvasMetrics();
 
   if (collapsed) {
@@ -54,12 +55,18 @@ export const CanvasGroupFrame: React.FC<{
     );
   }
 
+  // What the frame PAINTS, which is not quite what the layout reserved: the padding between a
+  // terminal and its frame is a screen distance to the eye, so it is clamped into a screen band
+  // rather than left to scale with the world. See `drawnFrameRect`. Nothing moves — the
+  // terminals stay on their layout rects and only the border around them breathes.
+  const box = drawnFrameRect(group.rect, zoom);
+
   return (
     <div
       className={['canvas-gframe', dropTarget ? 'drop' : '', moving ? 'moving' : '']
         .filter(Boolean).join(' ')}
       data-tab-id={group.tabId}
-      style={{ left: x, top: y, width: w, height: h }}
+      style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
     >
       {/* `labelScale`, NOT `counterScale`: a label is a world-space element, so an uncapped
           counter-scale gives it an unbounded world footprint — measured at 110x900 units on a
@@ -70,7 +77,7 @@ export const CanvasGroupFrame: React.FC<{
         return (
           <span
             className="canvas-glabel"
-            style={{ transform: `scale(${k})`, maxWidth: labelMaxWidth(w, k) }}
+            style={{ transform: `scale(${k})`, maxWidth: labelMaxWidth(box.w, k) }}
             onPointerDown={onLabelPointerDown}
             // Carries the full title as well as the hint, because the label now ellipsises.
             title={`${group.title} — drag to move this group and all its terminals`}

@@ -33,6 +33,15 @@ export interface CanvasState extends CanvasPersisted {
   /** Mirror of the backend edge table; never persisted renderer-side. */
   edges: CanvasEdge[];
   selectedId: string | null;
+  /**
+   * The selected CONNECTION, or null.
+   *
+   * Mutually exclusive with `selectedId` and enforced in the reducers rather than by the
+   * callers: <kbd>Delete</kbd> has to mean exactly one thing, and every one of the many
+   * `selectNode` dispatches scattered through the canvas would otherwise be a place the
+   * invariant could be forgotten. Selecting either clears the other.
+   */
+  selectedEdgeId: string | null;
   /** The node receiving keystrokes. Always granted a live terminal (design 010 D8). */
   focusedId: string | null;
   /** The node shown as a near-full-screen overlay on the canvas, or null.
@@ -69,6 +78,7 @@ const initialState: CanvasState = {
   sidebarOpen: true,
   sidebarWidth: 250,
   selectedId: null,
+  selectedEdgeId: null,
   focusedId: null,
   overlayId: null,
   recent: [],
@@ -114,7 +124,17 @@ const canvasSlice = createSlice({
     },
     selectNode: (state, action: PayloadAction<string | null>) => {
       state.selectedId = action.payload;
+      // Unconditionally, including for `null`: clearing the selection means clearing it. The
+      // background pointerdown dispatches exactly that and would otherwise leave a wire
+      // selected — and armed for Delete — on a canvas showing nothing selected.
+      state.selectedEdgeId = null;
       if (action.payload) touch(state, action.payload);
+    },
+    /** Select a connection, or clear with `null`. Takes the selection off any node — see
+     *  `selectedEdgeId`. */
+    selectEdge: (state, action: PayloadAction<string | null>) => {
+      state.selectedEdgeId = action.payload;
+      if (action.payload) state.selectedId = null;
     },
     focusNode: (state, action: PayloadAction<string | null>) => {
       state.focusedId = action.payload;
@@ -135,6 +155,12 @@ const canvasSlice = createSlice({
     },
     setEdges: (state, action: PayloadAction<CanvasEdge[]>) => {
       state.edges = action.payload;
+      // A selection that survived a wholesale replacement would name an edge that is no longer
+      // there: the handles have nowhere to draw and Delete aims at a row the server has already
+      // forgotten. Selection follows existence.
+      if (state.selectedEdgeId && !action.payload.some((e) => e.id === state.selectedEdgeId)) {
+        state.selectedEdgeId = null;
+      }
     },
     addEdge: (state, action: PayloadAction<CanvasEdge>) => {
       const e = action.payload;
@@ -144,6 +170,7 @@ const canvasSlice = createSlice({
     },
     removeEdge: (state, action: PayloadAction<string>) => {
       state.edges = state.edges.filter((e) => e.id !== action.payload);
+      if (state.selectedEdgeId === action.payload) state.selectedEdgeId = null;
     },
     /** Replace one edge with the row the server stored — the label edit path (Task 18).
      *  Ignores an id it does not hold rather than inserting: an edge this window has never
@@ -199,8 +226,8 @@ const canvasSlice = createSlice({
 
 export const {
   setViewport, panViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
-  updateEdge, setNearestGroup,
+  applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
+  removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 

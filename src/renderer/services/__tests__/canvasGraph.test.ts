@@ -2,9 +2,10 @@
  * @jest-environment jsdom
  */
 import {
-  nextRevision, putNodes, fetchGraph, createEdge, deleteEdge, patchEdgeLabel,
+  nextRevision, putNodes, fetchGraph, createEdge, deleteEdge, patchEdgeLabel, reconnectEdge,
   __resetRevisionForTests,
 } from '../canvasGraph';
+import type { CanvasEdge } from '../../store/slices/canvasSlice';
 
 type Call = { path: string; init?: { method?: string; body?: any } };
 
@@ -158,5 +159,81 @@ describe('edge mutations', () => {
     expect(calls[0].init).toEqual({ method: 'PATCH', body: { label: 'deploys to' } });
     await patchEdgeLabel('ce-1', null);
     expect(calls[1].init).toEqual({ method: 'PATCH', body: { label: null } });
+  });
+});
+
+/**
+ * Moving one end of an existing connection.
+ *
+ * Composed from create + delete rather than a new endpoint, so the order IS the contract: a
+ * server that refuses the new pair must leave the old wire alone. Every test below is about
+ * that order or about what the caller is told afterwards.
+ */
+describe('reconnectEdge', () => {
+  const edge = (over: Partial<CanvasEdge> = {}): CanvasEdge =>
+    ({ id: 'ce-1', from: 'a', to: 'b', label: null, origin: 'user', createdAt: 1, ...over });
+  const stored = (over: Partial<CanvasEdge> = {}): CanvasEdge => edge({ id: 'ce-2', ...over });
+
+  it('creates the new pair before deleting the old row', () => {
+    reply = (c) => (c.init?.method === 'POST' ? stored({ from: 'a', to: 'c' }) : null);
+    return reconnectEdge(edge(), 'a', 'c').then((done) => {
+      expect(done).toEqual({ edge: stored({ from: 'a', to: 'c' }), removedId: 'ce-1' });
+      expect(calls.map((c) => `${c.init?.method ?? 'GET'} ${c.path}`)).toEqual([
+        'POST /canvas/edges',
+        'DELETE /canvas/edges/ce-1',
+      ]);
+    });
+  });
+
+  it('carries the label across, so a named connection stays named', () => {
+    reply = () => stored({ label: 'deploys to' });
+    return reconnectEdge(edge({ label: 'deploys to' }), 'a', 'c').then(() => {
+      expect(calls[0].init?.body).toEqual({ from: 'a', to: 'c', label: 'deploys to' });
+    });
+  });
+
+  /**
+   * The one that decides whether this is safe. If the create fails there must be NO delete: the
+   * user still has the connection they were holding, and the drag simply did not take.
+   */
+  it('leaves the old connection alone when the new one cannot be stored', () => {
+    reply = () => null;
+    return reconnectEdge(edge(), 'a', 'c').then((done) => {
+      expect(done).toBeNull();
+      expect(calls.filter((c) => c.init?.method === 'DELETE')).toEqual([]);
+    });
+  });
+
+  /**
+   * A delete that failed is reported as a delete that failed.
+   *
+   * The caller uses `removedId` to decide whether to drop the row from the mirror. Claiming it
+   * regardless would hide a connection the server still holds — invisible for the rest of the
+   * session, and back on the canvas after the next restart with nothing to explain it.
+   */
+  it('reports the old row as still there when the delete fails', () => {
+    reply = (c) => {
+      if (c.init?.method === 'POST') return stored({ from: 'a', to: 'c' });
+      throw new Error('offline');
+    };
+    return reconnectEdge(edge(), 'a', 'c').then((done) => {
+      expect(done).toEqual({ edge: stored({ from: 'a', to: 'c' }), removedId: null });
+    });
+  });
+
+  /**
+   * The pair already existed AS this edge — the server answers a duplicate POST with the
+   * EXISTING row, so `created.id` comes back equal to the one we were about to delete.
+   *
+   * Deleting it here would remove the row just confirmed: a drag that changed nothing would
+   * destroy the connection. `reconnectPair` refuses this case upstream, which is exactly why
+   * the guard here has to be independent of it.
+   */
+  it('never deletes the row the server just handed back', () => {
+    reply = () => edge();
+    return reconnectEdge(edge(), 'a', 'b').then((done) => {
+      expect(done).toEqual({ edge: edge(), removedId: null });
+      expect(calls.filter((c) => c.init?.method === 'DELETE')).toEqual([]);
+    });
   });
 });

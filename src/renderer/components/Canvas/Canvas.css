@@ -583,17 +583,72 @@
 .canvas-wire.agent { stroke: #E8825A; stroke-dasharray: calc(7px * var(--node-chrome-k, 1)) calc(5px * var(--node-chrome-k, 1)); }
 .canvas-wire.hot { opacity: 1; stroke-width: calc(3px * var(--node-chrome-k, 1)); }
 .canvas-wire.cold { opacity: .12; }
+/* The picked connection. Last in the file so it wins over `.cold` without `!important` — a
+   selection that dims because the pointer wandered onto another node is a selection the user
+   cannot see they still have. */
+.canvas-wire.selected {
+  opacity: 1;
+  stroke: var(--accent-color, #007acc);
+  stroke-width: calc(3px * var(--node-chrome-k, 1));
+}
 
-/* The right-click target. Invisible and far wider than the drawn stroke, because a hairline is
-   not a hit target. `stroke` rather than `all`: only the band around the line should take the
-   click, never the area the curve encloses. */
+/* The click and right-click target. Invisible and far wider than the drawn stroke, because a
+   hairline is not a hit target. `stroke` rather than `all`: only the band around the line
+   should take the click, never the area the curve encloses. */
 .canvas-wire-hit {
   fill: none;
   stroke: transparent;
   stroke-width: calc(14px * var(--node-chrome-k, 1));
   pointer-events: stroke;
-  cursor: context-menu;
+  cursor: pointer;
 }
+
+/* ---- The selected connection's controls ---------------------------------- */
+
+/* Its own layer, ABOVE the masked over-layer (8) and the focused node (7), because both
+   handles sit exactly on a node's border — see the note in `CanvasWires`. Still under
+   `.canvas-overlay-backdrop` (15): a node blown up to fill the screen is not the moment to be
+   adjusting a wire behind it. The layer itself is transparent to the pointer; only the two
+   controls in it are not. */
+.canvas-wires.handles { z-index: 9; }
+.canvas-wire-handle,
+.canvas-wire-badge { pointer-events: all; }
+
+/* Authored in SCREEN pixels: the parent `<g>` carries the counter-scale, so nothing in here
+   multiplies by `--node-chrome-k` the way the world-space rules above have to. */
+.canvas-wire-handle {
+  fill: var(--bg-primary, #141414);
+  stroke: var(--accent-color, #007acc);
+  stroke-width: 2.5;
+  cursor: grab;
+}
+.canvas-wire-handle:hover { fill: var(--accent-color, #007acc); }
+
+/* While ANY wire drag is in flight, every wire surface stops taking the pointer.
+   `useWireDrag` resolves its drop target with `document.elementFromPoint(...).closest(
+   '.canvas-node')`, which answers with the TOPMOST element — so a control left interactive here
+   shadows the node underneath it and the drop is silently refused over that patch. The handles
+   are the acute case (they sit ON a node's border, which is exactly where a drop lands), and the
+   hit band is the long-standing one: dropping a wire on a node where another wire crosses it has
+   always failed for the same reason. */
+.canvas-mode.linking .canvas-wire-handle,
+.canvas-mode.linking .canvas-wire-badge,
+.canvas-mode.linking .canvas-wire-hit { pointer-events: none; }
+
+.canvas-wire-badge { cursor: pointer; }
+.canvas-wire-badge circle {
+  fill: var(--bg-primary, #141414);
+  stroke: var(--accent-color, #007acc);
+  stroke-width: 1.5;
+}
+.canvas-wire-badge path {
+  stroke: var(--text-primary, #d4d4d4);
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: none;
+}
+.canvas-wire-badge:hover circle { fill: var(--error-color, #f14c4c); stroke: var(--error-color, #f14c4c); }
+.canvas-wire-badge:hover path { stroke: #fff; }
 
 /* The wire being dragged out of a port, before it has a second endpoint. */
 .canvas-ghostwire {

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Rect } from './canvasGeometry';
 import { CanvasEdge } from '../../store/slices/canvasSlice';
-import { pickSides, portPoint, wirePath, wireMidpoint, edgeHeat } from './wireGeometry';
+import { WireEnds, wireEnds, wirePath, wireMidpoint, edgeHeat } from './wireGeometry';
 
 /**
  * Connection wires — `plan/013` Task 18, design 010 §4.6.
@@ -11,12 +11,30 @@ import { pickSides, portPoint, wirePath, wireMidpoint, edgeHeat } from './wireGe
  * painted at 30%, so the segment crossing a terminal reads as a ghost instead of a stripe
  * through the user's output. Neither layer takes pointer events; the hit targets are separate
  * transparent paths (see `.canvas-wire-hit`).
+ *
+ * A third layer appears only for the SELECTED wire, and it has to be a third: its endpoint
+ * handles sit exactly on a node's border, so anything drawn under the nodes would be half
+ * covered by the node it is attached to — and a grab target you can only hit half of is the
+ * kind of control people decide is broken.
  */
 
 /** The mask's coordinate space. Wide enough that no realistic layout leaves it. */
 const WORLD = 40000;
 /** Origin offset, so a node dragged into negative world space is still inside the mask. */
 const ORIGIN = -WORLD / 2;
+
+/**
+ * The selected wire's furniture, authored in SCREEN pixels.
+ *
+ * Everything in this file is world-space, so these are drawn inside a `scale(k)` where `k` is
+ * the chrome counter-scale — the same `1/z` that keeps a wire a hairline and a node header
+ * legible at every zoom. A handle sized in world units would be a dot at one end of the zoom
+ * range and a plate at the other.
+ */
+const HANDLE_R = 7;
+const BADGE_R = 9;
+/** How far the label steps aside for the delete badge that takes its place at the midpoint. */
+const LABEL_LIFT = 20;
 
 export interface CanvasWiresProps {
   edges: CanvasEdge[];
@@ -40,6 +58,12 @@ export interface CanvasWiresProps {
   masked: Record<string, Rect>;
   /** The hovered node, or null for "no hover focus". */
   hoveredId: string | null;
+  /** The selected connection, or null. Only this one shows handles and a delete badge. */
+  selectedEdgeId?: string | null;
+  /** `chromeScale(zoom)`. World units per screen pixel — see the note on `HANDLE_R`. */
+  chromeK?: number;
+  onWireClick?: (edge: CanvasEdge) => void;
+  onWireDelete?: (edge: CanvasEdge) => void;
   onWireContextMenu?: (edge: CanvasEdge, e: React.MouseEvent) => void;
 }
 
@@ -50,28 +74,36 @@ interface DrawnWire {
   cls: string;
   /** Where a label sits, when the edge has one. */
   mid: [number, number];
+  /** The two points the wire runs between — where its endpoint handles go. */
+  ends: WireEnds;
+  selected: boolean;
 }
 
 export function drawnWires(
   edges: CanvasEdge[],
   rects: Record<string, Rect>,
   hoveredId: string | null,
+  selectedEdgeId: string | null = null,
 ): DrawnWire[] {
   const out: DrawnWire[] = [];
   for (const e of edges) {
     const a = rects[e.from];
     const b = rects[e.to];
     if (!a || !b) continue;
-    const [s1, s2] = pickSides(a, b);
+    const ends = wireEnds(a, b);
+    const { p1, p2, s1, s2 } = ends;
     const heat = edgeHeat(e, hoveredId);
-    const p1 = portPoint(a, s1);
-    const p2 = portPoint(b, s2);
+    const selected = e.id === selectedEdgeId;
     out.push({
       key: e.id,
       edge: e,
+      ends,
+      selected,
       d: wirePath(p1, p2, s1, s2),
       mid: wireMidpoint(p1, p2, s1, s2),
-      cls: ['canvas-wire', e.origin === 'agent' ? 'agent' : '', heat ?? '']
+      // Selected LAST, so it survives `cold`: a wire you have picked is not one of the ones
+      // the hover focus is dimming, whatever the pointer happens to be over.
+      cls: ['canvas-wire', e.origin === 'agent' ? 'agent' : '', heat ?? '', selected ? 'selected' : '']
         .filter(Boolean)
         .join(' '),
     });
@@ -80,10 +112,12 @@ export function drawnWires(
 }
 
 export const CanvasWires: React.FC<CanvasWiresProps> = ({
-  edges, rects, masked, hoveredId, onWireContextMenu,
+  edges, rects, masked, hoveredId, selectedEdgeId = null, chromeK = 1,
+  onWireClick, onWireDelete, onWireContextMenu,
 }) => {
-  const wires = drawnWires(edges, rects, hoveredId);
+  const wires = drawnWires(edges, rects, hoveredId, selectedEdgeId);
   if (!wires.length) return null;
+  const picked = wires.find((w) => w.selected) ?? null;
 
   const svgProps = {
     width: WORLD,
@@ -97,15 +131,16 @@ export const CanvasWires: React.FC<CanvasWiresProps> = ({
       {/* Beneath the nodes: full strength, naturally occluded where it crosses one. */}
       <svg className="canvas-wires under" {...svgProps}>
         {wires.map((w) => <path key={w.key} d={w.d} className={w.cls} />)}
-        {/* Wide transparent strokes, so a hairline wire is still right-clickable. Their own
-            layer rather than a `pointer-events` on the visible paths: the stroke a user can hit
-            has to be far wider than the one they can see. */}
-        {onWireContextMenu && wires.map((w) => (
+        {/* Wide transparent strokes, so a hairline wire is still clickable. Their own layer
+            rather than a `pointer-events` on the visible paths: the stroke a user can hit has
+            to be far wider than the one they can see. */}
+        {wires.map((w) => (
           <path
             key={`hit-${w.key}`}
             d={w.d}
             className="canvas-wire-hit"
-            onContextMenu={(e) => onWireContextMenu(w.edge, e)}
+            onClick={() => onWireClick?.(w.edge)}
+            onContextMenu={onWireContextMenu ? (e) => onWireContextMenu(w.edge, e) : undefined}
           />
         ))}
         {/* The user-typed label (design 010 D3). On the under-layer, so a node crossing the
@@ -116,7 +151,10 @@ export const CanvasWires: React.FC<CanvasWiresProps> = ({
             key={`label-${w.key}`}
             className={`canvas-wire-label${w.cls.includes('cold') ? ' cold' : ''}`}
             x={w.mid[0]}
-            y={w.mid[1]}
+            // Selecting a wire puts a delete badge on its midpoint, which is where the label
+            // already was. The label steps up rather than the badge stepping aside: the badge
+            // is the thing being aimed at, so it keeps the position the eye went to.
+            y={w.mid[1] - (w.selected ? LABEL_LIFT * chromeK : 0)}
             textAnchor="middle"
             dominantBaseline="middle"
           >
@@ -145,6 +183,40 @@ export const CanvasWires: React.FC<CanvasWiresProps> = ({
           {wires.map((w) => <path key={w.key} d={w.d} className={w.cls} />)}
         </g>
       </svg>
+      {/* The selected wire's controls, above everything the wire can cross. */}
+      {picked && (
+        <svg className="canvas-wires handles" {...svgProps}>
+          {([['from', picked.ends.p1], ['to', picked.ends.p2]] as const).map(([end, p]) => (
+            <g key={end} transform={`translate(${p[0]},${p[1]}) scale(${chromeK})`}>
+              <circle
+                className="canvas-wire-handle"
+                data-edge-id={picked.edge.id}
+                data-end={end}
+                r={HANDLE_R}
+              >
+                {/* An SVG `<title>` is the only tooltip a shape can carry, and these controls
+                    need one: a dot on the end of a line says nothing about being draggable. */}
+                <title>Drag to connect this end to another terminal</title>
+              </circle>
+            </g>
+          ))}
+          <g transform={`translate(${picked.mid[0]},${picked.mid[1]}) scale(${chromeK})`}>
+            {/* Tam: "user can click on the connection line and then delete it if they want."
+                Delete and the right-click menu both do this too; a control you can see is what
+                makes the other two discoverable rather than trivia. */}
+            <g
+              className="canvas-wire-badge"
+              onClick={() => onWireDelete?.(picked.edge)}
+              role="button"
+              aria-label="Delete connection"
+            >
+              <title>Delete connection (Del)</title>
+              <circle r={BADGE_R} />
+              <path d="M-3.5,-3.5 L3.5,3.5 M3.5,-3.5 L-3.5,3.5" />
+            </g>
+          </g>
+        </svg>
+      )}
     </>
   );
 };

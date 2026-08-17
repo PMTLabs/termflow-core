@@ -43,6 +43,63 @@ export function portPoint(r: Rect, side: Side): [number, number] {
   }
 }
 
+/**
+ * Where a wire between two rects actually runs, faces included.
+ *
+ * One definition, because five things now have to agree about it: the drawn path, the wide
+ * transparent path the click lands on, the label's position, and — since a connection became
+ * editable — the two endpoint handles the user drags. A handle that is not exactly on the end
+ * of the wire it moves is a handle for a different wire.
+ */
+export interface WireEnds {
+  p1: [number, number];
+  p2: [number, number];
+  s1: Side;
+  s2: Side;
+}
+
+export function wireEnds(a: Rect, b: Rect): WireEnds {
+  const [s1, s2] = pickSides(a, b);
+  return { p1: portPoint(a, s1), p2: portPoint(b, s2), s1, s2 };
+}
+
+/** Which end of a connection a drag has hold of. Named for the edge's own fields, so nothing
+ *  has to remember whether "the left one" means source or destination. */
+export type WireEnd = 'from' | 'to';
+
+/**
+ * The node a re-endpoint drag PIVOTS ABOUT: dragging the `from` end leaves `to` where it is,
+ * and the other way round. This is what the ghost wire is drawn from, and what a drop is
+ * refused against as a self-edge.
+ */
+export function anchorOf(edge: { from: string; to: string }, end: WireEnd): string {
+  return end === 'from' ? edge.to : edge.from;
+}
+
+/**
+ * The pair an edge would BECOME if `end` were dropped on `target` — or `null` when the drop
+ * changes nothing this side can act on.
+ *
+ * Two refusals, and they are different things rather than one guard written twice. A pair whose
+ * ends coincide is a self-edge, which the backend rejects with a 400 after resolving both ids;
+ * a pair identical to the one already stored is a drag that ended where it started, which is
+ * not an error at all and must not cost the user their connection. Both answer `null` because
+ * the caller does the same thing with them — nothing — and giving "harmless" its own return
+ * value would only invite a caller to treat it as a failure.
+ */
+export function reconnectPair(
+  edge: { from: string; to: string },
+  end: WireEnd,
+  target: string,
+): { from: string; to: string } | null {
+  const pair = end === 'from'
+    ? { from: target, to: edge.to }
+    : { from: edge.from, to: target };
+  if (pair.from === pair.to) return null;
+  if (pair.from === edge.from && pair.to === edge.to) return null;
+  return pair;
+}
+
 /** Short wires still get a visible curve rather than collapsing to a straight line. */
 export const MIN_REACH = 46;
 

@@ -95,3 +95,72 @@ describe('wire layer stacking', () => {
     expect(block).toMatch(/pointer-events\s*:\s*none/);
   });
 });
+
+/**
+ * The selected connection's controls, which have to sit above the nodes they are attached to.
+ *
+ * Both handles are placed exactly ON a node's border (`portPoint` returns a point on the edge),
+ * so half of each one overlaps the node it belongs to. Drawn on the under-layer they would be
+ * half-covered by that node — a grab target you can only hit one side of, which is the kind of
+ * control people decide is broken rather than fiddly.
+ */
+describe('the selected connection layer', () => {
+  it('draws the handles above every node and every port', () => {
+    const handles = zOf('.canvas-wires.handles');
+    for (const rule of nodeLayer) {
+      expect({ selector: rule.selector, above: handles > rule.z })
+        .toEqual({ selector: rule.selector, above: true });
+    }
+    // Above the masked ghost too, or a wire crossing this one would draw over its own handle.
+    expect(handles).toBeGreaterThan(zOf('.canvas-wires.over'));
+  });
+
+  it('keeps them below the overlay backdrop', () => {
+    // A node blown up to fill the screen is not the moment to be adjusting a wire behind it.
+    expect(zOf('.canvas-wires.handles')).toBeLessThan(zOf('.canvas-overlay-backdrop'));
+  });
+
+  /**
+   * `.canvas-wires` is `pointer-events: none` and the handles layer inherits it. Without an
+   * explicit re-enable the controls are drawn, look interactive, and take no clicks at all.
+   */
+  it('re-enables the pointer on the controls themselves', () => {
+    const block = /\.canvas-wire-handle,\s*\n?\.canvas-wire-badge\s*\{([^}]*)\}/.exec(CSS)?.[1];
+    expect(block).toBeDefined();
+    expect(block).toMatch(/pointer-events\s*:\s*all/);
+  });
+
+  /**
+   * Every wire surface goes inert while a drag is in flight.
+   *
+   * `useWireDrag` finds its drop target with `elementFromPoint(...).closest('.canvas-node')`,
+   * which answers with the TOPMOST element. A wire surface still taking the pointer shadows the
+   * node underneath it, `closest` walks up through the SVG instead and finds nothing, and the
+   * drop is refused over that patch with no error anywhere. The handles are the acute case —
+   * they sit exactly on a node's border, which is exactly where a drop lands.
+   */
+  it('takes the pointer off every wire surface while linking', () => {
+    const rule = /\.canvas-mode\.linking[\s\S]*?\{([^}]*pointer-events\s*:\s*none[^}]*)\}/.exec(CSS);
+    expect(rule).not.toBeNull();
+    const head = CSS.slice(CSS.lastIndexOf('}', rule!.index) + 1, rule!.index + rule![0].indexOf('{'));
+    for (const sel of ['.canvas-wire-handle', '.canvas-wire-badge', '.canvas-wire-hit']) {
+      expect({ sel, inert: head.includes(`.canvas-mode.linking ${sel}`) })
+        .toEqual({ sel, inert: true });
+    }
+  });
+
+  /**
+   * A selected wire must not be dimmed by the hover focus.
+   *
+   * `.canvas-wire.cold` is 12% opacity and has the same specificity as `.canvas-wire.selected`,
+   * so the ONLY thing deciding the winner is source order. A selection nobody can see is one
+   * the user believes they lost — and then Delete removes a connection they stopped looking at.
+   */
+  it('declares the selected rule after the cold one, so it wins on source order', () => {
+    const cold = CSS.indexOf('.canvas-wire.cold');
+    const selected = CSS.indexOf('.canvas-wire.selected');
+    expect(cold).toBeGreaterThan(-1);
+    expect(selected).toBeGreaterThan(-1);
+    expect(selected).toBeGreaterThan(cold);
+  });
+});

@@ -245,6 +245,26 @@ export function stepShortcut(e: CanvasKey): StepDir | null {
   return e.shiftKey ? -1 : 1;
 }
 
+/**
+ * <kbd>Delete</kbd> / <kbd>Backspace</kbd> — remove the selected connection.
+ *
+ * Both keys, because which one "delete" means is a platform habit rather than a fact: a Mac
+ * laptop's big key reports `Backspace`, and a full keyboard's dedicated key reports `Delete`.
+ * Accepting one would leave half the users pressing a key that does nothing.
+ *
+ * **Bare only, and gated on something being selected by the caller.** Backspace is the single
+ * most destructive key to take speculatively — a browser once navigated back on it — so this
+ * resolves to an action only when there is a connection to remove, and the press is otherwise
+ * left completely alone. It never applies to a selected NODE: closing a terminal is
+ * `canvasClose`'s job and has its own confirmation.
+ */
+export function deleteShortcut(e: CanvasKey): boolean {
+  if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return false;
+  if (inEditable(e.target)) return false;
+  return e.code === 'Delete' || e.key === 'Delete'
+    || e.code === 'Backspace' || e.key === 'Backspace';
+}
+
 /** What a zoom keypress is asking the canvas for. */
 export type ZoomIntent = 'in' | 'out' | 'reset';
 
@@ -296,19 +316,36 @@ export type CanvasAction =
   | { do: 'overlay' }
   | { do: 'pan'; dx: number; dy: number }
   | { do: 'step'; dir: StepDir }
-  | { do: 'zoom'; intent: ZoomIntent };
+  | { do: 'zoom'; intent: ZoomIntent }
+  | { do: 'delete-edge' };
 
-export function canvasKeyAction(e: CanvasKey, hasSelection: boolean): CanvasAction | null {
+/**
+ * What the canvas currently has selected.
+ *
+ * An object rather than two booleans, and that is a deliberate defence rather than taste: they
+ * are adjacent, identically typed and mean opposite things, so a caller that swapped them would
+ * compile, pass type-checking, and fail only as `E` opening an overlay on nothing while Delete
+ * removed a connection nobody had selected. Named fields make the mistake unwritable.
+ */
+export interface CanvasSelection {
+  node: boolean;
+  edge: boolean;
+}
+
+export function canvasKeyAction(e: CanvasKey, sel: CanvasSelection): CanvasAction | null {
   // Zoom first because it is the only rule here that REQUIRES a modifier; every other one
   // refuses Ctrl/Cmd, so the order below is a readability choice rather than a load-bearing one.
   const intent = zoomShortcut(e);
   if (intent) return { do: 'zoom', intent };
   const target = fitShortcut(e);
   if (target) return { do: 'fit', target };
+  // Same shape as `E` below: with no connection selected the press resolves to nothing at all,
+  // so Backspace keeps whatever meaning the rest of the app gives it.
+  if (deleteShortcut(e)) return sel.edge ? { do: 'delete-edge' } : null;
   // `E` with nothing selected resolves to nothing AT ALL, rather than to an action the caller
   // then declines. That is what leaves the keypress untouched: an overlay opening on a terminal
   // the user never pointed at is worse than a key that did nothing.
-  if (openOverlayShortcut(e)) return hasSelection ? { do: 'overlay' } : null;
+  if (openOverlayShortcut(e)) return sel.node ? { do: 'overlay' } : null;
   // Unlike `E`, stepping with nothing selected is meaningful — it starts at one end.
   const step = stepShortcut(e);
   if (step) return { do: 'step', dir: step };

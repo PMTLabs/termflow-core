@@ -2,6 +2,7 @@ import { drawnWires } from '../CanvasWires';
 import { worldPoint, worldDelta } from '../canvasMutations';
 import { nodeRegistryPayload } from '../canvasSelectors';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { portPoint } from '../wireGeometry';
 import { CanvasEdge } from '../../../store/slices/canvasSlice';
 import type { CanvasModel } from '../canvasSelectors';
 
@@ -137,5 +138,56 @@ describe('nodeRegistryPayload', () => {
     // be off screen would make an agent's `/connections` answer depend on where the user
     // scrolled, which is the least explicable failure this endpoint could have.
     expect(nodeRegistryPayload(model)).toHaveLength(model.nodes.length);
+  });
+});
+
+/**
+ * The selected connection — Tam: "user can click on the connection line and then delete it".
+ *
+ * Selection is the state everything else in the feature hangs off: the class that shows it, the
+ * two endpoint handles a re-connect drag grabs, the delete badge, and the key.
+ */
+describe('drawnWires selection', () => {
+  const rects = { a: at(0, 0), b: at(900, 0), c: at(0, 900) };
+  const two = [edge('ce-1', 'a', 'b'), edge('ce-2', 'a', 'c')];
+
+  it('marks exactly the selected wire', () => {
+    const wires = drawnWires(two, rects, null, 'ce-2');
+    expect(wires.map((w) => w.selected)).toEqual([false, true]);
+    expect(wires[1].cls).toContain('selected');
+    expect(wires[0].cls).not.toContain('selected');
+  });
+
+  it('marks nothing when nothing is selected', () => {
+    for (const sel of [null, undefined, 'ce-gone']) {
+      const wires = drawnWires(two, rects, null, sel as string | null);
+      expect(wires.some((w) => w.selected)).toBe(false);
+    }
+  });
+
+  /**
+   * A selected wire that the hover focus would dim.
+   *
+   * `cold` is 12% opacity — a selection nobody can see is a selection the user thinks they lost,
+   * and then Delete removes something they are no longer looking at. The class order here is
+   * what lets the stylesheet's later rule win without `!important`.
+   */
+  it('keeps the selected class after cold, so the dimming cannot hide it', () => {
+    // Hovering `a` makes `b→c` cold; select it anyway.
+    const wires = drawnWires([...two, edge('ce-3', 'b', 'c')], rects, 'a', 'ce-3');
+    const cold = wires.find((w) => w.key === 'ce-3')!;
+    expect(cold.cls).toContain('cold');
+    expect(cold.cls.indexOf('selected')).toBeGreaterThan(cold.cls.indexOf('cold'));
+  });
+
+  /** The handles are drawn at these two points, so they have to be the wire's real ends rather
+   *  than a second computation of them. */
+  it('carries the endpoints the handles are placed on', () => {
+    const [w] = drawnWires([edge('ce-1', 'a', 'b')], rects, null, 'ce-1');
+    expect(w.ends.p1).toEqual(portPoint(rects.a, w.ends.s1));
+    expect(w.ends.p2).toEqual(portPoint(rects.b, w.ends.s2));
+    // ...and the path really starts and ends there.
+    expect(w.d.startsWith(`M${w.ends.p1[0]},${w.ends.p1[1]} `)).toBe(true);
+    expect(w.d.endsWith(` ${w.ends.p2[0]},${w.ends.p2[1]}`)).toBe(true);
   });
 });

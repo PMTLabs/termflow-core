@@ -6,8 +6,8 @@ import { terminalService } from '../../services/TerminalService';
 import { getAllLeafIds } from '../../store/slices/paneTreeOps';
 import { RootState } from '../../store';
 import {
-  CanvasEdge, addEdge, focusNode, panViewport, selectNode, setEdges, setNearestGroup, setNodeGeom,
-  setOverlayNode, setSidebarOpen,
+  CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
+  setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen,
 } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
@@ -49,7 +49,7 @@ import {
   selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
-import { createEdge, fetchGraph, putNodes } from '../../services/canvasGraph';
+import { createEdge, deleteEdge, fetchGraph, putNodes } from '../../services/canvasGraph';
 import './Canvas.css';
 
 /** How long the node registry waits for the model to settle. A group drag would otherwise
@@ -140,6 +140,7 @@ export const CanvasMode: React.FC = () => {
   const model = useSelector(selectCanvasModel);
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const selectedId = useSelector((s: RootState) => s.canvas.selectedId);
+  const selectedEdgeId = useSelector((s: RootState) => s.canvas.selectedEdgeId);
   const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
   const overlayId = useSelector((s: RootState) => s.canvas.overlayId);
   const recent = useSelector((s: RootState) => s.canvas.recent);
@@ -380,8 +381,25 @@ export const CanvasMode: React.FC = () => {
   }, []);
 
   const clearSelection = useCallback(() => {
+    // `selectNode(null)` clears the connection selection too — see `selectedEdgeId`. One
+    // dispatch, so a press on empty canvas cannot leave half a selection behind.
     dispatch(selectNode(null));
     dispatch(focusNode(null));
+  }, [dispatch]);
+
+  /**
+   * Remove a connection — where the ✕ badge and the Delete key both land. (The right-click
+   * menu reaches the same two calls from inside `CanvasWireMenu`, which owns its own service
+   * calls because it also edits the label.)
+   *
+   * The store is only touched once the SERVER has forgotten the row. An optimistic removal
+   * looks identical for the rest of the session and then hands the user back their deleted wire
+   * on the next restart, with nothing on screen to explain where it came from.
+   */
+  const dropEdge = useCallback((id: string) => {
+    void deleteEdge(id).then((ok) => {
+      if (ok) dispatch(removeEdge(id));
+    });
   }, [dispatch]);
 
   // Double-click a node BODY to open it as the full-screen overlay.
@@ -517,7 +535,10 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
-      const action = canvasKeyAction(e as unknown as CanvasKey, !!selectedId);
+      const action = canvasKeyAction(
+        e as unknown as CanvasKey,
+        { node: !!selectedId, edge: !!selectedEdgeId },
+      );
       if (!action) return;
 
       // Two vetoes that need the DOM, so neither can live in the rule — and both are scoped to
@@ -540,6 +561,9 @@ export const CanvasMode: React.FC = () => {
         case 'step': stepNode(action.dir); break;
         case 'zoom': zoomKey(action.intent); break;
         case 'pan': panScreen(action.dx, action.dy); break;
+        // Only reachable with a connection selected — `canvasKeyAction` resolves Delete to
+        // nothing at all otherwise, so the `!` is the rule's guarantee rather than a hope.
+        case 'delete-edge': dropEdge(selectedEdgeId!); break;
         default: {
           // Exhaustiveness, and the reason this is a switch rather than the if-chain it was:
           // the event is ALREADY consumed by the time we get here, so an unhandled action is a
@@ -553,7 +577,8 @@ export const CanvasMode: React.FC = () => {
     // Capture phase, matching InputHandler's ownership of global shortcuts.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [focusedId, fitAll, fitGroup, selectedId, panScreen, stepNode, zoomKey, dispatch]);
+  }, [focusedId, fitAll, fitGroup, selectedId, selectedEdgeId, panScreen, stepNode, zoomKey,
+    dropEdge, dispatch]);
 
   /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
    *  render gate below, which covers the minimap in the same breath — a second `overlayId`
@@ -766,6 +791,13 @@ export const CanvasMode: React.FC = () => {
           rects={wireRects}
           masked={maskRects}
           hoveredId={near ? hoveredId : null}
+          selectedEdgeId={selectedEdgeId}
+          // The same counter-scale the stylesheet publishes as `--node-chrome-k`. Passed as a
+          // number because the handles are SVG geometry, and `r`/`transform` are attributes a
+          // CSS variable cannot reach.
+          chromeK={chromeScale(vp.z)}
+          onWireClick={(edge) => dispatch(selectEdge(edge.id))}
+          onWireDelete={(edge) => dropEdge(edge.id)}
           onWireContextMenu={(edge, e) => {
             e.preventDefault();
             e.stopPropagation();

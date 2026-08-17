@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { addEdge } from '../../store/slices/canvasSlice';
-import { createEdge } from '../../services/canvasGraph';
+import { CanvasEdge, addEdge, removeEdge, selectEdge } from '../../store/slices/canvasSlice';
+import { createEdge, reconnectEdge } from '../../services/canvasGraph';
 import { worldPoint } from './canvasMutations';
 import { exceedsDragSlop } from './canvasGestures';
+import { Rect } from './canvasGeometry';
 import { CanvasModel } from './canvasSelectors';
 import {
-  Side, pickSides, portPoint, wirePath, oppositeSide, linkTargetId,
+  Side, WireEnd, pickSides, portPoint, wirePath, oppositeSide, linkTargetId, anchorOf,
+  reconnectPair,
 } from './wireGeometry';
 
 /**
@@ -27,7 +29,9 @@ import {
  */
 
 interface Link {
-  fromId: string;
+  /** The node this drag PIVOTS ABOUT — the port's own node for a fresh wire, and the end that
+   *  is staying put when an existing one is being re-pointed. */
+  anchorId: string;
   side: Side;
   /** World-space start point, frozen at pointerdown. */
   from: [number, number];
@@ -40,6 +44,14 @@ interface Link {
   /** True once the pointer has travelled past `DRAG_SLOP`. Until then the press is still a
    *  candidate click, and no ghost wire is drawn. */
   moved: boolean;
+  /**
+   * Set when an EXISTING connection is being re-pointed rather than a new one drawn.
+   *
+   * The edge is snapshotted at pointerdown deliberately: it is the row the drop will replace,
+   * and re-reading it mid-gesture would let a label edit in another window change what this
+   * drag is holding.
+   */
+  reconnect?: { edge: CanvasEdge; end: WireEnd };
 }
 
 export interface WireDragState {
@@ -69,12 +81,70 @@ export interface PortClick {
   y: number;
 }
 
+/** What a recognised pointerdown yields: the box to measure screen→world against, and the
+ *  half of a `Link` that depends on WHERE the press landed. */
+interface Started {
+  viewport: HTMLElement;
+  link: Pick<Link, 'anchorId' | 'side' | 'from' | 'reconnect'>;
+}
+
+type RectOf = (id: string) => Rect | undefined;
+
+/** A press on one of a node's four port dots: draw a NEW wire out of that face. */
+function startFromPort(el: Element | null, rectOf: RectOf): Started | null {
+  const port = el?.closest('.canvas-port') as HTMLElement | null;
+  if (!port) return null;
+  const side = port.getAttribute('data-port') as Side | null;
+  const anchorId = port.closest('.canvas-node')?.getAttribute('data-terminal-id');
+  const viewport = port.closest('.canvas-viewport') as HTMLElement | null;
+  if (!side || !anchorId || !viewport) return null;
+  const rect = rectOf(anchorId);
+  if (!rect) return null;
+  return { viewport, link: { anchorId, side, from: portPoint(rect, side) } };
+}
+
+/**
+ * A press on one of a SELECTED wire's two endpoint handles: move that end somewhere else.
+ *
+ * The gesture then behaves exactly like drawing a new wire out of the OTHER end — which is why
+ * it can share everything below rather than being a second drag implementation. All this has to
+ * establish is which node the wire is pivoting about.
+ */
+function startFromHandle(
+  el: Element | null,
+  edges: readonly CanvasEdge[],
+  rectOf: RectOf,
+): Started | null {
+  const handle = el?.closest('.canvas-wire-handle');
+  if (!handle) return null;
+  const edgeId = handle.getAttribute('data-edge-id');
+  const end = handle.getAttribute('data-end') as WireEnd | null;
+  const viewport = handle.closest('.canvas-viewport') as HTMLElement | null;
+  if (!edgeId || (end !== 'from' && end !== 'to') || !viewport) return null;
+  const edge = edges.find((x) => x.id === edgeId);
+  if (!edge) return null;
+  const anchor = rectOf(anchorOf(edge, end));
+  // The rect of the end being MOVED is needed too, and only for the departure face: starting
+  // the ghost anywhere but where the wire already leaves the anchor makes the drag begin with
+  // the wire snapping to a different side of the node the user did not touch.
+  const moving = rectOf(end === 'from' ? edge.from : edge.to);
+  if (!anchor || !moving) return null;
+  const [side] = pickSides(anchor, moving);
+  return {
+    viewport,
+    link: { anchorId: anchorOf(edge, end), side, from: portPoint(anchor, side), reconnect: { edge, end } },
+  };
+}
+
 export function useWireDrag(
   model: CanvasModel,
   onPortClick?: (click: PortClick) => void,
 ): WireDragState {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
+  // Read here rather than passed in: a re-endpoint drag starts from a handle that carries only
+  // an edge id, and this hook is the only thing that has to turn that back into the row.
+  const edges = useSelector((s: RootState) => s.canvas.edges);
 
   // Read through a ref for the reason the model and viewport are: the pointerup listener below
   // is registered once, and re-registering it whenever the callback identity changed would
@@ -88,32 +158,29 @@ export function useWireDrag(
   const [targetId, setTargetId] = useState<string | null>(null);
 
   // Read through a ref inside listeners registered once — see `useCanvasDrag`.
-  const latest = useRef({ model, vp });
-  latest.current = { model, vp };
+  const latest = useRef({ model, vp, edges });
+  latest.current = { model, vp, edges };
 
   const rectOf = (id: string) =>
     latest.current.model.nodes.find((n) => n.terminalId === id)?.rect;
 
   const onPointerDownCapture = useCallback((e: React.PointerEvent) => {
-    const port = (e.target as HTMLElement | null)?.closest('.canvas-port') as HTMLElement | null;
-    if (!port) return;
-    const side = port.getAttribute('data-port') as Side | null;
-    const fromId = port.closest('.canvas-node')?.getAttribute('data-terminal-id');
-    const viewport = port.closest('.canvas-viewport') as HTMLElement | null;
-    if (!side || !fromId || !viewport) return;
-    const rect = rectOf(fromId);
-    if (!rect) return;
+    const el = e.target as Element | null;
+    // Both gestures below are the same drag with a different starting point, so they share one
+    // capture handler and one `Link`. The handle is tested FIRST: it is drawn above the nodes
+    // and their ports, so an overlapping port must not steal a press aimed at an endpoint.
+    const started = startFromHandle(el, latest.current.edges, rectOf)
+      ?? startFromPort(el, rectOf);
+    if (!started) return;
 
-    // Capture, and stop: a port press must not also select the node, start a header drag or
-    // reach the viewport's pan. It is its own gesture in design §5's table.
+    // Capture, and stop: this press must not also select the node, start a header drag or reach
+    // the viewport's pan. It is its own gesture in design §5's table.
     e.preventDefault();
     e.stopPropagation();
 
-    const box = viewport.getBoundingClientRect();
+    const box = started.viewport.getBoundingClientRect();
     link.current = {
-      fromId,
-      side,
-      from: portPoint(rect, side),
+      ...started.link,
       rect: { left: box.left, top: box.top },
       origin: { x: e.clientX, y: e.clientY },
       moved: false,
@@ -146,11 +213,11 @@ export function useWireDrag(
         setLinking(true);
       }
       const { vp: v } = latest.current;
-      const over = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.fromId);
+      const over = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.anchorId);
       setTargetId(over);
 
       const target = over ? rectOf(over) : undefined;
-      const source = rectOf(l.fromId);
+      const source = rectOf(l.anchorId);
       if (target && source) {
         // Preview EXACTLY the wire that will exist. Once created, geometry comes from
         // `pickSides` — the grabbed port decides the edge's direction, never its shape — so
@@ -172,19 +239,46 @@ export function useWireDrag(
       // a terminal already connected to this one (item 4). It cannot also be a drop — the
       // pointer is still over the source node's own port, and `linkTargetId` refuses an edge
       // from a node to itself — so this returns rather than falling through.
+      //
+      // A click on an endpoint HANDLE is not that gesture and is not any gesture: the wire is
+      // already selected, which is what put the handle on screen, so the press has nothing left
+      // to say. Spawning a terminal there would be a shell profile menu opening because someone
+      // tapped a connection they had just selected.
       if (!l.moved) {
-        onPortClickRef.current?.({ fromId: l.fromId, side: l.side, x: e.clientX, y: e.clientY });
+        if (!l.reconnect) {
+          onPortClickRef.current?.({ fromId: l.anchorId, side: l.side, x: e.clientX, y: e.clientY });
+        }
         return;
       }
 
-      const to = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.fromId);
+      const to = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.anchorId);
       if (!to) return;
+
+      if (l.reconnect) {
+        const { edge, end } = l.reconnect;
+        const pair = reconnectPair(edge, end, to);
+        // Dropped back where it started, or on the node at the other end. Neither is a failure,
+        // and neither may cost the user the connection they were holding.
+        if (!pair) return;
+        void reconnectEdge(edge, pair.from, pair.to).then((done) => {
+          if (!done) return;
+          // Only what the SERVER agreed to. A delete that failed leaves the old wire in the
+          // mirror, where it belongs: it is still stored, and hiding it here would make it
+          // reappear on the next restart with nothing to explain it.
+          if (done.removedId) dispatch(removeEdge(done.removedId));
+          dispatch(addEdge(done.edge));
+          // The selection follows the wire the user is still holding — otherwise the handles
+          // vanish mid-adjustment and a second nudge needs a fresh click.
+          dispatch(selectEdge(done.edge.id));
+        });
+        return;
+      }
 
       // Dispatch ONLY the row the server returns. The id is minted server-side and is the only
       // one a later delete or label edit can name; an optimistic client id is never replaced,
       // so the delete would target something that does not exist and leave the real edge
       // behind. A duplicate pair comes back as the EXISTING row, which is the id we want.
-      void createEdge(l.fromId, to).then((edge) => {
+      void createEdge(l.anchorId, to).then((edge) => {
         if (edge) dispatch(addEdge(edge));
       });
     };

@@ -2,8 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
 import {
-  fitGroupFrame, groupAt, arrange, seedNodePosition,
-  PAD, PAD_TOP, GAP, GROUP_GAP, GroupBox,
+  fitGroupFrame, groupAt, arrange, seedNodePosition, framePadScale, drawnFrameRect,
+  PAD, PAD_TOP, GAP, GROUP_GAP, PAD_SCREEN_MIN, PAD_SCREEN_MAX, MAX_PAD_OUTSET, GroupBox,
 } from '../canvasLayout';
 import { readSource } from '../../../utils/readSource';
 
@@ -243,5 +243,180 @@ describe('group frame top padding clears the label, and no more', () => {
     // The 46-vs-30 case fails here: it reserved 16px for a ~2px overhang.
     expect(PAD_TOP - PAD).toBeLessThanOrEqual(px('font-size')!);
     expect(PAD_TOP).toBeGreaterThan(PAD);
+  });
+});
+
+/**
+ * The frame's padding as it is DRAWN — Tam's report, with three screenshots of one group.
+ *
+ * At z≈0.62 the gap between the terminal and its frame read as "terminal touch the edge of the
+ * group"; at z≈0.78 it "looks good"; at z≈3.56 "the padding between terminal and the group
+ * border are too much". Those are the same 16 world units at three zooms, so the numbers below
+ * are asserted against THOSE zooms rather than against the constants — a test that recomputed
+ * `PAD * framePadScale(z) * z` from the source would agree with any value the source held,
+ * including the one that produced the screenshots.
+ */
+describe('framePadScale', () => {
+  /** The side padding actually on screen, in CSS pixels, at a given zoom. */
+  const sidePx = (z: number) => PAD * framePadScale(z) * z;
+
+  it('leaves the zoom Tam already called good exactly as it was', () => {
+    // The fix must not "improve" the one rung of the ladder that was not broken.
+    expect(framePadScale(1)).toBe(1);
+    expect(sidePx(1)).toBe(PAD);
+    expect(sidePx(0.9)).toBeCloseTo(PAD * 0.9, 6);
+  });
+
+  it('opens up the gap that read as touching', () => {
+    // z≈0.62 drew 9.9px. Anything at or below what the screenshot showed is not a fix.
+    expect(PAD * 0.62).toBeLessThan(PAD_SCREEN_MIN);        // the trap is genuinely present
+    expect(sidePx(0.62)).toBeCloseTo(PAD_SCREEN_MIN, 6);
+    expect(sidePx(0.62)).toBeGreaterThan(PAD * 0.62);
+  });
+
+  it('closes the gap that read as too much', () => {
+    // z≈3.56 drew 57px.
+    expect(PAD * 3.56).toBeGreaterThan(PAD_SCREEN_MAX);     // the trap is genuinely present
+    expect(sidePx(3.56)).toBeCloseTo(PAD_SCREEN_MAX, 6);
+    expect(sidePx(3.56)).toBeLessThan(PAD * 3.56 / 2);
+  });
+
+  it('holds the drawn padding inside the band across the whole zoom range', () => {
+    // Below ~0.28 the workspace has collapsed to group chips and no frame is drawn at all, so
+    // the band is only claimed from there up. The cap is allowed to undershoot the minimum —
+    // see the next test for why that is the correct trade.
+    for (let z = 0.28; z <= 6; z += 0.02) {
+      const px = sidePx(z);
+      expect({ z: z.toFixed(2), tooBig: px > PAD_SCREEN_MAX + 1e-9 })
+        .toEqual({ z: z.toFixed(2), tooBig: false });
+    }
+  });
+
+  /**
+   * The cap, and why it is not negotiable.
+   *
+   * Two neighbouring frames each grow TOWARDS the other, so an uncapped clamp closes twice the
+   * outset out of the `GROUP_GAP` between them — and far enough out, two groups that share no
+   * terminals draw one border through the other. The whole point of a frame is to say which
+   * terminals are in which tab.
+   */
+  it('never grows far enough for two neighbouring frames to touch', () => {
+    for (let z = 0.05; z <= 6; z += 0.01) {
+      const g = framePadScale(z) - 1;
+      const worst = Math.max(PAD, PAD_TOP) * g;             // the top band is the larger outset
+      expect({ z: z.toFixed(2), closed: worst * 2 >= GROUP_GAP })
+        .toEqual({ z: z.toFixed(2), closed: false });
+    }
+    expect(MAX_PAD_OUTSET * 2).toBeLessThan(GROUP_GAP);
+  });
+
+  it('is a no-op for a zoom that cannot happen', () => {
+    // Guards a division, not a real viewport: `clampZoom` never returns these. A NaN here would
+    // reach `left`/`width` and take the whole frame off the screen.
+    for (const z of [0, -1, Number.NaN]) expect(framePadScale(z)).toBe(1);
+  });
+});
+
+describe('drawnFrameRect', () => {
+  const layout = { x: 100, y: 200, w: 400, h: 300 };
+
+  it('returns the layout rect untouched inside the band', () => {
+    // Identity, not merely equality: a frame that is not being rescaled must not churn a new
+    // object on every render.
+    expect(drawnFrameRect(layout, 1)).toBe(layout);
+  });
+
+  it('grows around the terminals rather than moving them', () => {
+    const box = drawnFrameRect(layout, 0.5);
+    const g = framePadScale(0.5) - 1;
+    // The interior — the part the terminals occupy — is the same box it was, on all four edges.
+    expect(box.x + PAD * (1 + g)).toBeCloseTo(layout.x + PAD, 6);
+    expect(box.y + PAD_TOP * (1 + g)).toBeCloseTo(layout.y + PAD_TOP, 6);
+    expect(box.x + box.w - PAD * (1 + g)).toBeCloseTo(layout.x + layout.w - PAD, 6);
+    expect(box.y + box.h - PAD * (1 + g)).toBeCloseTo(layout.y + layout.h - PAD, 6);
+  });
+
+  /**
+   * Three of the four outsets are the SIDE padding; only the top is the taller band.
+   *
+   * Asserted per edge rather than as a width and a height, because the two are not the same
+   * check: a height grown by the top band alone still gets bigger, still shrinks at high zoom,
+   * and is wrong only at the bottom edge — where the frame would sit tight against the last row
+   * of terminals at the exact zooms this whole rule exists to fix.
+   */
+  it('grows the left, right and bottom by the same amount, and only the top by more', () => {
+    for (const z of [0.35, 0.5, 0.7, 2, 4]) {
+      const box = drawnFrameRect(layout, z);
+      const g = framePadScale(z) - 1;
+      const out = {
+        left: (layout.x - box.x).toFixed(6),
+        right: (box.x + box.w - (layout.x + layout.w)).toFixed(6),
+        bottom: (box.y + box.h - (layout.y + layout.h)).toFixed(6),
+        top: (layout.y - box.y).toFixed(6),
+      };
+      expect({ z, ...out }).toEqual({
+        z,
+        left: (PAD * g).toFixed(6),
+        right: (PAD * g).toFixed(6),
+        bottom: (PAD * g).toFixed(6),
+        top: (PAD_TOP * g).toFixed(6),
+      });
+    }
+  });
+
+  it('shrinks by the same rule when the zoom is high', () => {
+    const box = drawnFrameRect(layout, 4);
+    expect(box.x).toBeGreaterThan(layout.x);
+    expect(box.y).toBeGreaterThan(layout.y);
+    expect(box.w).toBeLessThan(layout.w);
+    expect(box.h).toBeLessThan(layout.h);
+  });
+
+  /**
+   * The top band keeps its proportion to the sides at every zoom.
+   *
+   * `PAD_TOP` is `PAD` plus exactly the label overhang it has to clear. Clamping the two
+   * separately would let that difference drift, and the label straddling the border would end
+   * up printed over the terminal below it at one end of the range or floating in space at the
+   * other.
+   */
+  it('keeps the top band in proportion with the sides', () => {
+    for (const z of [0.3, 0.5, 1, 2, 4]) {
+      const box = drawnFrameRect(layout, z);
+      const side = layout.x - box.x;
+      const top = layout.y - box.y;
+      expect({ z, ratio: ((top + PAD_TOP) / (side + PAD)).toFixed(6) })
+        .toEqual({ z, ratio: (PAD_TOP / PAD).toFixed(6) });
+    }
+  });
+});
+
+/**
+ * Layout is NOT zoom-dependent, and this is the assertion that keeps it that way.
+ *
+ * The clamp is a rendering rule. If it ever leaked into `fitGroupFrame` or `arrange`, three
+ * things break at once: nodes would slide as you zoom, `arrange` would stop being deterministic,
+ * and the fit-to-bounds path would feed its own output back into itself — bounds derived from a
+ * zoom that is derived from those bounds.
+ */
+describe('the clamp stays out of the layout', () => {
+  it('shrink-wraps on PAD alone, whatever the zoom is', () => {
+    const nodes = [at(0, 0), at(NODE_W + GAP, 0)];
+    expect(fitGroupFrame(nodes)).toEqual({
+      x: -PAD, y: -PAD_TOP, w: NODE_W * 2 + GAP + PAD * 2, h: NODE_H + PAD_TOP + PAD,
+    });
+  });
+
+  it('does not let the drawn rule reach arrange or the seed', () => {
+    const src = readSource(path.join(__dirname, '..', 'canvasLayout.ts'));
+    const body = (name: string) => {
+      const i = src.indexOf(`export function ${name}(`);
+      return i < 0 ? '' : src.slice(i, src.indexOf('\n}\n', i));
+    };
+    for (const name of ['fitGroupFrame', 'arrange', 'seedNodePosition']) {
+      expect({ name, found: body(name).length > 0 }).toEqual({ name, found: true });
+      expect({ name, zoomAware: /framePadScale|drawnFrameRect/.test(body(name)) })
+        .toEqual({ name, zoomAware: false });
+    }
   });
 });
