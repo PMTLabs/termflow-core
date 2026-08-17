@@ -302,11 +302,28 @@ const TabItem: React.FC<TabItemProps> = ({
   const tabTree = useSelector((state: RootState) => state.panes.treesByTabId[tab.id] ?? null);
   const processIds = resolveTabProcessIds(tabTree, tab.id);
 
+  /**
+   * Canvas Mode's "you are here" marker (design 010 D9, §5.1).
+   *
+   * Read here rather than threaded through `TabItemProps` because this component already
+   * subscribes for its pane tree, and the value is per-tab: passing it down would mean the
+   * parent re-rendering the whole strip on every pan.
+   *
+   * **Added to `active`, never replacing it.** The original plan had this take over the active
+   * highlight, which was right when the canvas was an overlay hiding some other tab. It is a
+   * tab now, so the active tab genuinely IS the canvas — moving the highlight off it would
+   * render the one tab filling the screen as inactive.
+   *
+   * Selects a boolean, not the id, so a pan between two OTHER groups does not re-render
+   * every tab in the strip.
+   */
+  const isCanvasHere = useSelector((state: RootState) => state.canvas.nearestGroupId === tab.id);
+
   return (
     <>
       <div
         ref={ref}
-        className={`tab-item ${tab.isActive ? 'active' : ''} ${isDragging ? 'dragging' : ''} ${tab.exited ? 'exited' : ''} ${tab.hasBackgroundActivity && !tab.isActive ? 'has-activity' : ''} ${tab.isRunning ? 'tab-running' : ''} ${tab.hasUnseenOutput && !tab.isActive ? 'has-unseen' : ''}`}
+        className={`tab-item ${tab.isActive ? 'active' : ''} ${isDragging ? 'dragging' : ''} ${tab.exited ? 'exited' : ''} ${tab.hasBackgroundActivity && !tab.isActive ? 'has-activity' : ''} ${tab.isRunning ? 'tab-running' : ''} ${tab.hasUnseenOutput && !tab.isActive ? 'has-unseen' : ''} ${isCanvasHere ? 'canvas-here' : ''}`}
         style={{ opacity }}
         // Stop the press from reaching the title bar's Tauri drag region so
         // clicking/dragging a tab doesn't drag or maximize the window.

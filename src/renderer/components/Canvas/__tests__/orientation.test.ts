@@ -1,0 +1,212 @@
+import {
+  nearestGroupToCentre, minimapTransform, minimapPoint, minimapToWorld, minimapRect,
+  beaconFor, beaconLayout, BEACON_INSET, BEACON_SIZE,
+} from '../orientation';
+import { Viewport, Rect, NODE_W, NODE_H, CULL_MARGIN, isVisible } from '../canvasGeometry';
+import type { CanvasGroupModel, CanvasNodeModel } from '../canvasSelectors';
+
+const group = (tabId: string, x: number, y: number): CanvasGroupModel =>
+  ({ tabId, title: tabId, rect: { x, y, w: 400, h: 300 }, nodeIds: [], anyRunning: false });
+
+const node = (
+  terminalId: string, x: number, y: number, isRunning = true,
+): CanvasNodeModel => ({
+  terminalId,
+  tabId: 'tb-1',
+  paneId: 'pn-1',
+  title: terminalId,
+  shellType: 'pwsh',
+  rect: { x, y, w: NODE_W, h: NODE_H },
+  isRunning,
+  hasUnseenOutput: false,
+});
+
+describe('nearestGroupToCentre', () => {
+  const groups = [group('tb-a', 0, 0), group('tb-b', 2000, 0)];
+
+  it('picks the group nearest the viewport centre', () => {
+    const vp: Viewport = { x: -200, y: -150, z: 1 };
+    expect(nearestGroupToCentre(groups, vp, 800, 600)).toBe('tb-a');
+  });
+
+  /**
+   * This is also the WORLD-SPACE test, and it is the only one of the three that is.
+   *
+   * The centre has to be `screenToWorld(vp, vw/2, vh/2)`, not `(vw/2, vh/2)` — the viewport
+   * offset is the entire difference between "which group am I looking at" and "which group is
+   * nearest the world origin". Panning is the only thing that separates them, so a case where
+   * the viewport has actually been panned is the only case that can fail: here the raw screen
+   * centre (400, 300) is still nearest `tb-a`, while the real world centre (2600, 450) is
+   * nearest `tb-b`.
+   */
+  it('follows the viewport as it pans to another group', () => {
+    const vp: Viewport = { x: -2200, y: -150, z: 1 };
+    expect(nearestGroupToCentre(groups, vp, 800, 600)).toBe('tb-b');
+  });
+
+  it('returns null when there are no groups', () => {
+    expect(nearestGroupToCentre([], { x: 0, y: 0, z: 1 }, 800, 600)).toBeNull();
+  });
+});
+
+describe('minimapTransform', () => {
+  it('fits the bounds inside the minimap', () => {
+    const t = minimapTransform({ x: 0, y: 0, w: 1000, h: 1000 }, 100, 100);
+    expect(t.k).toBeGreaterThan(0);
+    expect(1000 * t.k).toBeLessThanOrEqual(100);
+  });
+
+  it('centres the content', () => {
+    const { k, ox, oy } = minimapTransform({ x: 0, y: 0, w: 1000, h: 500 }, 100, 100);
+    expect(ox).toBeCloseTo((100 - 1000 * k) / 2, 6);
+    expect(oy).toBeCloseTo((100 - 500 * k) / 2, 6);
+  });
+
+  it('never magnifies — a workspace smaller than the minimap is drawn at scale', () => {
+    // Without the ceiling a degenerate or tiny bounds gets an enormous `k`, and the viewport
+    // rectangle drawn through it covers the whole minimap while the content is a speck.
+    expect(minimapTransform({ x: 0, y: 0, w: 10, h: 10 }, 168, 112).k).toBe(1);
+  });
+
+  it('does not divide by zero on empty bounds', () => {
+    expect(Number.isFinite(minimapTransform({ x: 0, y: 0, w: 0, h: 0 }, 100, 100).k)).toBe(true);
+  });
+});
+
+describe('minimapPoint / minimapToWorld', () => {
+  /**
+   * The trap `ox`/`oy` set, and the reason the transform carries its own `bounds`.
+   *
+   * `ox` is a CENTRING offset for a box of size `w x h` sitting at 0,0 — it does not contain
+   * the world origin. A caller that maps `wx * k + ox` is correct for exactly one workspace:
+   * the one that happens to start at 0,0, which is every workspace a test builds by hand and
+   * almost no real one. `minimapPoint` owns the subtraction so it cannot be skipped.
+   */
+  const bounds: Rect = { x: 1000, y: 500, w: 400, h: 200 };
+  const t = minimapTransform(bounds, 100, 100);
+
+  it('maps a bounds rect far from the world origin into the minimap box', () => {
+    const tl = minimapPoint(t, bounds.x, bounds.y);
+    const br = minimapPoint(t, bounds.x + bounds.w, bounds.y + bounds.h);
+    for (const p of [tl, br]) {
+      expect(p.x).toBeGreaterThanOrEqual(0);
+      expect(p.x).toBeLessThanOrEqual(100);
+      expect(p.y).toBeGreaterThanOrEqual(0);
+      expect(p.y).toBeLessThanOrEqual(100);
+    }
+    // And it is the CENTRING offset that positions it, so the two agree.
+    expect(tl.x).toBeCloseTo(t.ox, 6);
+    expect(tl.y).toBeCloseTo(t.oy, 6);
+  });
+
+  it('round-trips through world space', () => {
+    // The invariant the click-to-fly path depends on: a click at minimap (mx, my) has to name
+    // the world point drawn there, or the minimap flies somewhere other than where you clicked.
+    const p = minimapPoint(t, 1234, 567);
+    const w = minimapToWorld(t, p.x, p.y);
+    expect(w.x).toBeCloseTo(1234, 6);
+    expect(w.y).toBeCloseTo(567, 6);
+  });
+
+  it('scales a rect by the same k it positions it with', () => {
+    const r = minimapRect(t, { x: 1000, y: 500, w: 400, h: 200 });
+    expect(r.w).toBeCloseTo(400 * t.k, 6);
+    expect(r.h).toBeCloseTo(200 * t.k, 6);
+    expect(r.x).toBeCloseTo(t.ox, 6);
+  });
+});
+
+describe('beaconFor', () => {
+  const vp: Viewport = { x: 0, y: 0, z: 1 };
+  const at = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
+
+  it('returns null for a node already on screen', () => {
+    expect(beaconFor(vp, at(100, 100), 800, 600)).toBeNull();
+  });
+
+  /**
+   * The whole point of the rewrite: "is this on screen?" has ONE answer on this canvas.
+   *
+   * `visibleNodeIds`' doc names Tasks 10, 18 and 23 as the three consumers that have to agree,
+   * and `isVisible`'s `CULL_MARGIN` is where that agreement lives. A centre-point test — which
+   * is what the plan's original sample used — disagrees for every node whose centre has left
+   * the viewport but whose body has not: the node PAINTS, and an edge beacon points at it.
+   *
+   * Asserted against `isVisible`'s own answer rather than a literal, so the two cannot drift
+   * apart later without this failing.
+   */
+  it('agrees with the shared cull predicate, not with a centre-point test', () => {
+    const painted = at(700, 100);   // centre at 870, past the right edge; body still inside the margin
+    expect(isVisible(vp, painted, 800, 600)).toBe(true);
+    expect(beaconFor(vp, painted, 800, 600)).toBeNull();
+
+    const gone = at(700 + CULL_MARGIN + NODE_W, 100);
+    expect(isVisible(vp, gone, 800, 600)).toBe(false);
+    expect(beaconFor(vp, gone, 800, 600)).not.toBeNull();
+  });
+
+  it('pins an off-screen node to the viewport edge', () => {
+    const b = beaconFor(vp, at(5000, 100), 800, 600)!;
+    expect(b.x).toBe(800 - BEACON_INSET);
+    expect(b.x).toBeGreaterThanOrEqual(0);
+  });
+
+  it('keeps the beacon inside the viewport on both axes', () => {
+    const b = beaconFor(vp, at(-5000, -5000), 800, 600)!;
+    expect(b.x).toBe(BEACON_INSET);
+    expect(b.y).toBe(BEACON_INSET);
+  });
+});
+
+describe('beacon sizing', () => {
+  it('insets far enough that a pinned marker is drawn whole', () => {
+    // The marker is CENTRED on the clamped point, so it overhangs by half its size. A larger
+    // marker or a smaller inset draws it half outside the viewport, taking half its click
+    // target with it — and nothing else in the suite looks at a beacon's pixels.
+    expect(BEACON_INSET * 2).toBeGreaterThanOrEqual(BEACON_SIZE);
+  });
+});
+
+describe('beaconLayout', () => {
+  const vp: Viewport = { x: 0, y: 0, z: 1 };
+
+  it('beacons only nodes that are both running and off screen', () => {
+    const out = beaconLayout([
+      node('tm-here', 100, 100),               // running, on screen
+      node('tm-idle', 5000, 100, false),       // off screen, not running
+      node('tm-gone', 5000, 400),              // off screen, running
+    ], vp, 800, 600);
+    expect(out.map((b) => b.terminalId)).toEqual(['tm-gone']);
+  });
+
+  it('returns nothing when the workspace is idle', () => {
+    expect(beaconLayout([node('tm-1', 5000, 100, false)], vp, 800, 600)).toEqual([]);
+  });
+
+  /**
+   * `isRunning` is a TAB-level fact (see `CanvasNodeModel`), so every pane of a running tab is
+   * "running". Four panes side by side off the same edge clamp to nearly the same point and
+   * would stack four identical markers, three of them unreachable. They collapse to one — and
+   * it carries a `count`, because a beacon that silently represented four terminals would be
+   * a cap pretending to be a single result.
+   */
+  it('collapses co-located beacons into one that reports how many it stands for', () => {
+    const out = beaconLayout([
+      node('tm-a', 5000, 100),
+      node('tm-b', 5010, 104),
+      node('tm-c', 5020, 108),
+    ], vp, 800, 600);
+    expect(out).toHaveLength(1);
+    expect(out[0].terminalId).toBe('tm-a');
+    expect(out[0].count).toBe(3);
+  });
+
+  it('keeps beacons that point in genuinely different directions', () => {
+    const out = beaconLayout([
+      node('tm-right', 5000, 100),
+      node('tm-left', -5000, 100),
+    ], vp, 800, 600);
+    expect(out).toHaveLength(2);
+    expect(out.every((b) => b.count === 1)).toBe(true);
+  });
+});

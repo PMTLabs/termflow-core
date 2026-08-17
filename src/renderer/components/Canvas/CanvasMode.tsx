@@ -4,12 +4,12 @@ import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { RootState } from '../../store';
 import {
-  CanvasEdge, focusNode, selectNode, setEdges, setOverlayNode, setSidebarOpen,
+  CanvasEdge, focusNode, selectNode, setEdges, setNearestGroup, setOverlayNode, setSidebarOpen,
 } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
 import { setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
-import { CanvasSidebar } from './CanvasSidebar';
+import { CanvasSidebar, ROW_FLY_ZOOM } from './CanvasSidebar';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
 import { CanvasNode } from './CanvasNode';
 import { NodeTerminal } from './NodeTerminal';
@@ -27,7 +27,11 @@ import { useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
 import { CanvasWireMenu } from './CanvasWireMenu';
 import { neighbourhood } from './wireGeometry';
-import { centreOn } from './viewportStyles';
+import { CanvasMinimap } from './CanvasMinimap';
+import { CanvasBeacons } from './CanvasBeacons';
+import { beaconLayout, nearestGroupToCentre } from './orientation';
+import { fitShortcut } from './canvasGestures';
+import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
   selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
@@ -85,6 +89,7 @@ export const CanvasMode: React.FC = () => {
   const recent = useSelector((s: RootState) => s.canvas.recent);
   const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
   const edges = useSelector((s: RootState) => s.canvas.edges);
+  const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
@@ -319,7 +324,92 @@ export const CanvasMode: React.FC = () => {
     focusRaf.current = null;
     dispatch(focusNode(null));
     dispatch(setOverlayNode(null));
+    // Same edge, same reason (design 010 §5.1). The tab strip's "you are here" marker means
+    // "the group you are looking at"; there is no such group once the canvas is not on screen,
+    // and a marker left behind would point at one from a canvas nobody is in.
+    dispatch(setNearestGroup(null));
   }, [dispatch]);
+
+  /**
+   * Which group is under the viewport centre — the tab strip's marker (design 010 D9, §5.1).
+   *
+   * Written through Redux because `TabManager` lives inside `TitleBar` and this lives under
+   * `.app-body`: two React trees that share only the store.
+   *
+   * The equality guard is load-bearing rather than tidy. `setViewport` fires once per
+   * `pointermove` during a pan, and this effect runs on each — dispatching the SAME id every
+   * frame would re-render every tab in the strip for the whole gesture.
+   */
+  useEffect(() => {
+    const id = nearestGroupToCentre(model.groups, vp, size.w, size.h);
+    if (id !== nearestGroupId) dispatch(setNearestGroup(id));
+  }, [model.groups, vp, size, nearestGroupId, dispatch]);
+
+  /** Frame the whole workspace.
+   *
+   *  Group rects, not node rects: a non-empty frame shrink-wraps its terminals (see
+   *  `buildModel`), so their union already contains every node — and an EMPTIED group keeps its
+   *  stored frame and is still part of the workspace, which a node-only union would drop. */
+  const fitAll = useCallback(() => {
+    const b = boundsOf(model.groups.map((g) => g.rect));
+    if (b) flyTo(fitViewport(b, size.w, size.h, metrics.zMax));
+  }, [model.groups, flyTo, size, metrics]);
+
+  /** Frame the group you are working in — the selected node's, falling back to the one the
+   *  marker is already pointing at, so the key always does something. */
+  const fitGroup = useCallback(() => {
+    const tabId = model.nodes.find((n) => n.terminalId === selectedId)?.tabId ?? nearestGroupId;
+    const g = model.groups.find((x) => x.tabId === tabId);
+    if (g) flyTo(fitViewport(g.rect, size.w, size.h, metrics.zMax));
+  }, [model, selectedId, nearestGroupId, flyTo, size, metrics]);
+
+  /**
+   * Shift+1 / Shift+2 (design 010 §5). A LOCAL listener rather than an `InputHandler` shortcut,
+   * for two independent reasons: `InputHandler` matches on a canonicalised `event.key`, so
+   * `Shift+1` would be registered as `Shift+1` and matched as `Shift+!` and never fire; and
+   * being mounted is exactly the gate these need, since `TerminalContainer` mounts this only
+   * while the canvas tab is active.
+   *
+   * `focusedId` is checked HERE and not inside `fitShortcut`: a focused node has a live terminal
+   * taking keystrokes, where `!` is a character. The rule itself has no business knowing that.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (focusedId) return;
+      const want = fitShortcut(e as unknown as Parameters<typeof fitShortcut>[0]);
+      if (!want) return;
+      e.preventDefault();
+      e.stopPropagation();
+      (want === 'all' ? fitAll : fitGroup)();
+    };
+    // Capture phase, matching InputHandler's ownership of global shortcuts.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [focusedId, fitAll, fitGroup]);
+
+  /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
+   *  render gate below, which covers the minimap in the same breath — a second `overlayId`
+   *  branch here would keep this list empty even if that gate were removed, hiding the fact
+   *  that the gate is what does the work. */
+  const beacons = useMemo(
+    () => beaconLayout(model.nodes, vp, size.w, size.h),
+    [model.nodes, vp, size],
+  );
+
+  /** A beacon click. The same destination a sidebar row click gets — it is the same gesture,
+   *  "take me to that terminal" — so it shares `ROW_FLY_ZOOM` rather than picking a second one. */
+  const flyToNode = useCallback((terminalId: string) => {
+    const n = model.nodes.find((x) => x.terminalId === terminalId);
+    if (!n) return;
+    dispatch(selectNode(terminalId));
+    flyTo(centreOn(n.rect, size.w, size.h, Math.max(vp.z, ROW_FLY_ZOOM), metrics.zMax));
+  }, [model.nodes, dispatch, flyTo, size, vp.z, metrics]);
+
+  /** A minimap click: pan to that world point, keeping the zoom the user chose. A zero-size
+   *  rect is a point as far as `centreOn` is concerned. */
+  const flyToWorld = useCallback((w: { x: number; y: number }) => {
+    flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));
+  }, [flyTo, size, vp.z, metrics]);
 
   // Leave the canvas for the tab this node lives in, with the cursor on its own pane.
   // `focusPaneInTab` before `setActiveTab`, because the activation path RESTORES the
@@ -371,7 +461,21 @@ export const CanvasMode: React.FC = () => {
           them. `size` is measured from `.canvas-viewport` itself, so the fly-to targets the
           space the canvas actually has rather than the whole window. */}
       {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} />}
-      <CanvasViewport onSize={onSize} onBackgroundPointerDown={clearSelection}>
+      <CanvasViewport
+        onSize={onSize}
+        onBackgroundPointerDown={clearSelection}
+        // Screen-space, but in VIEWPORT coordinates rather than `.canvas-mode`'s — which is why
+        // this is a slot on `CanvasViewport` and not a sibling of it like `.canvas-toolbar`.
+        // See the prop's own note: the sidebar puts ~255px between the two origins.
+        overlay={!overlayId ? (
+          <>
+            <CanvasBeacons beacons={beacons} onPick={flyToNode} />
+            {model.groups.length > 0 && (
+              <CanvasMinimap model={model} vp={vp} vw={size.w} vh={size.h} onPick={flyToWorld} />
+            )}
+          </>
+        ) : null}
+      >
         {/* Before the frames and nodes in document order; the two layers place themselves
             around them by z-index (1 under, 8 over), not by where they sit here. */}
         <CanvasWires

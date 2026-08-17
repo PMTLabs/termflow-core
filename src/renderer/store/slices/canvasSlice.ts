@@ -44,6 +44,18 @@ export interface CanvasState extends CanvasPersisted {
   overlayId: string | null;
   /** Most-recently-touched first; drives LOD budget priority. */
   recent: string[];
+  /** The tab whose group sits nearest the viewport centre — the tab strip's "you are here"
+   *  marker (design 010 D9, §5.1).
+   *
+   *  **Live-only, and NOT in `CanvasPersisted`.** It is derived from the viewport, so persisting
+   *  it would store an answer to a question the next session re-asks on its first frame. It is
+   *  also cleared on `CanvasMode`'s unmount: the marker means "the group you are looking at",
+   *  and there is no such group once the canvas is not on screen.
+   *
+   *  This is a SECOND marker, never a replacement for the active-tab highlight. Under D1a the
+   *  active tab genuinely is the canvas; moving the highlight off it would render the one tab
+   *  filling the screen as inactive. */
+  nearestGroupId: string | null;
 }
 
 export const SIDEBAR_MIN = 168;
@@ -60,6 +72,7 @@ const initialState: CanvasState = {
   focusedId: null,
   overlayId: null,
   recent: [],
+  nearestGroupId: null,
 };
 
 const touch = (state: CanvasState, id: string) => {
@@ -129,6 +142,11 @@ const canvasSlice = createSlice({
       const i = state.edges.findIndex((e) => e.id === action.payload.id);
       if (i >= 0) state.edges[i] = action.payload;
     },
+    /** The group nearest the viewport centre, for the tab strip's marker. `null` clears it —
+     *  which is what leaving the canvas does. */
+    setNearestGroup: (state, action: PayloadAction<string | null>) => {
+      state.nearestGroupId = action.payload;
+    },
     setSidebarOpen: (state, action: PayloadAction<boolean>) => {
       state.sidebarOpen = action.payload;
     },
@@ -148,6 +166,10 @@ const canvasSlice = createSlice({
       if (state.focusedId && !liveNodes.has(state.focusedId)) state.focusedId = null;
       // A closed terminal must not leave the canvas covered by an overlay of nothing.
       if (state.overlayId && !liveNodes.has(state.overlayId)) state.overlayId = null;
+      // Same reasoning one level up: a marker on a tab that has been closed points at a group
+      // the canvas no longer draws. Checked against `liveGroups`, not `liveNodes` — this one
+      // names a TAB, and the two id spaces overlap without being interchangeable (design 011 D7).
+      if (state.nearestGroupId && !liveGroups.has(state.nearestGroupId)) state.nearestGroupId = null;
     },
     /** Restore persisted geometry. Deliberately does NOT restore `focusedId`: whether the
      *  canvas is on screen at boot is decided by the restored TAB list, and a node that
@@ -167,7 +189,7 @@ const canvasSlice = createSlice({
 export const {
   setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
-  updateEdge,
+  updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 

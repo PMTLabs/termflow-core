@@ -1,4 +1,6 @@
-import { shouldArmSpacePan, shouldDisarmSpacePan, SpacePanKey } from '../canvasGestures';
+import {
+  shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, SpacePanKey, FitKey,
+} from '../canvasGestures';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
   ({ key: ' ', code: 'Space', repeat: false, target: null, ...over });
@@ -63,5 +65,49 @@ describe('shouldDisarmSpacePan', () => {
 
   it('ignores other keys', () => {
     expect(shouldDisarmSpacePan({ key: 'a', code: 'KeyA' })).toBe(false);
+  });
+});
+
+describe('fitShortcut', () => {
+  const fit = (over: Partial<FitKey> = {}): FitKey => ({
+    key: '!', code: 'Digit1', shiftKey: true,
+    ctrlKey: false, altKey: false, metaKey: false, target: null, ...over,
+  });
+
+  it('reads Shift+1 as "fit everything" however the key is reported', () => {
+    expect(fitShortcut(fit())).toBe('all');
+    // US layout reports `!`; AZERTY reports `1` because the digit IS the shifted glyph.
+    expect(fitShortcut(fit({ code: '', key: '!' }))).toBe('all');
+    expect(fitShortcut(fit({ code: '', key: '1' }))).toBe('all');
+    expect(fitShortcut(fit({ code: 'Digit1', key: 'Unidentified' }))).toBe('all');
+  });
+
+  it('reads Shift+2 as "fit this group"', () => {
+    expect(fitShortcut(fit({ code: 'Digit2', key: '@' }))).toBe('group');
+    expect(fitShortcut(fit({ code: '', key: '2' }))).toBe('group');
+  });
+
+  it('needs Shift, so a bare digit still reaches whatever wants it', () => {
+    expect(fitShortcut(fit({ shiftKey: false, key: '1' }))).toBeNull();
+    expect(fitShortcut(fit({ shiftKey: false, code: 'Digit2', key: '2' }))).toBeNull();
+  });
+
+  it('refuses any other modifier, so it cannot shadow a real shortcut', () => {
+    for (const mod of ['ctrlKey', 'altKey', 'metaKey'] as const) {
+      expect(fitShortcut(fit({ [mod]: true }))).toBeNull();
+    }
+  });
+
+  it('refuses in an editable target, so typing "!" into the search box does not fly', () => {
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      expect(fitShortcut(fit({ target: { tagName } }))).toBeNull();
+    }
+    expect(fitShortcut(fit({ target: { tagName: 'DIV', isContentEditable: true } }))).toBeNull();
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['3', 'a', 'Enter', '#', '']) {
+      expect(fitShortcut(fit({ key: k, code: k }))).toBeNull();
+    }
   });
 });

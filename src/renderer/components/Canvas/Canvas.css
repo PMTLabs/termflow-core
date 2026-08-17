@@ -553,6 +553,71 @@
   outline: none;
 }
 
+/* ---- Orientation: minimap and beacons (Task 23) --------------------------- */
+
+/* Both live in `CanvasViewport`'s `overlay` slot — inside `.canvas-viewport`, outside
+   `.canvas-world`. Screen space, but in VIEWPORT coordinates: the beacons are positioned by a
+   computed `left`/`top` from `worldToScreen`, and `.canvas-mode` starts ~255px further left
+   because the sidebar is its first flex child. `.canvas-toolbar` can live out there only
+   because it is anchored `right`, where the two frames coincide.
+
+   The minimap's WIDTH and HEIGHT are set inline from `CanvasMinimap.MINIMAP_W/H`, not here:
+   they are inputs to `minimapTransform`, so a copy in this file would be a second source of
+   truth for the projection and the failure would be a silently mis-scaled map. */
+.canvas-minimap {
+  position: absolute;
+  right: 11px;
+  bottom: 11px;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 5px;
+  background: rgba(20, 20, 20, .9);
+  cursor: pointer;
+}
+.canvas-minigroup {
+  position: absolute;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 2px;
+}
+.canvas-mininode {
+  position: absolute;
+  min-width: 2px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: var(--text-tertiary, #666666);
+}
+.canvas-mininode.running { background: var(--tab-running-accent, #3aa6ff); }
+/* Drawn last in the DOM, so it sits over the content without needing a z-index of its own. */
+.canvas-miniview {
+  position: absolute;
+  border: 1.5px solid var(--accent-color, #007acc);
+  border-radius: 2px;
+  background: rgba(0, 122, 204, .13);
+}
+
+/* Below the minimap's 20 so a beacon clamped into the bottom-right corner cannot cover it.
+   Centred on its clamped anchor — `BEACON_INSET` is sized against `BEACON_SIZE` so the overhang
+   stays inside the viewport; see `orientation.ts`. */
+.canvas-beacon {
+  position: absolute;
+  z-index: 19;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--tab-activity-accent, #f0a020);
+  border-radius: 50%;
+  background: rgba(240, 160, 32, .18);
+  color: var(--tab-activity-accent, #f0a020);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.canvas-beacon:hover { background: rgba(240, 160, 32, .34); }
+
 /* ---- Space-to-pan (the hand tool) --------------------------------------- */
 
 /* While Space is held the whole surface is a drag handle, so EVERY descendant has to say so —

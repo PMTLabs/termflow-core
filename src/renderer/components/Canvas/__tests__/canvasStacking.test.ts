@@ -110,6 +110,49 @@ describe('Canvas Mode stays inside its tab', () => {
 });
 
 /**
+ * The orientation chrome (`plan/013` Task 23) — the minimap and the edge beacons.
+ *
+ * Both are rendered into `CanvasViewport`'s `overlay` slot: inside `.canvas-viewport`, and
+ * deliberately OUTSIDE `.canvas-world`. That placement is what makes their z-indexes mean
+ * anything at all, and it is derived here rather than trusted, because moving either one back
+ * into the world would be a one-line change that looks harmless.
+ */
+describe('orientation chrome paints above the world it describes', () => {
+  const css = read('components/Canvas/Canvas.css');
+  const zOf = (selector: string): number => {
+    const m = /z-index:\s*(-?\d+)/.exec(ruleBody(css, selector));
+    if (!m) throw new Error(`no z-index in ${selector}`);
+    return Number(m[1]);
+  };
+
+  it('keeps the minimap above the beacons', () => {
+    // A beacon clamped into the bottom-right corner lands exactly on the minimap. Ordered the
+    // other way it covers a 168x112 click target with a 22px one, and the minimap stops
+    // working in precisely the situation — something running off screen — that put it there.
+    expect(zOf('.canvas-beacon')).toBeLessThan(zOf('.canvas-minimap'));
+  });
+
+  it('keeps both above `.canvas-world`, which claims no z-index of its own', () => {
+    // `.canvas-world` sets `will-change: transform`, so it is a stacking context at level 0 and
+    // nothing inside it can outrank a positive sibling. Give it a z-index and that stops being
+    // true — the nodes would paint over the chrome that is supposed to point AT them.
+    expect(ruleBody(css, '.canvas-world')).not.toMatch(/z-index:/);
+    expect(zOf('.canvas-beacon')).toBeGreaterThan(0);
+    expect(zOf('.canvas-minimap')).toBeGreaterThan(0);
+  });
+
+  it('leaves the minimap box UNSIZED here, because its size is a projection input', () => {
+    // `MINIMAP_W`/`MINIMAP_H` are arguments to `minimapTransform`, and the element takes them
+    // inline from the same constants. A width in this file would be a second source of truth
+    // for the projection, and the symptom — content scaled for a box of a different size —
+    // is silent: the map still draws, just wrong.
+    const body = ruleBody(css, '.canvas-minimap');
+    expect(body).not.toMatch(/(^|;)\s*width:/);
+    expect(body).not.toMatch(/(^|;)\s*height:/);
+  });
+});
+
+/**
  * A modal cannot escape an ancestor stacking context, so its z-index is only worth what its
  * ancestors allow. `ConfirmDialog` declares `z-index: 9999` and still painted behind Canvas
  * Mode's overlay at 900, because `TabManager` renders it inside `.title-bar-tabs`

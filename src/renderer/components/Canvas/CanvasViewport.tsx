@@ -20,7 +20,19 @@ export const CanvasViewport: React.FC<{
   /** A pointerdown that landed on the canvas background rather than on any node,
    *  chip, port or group label. */
   onBackgroundPointerDown?: () => void;
-}> = ({ children, onSize, onBackgroundPointerDown }) => {
+  /**
+   * Screen-space chrome, rendered INSIDE this element and OUTSIDE `.canvas-world` —
+   * so it neither pans nor zooms, but is positioned in VIEWPORT coordinates.
+   *
+   * That distinction is the reason this slot exists rather than the caller placing the chrome
+   * beside `<CanvasViewport>`. `.canvas-mode` is a flex row whose first child is the sidebar, so
+   * its origin is ~255px left of the viewport's; anything positioned by a computed `left`/`top`
+   * from `worldToScreen` — which returns viewport coordinates, because `onSize` measures this
+   * element — lands under the sidebar. `.canvas-toolbar` gets away with living out there only
+   * because it is anchored `right`, where the two frames coincide.
+   */
+  overlay?: React.ReactNode;
+}> = ({ children, onSize, onBackgroundPointerDown, overlay }) => {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const ref = useRef<HTMLDivElement>(null);
@@ -141,9 +153,13 @@ export const CanvasViewport: React.FC<{
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     // `.canvas-gchip` is in this list because it is a click target, not background —
-    // omitting it would start a pan on the one gesture that is supposed to fly in.
+    // omitting it would start a pan on the one gesture that is supposed to fly in. The minimap
+    // and the beacons are in it for exactly the same reason: both are aimed at, and without
+    // this a click on either would also grab the canvas and clear the selection.
     if (pan.current) return;                     // already panning, via Space
-    if ((e.target as HTMLElement).closest('.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port')) return;
+    if ((e.target as HTMLElement).closest(
+      '.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port, .canvas-minimap, .canvas-beacon'
+    )) return;
     onBackgroundPointerDown?.();
     startPan(e);
   }, [onBackgroundPointerDown, startPan]);
@@ -178,6 +194,7 @@ export const CanvasViewport: React.FC<{
     >
       <div className="canvas-grid" style={gridStyle(vp)} />
       <div className="canvas-world" style={worldStyle(vp)}>{children}</div>
+      {overlay}
     </div>
   );
 };

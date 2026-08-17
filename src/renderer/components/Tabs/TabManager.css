@@ -501,3 +501,28 @@ body.tab-dragging * {
   -webkit-user-select: none !important;
   cursor: grabbing !important;
 }
+
+/* ---- Canvas Mode: "you are here" marker (design 010 D9, §5.1) -------------- */
+
+/* The group nearest the canvas viewport centre. A bottom rail, deliberately NOT the
+   active-tab treatment: under D1a the canvas IS the active tab while this is showing, so the
+   two markers are on screen together and have to be told apart. `.tab-item` already sets
+   `position: relative` and `isolation: isolate`; `::after` belongs to the running sweep, so
+   this takes `::before`. */
+.tab-item.canvas-here::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent-color, #007acc);
+  pointer-events: none;
+}
+
+/* Nudged brighter on the tab that is ALSO active — reachable when the canvas is showing a
+   group whose tab was the last active one before the canvas opened. */
+.tab-item.canvas-here.active::before {
+  background: var(--tab-running-accent, #3aa6ff);
+}

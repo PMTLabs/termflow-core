@@ -1,7 +1,7 @@
 import canvasReducer, {
   setViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
-  updateEdge,
+  updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -228,5 +228,47 @@ describe('canvasSlice', () => {
       s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-live'], tabIds: [] }));
       expect(s.overlayId).toBe('tm-live');
     });
+  });
+});
+
+describe('nearestGroupId — the tab strip marker (design 010 D9, §5.1)', () => {
+  it('holds the group the canvas is looking at, and null clears it', () => {
+    let s = canvasReducer(init(), setNearestGroup('tb-a'));
+    expect(s.nearestGroupId).toBe('tb-a');
+    // What CanvasMode's unmount dispatches. A marker that outlived the canvas would sit on
+    // the strip pointing at a group nobody is looking at.
+    s = canvasReducer(s, setNearestGroup(null));
+    expect(s.nearestGroupId).toBeNull();
+  });
+
+  it('is dropped when its tab closes', () => {
+    let s = canvasReducer(init(), setNearestGroup('tb-gone'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: [], tabIds: ['tb-live'] }));
+    expect(s.nearestGroupId).toBeNull();
+  });
+
+  it('survives a prune that keeps its tab', () => {
+    // Paired with the case above so "always null after a prune" cannot pass both.
+    let s = canvasReducer(init(), setNearestGroup('tb-live'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: [], tabIds: ['tb-live'] }));
+    expect(s.nearestGroupId).toBe('tb-live');
+  });
+
+  it('is checked against TABS, not terminals', () => {
+    // The two id spaces overlap without being interchangeable (design 011 D7). Checking this
+    // against `terminalIds` would clear the marker for every group whose tab id is not also a
+    // live leaf id — i.e. every split tab.
+    let s = canvasReducer(init(), setNearestGroup('tb-split'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-1', 'tm-2'], tabIds: ['tb-split'] }));
+    expect(s.nearestGroupId).toBe('tb-split');
+  });
+
+  it('is never persisted, so a session cannot boot with a stale marker', () => {
+    // `hydrateCanvas` takes a Partial<CanvasPersisted>, and `nearestGroupId` is deliberately
+    // not one of its fields — this asserts the restore path cannot set it even if a blob
+    // written by some future build carried the key.
+    let s = canvasReducer(init(), setNearestGroup('tb-a'));
+    s = canvasReducer(s, hydrateCanvas({ nearestGroupId: 'tb-b' } as never));
+    expect(s.nearestGroupId).toBe('tb-a');
   });
 });

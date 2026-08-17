@@ -311,8 +311,13 @@ describe('Arrange button wiring', () => {
     // Anything passed to `CanvasViewport` as a child is rendered inside `.canvas-world`, which is
     // pan/zoom transformed — the toolbar would slide off the screen on the first pan. Asserted as
     // source ORDER rather than by matching a string, so it survives the JSX being reformatted.
+    //
+    // Matched on the `className` attribute, not on the bare class name: `CanvasMode` now names
+    // `.canvas-toolbar` in a comment ABOVE this point (explaining why Task 23's chrome went into
+    // the viewport's own slot instead), and a bare `indexOf` finds the prose first. That made
+    // this fail while the placement it polices was still correct.
     const closeViewport = MODE.indexOf('</CanvasViewport>');
-    const toolbar = MODE.indexOf('canvas-toolbar');
+    const toolbar = MODE.indexOf('className="canvas-toolbar"');
     expect(closeViewport).toBeGreaterThan(-1);
     expect(toolbar).toBeGreaterThan(closeViewport);
   });
