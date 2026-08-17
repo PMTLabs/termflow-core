@@ -129,6 +129,14 @@
 .canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
 .canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
+/* The agent/CLI chip (item 6). Shares the shell badge's metrics so the two sit as a pair, and
+   differs only where the difference carries meaning: it is ACCENT-coloured and pill-shaped
+   because it is the live fact — what is running now — next to the static one the pane was
+   launched as. `max-width` + ellipsis so an unexpectedly long agent name can never push the
+   header's buttons out of the node; `flex: none` keeps the title the thing that shrinks. */
+.canvas-node-agent { flex: none; display: inline-flex; align-items: center; gap: 4px; max-width: 40%; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--tab-running-accent, #3aa6ff); border: 1px solid var(--tab-running-accent, #3aa6ff); border-radius: 999px; padding: 1px 6px; position: relative; z-index: 1; overflow: hidden; }
+.canvas-node-agent-icon { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 2px; object-fit: contain; }
+.canvas-node-agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* `min-height: 0` so the chip tier can squeeze this to zero height without the flex
    auto-minimum forcing the node taller than CHIP_H. */
 .canvas-node-body { flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 var(--node-radius) var(--node-radius); background: var(--terminal-background, #0a0a0a); position: relative; }

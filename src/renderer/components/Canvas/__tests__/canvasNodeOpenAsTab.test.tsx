@@ -19,6 +19,21 @@ import { LodTier, HEAD_H, DEFAULT_METRICS } from '../canvasGeometry';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { CanvasNodeModel } from '../canvasSelectors';
 
+/**
+ * The agent chip's data source, stubbed at the hook.
+ *
+ * Not optional and not only for speed: the real `useDetectedAgent` reaches
+ * `AgentSchemeTracker` → the store → `colorSchemas` → `TerminalEngine` → xterm, which calls
+ * `HTMLCanvasElement.getContext` at module scope and throws in jsdom. Stubbing the hook keeps
+ * this suite about the node's header, and gives the chip's own cases a value to drive.
+ */
+let mockAgent: { agent: string | null; icon: string | null } = { agent: null, icon: null };
+jest.mock('../../Terminal/useDetectedAgent', () => ({
+  useDetectedAgent: () => mockAgent,
+}));
+
+beforeEach(() => { mockAgent = { agent: null, icon: null }; });
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -51,9 +66,11 @@ const node0: CanvasNodeModel = {
 interface Handlers {
   onOpenAsTab?: () => void;
   onOpenOverlay?: () => void;
+  onClose?: () => void;
   onPointerDown?: () => void;
   onDoubleClick?: () => void;
   onChipClick?: () => void;
+  onContextMenu?: () => void;
 }
 
 /** CanvasNode reads the session's host box from context (see `canvasMetrics`), so every
@@ -87,6 +104,8 @@ const byLabel = (fragment: string) =>
     .find((b) => (b.getAttribute('aria-label') ?? '').includes(fragment)) ?? null;
 const button = () => byLabel('in its tab');
 const overlayButton = () => byLabel('anvas') ?? byLabel('Shrink');
+const closeButton = () =>
+  container.querySelector<HTMLButtonElement>('.canvas-node-close');
 
 /** A real bubbling event, so `stopPropagation` is exercised rather than simulated. */
 const fire = (el: Element, type: string) =>
@@ -226,6 +245,124 @@ describe('enlarge-on-the-canvas button', () => {
     render('gpu', { onOpenOverlay: jest.fn(), onDoubleClick }, true);
     fire(container.querySelector('.canvas-node-body')!, 'dblclick');
     expect(onDoubleClick).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The close button — Tam's item 1.
+ *
+ * It shares `.canvas-node-open`'s box with the two above it, which is exactly why the cases
+ * here are about telling it apart from them. What it does is irreversible and what they do is
+ * not, so "the third button in a row of identical 18px squares" has to be distinguishable by
+ * more than position.
+ */
+describe('close-terminal button', () => {
+  it('is a third control, not a replacement for either', () => {
+    render('gpu', { onOpenAsTab: jest.fn(), onOpenOverlay: jest.fn(), onClose: jest.fn() });
+    expect(container.querySelectorAll('.canvas-node-open')).toHaveLength(3);
+    expect(closeButton()).not.toBeNull();
+    expect(closeButton()).not.toBe(button());
+    expect(closeButton()).not.toBe(overlayButton());
+  });
+
+  it('calls back when clicked, and only itself', () => {
+    const onClose = jest.fn();
+    const onOpenAsTab = jest.fn();
+    const onOpenOverlay = jest.fn();
+    render('gpu', { onClose, onOpenAsTab, onOpenOverlay });
+
+    fire(closeButton()!, 'click');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onOpenAsTab).not.toHaveBeenCalled();
+    expect(onOpenOverlay).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The header is a drag handle. A close button that let pointerdown through would start a
+   * drag on the node it is about to remove — and the pointer capture that drag takes outlives
+   * the node, so the canvas keeps following the mouse with nothing under it.
+   */
+  it('stops the node gestures, like its neighbours', () => {
+    const onPointerDown = jest.fn();
+    const onDoubleClick = jest.fn();
+    render('gpu', { onClose: jest.fn(), onPointerDown, onDoubleClick });
+
+    act(() => {
+      closeButton()!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+    });
+    fire(closeButton()!, 'dblclick');
+    expect(onPointerDown).not.toHaveBeenCalled();
+    expect(onDoubleClick).not.toHaveBeenCalled();
+  });
+
+  it('names the terminal it closes, and says so on hover', () => {
+    render('gpu', { onClose: jest.fn() });
+    expect(closeButton()!.getAttribute('aria-label')).toContain('server');
+    expect(closeButton()!.getAttribute('title')).toBe('Close terminal');
+    expect(closeButton()!.type).toBe('button');
+  });
+
+  it('is absent at the chip tier, and when no handler was supplied', () => {
+    render('chip', { onClose: jest.fn() });
+    expect(closeButton()).toBeNull();
+    render('gpu', {});
+    expect(closeButton()).toBeNull();
+  });
+
+  /**
+   * The half of item 1 that is about the OTHER button: while a node is overlaid, the control
+   * that shrinks it used to render `✕`. With a real close beside it, one header would have held
+   * two ✕ with different meanings, one of which kills a shell.
+   */
+  it('does not share its glyph with the shrink control', () => {
+    render('gpu', { onClose: jest.fn(), onOpenOverlay: jest.fn() }, true);
+    expect(closeButton()!.textContent).toBe('✕');
+    expect(overlayButton()!.textContent).not.toBe('✕');
+  });
+});
+
+/**
+ * The agent/CLI chip in the title bar — Tam's item 6.
+ *
+ * `AgentChip` exists but is positioned over the PANE's terminal content, and Canvas Mode moves
+ * `term.element` out of the pane into a node host while `TerminalPane` (and its chip) stay in
+ * the background tab — so the canvas showed no agent at all.
+ */
+describe('agent chip', () => {
+  const chip = () => container.querySelector('.canvas-node-agent');
+
+  it('shows the detected agent beside the shell badge', () => {
+    mockAgent = { agent: 'claude', icon: null };
+    render('gpu', {});
+    expect(chip()).not.toBeNull();
+    expect(chip()!.textContent).toContain('claude');
+    // Both are present: they are different facts. The shell is what the pane was launched as
+    // and never changes; the agent is what is running in it right now.
+    expect(container.querySelector('.canvas-node-shell')!.textContent).toBe('zsh');
+  });
+
+  it('renders nothing for a plain shell', () => {
+    mockAgent = { agent: null, icon: null };
+    render('gpu', {});
+    expect(chip()).toBeNull();
+  });
+
+  it('shows the binary icon when one resolved, and copes when none did', () => {
+    mockAgent = { agent: 'codex', icon: 'data:image/png;base64,AAA' };
+    render('gpu', {});
+    expect(chip()!.querySelector('img')).not.toBeNull();
+
+    mockAgent = { agent: 'codex', icon: null };
+    render('gpu', {});
+    expect(chip()!.querySelector('img')).toBeNull();
+    expect(chip()!.textContent).toContain('codex');
+  });
+
+  // Same reason the buttons and the shell badge go: at the chip tier the header IS the node.
+  it('is absent at the chip tier', () => {
+    mockAgent = { agent: 'claude', icon: null };
+    render('chip', {});
+    expect(chip()).toBeNull();
   });
 });
 

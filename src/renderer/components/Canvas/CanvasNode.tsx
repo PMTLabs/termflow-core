@@ -2,6 +2,7 @@ import React from 'react';
 import { LodTier, CHIP_H, HEAD_H, headScale, headFontSize } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
+import { CanvasNodeAgent } from './CanvasNodeAgent';
 
 /**
  * One terminal on the canvas.
@@ -145,6 +146,10 @@ export const CanvasNode: React.FC<{
               }}
         >
           <span className="canvas-node-title">{node.title}</span>
+          {/* Before the shell badge, because it is the one that changes and the one being
+              looked for. Both are suppressed at the chip tier, where the header IS the node
+              and there is room for a title and nothing else. */}
+          {!isChip && <CanvasNodeAgent terminalId={node.terminalId} />}
           {!isChip && <span className="canvas-node-shell">{node.shellType}</span>}
           {/* Every handler on these buttons stops propagation, and each one is stopping a
               DIFFERENT gesture the node itself owns: pointerdown selects (and, from Task 12,
