@@ -100,9 +100,9 @@ export function exceedsDragSlop(dxScreen: number, dyScreen: number): boolean {
 /** Which fit a keypress is asking for, or `null` when it is not asking for one. */
 export type FitTarget = 'all' | 'group';
 
-/** The parts of a KeyboardEvent the fit shortcuts read. Wider than `SpacePanKey` only because
- *  these are modified keys and Space is not. */
-export interface FitKey {
+/** The parts of a KeyboardEvent the canvas's keyboard rules read. Wider than `SpacePanKey` only
+ *  because these are modified keys and Space is not. */
+export interface CanvasKey {
   key: string;
   code: string;
   shiftKey: boolean;
@@ -111,6 +111,16 @@ export interface FitKey {
   metaKey: boolean;
   target: { tagName?: string; isContentEditable?: boolean } | null;
 }
+
+/** Is this key landing somewhere that owns its own typing? Shared by every rule below that
+ *  runs while the CANVAS has the keyboard, so a rename box and the sidebar search keep their
+ *  letters. Deliberately NOT used by `leaveTerminalShortcut` — see its own note. */
+const inEditable = (t: CanvasKey['target']): boolean =>
+  !!t && (!!t.isContentEditable || EDITABLE.test(t.tagName ?? ''));
+
+/** Does this press name the letter E, however the layout reports it? `code` is
+ *  layout-independent; `key` covers CapsLock, jsdom, and stacks that leave `code` empty. */
+const isLetterE = (e: CanvasKey): boolean => e.code === 'KeyE' || e.key.toLowerCase() === 'e';
 
 /**
  * <kbd>Shift</kbd>+<kbd>1</kbd> frames the whole workspace; <kbd>Shift</kbd>+<kbd>2</kbd> frames
@@ -131,13 +141,135 @@ export interface FitKey {
  * belongs to the caller, which knows `focusedId`; folding it in would mean passing it through a
  * function that has no other use for it.
  */
-export function fitShortcut(e: FitKey): FitTarget | null {
+export function fitShortcut(e: CanvasKey): FitTarget | null {
   if (!e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return null;
-  const t = e.target;
-  if (t && (t.isContentEditable || EDITABLE.test(t.tagName ?? ''))) return null;
+  if (inEditable(e.target)) return null;
   if (e.code === 'Digit1' || e.key === '!' || e.key === '1') return 'all';
   if (e.code === 'Digit2' || e.key === '@' || e.key === '2') return 'group';
   return null;
+}
+
+/**
+ * <kbd>E</kbd> — enlarge the selected node into the full-screen overlay (Tam's item 2).
+ *
+ * Bare, with no modifier, which it can only afford to be because the caller gates it on the
+ * canvas holding the keyboard: the moment a node is focused, `E` is a letter someone is typing
+ * into a shell. That gate is the caller's (it knows `focusedId`), exactly as it is for
+ * `fitShortcut`.
+ */
+export function openOverlayShortcut(e: CanvasKey): boolean {
+  if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return false;
+  if (inEditable(e.target)) return false;
+  return isLetterE(e);
+}
+
+/**
+ * <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> — give the keyboard back to the
+ * canvas: close the overlay if one is open, and release the terminal (Tam's items 1 and 2).
+ *
+ * **This is the one rule that must fire INSIDE a terminal, so it must not test for an editable
+ * target.** xterm's keyboard sink is a real `<textarea>`, so while a terminal holds the keyboard
+ * `event.target` is one — the guard every other rule here needs would refuse this shortcut in
+ * precisely the state it exists for. Adding it "for consistency" is the change that breaks it.
+ *
+ * **It replaces Esc, which is why it exists at all.** Esc used to close the overlay, and that
+ * made the key unusable in the terminal the overlay is showing — vim, less, fzf and every menu
+ * in codex want it. So Esc now goes to the PTY and the way out is a chord no TUI binds.
+ *
+ * Ctrl and Cmd are both accepted on every platform rather than branching on `navigator.platform`.
+ * Win+Shift+E never reaches the page (the OS takes it) and Ctrl+Shift+E is bound to nothing on
+ * macOS, so the union costs nothing and keeps this a pure function with no environment in it.
+ * Ctrl+E ALONE stays untouched, which matters: that is readline's end-of-line.
+ */
+export function leaveTerminalShortcut(e: CanvasKey): boolean {
+  if (!e.shiftKey || e.altKey) return false;
+  if (!e.ctrlKey && !e.metaKey) return false;
+  return isLetterE(e);
+}
+
+/** A unit step, in the direction the VIEW moves — <kbd>→</kbd> shows you what was off the right
+ *  edge. The world therefore translates the other way; `panBy` owns that inversion. */
+export interface PanDir {
+  dx: number;
+  dy: number;
+}
+
+/**
+ * How far one arrow press slides the canvas, in SCREEN pixels (Tam's item 3).
+ *
+ * Screen pixels, not world units, so a press moves the same visible distance at every zoom —
+ * a world-unit step would crawl when zoomed out and fling you off the workspace when zoomed in.
+ * It is also what makes the minimap's arrows a genuinely different scale rather than a second
+ * copy of this one: that step is measured in MINIMAP pixels, so it is constant relative to the
+ * whole workspace instead of to the screen. See `minimapPanStep`.
+ */
+export const PAN_STEP_PX = 96;
+
+/**
+ * Arrow keys pan the canvas.
+ *
+ * Bare arrows only. <kbd>Alt</kbd>+<kbd>Shift</kbd>+arrow is pane resize and plain
+ * <kbd>Alt</kbd>+arrow is word movement in the shell (see `shortcutActions`'s reserved list), so
+ * taking a modified arrow here would shadow a binding the rest of the app already owns.
+ */
+export function panShortcut(e: CanvasKey): PanDir | null {
+  if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return null;
+  if (inEditable(e.target)) return null;
+  if (e.code === 'ArrowLeft' || e.key === 'ArrowLeft') return { dx: -1, dy: 0 };
+  if (e.code === 'ArrowRight' || e.key === 'ArrowRight') return { dx: 1, dy: 0 };
+  if (e.code === 'ArrowUp' || e.key === 'ArrowUp') return { dx: 0, dy: -1 };
+  if (e.code === 'ArrowDown' || e.key === 'ArrowDown') return { dx: 0, dy: 1 };
+  return null;
+}
+
+/* ---- The two resolvers -----------------------------------------------------
+ *
+ * The rules above answer "is this that key?". These answer "so what happens?", which is the
+ * question the component used to answer inline — and the one item 1 was a wrong answer to: Esc
+ * closed the overlay, which made Esc unusable in the terminal the overlay exists to show. That
+ * was a RULE living in wiring, where nothing could reach it. Both resolvers below are pure, so
+ * "Esc inside an open overlay is a passthrough" is now a fact with a test rather than a branch
+ * inside an effect.
+ *
+ * They are split by which keyboard the press arrived on, which is also the gate each caller
+ * applies: `canvasKeyAction` for keys the canvas owns, `terminalKeyAction` for keys pressed
+ * while a terminal is holding them. Nothing is in both.
+ */
+
+/** What a key the CANVAS owns is asking for. Pan deltas come out already multiplied by
+ *  `PAN_STEP_PX`, so no caller can apply the step twice or invent its own. */
+export type CanvasAction =
+  | { do: 'fit'; target: FitTarget }
+  | { do: 'overlay' }
+  | { do: 'pan'; dx: number; dy: number };
+
+export function canvasKeyAction(e: CanvasKey, hasSelection: boolean): CanvasAction | null {
+  const target = fitShortcut(e);
+  if (target) return { do: 'fit', target };
+  // `E` with nothing selected resolves to nothing AT ALL, rather than to an action the caller
+  // then declines. That is what leaves the keypress untouched: an overlay opening on a terminal
+  // the user never pointed at is worse than a key that did nothing.
+  if (openOverlayShortcut(e)) return hasSelection ? { do: 'overlay' } : null;
+  const dir = panShortcut(e);
+  if (dir) return { do: 'pan', dx: dir.dx * PAN_STEP_PX, dy: dir.dy * PAN_STEP_PX };
+  return null;
+}
+
+/**
+ * What a key pressed INSIDE a focused terminal means to the canvas.
+ *
+ * `'passthrough'` is a real answer rather than the absence of one, and saying so is the point:
+ * it is what Esc resolves to whenever an overlay is open, and the caller must then leave the
+ * event completely alone — no `preventDefault`, no `stopPropagation` — so it reaches the PTY.
+ */
+export type TerminalAction = 'leave' | 'release-focus' | 'passthrough';
+
+export function terminalKeyAction(e: CanvasKey, overlayOpen: boolean): TerminalAction {
+  if (leaveTerminalShortcut(e)) return 'leave';
+  if (e.key !== 'Escape') return 'passthrough';
+  // Esc keeps its other job. With no overlay open a node can still be holding the keyboard —
+  // closing an overlay deliberately does not blur — and there Esc is what hands it back.
+  return overlayOpen ? 'passthrough' : 'release-focus';
 }
 
 /** Does this keypress release the hand tool?

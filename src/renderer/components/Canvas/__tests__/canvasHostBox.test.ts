@@ -140,7 +140,12 @@ describe('terminal host box is constant', () => {
   // invalid value, the host collapses to a zero box, `hasLayoutBox` goes false — and the
   // terminal silently never fits. Check the DESTINATION of the handoff, not just the
   // source, because an absent declaration is invisible from the CSS side.
-  it('has every geometry variable it consumes supplied by CanvasMode', () => {
+  //
+  // There are TWO legitimate providers, not one. The geometry variables are computed per frame
+  // and published from `CanvasMode`; a purely static one (a palette entry, say) is declared on
+  // `.canvas-mode` in the stylesheet itself, where it needs no round trip through React. What
+  // must never happen is a variable with NEITHER — which is what this actually asserts.
+  it('has every canvas variable it consumes supplied by CanvasMode or by the stylesheet', () => {
     const css = fs.readFileSync(CANVAS_CSS, 'utf8');
     const consumed = new Set(
       [...css.matchAll(/var\((--canvas-[a-z-]+)/g)].map((m) => m[1]),
@@ -148,10 +153,22 @@ describe('terminal host box is constant', () => {
     expect(consumed.size).toBeGreaterThan(0);
 
     const tsx = fs.readFileSync(path.join(RENDERER, 'components/Canvas/CanvasMode.tsx'), 'utf8');
-    const provided = new Set(
-      [...tsx.matchAll(/'(--canvas-[a-z-]+)':/g)].map((m) => m[1]),
-    );
+    const provided = new Set([
+      ...[...tsx.matchAll(/'(--canvas-[a-z-]+)':/g)].map((m) => m[1]),
+      // A DECLARATION, not a `var()` reference: anchored to the start of a declaration so
+      // `var(--canvas-x, …)` — which is a use — cannot satisfy itself.
+      ...[...css.matchAll(/(?:^|[{;])\s*(--canvas-[a-z-]+)\s*:/gm)].map((m) => m[1]),
+    ]);
     expect([...consumed].filter((v) => !provided.has(v))).toEqual([]);
+  });
+
+  /** The self-satisfaction the regex above is written to avoid, made explicit: a variable that
+   *  is only ever READ must still fail this check. Without this, widening the sources is one
+   *  loose pattern away from making the whole assertion vacuous. */
+  it('does not accept a var() reference as its own declaration', () => {
+    const css = '.x { color: var(--canvas-invented, red); }';
+    const declared = [...css.matchAll(/(?:^|[{;])\s*(--canvas-[a-z-]+)\s*:/gm)].map((m) => m[1]);
+    expect(declared).toEqual([]);
   });
 
   // The `var(..., 29px)` style fallbacks are dead code while CanvasMode supplies the

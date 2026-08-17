@@ -159,7 +159,10 @@ export const CanvasNode: React.FC<{
             <button
               type="button"
               className="canvas-node-open"
-              title={overlaid ? 'Shrink back to the canvas' : 'Enlarge on the canvas'}
+              // Both hotkeys are named here because neither is discoverable: `E` is a bare
+              // letter, and the chord that shrinks it back is pressed from inside a terminal
+              // that is covering the whole screen — with the button itself hidden behind it.
+              title={overlaid ? 'Shrink back to the canvas (Ctrl+Shift+E)' : 'Enlarge on the canvas (E)'}
               aria-label={overlaid ? `Shrink ${node.title}` : `Enlarge ${node.title} on the canvas`}
               onPointerDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}

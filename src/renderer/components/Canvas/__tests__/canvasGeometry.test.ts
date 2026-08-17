@@ -1,5 +1,5 @@
 import {
-  baseTier, clampZoom, zoomAt, screenToWorld, worldToScreen, isVisible, isFullyVisible, assignTiers,
+  baseTier, clampZoom, zoomAt, panBy, screenToWorld, worldToScreen, isVisible, isFullyVisible, assignTiers,
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
   Z_MIN, Viewport, Rect,
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
@@ -329,6 +329,58 @@ describe('assignTiers', () => {
 // inverse of screenToWorld, and the pair is what keeps painting (worldStyle's
 // transform) and hit-testing agreeing. A sign error in either is invisible until
 // clicks land on the wrong node.
+/**
+ * Sliding the view with the arrow keys — Tam's item 3.
+ *
+ * The sign is the whole content of the function and the one thing that can be silently wrong:
+ * a pan that scrolls the wrong way still looks like a working feature.
+ */
+describe('panBy', () => {
+  const vp: Viewport = { x: 37, y: -14, z: 0.65 };
+
+  it('shows what was off the right edge when you ask to go right', () => {
+    // Stated as an observation rather than as arithmetic: a world point that sat 100px right of
+    // the viewport's right edge has to end up ON screen after a 100px step right.
+    const before = worldToScreen(vp, 1000, 0).x;
+    const after = worldToScreen(panBy(vp, 100, 0), 1000, 0).x;
+    expect(after).toBeCloseTo(before - 100, 6);
+  });
+
+  it('does the same on the vertical axis, independently', () => {
+    const before = worldToScreen(vp, 0, 1000).y;
+    expect(worldToScreen(panBy(vp, 0, 100), 0, 1000).y).toBeCloseTo(before - 100, 6);
+    // ...and a vertical step leaves x completely alone, or a diagonal pan would drift.
+    expect(panBy(vp, 0, 100).x).toBe(vp.x);
+    expect(panBy(vp, 100, 0).y).toBe(vp.y);
+  });
+
+  it('keeps the zoom, at every zoom', () => {
+    for (const z of [Z_MIN, 0.3, 1, Z_MAX]) {
+      expect(panBy({ x: 0, y: 0, z }, 50, -20).z).toBe(z);
+    }
+  });
+
+  /** The step is in SCREEN pixels, so the same press moves the same visible distance however
+   *  far you are zoomed — that is the property that makes it a different scale from the
+   *  minimap's, whose step is measured against the workspace. */
+  it('moves the same number of screen pixels at every zoom', () => {
+    for (const z of [Z_MIN, 0.3, 1, Z_MAX]) {
+      const a: Viewport = { x: 0, y: 0, z };
+      expect({ z, dx: a.x - panBy(a, 96, 0).x }).toEqual({ z, dx: 96 });
+    }
+  });
+
+  it('is reversible, so left undoes right exactly', () => {
+    expect(panBy(panBy(vp, 96, 40), -96, -40)).toEqual(vp);
+  });
+
+  it('does not mutate the viewport it was given', () => {
+    const original = { ...vp };
+    panBy(vp, 100, 100);
+    expect(vp).toEqual(original);
+  });
+});
+
 describe('screenToWorld / worldToScreen', () => {
   const viewports: Viewport[] = [
     { x: 0, y: 0, z: 1 },

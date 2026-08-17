@@ -1,8 +1,14 @@
 import {
   nearestGroupToCentre, minimapTransform, minimapPoint, minimapToWorld, minimapRect,
+  minimapPanStep, MINIMAP_PAN_STEP,
   beaconFor, beaconLayout, BEACON_INSET, BEACON_SIZE,
 } from '../orientation';
-import { Viewport, Rect, NODE_W, NODE_H, CULL_MARGIN, isVisible } from '../canvasGeometry';
+import { MINIMAP_W, MINIMAP_H } from '../CanvasMinimap';
+import { PAN_STEP_PX } from '../canvasGestures';
+import { GROUP_CHIP_ZOOM } from '../canvasSelectors';
+import {
+  Viewport, Rect, NODE_W, NODE_H, CULL_MARGIN, isVisible, panBy, screenToWorld,
+} from '../canvasGeometry';
 import type { CanvasGroupModel, CanvasNodeModel } from '../canvasSelectors';
 
 const group = (tabId: string, x: number, y: number): CanvasGroupModel =>
@@ -113,6 +119,98 @@ describe('minimapPoint / minimapToWorld', () => {
     expect(r.w).toBeCloseTo(400 * t.k, 6);
     expect(r.h).toBeCloseTo(200 * t.k, 6);
     expect(r.x).toBeCloseTo(t.ox, 6);
+  });
+});
+
+/**
+ * The minimap's arrow keys move at the WORKSPACE's scale, not the screen's — Tam's item 3.
+ *
+ * Asserted through the projection rather than against the formula: what the feature promises is
+ * "one press slides the view by `MINIMAP_PAN_STEP` minimap pixels", and a test that recomputed
+ * `(STEP / k) * z` would pass against any sign, any inversion, and any drift between this and
+ * the transform the minimap actually draws with.
+ */
+describe('minimapPanStep', () => {
+  const VW = 1200;
+  const VH = 800;
+
+  /** Where the viewport's CENTRE lands on the minimap — the thing a press is supposed to move. */
+  const centreOnMinimap = (t: ReturnType<typeof minimapTransform>, vp: Viewport) => {
+    const w = screenToWorld(vp, VW / 2, VH / 2);
+    return minimapPoint(t, w.x, w.y);
+  };
+
+  const workspace = (w: number, h: number): Rect => ({ x: 0, y: 0, w, h });
+
+  it('slides the view by exactly one step of the minimap', () => {
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    const vp: Viewport = { x: -300, y: 120, z: 0.4 };
+    const step = minimapPanStep(t, vp.z);
+
+    const before = centreOnMinimap(t, vp);
+    const after = centreOnMinimap(t, panBy(vp, step, 0));
+    expect(after.x - before.x).toBeCloseTo(MINIMAP_PAN_STEP, 6);
+    expect(after.y - before.y).toBeCloseTo(0, 6);
+  });
+
+  it('is the same distance on the minimap at every zoom', () => {
+    // The property that makes this a workspace-relative scale: however far you are zoomed in,
+    // a press covers the same fraction of the whole map.
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    for (const z of [0.06, 0.2, 0.8, 2.4]) {
+      const vp: Viewport = { x: 0, y: 0, z };
+      const before = centreOnMinimap(t, vp);
+      const after = centreOnMinimap(t, panBy(vp, minimapPanStep(t, z), 0));
+      expect({ z, moved: Number((after.x - before.x).toFixed(6)) })
+        .toEqual({ z, moved: MINIMAP_PAN_STEP });
+    }
+  });
+
+  /**
+   * The point of having two scales at all. If this ever failed, the minimap's arrows would be a
+   * second, slightly different copy of the canvas's rather than the coarse navigation they are
+   * meant to be — and nothing else in the suite would notice, because both would still pan.
+   */
+  it('covers more ground than a canvas arrow press, at every zoom a node is readable at', () => {
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    for (const z of [GROUP_CHIP_ZOOM, 0.5, 1, 2, 3]) {
+      expect({ z, coarser: minimapPanStep(t, z) > PAN_STEP_PX }).toEqual({ z, coarser: true });
+    }
+  });
+
+  /**
+   * ...and the limit of that, stated rather than left to be discovered.
+   *
+   * The two strides ARE equal somewhere: the canvas's is constant in screen pixels, so in world
+   * units it grows without bound as you zoom out, while the minimap's is constant in world
+   * units. Below the crossing the canvas press is the coarser one — which is harmless, because
+   * the crossing sits below `GROUP_CHIP_ZOOM`, the zoom clicking a collapsed group flies you to.
+   * Everywhere you actually work, the minimap leads.
+   */
+  it('crosses over below the zoom a collapsed group flies you to', () => {
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    const crossover = (PAN_STEP_PX * t.k) / MINIMAP_PAN_STEP;
+    // Found the crossing it is placing — a value on the wrong side of both would pass a
+    // `toBeLessThan` on its own.
+    expect(minimapPanStep(t, crossover * 0.9)).toBeLessThan(PAN_STEP_PX);
+    expect(minimapPanStep(t, crossover * 1.1)).toBeGreaterThan(PAN_STEP_PX);
+    expect(crossover).toBeLessThan(GROUP_CHIP_ZOOM);
+  });
+
+  it('strides further as the workspace grows', () => {
+    // World units, so the zoom is held constant and only the map changes.
+    const small = minimapPanStep(minimapTransform(workspace(3000, 2000), MINIMAP_W, MINIMAP_H), 1);
+    const large = minimapPanStep(minimapTransform(workspace(12000, 8000), MINIMAP_W, MINIMAP_H), 1);
+    expect(large).toBeGreaterThan(small);
+  });
+
+  /** A workspace smaller than the box gets `k` capped at 1 (a minimap never magnifies), and the
+   *  step must stay finite and forward there too — that is the degenerate case a fresh session
+   *  with one group actually starts in. */
+  it('survives a workspace smaller than the minimap', () => {
+    const step = minimapPanStep(minimapTransform(workspace(40, 30), MINIMAP_W, MINIMAP_H), 1);
+    expect(Number.isFinite(step)).toBe(true);
+    expect(step).toBeGreaterThan(0);
   });
 });
 

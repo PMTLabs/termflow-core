@@ -19,6 +19,15 @@
   inset: 0;
   display: flex;
   background: var(--bg-primary, #141414);
+
+  /* The sidebar's GROUP colour (Tam's item 5).
+     Its own token, and a hue rather than another grey, because the list has two kinds of thing
+     in it and a group heading previously differed from a terminal row only in weight and size —
+     which reads as one list in two sizes, not as a tree. Teal deliberately: blue is already
+     "running" and "selected", amber is the search highlight and red is danger, so it is the one
+     free hue left in the canvas palette. 6.8:1 on the sidebar's own background, which is more
+     contrast than the `--text-secondary` it replaces, not less. */
+  --canvas-group-fg: #4ec9b0;
 }
 .canvas-viewport {
   flex: 1;
@@ -411,7 +420,7 @@
   font-weight: 600;
   letter-spacing: .13em;
   text-transform: uppercase;
-  color: var(--text-secondary, #969696);
+  color: var(--canvas-group-fg, #4ec9b0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -510,6 +519,35 @@
 .canvas-tbtn[aria-pressed="true"] {
   color: var(--text-primary, #cccccc);
   border-color: var(--accent-color, #007acc);
+}
+/* At the zoom clamps. `zoomAt` returns the viewport unchanged once `clampZoom` bites, so
+   without a visible state the button is indistinguishable from a broken one. */
+.canvas-tbtn:disabled {
+  opacity: .38;
+  cursor: default;
+}
+.canvas-tbtn:disabled:hover {
+  color: var(--text-secondary, #969696);
+  border-color: var(--border-color, #3e3e42);
+  background: var(--bg-secondary, #2d2d30);
+}
+/* The zoom pair. Square and glyph-sized rather than word-sized, so `−` and `+` read as one
+   control next to each other instead of as two very short words. */
+.canvas-tbtn-icon {
+  justify-content: center;
+  width: 27px;
+  padding: 5px 0;
+  font-size: 14px;
+  letter-spacing: 0;
+  line-height: 1;
+}
+/* Divides the two clusters: what acts on the WORKSPACE (List, Arrange) from what acts on the
+   VIEW (zoom, View All). Five undifferentiated buttons in a row read as one menu. */
+.canvas-tsep {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 1px;
+  background: var(--border-color, #3e3e42);
 }
 
 /* ---- Connection wires (Task 18) ----------------------------------------- */
@@ -623,6 +661,13 @@
   border-radius: 5px;
   background: rgba(20, 20, 20, .9);
   cursor: pointer;
+}
+/* The minimap is in the tab order now — its arrow keys pan the view at the workspace's scale
+   rather than the screen's — so it needs to show when it is the thing the keys will reach.
+   `:focus-visible`, not `:focus`, or every click on it would leave a ring behind. */
+.canvas-minimap:focus-visible {
+  outline: 2px solid var(--accent-color, #007acc);
+  outline-offset: 1px;
 }
 .canvas-minigroup {
   position: absolute;

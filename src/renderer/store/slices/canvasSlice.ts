@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Rect, Viewport, MAX_INTERACTIVE, NODE_W, NODE_H } from '../../components/Canvas/canvasGeometry';
+import { Rect, Viewport, panBy, MAX_INTERACTIVE, NODE_W, NODE_H } from '../../components/Canvas/canvasGeometry';
 import { ArrangeResult } from '../../components/Canvas/canvasLayout';
 
 /** A relationship between two terminals. Untyped by design — see design 010 §7.1. */
@@ -87,6 +87,17 @@ const canvasSlice = createSlice({
   reducers: {
     setViewport: (state, action: PayloadAction<Viewport>) => {
       state.viewport = action.payload;
+    },
+    /**
+     * Slide the view by a screen-space delta — the arrow keys (Tam's item 3).
+     *
+     * RELATIVE rather than an absolute `setViewport`, so the caller never has to read the
+     * viewport. That is what keeps the arrow handler a stable callback: the canvas listens for
+     * arrows in the capture phase on `window`, and a handler that closed over `vp` would tear
+     * that listener down and re-register it on every frame of a pan.
+     */
+    panViewport: (state, action: PayloadAction<{ dx: number; dy: number }>) => {
+      state.viewport = panBy(state.viewport, action.payload.dx, action.payload.dy);
     },
     setNodeGeom: (state, action: PayloadAction<{ id: string; rect: Rect }>) => {
       state.nodes[action.payload.id] = action.payload.rect;
@@ -187,7 +198,7 @@ const canvasSlice = createSlice({
 });
 
 export const {
-  setViewport, setNodeGeom, setGroupGeom,
+  setViewport, panViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
   updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,

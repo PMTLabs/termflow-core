@@ -1,5 +1,5 @@
 import canvasReducer, {
-  setViewport, setNodeGeom, setGroupGeom,
+  setViewport, panViewport, setNodeGeom, setGroupGeom,
   applyArrange, selectNode, focusNode, touchNode, setOverlayNode, setEdges, addEdge, removeEdge,
   updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
@@ -38,6 +38,25 @@ describe('canvasSlice', () => {
   it('stores the viewport', () => {
     const s = canvasReducer(init(), setViewport({ x: -12, y: 34, z: 0.75 }));
     expect(s.viewport).toEqual({ x: -12, y: 34, z: 0.75 });
+  });
+
+  /**
+   * The arrow keys pan RELATIVELY, which is the point: the handler that dispatches this listens
+   * on the window in the capture phase, and one that had to read `viewport` first would be torn
+   * down and re-registered on every frame of a mouse pan.
+   */
+  it('pans the viewport by a screen delta without being told where it was', () => {
+    let s = canvasReducer(init(), setViewport({ x: -12, y: 34, z: 0.75 }));
+    s = canvasReducer(s, panViewport({ dx: 96, dy: -40 }));
+    // Right and up on screen means the world moves the other way — `panBy` owns the inversion,
+    // and this asserts the reducer actually goes through it rather than adding.
+    expect(s.viewport).toEqual({ x: -12 - 96, y: 34 + 40, z: 0.75 });
+  });
+
+  it('accumulates across presses and leaves the zoom alone', () => {
+    let s = canvasReducer(init(), setViewport({ x: 0, y: 0, z: 0.4 }));
+    for (let i = 0; i < 3; i++) s = canvasReducer(s, panViewport({ dx: 10, dy: 0 }));
+    expect(s.viewport).toEqual({ x: -30, y: 0, z: 0.4 });
   });
 
   it('applies an arrange result wholesale, preserving node size', () => {

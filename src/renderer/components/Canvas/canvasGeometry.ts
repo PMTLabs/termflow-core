@@ -286,6 +286,20 @@ export function zoomAt(vp: Viewport, factor: number, cx: number, cy: number, zMa
   return { x: cx - (cx - vp.x) * k, y: cy - (cy - vp.y) * k, z };
 }
 
+/**
+ * Slide the view by a SCREEN-space delta, keeping the zoom.
+ *
+ * The sign inversion is the whole content of this function, and it is worth owning in one place:
+ * `vp.x` is where the WORLD sits, so showing the user what was off the right edge means moving
+ * the world LEFT. Both keyboard pan paths go through here rather than each negating for itself —
+ * they compute their deltas in different units (screen pixels on the canvas, minimap pixels on
+ * the minimap), and one of them getting the direction backwards would look like a working
+ * feature that scrolls the wrong way.
+ */
+export function panBy(vp: Viewport, dxScreen: number, dyScreen: number): Viewport {
+  return { ...vp, x: vp.x - dxScreen, y: vp.y - dyScreen };
+}
+
 export function screenToWorld(vp: Viewport, sx: number, sy: number): { x: number; y: number } {
   return { x: (sx - vp.x) / vp.z, y: (sy - vp.y) / vp.z };
 }

@@ -1,7 +1,8 @@
 import React, { useCallback, useMemo } from 'react';
 import { Rect, Viewport, screenToWorld } from './canvasGeometry';
 import { boundsOf } from './viewportStyles';
-import { minimapTransform, minimapRect, minimapToWorld } from './orientation';
+import { minimapTransform, minimapRect, minimapToWorld, minimapPanStep } from './orientation';
+import { panShortcut } from './canvasGestures';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -28,7 +29,12 @@ export const CanvasMinimap: React.FC<{
   vh: number;
   /** A world point the user aimed at. The caller owns the flight, since it owns the zoom. */
   onPick: (world: { x: number; y: number }) => void;
-}> = ({ model, vp, vw, vh, onPick }) => {
+  /** One arrow-key step, already converted to SCREEN pixels — the unit `panBy` takes, and the
+   *  same unit the canvas's own arrow keys speak, so the parent has one pan path rather than
+   *  two. The SIZE of the step is this component's to decide, because only it holds the
+   *  projection the step is measured against. */
+  onPan?: (dxScreen: number, dyScreen: number) => void;
+}> = ({ model, vp, vw, vh, onPick, onPan }) => {
   // The viewport's own world rect. Derived through `screenToWorld` rather than by inverting the
   // transform by hand, so it cannot disagree with the pan/zoom maths everything else uses.
   const view: Rect = useMemo(() => {
@@ -52,8 +58,30 @@ export const CanvasMinimap: React.FC<{
 
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
+    // Taken explicitly rather than left to the browser's default focusing of a `tabIndex`
+    // element: clicking the minimap and then using the arrows is the whole way into its
+    // keyboard mode, and a default that any later `preventDefault` would silently cancel is
+    // not something to hang a feature on.
+    e.currentTarget.focus();
     onPick(minimapToWorld(t, e.clientX - r.left, e.clientY - r.top));
   }, [t, onPick]);
+
+  /**
+   * The minimap's own arrows (Tam's item 3).
+   *
+   * A React handler on the element, so it only runs while the minimap actually HAS the keyboard
+   * — which is exactly the condition that separates these arrows from the canvas's. `CanvasMode`
+   * listens on the window in the capture phase and so would otherwise run first and pan by its
+   * own step as well; it bails on any event inside `.canvas-minimap` for that reason.
+   */
+  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!onPan) return;
+    const dir = panShortcut(e as unknown as Parameters<typeof panShortcut>[0]);
+    if (!dir) return;
+    e.preventDefault();
+    const step = minimapPanStep(t, vp.z);
+    onPan(dir.dx * step, dir.dy * step);
+  }, [onPan, t, vp.z]);
 
   const box = (r: Rect): React.CSSProperties => {
     const m = minimapRect(t, r);
@@ -65,8 +93,16 @@ export const CanvasMinimap: React.FC<{
       className="canvas-minimap"
       style={{ width: MINIMAP_W, height: MINIMAP_H }}
       onPointerDown={onPointerDown}
-      role="presentation"
-      title="Click to fly there"
+      onKeyDown={onKeyDown}
+      // Focusable, because the arrows above are only reachable by something that can hold the
+      // keyboard. `role="application"` rather than the `presentation` this carried while it was
+      // click-only: presentation on a focusable element hides a control that IS in the tab order,
+      // and application is what tells a screen reader to hand the arrow keys through instead of
+      // using them to walk the document.
+      tabIndex={0}
+      role="application"
+      aria-label="Workspace minimap — click to fly there, arrow keys to pan"
+      title="Click to fly there · arrow keys to pan"
     >
       {model.groups.map((g) => (
         <div key={g.tabId} className="canvas-minigroup" style={box(g.rect)} />

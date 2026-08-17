@@ -83,6 +83,37 @@ export function minimapToWorld(t: MinimapTransform, mx: number, my: number): { x
   return { x: (mx - t.ox) / t.k + t.bounds.x, y: (my - t.oy) / t.k + t.bounds.y };
 }
 
+/**
+ * How far one arrow press moves the view when the MINIMAP has the keyboard, in minimap pixels
+ * (Tam's item 3).
+ *
+ * The unit is the point. A step measured on the minimap is constant relative to the WHOLE
+ * WORKSPACE — ~17 presses cross it end to end however far you are zoomed in — where the canvas's
+ * own arrows move a constant number of SCREEN pixels (`PAN_STEP_PX`). That is what makes these
+ * two different scales rather than one number copied twice: at any working zoom a minimap press
+ * covers far more ground, and it keeps covering the same fraction of the workspace as the
+ * workspace grows.
+ */
+export const MINIMAP_PAN_STEP = 10;
+
+/**
+ * That step as a SCREEN-space distance, which is what `panBy` takes.
+ *
+ * `t.k` is minimap-px per world-unit, so dividing by it converts back to world units, and `z`
+ * takes those to the screen. Derived from the live transform rather than fixed, so the stride
+ * grows with the workspace — the same reason the minimap's own scale is not fixed either.
+ *
+ * **Where it stops leading, stated rather than left to be found.** This stride is constant in
+ * WORLD units while the canvas's is constant in SCREEN pixels, so the canvas's grows without
+ * bound in world terms as you zoom out and the two cross somewhere. That crossing lands below
+ * `GROUP_CHIP_ZOOM` — the zoom clicking a collapsed group flies you to — so at every zoom you
+ * actually work at the minimap is the coarser control, and below it you are looking at the whole
+ * workspace anyway. `orientation.test.ts` pins the crossing rather than trusting that sentence.
+ */
+export function minimapPanStep(t: MinimapTransform, z: number): number {
+  return (MINIMAP_PAN_STEP / t.k) * z;
+}
+
 /** A world rect as a minimap box. Positioned through `minimapPoint` and scaled by the same `k`,
  *  so a group frame and the nodes inside it cannot drift apart. */
 export function minimapRect(t: MinimapTransform, r: Rect): Rect {

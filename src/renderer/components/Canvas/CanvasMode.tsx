@@ -6,7 +6,7 @@ import { terminalService } from '../../services/TerminalService';
 import { getAllLeafIds } from '../../store/slices/paneTreeOps';
 import { RootState } from '../../store';
 import {
-  CanvasEdge, addEdge, focusNode, selectNode, setEdges, setNearestGroup, setNodeGeom,
+  CanvasEdge, addEdge, focusNode, panViewport, selectNode, setEdges, setNearestGroup, setNodeGeom,
   setOverlayNode, setSidebarOpen,
 } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
@@ -20,7 +20,7 @@ import { NodeSnapshot } from './NodeSnapshot';
 import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
-  NODE_W, NODE_H, HEAD_H,
+  zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
@@ -41,7 +41,7 @@ import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
 import { beaconLayout, nearestGroupToCentre } from './orientation';
-import { fitShortcut } from './canvasGestures';
+import { CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -65,6 +65,16 @@ const PUBLISH_DEBOUNCE_MS = 250;
  * canvas chrome. Sized to clear the minimap, which is the largest of them.
  */
 const FRAME_INSET = 130;
+
+/**
+ * One press of a toolbar zoom button (Tam's item 4).
+ *
+ * 1.3, so a press is unmistakably a step rather than a nudge, and ~5 of them cross the working
+ * range between the chip tier and 1:1. Deliberately coarser than the wheel, which is continuous
+ * and reversible mid-gesture; a button is neither, so a step it takes several presses to notice
+ * reads as a button that does not work.
+ */
+const ZOOM_STEP = 1.3;
 
 /**
  * Does this terminal still have a process?
@@ -437,29 +447,54 @@ export const CanvasMode: React.FC = () => {
     if (g) flyTo(fitViewport(g.rect, size.w, size.h, metrics.zMax));
   }, [model, selectedId, nearestGroupId, flyTo, size, metrics]);
 
+  /** One arrow-key step, in screen pixels. Relative, so this callback never reads the viewport
+   *  and stays referentially stable — see `panViewport` for why that matters to the listener
+   *  below. */
+  const panScreen = useCallback((dx: number, dy: number) => {
+    dispatch(panViewport({ dx, dy }));
+  }, [dispatch]);
+
+  /** One press of a zoom button, about the middle of the viewport — the point the user is
+   *  looking at, and the only anchor a button has (the wheel has the cursor). */
+  const zoomStep = useCallback((factor: number) => {
+    flyTo(zoomAt(vp, factor, size.w / 2, size.h / 2, metrics.zMax));
+  }, [flyTo, vp, size, metrics]);
+
   /**
-   * Shift+1 / Shift+2 (design 010 §5). A LOCAL listener rather than an `InputHandler` shortcut,
-   * for two independent reasons: `InputHandler` matches on a canonicalised `event.key`, so
-   * `Shift+1` would be registered as `Shift+1` and matched as `Shift+!` and never fire; and
-   * being mounted is exactly the gate these need, since `TerminalContainer` mounts this only
-   * while the canvas tab is active.
+   * Keys the CANVAS owns — while nothing has handed the keyboard to a terminal.
    *
-   * `focusedId` is checked HERE and not inside `fitShortcut`: a focused node has a live terminal
-   * taking keystrokes, where `!` is a character. The rule itself has no business knowing that.
+   * Shift+1 / Shift+2 fit (design 010 §5), `E` enlarges the selected node (Tam's item 2) and the
+   * arrows pan (item 3). They share one listener because they share one precondition, which is
+   * the whole reason `focusedId` is checked here rather than inside the rules: a focused node has
+   * a live terminal taking keystrokes, where `!`, `e` and an arrow are all just input. The rules
+   * themselves have no business knowing that.
+   *
+   * A LOCAL listener rather than `InputHandler` shortcuts, for two independent reasons:
+   * `InputHandler` matches on a canonicalised `event.key`, so `Shift+1` would be registered as
+   * `Shift+1`, matched as `Shift+!`, and never fire; and being mounted is exactly the gate these
+   * need, since `TerminalContainer` mounts this only while the canvas tab is active.
    */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
-      const want = fitShortcut(e as unknown as Parameters<typeof fitShortcut>[0]);
-      if (!want) return;
+      // The minimap owns its own arrows, at its own scale (`minimapPanStep`). This listener is
+      // in the CAPTURE phase, so it runs BEFORE the minimap's React handler and stopping the
+      // event there would be too late — the check has to be here. It is wiring, not a rule:
+      // `canvasKeyAction` is given a narrowed key and cannot see the DOM.
+      if ((e.target as HTMLElement | null)?.closest?.('.canvas-minimap')) return;
+
+      const action = canvasKeyAction(e as unknown as CanvasKey, !!selectedId);
+      if (!action) return;
       e.preventDefault();
       e.stopPropagation();
-      (want === 'all' ? fitAll : fitGroup)();
+      if (action.do === 'fit') (action.target === 'all' ? fitAll : fitGroup)();
+      else if (action.do === 'overlay') dispatch(setOverlayNode(selectedId));
+      else panScreen(action.dx, action.dy);
     };
     // Capture phase, matching InputHandler's ownership of global shortcuts.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [focusedId, fitAll, fitGroup]);
+  }, [focusedId, fitAll, fitGroup, selectedId, panScreen, dispatch]);
 
   /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
    *  render gate below, which covers the minimap in the same breath — a second `overlayId`
@@ -577,19 +612,33 @@ export const CanvasMode: React.FC = () => {
     }
   }, [spawnMenu, model.nodes, edges, tabs, dispatch, vp, size, flyTo, metrics]);
 
+  /**
+   * Keys that get you OUT of a terminal — the mirror of the listener above, and gated on the
+   * mirror condition.
+   *
+   * **Esc no longer closes the overlay (Tam's item 1).** It used to, and that quietly made Esc
+   * unusable in the one place a terminal is shown at full size: vim, less, fzf and every menu in
+   * codex want that key, and the canvas was eating it to shrink a window the user was working
+   * in. So Esc is now handed straight through whenever an overlay is open, and
+   * Ctrl/Cmd+Shift+E — a chord no TUI binds — is the way out.
+   *
+   * Esc keeps its other job. With no overlay open, a node can still be holding the keyboard
+   * (closing the overlay deliberately does not blur, see `setOverlayNode`), and there Esc is
+   * what hands it back.
+   */
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      // Esc unwinds one layer at a time. Closing the overlay AND releasing the keyboard on a
-      // single press would leave no way to shrink a node and keep typing in it.
-      if (overlayIdRef.current) {
-        dispatch(setOverlayNode(null));
-        return;
-      }
-      // Esc is a legitimate PTY key that xterm delivers while its textarea holds focus,
-      // so blur it before restoring the gate, or the gesture never reaches the canvas.
+      const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current);
+      // Completely untouched — no preventDefault, no stopPropagation — so it reaches the PTY.
+      if (action === 'passthrough') return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Both exits blur first: xterm's keyboard sink is a real textarea that holds DOM focus,
+      // and leaving it focused would keep every later keystroke inside a terminal the user has
+      // just stepped out of — including the `E` that is supposed to bring the overlay back.
       (document.activeElement as HTMLElement | null)?.blur();
+      if (action === 'leave') dispatch(setOverlayNode(null));
       dispatch(focusNode(null));
     };
     // Capture phase, matching InputHandler's ownership of global shortcuts.
@@ -637,7 +686,16 @@ export const CanvasMode: React.FC = () => {
           <>
             <CanvasBeacons beacons={beacons} onPick={flyToNode} />
             {model.groups.length > 0 && (
-              <CanvasMinimap model={model} vp={vp} vw={size.w} vh={size.h} onPick={flyToWorld} />
+              <CanvasMinimap
+                model={model}
+                vp={vp}
+                vw={size.w}
+                vh={size.h}
+                onPick={flyToWorld}
+                // Already in screen pixels — the minimap sized the step against its own
+                // projection, which is the only place that scale is known.
+                onPan={panScreen}
+              />
             )}
           </>
         ) : null}
@@ -766,6 +824,42 @@ export const CanvasMode: React.FC = () => {
             title="Grid each group's terminals, then the groups themselves"
           >
             Arrange
+          </button>
+          {/* Viewport controls, separated from the two above because they do something to the
+              VIEW rather than to the workspace. Tam's item 4. */}
+          <span className="canvas-tsep" aria-hidden="true" />
+          {/* Disabled at the clamps rather than left to no-op: `zoomAt` returns the same viewport
+              once `clampZoom` bites, so without this the button would be indistinguishable from
+              one that is broken. */}
+          <button
+            type="button"
+            className="canvas-tbtn canvas-tbtn-icon"
+            onClick={() => zoomStep(1 / ZOOM_STEP)}
+            disabled={vp.z <= Z_MIN}
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="canvas-tbtn canvas-tbtn-icon"
+            onClick={() => zoomStep(ZOOM_STEP)}
+            disabled={vp.z >= metrics.zMax}
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            +
+          </button>
+          {/* The same destination Shift+1 flies to, through the same callback — a second "show
+              me everything" that framed something slightly different would be worse than none. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            onClick={fitAll}
+            title="Zoom out until every terminal is on screen (Shift+1)"
+          >
+            View All
           </button>
         </div>
       )}
