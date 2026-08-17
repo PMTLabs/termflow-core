@@ -83,10 +83,19 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 ),
                 paneId: z.string().optional().describe("Pane ID within the tab to split"),
                 direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction: 'horizontal' (split right) or 'vertical' (split bottom)"),
+                connectToCaller: z.boolean().optional().default(true).describe(
+                    "Draw a connection from YOUR terminal to the new one on the TermFlow canvas, " +
+                    "recording that you spawned it. Default true. Set false for a terminal that " +
+                    "is unrelated to your work."
+                ),
             },
         },
-        async ({ name, profile, cols, rows, cwd, owningTabId, tabId, paneId, direction }) => {
+        async ({ name, profile, cols, rows, cwd, owningTabId, tabId, paneId, direction, connectToCaller }) => {
             try {
+                // Every other tool resolves the caller via getCallerId(); this one did not,
+                // which is why agent-spawned terminals had no provenance. Absent identity is
+                // not an error here — provenance is a bonus, never a precondition for a spawn.
+                const parentTerminalId = connectToCaller === false ? undefined : getCallerId();
                 const response = await api.post(`/terminals`, {
                     name,
                     profile_id: profile,
@@ -97,6 +106,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                     tabId,
                     paneId,
                     direction,
+                    parentTerminalId,
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {

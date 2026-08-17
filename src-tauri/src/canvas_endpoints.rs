@@ -6,7 +6,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -310,18 +309,12 @@ pub async fn create_edge(
             )
         }
     };
-    let edge = CanvasEdge {
-        id: format!("ce-{}", uuid::Uuid::new_v4()),
+    let edge = CanvasEdge::new(
         from_id,
         to_id,
-        label: request.label,
-        origin: request
-            .origin
-            .unwrap_or(EdgeOrigin::User)
-            .as_str()
-            .to_string(),
-        created_at: Utc::now().timestamp_millis(),
-    };
+        request.label,
+        request.origin.unwrap_or(EdgeOrigin::User).as_str(),
+    );
     match state.canvas_store.insert_edge(&edge) {
         Ok(InsertOutcome::Inserted(edge)) | Ok(InsertOutcome::Existing(edge)) => {
             (StatusCode::OK, Json(edge)).into_response()

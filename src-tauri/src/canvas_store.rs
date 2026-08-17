@@ -23,6 +23,29 @@ pub struct CanvasEdge {
     pub created_at: i64,
 }
 
+impl CanvasEdge {
+    /// Mint a new edge with a fresh id and the current timestamp.
+    ///
+    /// Both places that create edges go through this — the user's drag
+    /// (`POST /api/canvas/edges`) and an agent's spawn (`POST /api/terminals` with a
+    /// `parentTerminalId`). `plan/013` Task 20 spelled the id out again as a nine-character
+    /// truncation of a UUID, which would have put two different id shapes in one table for no
+    /// reason and given the auto-connect path its own collision odds.
+    ///
+    /// Endpoints must already be RENDERER ids — resolve through
+    /// `AppState::resolve_renderer_id` before calling.
+    pub fn new(from_id: String, to_id: String, label: Option<String>, origin: &str) -> Self {
+        Self {
+            id: format!("ce-{}", uuid::Uuid::new_v4()),
+            from_id,
+            to_id,
+            label,
+            origin: origin.to_string(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+}
+
 /// Why every method returns `Result`: a bare bool collapses "duplicate pair",
 /// "store disabled" and "SQLite is locked" into one `false`, so an auto-created
 /// edge would vanish silently and `/graph` would report an empty workspace during

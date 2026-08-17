@@ -900,6 +900,9 @@ const App: React.FC = () => {
         // P0-A (Task 5's emit): the unambiguous ids. `terminalId`/`tabId` above
         // are the legacy pair this event has always carried.
         processId?: string; rendererTerminalId?: string; owningTabId?: string;
+        // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
+        // the edge itself was already written by the backend before this event was emitted.
+        parentTerminalId?: string;
       };
       console.log('API: Creating terminal tab', options);
 
@@ -907,6 +910,33 @@ const App: React.FC = () => {
       const { processId, leafId, owningTabId } = resolveApiCreateIds(options);
       const tabId = owningTabId;
       const terminalId = processId;
+
+      // Fan the new node out from its caller, BEFORE the pane exists.
+      //
+      // The ordering is deliberate: `buildCanvasModel` reads `canvas.nodes` for a stored rect
+      // and seeds a position only when there is none, so writing the geometry first means the
+      // pane arrives and finds its place already chosen. Doing it afterwards would race the
+      // seeding and produce a visible jump from a seeded slot to the arc.
+      if (options.parentTerminalId && leafId) {
+        const { planAgentPlacement } = await import('./components/Canvas/agentSpawnPlacement');
+        const { buildCanvasModel } = await import('./components/Canvas/canvasSelectors');
+        const { setNodeGeom, setEdges } = await import('./store/slices/canvasSlice');
+        const state = store.getState();
+        const plan = planAgentPlacement(
+          buildCanvasModel(state),
+          state.canvas.edges,
+          options.parentTerminalId,
+          leafId,
+        );
+        if (plan) dispatch(setNodeGeom({ id: plan.terminalId, rect: plan.rect }));
+
+        // Refresh the edge mirror. `canvas.edges` is only filled by `fetchGraph()` when
+        // Canvas Mode MOUNTS (Task 18), so without this the wire the backend just wrote does
+        // not appear until the user toggles the canvas off and on — which is precisely the
+        // thing Task 20's acceptance check says must not be necessary.
+        const { fetchGraph } = await import('./services/canvasGraph');
+        void fetchGraph().then((graph) => { if (graph) dispatch(setEdges(graph.edges)); });
+      }
 
       // `store` is the file-scoped Redux store import (the same instance as
       // window.__REDUX_STORE__) — always defined, so no local alias/shadow.

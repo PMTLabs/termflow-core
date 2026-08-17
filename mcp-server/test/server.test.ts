@@ -368,3 +368,58 @@ describe("get_my_connections", () => {
         expect(tool!.inputSchema?.properties ?? {}).toEqual({});
     });
 });
+
+describe("create_terminal caller forwarding", () => {
+    // NOTE: `makeFakeApi` records calls as `{ method, url, body }`. plan/013 Task 20's own
+    // tests matched on `c.path`, which does not exist — `find` returns undefined and every
+    // assertion throws a TypeError instead of failing on the thing it meant to check.
+    const postToTerminals = (calls: Call[]) =>
+        calls.find((c) => c.method === "post" && c.url === "/terminals");
+
+    it("sends the caller's terminal id as parentTerminalId", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "create_terminal", arguments: { name: "worker" } });
+        expect((postToTerminals(calls)!.body as any).parentTerminalId).toBe("pc-self");
+    });
+
+    it("omits parentTerminalId when connectToCaller is false", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "create_terminal", arguments: { connectToCaller: false } });
+        expect((postToTerminals(calls)!.body as any).parentTerminalId).toBeUndefined();
+    });
+
+    it("omits parentTerminalId when there is no caller identity", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        await client.callTool({ name: "create_terminal", arguments: {} });
+        expect((postToTerminals(calls)!.body as any).parentTerminalId).toBeUndefined();
+    });
+
+    it("still creates the terminal when there is no caller", async () => {
+        // Provenance is a bonus, never a precondition. A client that does not forward the
+        // header must still be able to spawn terminals.
+        const { api } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        const res: any = await client.callTool({ name: "create_terminal", arguments: {} });
+        expect(res.isError).toBeFalsy();
+    });
+
+    it("still forwards owningTabId, which the auto-connect change must not displace", async () => {
+        // plan/013's replacement handler destructured {name, profile, cols, rows, cwd, tabId,
+        // paneId, direction, connectToCaller} — dropping `owningTabId`, the parameter P0-A made
+        // the PREFERRED way to target a tab. The schema would still advertise it, so an agent
+        // passing it would be silently ignored and its pane would land in the wrong tab.
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({
+            name: "create_terminal",
+            arguments: { owningTabId: "tb-target", paneId: "tm-anchor", direction: "horizontal" },
+        });
+        const body = postToTerminals(calls)!.body as any;
+        expect(body.owningTabId).toBe("tb-target");
+        expect(body.paneId).toBe("tm-anchor");
+        expect(body.direction).toBe("horizontal");
+    });
+});

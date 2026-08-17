@@ -210,15 +210,6 @@ export function buildCanvasModel(state: RootState): CanvasModel {
 }
 
 /**
- * The paint-cull set — the one place it is derived, so Tasks 10, 18 and 23 share it.
- *
- * A node OUTSIDE this set is still MOUNTED and still holds its terminal: culling is a
- * paint decision, never a relocation (design 010 §4.4, `012` §6.5 RC4). Unmounting on
- * a pan would relocate terminals at gesture frequency and SIGWINCH every ratatui/codex
- * PTY on the canvas. This set gates work — snapshot polling, edge mask rects, chrome —
- * and `visibility`, nothing else.
- */
-/**
  * The node→group registry this window publishes to `PUT /api/canvas/nodes` (Task 18 Step 7).
  *
  * The backend knows every terminal's id and owning tab after P0-A, but **only the renderer knows
@@ -239,6 +230,15 @@ export function nodeRegistryPayload(model: CanvasModel): NodeInfoPayload[] {
   }));
 }
 
+/**
+ * The paint-cull set — the one place it is derived, so Tasks 10, 18 and 23 share it.
+ *
+ * A node OUTSIDE this set is still MOUNTED and still holds its terminal: culling is a
+ * paint decision, never a relocation (design 010 §4.4, `012` §6.5 RC4). Unmounting on
+ * a pan would relocate terminals at gesture frequency and SIGWINCH every ratatui/codex
+ * PTY on the canvas. This set gates work — snapshot polling, edge mask rects, chrome —
+ * and `visibility`, nothing else.
+ */
 export function visibleNodeIds(
   nodes: CanvasNodeModel[],
   vp: Viewport,
