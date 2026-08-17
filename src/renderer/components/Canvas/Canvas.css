@@ -55,11 +55,21 @@
    frame being dragged as a whole. */
 .canvas-gframe.drop { border-color: var(--tab-running-accent, #3aa6ff); background: rgba(58,166,255,.09); }
 .canvas-gframe.moving { border-color: var(--accent-color, #007acc); background: rgba(0,122,204,.07); }
-.canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; }
-.canvas-gchip { position: absolute; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--border-color, #3e3e42); border-radius: 8px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); white-space: nowrap; cursor: zoom-in; }
-.canvas-gchip-title { font-size: 13px; font-weight: 600; }
-.canvas-gchip-count { font-size: 11px; color: var(--text-secondary, #969696); }
-.canvas-gchip-run { width: 7px; height: 7px; border-radius: 50%; background: var(--tab-running-accent, #3aa6ff); }
+/* `overflow`/`text-overflow` are what make the inline `max-width` bite — see `labelMaxWidth`.
+   Without them `white-space: nowrap` simply overflows the box and the cap does nothing, which
+   looks identical in the DOM and identical in any test that reads the style. */
+.canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* FIXED width, which is what lets `groupChips.groupChipLayout` resolve collisions exactly
+   rather than against an estimate — a chip sized by its own title would have to be measured,
+   and a layout that guesses widths only ever guesses the overlaps too. It also lines the chips
+   up instead of staggering them. `box-sizing` matters here: the layout's CHIP_W is the border
+   box, and content-box would make every chip 30px wider than the maths thinks. */
+.canvas-gchip { position: absolute; box-sizing: border-box; width: 190px; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--border-color, #3e3e42); border-radius: 8px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); white-space: nowrap; cursor: zoom-in; }
+/* Takes the slack, and ellipsises, so a long tab name cannot push the count out of a
+   fixed-width chip. */
+.canvas-gchip-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.canvas-gchip-count { font-size: 11px; color: var(--text-secondary, #969696); flex: none; margin-left: auto; }
+.canvas-gchip-run { width: 7px; height: 7px; border-radius: 50%; background: var(--tab-running-accent, #3aa6ff); flex: none; }
 
 /* ---- Nodes -------------------------------------------------------------- */
 

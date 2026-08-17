@@ -6,7 +6,7 @@ import type { RootState } from '../../store';
 import type { PaneNode } from '../../store/slices/panesSlice';
 import type { Tab } from '../../store/slices/tabsSlice';
 import {
-  NODE_W, NODE_H, CHIP_H, CULL_MARGIN, T_GPU, T_SNAP, Z_MIN,
+  NODE_W, NODE_H, CHIP_H, CULL_MARGIN, T_GPU, T_SNAP, Z_MIN, MIN_TITLE_PX,
   LodTier, Rect, Viewport, isVisible,
 } from './canvasGeometry';
 import { fitGroupFrame, seedNodePosition, PAD, PAD_TOP, GROUP_GAP } from './canvasLayout';
@@ -54,14 +54,59 @@ function leaves(node: PaneNode | null | undefined): PaneNode[] {
  *
  * The clamp is a guard against a degenerate `z`, NOT a style choice, so it is
  * derived from the legal zoom range rather than picked — and the top of that range is now a
- * property of the display the session opened on, so it is passed in. An arbitrary tighter ceiling
- * would quietly break the promise in the sentence above: at the group-collapse end of
- * the range `1/z` reaches 20, so a ceiling of (say) 3 would leave every frame label
- * rendering at under 3 real pixels across the whole chip band — present in the DOM,
- * invisible on screen, and passing any test that only probes zooms near 1.
+ * property of the display the session opened on, so it is passed in.
+ *
+ * **This is the raw counter-scale. The group LABEL no longer uses it directly — see
+ * `labelScale`.** The paragraph that used to sit here argued against ever capping it, on the
+ * grounds that a ceiling of about 3 would leave frame labels under three real pixels across
+ * the whole chip band. That was true when it was written and is not now: its premise was that
+ * a label had to stay legible down there because nothing else was, and `allCollapsed` now
+ * shows the group CHIP throughout that band precisely because a chip is the thing that stays
+ * legible. What the argument was really protecting is intact — something readable at every
+ * zoom — it is just no longer this element's job below the collapse threshold.
+ *
+ * The GROUP CHIP still uses the uncapped scale, and must: it is that readable rendering.
  */
 export function counterScale(z: number, zMax: number): number {
   return Math.min(1 / Z_MIN, Math.max(1 / zMax, 1 / z));
+}
+
+/** The label's own height in world units at scale 1 — an 11px line plus its leading. Used to
+ *  turn the frame's top band into a scale ceiling, so the two cannot drift apart. */
+export const LABEL_LINE_H = 14;
+
+/**
+ * How far a group's LABEL may counter-scale.
+ *
+ * `counterScale` alone reaches 20× at `Z_MIN`, and the label is a world-space element: at 20×
+ * an "11px" label is 220 world units tall and ~1800 wide, against a frame 372 wide with a
+ * 23-unit top band. Measured at z=0.1 it is already 110×900 — five times the band it is
+ * supposed to straddle and two and a half times its own frame — so it lands across whatever
+ * group happens to sit above or beside it. That is the overlap reported on 2026-08-17, and it
+ * is not a positioning bug: nothing in a WORLD layout can reserve space for an element whose
+ * world size grows without bound.
+ *
+ * Capped by the band it straddles, exactly as `headScale` is capped by the frame padding a
+ * node header may grow into. Past the cap the label shrinks with the world, which is correct
+ * rather than merely tolerable: that is the zoom at which the group CHIP takes over as the
+ * readable rendering of a group (see `allCollapsed`).
+ */
+export const MAX_LABEL_K = (PAD_TOP * 2) / LABEL_LINE_H;
+
+export function labelScale(z: number, zMax: number): number {
+  return Math.min(MAX_LABEL_K, counterScale(z, zMax));
+}
+
+/**
+ * The widest a label may draw, in world units, so it cannot reach the frame beside it.
+ *
+ * Separate from the scale cap because it binds on a different axis and for a different reason:
+ * the vertical cap is about the band the label straddles, this is about a long tab title. A
+ * scale ceiling cannot bound width — the text length does that — so this is applied as a
+ * `max-width` and the title ellipsises.
+ */
+export function labelMaxWidth(frameW: number, k: number): number {
+  return Math.max(0, frameW - 28) / k;      // 28 = the label's own left offset plus padding
 }
 
 /**
@@ -251,10 +296,40 @@ export function visibleNodeIds(
   return out;
 }
 
-/** True when the whole workspace has collapsed to group chips. Empty is not collapsed —
- *  there would be no chips to show, only the empty-canvas message. */
-export function allCollapsed(nodes: CanvasNodeModel[], tiers: Record<string, LodTier>): boolean {
-  return nodes.length > 0 && nodes.every((n) => tiers[n.terminalId] === 'group');
+/** A node chip's label as it actually lands on screen. World font times the zoom — the chip
+ *  box does NOT counter-scale, which is the whole reason this can fall below legibility. */
+export function chipLabelScreenPx(z: number): number {
+  return chipFontSize(z) * z;
+}
+
+/**
+ * True when the whole workspace has collapsed to group chips. Empty is not collapsed — there
+ * would be no chips to show, only the empty-canvas message.
+ *
+ * **The `chip` clause closes a band of the ladder that had no readable rendering at all.**
+ * This used to require every node to be at the `group` tier, which is `z < 0.118`. But a NODE
+ * chip's label is bounded by the chip box (`chipFontSize`), and measured across the band that
+ * box is 6.8–16px tall on screen — so between z=0.118 and z=0.237 the node labels render at
+ * **6.5–11px** while the group chip, the documented readable alternative, was not being shown
+ * yet. Reported 2026-08-17 as "in the ladder of zooming, it is too small", with a screenshot
+ * taken squarely inside that band.
+ *
+ * The threshold is DERIVED, not picked: collapse exactly when a node's own label stops
+ * reaching `MIN_TITLE_PX`, the same floor `headFontSize` holds every other tier to. So the
+ * ladder now has no rung where nothing is readable — above it a node names itself, below it
+ * its group does — and the two halves cannot drift apart, because they are the same number.
+ */
+export function allCollapsed(
+  nodes: CanvasNodeModel[],
+  tiers: Record<string, LodTier>,
+  z: number,
+): boolean {
+  if (nodes.length === 0) return false;
+  const nodeLabelsLegible = chipLabelScreenPx(z) >= MIN_TITLE_PX;
+  return nodes.every((n) => {
+    const tier = tiers[n.terminalId];
+    return tier === 'group' || (tier === 'chip' && !nodeLabelsLegible);
+  });
 }
 
 /**

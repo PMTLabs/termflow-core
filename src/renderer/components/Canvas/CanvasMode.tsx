@@ -34,6 +34,7 @@ import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, decideCanvasClose } from './canvasClose';
 import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
+import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
@@ -192,7 +193,20 @@ export const CanvasMode: React.FC = () => {
     [model, vp, size],
   );
 
-  const collapsed = allCollapsed(model.nodes, tiers);
+  const collapsed = allCollapsed(model.nodes, tiers, vp.z);
+
+  /**
+   * Keeps collapsed chips off each other.
+   *
+   * A chip counter-scales to a constant SCREEN size while its anchor is a WORLD position, so
+   * the gap between two chips shrinks with the zoom while the chips do not — measured, two
+   * adjacent groups are 46 screen px apart at z=0.1 against a 190px chip. Only computed while
+   * collapsed, which is the only time a chip is rendered at all.
+   */
+  const chipNudge = useMemo(
+    () => (collapsed ? chipOffsets(model.groups, vp.z) : {}),
+    [collapsed, model.groups, vp.z],
+  );
 
   // Whether a node PAINTS. Extracted because the wire mask and the node's own `hidden` prop
   // must agree exactly — a mask hole for a node that is not there shows the 30% ghost against
@@ -652,6 +666,7 @@ export const CanvasMode: React.FC = () => {
             group={g}
             zoom={vp.z}
             collapsed={collapsed}
+            chipOffset={chipNudge[g.tabId]}
             dropTarget={drag.dropTabId === g.tabId}
             moving={drag.movingTabId === g.tabId}
             onLabelPointerDown={drag.onGroupLabelPointerDown(g.tabId)}

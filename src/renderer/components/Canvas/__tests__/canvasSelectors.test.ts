@@ -1,9 +1,10 @@
 import {
-  buildCanvasModel, counterScale, chipFontSize, visibleNodeIds, allCollapsed, snapshotNodeIds,
-  GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM, CanvasNodeModel,
+  buildCanvasModel, counterScale, chipFontSize, chipLabelScreenPx, visibleNodeIds, allCollapsed,
+  snapshotNodeIds, GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM, CanvasNodeModel,
+  labelScale, labelMaxWidth, MAX_LABEL_K, LABEL_LINE_H,
 } from '../canvasSelectors';
 import {
-  NODE_W, NODE_H, CHIP_H, Z_MIN, T_CHIP, LodTier, Viewport, DEFAULT_METRICS,
+  NODE_W, NODE_H, CHIP_H, Z_MIN, T_CHIP, MIN_TITLE_PX, LodTier, Viewport, DEFAULT_METRICS,
   baseTier, clampZoom,
 } from '../canvasGeometry';
 
@@ -235,6 +236,76 @@ describe('visibleNodeIds', () => {
   });
 });
 
+/**
+ * The group LABEL's counter-scale, capped.
+ *
+ * A label is a world-space element, so an uncapped counter-scale gives it an unbounded WORLD
+ * footprint: at z=0.1 an "11px" label measures 110x900 world units against a frame 372 wide
+ * with a 23-unit top band. That is the overlap reported on 2026-08-17 — the label of one group
+ * printed across the frame of another. Nothing in a world layout can reserve space for it,
+ * because the space it needs depends on the zoom.
+ */
+describe('labelScale', () => {
+  it('is the plain counter-scale while that is small enough', () => {
+    // Zoomed in, nothing is capped and the label holds its constant on-screen size.
+    for (const z of [1.0, 0.8, 0.5]) {
+      expect(labelScale(z, Z_MAX)).toBeCloseTo(counterScale(z, Z_MAX), 9);
+      expect(labelScale(z, Z_MAX) * z).toBeCloseTo(1, 9);
+    }
+  });
+
+  it('stops growing once the label fills the band it straddles', () => {
+    // The cap is derived from the frame's top padding, not picked: the label may grow until
+    // it spans that band above and below the border it sits on, and no further.
+    expect(MAX_LABEL_K).toBeCloseTo((PAD_TOP * 2) / LABEL_LINE_H, 9);
+    expect(labelScale(Z_MIN, Z_MAX)).toBe(MAX_LABEL_K);
+    expect(labelScale(0.05, Z_MAX)).toBeLessThan(counterScale(0.05, Z_MAX));
+  });
+
+  /** The property the fix is FOR, asserted as a bound on world size rather than on the scale —
+   *  the scale is the mechanism, the footprint is the promise. */
+  it('keeps the label inside its own frame at every legal zoom', () => {
+    for (let z = Z_MIN; z <= Z_MAX; z += 0.013) {
+      const worldH = LABEL_LINE_H * labelScale(z, Z_MAX);
+      expect(worldH).toBeLessThanOrEqual(PAD_TOP * 2 + 1e-9);
+    }
+  });
+
+  it('never inverts — a lower zoom is never a smaller label', () => {
+    let prev = 0;
+    for (let z = Z_MAX; z >= Z_MIN; z -= 0.05) {
+      const k = labelScale(z, Z_MAX);
+      expect(k).toBeGreaterThanOrEqual(prev - 1e-9);
+      prev = k;
+    }
+  });
+});
+
+/**
+ * The other axis. A scale ceiling cannot bound WIDTH — the text length does that — so a long
+ * tab name would still reach the frame beside it however tightly the scale were capped.
+ */
+describe('labelMaxWidth', () => {
+  it('renders no wider than the frame, whatever the scale', () => {
+    for (const frameW of [200, 372, 900]) {
+      for (const z of [Z_MIN, 0.1, 0.3, 1.0]) {
+        const k = labelScale(z, Z_MAX);
+        expect(labelMaxWidth(frameW, k) * k).toBeLessThanOrEqual(frameW);
+      }
+    }
+  });
+
+  it('leaves room for the inset rather than filling the frame edge to edge', () => {
+    expect(labelMaxWidth(372, 1)).toBeLessThan(372);
+  });
+
+  it('never returns a negative width for a frame narrower than the inset', () => {
+    // A frame can be dragged very small; a negative max-width is a CSS error, not a clamp.
+    expect(labelMaxWidth(10, 1)).toBeGreaterThanOrEqual(0);
+    expect(labelMaxWidth(0, 3)).toBeGreaterThanOrEqual(0);
+  });
+});
+
 describe('allCollapsed', () => {
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', title: id, shellType: '',
@@ -242,19 +313,78 @@ describe('allCollapsed', () => {
   });
   const tiers = (m: Record<string, LodTier>) => m;
 
-  it('is true only when every node is at group tier', () => {
-    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'group' }))).toBe(true);
-    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'chip' }))).toBe(false);
+  /** A zoom where a node chip's own label is comfortably legible, and one where it is not.
+   *  Derived from the function itself, so moving `chipFontSize` or `MIN_TITLE_PX` moves these
+   *  with it instead of leaving two hard-coded numbers to rot. */
+  const Z_LEGIBLE = 0.28;
+  const Z_TINY = 0.14;
+
+  it('found zooms that actually straddle the legibility floor', () => {
+    // Without this the whole describe can pass vacuously with both constants on one side.
+    expect(chipLabelScreenPx(Z_LEGIBLE)).toBeGreaterThanOrEqual(MIN_TITLE_PX);
+    expect(chipLabelScreenPx(Z_TINY)).toBeLessThan(MIN_TITLE_PX);
+  });
+
+  it('is true when every node is at group tier, at any zoom', () => {
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'group' }), Z_LEGIBLE)).toBe(true);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'group' }), Z_TINY)).toBe(true);
+  });
+
+  /**
+   * The band that had no readable rendering at all — reported 2026-08-17 as "in the ladder of
+   * zooming, it is too small".
+   *
+   * A node CHIP's label is bounded by the chip box, which does not counter-scale, so across
+   * the lower chip band it lands at 6.5–11 screen pixels. The group chip is the documented
+   * readable alternative and it was only shown one tier further out, so between those two
+   * points nothing on screen could be read. Collapsing on the legibility floor rather than on
+   * the tier name closes it: above the floor a node names itself, below it its group does.
+   */
+  it('collapses a chip-tier workspace only once node labels stop being legible', () => {
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'chip', b: 'chip' }), Z_TINY)).toBe(true);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'chip', b: 'chip' }), Z_LEGIBLE)).toBe(false);
+  });
+
+  it('collapses a mixed group/chip workspace on the same rule', () => {
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'chip' }), Z_TINY)).toBe(true);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'chip' }), Z_LEGIBLE)).toBe(false);
   });
 
   // D8 forces a focused node to `gpu` at any zoom, so a focused workspace is never
   // fully collapsed — collapsing it anyway would hide the one node taking keystrokes.
+  // Unchanged by the legibility rule, and that is the point of asserting it at BOTH zooms:
+  // an interactive node is exempt because of what it is, not because of how big it is.
   it('is false while one node is held interactive', () => {
-    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'gpu' }))).toBe(false);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'gpu' }), Z_LEGIBLE)).toBe(false);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'group', b: 'gpu' }), Z_TINY)).toBe(false);
+    expect(allCollapsed([n('a'), n('b')], tiers({ a: 'chip', b: 'live' }), Z_TINY)).toBe(false);
   });
 
   it('is false for an empty workspace', () => {
-    expect(allCollapsed([], tiers({}))).toBe(false);
+    expect(allCollapsed([], tiers({}), Z_TINY)).toBe(false);
+  });
+});
+
+/**
+ * The legibility number the collapse rule is built on.
+ *
+ * Split out because it is the bridge between two things that must not drift: what a node chip
+ * actually renders, and the floor every other tier is held to by `headFontSize`.
+ */
+describe('chipLabelScreenPx', () => {
+  it('reports what the chip label really lands at, in screen pixels', () => {
+    // The chip box does NOT counter-scale, so this shrinks with the zoom — which is the whole
+    // reason the tier can become unreadable while everything else holds 11px.
+    expect(chipLabelScreenPx(0.14)).toBeCloseTo(chipFontSize(0.14) * 0.14, 6);
+    expect(chipLabelScreenPx(0.14)).toBeLessThan(chipLabelScreenPx(0.28));
+  });
+
+  it('measured: the lower chip band really is below the floor', () => {
+    // The evidence behind the report. If these ever come out above MIN_TITLE_PX, the collapse
+    // rule has become dead code and should be revisited rather than left in.
+    expect(chipLabelScreenPx(0.14)).toBeLessThan(MIN_TITLE_PX);
+    expect(chipLabelScreenPx(0.20)).toBeLessThan(MIN_TITLE_PX);
+    expect(chipLabelScreenPx(0.28)).toBeGreaterThanOrEqual(MIN_TITLE_PX);
   });
 });
 
