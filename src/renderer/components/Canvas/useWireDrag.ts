@@ -6,7 +6,6 @@ import { createEdge, reconnectEdge } from '../../services/canvasGraph';
 import { worldPoint } from './canvasMutations';
 import { exceedsDragSlop } from './canvasGestures';
 import { Rect } from './canvasGeometry';
-import { CanvasModel } from './canvasSelectors';
 import {
   Side, WireEnd, pickSides, portPoint, wirePath, oppositeSide, linkTargetId, anchorOf,
   reconnectPair,
@@ -136,8 +135,14 @@ function startFromHandle(
   };
 }
 
+/**
+ * @param rects Every node's DRAWN box, keyed by terminal id — the same map `CanvasWires` is
+ *   given. Passed rather than derived from the model on purpose: a node draws shorter than its
+ *   layout rect above zoom 1, so a hook that read `model.nodes[].rect` would start its ghost
+ *   at a different point from the wire the drop creates, and the wire would jump on release.
+ */
 export function useWireDrag(
-  model: CanvasModel,
+  rects: Record<string, Rect>,
   onPortClick?: (click: PortClick) => void,
 ): WireDragState {
   const dispatch = useDispatch();
@@ -158,11 +163,10 @@ export function useWireDrag(
   const [targetId, setTargetId] = useState<string | null>(null);
 
   // Read through a ref inside listeners registered once — see `useCanvasDrag`.
-  const latest = useRef({ model, vp, edges });
-  latest.current = { model, vp, edges };
+  const latest = useRef({ rects, vp, edges });
+  latest.current = { rects, vp, edges };
 
-  const rectOf = (id: string) =>
-    latest.current.model.nodes.find((n) => n.terminalId === id)?.rect;
+  const rectOf = (id: string) => latest.current.rects[id];
 
   const onPointerDownCapture = useCallback((e: React.PointerEvent) => {
     const el = e.target as Element | null;

@@ -5,6 +5,7 @@ import {
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
   headFontSize, HEAD_FONT, MIN_TITLE_PX, MAX_HEAD_K, HEAD_GROWTH_PX,
   canvasMetrics, DEFAULT_METRICS, MIN_HOST_W, MAX_HOST_W, HOST_ASPECT,
+  CHIP_H, headSlack, paintedNodeH, paintedNodeRect,
 } from '../canvasGeometry';
 import { PAD } from '../canvasLayout';
 
@@ -809,5 +810,95 @@ describe('canvasMetrics', () => {
       const w = m.hostW * overlayGeometry({ x: 0, y: 0, z: 1 }, w0, h0, m).scale;
       expect(w).toBeGreaterThanOrEqual(NODE_W * m.zMax);
     }
+  });
+});
+
+/**
+ * What a node PAINTS, as opposed to the slot the layout gave it.
+ *
+ * `headScale` takes its growth and shrinkage out of the node's own height, because the body is
+ * pinned at `h - HEAD_H` so the terminal surface can scale into it by width. Above zoom 1 that
+ * makes a node visibly shorter than its rect — and two of Tam's reports came from consumers
+ * that did not know: the group frame wrapped the rect and carried a dead band under its bottom
+ * row, and `portPoint(r, 's')` started wires below the node's drawn edge.
+ */
+describe('paintedNodeH', () => {
+  it('is exactly the rect height where the header is at natural size', () => {
+    expect(headScale(1)).toBe(1);
+    expect(paintedNodeH(NODE_H, 1, false)).toBe(NODE_H);
+    expect(headSlack(1)).toBe(0);
+  });
+
+  it('is SHORTER than the rect above zoom 1, by the header the node gave back', () => {
+    for (const z of [1.5, 2, 3.24, 5]) {
+      const drawn = paintedNodeH(NODE_H, z, false);
+      expect({ z, shorter: drawn < NODE_H }).toEqual({ z, shorter: true });
+      // The body is untouched at every zoom — that is the constraint the whole thing exists
+      // to satisfy, and the reason the height moves at all.
+      expect(drawn - HEAD_H * headScale(z)).toBeCloseTo(BODY_H, 9);
+    }
+  });
+
+  it('is TALLER than the rect below zoom 1, where the bar grows back', () => {
+    for (const z of [0.9, 0.6, 0.3]) {
+      expect({ z, taller: paintedNodeH(NODE_H, z, false) > NODE_H }).toEqual({ z, taller: true });
+    }
+  });
+
+  /**
+   * `HEAD_GROWTH_PX` is capped by `PAD` so a growing bar cannot push the bottom row through the
+   * frame's lower border. Asserted through `paintedNodeH` rather than against the constant,
+   * because it is the DRAWN height that has to fit, and that is the number the cap is about.
+   */
+  it('never grows a node past the frame padding beneath it', () => {
+    for (let z = Z_MIN; z <= 1; z += 0.01) {
+      const over = paintedNodeH(NODE_H, z, false) - NODE_H;
+      expect({ z: z.toFixed(2), fits: over <= PAD + 1e-9 }).toEqual({ z: z.toFixed(2), fits: true });
+    }
+  });
+
+  it('is the chip height at the chip tier, whatever the zoom', () => {
+    for (const z of [0.15, 0.2, 0.28]) expect(paintedNodeH(NODE_H, z, true)).toBe(CHIP_H);
+  });
+});
+
+describe('headSlack', () => {
+  it('is how far the drawn bottom sits above the rect bottom', () => {
+    for (const z of [0.4, 1, 2, 4]) {
+      expect(NODE_H - paintedNodeH(NODE_H, z, false)).toBeCloseTo(headSlack(z), 9);
+    }
+  });
+
+  /** Sign matters more than magnitude: a consumer that subtracts it must GROW below zoom 1 and
+   *  SHRINK above, and a sign flip looks like a plausible spacing choice in both directions. */
+  it('changes sign at zoom 1, and only there', () => {
+    expect(headSlack(0.5)).toBeLessThan(0);
+    expect(headSlack(1)).toBe(0);
+    expect(headSlack(2)).toBeGreaterThan(0);
+  });
+});
+
+describe('paintedNodeRect', () => {
+  const r: Rect = { x: 100, y: 200, w: NODE_W, h: NODE_H };
+
+  it('moves the bottom edge and nothing else', () => {
+    const box = paintedNodeRect(r, 3, false);
+    expect({ x: box.x, y: box.y, w: box.w }).toEqual({ x: r.x, y: r.y, w: r.w });
+    expect(box.h).toBe(paintedNodeH(r.h, 3, false));
+  });
+
+  /**
+   * The four ports, which is why this is fed to the wire layer.
+   *
+   * North is unaffected; south follows the drawn bottom; east and west are centred on the drawn
+   * height. The `.canvas-port` dots are laid out by CSS on the drawn box, so all four had to
+   * move together — fixing only the south face would have left the side dots half a slack above
+   * their own wires.
+   */
+  it('puts every port on the drawn box, not the reserved one', () => {
+    const box = paintedNodeRect(r, 3, false);
+    expect(box.y).toBe(r.y);                                  // north: unchanged
+    expect(box.y + box.h).toBeLessThan(r.y + r.h);             // south: pulled up
+    expect(box.y + box.h / 2).toBeLessThan(r.y + r.h / 2);     // east/west: with it
   });
 });

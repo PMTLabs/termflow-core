@@ -231,6 +231,48 @@ describe('the controls hold their size on screen', () => {
 });
 
 /**
+ * Everything that POINTS AT a node uses its drawn box, not the slot the layout gave it.
+ *
+ * A node draws `headSlack(z)` shorter than its `rect` above zoom 1 (`paintedNodeH`), and two of
+ * Tam's reports were consumers that did not know. This is the join between the one definition
+ * and its users, and nothing type-checks it: `Rect` in, `Rect` out, and a caller passing the
+ * layout rect compiles and renders and is wrong by twenty world units.
+ */
+describe('the node draws where the geometry says it does', () => {
+  const NODE = code('CanvasNode.tsx');
+
+  /** The node itself must not restate the arithmetic, or the definition it is supposed to be
+   *  the source of stops being one. */
+  it('takes its own height from paintedNodeH', () => {
+    expect(NODE).toContain('const nodeH = paintedNodeH(h, zoom, isChip);');
+    expect(NODE).toContain('height: nodeH,');
+    // The chip branch moved INTO the function; a second one here would shadow it.
+    expect(NODE).not.toContain('isChip ? CHIP_H : nodeH');
+  });
+
+  /**
+   * Tam: "at a certain zoom level, the connection point doesn't touch the terminal at the
+   * bottom." `portPoint(r, 's')` returns `rect.y + rect.h`, so the fix is upstream of the wire
+   * code entirely — feed it the drawn box and all four faces land on the node.
+   */
+  it('builds the wire and mask maps from the drawn box', () => {
+    expect(MODE).toContain('const box = paintedNodeRect(n.rect, vp.z, tiers[n.terminalId] === \'chip\');');
+    expect(MODE).toContain('all[n.terminalId] = box;');
+    expect(MODE).toContain('painted[n.terminalId] = box;');
+    // Both maps, or the 30% ghost is masked to a taller rectangle than the node it is over.
+    expect(MODE).not.toContain('all[n.terminalId] = n.rect;');
+  });
+
+  /** The drag's ghost has to start where the wire it creates will, so it takes the SAME map
+   *  rather than reaching into the model for a layout rect. */
+  it('gives the drag the same rects the wires are drawn from', () => {
+    expect(MODE).toContain('useWireDrag(wireRects,');
+    expect(DRAG).toContain('const rectOf = (id: string) => latest.current.rects[id];');
+    expect(DRAG).not.toContain('model.nodes.find');
+  });
+});
+
+/**
  * The group frame paints on its DRAWN rect — Tam's second report, three screenshots of one
  * group at three zooms.
  *

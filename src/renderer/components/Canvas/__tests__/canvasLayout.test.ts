@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { NODE_W, NODE_H, Rect, headSlack } from '../canvasGeometry';
 import {
   fitGroupFrame, groupAt, arrange, seedNodePosition, framePadScale, drawnFrameRect,
   PAD, PAD_TOP, GAP, GROUP_GAP, PAD_SCREEN_MIN, PAD_SCREEN_MAX, MAX_PAD_OUTSET, GroupBox,
@@ -320,48 +320,69 @@ describe('framePadScale', () => {
 describe('drawnFrameRect', () => {
   const layout = { x: 100, y: 200, w: 400, h: 300 };
 
-  it('returns the layout rect untouched inside the band', () => {
-    // Identity, not merely equality: a frame that is not being rescaled must not churn a new
-    // object on every render.
-    expect(drawnFrameRect(layout, 1)).toBe(layout);
-  });
-
-  it('grows around the terminals rather than moving them', () => {
-    const box = drawnFrameRect(layout, 0.5);
-    const g = framePadScale(0.5) - 1;
-    // The interior — the part the terminals occupy — is the same box it was, on all four edges.
-    expect(box.x + PAD * (1 + g)).toBeCloseTo(layout.x + PAD, 6);
-    expect(box.y + PAD_TOP * (1 + g)).toBeCloseTo(layout.y + PAD_TOP, 6);
-    expect(box.x + box.w - PAD * (1 + g)).toBeCloseTo(layout.x + layout.w - PAD, 6);
-    expect(box.y + box.h - PAD * (1 + g)).toBeCloseTo(layout.y + layout.h - PAD, 6);
+  /**
+   * The frame's four gaps, measured against what the terminals DRAW rather than the slots the
+   * layout gave them.
+   *
+   * This is the assertion Tam's second report broke. `fitGroupFrame` wraps rects; a node draws
+   * `headSlack(z)` shorter than its rect above zoom 1 — so a version of this test written
+   * against the rect passes while the frame carries a dead band under its bottom row, which is
+   * exactly what shipped.
+   *
+   * Per edge, never as a width and a height: a height that is wrong only at the bottom still
+   * grows when it should grow and shrinks when it should shrink.
+   */
+  it('leaves the same gap on the left, right and bottom, and more only at the top', () => {
+    for (const z of [0.35, 0.5, 0.7, 1, 2, 4]) {
+      const box = drawnFrameRect(layout, z);
+      const k = framePadScale(z);
+      // What the terminals inside occupy on screen: `fitGroupFrame` put them `PAD`/`PAD_TOP`
+      // inside the layout rect, and the bottom row draws `headSlack` above its own rect.
+      const content = {
+        left: layout.x + PAD,
+        right: layout.x + layout.w - PAD,
+        top: layout.y + PAD_TOP,
+        bottom: layout.y + layout.h - PAD - headSlack(z),
+      };
+      const gap = {
+        left: (content.left - box.x).toFixed(6),
+        right: (box.x + box.w - content.right).toFixed(6),
+        bottom: (box.y + box.h - content.bottom).toFixed(6),
+        top: (content.top - box.y).toFixed(6),
+      };
+      expect({ z, ...gap }).toEqual({
+        z,
+        left: (PAD * k).toFixed(6),
+        right: (PAD * k).toFixed(6),
+        bottom: (PAD * k).toFixed(6),
+        top: (PAD_TOP * k).toFixed(6),
+      });
+    }
   });
 
   /**
-   * Three of the four outsets are the SIDE padding; only the top is the taller band.
+   * The bottom gap must not grow with the zoom — the whole of the second report.
    *
-   * Asserted per edge rather than as a width and a height, because the two are not the same
-   * check: a height grown by the top band alone still gets bigger, still shrinks at high zoom,
-   * and is wrong only at the bottom edge — where the frame would sit tight against the last row
-   * of terminals at the exact zooms this whole rule exists to fix.
+   * Stated as a comparison against the sides rather than as a number, because the failure was
+   * never that the bottom was some particular size. It was that the bottom alone kept a term
+   * the other three edges did not have.
    */
-  it('grows the left, right and bottom by the same amount, and only the top by more', () => {
-    for (const z of [0.35, 0.5, 0.7, 2, 4]) {
+  it('never leaves more room under the last row than beside it', () => {
+    for (let z = 0.3; z <= 6; z += 0.02) {
       const box = drawnFrameRect(layout, z);
-      const g = framePadScale(z) - 1;
-      const out = {
-        left: (layout.x - box.x).toFixed(6),
-        right: (box.x + box.w - (layout.x + layout.w)).toFixed(6),
-        bottom: (box.y + box.h - (layout.y + layout.h)).toFixed(6),
-        top: (layout.y - box.y).toFixed(6),
-      };
-      expect({ z, ...out }).toEqual({
-        z,
-        left: (PAD * g).toFixed(6),
-        right: (PAD * g).toFixed(6),
-        bottom: (PAD * g).toFixed(6),
-        top: (PAD_TOP * g).toFixed(6),
-      });
+      const side = (layout.x + PAD) - box.x;
+      const under = (box.y + box.h) - (layout.y + layout.h - PAD - headSlack(z));
+      expect({ z: z.toFixed(2), same: Math.abs(under - side) < 1e-9 })
+        .toEqual({ z: z.toFixed(2), same: true });
     }
+  });
+
+  /** At zoom 1 nothing applies: the padding is already in band and a node draws exactly its
+   *  rect. Both terms have to be zero for the identity return above to be correct. */
+  it('is the identity exactly where both corrections vanish', () => {
+    expect(headSlack(1)).toBe(0);
+    expect(framePadScale(1)).toBe(1);
+    expect(drawnFrameRect(layout, 1)).toBe(layout);
   });
 
   it('shrinks by the same rule when the zoom is high', () => {

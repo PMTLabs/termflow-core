@@ -20,7 +20,7 @@ import { NodeSnapshot } from './NodeSnapshot';
 import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
-  zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
+  paintedNodeRect, zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
@@ -242,15 +242,23 @@ export const CanvasMode: React.FC = () => {
 
   // TWO rect maps, and the split is load-bearing (see `CanvasWiresProps`): geometry needs every
   // node so a wire to an off-screen one still draws, the mask needs only the ones that paint.
+  //
+  // Both are DRAWN rects, never layout rects. A node is shorter than its `rect` above zoom 1
+  // (`paintedNodeRect`), and `portPoint` puts the south port at the rect's bottom edge — so
+  // wires used to leave from a point in the empty space below the node, while the `.canvas-port`
+  // dot the user grabs is laid out by CSS on the drawn box. Tam: *"at a certain zoom level, the
+  // connection point doesn't touch the terminal at the bottom."* Feeding the drawn box in fixes
+  // all four faces at once, because east and west are centred on the same height.
   const { wireRects, maskRects } = useMemo(() => {
     const all: Record<string, Rect> = {};
     const painted: Record<string, Rect> = {};
     for (const n of model.nodes) {
-      all[n.terminalId] = n.rect;
-      if (!isHidden(n.terminalId) && n.terminalId !== overlayId) painted[n.terminalId] = n.rect;
+      const box = paintedNodeRect(n.rect, vp.z, tiers[n.terminalId] === 'chip');
+      all[n.terminalId] = box;
+      if (!isHidden(n.terminalId) && n.terminalId !== overlayId) painted[n.terminalId] = box;
     }
     return { wireRects: all, maskRects: painted };
-  }, [model.nodes, isHidden, overlayId]);
+  }, [model.nodes, tiers, vp.z, isHidden, overlayId]);
 
   // At the snapshot tier, on screen, and not swallowed by a whole-canvas collapse. The rule
   // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
@@ -314,7 +322,7 @@ export const CanvasMode: React.FC = () => {
   const arrange = useArrange(model, edges);
 
   // Draw a connection out of a node port (Task 18).
-  const wire = useWireDrag(model, useCallback((click: PortClick) => {
+  const wire = useWireDrag(wireRects, useCallback((click: PortClick) => {
     // A port press that never moved: offer the profile list, and remember which node the new
     // terminal is being wired to. `useWireDrag` has already decided this was a click rather
     // than a drag — see `exceedsDragSlop`.

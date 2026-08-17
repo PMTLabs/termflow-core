@@ -43,6 +43,12 @@ const MODEL: CanvasModel = {
   groups: [],
 };
 
+/** The DRAWN box of every node, which is what the hook takes now — the same map `CanvasWires`
+ *  is given, so the ghost starts exactly where the wire the drop creates will. At zoom 1 the
+ *  drawn box and the layout rect coincide, which is what keeps this harness honest about the
+ *  gesture rather than about the geometry. */
+const RECTS = Object.fromEntries(MODEL.nodes.map((n) => [n.terminalId, n.rect]));
+
 let container: HTMLDivElement;
 let root: Root;
 let store: EnhancedStore;
@@ -51,7 +57,7 @@ let clicks: PortClick[];
 /** The DOM `useWireDrag` resolves against: it finds the port by `closest`, so the harness has
  *  to have the real ancestry — port inside node inside viewport. */
 const Harness: React.FC = () => {
-  const wire = useWireDrag(MODEL, (c) => { clicks.push(c); });
+  const wire = useWireDrag(RECTS, (c) => { clicks.push(c); });
   return (
     <div className="canvas-viewport" onPointerDownCapture={wire.onPointerDownCapture}>
       <div className="canvas-node" data-terminal-id="tm-a">

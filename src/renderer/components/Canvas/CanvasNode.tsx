@@ -1,5 +1,5 @@
 import React from 'react';
-import { LodTier, CHIP_H, HEAD_H, headScale, headFontSize } from './canvasGeometry';
+import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
@@ -81,7 +81,12 @@ export const CanvasNode: React.FC<{
   // The body stays EXACTLY `h - HEAD_H` tall at every zoom, which is what lets the surface
   // scale into it by width with no letterboxing. The node's own height gives up the header's
   // slack instead.
-  const nodeH = (h - HEAD_H) + headH;
+  //
+  // Taken from `paintedNodeH` rather than written out here, because the group frame and every
+  // wire endpoint now ask that function where this node ends. Restating the arithmetic is how
+  // they drift, and the drift is invisible: a frame with a dead band under it and a wire
+  // starting below the node still look like a spacing preference rather than a bug.
+  const nodeH = paintedNodeH(h, zoom, isChip);
 
   return (
     <div
@@ -102,7 +107,7 @@ export const CanvasNode: React.FC<{
         left: x,
         top: y,
         width: w,
-        height: isChip ? CHIP_H : nodeH,
+        height: nodeH,
         visibility: hidden ? 'hidden' : undefined,
         // The host's CSS box, per node. It is a replica of this terminal's PANE box, which is
         // what makes the relocation fit find the same cols/rows it already had (`plan/017`).

@@ -1,4 +1,4 @@
-import { NODE_W, NODE_H, Rect } from './canvasGeometry';
+import { NODE_W, NODE_H, Rect, headSlack } from './canvasGeometry';
 
 /**
  * Padding inside a group frame.
@@ -74,20 +74,32 @@ export function framePadScale(z: number): number {
 
 /**
  * A frame's rect as it is PAINTED: the layout rect with its padding rescaled about the
- * terminals inside it.
+ * terminals inside it, and its bottom pulled up onto the last row's DRAWN edge.
  *
  * The two paddings are rescaled by the same factor rather than clamped separately, so the top
  * band keeps the `LABEL_OVERHANG` of extra room it exists to give the label — a band clamped
  * on its own would drift out of proportion with the sides at every zoom but one.
+ *
+ * **`headSlack` is the second half of the bottom, and it is why the first fix was not enough.**
+ * `fitGroupFrame` wraps node RECTS, and a node draws shorter than its rect above zoom 1 (see
+ * `paintedNodeH`) — so the frame reserved room for height the bottom row never used, and it
+ * showed up as a dead band under it. Tam, on the padding clamp alone: *"the padding between the
+ * terminal and the group border is still big at the bottom."* Only the bottom, because that is
+ * the only edge the slack is on.
+ *
+ * The chip tier is deliberately not a parameter. A frame is drawn only while its terminals are
+ * at the snapshot tier or better — below that `allCollapsed` replaces every frame with a group
+ * chip — so a frame can never be wrapping a node that is drawing as a chip.
  */
 export function drawnFrameRect(r: Rect, z: number): Rect {
   const g = framePadScale(z) - 1;
-  if (!g) return r;
+  const slack = headSlack(z);
+  if (!g && !slack) return r;
   return {
     x: r.x - PAD * g,
     y: r.y - PAD_TOP * g,
     w: r.w + PAD * 2 * g,
-    h: r.h + (PAD_TOP + PAD) * g,
+    h: r.h + (PAD_TOP + PAD) * g - slack,
   };
 }
 

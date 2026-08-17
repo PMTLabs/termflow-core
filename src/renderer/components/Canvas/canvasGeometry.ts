@@ -73,6 +73,55 @@ export function headScale(z: number): number {
   return Math.min(MAX_HEAD_K, Math.max(1, (MIN_TITLE_PX / HEAD_FONT) / z));
 }
 
+/* ---- What a node PAINTS, as opposed to the slot it was given ---------------
+ *
+ * `headScale` moves the node's own height: the body is pinned at `h - HEAD_H` so the terminal
+ * surface can scale into it by width with no letterboxing, so the header's growth and shrinkage
+ * come out of the NODE's height instead. Above zoom 1 that makes a node visibly SHORTER than
+ * its `rect.h`; below it, slightly taller.
+ *
+ * The comment on `HEAD_GROWTH_PX` called the difference "invisible at the zooms where this
+ * applies", and Tam's screenshots are the counter-example — twice over, from one cause:
+ *
+ *   - the group frame shrink-wraps `rect`, so the leftover appeared as a dead band under the
+ *     bottom row: *"the padding between the terminal and the group border is still big at the
+ *     bottom"*;
+ *   - `portPoint(r, 's')` returns `rect.y + rect.h`, so a wire left the node from BELOW its
+ *     drawn edge: *"at a certain zoom level, the connection point doesn't touch the terminal at
+ *     the bottom"*. The `.canvas-port` dot is laid out by CSS on the drawn box, so the dot and
+ *     the wire it starts were in different places — exactly what `portPoint`'s own note says
+ *     must never happen.
+ *
+ * So "where does this node end" gets ONE definition, and `CanvasNode` computes its own height
+ * from it rather than restating the arithmetic. Anything that POINTS AT a node asks here;
+ * anything that lays nodes OUT keeps using the rect, which is zoom-free by design.
+ */
+
+/** A node's drawn height, given the height its layout reserved. */
+export function paintedNodeH(h: number, z: number, isChip: boolean): number {
+  return isChip ? CHIP_H : (h - HEAD_H) + HEAD_H * headScale(z);
+}
+
+/**
+ * How far a node's drawn bottom sits ABOVE its rect's, in world units. Negative below zoom 1,
+ * where the growing header pushes the node down past its slot instead — which is why
+ * `HEAD_GROWTH_PX` is capped by the frame's padding.
+ */
+export function headSlack(z: number): number {
+  return HEAD_H * (1 - headScale(z));
+}
+
+/**
+ * The box a node actually paints.
+ *
+ * `isChip` is required rather than defaulted: the chip tier changes the answer by more than any
+ * other case, and a caller that simply forgot it would get a plausible number instead of an
+ * error — a wire attaching a node's height below a 7-pixel chip.
+ */
+export function paintedNodeRect(r: Rect, z: number, isChip: boolean): Rect {
+  return { ...r, h: paintedNodeH(r.h, z, isChip) };
+}
+
 /**
  * The title's font size in WORLD units, floored so it never renders below `MIN_TITLE_PX`.
  *
