@@ -3,6 +3,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../store';
 import { PaneManager } from './Panes/PaneManager';
 import { setPaneTree, setActiveTabId, addTabTree, removeTabTree } from '../store/slices/panesSlice';
+import { pruneCanvasGeometry } from '../store/slices/canvasSlice';
 import './TerminalContainer.css';
 import { generateId } from '../utils/id';
 import { clearTabPanesInPlace } from '../services/tabPanesStore';
@@ -73,6 +74,7 @@ export const TerminalContainer: React.FC = () => {
   // Clean up closed tabs
   useEffect(() => {
     const currentTabIds = new Set(tabs.map(tab => tab.id));
+    let closed = false;
     Object.keys(tabPanes).forEach(tabId => {
       if (!currentTabIds.has(tabId)) {
         console.log(`TerminalContainer: Cleaning up pane tree for closed tab ${tabId}`);
@@ -95,8 +97,31 @@ export const TerminalContainer: React.FC = () => {
           console.log(`TerminalContainer: Closed tab was active, clearing pane tree`);
           dispatch(setPaneTree(null));
         }
+        closed = true;
       }
     });
+
+    // Canvas geometry for the terminals that just went away (`plan/013` Task 22). Without
+    // this it accumulates for the life of the profile, and a reused id would inherit a
+    // stranger's position. `pruneCanvasGeometry` also clears selection/focus/overlay pointing
+    // at a dead node, so this is not only housekeeping.
+    //
+    // The two id sets are built from their OWN sources and are not interchangeable even
+    // though they overlap: leaves from the pane trees, tabs from the tab list (design 011 D7).
+    // Read AFTER the deletions above so a tab closed in this same pass is already gone.
+    if (closed) {
+      const leafIds = new Set<string>();
+      const walk = (node: any): void => {
+        if (!node) return;
+        if (node.type === 'terminal' && node.terminalId) leafIds.add(node.terminalId);
+        if (Array.isArray(node.children)) node.children.forEach(walk);
+      };
+      Object.values(tabPanes).forEach(walk);
+      dispatch(pruneCanvasGeometry({
+        terminalIds: [...leafIds],
+        tabIds: tabs.map((tab) => tab.id),
+      }));
+    }
   }, [tabs, activeTabId, dispatch]);
 
   // Ensure all tabs have a pane tree initialized (in the window map AND the

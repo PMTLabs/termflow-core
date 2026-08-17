@@ -12,6 +12,91 @@ import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, hydrateCanvas } from '../store/slices/canvasSlice';
+import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
+
+/** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
+const WORLD_LIMIT = 1e6;
+
+const isRect = (r: any): boolean =>
+  !!r
+  && ['x', 'y', 'w', 'h'].every((k) => typeof r[k] === 'number' && Number.isFinite(r[k]))
+  // A zero or negative box is unusable, and unbounded coordinates make the
+  // minimap and fit maths degenerate.
+  && r.w > 0 && r.h > 0
+  && Math.abs(r.x) < WORLD_LIMIT && Math.abs(r.y) < WORLD_LIMIT
+  && r.w < WORLD_LIMIT && r.h < WORLD_LIMIT;
+
+/**
+ * Validate persisted canvas geometry and prune anything whose terminal or tab did not survive
+ * restore — a stale blob must not resurrect a phantom node.
+ *
+ * `enabled` and `focusedId` are deliberately never carried through: Canvas Mode is a TAB
+ * (`shellType === 'canvas'`), so "is the canvas showing" is a fact of `tabs` and a persisted
+ * copy of it would be a second source of truth; and the app must never boot with a terminal
+ * silently holding the keyboard.
+ *
+ * **`zMax` is a required parameter for the same reason `clampZoom` made it one.** The zoom
+ * ceiling stopped being a module constant when the host box started being sized for the
+ * display — `plan/013` Task 22 was written against the old `clampZoom(z)` and does not compile.
+ * A default here would clamp a restored viewport to some other display's ceiling, which shows
+ * up as a canvas that stops zooming early on a 4K panel: a preference, not a bug, to anyone
+ * looking at it. The caller passes the ceiling for the display the app actually opened on.
+ *
+ * The two id arrays are different identities and they OVERLAP (design 011): `terminalIds` are
+ * renderer leaves, `tabIds` are owning tabs, and a tab's first pane uses the tab's own id as
+ * its leaf — so `tb-alpha` legitimately appears in both. Each must be built from its own
+ * source; deriving one from the other keeps a phantom group alive for every solo tab, or drops
+ * the node geometry of every root pane.
+ */
+export function sanitizeCanvasState(
+  canvas: unknown,
+  terminalIds: string[],
+  tabIds: string[],
+  zMax: number,
+): CanvasPersisted | undefined {
+  if (!canvas || typeof canvas !== 'object') return undefined;
+  const c = canvas as any;
+
+  const vpRaw = c.viewport ?? {};
+  const finite = (v: any, fallback: number) =>
+    (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+  // The shared clamp, not `z > 0`: a persisted z of 9999 is finite and positive but far
+  // outside the legal range, and would restore a canvas the user cannot see anything on.
+  const viewport = {
+    x: finite(vpRaw.x, 0),
+    y: finite(vpRaw.y, 0),
+    z: clampZoom(finite(vpRaw.z, 1), zMax),
+  };
+
+  const liveNodes = new Set(terminalIds);
+  const liveTabs = new Set(tabIds);
+  const nodes: Record<string, any> = {};
+  const groups: Record<string, any> = {};
+  for (const [id, r] of Object.entries(c.nodes ?? {})) {
+    if (liveNodes.has(id) && isRect(r)) nodes[id] = r;
+  }
+  for (const [id, r] of Object.entries(c.groups ?? {})) {
+    if (liveTabs.has(id) && isRect(r)) groups[id] = r;
+  }
+
+  return {
+    viewport,
+    nodes,
+    groups,
+    sidebarOpen: typeof c.sidebarOpen === 'boolean' ? c.sidebarOpen : true,
+    sidebarWidth: Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, finite(c.sidebarWidth, 250))),
+  };
+}
+
+/** The zoom ceiling for the display this window opened on — the same derivation
+ *  `CanvasMode` freezes for the session. */
+export function restoreZMax(): number {
+  return canvasMetrics(
+    typeof window === 'undefined' ? 1920 : window.innerWidth,
+    typeof window === 'undefined' ? 1040 : window.innerHeight,
+  ).zMax;
+}
 
 export interface AppState {
   tabs: any[];
@@ -26,6 +111,10 @@ export interface AppState {
    *  resumes where it left off. Optional — state saved by older builds has no
    *  such key and must still load. */
   terminalCwds?: { [terminalId: string]: string };
+  /** Canvas Mode geometry (`plan/013` Task 22). Optional — state written by any
+   *  earlier build has no such key and must still load. Deliberately excludes
+   *  `edges`, which the backend owns and the renderer refetches. */
+  canvas?: CanvasPersisted;
 }
 
 export interface SavedLayout {
@@ -105,6 +194,15 @@ class StateManagerClass {
         // saveState also runs from `beforeunload`, where an await would mean
         // localStorage.setItem never runs.
         terminalCwds: pruneCwds(getAllCwdSnapshots(), this.collectLiveTerminalIds(state)),
+        // Only the five CanvasPersisted fields — never `edges`, which the backend owns and
+        // the renderer refetches on entering Canvas Mode, and never `enabled`/`focusedId`.
+        canvas: {
+          viewport: state.canvas.viewport,
+          nodes: state.canvas.nodes,
+          groups: state.canvas.groups,
+          sidebarOpen: state.canvas.sidebarOpen,
+          sidebarWidth: state.canvas.sidebarWidth,
+        },
       };
 
       localStorage.setItem(this.STATE_KEY, JSON.stringify(appState));
@@ -190,6 +288,27 @@ class StateManagerClass {
         await window.electronAPI?.pruneTerminalHistory?.([...keep]);
       } catch (e) {
         console.warn('StateManager: history prune skipped:', e);
+      }
+
+      // Canvas geometry (`plan/013` Task 22), before the tabs it describes exist — the
+      // reducer only stores rects, and `buildCanvasModel` reads them when it projects.
+      //
+      // The two id lists come from their OWN sources and are not interchangeable, even
+      // though they overlap: leaves from the restored pane trees, tabs from the restored
+      // tab list. Deriving one from the other keeps a phantom group alive for every solo
+      // tab, or drops the node geometry of every root pane (design 011 D7).
+      if (appState.canvas) {
+        const leafIds = new Set<string>();
+        const walkLeaves = (node: any): void => {
+          if (!node) return;
+          if (node.type === 'terminal' && node.terminalId) leafIds.add(node.terminalId);
+          if (Array.isArray(node.children)) node.children.forEach(walkLeaves);
+        };
+        Object.values(appState.tabPanes || {}).forEach(walkLeaves);
+        walkLeaves(appState.paneTree);
+        const tabIds = (appState.tabs || []).map((t: any) => t?.id).filter(Boolean);
+        const canvas = sanitizeCanvasState(appState.canvas, [...leafIds], tabIds, restoreZMax());
+        if (canvas) dispatch(hydrateCanvas(canvas));
       }
 
       // Restore tabs
