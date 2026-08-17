@@ -136,10 +136,34 @@ describe('the canvas keys', () => {
    * move by both steps at once.
    */
   it('leaves the minimap\'s arrows to the minimap', () => {
-    expect(CANVAS_KEYS).toContain("closest?.('.canvas-minimap')");
-    const bail = CANVAS_KEYS.indexOf("closest?.('.canvas-minimap')");
-    const resolve = CANVAS_KEYS.indexOf('canvasKeyAction(');
-    expect(bail).toBeLessThan(resolve);
+    expect(CANVAS_KEYS).toContain("action.do === 'pan' && el?.closest?.('.canvas-minimap')");
+  });
+
+  /**
+   * Both DOM vetoes are scoped to the ONE action they are about.
+   *
+   * A blanket bail on either element takes the other keys with it, and silently: bailing on the
+   * whole event for anything inside the minimap kills Ctrl+= while it has focus, and bailing for
+   * anything focusable kills every shortcut while the search box is empty and focused. Neither
+   * shows up as an error — the keys just stop working somewhere nobody thought to try.
+   */
+  it('scopes each veto to its own action', () => {
+    for (const veto of ['.canvas-minimap', 'FOCUSABLE_CHROME']) {
+      const line = CANVAS_KEYS.split('\n').find((l) => l.includes(veto)) ?? '';
+      expect({ veto, guarded: /action\.do === '(pan|step)'/.test(line) })
+        .toEqual({ veto, guarded: true });
+    }
+  });
+
+  /** Tab has to keep walking the controls, or the canvas is a surface you can enter and never
+   *  leave with a keyboard. `[tabindex]` is what catches the minimap, which is a plain div. */
+  it('lets Tab still reach the chrome', () => {
+    expect(CANVAS_KEYS).toContain("action.do === 'step' && el?.closest?.(FOCUSABLE_CHROME)");
+    const list = /const FOCUSABLE_CHROME = '([^']+)';/.exec(MODE);
+    expect(list).not.toBeNull();
+    for (const sel of ['button', 'input', 'textarea', '[tabindex]']) {
+      expect(list![1]).toContain(sel);
+    }
   });
 
   it('listens in the capture phase and removes what it adds', () => {
@@ -155,6 +179,107 @@ describe('the canvas keys', () => {
     expect(MODE).toContain('dispatch(panViewport({ dx, dy }));');
     expect(CANVAS_KEYS).toContain('panScreen(action.dx, action.dy);');
     expect(CANVAS_KEYS).not.toContain('vp.');
+  });
+});
+
+/**
+ * Every action the resolver can return must be acted on — derived from the union rather than
+ * listed, so the next action added is covered the day it is written.
+ *
+ * This exists because two mutants survived a full round without it: the resolver returned
+ * `{ do: 'step' }` and `{ do: 'zoom' }` and the handler dropped both on the floor. That is the
+ * worst failure shape in this file — the event has ALREADY been `preventDefault`ed by the time
+ * the dispatch runs, so an unhandled action is a key that is swallowed and does nothing at all.
+ *
+ * The compiler covers a MISSING arm (the `never` in the default case). Only a test can cover an
+ * arm that is present and inert.
+ */
+describe('the canvas acts on every action it resolves', () => {
+  const GESTURES = code(path.join(CANVAS, 'canvasGestures.ts'));
+  const UNION = GESTURES.slice(
+    GESTURES.indexOf('export type CanvasAction ='),
+    GESTURES.indexOf('export function canvasKeyAction'),
+  );
+  const ACTIONS = [...UNION.matchAll(/\{ do: '(\w+)'([^}]*)\}/g)]
+    .map((m) => ({ name: m[1], payload: m[2].trim() }));
+
+  /** One `case` arm, from its label to the next label. */
+  const armFor = (name: string): string => {
+    const at = CANVAS_KEYS.indexOf(`case '${name}':`);
+    if (at < 0) return '';
+    const rest = CANVAS_KEYS.slice(at);
+    const end = rest.slice(1).search(/\n\s*(case '|default)/);
+    return end < 0 ? rest : rest.slice(0, end + 1);
+  };
+
+  it('found the union and the switch it is checking', () => {
+    // Or every filter below is empty for the wrong reason.
+    expect(ACTIONS.length).toBeGreaterThan(3);
+    expect(ACTIONS.map((a) => a.name)).toContain('pan');
+    expect(CANVAS_KEYS).toContain('switch (action.do)');
+    // The compile-time half. Without it a NEW variant needs no arm and no test notices.
+    expect(CANVAS_KEYS).toContain('const unhandled: never = action;');
+  });
+
+  it('gives every action an arm that calls something', () => {
+    const inert = ACTIONS.filter((a) => !armFor(a.name).includes('(')).map((a) => a.name);
+    expect(inert).toEqual([]);
+  });
+
+  it('uses the payload of every action that carries one', () => {
+    // `{ do: 'step'; dir: StepDir }` acted on as `stepNode(1)` would always step forward, and
+    // Shift+Tab would look like it worked while going the wrong way.
+    const ignored = ACTIONS
+      .filter((a) => a.payload && !armFor(a.name).includes('action.'))
+      .map((a) => a.name);
+    expect(ignored).toEqual([]);
+  });
+
+  it('has an arm per action and no arm without one', () => {
+    const cases = [...CANVAS_KEYS.matchAll(/case '(\w+)':/g)].map((m) => m[1]).sort();
+    expect(cases).toEqual(ACTIONS.map((a) => a.name).sort());
+  });
+});
+
+/** Tab-stepping and the zoom keys — the sixth round. */
+describe('stepping and zooming from the keyboard', () => {
+  const STEP = callback(MODE, 'stepNode');
+  const ZOOM = callback(MODE, 'zoomKey');
+
+  it('found both callbacks', () => {
+    expect(STEP).toContain('stepNodeId(');
+    expect(ZOOM).toContain('zoomStep(');
+  });
+
+  /**
+   * Stepping must follow the SIDEBAR's order, which it does by using the same array the sidebar
+   * is built from. Sorting by position here would give the keyboard one order and the list
+   * another — neither wrong enough to notice until you tried to follow one with the other.
+   */
+  it('steps in the model\'s own order', () => {
+    expect(STEP).toContain('model.nodes.map((n) => n.terminalId)');
+    expect(STEP).not.toMatch(/\.sort\(/);
+  });
+
+  /** Only flies when the node is not already framed, and never changes the zoom. Centring a
+   *  node you can already see yanks the viewport for nothing — on a key people hold down. */
+  it('flies only when the target is off screen, at the zoom the user chose', () => {
+    expect(STEP).toContain('!isFullyVisible(vp, n.rect, size.w, size.h, FRAME_INSET)');
+    expect(STEP).toContain('centreOn(n.rect, size.w, size.h, vp.z, metrics.zMax)');
+  });
+
+  it('selects the node it steps to', () => {
+    expect(STEP).toContain('dispatch(selectNode(next));');
+  });
+
+  /** The keys reuse the BUTTONS' step, so the two cannot drift apart, and reset asks for the
+   *  factor that lands on 1:1 rather than writing the zoom directly — which keeps it anchored
+   *  on the viewport centre like every other zoom. */
+  it('shares one zoom step with the toolbar, and resets to 1:1', () => {
+    expect(ZOOM).toContain('ZOOM_STEP');
+    expect(ZOOM).toContain('1 / ZOOM_STEP');
+    expect(ZOOM).toContain('1 / vp.z');
+    expect(ZOOM).not.toContain('setViewport');
   });
 });
 

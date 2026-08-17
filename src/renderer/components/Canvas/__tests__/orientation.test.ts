@@ -1,6 +1,6 @@
 import {
   nearestGroupToCentre, minimapTransform, minimapPoint, minimapToWorld, minimapRect,
-  minimapPanStep, MINIMAP_PAN_STEP,
+  minimapPanStep, MINIMAP_PAN_STEP, stepNodeId,
   beaconFor, beaconLayout, BEACON_INSET, BEACON_SIZE,
 } from '../orientation';
 import { MINIMAP_W, MINIMAP_H } from '../CanvasMinimap';
@@ -211,6 +211,68 @@ describe('minimapPanStep', () => {
     const step = minimapPanStep(minimapTransform(workspace(40, 30), MINIMAP_W, MINIMAP_H), 1);
     expect(Number.isFinite(step)).toBe(true);
     expect(step).toBeGreaterThan(0);
+  });
+});
+
+/** Tab / Shift+Tab walk the terminals — Tam's sixth round. */
+describe('stepNodeId', () => {
+  const ids = ['a', 'b', 'c'];
+
+  it('goes to the next and the previous', () => {
+    expect(stepNodeId(ids, 'a', 1)).toBe('b');
+    expect(stepNodeId(ids, 'b', -1)).toBe('a');
+  });
+
+  /** A list you can fall off the end of makes the last press do nothing and look broken. */
+  it('wraps in both directions', () => {
+    expect(stepNodeId(ids, 'c', 1)).toBe('a');
+    expect(stepNodeId(ids, 'a', -1)).toBe('c');
+  });
+
+  /** Entering from the end you are heading TOWARDS: the first Shift+Tab picks the last
+   *  terminal, rather than jumping to the first and then going backwards from there. */
+  it('enters at the near end when nothing is selected', () => {
+    expect(stepNodeId(ids, null, 1)).toBe('a');
+    expect(stepNodeId(ids, null, -1)).toBe('c');
+  });
+
+  /** A selection whose terminal has been closed since. `indexOf` gives -1, which must enter the
+   *  list rather than throwing the press away — otherwise Tab is dead until you click something,
+   *  and closing a node is exactly when you reach for the keyboard. */
+  it('enters the list when the selection has gone', () => {
+    expect(stepNodeId(ids, 'deleted', 1)).toBe('a');
+    expect(stepNodeId(ids, 'deleted', -1)).toBe('c');
+  });
+
+  it('has nowhere to go on an empty workspace', () => {
+    expect(stepNodeId([], null, 1)).toBeNull();
+    expect(stepNodeId([], 'a', -1)).toBeNull();
+  });
+
+  it('stays put with a single terminal', () => {
+    expect(stepNodeId(['only'], 'only', 1)).toBe('only');
+    expect(stepNodeId(['only'], 'only', -1)).toBe('only');
+  });
+
+  /** Forward then back returns you to where you started, from every position — including
+   *  across the wrap, which is where an off-by-one hides. */
+  it('round-trips from every position', () => {
+    for (const id of ids) {
+      expect({ id, back: stepNodeId(ids, stepNodeId(ids, id, 1), -1) }).toEqual({ id, back: id });
+      expect({ id, fwd: stepNodeId(ids, stepNodeId(ids, id, -1), 1) }).toEqual({ id, fwd: id });
+    }
+  });
+
+  it('visits every terminal exactly once per lap', () => {
+    // Tab N times on an N-terminal workspace and you must have seen all of them and be home.
+    const seen: string[] = [];
+    let at: string | null = ids[0];
+    for (let i = 0; i < ids.length; i++) {
+      seen.push(at!);
+      at = stepNodeId(ids, at, 1);
+    }
+    expect([...seen].sort()).toEqual([...ids].sort());
+    expect(at).toBe(ids[0]);
   });
 });
 

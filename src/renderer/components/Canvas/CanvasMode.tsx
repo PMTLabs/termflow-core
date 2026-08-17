@@ -40,7 +40,7 @@ import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
-import { beaconLayout, nearestGroupToCentre } from './orientation';
+import { beaconLayout, nearestGroupToCentre, stepNodeId } from './orientation';
 import { CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
@@ -75,6 +75,19 @@ const FRAME_INSET = 130;
  * reads as a button that does not work.
  */
 const ZOOM_STEP = 1.3;
+
+/**
+ * Anything on the canvas that owns <kbd>Tab</kbd> because it is a real, focusable control.
+ *
+ * Tab steps between TERMINALS only when the press lands on the canvas itself. Taking it
+ * everywhere would strand a keyboard user: the sidebar search, the toolbar buttons and the
+ * minimap are all reachable only by tabbing to them, and a canvas that swallowed the key would
+ * be a surface you could enter and never leave.
+ *
+ * `[tabindex]` is what catches the minimap, which is a plain `div` made focusable — matching it
+ * by class would have to be updated by whoever adds the next one, and would not be.
+ */
+const FOCUSABLE_CHROME = 'button, input, select, textarea, a[href], [tabindex]';
 
 /**
  * Does this terminal still have a process?
@@ -461,6 +474,33 @@ export const CanvasMode: React.FC = () => {
   }, [flyTo, vp, size, metrics]);
 
   /**
+   * Ctrl/Cmd + `+`/`−`/`0` — the same three steps as the buttons, so a user who learns one
+   * gets the other. `reset` goes to 1:1 by asking for the factor that lands there, rather than
+   * writing `z: 1` directly, so it is anchored on the viewport centre like every other zoom.
+   */
+  const zoomKey = useCallback((intent: 'in' | 'out' | 'reset') => {
+    zoomStep(intent === 'in' ? ZOOM_STEP : intent === 'out' ? 1 / ZOOM_STEP : 1 / vp.z);
+  }, [zoomStep, vp.z]);
+
+  /**
+   * Tab / Shift+Tab step the selection through the terminals.
+   *
+   * Flown to only when it is not already framed, which is the same rule a spawn uses and for the
+   * same reason: centring a node the user can already see yanks the viewport for nothing, and
+   * doing it on every press of a key people hold down is worse. The zoom is left exactly where
+   * they put it — this is "show me the next one", not "take me somewhere".
+   */
+  const stepNode = useCallback((dir: 1 | -1) => {
+    const next = stepNodeId(model.nodes.map((n) => n.terminalId), selectedId, dir);
+    if (!next) return;
+    dispatch(selectNode(next));
+    const n = model.nodes.find((x) => x.terminalId === next);
+    if (n && !isFullyVisible(vp, n.rect, size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(n.rect, size.w, size.h, vp.z, metrics.zMax));
+    }
+  }, [model.nodes, selectedId, dispatch, vp, size, flyTo, metrics]);
+
+  /**
    * Keys the CANVAS owns — while nothing has handed the keyboard to a terminal.
    *
    * Shift+1 / Shift+2 fit (design 010 §5), `E` enlarges the selected node (Tam's item 2) and the
@@ -477,24 +517,43 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
-      // The minimap owns its own arrows, at its own scale (`minimapPanStep`). This listener is
-      // in the CAPTURE phase, so it runs BEFORE the minimap's React handler and stopping the
-      // event there would be too late — the check has to be here. It is wiring, not a rule:
-      // `canvasKeyAction` is given a narrowed key and cannot see the DOM.
-      if ((e.target as HTMLElement | null)?.closest?.('.canvas-minimap')) return;
-
       const action = canvasKeyAction(e as unknown as CanvasKey, !!selectedId);
       if (!action) return;
+
+      // Two vetoes that need the DOM, so neither can live in the rule — and both are scoped to
+      // the ONE action they are about, because a blanket bail on either element would take the
+      // other keys with it.
+      const el = e.target as HTMLElement | null;
+      // The minimap owns its own arrows, at its own scale (`minimapPanStep`). This listener is
+      // in the CAPTURE phase, so it runs BEFORE the minimap's React handler and stopping the
+      // event there would be too late.
+      if (action.do === 'pan' && el?.closest?.('.canvas-minimap')) return;
+      // Tab is how a keyboard user reaches the search box, the toolbar and the minimap. It only
+      // steps terminals when the press lands on the canvas ITSELF.
+      if (action.do === 'step' && el?.closest?.(FOCUSABLE_CHROME)) return;
+
       e.preventDefault();
       e.stopPropagation();
-      if (action.do === 'fit') (action.target === 'all' ? fitAll : fitGroup)();
-      else if (action.do === 'overlay') dispatch(setOverlayNode(selectedId));
-      else panScreen(action.dx, action.dy);
+      switch (action.do) {
+        case 'fit': (action.target === 'all' ? fitAll : fitGroup)(); break;
+        case 'overlay': dispatch(setOverlayNode(selectedId)); break;
+        case 'step': stepNode(action.dir); break;
+        case 'zoom': zoomKey(action.intent); break;
+        case 'pan': panScreen(action.dx, action.dy); break;
+        default: {
+          // Exhaustiveness, and the reason this is a switch rather than the if-chain it was:
+          // the event is ALREADY consumed by the time we get here, so an unhandled action is a
+          // key that is swallowed and does nothing — the most invisible failure this file has.
+          // Adding a variant to `CanvasAction` without an arm is now a compile error.
+          const unhandled: never = action;
+          void unhandled;
+        }
+      }
     };
     // Capture phase, matching InputHandler's ownership of global shortcuts.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [focusedId, fitAll, fitGroup, selectedId, panScreen, dispatch]);
+  }, [focusedId, fitAll, fitGroup, selectedId, panScreen, stepNode, zoomKey, dispatch]);
 
   /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
    *  render gate below, which covers the minimap in the same breath — a second `overlayId`

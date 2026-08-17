@@ -121,6 +121,32 @@ export function minimapRect(t: MinimapTransform, r: Rect): Rect {
   return { x: p.x, y: p.y, w: r.w * t.k, h: r.h * t.k };
 }
 
+/**
+ * The next terminal in reading order — <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>.
+ *
+ * `ids` is `model.nodes` in its natural order, which is tab order and then pane order inside
+ * each tab. That is not an arbitrary choice made here: it is the SAME order the sidebar lists,
+ * because the sidebar is built from the same array. Sorting by position instead — left to right,
+ * say — would give the keyboard one order and the list another, and neither would be wrong
+ * enough to notice until you tried to follow one with the other.
+ *
+ * Wraps, because a list you can fall off the end of makes the last press do nothing and look
+ * broken. Starting from no selection enters at the end you are heading towards, so the first
+ * Shift+Tab picks the LAST terminal rather than jumping to the first and going backwards.
+ */
+export function stepNodeId(
+  ids: readonly string[],
+  current: string | null,
+  dir: 1 | -1,
+): string | null {
+  if (!ids.length) return null;
+  const at = current ? ids.indexOf(current) : -1;
+  // Also covers a selection that has been closed since — `indexOf` returns -1 and this enters
+  // from the near end rather than throwing the step away.
+  if (at < 0) return dir > 0 ? ids[0] : ids[ids.length - 1];
+  return ids[(at + dir + ids.length) % ids.length];
+}
+
 /* ---- Beacons ------------------------------------------------------------- */
 
 /**

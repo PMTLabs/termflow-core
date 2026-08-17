@@ -222,6 +222,59 @@ export function panShortcut(e: CanvasKey): PanDir | null {
   return null;
 }
 
+/** Which way <kbd>Tab</kbd> steps through the terminals. */
+export type StepDir = 1 | -1;
+
+/**
+ * <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> walk the terminals in reading order.
+ *
+ * **Tab inside a terminal is still a Tab**, which is the only reason this can be Tab at all: the
+ * caller gates it on the canvas holding the keyboard, so shell completion is untouched. Modified
+ * Tabs are refused because <kbd>Ctrl</kbd>+<kbd>Tab</kbd> and
+ * <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Tab</kbd> switch app tabs (`shortcutActions`) and would
+ * otherwise mean two things at once on this one surface.
+ *
+ * One more refusal lives in the WIRING and cannot live here: Tab is how a keyboard user reaches
+ * the sidebar search, the toolbar and the minimap. When the press lands on any of those, it must
+ * keep moving focus — see `FOCUSABLE_CHROME` in `CanvasMode`. That check needs the DOM.
+ */
+export function stepShortcut(e: CanvasKey): StepDir | null {
+  if (e.ctrlKey || e.altKey || e.metaKey) return null;
+  if (inEditable(e.target)) return null;
+  if (e.code !== 'Tab' && e.key !== 'Tab') return null;
+  return e.shiftKey ? -1 : 1;
+}
+
+/** What a zoom keypress is asking the canvas for. */
+export type ZoomIntent = 'in' | 'out' | 'reset';
+
+/**
+ * <kbd>Ctrl</kbd>/<kbd>Cmd</kbd> + <kbd>+</kbd> / <kbd>−</kbd> / <kbd>0</kbd> zoom the CANVAS.
+ *
+ * **There is no conflict with the terminal's font zoom, which is why these keys are free.** The
+ * engine binds the same set through xterm's `attachCustomKeyEventHandler`, which only ever runs
+ * while xterm holds DOM focus — so it fires inside a focused terminal and nowhere else. Gated on
+ * `focusedId` by the caller, the two surfaces divide the same chord exactly the way Tam asked
+ * for: the canvas zooms the canvas, and a terminal you are editing zooms its text.
+ *
+ * The key set is copied from the engine's handler deliberately, down to the numpad codes. Two
+ * surfaces answering the same idea with different key lists is a difference nobody can see until
+ * one of them does not respond — and `=` matters most, since `+` is a shifted key on most
+ * layouts and `Ctrl+=` is what people actually press.
+ *
+ * Shift is deliberately not tested for the same reason: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>=</kbd>
+ * IS <kbd>Ctrl</kbd>+<kbd>+</kbd> on a US keyboard.
+ */
+export function zoomShortcut(e: CanvasKey): ZoomIntent | null {
+  if (!e.ctrlKey && !e.metaKey) return null;
+  if (e.altKey) return null;
+  if (inEditable(e.target)) return null;
+  if (e.key === '=' || e.key === '+' || e.code === 'Equal' || e.code === 'NumpadAdd') return 'in';
+  if (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract') return 'out';
+  if (e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0') return 'reset';
+  return null;
+}
+
 /* ---- The two resolvers -----------------------------------------------------
  *
  * The rules above answer "is this that key?". These answer "so what happens?", which is the
@@ -241,15 +294,24 @@ export function panShortcut(e: CanvasKey): PanDir | null {
 export type CanvasAction =
   | { do: 'fit'; target: FitTarget }
   | { do: 'overlay' }
-  | { do: 'pan'; dx: number; dy: number };
+  | { do: 'pan'; dx: number; dy: number }
+  | { do: 'step'; dir: StepDir }
+  | { do: 'zoom'; intent: ZoomIntent };
 
 export function canvasKeyAction(e: CanvasKey, hasSelection: boolean): CanvasAction | null {
+  // Zoom first because it is the only rule here that REQUIRES a modifier; every other one
+  // refuses Ctrl/Cmd, so the order below is a readability choice rather than a load-bearing one.
+  const intent = zoomShortcut(e);
+  if (intent) return { do: 'zoom', intent };
   const target = fitShortcut(e);
   if (target) return { do: 'fit', target };
   // `E` with nothing selected resolves to nothing AT ALL, rather than to an action the caller
   // then declines. That is what leaves the keypress untouched: an overlay opening on a terminal
   // the user never pointed at is worse than a key that did nothing.
   if (openOverlayShortcut(e)) return hasSelection ? { do: 'overlay' } : null;
+  // Unlike `E`, stepping with nothing selected is meaningful — it starts at one end.
+  const step = stepShortcut(e);
+  if (step) return { do: 'step', dir: step };
   const dir = panShortcut(e);
   if (dir) return { do: 'pan', dx: dir.dx * PAN_STEP_PX, dy: dir.dy * PAN_STEP_PX };
   return null;

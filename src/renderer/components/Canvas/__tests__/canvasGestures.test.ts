@@ -3,7 +3,7 @@ import path from 'path';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
   openOverlayShortcut, leaveTerminalShortcut, panShortcut, PAN_STEP_PX,
-  canvasKeyAction, terminalKeyAction,
+  stepShortcut, zoomShortcut, canvasKeyAction, terminalKeyAction,
   DRAG_SLOP, SpacePanKey, CanvasKey,
 } from '../canvasGestures';
 
@@ -309,6 +309,122 @@ describe('panShortcut', () => {
 });
 
 /**
+ * Tab / Shift+Tab walk the terminals — Tam's sixth round.
+ *
+ * Tab is only available because the caller gates it on the canvas holding the keyboard: inside a
+ * terminal, Tab is shell completion and must stay that way.
+ */
+describe('stepShortcut', () => {
+  const tab = (over: Partial<CanvasKey> = {}) => canvasKey({ key: 'Tab', code: 'Tab', ...over });
+
+  it('steps forward on Tab and back on Shift+Tab', () => {
+    expect(stepShortcut(tab())).toBe(1);
+    expect(stepShortcut(tab({ shiftKey: true }))).toBe(-1);
+  });
+
+  it('reads either identifier', () => {
+    expect(stepShortcut(tab({ code: '' }))).toBe(1);
+    expect(stepShortcut(tab({ key: 'Unidentified' }))).toBe(1);
+  });
+
+  /** Ctrl+Tab and Ctrl+Shift+Tab switch APP TABS (`shortcutActions`). Claiming them here would
+   *  make one chord mean two things on this surface — and the canvas is itself a tab, so the
+   *  gesture the user loses is the one that leaves it. */
+  it('refuses Ctrl+Tab, so switching app tabs still works from the canvas', () => {
+    expect(stepShortcut(tab({ ctrlKey: true }))).toBeNull();
+    expect(stepShortcut(tab({ ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(stepShortcut(tab({ metaKey: true }))).toBeNull();
+    expect(stepShortcut(tab({ altKey: true }))).toBeNull();
+  });
+
+  it('refuses in an editable target, so Tab still leaves the search box', () => {
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      expect(stepShortcut(tab({ target: { tagName } }))).toBeNull();
+    }
+    expect(stepShortcut(tab({ target: { tagName: 'DIV' } }))).toBe(1);
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['a', 'Enter', 'ArrowRight', '']) {
+      expect(stepShortcut(canvasKey({ key: k, code: k }))).toBeNull();
+    }
+  });
+});
+
+/**
+ * Ctrl/Cmd + `+`/`−`/`0` zoom the canvas — Tam's sixth round.
+ *
+ * There is no conflict with the terminal's font zoom: the engine binds the same set through
+ * xterm's `attachCustomKeyEventHandler`, which only runs while xterm holds DOM focus. The caller
+ * gates this on the canvas holding the keyboard, so the two never see the same press.
+ */
+describe('zoomShortcut', () => {
+  const z = (over: Partial<CanvasKey> = {}) =>
+    canvasKey({ key: '=', code: 'Equal', ctrlKey: true, ...over });
+
+  it('reads zoom in however the layout and keypad report it', () => {
+    expect(zoomShortcut(z())).toBe('in');
+    expect(zoomShortcut(z({ key: '+', code: '' }))).toBe('in');
+    expect(zoomShortcut(z({ key: 'Unidentified', code: 'NumpadAdd' }))).toBe('in');
+    // Ctrl+Shift+= IS Ctrl++ on a US keyboard, which is why Shift is not tested for.
+    expect(zoomShortcut(z({ shiftKey: true }))).toBe('in');
+  });
+
+  it('reads zoom out and reset', () => {
+    expect(zoomShortcut(z({ key: '-', code: 'Minus' }))).toBe('out');
+    expect(zoomShortcut(z({ key: '_', code: '' }))).toBe('out');
+    expect(zoomShortcut(z({ key: 'Unidentified', code: 'NumpadSubtract' }))).toBe('out');
+    expect(zoomShortcut(z({ key: '0', code: 'Digit0' }))).toBe('reset');
+    expect(zoomShortcut(z({ key: 'Unidentified', code: 'Numpad0' }))).toBe('reset');
+  });
+
+  it('accepts Ctrl or Cmd and needs one of them', () => {
+    expect(zoomShortcut(z({ ctrlKey: false, metaKey: true }))).toBe('in');
+    // Bare `=` is a character. Taking it would make the canvas eat a key it has no claim on.
+    expect(zoomShortcut(z({ ctrlKey: false }))).toBeNull();
+  });
+
+  it('refuses when Alt is held, so it cannot swallow a different chord', () => {
+    expect(zoomShortcut(z({ altKey: true }))).toBeNull();
+  });
+
+  it('refuses in an editable target', () => {
+    expect(zoomShortcut(z({ target: { tagName: 'INPUT' } }))).toBeNull();
+    expect(zoomShortcut(z({ target: { tagName: 'DIV' } }))).toBe('in');
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['a', '1', 'ArrowUp', 'Enter', '']) {
+      expect(zoomShortcut(canvasKey({ key: k, code: k, ctrlKey: true }))).toBeNull();
+    }
+  });
+
+  /**
+   * The engine's own handler is the reference, and the two lists must not drift. Read out of
+   * the shipped terminal-core bundle rather than restated here — a copy of the list in this
+   * file would agree with itself forever.
+   */
+  it('answers every key the terminal engine answers', () => {
+    const engine = fs.readFileSync(
+      path.resolve(__dirname, '../../../../../node_modules/@termflow/terminal-core/dist/index.js'),
+      'utf8',
+    );
+    const handler = engine.slice(
+      engine.indexOf('if (event.ctrlKey && event.type === "keydown")'),
+    ).slice(0, 1200);
+    expect(handler).toContain('handleZoom("in")');          // found the handler it is reading
+    for (const [code, want] of [
+      ['NumpadAdd', 'in'], ['NumpadSubtract', 'out'], ['Numpad0', 'reset'],
+      ['Equal', 'in'], ['Minus', 'out'], ['Digit0', 'reset'],
+    ] as const) {
+      if (!handler.includes(code)) continue;               // the engine does not bind it either
+      expect({ code, got: zoomShortcut(canvasKey({ key: 'Unidentified', code, ctrlKey: true })) })
+        .toEqual({ code, got: want });
+    }
+  });
+});
+
+/**
  * What a key the canvas owns actually DOES.
  *
  * The rules above say "is this that key?"; this says "so what happens?" — the question that used
@@ -325,6 +441,22 @@ describe('canvasKeyAction', () => {
       .toEqual({ do: 'fit', target: 'group' });
     expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED))
       .toEqual({ do: 'overlay' });
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), SELECTED))
+      .toEqual({ do: 'step', dir: 1 });
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab', shiftKey: true }), SELECTED))
+      .toEqual({ do: 'step', dir: -1 });
+    expect(canvasKeyAction(canvasKey({ key: '=', code: 'Equal', ctrlKey: true }), SELECTED))
+      .toEqual({ do: 'zoom', intent: 'in' });
+    expect(canvasKeyAction(canvasKey({ key: '-', code: 'Minus', ctrlKey: true }), SELECTED))
+      .toEqual({ do: 'zoom', intent: 'out' });
+  });
+
+  /** Unlike `E`, stepping with nothing selected is meaningful — it enters the list at one end.
+   *  Declining it would make Tab do nothing on a canvas you have not clicked yet, which is
+   *  exactly when you most want the keyboard. */
+  it('steps with nothing selected', () => {
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), NOTHING_SELECTED))
+      .toEqual({ do: 'step', dir: 1 });
   });
 
   /**
@@ -355,9 +487,21 @@ describe('canvasKeyAction', () => {
   });
 
   it('says nothing about keys it does not own', () => {
-    for (const k of ['a', 'Escape', 'Enter', 'Tab', ' ', '']) {
+    for (const k of ['a', 'Escape', 'Enter', ' ', '']) {
       expect({ k, action: canvasKeyAction(canvasKey({ key: k, code: k }), SELECTED) })
         .toEqual({ k, action: null });
+    }
+  });
+
+  /** Ctrl+Tab switches app tabs and Ctrl+E is readline's end-of-line. Neither may resolve to a
+   *  canvas action, or the canvas would shadow a binding the rest of the app owns. */
+  it('leaves the app\'s own chords alone', () => {
+    for (const k of [
+      canvasKey({ key: 'Tab', code: 'Tab', ctrlKey: true }),
+      canvasKey({ key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true }),
+      canvasKey({ key: 'e', code: 'KeyE', ctrlKey: true }),
+    ]) {
+      expect(canvasKeyAction(k, SELECTED)).toBeNull();
     }
   });
 
@@ -417,6 +561,12 @@ describe('terminalKeyAction', () => {
       canvasKey({ key: '!', code: 'Digit1', shiftKey: true }),
       canvasKey({ key: ' ', code: 'Space' }),
       canvasKey({ key: 'Enter', code: 'Enter' }),
+      // The two the sixth round added, and the two that matter most here: inside a terminal Tab
+      // is shell completion and Ctrl+= is the FONT zoom, which the engine handles itself.
+      canvasKey({ key: 'Tab', code: 'Tab' }),
+      canvasKey({ key: 'Tab', code: 'Tab', shiftKey: true }),
+      canvasKey({ key: '=', code: 'Equal', ctrlKey: true }),
+      canvasKey({ key: '-', code: 'Minus', ctrlKey: true }),
     ]) {
       expect({ key: k.key, action: terminalKeyAction(k, OVERLAY_OPEN) })
         .toEqual({ key: k.key, action: 'passthrough' });
