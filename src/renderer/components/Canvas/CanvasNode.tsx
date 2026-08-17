@@ -1,5 +1,5 @@
 import React from 'react';
-import { LodTier, CHIP_H, HEAD_H, headScale } from './canvasGeometry';
+import { LodTier, CHIP_H, HEAD_H, headScale, headFontSize } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 
@@ -127,7 +127,16 @@ export const CanvasNode: React.FC<{
           className="canvas-node-head-inner"
           style={isChip
             ? { fontSize: chipFontSize(zoom) }
-            : { height: HEAD_H, width: `${100 / k}%`, transform: `scale(${k})` }}
+            : {
+                height: HEAD_H,
+                width: `${100 / k}%`,
+                transform: `scale(${k})`,
+                // Floored so the title stays readable across the live and snapshot tiers —
+                // `headScale`'s growth is capped by the frame's padding, so the bar alone
+                // cannot hold the glyph up all the way down. Overrides the 12px in Canvas.css,
+                // which stays as the natural size and the fallback.
+                fontSize: headFontSize(zoom),
+              }}
         >
           <span className="canvas-node-title">{node.title}</span>
           {!isChip && <span className="canvas-node-shell">{node.shellType}</span>}

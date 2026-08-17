@@ -3,8 +3,10 @@ import {
   NODE_W, NODE_H, T_GPU, T_LIVE, T_SNAP, T_CHIP, MAX_GPU, MAX_INTERACTIVE,
   Z_MIN, Viewport, Rect,
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
+  headFontSize, HEAD_FONT, MIN_TITLE_PX, MAX_HEAD_K, HEAD_GROWTH_PX,
   canvasMetrics, DEFAULT_METRICS, MIN_HOST_W, MAX_HOST_W, HOST_ASPECT,
 } from '../canvasGeometry';
+import { PAD } from '../canvasLayout';
 
 // The host box is per-session now (see `canvasMetrics`), so these are the metrics of an
 // ordinary maximised window on an ordinary 1080p display — not global constants.
@@ -283,11 +285,75 @@ describe('headScale — the capped title bar', () => {
   /** What `CanvasNode` renders: the body keeps its world height, the header gives up slack. */
   const nodeWorldH = (z: number) => (NODE_H - HEAD_H) + HEAD_H * headScale(z);
 
-  it('scales with the world at and below zoom 1, like every other node part', () => {
-    for (const z of [Z_MIN, 0.3, 0.75, 1]) {
-      expect(headScale(z)).toBe(1);
-      expect(screenHead(z)).toBeCloseTo(HEAD_H * z, 9);
+  /**
+   * REPLACES "scales with the world at and below zoom 1, like every other node part".
+   *
+   * That was the shipped behaviour and it was wrong on screen: the title shrank linearly with
+   * the world across the whole live/snapshot band — 3.6 screen px at z = 0.3 — and only became
+   * legible again at the CHIP tier, where `chipFontSize` floors it at 13. The ladder ran
+   * small, then smaller, then suddenly bigger. Reported from live testing, 2026-08-16.
+   *
+   * The bar now grows back below zoom 1 instead, capped by what the group frame can absorb.
+   */
+  it('grows the bar back below zoom 1 rather than letting it vanish', () => {
+    expect(headScale(1)).toBe(1);
+    // Strictly increasing as the world shrinks, until the cap.
+    expect(headScale(0.75)).toBeGreaterThan(1);
+    expect(headScale(0.5)).toBeGreaterThan(headScale(0.75));
+    expect(headScale(Z_MIN)).toBe(MAX_HEAD_K);
+  });
+
+  /**
+   * The floor, stated as the thing the user can actually see: a glyph's size in SCREEN pixels.
+   *
+   * Checked across the band where a node draws a real title bar — from the snapshot/chip
+   * boundary up to the ceiling. Below `T_SNAP` a node is a chip and `chipFontSize` owns the
+   * label instead, which is why the sweep starts there rather than at `Z_MIN`.
+   */
+  it('never renders the title below MIN_TITLE_PX, anywhere on the ladder', () => {
+    const zChip = T_SNAP / NODE_W;
+    for (let z = zChip; z <= Z_MAX; z += 0.01) {
+      const onScreen = headFontSize(z) * headScale(z) * z;
+      expect(onScreen).toBeGreaterThanOrEqual(MIN_TITLE_PX - 1e-9);
     }
+  });
+
+  it('does not inflate the title where the natural size is already big enough', () => {
+    // The floor must be a floor, not a rescale. At and above zoom 1 the header already holds
+    // a constant on-screen size, so nothing here may change.
+    for (const z of [1, 1.5, FOCUS_ZOOM, Z_MAX]) {
+      expect(headFontSize(z)).toBe(HEAD_FONT);
+    }
+  });
+
+  it('keeps the floored glyph inside the bar that has to hold it', () => {
+    // The two halves of this fix pull opposite ways: `headScale` is CAPPED by the frame's
+    // padding, while `headFontSize` keeps growing to hold the floor. Past some zoom-out the
+    // glyph would outgrow its own bar and be clipped by `.canvas-node-head { overflow: hidden }`
+    // — silently, since the node still looks like a node. This proves it does not happen over
+    // the band where a bar is drawn.
+    //
+    // Compared against a bare `HEAD_H`, and the units are the whole reason: the font is set on
+    // `.canvas-node-head-inner`, which is `HEAD_H` tall in its OWN coordinate space and is then
+    // scaled by `k` as one element. So the glyph competes with `HEAD_H`, not with the bar's
+    // world height `HEAD_H * k` — that comparison is off by `k` and passes at every zoom below
+    // 1 while failing above it for a reason that has nothing to do with legibility.
+    const zChip = T_SNAP / NODE_W;
+    for (let z = zChip; z <= Z_MAX; z += 0.01) {
+      expect(headFontSize(z)).toBeLessThanOrEqual(HEAD_H);
+    }
+    // How much room is actually left at the tightest point, so a future change to
+    // `MIN_TITLE_PX` or `MAX_HEAD_K` that eats it shows up here as a number rather than as
+    // clipped descenders on a screenshot.
+    expect(headFontSize(zChip) / HEAD_H).toBeCloseTo(0.866, 2);
+  });
+
+  it('may not grow the node past the slack its group frame leaves underneath', () => {
+    // `HEAD_GROWTH_PX` is derived from `PAD`, in another file. Asserted rather than restated:
+    // growing the bar grows the NODE (the body is fixed), and a node taller than its frame's
+    // bottom padding draws through the frame's lower border.
+    expect(HEAD_GROWTH_PX).toBeLessThanOrEqual(PAD);
+    expect(nodeWorldH(Z_MIN) - NODE_H).toBeCloseTo(HEAD_GROWTH_PX, 9);
   });
 
   it('holds a constant HEAD_H on screen above zoom 1', () => {
@@ -359,7 +425,41 @@ describe('overlayGeometry', () => {
     for (const z of [0.5, 1, 2.5, FOCUS_ZOOM, Z_MAX]) {
       const r = rendered({ x: 0, y: 0, z }, VW, VH);
       expect(r.w).toBeCloseTo(HOST_W * r.g.scale, 6);
-      expect(r.h).toBeCloseTo(HOST_H * r.g.scale + HEAD_H * Math.min(1, z), 6);
+      // Reconstructed through `headScale`, not through the closed form `Math.min(1, z)` it
+      // used to use: that reduction was only valid while `headScale` was `1 / max(1, z)`, and
+      // restating it here meant this test and the production code could disagree about the
+      // header while both looked self-consistent.
+      expect(r.h).toBeCloseTo(HOST_H * r.g.scale + HEAD_H * headScale(z) * z, 6);
+    }
+  });
+
+  /**
+   * The overlay must FIT, and this is the only assertion here that can tell.
+   *
+   * Everything else in this describe reconstructs the drawn box from the geometry the function
+   * returned, so a change that moves `scale` and the reconstruction together passes them all —
+   * which is exactly what happened when `headScreenH` was the hard-coded `HEAD_H * min(1, z)`.
+   * That closed form was the correct reduction of `HEAD_H * headScale(z) * z` only while
+   * `headScale` was `1 / max(1, z)`; once `headScale` gained its below-1 floor the overlay
+   * started sizing itself against a header SHORTER than the one `CanvasNode` draws, and grew
+   * past the margin it is supposed to leave.
+   *
+   * Compared against the viewport rather than against the function's own numbers, so there is
+   * nothing for a consistent change to move in step.
+   */
+  it('fits inside the viewport margin at every zoom, header included', () => {
+    // Swept over viewport HEIGHTS as well as zooms, and that is what makes it bite. On a tall
+    // viewport the `Math.min(1, ...)` cap dominates and `scale` is 1 whatever the header
+    // costs — so a wrong `headScreenH` is invisible there. It only shows up where the height
+    // term is the binding one, which is any window shorter than `hostH + headScreenH`.
+    for (const vh of [820, 900, 1000, VH]) {
+      const availH = vh - OVERLAY_MARGIN * 2;
+      const availW = VW - OVERLAY_MARGIN * 2;
+      for (const z of [0.3, 0.5, 0.8, 1, 2.5, FOCUS_ZOOM, Z_MAX]) {
+        const r = rendered({ x: 0, y: 0, z }, VW, vh);
+        expect(r.h).toBeLessThanOrEqual(availH + 1e-6);
+        expect(r.w).toBeLessThanOrEqual(availW + 1e-6);
+      }
     }
   });
 

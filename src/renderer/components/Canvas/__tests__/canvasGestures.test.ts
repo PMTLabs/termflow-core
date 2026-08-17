@@ -1,5 +1,7 @@
+import fs from 'fs';
+import path from 'path';
 import {
-  shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, SpacePanKey, FitKey,
+  shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, SpacePanKey, FitKey,
 } from '../canvasGestures';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
@@ -109,5 +111,59 @@ describe('fitShortcut', () => {
     for (const k of ['3', 'a', 'Enter', '#', '']) {
       expect(fitShortcut(fit({ key: k, code: k }))).toBeNull();
     }
+  });
+});
+
+describe('wheelAction', () => {
+  const wheel = (over: Partial<{ ctrlKey: boolean; metaKey: boolean }> = {}) =>
+    ({ ctrlKey: false, metaKey: false, ...over });
+
+  it('zooms the canvas on a plain wheel', () => {
+    expect(wheelAction(wheel(), null)).toBe('zoom');
+  });
+
+  it('leaves Ctrl/Cmd+wheel alone, so font zoom keeps working', () => {
+    expect(wheelAction(wheel({ ctrlKey: true }), null)).toBe('passthrough');
+    expect(wheelAction(wheel({ metaKey: true }), null)).toBe('passthrough');
+  });
+
+  it('gives the wheel to an open overlay', () => {
+    // The overlay is that terminal at 1:1 and the thing being read, so the wheel is a
+    // scrollback scroll. Zooming as well moved the world behind it at the same time.
+    expect(wheelAction(wheel(), 'tm-1')).toBe('passthrough');
+    expect(wheelAction(wheel({ ctrlKey: true }), 'tm-1')).toBe('passthrough');
+  });
+});
+
+describe('the canvas wheel does not reach the terminals underneath', () => {
+  const SRC = fs.readFileSync(path.resolve(__dirname, '../CanvasViewport.tsx'), 'utf8');
+
+  it('listens in the CAPTURE phase', () => {
+    // The terminals are DESCENDANTS of `.canvas-viewport`, so capture is the only phase that
+    // runs before them. Bubble-phase — what this shipped as — meant xterm had already
+    // forwarded the wheel to the PTY as a mouse escape sequence before the canvas saw it.
+    expect(SRC).toMatch(/addEventListener\('wheel',\s*onWheel,\s*\{[^}]*capture:\s*true/);
+    // removeEventListener must match, or the listener leaks past unmount.
+    expect(SRC).toMatch(/removeEventListener\('wheel',\s*onWheel,\s*\{\s*capture:\s*true/);
+  });
+
+  /** The wheel handler's own body. Scoped, because `CanvasViewport` calls `stopPropagation`
+   *  in its space-pan pointerdown handler too — a file-wide `toContain` matches that one and
+   *  passes with the wheel handler stripped bare. Sliced rather than matched with a regex:
+   *  the delimiters here are newlines and braces, which is the worst case for escaping. */
+  const wheelStart = SRC.indexOf('const onWheel');
+  const wheelBody = SRC.slice(wheelStart, SRC.indexOf('};', wheelStart));
+
+  it('found the wheel handler it is reading', () => {
+    // Or every assertion below passes vacuously against an empty string.
+    expect(wheelStart).toBeGreaterThan(-1);
+    expect(wheelBody).toContain('wheelAction(');
+  });
+
+  it('stops the event once it has claimed it', () => {
+    // preventDefault alone stops the PAGE scrolling; it does not stop the terminal seeing it,
+    // which is the whole bug — a mouse-tracking TUI gets the wheel as a PTY escape sequence.
+    expect(wheelBody).toContain('e.preventDefault();');
+    expect(wheelBody).toContain('e.stopPropagation();');
   });
 });

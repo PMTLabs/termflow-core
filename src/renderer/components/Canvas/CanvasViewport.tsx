@@ -5,7 +5,7 @@ import { setViewport } from '../../store/slices/canvasSlice';
 import { Viewport, zoomAt } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
-import { shouldArmSpacePan, shouldDisarmSpacePan } from './canvasGestures';
+import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from './canvasGestures';
 
 /**
  * Pan/zoom host. Plain wheel zooms the canvas; Ctrl+wheel is deliberately NOT
@@ -49,6 +49,11 @@ export const CanvasViewport: React.FC<{
   // the session anyway (see `canvasMetrics`), so a ref is exact rather than merely convenient.
   const zMaxRef = useRef(useCanvasMetrics().zMax);
 
+  // Read through a ref for the same reason: the wheel listener is registered once, and
+  // re-registering it every time the overlay opened would drop a wheel mid-gesture.
+  const overlayIdRef = useRef<string | null>(null);
+  overlayIdRef.current = useSelector((s: RootState) => s.canvas.overlayId);
+
   // React attaches wheel listeners at the root PASSIVELY, so preventDefault() inside
   // a synthetic onWheel is a no-op and logs a console error. Attach natively instead —
   // the same thing `useSurfaceZoom` already does for the existing font-zoom gesture.
@@ -56,15 +61,22 @@ export const CanvasViewport: React.FC<{
     const el = ref.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) return; // Ctrl+wheel stays font zoom
+      // The RULE is in `canvasGestures`, testable without a DOM; this owns only the wiring.
+      // `passthrough` leaves the event completely alone — no preventDefault, no stopPropagation
+      // — so it reaches the terminal it belongs to.
+      if (wheelAction(e, overlayIdRef.current) === 'passthrough') return;
       e.preventDefault();
+      e.stopPropagation();
       const r = el.getBoundingClientRect();
       dispatch(setViewport(
         zoomAt(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top, zMaxRef.current)
       ));
     };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    // CAPTURE, for the reason above: the terminals are descendants, so this is the only phase
+    // that can run before them. The two early returns are equally deliberate — Ctrl+wheel and
+    // an open overlay both leave the event alone so it reaches the terminal it belongs to.
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => el.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions);
   }, [dispatch]);
 
   // Measure the real box rather than the window: a sidebar (Task 15) makes the two

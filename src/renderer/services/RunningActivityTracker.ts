@@ -6,6 +6,7 @@ import {
   isRunningFromEvents,
   computeRunningTabIds,
   computeUnseenUpdate,
+  canvasIsShowing,
   shouldCountForRunning,
   isSubmitInput,
   WINDOW_MS,
@@ -281,9 +282,13 @@ class RunningActivityTrackerClass {
     if (!tabId) return;
     const tabsState = store.getState().tabs;
     if (tabId === tabsState.activeTabId) return;
+    // Same rule as the unseen pass: the canvas is showing every terminal, so a process that
+    // exits while it is up exited in front of the user. Without this an exit-settled bell
+    // still rings for every tab, since none of them is the active one under D1a.
+    if (canvasIsShowing(tabsState.tabs, tabsState.activeTabId)) return;
     // Mute gate: suppress this exit-settled bell if the tab is muted, or the
     // exiting pane itself is muted (an unmuted sibling in the same tab is
-    // unaffected). Mirrors the source-mute check in computeUnseenUpdate.
+    // unaffected). Mirrors the suppression check in computeUnseenUpdate.
     const tabMuted = tabsState.tabs.some(t => t.id === tabId && t.notifyMuted);
     const paneMuted = effectiveTerminalId
       ? isTerminalMuted(store.getState().panes.treesByTabId, effectiveTerminalId)
@@ -373,11 +378,16 @@ class RunningActivityTrackerClass {
     );
     // Mute predicate: a source is muted when its tab is muted, or its own pane
     // (the leaf carrying its terminalId) is muted. Read the current trees/tabs
-    // once per tick. computeUnseenUpdate still advances the mark for muted
-    // sources, so unmuting later doesn't ring a backlog of old output.
+    // once per tick. computeUnseenUpdate still advances the mark for suppressed
+    // sources, so unmuting later — or leaving the canvas — doesn't ring a backlog.
     const mutedTabIds = new Set(tabsState.tabs.filter(t => t.notifyMuted).map(t => t.id));
     const treesByTabId = store.getState().panes.treesByTabId;
-    const isSourceMuted = (processId: string, tabId: string): boolean => {
+    // Canvas Mode shows every terminal in the window at once, so while it is the active tab
+    // NOTHING is unseen — see `canvasIsShowing` for why this is not covered by the active-tab
+    // exemption. Read once per tick rather than per source: it is a property of the window.
+    const onCanvas = canvasIsShowing(tabsState.tabs, tabsState.activeTabId);
+    const isSuppressed = (processId: string, tabId: string): boolean => {
+      if (onCanvas) return true;
       if (mutedTabIds.has(tabId)) return true;
       const terminalId = terminalService.getTerminalIdForProcess(processId);
       return terminalId ? isTerminalMuted(treesByTabId, terminalId) : false;
@@ -390,7 +400,7 @@ class RunningActivityTrackerClass {
       this.unseenMark,
       now,
       UNSEEN_DEBOUNCE_MS,
-      isSourceMuted,
+      isSuppressed,
     );
     this.unseenMark = marks;
     // Synchronized repaint burst (window resize / RDP↔console reattach / un-minimize):

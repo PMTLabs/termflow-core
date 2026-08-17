@@ -44,8 +44,49 @@ export const BODY_H = NODE_H - HEAD_H;
  * below its `rect.h` above zoom 1, so a group frame keeps the slack — invisible at the zooms
  * where this applies, and conservative (a frame never clips a node).
  */
+export const HEAD_FONT = 12;
+/** The smallest a node title may render ON SCREEN. Below this it is a texture, not a label. */
+export const MIN_TITLE_PX = 11;
+
+/**
+ * How much the title bar may grow, in world px, once it starts counter-scaling downwards.
+ *
+ * **Derived from the group frame's bottom padding, not chosen.** Growing the bar grows the
+ * node (`BODY_H` is fixed — see below), and a node is drawn INSIDE its group's frame, which
+ * `fitGroupFrame` shrink-wraps with `PAD` of slack underneath. Growing by more than that slack
+ * would push the bottom row of nodes through the frame's lower border. `canvasGeometry.test.ts`
+ * asserts this against `canvasLayout.PAD` rather than restating the number, because the two live
+ * in different files and only one of them is obviously about the other.
+ */
+export const HEAD_GROWTH_PX = 16;
+export const MAX_HEAD_K = 1 + HEAD_GROWTH_PX / HEAD_H;
+
 export function headScale(z: number): number {
-  return 1 / Math.max(1, z);
+  // Above zoom 1: counter-scale exactly, so the bar holds a constant on-screen size and every
+  // pixel the zoom adds goes to the terminal.
+  if (z >= 1) return 1 / z;
+  // Below it the bar used to scale with the world, which is what made the title unreadable
+  // across the whole live/snapshot band: at z = 0.3 a 12px label renders at 3.6 screen px, and
+  // it only became legible again at the CHIP tier, where `chipFontSize` floors it at 13. The
+  // ladder therefore ran small -> smaller -> suddenly bigger. So the bar grows back here too,
+  // capped by what the frame can absorb.
+  return Math.min(MAX_HEAD_K, Math.max(1, (MIN_TITLE_PX / HEAD_FONT) / z));
+}
+
+/**
+ * The title's font size in WORLD units, floored so it never renders below `MIN_TITLE_PX`.
+ *
+ * The bar alone cannot fix this. `headScale` is capped at `MAX_HEAD_K` by the frame's padding,
+ * so past a certain zoom-out the bar stops growing while the world keeps shrinking — and the
+ * text inside it would resume shrinking with it. This compensates in the other direction.
+ *
+ * On screen the glyph measures `headFontSize(z) * headScale(z) * z`, and by construction that
+ * is `max(HEAD_FONT * k * z, MIN_TITLE_PX)` — exactly floored, never inflated above the natural
+ * size at the zooms where the natural size is already big enough.
+ */
+export function headFontSize(z: number): number {
+  const k = headScale(z);
+  return Math.max(HEAD_FONT, MIN_TITLE_PX / (k * z));
 }
 
 /**
@@ -296,9 +337,11 @@ export interface OverlayGeometry {
 export function overlayGeometry(vp: Viewport, vw: number, vh: number, m: SurfaceBox): OverlayGeometry {
   const availW = Math.max(1, vw - OVERLAY_MARGIN * 2);
   const availH = Math.max(1, vh - OVERLAY_MARGIN * 2);
-  // The header's SCREEN height, which is `HEAD_H` wherever the cap is in force and shrinks
-  // with the world below zoom 1 — `HEAD_H * headScale(z) * z` reduced.
-  const headScreenH = HEAD_H * Math.min(1, vp.z);
+  // The header's SCREEN height. Expressed through `headScale` rather than reduced by hand:
+  // this used to read `HEAD_H * Math.min(1, vp.z)`, which was the correct reduction only while
+  // `headScale` was `1 / max(1, z)`. It now floors below zoom 1, so the closed form silently
+  // became wrong — the overlay would fit itself against a header shorter than the one drawn.
+  const headScreenH = HEAD_H * headScale(vp.z) * vp.z;
   // Floored at `SURFACE_SCALE`, which is the scale at which the host renders exactly `NODE_W`
   // wide — an "overlay" narrower than an ordinary node is not enlarged in any sense, and
   // without the floor a viewport shorter than the header alone drives the fit term NEGATIVE

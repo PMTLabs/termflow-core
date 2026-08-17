@@ -1,3 +1,5 @@
+import { CANVAS_SHELL_TYPE } from './tabKinds';
+
 /** Tunable output-rate heuristic constants for the "running" indicator. */
 export const WINDOW_MS = 1000;        // trailing window for the rate measure
 export const EVAL_INTERVAL_MS = 400;  // how often the tracker re-evaluates
@@ -179,15 +181,46 @@ export interface UnseenInput {
  * process (its pane tree not seeded yet) is left un-marked so a later tick
  * retries it — preserving the late-seeding catch.
  *
- * MUTE: `isSourceMuted(processId, tabId)` reports whether notifications are
- * muted for this output source (its tab is muted, or its own pane is muted). A
- * muted source is excluded from `toFlag` (no bell / toast / OS notification /
- * chime — everything downstream hangs off the flag) but its mark STILL advances,
- * exactly like the active-tab case, so unmuting later never rings a backlog of
- * old output. Defaults to "never muted" for callers/tests that don't pass it.
+ * SUPPRESSION: `isSuppressed(processId, tabId)` reports whether this output must
+ * not raise a notification. Two unrelated reasons share the mechanism because
+ * they need identical handling:
+ *
+ *   - the source is MUTED (its tab is muted, or its own pane is muted); or
+ *   - CANVAS MODE IS SHOWING, in which case the user is looking at every terminal
+ *     at once and nothing is unseen (see `canvasIsShowing`).
+ *
+ * A suppressed source is excluded from `toFlag` (no bell / toast / OS notification
+ * / chime — everything downstream hangs off the flag) but its mark STILL advances,
+ * exactly like the active-tab case, so leaving the canvas — or unmuting later —
+ * never rings a backlog of output the user has already watched go by. Defaults to
+ * "never suppressed" for callers/tests that don't pass it.
  *
  * Pure: takes the current marks, returns a NEW marks map (no mutation).
  */
+/**
+ * Is Canvas Mode the tab on screen?
+ *
+ * **The reason this exists.** "Unseen output" is defined against a SINGLE active tab, which was
+ * right while the canvas was a full-screen overlay: the user's terminal tab stayed active behind
+ * it and stayed exempt. Under `design/010` D1a the canvas is itself a tab, so the moment it is
+ * opened NO terminal tab is active — and every running terminal starts ringing the unseen bell,
+ * firing a toast and a chime, while the user is looking straight at it on the canvas. Reported
+ * from live testing, 2026-08-16: "very annoying".
+ *
+ * The canvas shows every terminal in the window at once, so while it is up, "seen" is not one
+ * tab — it is all of them.
+ *
+ * Takes the tab list rather than a `shellType` so the caller cannot pass the wrong tab's kind;
+ * `activeTabId` is looked up here.
+ */
+export function canvasIsShowing(
+  tabs: readonly { id: string; shellType?: string | null }[],
+  activeTabId: string | null,
+): boolean {
+  if (!activeTabId) return false;
+  return tabs.some((t) => t.id === activeTabId && t.shellType === CANVAS_SHELL_TYPE);
+}
+
 export function computeUnseenUpdate(
   outputs: UnseenInput[],
   resolveTab: (processId: string) => string | null,
@@ -196,7 +229,7 @@ export function computeUnseenUpdate(
   marks: Map<string, number>,
   now: number,
   debounceMs: number,
-  isSourceMuted: (processId: string, tabId: string) => boolean = () => false,
+  isSuppressed: (processId: string, tabId: string) => boolean = () => false,
 ): { toFlag: string[]; marks: Map<string, number>; causalByTab: Map<string, number> } {
   const nextMarks = new Map(marks);
   const toFlag = new Set<string>();
@@ -211,9 +244,10 @@ export function computeUnseenUpdate(
     if (!tabId) continue; // unresolved → retry next tick, do NOT advance the mark
     nextMarks.set(processId, newest); // resolved + settled → this output is now accounted for
     if (tabId === activeTabId || alreadyUnseen.has(tabId)) continue;
-    // Muted source: mark already advanced above (so no backlog ring on unmute),
-    // but suppress every notification surface by never flagging the tab.
-    if (isSourceMuted(processId, tabId)) continue;
+    // Suppressed source (muted, or the canvas is showing every terminal at once): the mark
+    // was already advanced above, so nothing rings in arrears; the tab is simply never
+    // flagged, which turns off every notification surface downstream of the flag.
+    if (isSuppressed(processId, tabId)) continue;
     toFlag.add(tabId);
     causalByTab.set(tabId, Math.max(causalByTab.get(tabId) ?? 0, newest));
   }

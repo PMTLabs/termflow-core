@@ -45,6 +45,37 @@ export function shouldArmSpacePan(e: SpacePanKey, focusedNodeId: string | null):
   return true;
 }
 
+/**
+ * Who owns a wheel over the canvas.
+ *
+ * `'zoom'` — the canvas takes it: `preventDefault`, `stopPropagation`, change the viewport.
+ * `'passthrough'` — leave the event completely alone so it reaches the terminal underneath.
+ *
+ * Both refusals are about a wheel that already means something to the terminal, and the
+ * `stopPropagation` on the accept path is about the opposite mistake:
+ *
+ *  - **Ctrl/Cmd+wheel is font zoom** inside a focused terminal (design 010 §4.1), and has been
+ *    since long before the canvas existed.
+ *  - **An open overlay owns the wheel.** The overlay is that terminal at 1:1 and the thing the
+ *    user is reading, so a wheel there is a scrollback scroll. Zooming as well made one gesture
+ *    do two things — scroll the terminal AND move the world behind it.
+ *  - **When the canvas does take it, the terminals must not also see it.** A terminal in
+ *    mouse-tracking mode (vim, codex, any ratatui app) forwards a wheel to the PTY as a mouse
+ *    escape sequence, the app redraws, and that redraw is real output — so a plain zoom made
+ *    the terminal's content change and rang the unseen bell, the chime and a toast. Reported
+ *    from live testing, 2026-08-16.
+ */
+export type WheelAction = 'zoom' | 'passthrough';
+
+export function wheelAction(
+  e: { ctrlKey: boolean; metaKey: boolean },
+  overlayId: string | null,
+): WheelAction {
+  if (e.ctrlKey || e.metaKey) return 'passthrough';
+  if (overlayId) return 'passthrough';
+  return 'zoom';
+}
+
 /** Which fit a keypress is asking for, or `null` when it is not asking for one. */
 export type FitTarget = 'all' | 'group';
 
