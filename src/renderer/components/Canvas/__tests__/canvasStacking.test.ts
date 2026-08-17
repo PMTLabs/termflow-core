@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * What keeps Canvas Mode's paint honest, now that it is a TAB rather than an overlay.
@@ -25,12 +26,12 @@ import path from 'path';
 
 const RENDERER = path.resolve(__dirname, '../../..');
 
-const read = (rel: string) => fs.readFileSync(path.join(RENDERER, rel), 'utf8');
+const read = (rel: string) => readSource(path.join(RENDERER, rel));
 
 /** Every `z-index: N` DECLARATION in a file. Prose mentions of z-index in comments
  *  have no colon and are correctly ignored. */
 function zIndexesIn(file: string): number[] {
-  return [...fs.readFileSync(file, 'utf8').matchAll(/z-index:\s*(-?\d+)/g)].map((m) => Number(m[1]));
+  return [...readSource(file).matchAll(/z-index:\s*(-?\d+)/g)].map((m) => Number(m[1]));
 }
 
 /**
@@ -170,7 +171,7 @@ describe('app-level modals escape their caller', () => {
     return fs.readdirSync(UI)
       .filter((n) => n.endsWith('.css'))
       .filter((n) => {
-        const css = fs.readFileSync(path.join(UI, n), 'utf8');
+        const css = readSource(path.join(UI, n));
         return /position:\s*fixed/.test(css) && zIndexesIn(path.join(UI, n)).some((z) => z >= 1000);
       });
   }
@@ -186,7 +187,7 @@ describe('app-level modals escape their caller', () => {
     for (const css of overlayStylesheets()) {
       const tsx = path.join(UI, css.replace(/\.css$/, '.tsx'));
       if (!fs.existsSync(tsx)) continue;
-      if (!/createPortal/.test(fs.readFileSync(tsx, 'utf8'))) offenders.push(path.basename(tsx));
+      if (!/createPortal/.test(readSource(tsx))) offenders.push(path.basename(tsx));
     }
     expect(offenders).toEqual([]);
   });

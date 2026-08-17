@@ -1,4 +1,3 @@
-import fs from 'fs';
 import path from 'path';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
@@ -6,6 +5,7 @@ import {
   stepShortcut, zoomShortcut, canvasKeyAction, terminalKeyAction,
   DRAG_SLOP, SpacePanKey, CanvasKey,
 } from '../canvasGestures';
+import { readSource } from '../../../utils/readSource';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
   ({ key: ' ', code: 'Space', repeat: false, target: null, ...over });
@@ -405,10 +405,7 @@ describe('zoomShortcut', () => {
    * file would agree with itself forever.
    */
   it('answers every key the terminal engine answers', () => {
-    const engine = fs.readFileSync(
-      path.resolve(__dirname, '../../../../../node_modules/@termflow/terminal-core/dist/index.js'),
-      'utf8',
-    );
+    const engine = readSource(path.resolve(__dirname, '../../../../../node_modules/@termflow/terminal-core/dist/index.js'));
     const handler = engine.slice(
       engine.indexOf('if (event.ctrlKey && event.type === "keydown")'),
     ).slice(0, 1200);
@@ -598,7 +595,7 @@ describe('wheelAction', () => {
 });
 
 describe('the canvas wheel does not reach the terminals underneath', () => {
-  const SRC = fs.readFileSync(path.resolve(__dirname, '../CanvasViewport.tsx'), 'utf8');
+  const SRC = readSource(path.resolve(__dirname, '../CanvasViewport.tsx'));
 
   it('listens in the CAPTURE phase', () => {
     // The terminals are DESCENDANTS of `.canvas-viewport`, so capture is the only phase that

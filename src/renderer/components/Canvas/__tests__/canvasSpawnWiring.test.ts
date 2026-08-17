@@ -10,13 +10,13 @@
  * Comment-stripped before matching, same as `canvasCloseWiring.test.ts`: three tests in this
  * plan have been satisfied by their own explanatory prose.
  */
-import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 const CANVAS = path.resolve(__dirname, '..');
 
 function code(file: string): string {
-  return fs.readFileSync(file, 'utf8')
+  return readSource(file)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }

@@ -1,5 +1,4 @@
 /** @jest-environment jsdom */
-import fs from 'fs';
 import path from 'path';
 import { FitAddon } from '@xterm/addon-fit';
 
@@ -11,6 +10,7 @@ jest.mock('@termflow/terminal-core', () => ({ terminalCache: fakeCache }));
 
 // eslint-disable-next-line import/first
 import { measureHostBox, clearHostBoxes, _hostBoxCount } from '../canvasHostBoxes';
+import { readSource } from '../../../utils/readSource';
 
 const FALLBACK = { w: 1600, h: 680 };
 
@@ -210,7 +210,7 @@ describe('a host that matches the pane makes the relocation fit a no-op', () => 
  */
 describe('the CSS chain that makes the replica exact', () => {
   const read = (p: string) =>
-    fs.readFileSync(path.resolve(__dirname, p), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    readSource(path.resolve(__dirname, p)).replace(/\/\*[\s\S]*?\*\//g, '');
   const CANVAS = read('../Canvas.css');
   const DISPLAY = read('../../Terminal/TerminalDisplay.css');
 
@@ -278,7 +278,7 @@ describe('the CSS chain that makes the replica exact', () => {
  * built regex: a mis-escaped dynamic pattern matches nothing and passes while checking nothing.
  */
 describe('CanvasMode passes each node its own box', () => {
-  const SRC = fs.readFileSync(path.resolve(__dirname, '../CanvasMode.tsx'), 'utf8');
+  const SRC = readSource(path.resolve(__dirname, '../CanvasMode.tsx'));
 
   it('measures a box per node', () => {
     expect(SRC).toContain('measureHostBox(n.terminalId');

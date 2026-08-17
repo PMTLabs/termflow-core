@@ -5,6 +5,7 @@ import {
   fitGroupFrame, groupAt, arrange, seedNodePosition,
   PAD, PAD_TOP, GAP, GROUP_GAP, GroupBox,
 } from '../canvasLayout';
+import { readSource } from '../../../utils/readSource';
 
 const at = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
 
@@ -201,10 +202,7 @@ describe('seedNodePosition', () => {
  * label sits. Restyling the label without revisiting the padding is what this catches.
  */
 describe('group frame top padding clears the label, and no more', () => {
-  const CSS = fs.readFileSync(
-    path.resolve(__dirname, '../Canvas.css'),
-    'utf8',
-  ).replace(/\/\*[\s\S]*?\*\//g, '');
+  const CSS = readSource(path.resolve(__dirname, '../Canvas.css')).replace(/\/\*[\s\S]*?\*\//g, '');
 
   const label = (() => {
     const m = CSS.match(/\.canvas-glabel\s*\{([^}]*)\}/);

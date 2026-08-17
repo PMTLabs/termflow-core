@@ -1,5 +1,5 @@
-import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * The two placement decisions Task 23's minimap and beacons depend on, derived from source.
@@ -11,7 +11,7 @@ import path from 'path';
  */
 
 const dir = path.resolve(__dirname, '..');
-const src = (f: string) => fs.readFileSync(path.join(dir, f), 'utf8');
+const src = (f: string) => readSource(path.join(dir, f));
 
 const MODE = src('CanvasMode.tsx');
 const VIEWPORT = src('CanvasViewport.tsx');
@@ -123,8 +123,8 @@ describe('orientation chrome goes in the viewport slot, not the world', () => {
  */
 describe('the nearest-group marker is added to the active highlight, not swapped for it', () => {
   const TABS = path.resolve(__dirname, '../../Tabs');
-  const TSX = fs.readFileSync(path.join(TABS, 'TabManager.tsx'), 'utf8');
-  const CSS = fs.readFileSync(path.join(TABS, 'TabManager.css'), 'utf8');
+  const TSX = readSource(path.join(TABS, 'TabManager.tsx'));
+  const CSS = readSource(path.join(TABS, 'TabManager.css'));
 
   it('leaves the active-tab highlight alone', () => {
     // The half of §5.1 that is invisible in a diff: `active` must still be driven by

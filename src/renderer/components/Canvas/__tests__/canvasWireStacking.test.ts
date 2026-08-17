@@ -1,5 +1,5 @@
-import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * The two wire layers must actually straddle the nodes.
@@ -17,7 +17,7 @@ import path from 'path';
  * node rules the file actually contains, and a new one is covered the day it is written.
  */
 
-const CSS = fs.readFileSync(path.resolve(__dirname, '../Canvas.css'), 'utf8')
+const CSS = readSource(path.resolve(__dirname, '../Canvas.css'))
   .replace(/\/\*[\s\S]*?\*\//g, '');
 
 interface Rule { selector: string; z: number }

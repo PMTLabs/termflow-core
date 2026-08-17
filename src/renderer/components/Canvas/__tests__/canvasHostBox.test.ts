@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { NODE_W, NODE_H, HEAD_H } from '../canvasGeometry';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * Task 9 mounts the live terminal host inside `.canvas-node-body`. Under a
@@ -47,7 +48,7 @@ interface Rule { file: string; selector: string; body: string }
 /** Every top-level `selector { ... }` rule in a file. At-rule blocks (`@media`) are
  *  entered rather than skipped, so a `display: none` nested inside one is still seen. */
 function rulesIn(file: string): Rule[] {
-  const css = fs.readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const css = readSource(file).replace(/\/\*[\s\S]*?\*\//g, '');
   const out: Rule[] = [];
   for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const selector = m[1].trim();
@@ -146,13 +147,13 @@ describe('terminal host box is constant', () => {
   // `.canvas-mode` in the stylesheet itself, where it needs no round trip through React. What
   // must never happen is a variable with NEITHER — which is what this actually asserts.
   it('has every canvas variable it consumes supplied by CanvasMode or by the stylesheet', () => {
-    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    const css = readSource(CANVAS_CSS);
     const consumed = new Set(
       [...css.matchAll(/var\((--canvas-[a-z-]+)/g)].map((m) => m[1]),
     );
     expect(consumed.size).toBeGreaterThan(0);
 
-    const tsx = fs.readFileSync(path.join(RENDERER, 'components/Canvas/CanvasMode.tsx'), 'utf8');
+    const tsx = readSource(path.join(RENDERER, 'components/Canvas/CanvasMode.tsx'));
     const provided = new Set([
       ...[...tsx.matchAll(/'(--canvas-[a-z-]+)':/g)].map((m) => m[1]),
       // A DECLARATION, not a `var()` reference: anchored to the start of a declaration so
@@ -175,7 +176,7 @@ describe('terminal host box is constant', () => {
   // variables — but a stale one is a wrong number sitting in the file waiting to be read
   // as authoritative. Derive them from the TypeScript constants instead of trusting them.
   it('keeps its variable fallbacks equal to the TypeScript constants', () => {
-    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    const css = readSource(CANVAS_CSS);
     const fallbacks: Record<string, number> = {
       '--canvas-node-w': NODE_W,
       '--canvas-node-h': NODE_H,
@@ -211,7 +212,7 @@ describe('terminal host box is constant', () => {
    * is the case where being plausibly wrong is worse than failing.
    */
   it('gives the per-session host variables no literal fallback', () => {
-    const css = fs.readFileSync(CANVAS_CSS, 'utf8');
+    const css = readSource(CANVAS_CSS);
     for (const name of ['--canvas-host-w', '--canvas-host-h', '--canvas-surface-scale']) {
       expect(css).toContain(`var(${name})`);
       // Substring, not a built regex: the name is full of metacharacters, and a mis-escaped

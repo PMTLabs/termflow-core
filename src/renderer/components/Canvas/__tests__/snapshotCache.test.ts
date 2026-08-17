@@ -1,6 +1,6 @@
-import fs from 'fs';
 import path from 'path';
 import { SnapshotCache, SNAPSHOT_TTL_MS, isUsableSnapshot, stripAnsi } from '../snapshotCache';
+import { readSource } from '../../../utils/readSource';
 
 const entry = (t: number) => ({ ansi: 'x', rows: 24, cols: 80, fetchedAt: t });
 
@@ -175,7 +175,7 @@ describe('stripAnsi', () => {
  * passes while checking nothing.
  */
 describe('snapshot tier wiring', () => {
-  const src = (f: string) => fs.readFileSync(path.resolve(__dirname, f), 'utf8');
+  const src = (f: string) => readSource(path.resolve(__dirname, f));
   const MODE = src('../CanvasMode.tsx');
   const SNAP = src('../NodeSnapshot.tsx');
 

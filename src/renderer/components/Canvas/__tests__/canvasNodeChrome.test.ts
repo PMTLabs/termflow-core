@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * Node chrome holds a constant on-screen size once the zoom passes 1.
@@ -20,10 +21,7 @@ import path from 'path';
  * applying `--node-k` there would scale them twice.
  */
 
-const CSS = fs.readFileSync(
-  path.resolve(__dirname, '../Canvas.css'),
-  'utf8',
-).replace(/\/\*[\s\S]*?\*\//g, '');
+const CSS = readSource(path.resolve(__dirname, '../Canvas.css')).replace(/\/\*[\s\S]*?\*\//g, '');
 
 interface Rule { selector: string; body: string }
 

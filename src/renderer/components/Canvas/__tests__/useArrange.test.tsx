@@ -16,7 +16,6 @@
  *
  * `react-dom/client` + `React.act` directly; the repo has no `@testing-library/react`.
  */
-import fs from 'fs';
 import path from 'path';
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
@@ -27,6 +26,7 @@ import { useArrange } from '../useArrange';
 import { arrangeTarget, ARRANGE_MS } from '../animateLayout';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
 import type { CanvasModel, CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
+import { readSource } from '../../../utils/readSource';
 
 const node = (terminalId: string, tabId: string, rect: Rect): CanvasNodeModel => ({
   terminalId, tabId, paneId: `pn-${terminalId}`, title: terminalId, shellType: 'zsh',
@@ -303,7 +303,7 @@ describe('useArrange — unmount', () => {
  * on screen.
  */
 describe('Arrange button wiring', () => {
-  const src = (f: string) => fs.readFileSync(path.resolve(__dirname, f), 'utf8');
+  const src = (f: string) => readSource(path.resolve(__dirname, f));
   const MODE = src('../CanvasMode.tsx');
   const CSS = src('../Canvas.css');
 
@@ -345,7 +345,7 @@ describe('Arrange button wiring', () => {
    * out the un-optimised grid. Both halves of the handoff need their own assertion.
    */
   it('forwards those edges into the layout target', () => {
-    const HOOK = fs.readFileSync(path.resolve(__dirname, '../useArrange.ts'), 'utf8');
+    const HOOK = readSource(path.resolve(__dirname, '../useArrange.ts'));
     expect(HOOK).toContain('arrangeTarget(latest.current, latestEdges.current)');
     // Through a ref like the model, so the callback keeps the stable identity the toolbar needs.
     expect(HOOK).toContain('latestEdges.current = edges;');

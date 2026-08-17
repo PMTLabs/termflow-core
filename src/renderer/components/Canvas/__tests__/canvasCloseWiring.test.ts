@@ -12,6 +12,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 const CANVAS = path.resolve(__dirname, '..');
 const PANES = path.resolve(__dirname, '../../Panes');
@@ -19,7 +20,7 @@ const PANES = path.resolve(__dirname, '../../Panes');
 /** Source with block and line comments removed. Not a parser — but it does not need to be, and
  *  the failure mode it exists to stop is prose, not clever code. */
 function code(file: string): string {
-  return fs.readFileSync(file, 'utf8')
+  return readSource(file)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }

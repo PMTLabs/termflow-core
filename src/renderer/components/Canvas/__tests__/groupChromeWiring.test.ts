@@ -6,20 +6,20 @@
  * by their own explanatory prose, and this one polices identifiers that its own doc block
  * names.
  */
-import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 const CANVAS = path.resolve(__dirname, '..');
 
 function code(file: string): string {
-  return fs.readFileSync(file, 'utf8')
+  return readSource(file)
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|[^:])\/\/.*$/gm, '$1');
 }
 
 const FRAME = code(path.join(CANVAS, 'CanvasGroupFrame.tsx'));
 const MODE = code(path.join(CANVAS, 'CanvasMode.tsx'));
-const CSS = fs.readFileSync(path.join(CANVAS, 'Canvas.css'), 'utf8');
+const CSS = readSource(path.join(CANVAS, 'Canvas.css'));
 
 describe('the label is capped and the chip is not', () => {
   /**

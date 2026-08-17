@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { isVirtualTab, SETTINGS_SHELL_TYPE, CANVAS_SHELL_TYPE } from '../tabKinds';
+import { readSource } from '../../utils/readSource';
 
 describe('isVirtualTab', () => {
   it('covers both screen tabs and nothing else', () => {
@@ -85,7 +86,7 @@ describe('nothing compares shellType to a bare string literal', () => {
   it('has no such comparison left anywhere in the renderer', () => {
     const offenders: string[] = [];
     for (const file of files) {
-      const src = stripComments(fs.readFileSync(file, 'utf8'));
+      const src = stripComments(readSource(file));
       for (const m of src.matchAll(COMPARISON)) {
         offenders.push(`${path.relative(RENDERER, file)}: ${m[0]}`);
       }

@@ -1,5 +1,5 @@
-import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../../utils/readSource';
 
 /**
  * The Settings gear must outgrow the window glyphs it sits beside.
@@ -16,9 +16,9 @@ import path from 'path';
  */
 
 const dir = path.resolve(__dirname, '..');
-const CSS = fs.readFileSync(path.join(dir, 'TitleBar.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-const GEAR = fs.readFileSync(path.join(dir, 'GearIcon.tsx'), 'utf8');
-const BAR = fs.readFileSync(path.join(dir, 'TitleBar.tsx'), 'utf8');
+const CSS = readSource(path.join(dir, 'TitleBar.css')).replace(/\/\*[\s\S]*?\*\//g, '');
+const GEAR = readSource(path.join(dir, 'GearIcon.tsx'));
+const BAR = readSource(path.join(dir, 'TitleBar.tsx'));
 
 const pxIn = (selector: string, prop: string): number => {
   const rule = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`);

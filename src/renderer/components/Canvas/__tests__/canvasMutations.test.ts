@@ -1,4 +1,3 @@
-import fs from 'fs';
 import path from 'path';
 import {
   findPaneIdByTerminalId, planRegroup, moveGroupBy, worldDelta, dropTargetTabId, regridGroup,
@@ -8,6 +7,7 @@ import panesReducer, {
   PaneNode, removePaneFromTab, insertPaneIntoTab,
 } from '../../../store/slices/panesSlice';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { readSource } from '../../../utils/readSource';
 
 const trees = (): Record<string, PaneNode> => ({
   'tb-a': {
@@ -403,7 +403,7 @@ describe('regridGroup', () => {
  * pin the handful of choices that would silently undo the pure logic above.
  */
 describe('drag wiring', () => {
-  const src = (f: string) => fs.readFileSync(path.resolve(__dirname, f), 'utf8');
+  const src = (f: string) => readSource(path.resolve(__dirname, f));
   const DRAG = src('../useCanvasDrag.ts');
   const MODE = src('../CanvasMode.tsx');
 
