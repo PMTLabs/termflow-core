@@ -509,20 +509,30 @@ body.tab-dragging * {
    two markers are on screen together and have to be told apart. `.tab-item` already sets
    `position: relative` and `isolation: isolate`; `::after` belongs to the running sweep, so
    this takes `::before`. */
-.tab-item.canvas-here::before {
-  content: '';
-  position: absolute;
-  left: 6px;
-  right: 6px;
-  bottom: 0;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--accent-color, #007acc);
-  pointer-events: none;
+/* Canvas Mode's "you are here" marker (design 010 D9, §5.1) — the tab whose group is under
+   the canvas viewport centre.
+
+   An ICON, deliberately, and this is the second attempt. It first shipped as a 2px accent rail
+   along the bottom of the tab, and the first person to see it asked why that tab had a border:
+   a marker nobody can name is noise. The lesson was already in this file — see the
+   reduced-motion note on `.tab-item.tab-running::after`, which kept the animated sweep
+   precisely because a static accent line "read as a stray border" — and every other per-tab
+   status here (exited, activity, unseen, muted) is an icon with its own `title`. A tooltip is
+   what makes a rare, contextual cue legible; a rail cannot carry one.
+
+   Only ever on ONE tab, and only while the canvas tab is active (`CanvasMode` clears
+   `nearestGroupId` on unmount), so the width it costs the title is bounded and temporary. */
+.tab-canvas-here {
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent-color, #007acc);
+  flex-shrink: 0;
 }
 
-/* Nudged brighter on the tab that is ALSO active — reachable when the canvas is showing a
-   group whose tab was the last active one before the canvas opened. */
-.tab-item.canvas-here.active::before {
-  background: var(--tab-running-accent, #3aa6ff);
+/* Brighter on the tab that is ALSO active — reachable when the canvas is centred on the group
+   whose tab was last active before the canvas opened. The near-black active background dulls
+   the base accent. */
+.tab-item.active .tab-canvas-here {
+  color: var(--tab-running-accent, #3aa6ff);
 }

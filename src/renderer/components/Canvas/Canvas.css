@@ -296,6 +296,23 @@
   border-color: var(--border-color, #3e3e42);
 }
 
+/* The one destructive control in the header, so it is the one that reads as destructive on
+   hover — the two beside it move a terminal around, this one ends it. It shares
+   `.canvas-node-open`'s box so the three stay the same size and reveal together; only the
+   hover colour differs. */
+.canvas-node-close:hover {
+  color: var(--danger-color, #e81123);
+  border-color: var(--danger-color, #e81123);
+}
+
+/* ---- Canvas menus ------------------------------------------------------- */
+
+/* Scoped to `.canvas-menu` rather than added to `PaneContextMenu.css`, whose classes these
+   menus borrow but do not own — the pane and tab menus share that file and have no
+   destructive row. */
+.canvas-menu .context-menu-item.danger { color: var(--danger-color, #e81123); }
+.canvas-menu .context-menu-item.danger:hover:not(:disabled) { color: var(--danger-color, #e81123); }
+
 /* ---- Connection ports --------------------------------------------------- */
 
 /* Sized through `--node-chrome-k` for the same reason as the frame above: at the working zoom

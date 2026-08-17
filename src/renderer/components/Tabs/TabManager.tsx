@@ -316,6 +316,15 @@ const TabItem: React.FC<TabItemProps> = ({
    *
    * Selects a boolean, not the id, so a pan between two OTHER groups does not re-render
    * every tab in the strip.
+   *
+   * **Rendered as a LABELLED ICON, not a CSS rail** — see `.tab-canvas-here`. It first shipped
+   * as a 2px accent line along the bottom of the tab, and Tam's reaction on the first live run
+   * was "why does the first non-canvas tab have a border?" — the marker was visible and
+   * meaningless, which is worse than absent. This file had already written that lesson down
+   * (the reduced-motion note above `.tab-item.tab-running::after`: a static accent line "read
+   * as a stray border, not a 'running' signal") and every other per-tab status here — exited,
+   * background activity, unseen output, muted — is an icon carrying its own `title`. This one
+   * now is too.
    */
   const isCanvasHere = useSelector((state: RootState) => state.canvas.nearestGroupId === tab.id);
 
@@ -323,7 +332,7 @@ const TabItem: React.FC<TabItemProps> = ({
     <>
       <div
         ref={ref}
-        className={`tab-item ${tab.isActive ? 'active' : ''} ${isDragging ? 'dragging' : ''} ${tab.exited ? 'exited' : ''} ${tab.hasBackgroundActivity && !tab.isActive ? 'has-activity' : ''} ${tab.isRunning ? 'tab-running' : ''} ${tab.hasUnseenOutput && !tab.isActive ? 'has-unseen' : ''} ${isCanvasHere ? 'canvas-here' : ''}`}
+        className={`tab-item ${tab.isActive ? 'active' : ''} ${isDragging ? 'dragging' : ''} ${tab.exited ? 'exited' : ''} ${tab.hasBackgroundActivity && !tab.isActive ? 'has-activity' : ''} ${tab.isRunning ? 'tab-running' : ''} ${tab.hasUnseenOutput && !tab.isActive ? 'has-unseen' : ''}`}
         style={{ opacity }}
         // Stop the press from reaching the title bar's Tauri drag region so
         // clicking/dragging a tab doesn't drag or maximize the window.
@@ -348,6 +357,9 @@ const TabItem: React.FC<TabItemProps> = ({
         >
           {tab.title}
         </span>
+        {isCanvasHere && (
+          <span className="tab-canvas-here" title="Canvas Mode is centred on this tab's group">◎</span>
+        )}
         {tab.hasBackgroundActivity && !tab.isActive && (
           <span className="tab-activity-dot" title="Background activity from an external (MCP/API) call">●</span>
         )}

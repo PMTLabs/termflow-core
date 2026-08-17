@@ -67,22 +67,6 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
     setPendingClosePaneId(paneId);
   }, []);
 
-  // Spec 045 §3.4: Ctrl+Shift+W asks for a close; the dialog below confirms it,
-  // exactly as the pane's (x) button does. PaneManager is mounted per tab
-  // (TerminalContainer.tsx:162), so every tab's listener fires — the tree guard
-  // ensures only the owning tab responds.
-  useEffect(() => {
-    const onRequest = (e: Event) => {
-      const paneId = (e as CustomEvent).detail?.paneId;
-      if (!paneId || !paneTree) return;
-      const inThisTree = (node: PaneNode): boolean =>
-        node.id === paneId || (node.children?.some(inThisTree) ?? false);
-      if (inThisTree(paneTree)) handleClose(paneId);
-    };
-    window.addEventListener('ui:requestPaneClose', onRequest);
-    return () => window.removeEventListener('ui:requestPaneClose', onRequest);
-  }, [handleClose, paneTree]);
-
   // Non-blocking close (P0 — Faster Pane Close): the pane must disappear from
   // the UI immediately on confirm, so the backend PTY teardown (a multi-second
   // await) must never gate it. Ordering is encoded in the pure helper —
@@ -111,6 +95,38 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       clearCwdSnapshot,
     });
   }, [dispatch, paneTree]);
+
+  // Spec 045 §3.4: Ctrl+Shift+W asks for a close; the dialog below confirms it,
+  // exactly as the pane's (x) button does. PaneManager is mounted per tab
+  // (TerminalContainer.tsx:162), so every tab's listener fires — the tree guard
+  // ensures only the owning tab responds.
+  //
+  // `ui:forcePaneClose` is the same request with the dialog skipped, and it exists for the
+  // same reason `ui:forceTabClose` does: a pane whose process has already exited has nothing
+  // to terminate, so "any running process will be terminated" would be a lie. Canvas Mode's
+  // node close (`canvasClose.ts`) picks between the two per terminal. Both share the tree
+  // guard and both end at `performClose`, so the forced path cannot skip the PTY teardown or
+  // the cwd-snapshot clear — it skips only the asking.
+  //
+  // Declared AFTER `performClose`: naming it in a dependency array above its `const` is a TDZ
+  // ReferenceError at render time, not a lint warning.
+  useEffect(() => {
+    const inThisTree = (node: PaneNode, paneId: string): boolean =>
+      node.id === paneId || (node.children?.some((c) => inThisTree(c, paneId)) ?? false);
+    const route = (act: (paneId: string) => void) => (e: Event) => {
+      const paneId = (e as CustomEvent).detail?.paneId;
+      if (!paneId || !paneTree) return;
+      if (inThisTree(paneTree, paneId)) act(paneId);
+    };
+    const onRequest = route(handleClose);
+    const onForce = route(performClose);
+    window.addEventListener('ui:requestPaneClose', onRequest);
+    window.addEventListener('ui:forcePaneClose', onForce);
+    return () => {
+      window.removeEventListener('ui:requestPaneClose', onRequest);
+      window.removeEventListener('ui:forcePaneClose', onForce);
+    };
+  }, [handleClose, performClose, paneTree]);
 
   const handleResize = useCallback((paneId: string, size: number) => {
     dispatch(resizePane({ paneId, size }));

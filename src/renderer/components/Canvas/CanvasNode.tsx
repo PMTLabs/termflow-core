@@ -43,6 +43,11 @@ export const CanvasNode: React.FC<{
   onOpenAsTab?: () => void;
   /** Enlarge this node to a near-full-screen overlay, without leaving the canvas. */
   onOpenOverlay?: () => void;
+  /** Close this terminal. Routed through the app's existing pane/tab close flows — see
+   *  `canvasClose.ts` — so the canvas never tears a PTY down itself. */
+  onClose?: () => void;
+  /** Right-click anywhere on the node. */
+  onContextMenu?: (e: React.MouseEvent) => void;
   /** True while this node IS the overlay. Swaps the enlarge control for a close one and
    *  suppresses the chip/fly-to gestures, which make no sense on something already filling
    *  the screen. */
@@ -54,7 +59,7 @@ export const CanvasNode: React.FC<{
 }> = ({
   node, tier, zoom, selected, focused, dimmed, linkTarget, hidden,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  overlaid, hostBox, children,
+  onClose, onContextMenu, overlaid, hostBox, children,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
@@ -113,6 +118,7 @@ export const CanvasNode: React.FC<{
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}
       onDoubleClick={isChip || overlaid ? undefined : onDoubleClick}
+      onContextMenu={onContextMenu}
     >
       <div
         className="canvas-node-head"
@@ -154,7 +160,12 @@ export const CanvasNode: React.FC<{
               onDoubleClick={(e) => e.stopPropagation()}
               onClick={(e) => { e.stopPropagation(); onOpenOverlay(); }}
             >
-              {overlaid ? '✕' : '⛶'}
+              {/* NOT `✕` when overlaid, which is what shipped first. ✕ is the universal close
+                  glyph, so the control that shrank a node back to the canvas read as the one
+                  that killed its shell — and with a real close button now sitting beside it,
+                  the two would have been the same character doing different things. This
+                  toggles a size, so both faces of it are sizing glyphs. */}
+              {overlaid ? '⤡' : '⛶'}
             </button>
           )}
           {!isChip && onOpenAsTab && (
@@ -168,6 +179,21 @@ export const CanvasNode: React.FC<{
               onClick={(e) => { e.stopPropagation(); onOpenAsTab(); }}
             >
               ⧉
+            </button>
+          )}
+          {/* Last, so it is the top-RIGHT control Tam asked for, and so the destructive one is
+              not where a finger lands reaching for either of the two above it. */}
+          {!isChip && onClose && (
+            <button
+              type="button"
+              className="canvas-node-open canvas-node-close"
+              title="Close terminal"
+              aria-label={`Close ${node.title}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              onDoubleClick={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); onClose(); }}
+            >
+              ✕
             </button>
           )}
         </div>

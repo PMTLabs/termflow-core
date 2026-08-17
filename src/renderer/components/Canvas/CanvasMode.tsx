@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
+import { terminalService } from '../../services/TerminalService';
+import { getAllLeafIds } from '../../store/slices/paneTreeOps';
 import { RootState } from '../../store';
 import {
   CanvasEdge, focusNode, selectNode, setEdges, setNearestGroup, setOverlayNode, setSidebarOpen,
@@ -26,6 +28,8 @@ import { useArrange } from './useArrange';
 import { useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
 import { CanvasWireMenu } from './CanvasWireMenu';
+import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { closeEventFor, decideCanvasClose } from './canvasClose';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
@@ -34,6 +38,7 @@ import { fitShortcut } from './canvasGestures';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
+  CanvasNodeModel,
   selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
@@ -43,6 +48,17 @@ import './Canvas.css';
 /** How long the node registry waits for the model to settle. A group drag would otherwise
  *  publish once per `pointermove`. */
 const PUBLISH_DEBOUNCE_MS = 250;
+
+/**
+ * Does this terminal still have a process?
+ *
+ * The same predicate `App.tsx` resolves a tab's exit with — `TerminalService` deletes the
+ * mapping on `pty:exit`, so it goes false exactly when the PTY dies. Module-level because it
+ * closes over nothing: a `useCallback` here would be a dependency on every hook that needs it,
+ * for a function that can never change.
+ */
+const isTerminalAlive = (terminalId: string): boolean =>
+  !!terminalService.getProcessIdForTerminal(terminalId);
 
 /** The node geometry the stylesheet needs, as CSS variables rather than numbers repeated in
  *  Canvas.css. The host half is per-session — see `canvasMetrics` — so this is built from the
@@ -90,9 +106,14 @@ export const CanvasMode: React.FC = () => {
   const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
   const edges = useSelector((s: RootState) => s.canvas.edges);
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
+  // For `closeNode` only — the pane COUNT per tab, which decides whether closing a node is a
+  // pane close or a tab close. `selectCanvasModel` reads this too, so it is already a
+  // subscription this tree pays for.
+  const treesByTabId = useSelector((s: RootState) => s.panes.treesByTabId);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
+  const [nodeMenu, setNodeMenu] = useState<{ node: CanvasNodeModel; x: number; y: number } | null>(null);
 
   // FROZEN FOR THE SESSION, and the two things about that are both load-bearing.
   //
@@ -419,6 +440,21 @@ export const CanvasMode: React.FC = () => {
     dispatch(setActiveTab(tabId));
   }, [dispatch]);
 
+  /**
+   * Close a node's terminal by handing the request to the surface that owns it — see
+   * `canvasClose.ts` for why the canvas decides pane-vs-tab and confirm-vs-force but performs
+   * neither. `PaneManager` and `TabManager` are mounted for every tab while the canvas is up
+   * (`TerminalContainer` renders them all), so the event always finds its owner.
+   *
+   * The pane COUNT is read from the tree, not from `model.nodes`: the model drops leaves that
+   * have no terminal yet, and a tab mid-split has one of those.
+   */
+  const closeNode = useCallback((node: CanvasNodeModel) => {
+    const panes = getAllLeafIds(treesByTabId[node.tabId] ?? null).length;
+    const { type, detail } = closeEventFor(decideCanvasClose(node, panes, isTerminalAlive));
+    window.dispatchEvent(new CustomEvent(type, { detail }));
+  }, [treesByTabId]);
+
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
@@ -550,6 +586,15 @@ export const CanvasMode: React.FC = () => {
               onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}
+              onClose={() => closeNode(n)}
+              // `n`, never `node`: `node` is the overlay's inflated copy, and the menu needs the
+              // terminal's identity, not its current rect.
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dispatch(selectNode(n.terminalId));
+                setNodeMenu({ node: n, x: e.clientX, y: e.clientY });
+              }}
             >
               {/* RC4: mounted for EVERY node, at every tier, for the whole canvas
                   session. The tier ladder and the cull margin decide what a node
@@ -605,6 +650,19 @@ export const CanvasMode: React.FC = () => {
           toTitle={model.nodes.find((n) => n.terminalId === wireMenu.edge.to)?.title ?? 'gone'}
           onClose={() => setWireMenu(null)}
         />
+      )}
+      {nodeMenu && (
+        <CanvasMenu x={nodeMenu.x} y={nodeMenu.y} onClose={() => setNodeMenu(null)}>
+          <div className="context-menu-header">{nodeMenu.node.title}</div>
+          <div className="context-menu-divider" />
+          <CanvasMenuItem
+            icon="✕"
+            danger
+            onClick={() => { setNodeMenu(null); closeNode(nodeMenu.node); }}
+          >
+            Close Terminal
+          </CanvasMenuItem>
+        </CanvasMenu>
       )}
     </div>
     </CanvasMetricsContext.Provider>

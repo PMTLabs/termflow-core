@@ -109,10 +109,13 @@ describe('the nearest-group marker is added to the active highlight, not swapped
   const TSX = fs.readFileSync(path.join(TABS, 'TabManager.tsx'), 'utf8');
   const CSS = fs.readFileSync(path.join(TABS, 'TabManager.css'), 'utf8');
 
-  it('keeps both classes on the same element', () => {
+  it('leaves the active-tab highlight alone', () => {
+    // The half of §5.1 that is invisible in a diff: `active` must still be driven by
+    // `tab.isActive` and by nothing else. A marker that swapped itself in here would render the
+    // canvas tab — the one filling the window — as inactive.
     const className = /className=\{`tab-item [^`]*`\}/.exec(TSX)?.[0] ?? '';
     expect(className).toContain("tab.isActive ? 'active' : ''");
-    expect(className).toContain("isCanvasHere ? 'canvas-here' : ''");
+    expect(className).not.toContain('isCanvasHere');
   });
 
   it('reads the marker from the store rather than a prop', () => {
@@ -122,13 +125,40 @@ describe('the nearest-group marker is added to the active highlight, not swapped
     expect(TSX).toContain('state.canvas.nearestGroupId === tab.id');
   });
 
+  /**
+   * REPLACES "is styled, and not as a copy of the active tab", which pinned the marker as a
+   * `.tab-item.canvas-here::before` rail.
+   *
+   * That rail is what shipped, and the first person to see it live asked why the first
+   * non-canvas tab had a border. A cue nobody can name is worse than no cue: it costs attention
+   * and returns nothing. The rewrite is not cosmetic — it moves the marker onto the channel the
+   * rest of this strip already uses for per-tab status (exited, activity, unseen, muted are all
+   * an icon plus a `title`), and the `title` is the whole point, because it is the only part
+   * that can answer "what is this?" at the moment the question is asked.
+   */
+  it('renders the marker as an element that can explain itself', () => {
+    const marker = /<span className="tab-canvas-here"[^>]*>/.exec(TSX)?.[0] ?? '';
+    expect(marker).not.toBe('');
+    // A `title` is the requirement, not decoration — and it has to name the canvas, since
+    // "centred here" is meaningless without saying centred by what.
+    expect(marker).toMatch(/title="[^"]*[Cc]anvas[^"]*"/);
+    // Gated on the selector above, so it appears on exactly the one tab and only while the
+    // canvas is up.
+    expect(TSX).toContain('{isCanvasHere && (');
+  });
+
   it('is styled, and not as a copy of the active tab', () => {
-    // A class that exists only in the JSX is an invisible marker. A class that repaints the tab
-    // background is a second active tab.
-    const rule = /\.tab-item\.canvas-here::before\s*\{([^}]*)\}/.exec(CSS);
+    // A class that exists only in the JSX is an invisible marker; a class that repaints the tab
+    // background is a second active tab. Both halves still bind — only the selector moved.
+    const rule = /(^|\n)\.tab-canvas-here\s*\{([^}]*)\}/.exec(CSS);
     expect(rule).not.toBeNull();
-    expect(rule![1]).toMatch(/background:/);
-    const plain = /(^|\n)\.tab-item\.canvas-here\s*\{([^}]*)\}/.exec(CSS);
-    expect(plain?.[2] ?? '').not.toMatch(/background-color:/);
+    expect(rule![2]).toMatch(/color:/);
+    expect(rule![2]).not.toMatch(/background/);
+  });
+
+  it('leaves no trace of the rail it replaced', () => {
+    // A leftover `.canvas-here` rule would still paint the border Tam asked about: the class is
+    // gone from the JSX, so nothing here would fail — the stylesheet is the only witness.
+    expect(CSS).not.toMatch(/\.tab-item\.canvas-here/);
   });
 });
