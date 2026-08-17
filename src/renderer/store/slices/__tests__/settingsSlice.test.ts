@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -248,5 +248,43 @@ describe('customKeybindings', () => {
     state = settingsReducer(state, setCustomKeybinding({ actionId: 'newTab', combo: 'Ctrl+Alt+N' }));
     state = settingsReducer(state, setCustomKeybindings({ closeTab: 'Ctrl+Alt+W' }));
     expect(state.customKeybindings).toEqual({ closeTab: 'Ctrl+Alt+W' });
+  });
+});
+
+/**
+ * Canvas Mode's wheel mapping (Tam, 2026-08-17).
+ *
+ * The DEFAULT is the assertion that matters. Shipping this as `'scroll'` would change what the
+ * wheel does for every existing user without them asking, and "the wheel stopped zooming" is
+ * indistinguishable from a bug when nobody touched a setting.
+ */
+describe('settingsSlice canvasWheelMode', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it("defaults to 'zoom' — the behaviour the canvas already had", () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.canvasWheelMode).toBe('zoom');
+  });
+
+  it("can be switched to 'scroll' and back", () => {
+    let state = settingsReducer(undefined, setCanvasWheelMode('scroll'));
+    expect(state.canvasWheelMode).toBe('scroll');
+    state = settingsReducer(state, setCanvasWheelMode('zoom'));
+    expect(state.canvasWheelMode).toBe('zoom');
+  });
+
+  it('persists the change, so it survives a restart', () => {
+    // Every other setter on this slice writes through to config.json; one that forgot would
+    // work perfectly all session and revert on the next launch.
+    const setConfigValue = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue };
+    try {
+      settingsReducer(undefined, setCanvasWheelMode('scroll'));
+      expect(setConfigValue).toHaveBeenCalledWith('canvasWheelMode', 'scroll');
+    } finally {
+      delete (global as any).window.electronAPI;
+    }
   });
 });

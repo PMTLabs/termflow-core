@@ -28,6 +28,7 @@ import {
   setSmartCtrlC,
   setEnhancedKeyboard,
   setCommandSuggestions,
+  setCanvasWheelMode,
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
@@ -531,6 +532,13 @@ const App: React.FC = () => {
         }
         if (config.commandSuggestions !== undefined) {
           dispatch(setCommandSuggestions(config.commandSuggestions));
+        }
+        // Validated against the union rather than trusted, unlike the booleans above: this one
+        // decides what the wheel DOES, so a hand-edited or stale value would leave the canvas in
+        // a mode no gesture matches — a wheel that silently does nothing, with a Settings
+        // dropdown showing no option selected to explain it.
+        if (config.canvasWheelMode === 'zoom' || config.canvasWheelMode === 'scroll') {
+          dispatch(setCanvasWheelMode(config.canvasWheelMode));
         }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));

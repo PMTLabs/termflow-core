@@ -1,8 +1,10 @@
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import { Rect, Viewport, screenToWorld } from './canvasGeometry';
 import { boundsOf } from './viewportStyles';
-import { minimapTransform, minimapRect, minimapToWorld, minimapPanStep } from './orientation';
-import { panShortcut } from './canvasGestures';
+import {
+  minimapTransform, minimapRect, minimapToWorld, minimapPanStep, minimapToScreen,
+} from './orientation';
+import { panShortcut, exceedsDragSlop } from './canvasGestures';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -21,6 +23,11 @@ import type { CanvasModel } from './canvasSelectors';
 
 export const MINIMAP_W = 168;
 export const MINIMAP_H = 112;
+
+/** The "you are here" rectangle. A constant rather than a literal in the handler, because
+ *  `CanvasViewport` keeps its own selectors in named constants for the same reason: a selector
+ *  spelled out at the point of use is a string nothing checks against the class it names. */
+const VIEW_RECT = '.canvas-miniview';
 
 export const CanvasMinimap: React.FC<{
   model: CanvasModel;
@@ -56,15 +63,80 @@ export const CanvasMinimap: React.FC<{
     return minimapTransform(bounds ?? view, MINIMAP_W, MINIMAP_H);
   }, [model.groups, view]);
 
+  /** The world point drawn under a client-space pointer. */
+  const worldAt = useCallback((el: HTMLDivElement, cx: number, cy: number) => {
+    const r = el.getBoundingClientRect();
+    return minimapToWorld(t, cx - r.left, cy - r.top);
+  }, [t]);
+
+  /**
+   * A drag of the view rectangle (Tam, 2026-08-17: *"the blue rectangle is not draggable"*).
+   *
+   * `x`/`y` are the last position the pan was measured from, `sx`/`sy` where the press landed.
+   * Both are needed: deltas come from the LAST move so the rectangle keeps the grab offset it
+   * was picked up with, while the slop that decides click-versus-drag is measured from the
+   * START — a threshold reset on every move is never crossed by a slow drag.
+   */
+  const drag = useRef<{ x: number; y: number; sx: number; sy: number; moved: boolean } | null>(null);
+
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
     // Taken explicitly rather than left to the browser's default focusing of a `tabIndex`
     // element: clicking the minimap and then using the arrows is the whole way into its
     // keyboard mode, and a default that any later `preventDefault` would silently cancel is
     // not something to hang a feature on.
     e.currentTarget.focus();
-    onPick(minimapToWorld(t, e.clientX - r.left, e.clientY - r.top));
-  }, [t, onPick]);
+    // A press ON the rectangle is a drag; anywhere else it is the fly-to it has always been.
+    // Deliberately NOT both: `onPick` animates over `FLY_MS`, and a flight dispatching a
+    // viewport a frame at a time from a start it captured before the drag began would
+    // overwrite every pan the drag made until it finished.
+    if (onPan && (e.target as Element | null)?.closest?.(VIEW_RECT)) {
+      drag.current = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
+      e.currentTarget.setPointerCapture(e.pointerId);
+      return;
+    }
+    onPick(worldAt(e.currentTarget, e.clientX, e.clientY));
+  }, [onPan, onPick, worldAt]);
+
+  /**
+   * `t` is read LIVE rather than frozen at pointerdown, because it is what the rectangle is
+   * currently drawn with — a frozen copy would pan by one scale while the user watched another.
+   * The cost is that dragging out past the content changes `k` mid-gesture (the viewport rect is
+   * part of the bounds, see above), so the rectangle lags the cursor slightly out there. Inside
+   * the content — every normal drag — the bounds do not move and it tracks exactly.
+   */
+  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d || !onPan) return;
+    if (!d.moved && !exceedsDragSlop(e.clientX - d.sx, e.clientY - d.sy)) return;
+    d.moved = true;
+    onPan(
+      minimapToScreen(t, vp.z, e.clientX - d.x),
+      minimapToScreen(t, vp.z, e.clientY - d.y),
+    );
+    d.x = e.clientX;
+    d.y = e.clientY;
+  }, [onPan, t, vp.z]);
+
+  /**
+   * A press on the rectangle that never moved is still a CLICK, and it still flies.
+   *
+   * Without this the drag would shadow the fly-to over its own area — and that area is not
+   * small: the viewport rect is part of the minimap's bounds, so at a wide zoom-out it covers
+   * nearly the whole box and "click to fly there" would quietly stop working exactly where the
+   * user can see the most to aim at.
+   */
+  const onPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    drag.current = null;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    if (!d.moved) onPick(worldAt(e.currentTarget, e.clientX, e.clientY));
+  }, [onPick, worldAt]);
+
+  /** A cancelled pointer is not a click — the gesture was taken away, not completed. */
+  const onPointerCancel = useCallback(() => {
+    drag.current = null;
+  }, []);
 
   /**
    * The minimap's own arrows (Tam's item 3).
@@ -93,6 +165,9 @@ export const CanvasMinimap: React.FC<{
       className="canvas-minimap"
       style={{ width: MINIMAP_W, height: MINIMAP_H }}
       onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
       onKeyDown={onKeyDown}
       // Focusable, because the arrows above are only reachable by something that can hold the
       // keyboard. `role="application"` rather than the `presentation` this carried while it was
@@ -101,8 +176,8 @@ export const CanvasMinimap: React.FC<{
       // using them to walk the document.
       tabIndex={0}
       role="application"
-      aria-label="Workspace minimap — click to fly there, arrow keys to pan"
-      title="Click to fly there · arrow keys to pan"
+      aria-label="Workspace minimap — click to fly there, drag the view box to pan, arrow keys to pan"
+      title="Click to fly there · drag the view box to pan · arrow keys to pan"
     >
       {model.groups.map((g) => (
         <div key={g.tabId} className="canvas-minigroup" style={box(g.rect)} />

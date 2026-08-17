@@ -48,8 +48,29 @@ describe('the pan bail-out covers every orientation click target', () => {
   it('shares one definition between the pan and the context menu', () => {
     expect(VIEWPORT).toContain('const isBackground = (target: EventTarget | null): boolean =>');
     expect(VIEWPORT.match(/isBackground\(e\.target\)/g) ?? []).toHaveLength(2);
-    // …and nothing else in the file re-derives it.
+  });
+
+  /**
+   * The rule the assertion above used to carry as a trailing line, now stated as its own: every
+   * selector this file asks the DOM for lives in a named constant at the top.
+   *
+   * There are two questions here now — "did this land on empty canvas?" and "which terminal is
+   * the pointer over?" — and the second was added for the wheel setting. A bare literal passed
+   * to `closest` is a class name nothing checks against the component that renders it, and the
+   * failure is a gesture that quietly stops recognising a surface after a rename.
+   */
+  it('asks the DOM only through named selector constants', () => {
     expect(VIEWPORT.match(/closest\(\s*'/g) ?? []).toHaveLength(0);
+    expect(VIEWPORT).toMatch(/const NODE = '\.canvas-node';/);
+    expect(VIEWPORT).toMatch(/const NODE_TERMINAL_ATTR = 'data-terminal-id';/);
+  });
+
+  it('reads the terminal id from the attribute CanvasNode writes', () => {
+    // The two halves live in different files, and a rename in one is invisible to the other:
+    // `getAttribute` returns null, `onFocusedTerminal` is false forever, and the only symptom
+    // is that Ctrl+wheel stops zooming the font of the terminal you are editing.
+    expect(readSource(path.join(dir, 'CanvasNode.tsx'))).toContain('data-terminal-id={node.terminalId}');
+    expect(VIEWPORT).toContain('.closest(NODE)?.getAttribute(NODE_TERMINAL_ATTR)');
   });
 
   it.each([

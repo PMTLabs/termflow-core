@@ -97,11 +97,24 @@ export function minimapToWorld(t: MinimapTransform, mx: number, my: number): { x
 export const MINIMAP_PAN_STEP = 10;
 
 /**
- * That step as a SCREEN-space distance, which is what `panBy` takes.
+ * A distance measured on the MINIMAP, as the SCREEN-space distance `panBy` takes.
  *
  * `t.k` is minimap-px per world-unit, so dividing by it converts back to world units, and `z`
  * takes those to the screen. Derived from the live transform rather than fixed, so the stride
  * grows with the workspace — the same reason the minimap's own scale is not fixed either.
+ *
+ * **Both of the minimap's pan gestures go through here**, and that is the point of the function
+ * existing rather than the arithmetic sitting inline in `minimapPanStep`: an arrow press and a
+ * drag of the view rectangle are the same conversion applied to different distances, and a drag
+ * that used its own copy could disagree with the arrows about which way the view moves — the one
+ * mistake in a pan control that looks like a working feature.
+ */
+export function minimapToScreen(t: MinimapTransform, z: number, dMinimap: number): number {
+  return (dMinimap / t.k) * z;
+}
+
+/**
+ * One arrow press, as that same SCREEN-space distance.
  *
  * **Where it stops leading, stated rather than left to be found.** This stride is constant in
  * WORLD units while the canvas's is constant in SCREEN pixels, so the canvas's grows without
@@ -111,7 +124,7 @@ export const MINIMAP_PAN_STEP = 10;
  * workspace anyway. `orientation.test.ts` pins the crossing rather than trusting that sentence.
  */
 export function minimapPanStep(t: MinimapTransform, z: number): number {
-  return (MINIMAP_PAN_STEP / t.k) * z;
+  return minimapToScreen(t, z, MINIMAP_PAN_STEP);
 }
 
 /** A world rect as a minimap box. Positioned through `minimapPoint` and scaled by the same `k`,

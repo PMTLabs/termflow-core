@@ -737,13 +737,19 @@
   background: var(--text-tertiary, #666666);
 }
 .canvas-mininode.running { background: var(--tab-running-accent, #3aa6ff); }
-/* Drawn last in the DOM, so it sits over the content without needing a z-index of its own. */
+/* Drawn last in the DOM, so it sits over the content without needing a z-index of its own —
+   which is also what makes it the hit target for the drag that pans the view.
+   `grab`/`grabbing` rather than the minimap's own `pointer`: it is the one part of this box you
+   move rather than aim at, and nothing else says so. `:active` needs no state and no re-render
+   — the press is held on this element for the whole gesture. */
 .canvas-miniview {
   position: absolute;
   border: 1.5px solid var(--accent-color, #007acc);
   border-radius: 2px;
   background: rgba(0, 122, 204, .13);
+  cursor: grab;
 }
+.canvas-miniview:active { cursor: grabbing; }
 
 /* Below the minimap's 20 so a beacon clamped into the bottom-right corner cannot cover it.
    Centred on its clamped anchor — `BEACON_INSET` is sized against `BEACON_SIZE` so the overhang

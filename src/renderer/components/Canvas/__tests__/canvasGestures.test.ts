@@ -3,7 +3,8 @@ import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
   openOverlayShortcut, leaveTerminalShortcut, panShortcut, PAN_STEP_PX,
   stepShortcut, zoomShortcut, deleteShortcut, canvasKeyAction, terminalKeyAction,
-  DRAG_SLOP, SpacePanKey, CanvasKey,
+  wheelPanDelta, WHEEL_LINE_PX, WHEEL_PAGE_PX,
+  DRAG_SLOP, SpacePanKey, CanvasKey, WheelContext, WheelScroll,
 } from '../canvasGestures';
 import { readSource } from '../../../utils/readSource';
 
@@ -649,21 +650,119 @@ describe('terminalKeyAction', () => {
 describe('wheelAction', () => {
   const wheel = (over: Partial<{ ctrlKey: boolean; metaKey: boolean }> = {}) =>
     ({ ctrlKey: false, metaKey: false, ...over });
+  /** The default mode, with nothing focused and no overlay — what the canvas ships as. */
+  const ctx = (over: Partial<WheelContext> = {}): WheelContext =>
+    ({ overlayId: null, mode: 'zoom', onFocusedTerminal: false, ...over });
 
-  it('zooms the canvas on a plain wheel', () => {
-    expect(wheelAction(wheel(), null)).toBe('zoom');
+  describe("mode 'zoom' — the default", () => {
+    it('zooms the canvas on a plain wheel', () => {
+      expect(wheelAction(wheel(), ctx())).toBe('zoom');
+    });
+
+    it('leaves Ctrl/Cmd+wheel alone, so font zoom keeps working', () => {
+      expect(wheelAction(wheel({ ctrlKey: true }), ctx())).toBe('passthrough');
+      expect(wheelAction(wheel({ metaKey: true }), ctx())).toBe('passthrough');
+    });
+
+    /**
+     * The chord follows the POINTER in this mode, not the keyboard. Every node's engine binds
+     * its own wheel-zoom listener to its container, so Ctrl+wheel over an unfocused terminal
+     * zooms that terminal — which is the behaviour a pane has, and the reason this mode passes
+     * the event through without asking who is focused.
+     */
+    it('passes the chord through whether or not that terminal is focused', () => {
+      expect(wheelAction(wheel({ ctrlKey: true }), ctx({ onFocusedTerminal: true }))).toBe('passthrough');
+      expect(wheelAction(wheel({ ctrlKey: true }), ctx({ onFocusedTerminal: false }))).toBe('passthrough');
+    });
   });
 
-  it('leaves Ctrl/Cmd+wheel alone, so font zoom keeps working', () => {
-    expect(wheelAction(wheel({ ctrlKey: true }), null)).toBe('passthrough');
-    expect(wheelAction(wheel({ metaKey: true }), null)).toBe('passthrough');
+  /**
+   * Tam, 2026-08-17: *"allow ctrl+wheel on canvas do zoom in/out, and let the wheel as the
+   * scroll the canvas"* — with the preceding sentence keeping font zoom in the terminal he is
+   * editing. Both halves are asserted, because implementing only the first is a mode that
+   * works and quietly takes a gesture away.
+   */
+  describe("mode 'scroll' — the setting", () => {
+    const scroll = (over: Partial<WheelContext> = {}) => ctx({ mode: 'scroll', ...over });
+
+    it('scrolls the canvas on a plain wheel', () => {
+      expect(wheelAction(wheel(), scroll())).toBe('pan');
+    });
+
+    it('zooms the canvas on Ctrl/Cmd+wheel', () => {
+      expect(wheelAction(wheel({ ctrlKey: true }), scroll())).toBe('zoom');
+      expect(wheelAction(wheel({ metaKey: true }), scroll())).toBe('zoom');
+    });
+
+    it('still gives the chord to the terminal that holds the keyboard', () => {
+      // The half of his message that is easy to drop: the canvas taking Ctrl+wheel everywhere
+      // would leave the terminal you are typing in with no wheel font zoom at all.
+      expect(wheelAction(wheel({ ctrlKey: true }), scroll({ onFocusedTerminal: true }))).toBe('passthrough');
+      expect(wheelAction(wheel({ metaKey: true }), scroll({ onFocusedTerminal: true }))).toBe('passthrough');
+    });
+
+    it('still SCROLLS a plain wheel over that same focused terminal', () => {
+      // Only the chord is handed over. A plain wheel is the canvas's in both modes — a terminal
+      // in mouse-tracking mode would otherwise forward it to the PTY, which is the bug the
+      // `stopPropagation` on the accept path exists for.
+      expect(wheelAction(wheel(), scroll({ onFocusedTerminal: true }))).toBe('pan');
+    });
   });
 
-  it('gives the wheel to an open overlay', () => {
+  it('gives the wheel to an open overlay, in either mode', () => {
     // The overlay is that terminal at 1:1 and the thing being read, so the wheel is a
     // scrollback scroll. Zooming as well moved the world behind it at the same time.
-    expect(wheelAction(wheel(), 'tm-1')).toBe('passthrough');
-    expect(wheelAction(wheel({ ctrlKey: true }), 'tm-1')).toBe('passthrough');
+    for (const mode of ['zoom', 'scroll'] as const) {
+      expect(wheelAction(wheel(), ctx({ mode, overlayId: 'tm-1' }))).toBe('passthrough');
+      expect(wheelAction(wheel({ ctrlKey: true }), ctx({ mode, overlayId: 'tm-1' }))).toBe('passthrough');
+    }
+  });
+});
+
+/**
+ * How far a wheel scrolls the canvas.
+ *
+ * Every assertion here is a sign or a unit, which is exactly the kind of mistake that survives
+ * review: a scroll that pans the wrong way looks like a working control someone got backwards,
+ * and a `deltaMode` left unconverted looks like a control that barely moves.
+ */
+describe('wheelPanDelta', () => {
+  const w = (over: Partial<WheelScroll> = {}): WheelScroll =>
+    ({ deltaX: 0, deltaY: 0, deltaMode: 0, shiftKey: false, ...over });
+
+  it('passes pixel deltas straight through, sign included', () => {
+    // A wheel DOWN (positive deltaY) shows what was BELOW — the view moves down, which is a
+    // positive `dy` in the direction `panBy` documents. `panBy` owns the inversion into world
+    // space; a second negation here would cancel it and scroll backwards.
+    expect(wheelPanDelta(w({ deltaY: 120 }))).toEqual({ dx: 0, dy: 120 });
+    expect(wheelPanDelta(w({ deltaY: -120 }))).toEqual({ dx: 0, dy: -120 });
+    expect(wheelPanDelta(w({ deltaX: 40 }))).toEqual({ dx: 40, dy: 0 });
+    expect(wheelPanDelta(w({ deltaX: -40, deltaY: 30 }))).toEqual({ dx: -40, dy: 30 });
+  });
+
+  it('converts LINE and PAGE deltas to pixels', () => {
+    // Firefox reports a mouse notch as 3 LINES. Used raw, that is a three-pixel pan — a control
+    // that looks broken rather than one that looks wrong.
+    expect(wheelPanDelta(w({ deltaY: 3, deltaMode: 1 }))).toEqual({ dx: 0, dy: 3 * WHEEL_LINE_PX });
+    expect(wheelPanDelta(w({ deltaX: -2, deltaMode: 1 }))).toEqual({ dx: -2 * WHEEL_LINE_PX, dy: 0 });
+    expect(wheelPanDelta(w({ deltaY: 1, deltaMode: 2 }))).toEqual({ dx: 0, dy: WHEEL_PAGE_PX });
+    // …and a page is a bigger step than a line, or the two constants have been swapped.
+    expect(WHEEL_PAGE_PX).toBeGreaterThan(WHEEL_LINE_PX);
+  });
+
+  it('sends Shift+wheel sideways', () => {
+    expect(wheelPanDelta(w({ deltaY: 120, shiftKey: true }))).toEqual({ dx: 120, dy: 0 });
+    expect(wheelPanDelta(w({ deltaY: 3, deltaMode: 1, shiftKey: true })))
+      .toEqual({ dx: 3 * WHEEL_LINE_PX, dy: 0 });
+  });
+
+  /**
+   * The carve-out that keeps a trackpad usable. A two-finger swipe reports BOTH axes; folding
+   * its `deltaY` onto x because Shift happened to be held would turn a diagonal swipe into a
+   * horizontal one and throw the vertical component on the floor.
+   */
+  it('leaves a device that reports its own horizontal delta alone', () => {
+    expect(wheelPanDelta(w({ deltaX: 10, deltaY: 40, shiftKey: true }))).toEqual({ dx: 10, dy: 40 });
   });
 });
 
@@ -697,6 +796,34 @@ describe('the canvas wheel does not reach the terminals underneath', () => {
     // which is the whole bug — a mouse-tracking TUI gets the wheel as a PTY escape sequence.
     expect(wheelBody).toContain('e.preventDefault();');
     expect(wheelBody).toContain('e.stopPropagation();');
+  });
+
+  /**
+   * The three inputs of the decision, each read from somewhere LIVE.
+   *
+   * Any one of them frozen is a mode that half works: a hard-coded `mode` ignores the setting, a
+   * hard-coded `onFocusedTerminal: false` takes font zoom away from the terminal being edited,
+   * and reading either from a stale closure is worse than both — it works until the value
+   * changes, which is after the user has decided the setting does nothing.
+   */
+  it('feeds the rule the live mode and the focused terminal', () => {
+    expect(wheelBody).toContain('mode: wheelModeRef.current');
+    expect(wheelBody).toContain('overlayId: overlayIdRef.current');
+    expect(wheelBody).toMatch(/onFocusedTerminal:\s*!!focused && terminalIdAt\(e\.target\) === focused/);
+    // …and the two refs are actually assigned from the store on every render, rather than
+    // initialised once — the failure mode a ref makes easy.
+    expect(SRC).toMatch(/wheelModeRef\.current = useSelector\(/);
+    expect(SRC).toMatch(/focusedIdRef\.current = focusedId/);
+    expect(SRC).toMatch(/const focusedId = useSelector\(/);
+  });
+
+  it('pans through the same relative action the arrow keys use', () => {
+    // `panViewport` and not `setViewport`: the handler is registered once and never re-reads
+    // the viewport, so an absolute pan computed here would be built on `vpRef` and is one more
+    // place the sign inversion could be got wrong. `panBy` owns that inversion for both.
+    expect(wheelBody).toMatch(/if \(action === 'pan'\)/);
+    expect(wheelBody).toContain('wheelPanDelta(e)');
+    expect(wheelBody).toContain('dispatch(panViewport({ dx, dy }))');
   });
 });
 

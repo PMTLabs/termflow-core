@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { setViewport } from '../../store/slices/canvasSlice';
+import { setViewport, panViewport } from '../../store/slices/canvasSlice';
 import { Viewport, zoomAt } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
-import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from './canvasGestures';
+import {
+  shouldArmSpacePan, shouldDisarmSpacePan, wheelAction, wheelPanDelta, CanvasWheelMode,
+} from './canvasGestures';
 
 /**
  * Everything on the canvas that is a TARGET rather than background.
@@ -33,9 +35,24 @@ const isBackground = (target: EventTarget | null): boolean =>
   !(target as HTMLElement | null)?.closest(BACKGROUND_BAIL);
 
 /**
- * Pan/zoom host. Plain wheel zooms the canvas; Ctrl+wheel is deliberately NOT
- * intercepted so it keeps its existing meaning (font zoom inside a focused
- * terminal) — see design 010 §4.1.
+ * A node, and the terminal it is showing — the other question this file asks the DOM.
+ *
+ * Kept in named constants beside `BACKGROUND_BAIL` rather than spelled out inside the handler,
+ * so every selector this component depends on is in one place and a class rename has one
+ * grep-able answer. The attribute is `CanvasNode`'s, and `orientationWiring.test.ts` holds the
+ * rule that nothing here passes a bare literal to `closest`.
+ */
+const NODE = '.canvas-node';
+const NODE_TERMINAL_ATTR = 'data-terminal-id';
+
+const terminalIdAt = (target: EventTarget | null): string | null =>
+  (target as HTMLElement | null)?.closest(NODE)?.getAttribute(NODE_TERMINAL_ATTR) ?? null;
+
+/**
+ * Pan/zoom host. Which gesture the wheel is belongs to `wheelAction` and to the user's
+ * `canvasWheelMode` setting — by default the wheel zooms the canvas and Ctrl+wheel is left
+ * completely alone so it keeps its existing meaning (font zoom in the terminal under the
+ * pointer, design 010 §4.1); set to `'scroll'` the wheel pans and the chord zooms the canvas.
  */
 export const CanvasViewport: React.FC<{
   children?: React.ReactNode;
@@ -82,6 +99,15 @@ export const CanvasViewport: React.FC<{
   const overlayIdRef = useRef<string | null>(null);
   overlayIdRef.current = useSelector((s: RootState) => s.canvas.overlayId);
 
+  // The wheel mapping, and the terminal holding the keyboard. Same refs-not-deps reason as
+  // above — and `focusedId` in particular changes on every click, which would otherwise tear
+  // the listener down and rebuild it mid-scroll.
+  const wheelModeRef = useRef<CanvasWheelMode>('zoom');
+  wheelModeRef.current = useSelector((s: RootState) => s.settings.canvasWheelMode);
+  const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
+  const focusedIdRef = useRef<string | null>(null);
+  focusedIdRef.current = focusedId;
+
   // React attaches wheel listeners at the root PASSIVELY, so preventDefault() inside
   // a synthetic onWheel is a no-op and logs a console error. Attach natively instead —
   // the same thing `useSurfaceZoom` already does for the existing font-zoom gesture.
@@ -92,9 +118,22 @@ export const CanvasViewport: React.FC<{
       // The RULE is in `canvasGestures`, testable without a DOM; this owns only the wiring.
       // `passthrough` leaves the event completely alone — no preventDefault, no stopPropagation
       // — so it reaches the terminal it belongs to.
-      if (wheelAction(e, overlayIdRef.current) === 'passthrough') return;
+      const focused = focusedIdRef.current;
+      const action = wheelAction(e, {
+        overlayId: overlayIdRef.current,
+        mode: wheelModeRef.current,
+        onFocusedTerminal: !!focused && terminalIdAt(e.target) === focused,
+      });
+      if (action === 'passthrough') return;
       e.preventDefault();
       e.stopPropagation();
+      if (action === 'pan') {
+        // Relative, so this never reads the viewport — and so a scroll and an arrow key reach
+        // the store by the same path, with `panBy` owning the one sign inversion between them.
+        const { dx, dy } = wheelPanDelta(e);
+        dispatch(panViewport({ dx, dy }));
+        return;
+      }
       const r = el.getBoundingClientRect();
       dispatch(setViewport(
         zoomAt(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top, zMaxRef.current)
@@ -143,7 +182,8 @@ export const CanvasViewport: React.FC<{
   const [spacePan, setSpacePan] = useState(false);
   const spacePanRef = useRef(false);
   spacePanRef.current = spacePan;
-  const focusedId = useSelector((s: RootState) => s.canvas.focusedId);
+  // `focusedId` is selected above, with the wheel's refs — this effect wants the VALUE (it
+  // re-registers when the focus changes), the wheel wants a ref. One selector serves both.
 
   useEffect(() => {
     const arm = (e: KeyboardEvent) => {

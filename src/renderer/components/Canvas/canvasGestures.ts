@@ -48,14 +48,16 @@ export function shouldArmSpacePan(e: SpacePanKey, focusedNodeId: string | null):
 /**
  * Who owns a wheel over the canvas.
  *
- * `'zoom'` — the canvas takes it: `preventDefault`, `stopPropagation`, change the viewport.
+ * `'zoom'` — the canvas zooms about the cursor. `'pan'` — the canvas scrolls. Both mean the
+ * canvas TAKES the event: `preventDefault`, `stopPropagation`, change the viewport.
  * `'passthrough'` — leave the event completely alone so it reaches the terminal underneath.
  *
- * Both refusals are about a wheel that already means something to the terminal, and the
+ * The refusals are about a wheel that already means something to the terminal, and the
  * `stopPropagation` on the accept path is about the opposite mistake:
  *
- *  - **Ctrl/Cmd+wheel is font zoom** inside a focused terminal (design 010 §4.1), and has been
- *    since long before the canvas existed.
+ *  - **Ctrl/Cmd+wheel is font zoom** inside a terminal (design 010 §4.1), and has been since
+ *    long before the canvas existed. Which terminals still get it depends on the mode — see
+ *    `CanvasWheelMode`.
  *  - **An open overlay owns the wheel.** The overlay is that terminal at 1:1 and the thing the
  *    user is reading, so a wheel there is a scrollback scroll. Zooming as well made one gesture
  *    do two things — scroll the terminal AND move the world behind it.
@@ -65,15 +67,94 @@ export function shouldArmSpacePan(e: SpacePanKey, focusedNodeId: string | null):
  *    the terminal's content change and rang the unseen bell, the chime and a toast. Reported
  *    from live testing, 2026-08-16.
  */
-export type WheelAction = 'zoom' | 'passthrough';
+export type WheelAction = 'zoom' | 'pan' | 'passthrough';
+
+/**
+ * Which gesture the wheel is, on the canvas — the user's `canvasWheelMode` setting.
+ *
+ * `'zoom'` is what the canvas shipped with and stays the default: the wheel zooms, and
+ * Ctrl/Cmd+wheel is handed straight to the terminal under the pointer so its font zoom keeps
+ * working exactly as it does in a pane.
+ *
+ * `'scroll'` is Tam's request, 2026-08-17, and is the mapping every document-shaped canvas uses:
+ * the wheel scrolls the workspace and Ctrl/Cmd+wheel zooms it. The terminal keeps the chord in
+ * the one place his message singles out — *"when on editing terminal, it zoom in/out the text
+ * which is correct now"* — so font zoom follows the KEYBOARD here rather than the pointer. That
+ * is the difference between the two modes worth stating: in `'zoom'` the chord belongs to
+ * whatever terminal you are pointing at, in `'scroll'` only to the one you are typing into.
+ *
+ * Owned here rather than in the settings slice because this is the module that acts on it; the
+ * slice imports the type so there is one list of the modes rather than two that can drift.
+ */
+export type CanvasWheelMode = 'zoom' | 'scroll';
+
+/**
+ * Everything the decision needs besides the event.
+ *
+ * An object rather than positional arguments, for the reason `CanvasSelection` is one: it grew
+ * from a lone `overlayId` to three values, two of which are the same shape as each other, and a
+ * caller that transposed them would compile and fail as a wheel that zoomed the wrong thing.
+ */
+export interface WheelContext {
+  /** The full-screen overlay's terminal, or null. */
+  overlayId: string | null;
+  mode: CanvasWheelMode;
+  /** Is the pointer over the terminal that currently holds the KEYBOARD? Only consulted in
+   *  `'scroll'` mode, where it is what keeps font zoom reachable while you edit. */
+  onFocusedTerminal: boolean;
+}
 
 export function wheelAction(
   e: { ctrlKey: boolean; metaKey: boolean },
-  overlayId: string | null,
+  ctx: WheelContext,
 ): WheelAction {
-  if (e.ctrlKey || e.metaKey) return 'passthrough';
-  if (overlayId) return 'passthrough';
-  return 'zoom';
+  // First, and in both modes: the overlay is a terminal at 1:1, and every wheel in it is its own.
+  if (ctx.overlayId) return 'passthrough';
+  const zoomChord = e.ctrlKey || e.metaKey;
+  if (ctx.mode === 'scroll') {
+    if (zoomChord) return ctx.onFocusedTerminal ? 'passthrough' : 'zoom';
+    return 'pan';
+  }
+  return zoomChord ? 'passthrough' : 'zoom';
+}
+
+/**
+ * A wheel notch expressed in CSS pixels, whatever unit the device reported it in.
+ *
+ * `deltaMode` is the part that is easy to miss and impossible to see in a diff: a mouse on
+ * Firefox reports LINES (`deltaY` of 3, meaning three lines), and a raw `deltaY` used as pixels
+ * would pan three pixels per notch — a control that looks broken rather than wrong. The pixel
+ * values are the conventional ones a browser uses for its own scrolling.
+ */
+export const WHEEL_LINE_PX = 16;
+export const WHEEL_PAGE_PX = 320;
+
+export interface WheelScroll {
+  deltaX: number;
+  deltaY: number;
+  /** 0 = pixels, 1 = lines, 2 = pages (`WheelEvent.DOM_DELTA_*`). */
+  deltaMode: number;
+  shiftKey: boolean;
+}
+
+/**
+ * How far a wheel scrolls the canvas, in the SCREEN pixels `panBy` takes.
+ *
+ * The signs are straight through, and that is the claim worth a test: a wheel DOWN shows you
+ * what was below, which is the view moving down — `panBy` owns the inversion into world space,
+ * exactly as it does for the arrow keys.
+ *
+ * **Shift+wheel is horizontal**, the convention every browser and editor shares. Applied only
+ * when the device reported no horizontal delta of its own: a trackpad and a tilt wheel send a
+ * real `deltaX`, and swapping THAT onto the x axis would turn a diagonal trackpad swipe into a
+ * horizontal one and throw the vertical component away.
+ */
+export function wheelPanDelta(e: WheelScroll): { dx: number; dy: number } {
+  const unit = e.deltaMode === 1 ? WHEEL_LINE_PX : e.deltaMode === 2 ? WHEEL_PAGE_PX : 1;
+  const dx = e.deltaX * unit;
+  const dy = e.deltaY * unit;
+  if (e.shiftKey && dx === 0) return { dx: dy, dy: 0 };
+  return { dx, dy };
 }
 
 /**

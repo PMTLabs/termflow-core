@@ -1,6 +1,6 @@
 import {
   nearestGroupToCentre, minimapTransform, minimapPoint, minimapToWorld, minimapRect,
-  minimapPanStep, MINIMAP_PAN_STEP, stepNodeId,
+  minimapPanStep, minimapToScreen, MINIMAP_PAN_STEP, stepNodeId,
   beaconFor, beaconLayout, BEACON_INSET, BEACON_SIZE,
 } from '../orientation';
 import { MINIMAP_W, MINIMAP_H } from '../CanvasMinimap';
@@ -119,6 +119,62 @@ describe('minimapPoint / minimapToWorld', () => {
     expect(r.w).toBeCloseTo(400 * t.k, 6);
     expect(r.h).toBeCloseTo(200 * t.k, 6);
     expect(r.x).toBeCloseTo(t.ox, 6);
+  });
+});
+
+/**
+ * Dragging the view rectangle — Tam, 2026-08-17: *"the blue rectangle is not draggable"*.
+ *
+ * The promise a drag makes is the strictest one on this surface: the rectangle stays under the
+ * cursor. So the assertion is that a pointer moving N minimap pixels moves the DRAWN rectangle
+ * by the same N — measured through `minimapPoint`, the projection the component renders with,
+ * not against the formula. Recomputing `(d / k) * z` would agree with any sign and with a
+ * factor that had drifted away from the drawing.
+ */
+describe('minimapToScreen', () => {
+  const VW = 1200;
+  const VH = 800;
+  const workspace = (w: number, h: number): Rect => ({ x: 0, y: 0, w, h });
+  /** Where the viewport's top-left corner lands on the minimap — the rectangle's own origin. */
+  const rectOnMinimap = (t: ReturnType<typeof minimapTransform>, vp: Viewport) => {
+    const w = screenToWorld(vp, 0, 0);
+    return minimapPoint(t, w.x, w.y);
+  };
+
+  it('moves the rectangle exactly as far as the pointer did', () => {
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    const vp: Viewport = { x: -300, y: 120, z: 0.4 };
+    for (const [dmx, dmy] of [[12, 0], [0, -9], [-7, 5], [30, 30]]) {
+      const before = rectOnMinimap(t, vp);
+      const after = rectOnMinimap(t, panBy(vp, minimapToScreen(t, vp.z, dmx), minimapToScreen(t, vp.z, dmy)));
+      expect({
+        dx: Number((after.x - before.x).toFixed(6)),
+        dy: Number((after.y - before.y).toFixed(6)),
+      }).toEqual({ dx: dmx, dy: dmy });
+    }
+  });
+
+  it('holds at every zoom, and at every workspace size', () => {
+    // The conversion is the only thing between a drag that tracks the cursor and one that
+    // slowly slides away from it, and both inputs change under a real drag.
+    for (const z of [0.06, 0.5, 1, 3.2]) {
+      for (const w of [3000, 12000]) {
+        const t = minimapTransform(workspace(w, w * 0.66), MINIMAP_W, MINIMAP_H);
+        const vp: Viewport = { x: 40, y: -60, z };
+        const before = rectOnMinimap(t, vp);
+        const after = rectOnMinimap(t, panBy(vp, minimapToScreen(t, z, 14), 0));
+        expect({ z, w, moved: Number((after.x - before.x).toFixed(6)) }).toEqual({ z, w, moved: 14 });
+      }
+    }
+  });
+
+  it('is what one arrow press is measured in', () => {
+    // Not a tautology restated: it pins that the two gestures share ONE converter, so a drag
+    // and an arrow key cannot end up disagreeing about which way the view moves.
+    const t = minimapTransform(workspace(6000, 4000), MINIMAP_W, MINIMAP_H);
+    for (const z of [0.2, 1, 2.5]) {
+      expect(minimapPanStep(t, z)).toBe(minimapToScreen(t, z, MINIMAP_PAN_STEP));
+    }
   });
 });
 
