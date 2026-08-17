@@ -264,10 +264,33 @@ fn store_error() -> Response {
     )
 }
 
+/// The canvas's own graph fetch.
+///
+/// **Edges are deliberately NOT filtered by `live` here, and that asymmetry with
+/// `get_connections` / `node_block` is the fix for a real bug** (Tam, live testing: "the
+/// connection lines are lost after I restart the app").
+///
+/// `live` is the set of terminals with a REGISTERED PTY. At startup that set is empty and fills
+/// in asynchronously as each restored pane spawns its shell — while the canvas fetches this graph
+/// exactly once, when `CanvasMode` mounts. If the canvas tab is the active one after a restart,
+/// the fetch wins that race, every edge is filtered out as "gone", and the renderer's mirror stays
+/// empty for the rest of the session. The rows were on disk the whole time.
+///
+/// Filtering here was also redundant, which is why removing it is safe rather than a trade:
+/// `CanvasWires` already skips any edge whose endpoints it has no rect for, and those rects come
+/// from tabs and panes, which are restored synchronously. The renderer decides what it can draw;
+/// this endpoint's job is to say what was stored. It has exactly one consumer — `fetchGraph`.
+///
+/// The two agent-facing readers keep the filter, and should: `get_connections` and the
+/// `node_block` inside `get_my_terminal` answer "who can I talk to", where a peer with no process
+/// is a wrong answer rather than a slow one.
+///
+/// **Do not "fix" the accumulation of stale rows by calling `prune_edges` at startup.** It takes
+/// the same `live` set, so at boot it would delete precisely the edges this exists to preserve.
 pub async fn get_graph(State(state): State<AppState>) -> Response {
     let live = live_renderer_ids(&state);
     let edges = match state.canvas_store.all_edges() {
-        Ok(edges) => filter_live(edges, &live),
+        Ok(edges) => edges,
         Err(_) => return store_error(),
     };
     let registry = merged_registry(&state.canvas_nodes.read());
@@ -735,5 +758,94 @@ mod tests {
         let merged = merged_registry(&registries);
         assert!(merged.contains_key("tm-a"));
         assert!(merged.contains_key("tm-b"));
+    }
+
+    /* ---- Which reader filters by liveness, and which must not -------------
+     *
+     * Tam, live testing: "the connection lines are lost after I restart the app". `live` is the
+     * set of terminals with a REGISTERED PTY; at startup it is empty and fills in asynchronously,
+     * while the canvas fetches its graph exactly once when `CanvasMode` mounts. Filtering there
+     * dropped every edge as "gone" and the rows — which were on disk the whole time — never
+     * reached the renderer again that session.
+     *
+     * These handlers take `AppState`, which cannot be built under the unit-test binary (see the
+     * `integration-tests` feature gate), so the wiring is asserted from the source text. That is
+     * the same second-best the renderer's own wiring tests settle for, and it is the ONLY thing
+     * that can catch this: every pure helper below was, and stayed, correct.
+     */
+    mod liveness_filter {
+        /// Normalised, because a Windows checkout is CRLF and every slice below is newline
+        /// delimited — the same trap that took an hour on the renderer side.
+        fn source() -> String {
+            include_str!("canvas_endpoints.rs").replace("\r\n", "\n")
+        }
+
+        /// One `pub async fn` body, from its signature to the `}` that closes it.
+        ///
+        /// Terminated on a brace in COLUMN ZERO, not on the next `pub`. Slicing to the next item
+        /// ran the last handler in the file all the way to the end — through this very test
+        /// module, which says `filter_live` a dozen times — so "get_connections still filters"
+        /// passed with the call deleted. The guard test below is what caught that.
+        fn body_of(name: &str) -> String {
+            let src = source();
+            let sig = format!("pub async fn {name}(");
+            let at = src.find(&sig).unwrap_or_else(|| panic!("no fn {name} — it moved or was renamed"));
+            let rest = &src[at..];
+            let end = rest.find("\n}\n").map(|i| i + 3).unwrap_or(rest.len());
+            rest[..end].to_string()
+        }
+
+        #[test]
+        fn found_the_handlers_it_is_reading() {
+            // Or every assertion below is about an empty string.
+            assert!(body_of("get_graph").contains("canvas_store.all_edges()"));
+            assert!(body_of("get_connections").contains("canvas_store.edges_for("));
+        }
+
+        /// The slice must be ONE handler. An over-long slice makes every "this handler does X"
+        /// assertion below a statement about the rest of the file instead.
+        #[test]
+        fn each_slice_is_one_handler_and_not_the_rest_of_the_file() {
+            let whole = source();
+            for name in ["get_graph", "get_connections"] {
+                let body = body_of(name);
+                assert_eq!(
+                    body.matches("pub async fn").count(),
+                    1,
+                    "{name}'s slice swallowed another handler"
+                );
+                assert!(!body.contains("mod tests"), "{name}'s slice reached the test module");
+                assert!(body.len() < whole.len() / 4, "{name}'s slice is most of the file");
+            }
+        }
+
+        /// THE regression. The canvas draws what it has rects for — `CanvasWires` skips any edge
+        /// with a missing endpoint — and those rects come from tabs and panes, which are restored
+        /// synchronously. This endpoint's job is to say what was STORED.
+        #[test]
+        fn the_canvas_graph_does_not_hide_edges_whose_terminals_have_not_spawned_yet() {
+            assert!(
+                !body_of("get_graph").contains("filter_live"),
+                "get_graph must not filter by PTY liveness — at startup that set is empty, \
+                 and the canvas fetches this graph exactly once"
+            );
+        }
+
+        /// ...and the agent-facing reader keeps it, which is the half that makes the asymmetry
+        /// deliberate rather than an omission. "Who can I talk to" wants live peers.
+        #[test]
+        fn the_agent_facing_readers_still_hide_dead_endpoints() {
+            assert!(body_of("get_connections").contains("filter_live"));
+            assert!(source().contains("filter_live(edges, live)")); // node_block, for get_my_terminal
+        }
+
+        /// Startup pruning would delete exactly the edges the fix preserves: `prune_edges` takes
+        /// the same `live` set, so at boot every restored-but-unspawned endpoint looks dead.
+        #[test]
+        fn nothing_prunes_edges_on_startup() {
+            let lib = include_str!("lib.rs").replace("\r\n", "\n");
+            assert!(lib.contains("canvas_store.init("), "found the startup wiring");
+            assert!(!lib.contains("canvas_store.prune_edges("));
+        }
     }
 }
