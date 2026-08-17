@@ -8,6 +8,25 @@ import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
 import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from './canvasGestures';
 
 /**
+ * Everything on the canvas that is a TARGET rather than background.
+ *
+ * `.canvas-gchip` is here because it is a click target — omitting it would start a pan on the
+ * one gesture that is supposed to fly in. The minimap and the beacons are here for exactly the
+ * same reason: both are aimed at, and without this a click on either would also grab the canvas
+ * and clear the selection.
+ *
+ * One constant, shared by the pan and the background context menu, because "did this land on
+ * empty canvas?" has to have one answer. Two copies would drift the day a surface is added —
+ * and the copy that was not updated fails silently, as a pan that starts under a new control
+ * or a menu that opens on top of one.
+ */
+const BACKGROUND_BAIL =
+  '.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port, .canvas-minimap, .canvas-beacon';
+
+const isBackground = (target: EventTarget | null): boolean =>
+  !(target as HTMLElement | null)?.closest(BACKGROUND_BAIL);
+
+/**
  * Pan/zoom host. Plain wheel zooms the canvas; Ctrl+wheel is deliberately NOT
  * intercepted so it keeps its existing meaning (font zoom inside a focused
  * terminal) — see design 010 §4.1.
@@ -20,6 +39,9 @@ export const CanvasViewport: React.FC<{
   /** A pointerdown that landed on the canvas background rather than on any node,
    *  chip, port or group label. */
   onBackgroundPointerDown?: () => void;
+  /** A right-click on that same background. Shares `BACKGROUND_BAIL`'s definition of
+   *  "background" with the pan, so the two cannot disagree about what is empty canvas. */
+  onBackgroundContextMenu?: (e: React.MouseEvent) => void;
   /**
    * Screen-space chrome, rendered INSIDE this element and OUTSIDE `.canvas-world` —
    * so it neither pans nor zooms, but is positioned in VIEWPORT coordinates.
@@ -32,7 +54,7 @@ export const CanvasViewport: React.FC<{
    * because it is anchored `right`, where the two frames coincide.
    */
   overlay?: React.ReactNode;
-}> = ({ children, onSize, onBackgroundPointerDown, overlay }) => {
+}> = ({ children, onSize, onBackgroundPointerDown, onBackgroundContextMenu, overlay }) => {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const ref = useRef<HTMLDivElement>(null);
@@ -164,17 +186,26 @@ export const CanvasViewport: React.FC<{
   }, [startPan]);
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // `.canvas-gchip` is in this list because it is a click target, not background —
-    // omitting it would start a pan on the one gesture that is supposed to fly in. The minimap
-    // and the beacons are in it for exactly the same reason: both are aimed at, and without
-    // this a click on either would also grab the canvas and clear the selection.
     if (pan.current) return;                     // already panning, via Space
-    if ((e.target as HTMLElement).closest(
-      '.canvas-node, .canvas-gchip, .canvas-glabel, .canvas-port, .canvas-minimap, .canvas-beacon'
-    )) return;
-    onBackgroundPointerDown?.();
-    startPan(e);
+    if (isBackground(e.target)) {
+      onBackgroundPointerDown?.();
+      startPan(e);
+    }
   }, [onBackgroundPointerDown, startPan]);
+
+  /**
+   * Right-click on empty canvas — the "create a terminal here" menu (Tam's item 3).
+   *
+   * A node stops its own contextmenu, so this never sees one; the bail list is still needed
+   * for everything that does NOT have a handler of its own — a group chip, a group label, the
+   * minimap, a beacon — where a "new terminal here" menu would be answering a question about a
+   * different thing entirely.
+   */
+  const onContextMenu = useCallback((e: React.MouseEvent) => {
+    if (!onBackgroundContextMenu || !isBackground(e.target)) return;
+    e.preventDefault();
+    onBackgroundContextMenu(e);
+  }, [onBackgroundContextMenu]);
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pan.current) return;
@@ -203,6 +234,7 @@ export const CanvasViewport: React.FC<{
       onPointerMove={onPointerMove}
       onPointerUp={endPan}
       onPointerCancel={endPan}
+      onContextMenu={onContextMenu}
     >
       <div className="canvas-grid" style={gridStyle(vp)} />
       <div className="canvas-world" style={worldStyle(vp)}>{children}</div>

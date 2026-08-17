@@ -321,6 +321,20 @@
 .canvas-menu .context-menu-item.danger { color: var(--danger-color, #e81123); }
 .canvas-menu .context-menu-item.danger:hover:not(:disabled) { color: var(--danger-color, #e81123); }
 
+/* The shell-profile list (items 3 and 4). A workspace can have a dozen profiles configured, so
+   it scrolls rather than growing past the window — a menu opened near the bottom edge would
+   otherwise put its last entries out of reach. */
+.canvas-profile-menu { max-height: 60vh; overflow-y: auto; }
+/* Sized to the emoji it replaces, so a profile with a resolved binary icon and one without do
+   not sit at different heights in the same list. */
+.canvas-menu-icon-img { width: 14px; height: 14px; border-radius: 3px; object-fit: contain; }
+.canvas-menu-default {
+  margin-left: 8px; padding: 0 5px;
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-tertiary, #666666);
+  border: 1px solid var(--border-color, #3e3e42); border-radius: 2px;
+}
+
 /* ---- Connection ports --------------------------------------------------- */
 
 /* Sized through `--node-chrome-k` for the same reason as the frame above: at the working zoom

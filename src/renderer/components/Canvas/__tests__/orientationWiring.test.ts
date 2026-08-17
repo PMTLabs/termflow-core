@@ -20,19 +20,36 @@ const BEACONS = src('CanvasBeacons.tsx');
 
 describe('the pan bail-out covers every orientation click target', () => {
   /**
-   * `CanvasViewport.onPointerDown` starts a pan and clears the selection unless the press
-   * landed on something in its `closest(...)` list. That list is the ONLY thing stopping a
-   * minimap or beacon click from also grabbing the canvas — neither component calls
+   * `CanvasViewport` starts a pan, clears the selection, and now also opens the "new terminal
+   * here" menu — each only when the press landed on empty canvas. That list is the ONLY thing
+   * stopping a minimap or beacon click from also grabbing the canvas: neither component calls
    * `stopPropagation`, deliberately, because a second guard would keep them working after the
    * list entry was deleted and make the entry untestable.
+   *
+   * Read from `BACKGROUND_BAIL` rather than from a `closest(...)` literal, which is where it
+   * lived until the background context menu (Tam's item 3) needed the same answer. That move
+   * is itself the point of `shares one definition` below.
    */
-  const bailList = /closest\(\s*'([^']+)'/.exec(VIEWPORT)?.[1] ?? '';
+  const bailList = /const BACKGROUND_BAIL\s*=\s*'([^']+)'/.exec(VIEWPORT)?.[1] ?? '';
 
   it('found the list it is policing', () => {
-    // Without this the two assertions below pass vacuously against an empty string the moment
-    // the call is reformatted onto one line or the quotes change.
+    // Without this the assertions below pass vacuously against an empty string the moment the
+    // constant is reformatted or the quotes change — which is exactly what happened when the
+    // literal moved out of `closest(...)`, and this is the check that caught it.
     expect(bailList).toContain('.canvas-node');
     expect(bailList).toContain('.canvas-port');
+  });
+
+  /**
+   * Both gestures go through the same predicate. Two hand-rolled `closest(...)` calls would
+   * drift the day a surface is added, and the copy that was not updated fails silently — as a
+   * pan that starts under a new control, or a menu that opens on top of one.
+   */
+  it('shares one definition between the pan and the context menu', () => {
+    expect(VIEWPORT).toContain('const isBackground = (target: EventTarget | null): boolean =>');
+    expect(VIEWPORT.match(/isBackground\(e\.target\)/g) ?? []).toHaveLength(2);
+    // …and nothing else in the file re-derives it.
+    expect(VIEWPORT.match(/closest\(\s*'/g) ?? []).toHaveLength(0);
   });
 
   it.each([

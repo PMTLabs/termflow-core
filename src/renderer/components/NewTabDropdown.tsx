@@ -7,27 +7,11 @@ import { openCanvasTab } from '../services/openCanvas';
 import './NewTabDropdown.css';
 import { getCachedIcon, loadIcon } from '../services/binaryIcons';
 import { resolveDefaultProfile, buildNewTabFields } from '../services/newTabActions';
+// Shared with Canvas Mode's profile menu — see `services/shellProfileIcon`.
+import { profileEmoji } from '../services/shellProfileIcon';
 
 interface NewTabDropdownProps {
   onNewTab?: () => void;
-}
-
-/**
- * Pick an emoji for a shell profile. The backend tags profiles with an icon
- * identifier ("terminal-powershell", "terminal-cmd", "terminal-bash", …) rather
- * than an emoji, so map those (with a name fallback) to a recognisable glyph.
- */
-function profileEmoji(profile: { icon?: string; name: string }): string {
-  const key = (profile.icon || '').toLowerCase();
-  const name = (profile.name || '').toLowerCase();
-  if (key.includes('powershell') || name.includes('powershell')) return '🔷';
-  if (key.includes('cmd') || name.includes('command prompt')) return '⬛';
-  if (name.includes('git')) return '🌿';
-  if (key.includes('linux') || name.includes('wsl') || name.includes('ubuntu')
-    || name.includes('mint') || name.includes('debian')) return '🐧';
-  if (key.includes('fish')) return '🐟';
-  if (key.includes('zsh') || key.includes('bash') || name.includes('bash')) return '🐚';
-  return '🖥️';
 }
 
 export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {

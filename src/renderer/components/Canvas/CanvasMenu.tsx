@@ -70,7 +70,9 @@ export const CanvasMenu: React.FC<{
  *  borrows that stylesheet, it does not own it, and a rule added there would apply to the pane
  *  and tab menus that have no such item. */
 export const CanvasMenuItem: React.FC<{
-  icon?: string;
+  /** A glyph or an <img>. Wide because a shell profile shows its real binary icon when the
+   *  session has resolved one and an emoji when it has not. */
+  icon?: React.ReactNode;
   onClick: () => void;
   danger?: boolean;
   children: React.ReactNode;

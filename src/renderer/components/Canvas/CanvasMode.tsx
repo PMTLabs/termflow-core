@@ -6,10 +6,11 @@ import { terminalService } from '../../services/TerminalService';
 import { getAllLeafIds } from '../../store/slices/paneTreeOps';
 import { RootState } from '../../store';
 import {
-  CanvasEdge, focusNode, selectNode, setEdges, setNearestGroup, setOverlayNode, setSidebarOpen,
+  CanvasEdge, addEdge, focusNode, selectNode, setEdges, setNearestGroup, setNodeGeom,
+  setOverlayNode, setSidebarOpen,
 } from '../../store/slices/canvasSlice';
 import { focusPaneInTab } from '../../store/slices/panesSlice';
-import { setActiveTab } from '../../store/slices/tabsSlice';
+import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
 import { CanvasSidebar, ROW_FLY_ZOOM } from './CanvasSidebar';
 import { CanvasGroupFrame } from './CanvasGroupFrame';
@@ -25,11 +26,15 @@ import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
 import { useCanvasDrag } from './useCanvasDrag';
 import { useArrange } from './useArrange';
-import { useWireDrag } from './useWireDrag';
+import { PortClick, useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
 import { CanvasWireMenu } from './CanvasWireMenu';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, decideCanvasClose } from './canvasClose';
+import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
+import { worldPoint } from './canvasMutations';
+import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
@@ -42,7 +47,7 @@ import {
   selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
-import { fetchGraph, putNodes } from '../../services/canvasGraph';
+import { createEdge, fetchGraph, putNodes } from '../../services/canvasGraph';
 import './Canvas.css';
 
 /** How long the node registry waits for the model to settle. A group drag would otherwise
@@ -110,10 +115,28 @@ export const CanvasMode: React.FC = () => {
   // pane close or a tab close. `selectCanvasModel` reads this too, so it is already a
   // subscription this tree pays for.
   const treesByTabId = useSelector((s: RootState) => s.panes.treesByTabId);
+  // For `spawn` only, to keep a new terminal's title unique. Selects the ARRAY, not a mapped
+  // copy of it: `s.tabs.tabs` is a stable reference between changes, whereas `.map(...)` in a
+  // selector allocates a new array on every dispatch in the app and re-renders the canvas.
+  const tabs = useSelector((s: RootState) => s.tabs.tabs);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{ node: CanvasNodeModel; x: number; y: number } | null>(null);
+  /**
+   * The shell-profile menu, and where the terminal it creates should go.
+   *
+   * One slot for both spawn gestures (items 3 and 4): a right-click on empty canvas carries an
+   * `at` and no source, a port click carries a `fromId` and no point. The two are mutually
+   * exclusive by construction, which is why they are one nullable state and not two — two
+   * would have a fourth, meaningless combination, and the day both were set the menu would
+   * open twice.
+   */
+  const [spawnMenu, setSpawnMenu] = useState<
+    { x: number; y: number; at: { x: number; y: number }; fromId?: undefined }
+    | { x: number; y: number; at?: undefined; fromId: string }
+    | null
+  >(null);
 
   // FROZEN FOR THE SESSION, and the two things about that are both load-bearing.
   //
@@ -242,7 +265,12 @@ export const CanvasMode: React.FC = () => {
   const arrange = useArrange(model);
 
   // Draw a connection out of a node port (Task 18).
-  const wire = useWireDrag(model);
+  const wire = useWireDrag(model, useCallback((click: PortClick) => {
+    // A port press that never moved: offer the profile list, and remember which node the new
+    // terminal is being wired to. `useWireDrag` has already decided this was a click rather
+    // than a drag — see `exceedsDragSlop`.
+    setSpawnMenu({ x: click.x, y: click.y, fromId: click.fromId });
+  }, []));
 
   // The graph is backend-owned; `canvasSlice.edges` is a mirror and is never persisted
   // renderer-side. Fetched once per canvas session — every later change goes through an
@@ -455,6 +483,48 @@ export const CanvasMode: React.FC = () => {
     window.dispatchEvent(new CustomEvent(type, { detail }));
   }, [treesByTabId]);
 
+  /**
+   * Create a terminal from the canvas — Tam's items 3 and 4.
+   *
+   * **The order is the whole thing.** `buildCanvasModel` reads `canvas.nodes` for a stored rect
+   * and seeds a position only when there is none, so the geometry has to be written BEFORE the
+   * tab exists. Doing it the other way round races Task 8's seeding and shows a visible jump
+   * from a seeded slot to the place the user actually pointed at. This is the same ordering
+   * `App.tsx` uses for an agent-spawned terminal, and for the same reason.
+   *
+   * A renderer-created tab's root pane carries `terminalId === tab.id`, which is what makes the
+   * new tab's id usable as the node id here, before any pane has been built.
+   */
+  const spawn = useCallback((profile: ShellProfileLike) => {
+    const menu = spawnMenu;
+    if (!menu) return;
+    const source = menu.fromId
+      ? model.nodes.find((n) => n.terminalId === menu.fromId)
+      : undefined;
+    // A port click on a node that vanished between press and release — its tab closed, its
+    // pane was re-homed — has nowhere to fan from and nothing to connect to. Dropping the
+    // spawn is right: half of what was asked for is a terminal wired to nothing.
+    if (menu.fromId && !source) return;
+
+    const rect = source
+      ? spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
+          edges.filter((e) => e.from === source.terminalId).length)
+      : spawnRectAt(menu.at!);
+
+    const plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
+    dispatch(setNodeGeom({ id: plan.tab.id, rect: plan.rect }));
+    dispatch(addTab(plan.tab));
+
+    // Then the wire, if this came from a port. Server-minted id only, exactly as the drag path
+    // does — an optimistic client id is never replaced, so a later delete would name a row
+    // that does not exist and leave the real edge behind.
+    if (source) {
+      void createEdge(source.terminalId, plan.tab.id).then((edge) => {
+        if (edge) dispatch(addEdge(edge));
+      });
+    }
+  }, [spawnMenu, model.nodes, edges, tabs, dispatch]);
+
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
@@ -500,6 +570,14 @@ export const CanvasMode: React.FC = () => {
       <CanvasViewport
         onSize={onSize}
         onBackgroundPointerDown={clearSelection}
+        // Item 3. The world point is resolved HERE rather than inside the viewport because the
+        // conversion needs the current `vp`, and `e.currentTarget` is `.canvas-viewport` itself
+        // — the box `worldPoint` must measure against, since `.canvas-world` sits at its origin
+        // and the sidebar puts ~255px between that and the window.
+        onBackgroundContextMenu={(e) => {
+          const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setSpawnMenu({ x: e.clientX, y: e.clientY, at: worldPoint(e.clientX, e.clientY, box, vp) });
+        }}
         // Screen-space, but in VIEWPORT coordinates rather than `.canvas-mode`'s — which is why
         // this is a slot on `CanvasViewport` and not a sibling of it like `.canvas-toolbar`.
         // See the prop's own note: the sidebar puts ~255px between the two origins.
@@ -663,6 +741,18 @@ export const CanvasMode: React.FC = () => {
             Close Terminal
           </CanvasMenuItem>
         </CanvasMenu>
+      )}
+      {spawnMenu && (
+        <CanvasProfileMenu
+          x={spawnMenu.x}
+          y={spawnMenu.y}
+          // The header is the only thing that tells the two gestures apart on screen, and they
+          // do different things: one drops a terminal where you pointed, the other also wires
+          // it to the node whose port you clicked.
+          header={spawnMenu.fromId ? 'Connect a new terminal' : 'New terminal here'}
+          onPick={spawn}
+          onClose={() => setSpawnMenu(null)}
+        />
       )}
     </div>
     </CanvasMetricsContext.Provider>

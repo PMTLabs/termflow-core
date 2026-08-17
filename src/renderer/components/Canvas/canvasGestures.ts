@@ -76,6 +76,27 @@ export function wheelAction(
   return 'zoom';
 }
 
+/**
+ * How far the pointer must travel before a press on a connection port counts as a DRAG
+ * rather than a click (`plan/013` Task 18 + Tam's item 4).
+ *
+ * A port press means two different things now — drag to an existing node to wire them, or
+ * click to create a new terminal already connected — so something has to tell them apart, and
+ * the only thing that can is movement.
+ *
+ * 4px, and the value matters in both directions. Too small and an ordinary click is a
+ * one-pixel drag that connects nothing and silently swallows the gesture: a pointer is never
+ * perfectly still, a trackpad tap least of all. Too large and the start of a real drag feels
+ * dead, and — worse — a short drag onto an adjacent node would register as a click and open a
+ * menu the user never asked for.
+ */
+export const DRAG_SLOP = 4;
+
+/** Squared distance, so no `Math.sqrt` runs on every `pointermove`. */
+export function exceedsDragSlop(dxScreen: number, dyScreen: number): boolean {
+  return dxScreen * dxScreen + dyScreen * dyScreen > DRAG_SLOP * DRAG_SLOP;
+}
+
 /** Which fit a keypress is asking for, or `null` when it is not asking for one. */
 export type FitTarget = 'all' | 'group';
 

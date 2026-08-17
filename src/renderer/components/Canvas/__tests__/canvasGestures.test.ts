@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import {
-  shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, SpacePanKey, FitKey,
+  shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
+  DRAG_SLOP, SpacePanKey, FitKey,
 } from '../canvasGestures';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
@@ -165,5 +166,53 @@ describe('the canvas wheel does not reach the terminals underneath', () => {
     // which is the whole bug — a mouse-tracking TUI gets the wheel as a PTY escape sequence.
     expect(wheelBody).toContain('e.preventDefault();');
     expect(wheelBody).toContain('e.stopPropagation();');
+  });
+});
+
+/**
+ * Telling a port CLICK from a port DRAG — Tam's item 4.
+ *
+ * A press on a connection port means two different things now: drag to an existing node to
+ * wire them, or click to create a new terminal already connected. Movement is the only thing
+ * that separates them, and both mistakes are silent.
+ */
+describe('exceedsDragSlop', () => {
+  it('treats a still pointer as a click', () => {
+    expect(exceedsDragSlop(0, 0)).toBe(false);
+  });
+
+  /**
+   * A pointer is never perfectly still, and a trackpad tap least of all — the finger rolls a
+   * pixel or two on the way down. Without the tolerance every click would be a one-pixel drag
+   * that lands on nothing, connects nothing, and swallows the gesture with no feedback at all.
+   */
+  it('tolerates the wobble in a real click', () => {
+    expect(exceedsDragSlop(1, 0)).toBe(false);
+    expect(exceedsDragSlop(0, -2)).toBe(false);
+    expect(exceedsDragSlop(2, 2)).toBe(false);
+  });
+
+  it('calls a deliberate move a drag', () => {
+    expect(exceedsDragSlop(0, 40)).toBe(true);
+    expect(exceedsDragSlop(-120, 0)).toBe(true);
+    expect(exceedsDragSlop(-30, 30)).toBe(true);
+  });
+
+  /**
+   * RADIAL, not per-axis. A diagonal drag moves less along each axis than along its path, so
+   * `|dx| > SLOP || |dy| > SLOP` would need ~1.4× the travel at 45° before it noticed — a
+   * threshold that depends on the direction you happen to drag in.
+   */
+  it('measures distance, not the larger axis', () => {
+    const d = DRAG_SLOP * 0.75;                 // under the threshold on either axis alone…
+    expect(exceedsDragSlop(d, d)).toBe(true);   // …but past it as a distance
+    expect(exceedsDragSlop(DRAG_SLOP, 0)).toBe(false);      // exactly at it is not past it
+    expect(exceedsDragSlop(DRAG_SLOP + 0.5, 0)).toBe(true);
+  });
+
+  it('is symmetric in every direction', () => {
+    for (const [dx, dy] of [[9, 5], [-9, 5], [9, -5], [-9, -5], [5, 9], [-5, -9]]) {
+      expect(exceedsDragSlop(dx, dy)).toBe(true);
+    }
   });
 });

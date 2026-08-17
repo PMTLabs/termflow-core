@@ -4,6 +4,7 @@ import { RootState } from '../../store';
 import { addEdge } from '../../store/slices/canvasSlice';
 import { createEdge } from '../../services/canvasGraph';
 import { worldPoint } from './canvasMutations';
+import { exceedsDragSlop } from './canvasGestures';
 import { CanvasModel } from './canvasSelectors';
 import {
   Side, pickSides, portPoint, wirePath, oppositeSide, linkTargetId,
@@ -32,6 +33,13 @@ interface Link {
   from: [number, number];
   /** `.canvas-viewport`'s box, for screen→world. */
   rect: { left: number; top: number };
+  /** Where the press landed, in SCREEN pixels — the origin the drag slop is measured from.
+   *  Screen rather than world so the threshold is a constant number of pixels the user moved,
+   *  not a distance that shrinks with the zoom. */
+  origin: { x: number; y: number };
+  /** True once the pointer has travelled past `DRAG_SLOP`. Until then the press is still a
+   *  candidate click, and no ghost wire is drawn. */
+  moved: boolean;
 }
 
 export interface WireDragState {
@@ -51,9 +59,28 @@ function terminalIdAt(x: number, y: number): string | null {
   return el?.closest('.canvas-node')?.getAttribute('data-terminal-id') ?? null;
 }
 
-export function useWireDrag(model: CanvasModel): WireDragState {
+/** A port press that never moved — Tam's item 4. Carries the port so the caller can put its
+ *  menu on it, and the node so the caller knows what to connect the new terminal to. */
+export interface PortClick {
+  fromId: string;
+  side: Side;
+  /** Where to open the menu, in client coordinates. */
+  x: number;
+  y: number;
+}
+
+export function useWireDrag(
+  model: CanvasModel,
+  onPortClick?: (click: PortClick) => void,
+): WireDragState {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
+
+  // Read through a ref for the reason the model and viewport are: the pointerup listener below
+  // is registered once, and re-registering it whenever the callback identity changed would
+  // drop a release mid-gesture.
+  const onPortClickRef = useRef(onPortClick);
+  onPortClickRef.current = onPortClick;
 
   const link = useRef<Link | null>(null);
   const [ghost, setGhost] = useState<string | null>(null);
@@ -88,8 +115,12 @@ export function useWireDrag(model: CanvasModel): WireDragState {
       side,
       from: portPoint(rect, side),
       rect: { left: box.left, top: box.top },
+      origin: { x: e.clientX, y: e.clientY },
+      moved: false,
     };
-    setLinking(true);
+    // `linking` is NOT set here any more: it reveals every node's ports as candidate targets,
+    // which is feedback for a drag and a flash of visual noise for a click. It arms on the
+    // first move past the slop instead, along with the ghost.
     setGhost(null);
     setTargetId(null);
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -106,6 +137,14 @@ export function useWireDrag(model: CanvasModel): WireDragState {
     const onMove = (e: PointerEvent) => {
       const l = link.current;
       if (!l) return;
+      // Below the slop this press is still a candidate click: no ghost, no target highlight,
+      // no revealed ports. Once past it, it is a drag for good — `moved` never goes back, so a
+      // drag that happens to return to its origin does not turn into a click on release.
+      if (!l.moved) {
+        if (!exceedsDragSlop(e.clientX - l.origin.x, e.clientY - l.origin.y)) return;
+        l.moved = true;
+        setLinking(true);
+      }
       const { vp: v } = latest.current;
       const over = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.fromId);
       setTargetId(over);
@@ -128,6 +167,16 @@ export function useWireDrag(model: CanvasModel): WireDragState {
       const l = link.current;
       if (!l) return;
       end();
+
+      // A press that never travelled is a CLICK on the port: offer a shell profile and create
+      // a terminal already connected to this one (item 4). It cannot also be a drop — the
+      // pointer is still over the source node's own port, and `linkTargetId` refuses an edge
+      // from a node to itself — so this returns rather than falling through.
+      if (!l.moved) {
+        onPortClickRef.current?.({ fromId: l.fromId, side: l.side, x: e.clientX, y: e.clientY });
+        return;
+      }
+
       const to = linkTargetId(terminalIdAt(e.clientX, e.clientY), l.fromId);
       if (!to) return;
 
