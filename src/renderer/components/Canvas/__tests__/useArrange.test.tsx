@@ -329,9 +329,26 @@ describe('Arrange button wiring', () => {
   });
 
   it('calls the hook, rather than a second copy of the animation', () => {
-    expect(MODE).toContain('useArrange(model)');
+    // `edges` as well as `model` since the seventh round: the wires decide the ORDER Arrange
+    // fills its slots in (`optimiseArrangeOrder`). Passing only the model compiles and runs, and
+    // silently gives back the un-optimised grid.
+    expect(MODE).toContain('useArrange(model, edges)');
     expect(MODE).toContain('onClick={arrange}');
     expect(MODE).not.toContain('requestAnimationFrame(step');
+  });
+
+  /**
+   * ...and the hook has to forward them, which is a separate failure from not being given them.
+   *
+   * A mutant dropping the second argument here survived a whole mutation pass: everything about
+   * the optimiser stayed green, `CanvasMode` still passed its edges in, and Arrange quietly laid
+   * out the un-optimised grid. Both halves of the handoff need their own assertion.
+   */
+  it('forwards those edges into the layout target', () => {
+    const HOOK = fs.readFileSync(path.resolve(__dirname, '../useArrange.ts'), 'utf8');
+    expect(HOOK).toContain('arrangeTarget(latest.current, latestEdges.current)');
+    // Through a ref like the model, so the callback keeps the stable identity the toolbar needs.
+    expect(HOOK).toContain('latestEdges.current = edges;');
   });
 
   it('has styles to render with', () => {

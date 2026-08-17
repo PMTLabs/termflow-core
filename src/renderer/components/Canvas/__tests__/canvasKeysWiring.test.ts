@@ -346,6 +346,13 @@ describe('the viewport toolbar', () => {
     expect(TOOLBAR).toContain('onClick={fitAll}');
   });
 
+  /** A `−` in a 27px box is the only clue the keyboard chord exists, and it is the one people
+   *  go looking for after learning the terminal's own font zoom. */
+  it('names its keyboard shortcut on both zoom buttons', () => {
+    expect(TOOLBAR).toContain('title="Zoom in (Ctrl +)"');
+    expect(TOOLBAR).toContain('title="Zoom out (Ctrl -)"');
+  });
+
   /** `zoomAt` returns the viewport unchanged once `clampZoom` bites, so at the clamps an enabled
    *  button is indistinguishable from a broken one. */
   it('disables each zoom button at its own clamp', () => {

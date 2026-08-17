@@ -310,7 +310,7 @@ export const CanvasMode: React.FC = () => {
   // Auto-arrange (Task 13). A button, never automatic — design 010 D10: a canvas that
   // rearranges itself while you are looking away destroys the spatial memory the whole
   // feature exists to build.
-  const arrange = useArrange(model);
+  const arrange = useArrange(model, edges);
 
   // Draw a connection out of a node port (Task 18).
   const wire = useWireDrag(model, useCallback((click: PortClick) => {
@@ -895,7 +895,11 @@ export const CanvasMode: React.FC = () => {
             className="canvas-tbtn canvas-tbtn-icon"
             onClick={() => zoomStep(1 / ZOOM_STEP)}
             disabled={vp.z <= Z_MIN}
-            title="Zoom out"
+            // Named here because a `−` in a 27px box is the only clue the chord exists, and it
+            // is the one people go looking for after learning the terminal's own font zoom.
+            // "Ctrl" rather than a platform branch, matching every other shortcut hint in the
+            // app (`TerminalPane`'s maximise button, the tab menu) — Cmd works too.
+            title="Zoom out (Ctrl -)"
             aria-label="Zoom out"
           >
             −
@@ -905,7 +909,7 @@ export const CanvasMode: React.FC = () => {
             className="canvas-tbtn canvas-tbtn-icon"
             onClick={() => zoomStep(ZOOM_STEP)}
             disabled={vp.z >= metrics.zMax}
-            title="Zoom in"
+            title="Zoom in (Ctrl +)"
             aria-label="Zoom in"
           >
             +

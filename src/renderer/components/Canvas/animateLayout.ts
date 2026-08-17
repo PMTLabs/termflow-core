@@ -1,5 +1,6 @@
 import { Rect } from './canvasGeometry';
 import { arrange, ArrangeResult } from './canvasLayout';
+import { ArrangeEdge, optimiseArrangeOrder } from './canvasArrange';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -75,10 +76,19 @@ export function currentLayout(model: CanvasModel): ArrangeResult {
 /**
  * Where Arrange is taking everything.
  *
- * Deterministic in the group MEMBERSHIP alone — no current position feeds in — which is what
- * makes a second press mid-flight safe: it re-aims at the identical target from wherever the
- * first press had got to, so the two cannot chase each other.
+ * Deterministic in the group MEMBERSHIP and the CONNECTIONS alone — no current position feeds
+ * in — which is what makes a second press mid-flight safe: it re-aims at the identical target
+ * from wherever the first press had got to, so the two cannot chase each other. `edges` does not
+ * weaken that; a wire is not a position, and the optimiser it feeds is itself deterministic.
+ *
+ * `edges` defaults to none, and with none `optimiseArrangeOrder` returns its input untouched —
+ * so a workspace with no connections arranges exactly as it always did, by construction rather
+ * than by a branch someone has to remember.
  */
-export function arrangeTarget(model: CanvasModel): ArrangeResult {
-  return arrange({ groups: model.groups.map((g) => ({ id: g.tabId, nodeIds: g.nodeIds })) });
+export function arrangeTarget(
+  model: CanvasModel,
+  edges: readonly ArrangeEdge[] = [],
+): ArrangeResult {
+  const input = { groups: model.groups.map((g) => ({ id: g.tabId, nodeIds: g.nodeIds })) };
+  return arrange(optimiseArrangeOrder(input, edges));
 }

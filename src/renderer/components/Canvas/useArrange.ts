@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useDispatch } from 'react-redux';
 import { applyArrange } from '../../store/slices/canvasSlice';
 import type { CanvasModel } from './canvasSelectors';
+import type { ArrangeEdge } from './canvasArrange';
 import {
   ARRANGE_MS, arrangeTarget, currentLayout, easeOutCubic, interpolateArrange,
 } from './animateLayout';
@@ -20,7 +21,7 @@ import {
  * two animations on this surface that behaved differently under it would be a bug the user only
  * ever hit on one of them.
  */
-export function useArrange(model: CanvasModel): () => void {
+export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = []): () => void {
   const dispatch = useDispatch();
   const raf = useRef<number | null>(null);
 
@@ -29,6 +30,13 @@ export function useArrange(model: CanvasModel): () => void {
   // continuously — including on the ~26 dispatches this very animation makes.
   const latest = useRef(model);
   latest.current = model;
+
+  // Same ref, same reason. The wires decide the ORDER Arrange fills its slots in
+  // (`optimiseArrangeOrder`), so they have to be current at the moment of the press — and
+  // `canvas.edges` is replaced wholesale by `setEdges`, so a dependency on it would be one more
+  // thing re-creating this callback.
+  const latestEdges = useRef(edges);
+  latestEdges.current = edges;
 
   // A run in progress when the canvas tab closes would keep dispatching into an unmounted tree.
   useEffect(() => () => {
@@ -42,7 +50,7 @@ export function useArrange(model: CanvasModel): () => void {
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = null;
 
-    const to = arrangeTarget(latest.current);
+    const to = arrangeTarget(latest.current, latestEdges.current);
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(applyArrange(to));
       return;
