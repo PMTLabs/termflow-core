@@ -115,6 +115,27 @@ const canvasSlice = createSlice({
     setGroupGeom: (state, action: PayloadAction<{ id: string; rect: Rect }>) => {
       state.groups[action.payload.id] = action.payload.rect;
     },
+    /**
+     * A group and every one of its members, in ONE transition.
+     *
+     * Dragging a group moved its frame and each member with a dispatch apiece, so a group
+     * of 100 terminals produced 101 Redux transitions per `pointermove` — around 6,000
+     * actions a second at a normal event rate, each one invalidating the canvas selector
+     * and re-running projection and reconciliation WHILE the pointer was still moving.
+     * The work is O(members × events), which is exactly the shape that misses a frame
+     * budget on the workspaces big enough to want group drags.
+     *
+     * Rects are taken whole rather than merged with `prev` like `applyArrange` does: the
+     * caller computed these FROM the current rects (`moveGroupBy`), so width and height
+     * are already the live ones and re-reading them would only invite a stale mix.
+     */
+    moveGroupGeom: (
+      state,
+      action: PayloadAction<{ tabId: string; frame: Rect; nodes: Record<string, Rect> }>,
+    ) => {
+      state.groups[action.payload.tabId] = action.payload.frame;
+      for (const [id, rect] of Object.entries(action.payload.nodes)) state.nodes[id] = rect;
+    },
     applyArrange: (state, action: PayloadAction<ArrangeResult>) => {
       for (const [id, rect] of Object.entries(action.payload.groups)) state.groups[id] = rect;
       for (const [id, pos] of Object.entries(action.payload.nodes)) {
@@ -199,7 +220,12 @@ const canvasSlice = createSlice({
       const liveGroups = new Set(action.payload.tabIds);
       for (const id of Object.keys(state.nodes)) if (!liveNodes.has(id)) delete state.nodes[id];
       for (const id of Object.keys(state.groups)) if (!liveGroups.has(id)) delete state.groups[id];
-      state.recent = state.recent.filter((id) => liveNodes.has(id));
+      // Assigned only when it actually shrank. `filter` always returns a NEW array, and
+      // Immer treats that assignment as a change — which would hand every subscriber a new
+      // state object on a prune that pruned nothing. That was harmless while this ran only
+      // on tab close; it runs on every pane close now, so the no-op has to be a real no-op.
+      const liveRecent = state.recent.filter((id) => liveNodes.has(id));
+      if (liveRecent.length !== state.recent.length) state.recent = liveRecent;
       if (state.selectedId && !liveNodes.has(state.selectedId)) state.selectedId = null;
       if (state.focusedId && !liveNodes.has(state.focusedId)) state.focusedId = null;
       // A closed terminal must not leave the canvas covered by an overlay of nothing.
@@ -225,7 +251,7 @@ const canvasSlice = createSlice({
 });
 
 export const {
-  setViewport, panViewport, setNodeGeom, setGroupGeom,
+  setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,

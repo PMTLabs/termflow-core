@@ -36,6 +36,18 @@ export interface ConnectDeps {
   wait: (ms: number) => Promise<void>;
   /** Monotonic-ish clock, injected so a test does not sleep. */
   now: () => number;
+  /**
+   * Give up NOW, whatever the deadline says.
+   *
+   * The poll runs for up to ten seconds and then wires the pair anyway, which is right while
+   * the canvas is still there — a terminal that registered in the last interval is a likely
+   * win. It is wrong once the canvas has gone: the loop kept a closure alive for the rest of
+   * that window and then created an edge for a workspace nobody is looking at, from a source
+   * node the user may have closed in the meantime.
+   *
+   * Optional so existing callers and tests keep their behaviour; absent means "never abort".
+   */
+  abandoned?: () => boolean;
 }
 
 /**
@@ -62,11 +74,17 @@ export async function connectWhenReady(
 ): Promise<CanvasEdge | null> {
   const deadline = deps.now() + timeoutMs;
   while (!deps.isReady(toId)) {
+    // Checked BEFORE the deadline branch, so abandoning wins over the last-attempt rule —
+    // otherwise a canvas torn down on the final tick would still create the edge.
+    if (deps.abandoned?.()) return null;
     if (deps.now() >= deadline) {
       console.warn(`[CANVAS] ${toId} never registered; connecting anyway as a last attempt`);
       break;
     }
     await deps.wait(CONNECT_POLL_MS);
   }
+  // ...and again after the loop: `wait` is the only suspension point, so the canvas can have
+  // gone away during the very interval that made the terminal ready.
+  if (deps.abandoned?.()) return null;
   return deps.createEdge(fromId, toId);
 }

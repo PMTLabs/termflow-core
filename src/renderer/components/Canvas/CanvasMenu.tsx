@@ -31,11 +31,24 @@ export const CanvasMenu: React.FC<{
 }> = ({ x, y, onClose, className, children }) => {
   const ref = useRef<HTMLDivElement>(null);
 
+  /**
+   * `onClose` through a ref so the effect below can run ONCE per menu.
+   *
+   * Callers pass an inline closure (`onClose={() => setNodeMenu(null)}`), so its identity
+   * changed on every render of the canvas — and the canvas re-renders on every frame of a
+   * pan. Keyed on `onClose`, the effect tore its listeners down and re-armed them behind a
+   * fresh `requestAnimationFrame` each time, leaving a window of a frame or more in which an
+   * outside click did not dismiss the menu at all. Asking every caller for a `useCallback`
+   * would fix one site and leave the trap armed for the next.
+   */
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      if (!ref.current?.contains(e.target as Node)) onCloseRef.current();
     };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onCloseRef.current(); };
     // A frame late, or the very click that opened the menu closes it again.
     const id = requestAnimationFrame(() => {
       window.addEventListener('mousedown', onDown);
@@ -46,7 +59,7 @@ export const CanvasMenu: React.FC<{
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey);
     };
-  }, [onClose]);
+  }, []);
 
   return createPortal(
     <div

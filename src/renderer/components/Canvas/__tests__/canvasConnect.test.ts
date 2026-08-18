@@ -122,3 +122,74 @@ describe('the ids it connects', () => {
     expect(asked).toEqual(['tb-child']);
   });
 });
+
+/**
+ * Giving up when the canvas has gone.
+ *
+ * The poll runs for up to ten seconds and then wires the pair anyway, which is right while
+ * the canvas is on screen — a terminal that registered in the last interval is a likely win.
+ * It is wrong once the canvas is unmounted: the loop kept its closures alive for the rest of
+ * that window and then created an edge in a workspace nobody is looking at, from a source
+ * node the user may have closed while waiting.
+ */
+describe('abandoning the wait', () => {
+  it('stops polling and creates nothing once abandoned', async () => {
+    const h = harness({ readyAfterMs: 5_000 });
+    let gone = false;
+    const promise = connectWhenReady(
+      { ...h.deps, abandoned: () => gone },
+      'tm-a', 'tb-new',
+    );
+    // The first poll happens, then the canvas goes away.
+    gone = true;
+    await expect(promise).resolves.toBeNull();
+    expect(h.calls).toEqual([]);                       // no edge for a canvas that is gone
+    expect(h.elapsed()).toBeLessThan(5_000);           // and it did not sit out the wait
+  });
+
+  /**
+   * Abandoning beats the last-attempt rule.
+   *
+   * Checked BEFORE the deadline branch for exactly this case: a canvas torn down on the
+   * final tick would otherwise fall through to "connect anyway" and create the edge.
+   */
+  it('does not take its last attempt when abandoned at the deadline', async () => {
+    const h = harness({ readyAfterMs: Number.MAX_SAFE_INTEGER });
+    await expect(
+      connectWhenReady({ ...h.deps, abandoned: () => true }, 'tm-a', 'tb-new'),
+    ).resolves.toBeNull();
+    expect(h.calls).toEqual([]);
+  });
+
+  /**
+   * The check AFTER the loop, which is a separate guard from the one inside it.
+   *
+   * With the terminal already registered the loop body never executes, so the in-loop check
+   * cannot fire — and `wait` is the only suspension point, meaning the canvas can equally
+   * have gone during the very interval that made the terminal ready.
+   */
+  it('creates nothing when the terminal is already ready but the canvas has gone', async () => {
+    const h = harness({ readyAfterMs: 0 });
+    await expect(
+      connectWhenReady({ ...h.deps, abandoned: () => true }, 'tm-a', 'tb-new'),
+    ).resolves.toBeNull();
+    expect(h.calls).toEqual([]);
+  });
+
+  // The positive control: the flag is what stops it, not the mere presence of the dep.
+  it('behaves exactly as before while it is NOT abandoned', async () => {
+    const h = harness({ readyAfterMs: 300 });
+    await expect(
+      connectWhenReady({ ...h.deps, abandoned: () => false }, 'tm-a', 'tb-new'),
+    ).resolves.toEqual(EDGE);
+    expect(h.calls).toEqual([['tm-a', 'tb-new']]);
+  });
+
+  // ...and a caller that never supplies one keeps the old behaviour, including the
+  // deliberate last attempt after the timeout.
+  it('never aborts when no abandoned check is given', async () => {
+    const h = harness({ readyAfterMs: Number.MAX_SAFE_INTEGER });
+    await expect(connectWhenReady(h.deps, 'tm-a', 'tb-new')).resolves.toEqual(EDGE);
+    expect(h.calls).toEqual([['tm-a', 'tb-new']]);
+  });
+});

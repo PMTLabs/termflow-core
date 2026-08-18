@@ -14,6 +14,7 @@ import { SplitPane } from './SplitPane';
 import { TerminalPane } from './TerminalPane';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { terminalService } from '../../services/TerminalService';
+import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { closePaneNonBlocking } from '../../services/paneClose';
 import './PaneManager.css';
@@ -106,6 +107,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       ),
       closeTerminal: (id) => terminalService.closeTerminal(id),
       clearCwdSnapshot,
+      releaseSurface: cleanupTerminalCache,
     });
   }, [dispatch, paneTree, tabId]);
 

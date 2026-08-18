@@ -1,5 +1,5 @@
 import canvasReducer, {
-  setViewport, panViewport, setNodeGeom, setGroupGeom,
+  setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
@@ -366,5 +366,82 @@ describe('connection selection', () => {
     expect(s.selectedEdgeId).toBe('ce-1');          // still there, still selected
     s = canvasReducer(s, setEdges([edge('ce-9', 'c', 'd')]));
     expect(s.selectedEdgeId).toBeNull();
+  });
+});
+
+/**
+ * A group drag used to be one dispatch per member per pointer event — 101 Redux transitions
+ * per event for a 100-terminal group, each invalidating the canvas selector and re-running
+ * projection while the pointer was still moving.
+ */
+describe('moveGroupGeom', () => {
+  const rect = (x: number, y: number) => ({ x, y, w: 340, h: 210 });
+
+  it('moves the frame and every member in one transition', () => {
+    let s = init();
+    s = canvasReducer(s, setGroupGeom({ id: 'tb-1', rect: rect(0, 0) }));
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-a', rect: rect(10, 10) }));
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-b', rect: rect(10, 300) }));
+
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1',
+      frame: rect(100, 100),
+      nodes: { 'tm-a': rect(110, 110), 'tm-b': rect(110, 400) },
+    }));
+
+    expect(s.groups['tb-1']).toEqual(rect(100, 100));
+    expect(s.nodes['tm-a']).toEqual(rect(110, 110));
+    expect(s.nodes['tm-b']).toEqual(rect(110, 400));
+  });
+
+  // Only the named members move. A group drag must not disturb a node in another group.
+  it('leaves nodes it was not given alone', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-other', rect: rect(5, 5) }));
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1', frame: rect(0, 0), nodes: { 'tm-a': rect(1, 1) },
+    }));
+    expect(s.nodes['tm-other']).toEqual(rect(5, 5));
+  });
+
+  // Rects are taken WHOLE, unlike `applyArrange` which merges width/height from the previous
+  // entry. The caller derived these from the current rects, so re-reading would only mix a
+  // stale size into a fresh position.
+  it('takes the rect whole rather than merging the previous size', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-a', rect: { x: 0, y: 0, w: 999, h: 999 } }));
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1', frame: rect(0, 0), nodes: { 'tm-a': rect(2, 2) },
+    }));
+    expect(s.nodes['tm-a']).toEqual(rect(2, 2));
+  });
+});
+
+/**
+ * The prune now runs on every pane close, not only when a tab disappears, so a run that
+ * finds nothing stale has to be a real no-op. `recent` was the one field that failed that:
+ * `filter` always returns a NEW array, and Immer reads the assignment as a change — handing
+ * every subscriber a fresh state object for a prune that pruned nothing.
+ */
+describe('pruneCanvasGeometry is inert when nothing is stale', () => {
+  it('returns the identical state object', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-live', rect: { x: 0, y: 0, w: 1, h: 1 } }));
+    s = canvasReducer(s, touchNode('tm-live'));
+    const before = s;
+    const after = canvasReducer(s, pruneCanvasGeometry({
+      terminalIds: ['tm-live'], tabIds: [],
+    }));
+    expect(after).toBe(before);
+  });
+
+  // ...and it still prunes when there IS something to prune, or the test above would pass
+  // on a reducer that had stopped working entirely.
+  it('still drops a dead id from recent', () => {
+    let s = init();
+    s = canvasReducer(s, touchNode('tm-gone'));
+    s = canvasReducer(s, touchNode('tm-live'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-live'], tabIds: [] }));
+    expect(s.recent).toEqual(['tm-live']);
   });
 });

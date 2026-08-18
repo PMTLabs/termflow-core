@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { setNodeGeom, setGroupGeom } from '../../store/slices/canvasSlice';
+import { setNodeGeom, setGroupGeom, moveGroupGeom } from '../../store/slices/canvasSlice';
 import { removePaneFromTab, insertPaneIntoTab } from '../../store/slices/panesSlice';
 import { Rect } from './canvasGeometry';
 import { fitGroupFrame } from './canvasLayout';
@@ -138,10 +138,14 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
         gd.moved = true;
         const { dx, dy } = worldDelta(e.clientX - gd.startX, e.clientY - gd.startY, z);
         const moved = moveGroupBy(gd.frame, gd.nodes, gd.ids, dx, dy);
-        dispatch(setGroupGeom({ id: gd.tabId, rect: moved.frame }));
+        // ONE transition for the frame and every member. This was a dispatch per member,
+        // so a 100-terminal group produced 101 Redux actions per pointer event — each one
+        // invalidating the canvas selector and re-running layout mid-gesture.
+        const nodes: Record<string, Rect> = {};
         for (const id of gd.ids) {
-          if (moved.nodes[id]) dispatch(setNodeGeom({ id, rect: moved.nodes[id] }));
+          if (moved.nodes[id]) nodes[id] = moved.nodes[id];
         }
+        dispatch(moveGroupGeom({ tabId: gd.tabId, frame: moved.frame, nodes }));
       }
     };
 

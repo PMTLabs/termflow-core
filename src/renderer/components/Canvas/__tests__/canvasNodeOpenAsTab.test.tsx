@@ -347,11 +347,25 @@ describe('agent chip', () => {
     expect(chip()).toBeNull();
   });
 
-  it('shows the binary icon when one resolved, and copes when none did', () => {
+  it('shows the binary icon when one resolved', () => {
     mockAgent = { agent: 'codex', icon: 'data:image/png;base64,AAA' };
     render('gpu', {});
     expect(chip()!.querySelector('img')).not.toBeNull();
+  });
 
+  /**
+   * Split from the case above rather than re-rendering into the same tree, and the reason is
+   * the memo on `CanvasNodeAgent`.
+   *
+   * Mutating `mockAgent` and calling `render` again is a PARENT re-render with identical
+   * props, which a memoised child correctly skips — so the old chip stayed on screen and the
+   * test read that as a bug in the component. It is not how the value changes in production:
+   * `useDetectedAgent` subscribes to the tracker and updates the chip's OWN state, and memo
+   * never blocks a re-render a component schedules for itself. Each case gets a fresh tree
+   * (`beforeEach` makes one), which is also the more honest arrangement: "an agent whose
+   * binary icon never resolved" is a starting state, not a transition.
+   */
+  it('copes with an agent whose icon never resolved', () => {
     mockAgent = { agent: 'codex', icon: null };
     render('gpu', {});
     expect(chip()!.querySelector('img')).toBeNull();

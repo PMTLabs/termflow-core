@@ -7,6 +7,7 @@ import { pruneCanvasGeometry } from '../store/slices/canvasSlice';
 import './TerminalContainer.css';
 import { clearTabPanesInPlace } from '../services/tabPanesStore';
 import { planSeeds } from '../services/tabTreeSeed';
+import { getAllTerminalIds } from '../store/slices/paneTreeOps';
 
 interface TabPaneMapping {
   [tabId: string]: any; // Store pane tree for each tab
@@ -76,7 +77,6 @@ export const TerminalContainer: React.FC = () => {
   // Clean up closed tabs
   useEffect(() => {
     const currentTabIds = new Set(tabs.map(tab => tab.id));
-    let closed = false;
     Object.keys(tabPanes).forEach(tabId => {
       if (!currentTabIds.has(tabId)) {
         console.log(`TerminalContainer: Cleaning up pane tree for closed tab ${tabId}`);
@@ -99,32 +99,36 @@ export const TerminalContainer: React.FC = () => {
           console.log(`TerminalContainer: Closed tab was active, clearing pane tree`);
           dispatch(setPaneTree(null));
         }
-        closed = true;
       }
     });
 
-    // Canvas geometry for the terminals that just went away (`plan/013` Task 22). Without
-    // this it accumulates for the life of the profile, and a reused id would inherit a
-    // stranger's position. `pruneCanvasGeometry` also clears selection/focus/overlay pointing
-    // at a dead node, so this is not only housekeeping.
-    //
-    // The two id sets are built from their OWN sources and are not interchangeable even
-    // though they overlap: leaves from the pane trees, tabs from the tab list (design 011 D7).
-    // Read AFTER the deletions above so a tab closed in this same pass is already gone.
-    if (closed) {
-      const leafIds = new Set<string>();
-      const walk = (node: any): void => {
-        if (!node) return;
-        if (node.type === 'terminal' && node.terminalId) leafIds.add(node.terminalId);
-        if (Array.isArray(node.children)) node.children.forEach(walk);
-      };
-      Object.values(tabPanes).forEach(walk);
-      dispatch(pruneCanvasGeometry({
-        terminalIds: [...leafIds],
-        tabIds: tabs.map((tab) => tab.id),
-      }));
-    }
   }, [tabs, activeTabId, dispatch]);
+
+  // Canvas geometry for terminals that no longer exist (`plan/013` Task 22). Without this it
+  // accumulates for the life of the profile, and a reused id would inherit a stranger's
+  // position. `pruneCanvasGeometry` also clears selection/focus/overlay pointing at a dead
+  // node, so this is not only housekeeping.
+  //
+  // **Keyed on the live TERMINALS, not on tab closure.** This used to run inside the cleanup
+  // effect above, gated on a tab having disappeared — but closing one pane of a split tab
+  // does not change `tabs` at all, so that pane's rect stayed in `canvas.nodes` forever and
+  // `saveState` wrote it to localStorage every 30 seconds. Split and close panes for a few
+  // months and the persisted blob is mostly dead rectangles.
+  //
+  // The two id sets are built from their OWN sources and are not interchangeable even though
+  // they overlap: leaves from the pane trees, tabs from the tab list (design 011 D7).
+  // `treesByTabId` is the authoritative store rather than the window mirror, which is
+  // upsert-only by key.
+  useEffect(() => {
+    const leafIds = new Set<string>();
+    for (const tree of Object.values(treesByTabId)) {
+      for (const terminalId of getAllTerminalIds(tree)) leafIds.add(terminalId);
+    }
+    dispatch(pruneCanvasGeometry({
+      terminalIds: [...leafIds],
+      tabIds: tabs.map((tab) => tab.id),
+    }));
+  }, [tabs, treesByTabId, dispatch]);
 
   // Ensure all tabs have a pane tree initialized (in the window map AND the
   // authoritative Redux store treesByTabId, which background tabs now render from).

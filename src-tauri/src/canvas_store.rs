@@ -278,6 +278,44 @@ impl CanvasStore {
         )
     }
 
+    /// The stored row for one id, if any. `Ok(None)` is "no such edge".
+    ///
+    /// `patch_edge` used to answer with `all_edges()` and a linear `find`, which pulled the
+    /// whole table into memory and deserialised every historical row to return one — cost
+    /// growing with every connection ever made, on a request that names its row exactly.
+    pub fn get_by_id(&self, id: &str) -> Result<Option<CanvasEdge>, CanvasStoreError> {
+        Ok(self
+            .query(
+                "SELECT id, from_id, to_id, label, origin, created_at
+                 FROM canvas_edges WHERE id = ?1",
+                &[&id],
+            )?
+            .into_iter()
+            .next())
+    }
+
+    /// Delete every edge naming `renderer_id` at either end. Returns how many went.
+    ///
+    /// **Targeted at ONE terminal on an explicit close, which is exactly what makes it safe
+    /// where `prune_edges` is not.** Pruning takes a `live` SET, so at boot — or at any
+    /// moment before a restored pane has spawned its shell — a perfectly good peer looks
+    /// dead and its edges go with it. That is the bug `get_graph` stopped filtering to fix,
+    /// and `nothing_prunes_edges_on_startup` guards it. This runs from `close_terminal`,
+    /// where the terminal is gone by the user's own instruction, so there is no liveness
+    /// guess to get wrong. Without it, `canvas_edges` grows for the life of the profile:
+    /// closing a wired terminal left its rows behind forever.
+    ///
+    /// Equality, never `LIKE`, for the same reason `edges_for` gives: renderer ids share a
+    /// prefix space (`tm-a`, `tm-ab`), so a pattern would take a neighbour's edges too.
+    pub fn delete_edges_for(&self, renderer_id: &str) -> Result<usize, CanvasStoreError> {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(CanvasStoreError::Disabled)?;
+        Ok(conn.execute(
+            "DELETE FROM canvas_edges WHERE from_id = ?1 OR to_id = ?1",
+            [renderer_id],
+        )?)
+    }
+
     /// Housekeeping only — correctness comes from filtering reads by liveness.
     /// Deletes at most `limit` edges older than `older_than` whose endpoints are
     /// all dead, so startup is never blocked.
@@ -368,6 +406,55 @@ mod tests {
         assert!(v.get("fromId").is_none(), "the snake/camel name must not leak");
         assert!(v.get("toId").is_none());
         assert!(v.get("created_at").is_none());
+    }
+
+    #[test]
+    fn get_by_id_answers_without_scanning_the_table() {
+        let s = CanvasStore::new_in_memory();
+        s.insert_edge(&edge("ce-1", "tm-a", "tm-b", "user", 10)).unwrap();
+        s.insert_edge(&edge("ce-2", "tm-c", "tm-d", "user", 20)).unwrap();
+        assert_eq!(s.get_by_id("ce-2").unwrap().unwrap().from_id, "tm-c");
+        // A missing id is an ANSWER (`Ok(None)`), not an error — `patch_edge` turns it into
+        // a 404, and collapsing it into `Err` would report an unavailable store instead.
+        assert!(s.get_by_id("ce-nope").unwrap().is_none());
+    }
+
+    /// Closing a terminal takes its wires with it — the only thing that ever deletes an
+    /// edge outside an explicit DELETE, and the reason `canvas_edges` stops growing forever.
+    #[test]
+    fn delete_edges_for_removes_both_directions_and_nothing_else() {
+        let s = CanvasStore::new_in_memory();
+        s.insert_edge(&edge("ce-out", "tm-a", "tm-b", "user", 10)).unwrap();
+        s.insert_edge(&edge("ce-in", "tm-c", "tm-a", "user", 20)).unwrap();
+        s.insert_edge(&edge("ce-other", "tm-c", "tm-d", "user", 30)).unwrap();
+
+        assert_eq!(s.delete_edges_for("tm-a").unwrap(), 2, "both directions");
+        let left: Vec<String> = s.all_edges().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(left, vec!["ce-other"], "an unrelated edge is untouched");
+    }
+
+    /// Equality, never `LIKE`. Renderer ids share a prefix space, so a pattern match would
+    /// take a neighbour's wires when a terminal closes — a silent loss on someone else's
+    /// node. Same reasoning `edges_for` documents, asserted rather than assumed.
+    #[test]
+    fn delete_edges_for_does_not_match_an_id_prefix() {
+        let s = CanvasStore::new_in_memory();
+        s.insert_edge(&edge("ce-1", "tm-a", "tm-z", "user", 10)).unwrap();
+        s.insert_edge(&edge("ce-2", "tm-ab", "tm-z", "user", 20)).unwrap();
+
+        assert_eq!(s.delete_edges_for("tm-a").unwrap(), 1);
+        let left: Vec<String> = s.all_edges().unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(left, vec!["ce-2"], "tm-ab is a different terminal");
+    }
+
+    /// Deleting for a terminal with no wires is a no-op, not an error: most terminals are
+    /// never connected to anything, and every close goes through this path.
+    #[test]
+    fn delete_edges_for_is_a_no_op_when_nothing_names_it() {
+        let s = CanvasStore::new_in_memory();
+        s.insert_edge(&edge("ce-1", "tm-a", "tm-b", "user", 10)).unwrap();
+        assert_eq!(s.delete_edges_for("tm-lonely").unwrap(), 0);
+        assert_eq!(s.all_edges().unwrap().len(), 1);
     }
 
     #[test]

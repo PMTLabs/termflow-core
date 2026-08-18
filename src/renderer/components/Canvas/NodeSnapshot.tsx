@@ -31,7 +31,7 @@ const POLL_MS = 500;
  * `SnapshotEntry.ansi` into a data URL behind the same props. The cache already stores the raw
  * ANSI for exactly that reason.
  */
-export const NodeSnapshot: React.FC<{ terminalId: string }> = ({ terminalId }) => {
+const NodeSnapshotImpl: React.FC<{ terminalId: string }> = ({ terminalId }) => {
   // Seeded from the cache so a node panned back into view paints immediately rather than
   // flashing empty for up to a tick.
   const [ansi, setAnsi] = useState<string | null>(
@@ -114,6 +114,18 @@ export const NodeSnapshot: React.FC<{ terminalId: string }> = ({ terminalId }) =
     </div>
   );
 };
+
+/**
+ * Memoised, and the props are why it can be.
+ *
+ * Canvas Mode re-renders on every frame of a pan or zoom — `setViewport` fires per pointer
+ * event — and without this every node's polling snapshot re-ran with it, for the whole workspace
+ * including the nodes culled off screen. The props here are primitives, so the equality
+ * check is exact and cheap; `CanvasNode` itself is deliberately NOT memoised, because it
+ * takes `children` and seven per-node closures that are rebuilt each render, and a memo
+ * that never bails is only a slower render.
+ */
+export const NodeSnapshot = React.memo(NodeSnapshotImpl);
 
 export { SNAPSHOT_TTL_MS };
 export default NodeSnapshot;

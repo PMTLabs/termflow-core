@@ -23,7 +23,7 @@ import { setSurfaceHost, clearSurfaceHost } from '../../services/surfaceHosts';
  * order promotions (design/010 D8 puts the focused node first), demote before it
  * promotes, and honour CALLER-DROP. See `canvasRenderPolicy.ts`.
  */
-export const NodeTerminal: React.FC<{
+const NodeTerminalImpl: React.FC<{
   terminalId: string;
   focused: boolean;
 }> = ({ terminalId, focused }) => {
@@ -51,5 +51,17 @@ export const NodeTerminal: React.FC<{
     </div>
   );
 };
+
+/**
+ * Memoised, and the props are why it can be.
+ *
+ * Canvas Mode re-renders on every frame of a pan or zoom — `setViewport` fires per pointer
+ * event — and without this every node's host registration and surface subscription re-ran with it, for the whole workspace
+ * including the nodes culled off screen. The props here are primitives, so the equality
+ * check is exact and cheap; `CanvasNode` itself is deliberately NOT memoised, because it
+ * takes `children` and seven per-node closures that are rebuilt each render, and a memo
+ * that never bails is only a slower render.
+ */
+export const NodeTerminal = React.memo(NodeTerminalImpl);
 
 export default NodeTerminal;

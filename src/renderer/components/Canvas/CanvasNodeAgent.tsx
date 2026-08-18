@@ -22,7 +22,7 @@ import { useDetectedAgent } from '../Terminal/useDetectedAgent';
  * Renders nothing for a plain shell — an empty chip on every node would cost the title bar its
  * width and say less than the space it took.
  */
-export const CanvasNodeAgent: React.FC<{ terminalId: string }> = ({ terminalId }) => {
+const CanvasNodeAgentImpl: React.FC<{ terminalId: string }> = ({ terminalId }) => {
   const { agent, icon } = useDetectedAgent(terminalId);
 
   if (!agent) return null;
@@ -34,5 +34,17 @@ export const CanvasNodeAgent: React.FC<{ terminalId: string }> = ({ terminalId }
     </span>
   );
 };
+
+/**
+ * Memoised, and the props are why it can be.
+ *
+ * Canvas Mode re-renders on every frame of a pan or zoom — `setViewport` fires per pointer
+ * event — and without this every node's agent-detection subscription re-ran with it, for the whole workspace
+ * including the nodes culled off screen. The props here are primitives, so the equality
+ * check is exact and cheap; `CanvasNode` itself is deliberately NOT memoised, because it
+ * takes `children` and seven per-node closures that are rebuilt each render, and a memo
+ * that never bails is only a slower render.
+ */
+export const CanvasNodeAgent = React.memo(CanvasNodeAgentImpl);
 
 export default CanvasNodeAgent;

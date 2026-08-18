@@ -197,6 +197,20 @@ export const CanvasMode: React.FC = () => {
   ));
   const flyTo = useFlyTo();
 
+  /**
+   * Is this canvas still on screen?
+   *
+   * Read by fire-and-forget work that outlives a render — `connectWhenReady` polls for up to
+   * ten seconds — so it can stop instead of finishing against a canvas that has gone. A ref
+   * rather than state: nothing renders from it, and a setState on unmount is the bug this
+   * exists to avoid, not a way to express it.
+   */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
   const onSize = useCallback((w: number, h: number) => setSize({ w, h }), []);
 
   const tiers = useMemo(() => {
@@ -702,6 +716,10 @@ export const CanvasMode: React.FC = () => {
           createEdge,
           wait: (ms) => new Promise((r) => setTimeout(r, ms)),
           now: () => Date.now(),
+          // Stop polling if the canvas is unmounted while we wait. Without this the loop
+          // ran its full ten seconds against a screen nobody is looking at and then wired
+          // the pair anyway.
+          abandoned: () => !mounted.current,
         },
         source.terminalId,
         plan.tab.id,

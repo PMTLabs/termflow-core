@@ -53,6 +53,21 @@ describe('performClose removes the pane from its owning tab', () => {
     expect(BODY).not.toContain('removeFromUi: () => dispatch(closePane(paneId))');
   });
 
+  /**
+   * ...and the pane takes its cached engine with it.
+   *
+   * `cleanupTerminalCache` had ONE caller, the tab-close path, so closing a split pane killed
+   * the PTY and left the cache entry holding a WebGL context that `countActiveWebGLAddons()`
+   * counted against the 12-context budget for the rest of the session. Asserted at the WIRING
+   * level because the disposal itself was never missing — two external reviewers read the same
+   * code and split on it, one confirming the dispose exists and the other that nothing on this
+   * path reaches it. Only the second question mattered.
+   */
+  it('hands the pane-close helper a way to release the terminal surface', () => {
+    expect(BODY).toContain('releaseSurface: cleanupTerminalCache');
+    expect(SRC).toContain("import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';");
+  });
+
   // A stale closure here would reintroduce the bug in its most confusing form: the right
   // action dispatched against the tab the component was mounted for LAST.
   it('lists tabId as a dependency of the callback', () => {

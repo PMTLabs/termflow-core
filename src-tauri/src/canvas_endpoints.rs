@@ -369,13 +369,14 @@ pub async fn patch_edge(
     {
         Ok(false) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
         Err(_) => store_error(),
-        Ok(true) => match state.canvas_store.all_edges() {
-            Ok(edges) => match edges.into_iter().find(|edge| edge.id == id) {
-                Some(edge) => (StatusCode::OK, Json(edge)).into_response(),
-                // A concurrent delete after the successful update is a confirmed
-                // absence, not an unavailable store.
-                None => error(StatusCode::NOT_FOUND, "canvas edge not found"),
-            },
+        Ok(true) => match state.canvas_store.get_by_id(&id) {
+            // Indexed by id rather than `all_edges()` + a linear find: the request names
+            // its row exactly, and scanning every edge ever created to return one made a
+            // constant-cost operation grow with the table.
+            Ok(Some(edge)) => (StatusCode::OK, Json(edge)).into_response(),
+            // A concurrent delete after the successful update is a confirmed
+            // absence, not an unavailable store.
+            Ok(None) => error(StatusCode::NOT_FOUND, "canvas edge not found"),
             Err(_) => store_error(),
         },
     }
@@ -837,6 +838,44 @@ mod tests {
         fn the_agent_facing_readers_still_hide_dead_endpoints() {
             assert!(body_of("get_connections").contains("filter_live"));
             assert!(source().contains("filter_live(edges, live)")); // node_block, for get_my_terminal
+        }
+
+        /// One row is fetched by id, not by scanning every edge ever created.
+        ///
+        /// `patch_edge` answered with `all_edges()` and a linear `find`, so returning the row
+        /// a request named exactly cost a full table read that grew with the profile's whole
+        /// history. Behaviour is identical either way, which is precisely why this has to be
+        /// asserted as WIRING — no functional test can tell the two apart.
+        #[test]
+        fn patch_edge_looks_its_row_up_by_id() {
+            let body = body_of("patch_edge");
+            assert!(body.contains("canvas_store.get_by_id(&id)"));
+            // The CALL form, receiver included. `body_of` returns raw source, comments and
+            // all, and a bare `all_edges()` matched the sentence in the comment explaining
+            // why it is no longer used — a test measuring its own prose rather than the code.
+            assert!(
+                !body.contains("canvas_store.all_edges()"),
+                "a full-table scan to return one named row"
+            );
+        }
+
+        /// A closed terminal takes its wires with it, and that is the ONLY thing bounding
+        /// `canvas_edges`. Asserted as a WIRING fact, because the store method existing
+        /// proves nothing: `prune_edges` has existed since day one with no caller at all,
+        /// which is exactly how the table came to grow for the life of the profile.
+        #[test]
+        fn closing_a_terminal_deletes_its_edges() {
+            let commands = include_str!("commands.rs").replace("
+", "
+");
+            assert!(
+                commands.contains("canvas_store.delete_edges_for(&tab_id)"),
+                "close_terminal must delete the closed terminal's edges"
+            );
+            // ...and it must stay the TARGETED delete. `prune_edges` takes a liveness set,
+            // so reaching for it here would reap a restored-but-unspawned peer's wires —
+            // the same trap `nothing_prunes_edges_on_startup` guards one door of.
+            assert!(!commands.contains("canvas_store.prune_edges("));
         }
 
         /// Startup pruning would delete exactly the edges the fix preserves: `prune_edges` takes
