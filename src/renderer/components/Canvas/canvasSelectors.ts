@@ -135,7 +135,7 @@ export const NODE_CHIP_ZOOM = T_GPU / NODE_W + 0.1;
  */
 function buildModel(
   tabs: Tab[],
-  trees: Record<string, PaneNode>,
+  trees: Record<string, PaneNode | null>,
   stored: Record<string, Rect>,
   storedGroups: Record<string, Rect>,
 ): CanvasModel {

@@ -5,8 +5,8 @@ import { PaneManager } from './Panes/PaneManager';
 import { setPaneTree, setActiveTabId, addTabTree, removeTabTree } from '../store/slices/panesSlice';
 import { pruneCanvasGeometry } from '../store/slices/canvasSlice';
 import './TerminalContainer.css';
-import { generateId } from '../utils/id';
 import { clearTabPanesInPlace } from '../services/tabPanesStore';
+import { seedTreeFor } from '../services/tabTreeSeed';
 
 interface TabPaneMapping {
   [tabId: string]: any; // Store pane tree for each tab
@@ -52,14 +52,12 @@ export const TerminalContainer: React.FC = () => {
     const activeTab = tabs.find(t => t.id === activeTabId);
     if (isVirtualTab(activeTab?.shellType)) return;
 
-    if (!treesByTabId[activeTabId]) {
-      const seed = tabPanes[activeTabId] || {
-        id: generateId('pn'),
-        type: 'terminal' as const,
-        terminalId: activeTabId,
-        name: activeTab?.title || 'Terminal',
-        shellType: activeTab?.shellType,
-      };
+    const seed = seedTreeFor(
+      { id: activeTabId, title: activeTab?.title, shellType: activeTab?.shellType },
+      treesByTabId,
+      tabPanes,
+    );
+    if (seed) {
       tabPanes[activeTabId] = seed;
       dispatch(addTabTree({ tabId: activeTabId, tree: seed }));
     }
@@ -129,21 +127,15 @@ export const TerminalContainer: React.FC = () => {
   useEffect(() => {
     tabs.forEach(tab => {
       if (isVirtualTab(tab.shellType)) return;
-      if (!tabPanes[tab.id]) {
-        console.log('TerminalContainer: Pre-initializing pane tree for tab', tab.id);
-        const newPaneId = generateId('pn');
-        tabPanes[tab.id] = {
-          id: newPaneId,
-          type: 'terminal' as const,
-          terminalId: tab.id,
-          name: tab.title || 'Terminal',
-          shellType: tab.shellType,
-        };
-      }
-      // Seed Redux from the window map (covers API-/restore-created tabs).
-      if (!treesByTabId[tab.id]) {
-        dispatch(addTabTree({ tabId: tab.id, tree: tabPanes[tab.id] }));
-      }
+      // Seeds Redux AND the window map from one decision (covers API-/restore-created
+      // tabs). Returns null for a tab that is already initialised — including one that is
+      // initialised and EMPTY — and for a seed that would duplicate another tab's
+      // terminal. See services/tabTreeSeed.ts.
+      const seed = seedTreeFor(tab, treesByTabId, tabPanes);
+      if (!seed) return;
+      console.log('TerminalContainer: Pre-initializing pane tree for tab', tab.id);
+      tabPanes[tab.id] = seed;
+      dispatch(addTabTree({ tabId: tab.id, tree: seed }));
     });
   }, [tabs, treesByTabId, dispatch]);
 
@@ -167,7 +159,12 @@ export const TerminalContainer: React.FC = () => {
         // Each tab renders from its OWN authoritative tree (reducers keep it in
         // sync via syncActive). This avoids any dependency on the active-tab
         // paneTree mirror, so switching tabs can't show another tab's content.
-        let displayPaneTree = treesByTabId[tab.id] || tabPanes[tab.id];
+        // The authoritative entry wins WHENEVER IT EXISTS, including when it holds null.
+        // `||` fell through on null to `tabPanes`, a window-global mirror that is never
+        // pruned — so an emptied tab re-rendered the tree its terminal had already left,
+        // mounting that terminal in two places at once.
+        const initialised = tab.id in treesByTabId;
+        let displayPaneTree = initialised ? treesByTabId[tab.id] : tabPanes[tab.id];
         // Keep a single-pane tab's pane name in step with the tab title (renames).
         // `type === 'terminal'` alone already scopes this to the solo/root pane
         // (a split tab's tree is a 'split' node here, never 'terminal') — an
@@ -209,6 +206,14 @@ export const TerminalContainer: React.FC = () => {
                 tabId={tab.id}
                 maximizedPaneId={maximizedPaneByTabId[tab.id] ?? null}
               />
+            ) : initialised ? (
+              // Open and empty: every terminal this tab had was moved into another group.
+              // A legal resting state (design 010 §6.3), not a stage of starting up — saying
+              // "initializing" here would promise a terminal that is never coming.
+              <div className="empty-state">
+                <p>This tab has no terminals.</p>
+                <p>Drag one onto its group in Canvas Mode, or close the tab.</p>
+              </div>
             ) : (
               <div className="loading-state">
                 Initializing background terminal...

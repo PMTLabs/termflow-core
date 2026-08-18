@@ -188,12 +188,16 @@ describe('panesSlice movePaneToTab', () => {
     expect(s.treesByTabId['tb-1'].terminalId).toBe('tm-2');
   });
 
-  it('removePaneFromTab prunes a pane and deletes the tab when it empties', () => {
+  // The entry survives holding null — "open and empty" — rather than being deleted. Deleting
+  // it made an emptied tab look identical to one that had never been initialised, and
+  // TerminalContainer's seed effect then gave it a terminal it had just given away.
+  it('removePaneFromTab prunes a pane and leaves the tab entry null when it empties', () => {
     let s = withActive('tb-1');
     s = reducer(s, initializePane({ terminalId: 'tb-1' }));
     const onlyPane = s.paneTree!.id;
     s = reducer(s, removePaneFromTab({ tabId: 'tb-1', paneId: onlyPane }));
-    expect(s.treesByTabId['tb-1']).toBeUndefined();
+    expect('tb-1' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-1']).toBeNull();
     expect(s.paneTree).toBeNull();
     expect(s.activePaneId).toBeNull();
   });
@@ -223,7 +227,34 @@ describe('panesSlice movePaneToTab', () => {
     expect(s.activePaneId).toBe('pn-ext');
   });
 
-  it('deletes source tab tree when it empties', () => {
+  // An empty tab is a legal DESTINATION: design 010 §6.3 keeps an emptied group's frame on
+  // the canvas as a drop target, so the drop has to land somewhere. The arriving pane becomes
+  // the tab's whole tree. Refusing it left a group you could drag out of and never back into.
+  it('insertPaneIntoTab makes the arriving pane the whole tree of an emptied tab', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    s = reducer(s, removePaneFromTab({ tabId: 'tb-1', paneId: s.paneTree!.id }));
+    expect(s.treesByTabId['tb-1']).toBeNull();
+
+    s = reducer(s, insertPaneIntoTab({
+      tabId: 'tb-1', targetPaneId: null, zone: 'right', node: leaf('pn-back', 'tm-back'),
+    }));
+    expect(s.treesByTabId['tb-1']!.type).toBe('terminal');
+    expect(s.treesByTabId['tb-1']!.terminalId).toBe('tm-back');
+  });
+
+  // A tab whose entry was never written has no layout to insert into — distinct from the null
+  // above, and still refused. Without this the two cases could collapse into one and the
+  // reducer would start manufacturing trees for tabs that are still starting up.
+  it('insertPaneIntoTab refuses a tab that has no entry at all', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, insertPaneIntoTab({
+      tabId: 'tb-never', targetPaneId: null, zone: 'right', node: leaf('pn-x', 'tm-x'),
+    }));
+    expect('tb-never' in s.treesByTabId).toBe(false);
+  });
+
+  it('nulls the source tab tree when it empties', () => {
     let s = withActive('tb-1');
     s = reducer(s, initializePane({ terminalId: 'tb-1' }));
     const onlyPane = s.paneTree!.id;
@@ -232,8 +263,11 @@ describe('panesSlice movePaneToTab', () => {
       sourceTabId: 'tb-1', sourcePaneId: onlyPane,
       targetTabId: 'tb-2', targetPaneId: 'pn-q1', zone: 'left',
     }));
-    expect(s.treesByTabId['tb-1']).toBeUndefined();
-    expect(s.treesByTabId['tb-2'].children!.map(c => c.terminalId)).toEqual(['tb-1', 'tb-2']);
+    // Null, not deleted. `PaneDragController.commitDrop` reads exactly this to decide whether
+    // to close the source tab, so the tab-strip drag still closes a tab it empties.
+    expect('tb-1' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-1']).toBeNull();
+    expect(s.treesByTabId['tb-2']!.children!.map(c => c.terminalId)).toEqual(['tb-1', 'tb-2']);
   });
 });
 

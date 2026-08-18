@@ -175,22 +175,36 @@ describe('planRegroup agrees with the reducers that actually apply it', () => {
     expect(shape(swapped)).not.toEqual(shape(trees()['tb-a']));
   });
 
-  // The case `addTabTree` could not have expressed: an emptied source tab drops its tree
-  // entry entirely rather than storing a null.
-  it('drops the source tree entirely when the last terminal leaves', () => {
+  // The case `addTabTree` could not have expressed: an emptied source tab KEEPS its entry,
+  // holding null.
+  //
+  // This used to assert the entry was deleted, and that is the bug Tam hit. A deleted key is
+  // indistinguishable from a tab that was never initialised, so `TerminalContainer`'s seed
+  // effect — whose whole job is to give an uninitialised tab a tree — fired on the tab that
+  // had just been emptied and manufactured a root leaf carrying the tab's own id. That is
+  // exactly the id this move carried AWAY, so the terminal came back from the dead and was a
+  // member of two groups at once.
+  it('keeps the source tab entry, holding null, when the last terminal leaves', () => {
     const { plan, s } = applyViaReducers(state(), 'tb-b', 'tb-b', 'tb-a');
     expect(plan.fromTree).toBeNull();
-    expect(s.treesByTabId['tb-b']).toBeUndefined();
+    expect('tb-b' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-b']).toBeNull();
   });
 
   // Design §6.3/§10: an emptied group keeps its frame and stays a drop target. The TAB must
   // therefore survive — nothing here may delete it, or a session the user only meant to move
   // would be killed.
-  it('leaves the emptied tab itself in place', () => {
+  it('leaves the emptied tab itself in place, and EMPTY', () => {
     const { s } = applyViaReducers(state(), 'tb-b', 'tb-b', 'tb-a');
-    // Only the tree is gone; no reducer here touches the tab list, and the canvas still knows
-    // the group because `buildCanvasModel` reads tabs, not trees.
-    expect(Object.keys(s.treesByTabId)).toEqual(['tb-a']);
+    expect(Object.keys(s.treesByTabId).sort()).toEqual(['tb-a', 'tb-b']);
+
+    // The half that was missing. The old version proved the tab survived and stopped there —
+    // so a tab that survived and then quietly refilled itself passed it. What the move
+    // actually promises is that the terminal is in exactly ONE tree afterwards.
+    const homes = Object.entries(s.treesByTabId)
+      .filter(([, t]) => findPaneIdByTerminalId(t, 'tb-b') !== null)
+      .map(([tabId]) => tabId);
+    expect(homes).toEqual(['tb-a']);
   });
 
   it('clears a maximize on the source tab when the maximized pane is the one that moves', () => {

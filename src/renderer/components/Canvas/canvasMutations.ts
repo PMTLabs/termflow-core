@@ -22,8 +22,9 @@ export interface RegroupPlan {
   toTabId: string;
   /** The leaf to move, in the SOURCE tree. */
   paneId: string;
-  /** The leaf in the DESTINATION tree to insert against. */
-  anchorPaneId: string;
+  /** The leaf in the DESTINATION tree to insert against. Null when the destination is an
+   *  open, empty tab — the moved pane becomes its whole tree. */
+  anchorPaneId: string | null;
   /** What the source tree becomes. Null when the tab has no terminals left. */
   fromTree: PaneNode | null;
   /** What the destination tree becomes. */
@@ -57,15 +58,18 @@ export interface RegroupPlan {
  * `removeLeaf`/`insertByZone` both clone, so the caller's trees are never mutated.
  */
 export function planRegroup(
-  trees: Record<string, PaneNode>,
+  trees: Record<string, PaneNode | null>,
   terminalId: string,
   fromTabId: string,
   toTabId: string,
 ): RegroupPlan | null {
   if (fromTabId === toTabId) return null;
   const from = trees[fromTabId];
+  // `undefined` is a tab with no layout at all; `null` is an open tab that has been emptied,
+  // and design 010 §6.3 keeps its frame as a drop target — so it is a legal DESTINATION,
+  // just never a source.
   const to = trees[toTabId];
-  if (!from || !to) return null;
+  if (!from || to === undefined) return null;
 
   const paneId = findPaneIdByTerminalId(from, terminalId);
   if (!paneId) return null;
@@ -73,9 +77,10 @@ export function planRegroup(
   const { tree: fromTree, removed } = removeLeaf(from, paneId);
   if (!removed) return null;
 
-  const anchorPaneId = firstLeafId(to);
-  if (!anchorPaneId) return null;
-  const toTree = insertByZone(to, anchorPaneId, removed, 'right');
+  const anchorPaneId = to && firstLeafId(to);
+  // A tree that exists but has no leaf to aim at is malformed, not empty.
+  if (to && !anchorPaneId) return null;
+  const toTree = to && anchorPaneId ? insertByZone(to, anchorPaneId, removed, 'right') : removed;
 
   return { fromTabId, toTabId, paneId, anchorPaneId, fromTree, toTree, movedPane: removed };
 }

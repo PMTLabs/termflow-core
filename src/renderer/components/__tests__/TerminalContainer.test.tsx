@@ -29,7 +29,9 @@ import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
-import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
+import panesReducer, {
+  addTabTree, setActiveTabId, removePaneFromTab, insertPaneIntoTab,
+} from '../../store/slices/panesSlice';
 import { runApiCreateMode0 } from '../../services/apiCreatedTab';
 
 jest.mock('../TerminalContainer.css', () => ({}));
@@ -249,5 +251,91 @@ describe('TerminalContainer — the canvas tab', () => {
 
     expect(store.getState().tabs.activeTabId).toBe(shellTab.id);
     expect(container.querySelector('[data-testid="canvas-mode"]')).toBeNull();
+  });
+});
+
+/**
+ * A tab emptied by canvas re-homing must render as EMPTY and stay that way.
+ *
+ * Tam's report — "I click Arrange and the terminals and groups are messed up" — traced to a
+ * terminal that had been dragged into another group coming back to life in the one it left,
+ * so it was a member of both. Two things here resurrected it, and each is pinned separately
+ * because either alone reproduces the bug:
+ *
+ *  - the seed effect, which could not tell an emptied tab from an uninitialised one; and
+ *  - this render, which fell through on a null tree to `window.tabPanes` — a mirror that is
+ *    upsert-only and so still held the tree the terminal had already left.
+ */
+describe('TerminalContainer — a tab emptied by canvas re-homing', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    const existing = (window as any).tabPanes;
+    if (existing) Object.keys(existing).forEach((k) => delete existing[k]);
+    else (window as any).tabPanes = {};
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  const setup = async () => {
+    const store = makeStore();
+    store.dispatch(addTab({ id: 'tb-keep', title: 'Windows PowerShell', shellType: 'bash' } as any));
+    store.dispatch(addTab({ id: 'tb-empty', title: 'PowerShell 7 4', shellType: 'bash' } as any));
+    store.dispatch(addTabTree({
+      tabId: 'tb-keep', tree: { id: 'pn-k', type: 'terminal', terminalId: 'tb-keep' },
+    }));
+    store.dispatch(addTabTree({
+      tabId: 'tb-empty', tree: { id: 'pn-e', type: 'terminal', terminalId: 'tb-empty' },
+    }));
+    // The mirror now holds tb-empty's tree, exactly as the store subscription leaves it.
+    (window as any).tabPanes['tb-empty'] = { id: 'pn-e', type: 'terminal', terminalId: 'tb-empty' };
+
+    // Re-home tb-empty's only terminal into tb-keep — the canvas drag, via its reducers.
+    store.dispatch(removePaneFromTab({ tabId: 'tb-empty', paneId: 'pn-e' }));
+    store.dispatch(insertPaneIntoTab({
+      tabId: 'tb-keep', targetPaneId: 'pn-k', zone: 'right',
+      node: { id: 'pn-e', type: 'terminal', terminalId: 'tb-empty' },
+    }));
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <Provider store={store}>
+          <TerminalContainer />
+        </Provider>,
+      );
+    });
+    return store;
+  };
+
+  it('renders no pane for the emptied tab, and does not refill it', async () => {
+    const store = await setup();
+    expect(container.querySelector('[data-testid="pane-manager-tb-empty"]')).toBeNull();
+    // The seed effect had a full render to fire in; the entry must still be null.
+    expect(store.getState().panes.treesByTabId['tb-empty']).toBeNull();
+  });
+
+  it('says the tab is empty rather than claiming a terminal is on its way', async () => {
+    await setup();
+    const tab = container.querySelector('[data-tab-id="tb-empty"]');
+    expect(tab?.querySelector('.empty-state')).not.toBeNull();
+    expect(tab?.querySelector('.loading-state')).toBeNull();
+  });
+
+  it('leaves the moved terminal mounted exactly once, in its new tab', async () => {
+    await setup();
+    const mounted = [...container.querySelectorAll('[data-terminal-id]')]
+      .map((el) => el.getAttribute('data-terminal-id'))
+      .filter((id) => id === 'tb-empty');
+    expect(mounted).toEqual([]);           // the mock reports the ROOT leaf of each tab...
+    const keep = container.querySelector('[data-testid="pane-manager-tb-keep"]');
+    expect(keep).not.toBeNull();           // ...and tb-keep is now a split, so its root has none
+    expect(container.querySelectorAll('[data-testid^="pane-manager-"]').length).toBe(1);
   });
 });
