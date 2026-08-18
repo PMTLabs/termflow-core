@@ -192,7 +192,7 @@ pub const GEOMETRY_DEBOUNCE: Duration = Duration::from_millis(500);
 /// been written yet — which must always write, otherwise the FIRST geometry
 /// change of a session is held indefinitely.
 pub fn debounce_due(dirty: bool, since: Option<Duration>) -> bool {
-    dirty && since.map_or(true, |d| d >= GEOMETRY_DEBOUNCE)
+    dirty && since.is_none_or(|d| d >= GEOMETRY_DEBOUNCE)
 }
 
 /// Live window bookkeeping: the registry, the `label → windowId` map the
