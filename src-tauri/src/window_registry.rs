@@ -147,6 +147,40 @@ pub fn save(path: &Path, registry: &Registry) -> Result<(), String> {
     crate::app_config::write_atomic(path, &json)
 }
 
+/// A monitor's work area in the same physical-pixel space as `WindowRecord`.
+#[derive(Debug, Clone, Copy)]
+pub struct MonitorRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// How much of a restored window must remain visible on some monitor for the
+/// user to be able to grab it. Roughly a title bar's worth.
+pub const MIN_VISIBLE_PX: i32 = 80;
+
+/// Can the user actually reach this window where it was last seen?
+///
+/// Monitors get unplugged and resolutions change between sessions. Restoring a
+/// window onto coordinates that no longer exist puts it somewhere the user
+/// cannot click, drag or close — worse than ignoring the saved position.
+pub fn is_reachable(record: &WindowRecord, monitors: &[MonitorRect]) -> bool {
+    // No monitors reported: we cannot prove it is unreachable, and refusing to
+    // place every window would be a worse failure than trusting the record.
+    if monitors.is_empty() {
+        return true;
+    }
+    let (wx0, wy0) = (record.x, record.y);
+    let wx1 = record.x + record.width as i32;
+    let wy1 = record.y + record.height as i32;
+    monitors.iter().any(|m| {
+        let overlap_w = wx1.min(m.x + m.width as i32) - wx0.max(m.x);
+        let overlap_h = wy1.min(m.y + m.height as i32) - wy0.max(m.y);
+        overlap_w >= MIN_VISIBLE_PX && overlap_h >= MIN_VISIBLE_PX
+    })
+}
+
 /// Minimum gap between geometry writes. Dragging a window emits a `Moved` event
 /// per frame; without this the registry file would be rewritten ~60×/second for
 /// the whole duration of the drag.
@@ -218,6 +252,16 @@ impl WindowTracker {
     pub fn register(&self, record: WindowRecord) {
         self.bind(&record.label, &record.id);
         self.registry.lock().upsert(record);
+        self.persist_now();
+    }
+
+    /// Drop a record by id, for a window that never came to exist.
+    ///
+    /// `forget` cannot do this: it resolves through the `label → id` map, which
+    /// only holds windows that were successfully built. A record left behind
+    /// would be retried on every single start.
+    pub fn drop_record(&self, id: &str) {
+        self.registry.lock().remove(id);
         self.persist_now();
     }
 
@@ -457,6 +501,23 @@ mod tests {
     }
 
     #[test]
+    fn drop_record_removes_a_window_that_was_never_built() {
+        // The restore loop loads N records, then fails to build one. `forget`
+        // is useless there (nothing was ever bound to a label), so without
+        // drop_record the dead record is retried on every single start.
+        let t = WindowTracker::new(
+            temp_dir("drop-record").join("window-registry.json"),
+            Registry { version: VERSION, windows: vec![rec("w0", "main"), rec("w1", "window-a")] },
+        );
+        assert_eq!(t.forget("window-a"), (), "no binding exists yet");
+        assert_eq!(t.snapshot().windows.len(), 2, "forget cannot reach an unbuilt record");
+
+        t.drop_record("w1");
+        assert_eq!(t.snapshot().windows.len(), 1);
+        assert_eq!(load(&t.path).windows.len(), 1, "and it is persisted");
+    }
+
+    #[test]
     fn forgetting_an_unregistered_label_is_a_noop() {
         let t = tracker("forget-unreg");
         t.register(rec("w0", "main"));
@@ -543,6 +604,52 @@ mod tests {
             "60 move events inside one debounce window must produce zero extra writes"
         );
         assert_eq!(t.snapshot().windows[0].x, 59, "…while memory tracks the latest position");
+    }
+
+    // --- reachability ---
+
+    fn mon(x: i32, y: i32, w: u32, h: u32) -> MonitorRect {
+        MonitorRect { x, y, width: w, height: h }
+    }
+
+    fn at(x: i32, y: i32) -> WindowRecord {
+        let mut r = rec("w0", "main");
+        r.x = x;
+        r.y = y;
+        r.width = 1280;
+        r.height = 800;
+        r
+    }
+
+    #[test]
+    fn a_window_on_the_primary_monitor_is_reachable() {
+        assert!(is_reachable(&at(100, 100), &[mon(0, 0, 1920, 1080)]));
+    }
+
+    #[test]
+    fn a_window_on_an_unplugged_second_monitor_is_not_reachable() {
+        // Saved on a monitor to the right that is now gone.
+        assert!(!is_reachable(&at(2400, 200), &[mon(0, 0, 1920, 1080)]));
+    }
+
+    #[test]
+    fn a_window_on_a_monitor_left_of_the_primary_is_reachable() {
+        // Negative coordinates are legitimate, not corruption.
+        assert!(is_reachable(&at(-1800, 40), &[mon(0, 0, 1920, 1080), mon(-1920, 0, 1920, 1080)]));
+    }
+
+    #[test]
+    fn a_barely_overlapping_window_is_not_reachable() {
+        // 20px of the window pokes onto the monitor — not enough to grab.
+        assert!(!is_reachable(&at(1900, 100), &[mon(0, 0, 1920, 1080)]));
+        // Exactly the threshold is reachable.
+        assert!(is_reachable(&at(1920 - MIN_VISIBLE_PX, 100), &[mon(0, 0, 1920, 1080)]));
+    }
+
+    #[test]
+    fn with_no_monitors_reported_every_window_is_trusted() {
+        // Failing to enumerate monitors must not relocate every window.
+        assert!(is_reachable(&at(9999, 9999), &[]));
     }
 
     #[test]

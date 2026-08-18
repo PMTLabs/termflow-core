@@ -1411,6 +1411,33 @@ pub fn register_window_in_registry(
     state.windows.note_focus(window.label());
 }
 
+/// The stable session id for the calling window (plan 018 Task 3).
+///
+/// The renderer resolves this BEFORE the bridge or `App` loads and derives its
+/// `localStorage` keys from it, so every window persists its own tabs instead
+/// of clobbering one shared key.
+///
+/// Returns `Err` for an unknown label rather than defaulting to slot 0. A silent
+/// fallback would put two windows back on one key — the exact defect this
+/// exists to fix — and would do it invisibly.
+#[tauri::command]
+pub fn get_window_session_id(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
+    state
+        .windows
+        .id_for_label(window.label())
+        .ok_or_else(|| format!("no window session id registered for label '{}'", window.label()))
+}
+
+/// Every window id the registry currently holds. The renderer sweeps orphaned
+/// session blobs against this list (plan 018 Task 9).
+#[tauri::command]
+pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
+    state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
+}
+
 // ----- Detach / cross-window pane handoff -----------------------------------
 //
 // The PTY processes live in this shared backend (AppState), so moving a pane to

@@ -391,6 +391,77 @@ mod tests {
         assert!(ProfileIdentity::resolve_with_baked(None, Some(""), Some(false), false).is_err());
     }
 
+    /// Every `TERMFLOW_PROFILE=<name>` the package scripts bake in, first-seen
+    /// order, deduplicated (each profile has both a build and a publish script).
+    ///
+    /// Read from `package.json` itself rather than restated here: the build
+    /// script is the only place a profile name is declared, and nothing else
+    /// connects that string to the sanitiser every derived path, pipe, lock and
+    /// port name depends on. A name added there that this module would refuse
+    /// produces a build whose every launch fails closed -- so the roster is
+    /// checked at test time instead of at the user's first launch.
+    fn baked_profile_names() -> Vec<&'static str> {
+        const PACKAGE_JSON: &str = include_str!("../../package.json");
+        const MARKER: &str = "TERMFLOW_PROFILE=";
+        let mut out: Vec<&'static str> = Vec::new();
+        for (at, _) in PACKAGE_JSON.match_indices(MARKER) {
+            let rest = &PACKAGE_JSON[at + MARKER.len()..];
+            // The name runs to the first character `sanitize` would reject --
+            // in practice the space before `tauri build`.
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            if !name.is_empty() && !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_baked_build_profile_is_valid_and_isolated() {
+        let names = baked_profile_names();
+        // The side-by-side builds this repo ships. Adding a `:<name>` script
+        // pair means adding it here too -- which is what drags the new name
+        // through the sanitiser and the distinctness checks below.
+        for expected in ["alt", "nightly"] {
+            assert!(
+                names.contains(&expected),
+                "package.json should bake TERMFLOW_PROFILE={expected}; found {names:?}"
+            );
+        }
+
+        // Isolation is what a profile IS: no baked build may share an identity
+        // key (lock, pipe, host record, port claim) or a config filename with
+        // the default build or with a sibling.
+        let default =
+            ProfileIdentity { channel: "rel", name: DEFAULT.into(), integrity: Integrity::Medium };
+        let mut keys = vec![default.key()];
+        let mut configs = vec![default.scoped_file("config.json")];
+        for name in &names {
+            let id = ProfileIdentity::resolve_with_baked(None, Some(name), Some(false), false)
+                .unwrap_or_else(|e| {
+                    panic!("package.json bakes TERMFLOW_PROFILE={name}, which fails to resolve: {e}")
+                });
+            assert_eq!(id.name.as_str(), *name, "a baked name must survive verbatim");
+            // A baked profile must never claim the machine-wide fabric
+            // singletons the default instance owns.
+            assert!(!id.is_primary(), "{name} must not be the primary instance");
+            keys.push(id.key());
+            configs.push(id.scoped_file("config.json"));
+        }
+
+        let want = names.len() + 1; // every baked profile, plus the default
+        let uniq = |mut v: Vec<String>| {
+            v.sort();
+            v.dedup();
+            v.len()
+        };
+        assert_eq!(uniq(keys.clone()), want, "identity keys collide: {keys:?}");
+        assert_eq!(uniq(configs.clone()), want, "config filenames collide: {configs:?}");
+    }
+
     #[test]
     fn no_baked_profile_leaves_todays_defaults_alone() {
         assert_eq!(
