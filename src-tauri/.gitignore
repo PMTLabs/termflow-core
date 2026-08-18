@@ -3,6 +3,7 @@
 /target/
 /gen/schemas
 /target-pro-alt/
+/target-pro-nightly/
 
 # PTY-host sidecar sub-crates: build dirs + standalone locks (they use the
 # workspace lock once wired). Never commit their target/ output.
