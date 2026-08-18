@@ -26,6 +26,13 @@ if (isTauri) {
   const profile = await initProfileScope(invoke);
   console.log('Profile:', profile.scope);
 
+  // Then resolve WHICH WINDOW this is, for the same reason and before the same
+  // consumers (plan 018). Every window of one instance shares this localStorage;
+  // without an id they all write the session to one key and clobber each other.
+  const { initWindowScope } = require('./services/windowScope');
+  const windowId = await initWindowScope(invoke);
+  console.log('Window:', windowId);
+
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
 } else if (!(window as any).electronAPI) {
@@ -65,6 +72,13 @@ const root = ReactDOM.createRoot(container);
 // Render app with Redux provider
 // Note: React.StrictMode removed to prevent duplicate terminal creation in development
 // StrictMode causes components to mount twice which was creating duplicate terminals
+// Canvas Mode's human-only verification gates, as one-line console commands
+// (`tf.help()`). Dev builds only — see services/devDiagnostics.ts.
+if (process.env.NODE_ENV === 'development') {
+  const { installDevDiagnostics } = await import('./services/devDiagnostics');
+  installDevDiagnostics();
+}
+
 root.render(
   <Provider store={store}>
     <App />

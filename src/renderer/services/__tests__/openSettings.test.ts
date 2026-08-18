@@ -46,4 +46,31 @@ describe('openSettingsTab (single-instance Settings)', () => {
 
     expect(dispatch).not.toHaveBeenCalled();
   });
+  it('a second open activates the tab the first one created, rather than adding another', () => {
+    // The gear's whole contract (`plan/013` Task 21): click it twice, get one Settings tab.
+    //
+    // The two branches are each covered above, but only from a hand-built state — nothing
+    // exercised the SEQUENCE, where the second call has to find the tab the first one made.
+    // Task 21's own version of this test read `store.getState()` directly; `../../store` is
+    // mocked here with a no-op dispatch, so the tab list never changes and the assertion
+    // would have been against an empty array. Reflecting the created tab back in by hand is
+    // what the real reducer does, and is what makes the two calls actually connect.
+    mockState.tabs.tabs = [{ id: 'tb-1', shellType: 'default', isActive: true }];
+
+    openSettingsTab();
+    const created = dispatch.mock.calls[0][0].payload as { id: string };
+    expect(created.id).toBeTruthy();
+
+    mockState.tabs.tabs = [
+      { id: 'tb-1', shellType: 'default', isActive: false },
+      { id: created.id, shellType: 'settings', isActive: false },
+    ];
+    dispatch.mockClear();
+
+    openSettingsTab();
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(setActiveTab(created.id));
+    expect(mockState.tabs.tabs.filter((t) => t.shellType === 'settings')).toHaveLength(1);
+  });
 });

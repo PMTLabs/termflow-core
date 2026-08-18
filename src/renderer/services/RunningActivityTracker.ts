@@ -6,6 +6,7 @@ import {
   isRunningFromEvents,
   computeRunningTabIds,
   computeUnseenUpdate,
+  canvasIsShowing,
   shouldCountForRunning,
   isSubmitInput,
   WINDOW_MS,
@@ -13,6 +14,7 @@ import {
   MIN_CHUNKS,
   MIN_BYTES,
   RESIZE_COOLDOWN_MS,
+  VIEW_CHANGE_COOLDOWN_MS,
   RECONNECT_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
   UNSEEN_DEBOUNCE_MS,
@@ -58,6 +60,7 @@ class RunningActivityTrackerClass {
   private onInput = (e: Event) => this.handleInput(e as CustomEvent);
   private onExit = (e: Event) => this.handleExit(e as CustomEvent);
   private onResize = () => this.handleResize();
+  private onPtyResize = () => this.notifyViewChangeBurst();
   private onVisibility = () => this.handleVisibility();
 
   start(startupGraceMs: number = STARTUP_COOLDOWN_MS): void {
@@ -72,6 +75,7 @@ class RunningActivityTrackerClass {
     window.addEventListener('pty:input', this.onInput);
     window.addEventListener('pty:exit', this.onExit);
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('pty:resize', this.onPtyResize);
     document.addEventListener('visibilitychange', this.onVisibility);
     this.lastActiveTabId = store.getState().tabs.activeTabId;
     this.unsubscribe = store.subscribe(() => this.handleActiveTabChange());
@@ -83,6 +87,7 @@ class RunningActivityTrackerClass {
     window.removeEventListener('pty:input', this.onInput);
     window.removeEventListener('pty:exit', this.onExit);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('pty:resize', this.onPtyResize);
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.unsubscribe?.();
     this.unsubscribe = null;
@@ -129,6 +134,36 @@ class RunningActivityTrackerClass {
   // reconnect cooldown the visibility path uses.
   notifyReconnectBurst(): void {
     this.resetForBurst(RECONNECT_COOLDOWN_MS);
+  }
+
+  /**
+   * The user changed how they are LOOKING at a terminal, so a repaint is coming that nobody
+   * asked the program for.
+   *
+   * A resize is the one output cause that is never work: a TUI repaints its whole screen
+   * because the geometry changed, and the geometry changed because of a font zoom, a Canvas
+   * Mode relocation, a pane split, a window drag. Counting that as activity is what made
+   * switching to the canvas — and zooming inside it — light the running sweep across the whole
+   * tab strip and pop a notification.
+   *
+   * Armed from TWO places, deliberately:
+   *
+   *  - the `pty:resize` event, which `TerminalService` publishes at the single choke point
+   *    every renderer-caused resize goes through. That is the general rule, and it covers
+   *    causes nobody has thought of yet.
+   *  - `CanvasMode`'s mount and unmount, which is EARLIER — the relocation's fit is debounced,
+   *    so arming at the edge covers the window before any resize has been decided on.
+   *
+   * A LONGER window than a plain window resize, because the chain is longer. See
+   * `VIEW_CHANGE_COOLDOWN_MS`.
+   *
+   * This suppresses the ATTRIBUTION of that output, not the output itself. The repaint still
+   * lands in the buffer, so a TUI's previous frame remains in scrollback — that is a property
+   * of the canvas host having a different grid than the pane, and it is a `design/012`
+   * question, not one this tracker can answer.
+   */
+  notifyViewChangeBurst(): void {
+    this.resetForBurst(VIEW_CHANGE_COOLDOWN_MS);
   }
 
   private handleResize(): void {
@@ -247,9 +282,13 @@ class RunningActivityTrackerClass {
     if (!tabId) return;
     const tabsState = store.getState().tabs;
     if (tabId === tabsState.activeTabId) return;
+    // Same rule as the unseen pass: the canvas is showing every terminal, so a process that
+    // exits while it is up exited in front of the user. Without this an exit-settled bell
+    // still rings for every tab, since none of them is the active one under D1a.
+    if (canvasIsShowing(tabsState.tabs, tabsState.activeTabId)) return;
     // Mute gate: suppress this exit-settled bell if the tab is muted, or the
     // exiting pane itself is muted (an unmuted sibling in the same tab is
-    // unaffected). Mirrors the source-mute check in computeUnseenUpdate.
+    // unaffected). Mirrors the suppression check in computeUnseenUpdate.
     const tabMuted = tabsState.tabs.some(t => t.id === tabId && t.notifyMuted);
     const paneMuted = effectiveTerminalId
       ? isTerminalMuted(store.getState().panes.treesByTabId, effectiveTerminalId)
@@ -339,11 +378,16 @@ class RunningActivityTrackerClass {
     );
     // Mute predicate: a source is muted when its tab is muted, or its own pane
     // (the leaf carrying its terminalId) is muted. Read the current trees/tabs
-    // once per tick. computeUnseenUpdate still advances the mark for muted
-    // sources, so unmuting later doesn't ring a backlog of old output.
+    // once per tick. computeUnseenUpdate still advances the mark for suppressed
+    // sources, so unmuting later — or leaving the canvas — doesn't ring a backlog.
     const mutedTabIds = new Set(tabsState.tabs.filter(t => t.notifyMuted).map(t => t.id));
     const treesByTabId = store.getState().panes.treesByTabId;
-    const isSourceMuted = (processId: string, tabId: string): boolean => {
+    // Canvas Mode shows every terminal in the window at once, so while it is the active tab
+    // NOTHING is unseen — see `canvasIsShowing` for why this is not covered by the active-tab
+    // exemption. Read once per tick rather than per source: it is a property of the window.
+    const onCanvas = canvasIsShowing(tabsState.tabs, tabsState.activeTabId);
+    const isSuppressed = (processId: string, tabId: string): boolean => {
+      if (onCanvas) return true;
       if (mutedTabIds.has(tabId)) return true;
       const terminalId = terminalService.getTerminalIdForProcess(processId);
       return terminalId ? isTerminalMuted(treesByTabId, terminalId) : false;
@@ -356,7 +400,7 @@ class RunningActivityTrackerClass {
       this.unseenMark,
       now,
       UNSEEN_DEBOUNCE_MS,
-      isSourceMuted,
+      isSuppressed,
     );
     this.unseenMark = marks;
     // Synchronized repaint burst (window resize / RDP↔console reattach / un-minimize):

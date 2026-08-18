@@ -31,7 +31,7 @@ export interface ExternalActivityDetail {
 
 export function resolveActivityTabId(
   detail: ExternalActivityDetail,
-  treesByTabId: Record<string, PaneNode>,
+  treesByTabId: Record<string, PaneNode | null>,
   knownTabIds: Set<string>,
 ): string | null {
   // 1. The PANE TREE IS AUTHORITATIVE. Resolve the renderer leaf through it

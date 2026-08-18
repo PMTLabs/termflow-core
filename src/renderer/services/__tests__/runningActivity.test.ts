@@ -2,6 +2,7 @@ import {
   isRunningFromEvents,
   computeRunningTabIds,
   computeUnseenUpdate,
+  canvasIsShowing,
   isEchoChunk,
   isSubmitInput,
   shouldCountForRunning,
@@ -245,5 +246,65 @@ describe('shouldCountForRunning (echo/line-repaint excluded from the running-rat
   });
   it('counts output after a submit (lastInputAt reset to -Infinity)', () => {
     expect(shouldCountForRunning(1000, -Infinity)).toBe(true);
+  });
+});
+
+describe('canvasIsShowing — the D1a notification regression', () => {
+  // Local copies: the fixtures above are scoped to the `computeUnseenUpdate` describe.
+  const out = (processId: string, newest: number) => ({ processId, newest });
+  const DEBOUNCE = 2000;
+  const SETTLED_NOW = 10000;
+  const tabs = [
+    { id: 'tb-work', shellType: 'pwsh' },
+    { id: 'tb-canvas', shellType: 'canvas' },
+    { id: 'tb-settings', shellType: 'settings' },
+  ];
+
+  it('is true only while the CANVAS tab is the active one', () => {
+    expect(canvasIsShowing(tabs, 'tb-canvas')).toBe(true);
+    expect(canvasIsShowing(tabs, 'tb-work')).toBe(false);
+    // Settings is also a virtual tab, and it is NOT the canvas: it shows no terminals at all,
+    // so output behind it really is unseen and must keep ringing.
+    expect(canvasIsShowing(tabs, 'tb-settings')).toBe(false);
+  });
+
+  it('is false with no active tab, and for an id that is not in the list', () => {
+    expect(canvasIsShowing(tabs, null)).toBe(false);
+    expect(canvasIsShowing(tabs, 'tb-gone')).toBe(false);
+    expect(canvasIsShowing([], 'tb-canvas')).toBe(false);
+  });
+
+  /**
+   * The behaviour the whole fix is for, stated end to end.
+   *
+   * Under D1a the canvas is a tab, so `activeTabId` is the canvas and NO terminal tab is
+   * exempt — every running terminal rang the unseen bell, fired a toast and a chime while the
+   * user was looking straight at it. Suppression turns the flag off; advancing the mark is what
+   * stops the same output ringing in arrears the moment they leave the canvas.
+   */
+  it('flags nothing while the canvas is up, but still accounts for the output', () => {
+    const resolve = () => 'tb-work';
+    const marks = new Map<string, number>();
+    const suppressed = computeUnseenUpdate(
+      [out('p1', 100)], resolve, 'tb-canvas', new Set(), marks, SETTLED_NOW, DEBOUNCE,
+      () => true,
+    );
+    expect(suppressed.toFlag).toEqual([]);
+    expect(suppressed.marks.get('p1')).toBe(100);
+
+    // Leaving the canvas must not then ring for output already watched go by.
+    const after = computeUnseenUpdate(
+      [out('p1', 100)], resolve, 'tb-work2', new Set(), suppressed.marks, SETTLED_NOW, DEBOUNCE,
+    );
+    expect(after.toFlag).toEqual([]);
+  });
+
+  it('still flags normally once the canvas is not the active tab', () => {
+    // Paired with the case above so "never flags" cannot pass both.
+    const { toFlag } = computeUnseenUpdate(
+      [out('p1', 100)], () => 'tb-work', 'tb-other', new Set(), new Map(), SETTLED_NOW, DEBOUNCE,
+      () => false,
+    );
+    expect(toFlag).toEqual(['tb-work']);
   });
 });

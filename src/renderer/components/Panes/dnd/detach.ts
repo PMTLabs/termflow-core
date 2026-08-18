@@ -14,6 +14,7 @@ import { setZoom, ZOOM_DEFAULT } from '../../../store/slices/zoomSlice';
 import { getCwdSnapshot, setCwdSnapshot } from '../../../services/cwdSnapshot';
 import { generateId } from '../../../utils/id';
 import { computeZone } from './zone';
+import { tabHasNoPanes } from '../../../store/slices/paneTreeOps';
 import { DetachPayload, DetachTerminal } from './types';
 
 const DETACH_PREFIX = 'detach-';
@@ -94,7 +95,10 @@ export function newDetachToken(): string {
 /** Remove a just-moved pane from its source tab, closing the tab if it empties. */
 export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = []): void {
   store.dispatch(removePaneFromTab({ tabId: sourceTabId, paneId: sourcePaneId }));
-  if (store.getState().panes.treesByTabId[sourceTabId] === undefined) {
+  // Detaching the last pane hands the terminal to another WINDOW, so there is nothing left
+  // here to keep the tab open for. `tabHasNoPanes` owns the "is it empty" rule — an emptied
+  // tab now keeps its key holding null rather than being deleted.
+  if (tabHasNoPanes(store.getState().panes.treesByTabId, sourceTabId)) {
     store.dispatch(removeTab(sourceTabId));
   }
   // Drop this window's mapping for the handed-off terminals (PTY stays alive).

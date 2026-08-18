@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { Rect, Viewport, MAX_INTERACTIVE, NODE_W, NODE_H } from '../../components/Canvas/canvasGeometry';
+import { Rect, Viewport, panBy, MAX_INTERACTIVE, NODE_W, NODE_H } from '../../components/Canvas/canvasGeometry';
 import { ArrangeResult } from '../../components/Canvas/canvasLayout';
 
 /** A relationship between two terminals. Untyped by design — see design 010 §7.1. */
@@ -20,22 +20,57 @@ export interface CanvasPersisted {
   sidebarWidth: number;
 }
 
+/**
+ * Note what is NOT here: an `enabled` flag.
+ *
+ * Canvas Mode is a tab (`shellType === 'canvas'`, see `services/openCanvas.ts`), so
+ * "is the canvas showing" is already a fact of `tabs` — `activeTab.shellType`. Keeping a
+ * second copy of it here would be two sources of truth for one boolean, and every path
+ * that switches tabs without going through the canvas helpers (a click in the strip,
+ * Ctrl+Tab, closing the tab, session restore) would be a path that could desync them.
+ */
 export interface CanvasState extends CanvasPersisted {
-  enabled: boolean;
   /** Mirror of the backend edge table; never persisted renderer-side. */
   edges: CanvasEdge[];
   selectedId: string | null;
+  /**
+   * The selected CONNECTION, or null.
+   *
+   * Mutually exclusive with `selectedId` and enforced in the reducers rather than by the
+   * callers: <kbd>Delete</kbd> has to mean exactly one thing, and every one of the many
+   * `selectNode` dispatches scattered through the canvas would otherwise be a place the
+   * invariant could be forgotten. Selecting either clears the other.
+   */
+  selectedEdgeId: string | null;
   /** The node receiving keystrokes. Always granted a live terminal (design 010 D8). */
   focusedId: string | null;
+  /** The node shown as a near-full-screen overlay on the canvas, or null.
+   *
+   *  Deliberately separate from `focusedId` even though opening an overlay also focuses:
+   *  focus is "this node has the keyboard" and survives closing the overlay onto the same
+   *  node, while this is "this node is enlarged". Folding them together would make Esc
+   *  ambiguous — it has to close the overlay first and release the keyboard second. */
+  overlayId: string | null;
   /** Most-recently-touched first; drives LOD budget priority. */
   recent: string[];
+  /** The tab whose group sits nearest the viewport centre — the tab strip's "you are here"
+   *  marker (design 010 D9, §5.1).
+   *
+   *  **Live-only, and NOT in `CanvasPersisted`.** It is derived from the viewport, so persisting
+   *  it would store an answer to a question the next session re-asks on its first frame. It is
+   *  also cleared on `CanvasMode`'s unmount: the marker means "the group you are looking at",
+   *  and there is no such group once the canvas is not on screen.
+   *
+   *  This is a SECOND marker, never a replacement for the active-tab highlight. Under D1a the
+   *  active tab genuinely is the canvas; moving the highlight off it would render the one tab
+   *  filling the screen as inactive. */
+  nearestGroupId: string | null;
 }
 
 export const SIDEBAR_MIN = 168;
 export const SIDEBAR_MAX = 480;
 
 const initialState: CanvasState = {
-  enabled: false,
   viewport: { x: 0, y: 0, z: 1 },
   nodes: {},
   groups: {},
@@ -43,8 +78,11 @@ const initialState: CanvasState = {
   sidebarOpen: true,
   sidebarWidth: 250,
   selectedId: null,
+  selectedEdgeId: null,
   focusedId: null,
+  overlayId: null,
   recent: [],
+  nearestGroupId: null,
 };
 
 const touch = (state: CanvasState, id: string) => {
@@ -57,23 +95,46 @@ const canvasSlice = createSlice({
   name: 'canvas',
   initialState,
   reducers: {
-    setCanvasEnabled: (state, action: PayloadAction<boolean>) => {
-      state.enabled = action.payload;
-      // Focus is a canvas-only concept; leaving the mode must hand input back.
-      if (!action.payload) state.focusedId = null;
-    },
-    toggleCanvasMode: (state) => {
-      state.enabled = !state.enabled;
-      if (!state.enabled) state.focusedId = null;
-    },
     setViewport: (state, action: PayloadAction<Viewport>) => {
       state.viewport = action.payload;
+    },
+    /**
+     * Slide the view by a screen-space delta — the arrow keys (Tam's item 3).
+     *
+     * RELATIVE rather than an absolute `setViewport`, so the caller never has to read the
+     * viewport. That is what keeps the arrow handler a stable callback: the canvas listens for
+     * arrows in the capture phase on `window`, and a handler that closed over `vp` would tear
+     * that listener down and re-register it on every frame of a pan.
+     */
+    panViewport: (state, action: PayloadAction<{ dx: number; dy: number }>) => {
+      state.viewport = panBy(state.viewport, action.payload.dx, action.payload.dy);
     },
     setNodeGeom: (state, action: PayloadAction<{ id: string; rect: Rect }>) => {
       state.nodes[action.payload.id] = action.payload.rect;
     },
     setGroupGeom: (state, action: PayloadAction<{ id: string; rect: Rect }>) => {
       state.groups[action.payload.id] = action.payload.rect;
+    },
+    /**
+     * A group and every one of its members, in ONE transition.
+     *
+     * Dragging a group moved its frame and each member with a dispatch apiece, so a group
+     * of 100 terminals produced 101 Redux transitions per `pointermove` — around 6,000
+     * actions a second at a normal event rate, each one invalidating the canvas selector
+     * and re-running projection and reconciliation WHILE the pointer was still moving.
+     * The work is O(members × events), which is exactly the shape that misses a frame
+     * budget on the workspaces big enough to want group drags.
+     *
+     * Rects are taken whole rather than merged with `prev` like `applyArrange` does: the
+     * caller computed these FROM the current rects (`moveGroupBy`), so width and height
+     * are already the live ones and re-reading them would only invite a stale mix.
+     */
+    moveGroupGeom: (
+      state,
+      action: PayloadAction<{ tabId: string; frame: Rect; nodes: Record<string, Rect> }>,
+    ) => {
+      state.groups[action.payload.tabId] = action.payload.frame;
+      for (const [id, rect] of Object.entries(action.payload.nodes)) state.nodes[id] = rect;
     },
     applyArrange: (state, action: PayloadAction<ArrangeResult>) => {
       for (const [id, rect] of Object.entries(action.payload.groups)) state.groups[id] = rect;
@@ -84,15 +145,43 @@ const canvasSlice = createSlice({
     },
     selectNode: (state, action: PayloadAction<string | null>) => {
       state.selectedId = action.payload;
+      // Unconditionally, including for `null`: clearing the selection means clearing it. The
+      // background pointerdown dispatches exactly that and would otherwise leave a wire
+      // selected — and armed for Delete — on a canvas showing nothing selected.
+      state.selectedEdgeId = null;
       if (action.payload) touch(state, action.payload);
+    },
+    /** Select a connection, or clear with `null`. Takes the selection off any node — see
+     *  `selectedEdgeId`. */
+    selectEdge: (state, action: PayloadAction<string | null>) => {
+      state.selectedEdgeId = action.payload;
+      if (action.payload) state.selectedId = null;
     },
     focusNode: (state, action: PayloadAction<string | null>) => {
       state.focusedId = action.payload;
       if (action.payload) touch(state, action.payload);
     },
     touchNode: (state, action: PayloadAction<string>) => { touch(state, action.payload); },
+    /** Open the full-screen overlay on a node, or close it with `null`.
+     *
+     *  Opening also focuses: an overlay you cannot type into is a screenshot. Closing does
+     *  NOT blur — you were working in that terminal a moment ago, and yanking the keyboard
+     *  away as the node shrinks back is not what anyone means by "close". */
+    setOverlayNode: (state, action: PayloadAction<string | null>) => {
+      state.overlayId = action.payload;
+      if (action.payload) {
+        state.focusedId = action.payload;
+        touch(state, action.payload);
+      }
+    },
     setEdges: (state, action: PayloadAction<CanvasEdge[]>) => {
       state.edges = action.payload;
+      // A selection that survived a wholesale replacement would name an edge that is no longer
+      // there: the handles have nowhere to draw and Delete aims at a row the server has already
+      // forgotten. Selection follows existence.
+      if (state.selectedEdgeId && !action.payload.some((e) => e.id === state.selectedEdgeId)) {
+        state.selectedEdgeId = null;
+      }
     },
     addEdge: (state, action: PayloadAction<CanvasEdge>) => {
       const e = action.payload;
@@ -102,6 +191,20 @@ const canvasSlice = createSlice({
     },
     removeEdge: (state, action: PayloadAction<string>) => {
       state.edges = state.edges.filter((e) => e.id !== action.payload);
+      if (state.selectedEdgeId === action.payload) state.selectedEdgeId = null;
+    },
+    /** Replace one edge with the row the server stored — the label edit path (Task 18).
+     *  Ignores an id it does not hold rather than inserting: an edge this window has never
+     *  seen arrives through `setEdges`/`addEdge`, and appending here would let a PATCH
+     *  response resurrect an edge deleted in the meantime. */
+    updateEdge: (state, action: PayloadAction<CanvasEdge>) => {
+      const i = state.edges.findIndex((e) => e.id === action.payload.id);
+      if (i >= 0) state.edges[i] = action.payload;
+    },
+    /** The group nearest the viewport centre, for the tab strip's marker. `null` clears it —
+     *  which is what leaving the canvas does. */
+    setNearestGroup: (state, action: PayloadAction<string | null>) => {
+      state.nearestGroupId = action.payload;
     },
     setSidebarOpen: (state, action: PayloadAction<boolean>) => {
       state.sidebarOpen = action.payload;
@@ -117,12 +220,25 @@ const canvasSlice = createSlice({
       const liveGroups = new Set(action.payload.tabIds);
       for (const id of Object.keys(state.nodes)) if (!liveNodes.has(id)) delete state.nodes[id];
       for (const id of Object.keys(state.groups)) if (!liveGroups.has(id)) delete state.groups[id];
-      state.recent = state.recent.filter((id) => liveNodes.has(id));
+      // Assigned only when it actually shrank. `filter` always returns a NEW array, and
+      // Immer treats that assignment as a change — which would hand every subscriber a new
+      // state object on a prune that pruned nothing. That was harmless while this ran only
+      // on tab close; it runs on every pane close now, so the no-op has to be a real no-op.
+      const liveRecent = state.recent.filter((id) => liveNodes.has(id));
+      if (liveRecent.length !== state.recent.length) state.recent = liveRecent;
       if (state.selectedId && !liveNodes.has(state.selectedId)) state.selectedId = null;
       if (state.focusedId && !liveNodes.has(state.focusedId)) state.focusedId = null;
+      // A closed terminal must not leave the canvas covered by an overlay of nothing.
+      if (state.overlayId && !liveNodes.has(state.overlayId)) state.overlayId = null;
+      // Same reasoning one level up: a marker on a tab that has been closed points at a group
+      // the canvas no longer draws. Checked against `liveGroups`, not `liveNodes` — this one
+      // names a TAB, and the two id spaces overlap without being interchangeable (design 011 D7).
+      if (state.nearestGroupId && !liveGroups.has(state.nearestGroupId)) state.nearestGroupId = null;
     },
-    /** Restore persisted geometry. Deliberately does NOT restore `enabled` or
-     *  `focusedId` — the app always boots in tab mode. */
+    /** Restore persisted geometry. Deliberately does NOT restore `focusedId`: whether the
+     *  canvas is on screen at boot is decided by the restored TAB list, and a node that
+     *  was holding keystrokes in the last session must not silently hold them again
+     *  before the user has looked at it. */
     hydrateCanvas: (state, action: PayloadAction<Partial<CanvasPersisted>>) => {
       const p = action.payload;
       if (p.viewport) state.viewport = p.viewport;
@@ -135,8 +251,9 @@ const canvasSlice = createSlice({
 });
 
 export const {
-  setCanvasEnabled, toggleCanvasMode, setViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
+  setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
+  applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
+  removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 

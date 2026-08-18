@@ -21,6 +21,7 @@
  */
 import { isEditableNonTerminalTarget } from '../../../services/inputTargets';
 import { setPaneBackgroundVar } from '../../../store/terminalTheme';
+import { readSource } from '../../../utils/readSource';
 
 /** The pane's structure, as TerminalDisplay.tsx:542-549 renders it. */
 function makePane(id: string): { wrapper: HTMLElement; display: HTMLElement } {
@@ -169,10 +170,7 @@ describe('design/012 D19 / §4.4 row 8 — §13 T22b: the pointer gate can inher
     const fs = require('fs') as typeof import('fs');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const path = require('path') as typeof import('path');
-    const css = fs.readFileSync(
-      path.join(__dirname, '..', 'TerminalDisplay.css'),
-      'utf8',
-    );
+    const css = readSource(path.join(__dirname, '..', 'TerminalDisplay.css'));
 
     // PLAN CORRECTION (015 Task 14): strip comments FIRST. The plan split the raw
     // stylesheet on `}`, which leaves the comment block preceding a rule glued to

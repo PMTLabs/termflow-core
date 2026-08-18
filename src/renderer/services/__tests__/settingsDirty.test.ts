@@ -11,6 +11,7 @@ const base: TrackedSettings = {
   enhancedKeyboard: true,
   commandSuggestions: true,
   activateTabOnApiCreate: false,
+  canvasWheelMode: 'zoom',
   defaultEditor: '',
   defaultProfile: 'p1',
   shellProfiles: [{ id: 'p1', cwd: 'C:/a' }, { id: 'p2', cwd: undefined }],
@@ -43,6 +44,14 @@ describe('settingsDirty', () => {
     expect(isCategoryDirty('terminal', { ...base, defaultEditor: 'code' }, snap)).toBe(true);
     expect(isCategoryDirty('terminal', { ...base, smartCtrlC: false }, snap)).toBe(true);
     expect(isCategoryDirty('terminal', { ...base, fontSize: 99 }, snap)).toBe(false);
+  });
+
+  it('terminal tracks the canvas wheel mode', () => {
+    // A tracked field left out of the snapshot is invisible rather than wrong: the setting
+    // still applies and still persists, and the unsaved-changes guard simply never mentions it.
+    const snap = snapshotCategory('terminal', base);
+    expect(isCategoryDirty('terminal', { ...base, canvasWheelMode: 'scroll' }, snap)).toBe(true);
+    expect(isCategoryDirty('terminal', { ...base, canvasWheelMode: 'zoom' }, snap)).toBe(false);
   });
 
   it('profiles tracks cwd and defaultProfile, ignores other fields', () => {

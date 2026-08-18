@@ -69,6 +69,48 @@ describe('StateManager.loadLayout (review 109 H2)', () => {
     expect(state.panes.treesByTabId['tb-api1'].terminalId).toBe('tm-api-leaf-1');
   });
 
+  /**
+   * A saved layout can legitimately hold `null` for a tab that is open and empty, and the
+   * restore has to WRITE that null.
+   *
+   * The dispatch was guarded on truthiness, so `null` fell through it and the key was left
+   * absent — which `planSeeds` reads as "never initialised" and fills with a manufactured
+   * terminal. Loading a layout therefore refilled the tab the user had deliberately emptied
+   * before saving it, and the terminal it invented carried the tab's own id: the same
+   * resurrection, arriving by a different door.
+   */
+  it('restores a tab saved as open-and-EMPTY without refilling it', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    const activeTree = { id: 'pn-r1', type: 'terminal' as const, terminalId: 'tb-active1' };
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-empty',
+      name: 'has an emptied tab',
+      tabs: [
+        { id: 'tb-active1', title: 'Active' },
+        { id: 'tb-emptied', title: 'Emptied' },
+      ],
+      activeTabId: 'tb-active1',
+      paneTree: activeTree,
+      activePaneId: 'pn-r1',
+      treesByTabId: { 'tb-active1': activeTree, 'tb-emptied': null },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }]));
+
+    expect(await StateManager.loadLayout('layout-empty', store.dispatch)).toBe(true);
+
+    const trees = (store.getState() as any).panes.treesByTabId;
+    // Initialised — the key is there — and EMPTY. Both halves matter: the key is what stops
+    // the seed net, and the null is what stops a terminal appearing.
+    expect('tb-emptied' in trees).toBe(true);
+    expect(trees['tb-emptied']).toBeNull();
+    // The negative control: a tab the layout says nothing about is still left absent, so
+    // the fix cannot be "dispatch for everything".
+    expect('tb-never-mentioned' in trees).toBe(false);
+  });
+
   it('falls back to today\'s behavior for an OLD-format layout with only paneTree, without crashing or dropping tabs', async () => {
     const store = makeStore();
     (window as any).__REDUX_STORE__ = store;

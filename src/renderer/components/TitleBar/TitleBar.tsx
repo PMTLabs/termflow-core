@@ -3,6 +3,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import { TabManager } from '../Tabs/TabManager';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
+import { GearIcon } from './GearIcon';
+import { openSettingsTab } from '../../services/openSettings';
 import './TitleBar.css';
 
 type ServerStatus = 'checking' | 'online' | 'partial' | 'offline';
@@ -207,8 +209,39 @@ export const TitleBar: React.FC = () => {
                 so a full tab strip never butts right up against the minimize button —
                 the user can always grab here to move the window. */}
             <div className="title-bar-drag-region" data-tauri-drag-region />
+            {/* macOS paints its own traffic lights behind `.mac-native-spacer` and renders no
+                minimize button at all, so `.window-controls` is skipped entirely there and
+                "next to minimize" has no meaning. The gear still belongs in the same screen
+                corner, so it is rendered here instead — after the drag region, at the trailing
+                edge.
+
+                No drag-region opt-out is needed on either copy. `data-tauri-drag-region` is an
+                attribute on the `.title-bar` root and the spacer above; descendants do not
+                inherit it, which is exactly how `.server-status-icon` and
+                `.active-window-indicator` stay clickable. There is no `no-drag` class in this
+                file to copy. */}
+            {isMac && (
+                <button
+                    type="button"
+                    className="window-control-btn settings is-mac"
+                    onClick={() => openSettingsTab()}
+                    aria-label="Settings"
+                    title="Settings"
+                >
+                    <GearIcon />
+                </button>
+            )}
             {!isMac && (
                 <div className="window-controls">
+                    <button
+                        type="button"
+                        className="window-control-btn settings"
+                        onClick={() => openSettingsTab()}
+                        aria-label="Settings"
+                        title="Settings"
+                    >
+                        <GearIcon />
+                    </button>
                     <button
                         className="window-control-btn minimize"
                         onClick={handleMinimize}

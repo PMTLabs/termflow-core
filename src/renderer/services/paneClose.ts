@@ -23,12 +23,15 @@ export interface ClosePaneDeps {
    *  clears the snapshot synchronously so a late write from the (now
    *  in-flight) backend close is dropped once the generation moves. */
   clearCwdSnapshot: (terminalId: string) => void;
-  /** Disposes the terminal's cached xterm engine — its Terminal, its scrollback, its
-   *  bridge subscriptions and, the reason this dep exists, its WebGL context.
+  /** Disposes the terminal's cached xterm engine — its Terminal, its scrollback,
+   *  its bridge subscriptions and, the reason this dep exists, its WebGL context.
    *
-   *  REQUIRED, not optional: an optional dep lets a caller silently forget it, which
-   *  is exactly how this leaked in the first place. Injected rather than imported so
-   *  this helper stays free of terminal-core. */
+   *  `cleanupTerminalCache` had exactly ONE caller: the TAB-close path. Closing a
+   *  single pane killed the PTY and left the whole cache entry alive, and
+   *  `countActiveWebGLAddons()` kept counting its addon against the 12-context
+   *  budget for the rest of the session — so a user who splits and closes panes
+   *  all day silently loses GPU rendering for every terminal opened afterwards.
+   *  Injected rather than imported so this helper stays free of terminal-core. */
   releaseSurface: (terminalId: string) => void;
 }
 
@@ -55,17 +58,11 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   clearCwdSnapshot(terminalId);
 
   // ...and dispose the cached xterm engine for the same reason, in the same place.
-  // The cache is keyed by terminalId, so this is per TERMINAL — exactly what the
-  // tab-close path does per pane of the tab it closes (TabManager.closeOneTab),
-  // and it disposes before its own removeTab dispatch, so this ordering is the
-  // proven one rather than a new one.
-  //
-  // Without it the entry — Terminal, scrollback, bridge subs and WebGL context —
-  // outlives the pane. A renderer allows only ~16 GL contexts; past that the browser
-  // drops the OLDEST, which is the longest-running terminal, and webgl.ts disposes
-  // that addon without ever reloading it. The session's most-used terminal silently
-  // falls back to the DOM renderer, which re-renders full rows on every selection
-  // change: selection lags the cursor and scrolling stutters, worsening all day.
+  // The cache is keyed by terminalId, so this is per TERMINAL, exactly as the
+  // tab-close path does it per pane of the tab it is closing (TabManager.closeOneTab).
+  // Before the UI removal has been committed by React is the same window that path
+  // uses — it disposes before its own `removeTab` dispatch — so the ordering here is
+  // the proven one rather than a new one.
   releaseSurface(terminalId);
 
   // Fire-and-forget: the backend PTY kill can take multiple seconds and must

@@ -24,6 +24,16 @@ function makeStore() {
     return configureStore({ reducer: { ui: uiReducer } });
 }
 
+/**
+ * ToastContainer portals to <body>, so it is NOT inside the test's own `container` —
+ * an overlay cannot escape an ancestor stacking context, and rendering in place made its
+ * z-index worth only whatever its caller's ancestors allowed. Query the document instead;
+ * asserting through `container` would now find nothing and pass vacuously on any
+ * `not.toContain` check.
+ */
+const toastRoot = (): HTMLElement =>
+    document.body.querySelector('.toast-container') as HTMLElement ?? document.body;
+
 describe('ToastContainer — auto-dismiss vs sticky', () => {
     let container: HTMLDivElement;
     let root: Root;
@@ -59,7 +69,7 @@ describe('ToastContainer — auto-dismiss vs sticky', () => {
         const store = makeStore();
         mount(store);
         act(() => { store.dispatch(addToast({ message: 'transient', duration: 3000 })); });
-        expect(container.textContent).toContain('transient');
+        expect(toastRoot().textContent).toContain('transient');
         act(() => { jest.advanceTimersByTime(3000); });
         expect(store.getState().ui.toasts).toHaveLength(0);
     });
@@ -71,14 +81,14 @@ describe('ToastContainer — auto-dismiss vs sticky', () => {
         // Well past any normal auto-dismiss window — the sticky toast must remain.
         act(() => { jest.advanceTimersByTime(60_000); });
         expect(store.getState().ui.toasts).toHaveLength(1);
-        expect(container.textContent).toContain('New activity in "build"');
+        expect(toastRoot().textContent).toContain('New activity in "build"');
     });
 
     it('removes a sticky toast when the user clicks it', () => {
         const store = makeStore();
         mount(store);
         act(() => { store.dispatch(addToast({ message: 'click me', sticky: true })); });
-        const item = container.querySelector('.toast-item') as HTMLElement;
+        const item = toastRoot().querySelector('.toast-item') as HTMLElement;
         expect(item).toBeTruthy();
         act(() => { item.click(); });
         expect(store.getState().ui.toasts).toHaveLength(0);

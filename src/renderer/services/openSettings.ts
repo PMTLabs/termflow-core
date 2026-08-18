@@ -1,5 +1,6 @@
 import { store } from '../store';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
+import { SETTINGS_SHELL_TYPE } from './tabKinds';
 
 // A category the newly-opened SettingsPage should navigate to on mount (e.g. the
 // tray "Peers…" item opens Settings pointed at Peers). Consumed exactly once by
@@ -34,7 +35,7 @@ export function consumePendingSettingsCategory(): string | null {
  */
 export function openSettingsTab(category?: string): void {
   const { tabs } = store.getState().tabs;
-  const existing = tabs.find(tab => tab.shellType === 'settings');
+  const existing = tabs.find(tab => tab.shellType === SETTINGS_SHELL_TYPE);
 
   if (existing) {
     if (!existing.isActive) {
@@ -54,7 +55,7 @@ export function openSettingsTab(category?: string): void {
     addTab({
       id: `tab-settings-${Date.now()}`,
       title: 'Settings',
-      shellType: 'settings',
+      shellType: SETTINGS_SHELL_TYPE,
       icon: '⚙️',
     }),
   );

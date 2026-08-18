@@ -9,6 +9,7 @@ import {
   getSelectedPaneId,
   isTerminalMuted,
   resolveExitedTabId,
+  tabHasNoPanes,
   soloRootLeafId,
   tabLeafIds,
 } from '../paneTreeOps';
@@ -332,5 +333,32 @@ describe('resolveExitedTabId', () => {
   // must resolve to nothing here, not to a stale/wrong tab.
   it('returns null in the source window once the tab/pane has been detached away', () => {
     expect(resolveExitedTabId({}, [], 'tm-original-pane-id', alive([]))).toBeNull();
+  });
+});
+
+/**
+ * The rule the cross-window detach and the tab-strip drag both use to decide whether a tab
+ * they just took a pane from should close. It has to collapse the two "no panes" states,
+ * because an emptied tab keeps its key holding NULL — it used to be deleted, and both call
+ * sites tested `=== undefined` for exactly that reason.
+ */
+describe('tabHasNoPanes', () => {
+  const leafNode: PaneNode = { id: 'p1', type: 'terminal', terminalId: 't1' };
+
+  it('is true for a tab that was emptied (null) and one that never existed (absent)', () => {
+    expect(tabHasNoPanes({ 'tab-1': null }, 'tab-1')).toBe(true);
+    expect(tabHasNoPanes({}, 'tab-1')).toBe(true);
+  });
+
+  it('is false while the tab still has a tree', () => {
+    expect(tabHasNoPanes({ 'tab-1': leafNode }, 'tab-1')).toBe(false);
+  });
+
+  // Guard the guard: it must answer about the tab it was ASKED about, not about the map
+  // being non-empty. A version ignoring `tabId` would pass both cases above.
+  it('answers about the named tab only', () => {
+    const trees = { 'tab-1': leafNode, 'tab-2': null };
+    expect(tabHasNoPanes(trees, 'tab-1')).toBe(false);
+    expect(tabHasNoPanes(trees, 'tab-2')).toBe(true);
   });
 });

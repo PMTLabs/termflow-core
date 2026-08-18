@@ -1182,6 +1182,22 @@ pub async fn close_terminal(
         state.cleanup_terminal_state(&id);
         if let Some(tab_id) = tab_id {
             state.history_store.delete(&tab_id);
+            // ...and the canvas wires that named it. Nothing else ever deleted an edge on
+            // a terminal's death, so `canvas_edges` grew for the life of the profile and
+            // every `get_graph` deserialised the accumulated history.
+            //
+            // Keyed on the RENDERER id, which is the id space edges use — the same one
+            // `history_store` is keyed by, and deliberately not `id` (the backend handle).
+            // Targeted deletion rather than `prune_edges`: pruning takes a liveness set and
+            // would reap a restored-but-unspawned peer's edges, which is precisely the bug
+            // `get_graph` stopped filtering to avoid.
+            match state.canvas_store.delete_edges_for(&tab_id) {
+                Ok(0) => {}
+                Ok(n) => log::info!("Deleted {} canvas edge(s) for terminal {}", n, tab_id),
+                // Non-fatal: the terminal is closing either way, and a canvas store that
+                // cannot answer must not fail the close.
+                Err(e) => log::warn!("Failed to delete canvas edges for {}: {}", tab_id, e),
+            }
         }
     }
 
@@ -1238,7 +1254,7 @@ pub fn diag_log(msg: String) {
 #[tauri::command]
 pub fn quit_app(app_handle: tauri::AppHandle) {
     log::info!("quit_app: exiting (EULA declined or explicit quit).");
-    app_handle.exit(0);
+    flush_then_exit(&app_handle);
 }
 
 /// Exit the app after the user confirms the close in the in-app dialog.
@@ -1255,7 +1271,10 @@ pub fn confirm_close_app(app_handle: tauri::AppHandle, window: tauri::Window) {
         .count();
     if count <= 1 {
         log::info!("Last window confirmed close; exiting app.");
-        app_handle.exit(0);
+        // This window has already saved (the renderer awaits saveStateWithCwds
+        // before invoking us), but any OTHER window still alive — a hidden one,
+        // or one mid-teardown — has not, and exit() would skip its unload.
+        flush_then_exit(&app_handle);
     } else {
         log::info!("Closing window '{}' ({} window(s) remain).", window.label(), count - 1);
         if let Err(e) = window.destroy() {
@@ -1380,6 +1399,226 @@ pub async fn generate_api_token(
     Ok(token)
 }
 
+/// Reserve a stable session id for a window that is ABOUT to be built
+/// (plan 018 Task 2).
+///
+/// Must run BEFORE `builder.build()`. The webview begins loading the moment it
+/// is built, and its very first act is to resolve this id — a binding published
+/// afterwards is a race whose losing side falls back to slot 0, silently merging
+/// the new window into the main window's session. That is precisely the defect
+/// this feature exists to remove, so the ordering is load-bearing, not a
+/// micro-optimisation.
+pub fn reserve_window_id(app: &tauri::AppHandle, label: &str) -> Option<String> {
+    use tauri::Manager as _;
+    let state = app.try_state::<AppState>()?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    state.windows.bind(label, &id);
+    Some(id)
+}
+
+/// Record a just-built window's real geometry under its reserved id.
+///
+/// Best-effort on geometry: a window that cannot report its position is still
+/// recorded, using the builder's defaults. An unrecorded window is one that
+/// silently never restores — strictly worse than one restored at the wrong
+/// coordinates.
+pub fn record_new_window(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    id: String,
+    fallback_size: (u32, u32),
+) {
+    use tauri::Manager as _;
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let pos = window.outer_position().ok();
+    let size = window.inner_size().ok();
+    state.windows.register(crate::window_registry::WindowRecord {
+        id,
+        label: window.label().to_string(),
+        x: pos.map(|p| p.x).unwrap_or(0),
+        y: pos.map(|p| p.y).unwrap_or(0),
+        width: size.map(|s| s.width).unwrap_or(fallback_size.0),
+        height: size.map(|s| s.height).unwrap_or(fallback_size.1),
+        maximized: window.is_maximized().unwrap_or(false),
+        focused: false,
+    });
+    // A newly opened window takes focus; set it through the tracker so exactly
+    // one record carries the flag.
+    state.windows.note_focus(window.label());
+}
+
+/// The stable session id for the calling window (plan 018 Task 3).
+///
+/// The renderer resolves this BEFORE the bridge or `App` loads and derives its
+/// `localStorage` keys from it, so every window persists its own tabs instead
+/// of clobbering one shared key.
+///
+/// Returns `Err` for an unknown label rather than defaulting to slot 0. A silent
+/// fallback would put two windows back on one key — the exact defect this
+/// exists to fix — and would do it invisibly.
+#[tauri::command]
+pub fn get_window_session_id(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
+    state
+        .windows
+        .id_for_label(window.label())
+        .ok_or_else(|| format!("no window session id registered for label '{}'", window.label()))
+}
+
+/// Every window id the registry currently holds. The renderer sweeps orphaned
+/// session blobs against this list (plan 018 Task 9).
+#[tauri::command]
+pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
+    state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
+}
+
+// ----- Quit: give every window a chance to persist first ---------------------
+//
+// `AppHandle::exit` tears the process down without firing `CloseRequested` for
+// any window, so no renderer gets its `beforeunload`. That was survivable while
+// one shared key held the whole session — some window had almost certainly
+// written it recently. With per-window sessions (plan 018) each window owns data
+// only IT can write, so an unflushed window loses its tabs outright.
+
+/// How long a quit will wait for windows to persist. A quit that hangs is worse
+/// than a stale tab, so this is a hard ceiling, not a target.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Ask every window to persist its session, then exit — or exit anyway once
+/// `FLUSH_TIMEOUT` elapses.
+pub fn flush_then_exit(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager as _};
+
+    let Some(state) = app.try_state::<AppState>() else {
+        app.exit(0);
+        return;
+    };
+
+    // A second Quit while a flush is in flight means "I am done waiting".
+    if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log::info!("flush_then_exit: already flushing; exiting now.");
+        app.exit(0);
+        return;
+    }
+
+    let expected: Vec<String> = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.as_str() != "drag-preview")
+        .cloned()
+        .collect();
+    if expected.is_empty() {
+        app.exit(0);
+        return;
+    }
+
+    state.flush_acks.clear();
+    if let Err(e) = app.emit("app:flush-session", ()) {
+        // Nothing will ack, so do not make the user wait out the timeout.
+        log::warn!("flush_then_exit: could not ask windows to flush ({e}); exiting now.");
+        app.exit(0);
+        return;
+    }
+
+    let acks = state.flush_acks.clone();
+    let app = app.clone();
+    let want = expected.len();
+    tauri::async_runtime::spawn(async move {
+        let all_acked = wait_for_acks(&acks, want, FLUSH_TIMEOUT).await;
+        if all_acked {
+            log::info!("flush_then_exit: all {want} window(s) persisted; exiting.");
+        } else {
+            log::warn!(
+                "flush_then_exit: {}/{} window(s) persisted before the {}ms deadline; exiting anyway.",
+                acks.len(),
+                want,
+                FLUSH_TIMEOUT.as_millis()
+            );
+        }
+        app.exit(0);
+    });
+}
+
+/// Wait until `want` windows have acked, or `timeout` elapses. Returns whether
+/// every window acked.
+///
+/// Split out from `flush_then_exit` so the TIMEOUT path is testable: it is the
+/// branch that matters (a renderer that never answers must not wedge the quit)
+/// and the one a happy-path test would never reach.
+async fn wait_for_acks(
+    acks: &dashmap::DashMap<String, ()>,
+    want: usize,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if acks.len() >= want {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn a_window_that_never_acks_does_not_wedge_the_quit() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        acks.insert("main".into(), ());
+        let started = Instant::now();
+        // Two windows expected, one silent.
+        let all = wait_for_acks(&acks, 2, Duration::from_millis(120)).await;
+        assert!(!all, "must report the flush as incomplete");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "must actually have waited for the deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "and must not wait past it — a quit that hangs is worse than a stale tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_acks_release_the_wait_early() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        let bg = acks.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            bg.insert("main".into(), ());
+            bg.insert("window-a".into(), ());
+        });
+        let started = Instant::now();
+        assert!(wait_for_acks(&acks, 2, Duration::from_secs(30)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait must end on the acks, not on the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn expecting_nobody_returns_immediately() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        assert!(wait_for_acks(&acks, 0, Duration::from_secs(30)).await);
+    }
+}
+
+/// A window reporting that it has persisted its session (plan 018 Task 8).
+#[tauri::command]
+pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindow) {
+    state.flush_acks.insert(window.label().to_string(), ());
+}
+
 // ----- Detach / cross-window pane handoff -----------------------------------
 //
 // The PTY processes live in this shared backend (AppState), so moving a pane to
@@ -1477,15 +1716,26 @@ pub async fn create_detached_window(
         }
     }
 
+    // Reserve BEFORE build (see reserve_window_id): a detached window saves its
+    // own session from the moment it mounts, so it must know its id by then.
+    let reserved = reserve_window_id(&app_handle, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    if let Some(id) = reserved {
+        record_new_window(&app_handle, &window, id, (900, 600));
+    }
     refresh_menu(&app_handle);
     Ok(label)
 }
 
 /// Open a fresh, empty app window (File > New Window). Unlike a detached window,
-/// it carries no payload: it boots with `?newWindow=1`, which skips session
-/// restore and opens a single default terminal tab.
+/// it carries no payload: it boots with `?newWindow=1` and opens a single
+/// default terminal tab.
+///
+/// `?newWindow=1` no longer means "skip session restore" (plan 018 Task 5). The
+/// window gets its own session id, finds nothing saved under it, and the normal
+/// post-restore decision opens the default tab. It still saves under that id, so
+/// this window is restored like any other on the next start.
 pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<String, String> {
     let label = format!("window-{}", uuid::Uuid::new_v4().simple());
     let mut url = "index.html?newWindow=1".to_string();
@@ -1524,8 +1774,13 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
+    // Reserve BEFORE build: the webview resolves its id as its first action.
+    let reserved = reserve_window_id(app, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    if let Some(id) = reserved {
+        record_new_window(app, &window, id, (1280, 800));
+    }
     Ok(label)
 }
 

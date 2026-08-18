@@ -538,6 +538,23 @@ class BrowserBridge implements ElectronAPI {
     async setKeepRunningInBackground(_enabled: boolean): Promise<void> {
         // No tray / background process in the browser host.
     }
+
+    // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
+    async canvasApiRequest(path: string, init?: { method?: string; body?: unknown }): Promise<unknown> {
+        const method = init?.method ?? 'GET';
+        const response = await fetch(`${API_BASE_URL}${path}`, {
+            method,
+            headers: {
+                ...this.buildAuthHeaders(),
+                ...(init?.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+            },
+            ...(init?.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        });
+        if (!response.ok) {
+            throw new Error(`Canvas API ${method} ${path} failed: ${response.status} ${response.statusText}`);
+        }
+        return response.status === 204 ? null : await response.json();
+    }
 }
 
 // Singleton instance

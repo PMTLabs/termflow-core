@@ -1,4 +1,7 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+// Pure and import-free, so a slice can depend on it without risking a cycle back through
+// the store.
+import { shouldAdoptAutoTitle } from '../../services/autoTitle';
 
 export interface Tab {
   id: string;
@@ -198,6 +201,11 @@ const tabsSlice = createSlice({
     setAutoTabTitle: (state, action: PayloadAction<{ id: string; title: string }>) => {
       const tab = state.tabs.find(t => t.id === action.payload.id);
       if (!tab || tab.titleIsCustom) return;
+      // `cmd.exe` announces its own full path as its OSC title, so a "Command Prompt" tab
+      // renamed itself to `C:\WINDOWS\system32\cmd.exe` a frame after opening — and Canvas
+      // Mode labels a group with its tab's title, which is where it finally got noticed.
+      // Refusing keeps the profile name that is already there. See `services/autoTitle`.
+      if (!shouldAdoptAutoTitle(action.payload.title)) return;
       tab.title = action.payload.title;
     },
 

@@ -6,6 +6,7 @@ import { movePaneWithinTab, movePaneToTab } from '../../../store/slices/panesSli
 import { setActiveTab, removeTab } from '../../../store/slices/tabsSlice';
 import { PaneNode } from '../../../store/slices/panesSlice';
 import { computeZone } from './zone';
+import { tabHasNoPanes } from '../../../store/slices/paneTreeOps';
 import { PaneDragSource, PaneDragState, PaneDropTarget } from './types';
 import { PaneDragLayer } from './PaneDragLayer';
 import { PaneDropOverlay } from './PaneDropOverlay';
@@ -260,7 +261,9 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           sourceTabId: s.sourceTabId, sourcePaneId: s.sourcePaneId,
           targetTabId: t.tabId, targetPaneId: t.paneId, zone: t.zone,
         }));
-        if (store.getState().panes.treesByTabId[s.sourceTabId] === undefined) {
+        // A tab-strip drag that empties its source still closes it. `tabHasNoPanes` owns
+        // the rule; an emptied tab now keeps its key holding null rather than being deleted.
+        if (tabHasNoPanes(store.getState().panes.treesByTabId, s.sourceTabId)) {
           dispatch(removeTab(s.sourceTabId));
         }
       }

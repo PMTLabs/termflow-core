@@ -1,41 +1,33 @@
-/* `.app-body` is `flex:1; overflow:hidden` with NO position, so an absolutely
-   positioned child would anchor to `.app` and cover the title bar — burying the
-   tab strip and the window controls. The tab strip must stay visible in Canvas
-   Mode (design 010 D9), so establish the containing block here. */
-.app-body { position: relative; }
+/* Canvas Mode is a TAB, not an overlay (backlog/007 §4). It fills `.tab-content`,
+   which is already `position: absolute; inset: 0` inside `.terminal-container`.
 
-/* Canvas Mode — overlays the tab-mode terminal container without unmounting it,
-   so terminals can be handed back and forth (design 010 §4.3).
+   NOTE WHAT IS GONE: the z-index. As an overlay this element sat at 900 and that number
+   was a genuine cross-file invariant — the tab-mode DOM stayed mounted and painting
+   underneath, so every floating widget a terminal owns (ScrollToBottomButton at 6,
+   TerminalSearchBar at 10, CommandSuggestPopup at 30) competed with the canvas directly,
+   and `.terminal-display`'s `isolation: isolate` did not contain them because they are
+   its SIBLINGS.
 
-   THE Z-INDEX IS AN INVARIANT, NOT A PREFERENCE. Because the tab-mode DOM stays
-   mounted underneath, every floating widget it owns competes with this overlay
-   directly: .terminal-display's `isolation: isolate` does NOT contain them, since
-   ScrollToBottomButton (6), TerminalSearchBar (10) and CommandSuggestPopup (30)
-   are SIBLINGS of .terminal-display inside .terminal-display-wrapper — which is
-   `position: relative` with no z-index, as is .terminal-pane-content (whose own
-   comment says it is deliberately not a stacking context). At the original
-   z-index 5 a scroll-to-bottom button left over from tab mode painted on top of
-   the canvas and stayed clickable.
-
-   So this sits ABOVE every floating widget the terminal subtree owns (the three
-   above, plus the pane header at 8 and the agent chip at 5 — all <= 30) and BELOW
-   the 1000-level menu/popup tier. Below is deliberate: the tab strip stays live in
-   Canvas Mode (design 010 D9) and TitleBar/TabContextMenu/TabRenamePopup/
-   ShellSelector/SplitButton all open at 1000 into the body area. Raising this into
-   the low thousands would fix the leak and bury those instead.
-
-   900 leaves 31-899 free for canvas-owned chrome. This element creates a stacking
-   context, so canvas descendants stack INSIDE it and cannot leak out.
-
-   The invariant is pinned by canvasZIndex.test.ts, which DERIVES both bounds from
-   the real stylesheets rather than repeating the numbers — add a widget anywhere in
-   Terminal/ or Panes/ above 900 and that test fails. */
+   None of that is reachable now. An inactive tab is `opacity: 0` — which both makes its
+   whole subtree fully transparent and gives it its own stacking context — so no widget
+   in another tab can paint over the canvas at any z-index. Adding one back here would be
+   re-solving a problem that no longer exists, and it would create a stacking context that
+   traps canvas-owned chrome. `canvasStacking.test.ts` derives the replacement invariant
+   from TerminalContainer.css. */
 .canvas-mode {
   position: absolute;
   inset: 0;
   display: flex;
   background: var(--bg-primary, #141414);
-  z-index: 900;
+
+  /* The sidebar's GROUP colour (Tam's item 5).
+     Its own token, and a hue rather than another grey, because the list has two kinds of thing
+     in it and a group heading previously differed from a terminal row only in weight and size —
+     which reads as one list in two sizes, not as a tree. Teal deliberately: blue is already
+     "running" and "selected", amber is the search highlight and red is danger, so it is the one
+     free hue left in the canvas palette. 6.8:1 on the sidebar's own background, which is more
+     contrast than the `--text-secondary` it replaces, not less. */
+  --canvas-group-fg: #4ec9b0;
 }
 .canvas-viewport {
   flex: 1;
@@ -45,6 +37,8 @@
   cursor: grab;
 }
 .canvas-viewport.panning { cursor: grabbing; }
+.canvas-grid { position: absolute; inset: 0; pointer-events: none; }
+.canvas-world { position: absolute; top: 0; left: 0; will-change: transform; }
 .canvas-empty {
   position: absolute;
   inset: 0;
@@ -55,3 +49,742 @@
   font-size: 13px;
   pointer-events: none;
 }
+
+/* ---- Group frames ------------------------------------------------------- */
+
+/* Counter-scaled like every other piece of canvas chrome. This was the last thing still
+   growing with the zoom — a 1px frame border draws at 4.2px at the working zoom, so the group
+   outline ended up heavier than the terminals it contains. It reads `--node-chrome-k` from
+   `.canvas-mode`, which is why that variable lives at the root: a frame is a SIBLING of the
+   nodes, never a child, so a node-level variable could never have reached it. */
+.canvas-gframe { position: absolute; border: calc(1px * var(--node-chrome-k, 1)) solid var(--border-color, #3e3e42); border-radius: calc(9px * var(--node-k, 1)); background: rgba(255,255,255,.018); }
+/* Drag feedback (Tasks 11 + 12). Colour only — never a width change: the frame's border is
+   counter-scaled to a hairline, and thickening it on hover would undo that at the one moment the
+   user is looking closely. `.drop` is the frame a dragged node would re-home INTO; `.moving` is a
+   frame being dragged as a whole. */
+.canvas-gframe.drop { border-color: var(--tab-running-accent, #3aa6ff); background: rgba(58,166,255,.09); }
+.canvas-gframe.moving { border-color: var(--accent-color, #007acc); background: rgba(0,122,204,.07); }
+/* `overflow`/`text-overflow` are what make the inline `max-width` bite — see `labelMaxWidth`.
+   Without them `white-space: nowrap` simply overflows the box and the cap does nothing, which
+   looks identical in the DOM and identical in any test that reads the style. */
+.canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* FIXED width, which is what lets `groupChips.groupChipLayout` resolve collisions exactly
+   rather than against an estimate — a chip sized by its own title would have to be measured,
+   and a layout that guesses widths only ever guesses the overlaps too. It also lines the chips
+   up instead of staggering them. `box-sizing` matters here: the layout's CHIP_W is the border
+   box, and content-box would make every chip 30px wider than the maths thinks. */
+.canvas-gchip { position: absolute; box-sizing: border-box; width: 190px; display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid var(--border-color, #3e3e42); border-radius: 8px; background: var(--bg-secondary, #2d2d30); color: var(--text-primary, #cccccc); white-space: nowrap; cursor: zoom-in; }
+/* Takes the slack, and ellipsises, so a long tab name cannot push the count out of a
+   fixed-width chip. */
+.canvas-gchip-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.canvas-gchip-count { font-size: 11px; color: var(--text-secondary, #969696); flex: none; margin-left: auto; }
+.canvas-gchip-run { width: 7px; height: 7px; border-radius: 50%; background: var(--tab-running-accent, #3aa6ff); flex: none; }
+
+/* ---- Nodes -------------------------------------------------------------- */
+
+/* NEVER use `display: none` on .canvas-node or .canvas-node-body. Task 9 mounts the
+   live terminal host inside the body, and under a `display:none` ancestor
+   FitAddon.proposeDimensions() returns a plausible, WRONG {cols:12, rows:6} instead
+   of erroring — three unguarded fit() call sites would then resize the PTY to a
+   bogus grid (`012` §6.5 RC3). Hiding is `visibility`, applied inline by CanvasNode.
+   Ports are exempt: they are siblings of the body, never ancestors of a terminal. */
+/* `--node-k` is the counter-scale from `headScale(zoom)`, set per node: 1 up to zoom 1, then
+   1/zoom. Everything CHROME on a node is expressed through it, so all of it holds a constant
+   on-screen size once the zoom passes 1, while the terminal keeps growing.
+
+   Chrome is not just the title bar. A 1px border renders 4.2px thick at the working zoom, a
+   2px selection ring 8.5px, and the 13px connector ports 55px across — a node that should look
+   like a terminal ends up looking like a cartoon of one. They are listed together here rather
+   than fixed one at a time because they are one property, not four coincidences. */
+/* The frame is an OUTLINE, not a border, and its width is counter-scaled by `--node-chrome-k`
+   (= 1/zoom) so it is one screen pixel at every zoom.
+
+   Why an outline. A border participates in layout, and `box-sizing: border-box` is global here,
+   so a world-space border eats the body's height — at the overview `1px / 0.05` is twenty world
+   pixels, a tenth of the body, and the box the surface scales into would change with zoom. An
+   outline costs no layout at all, which is what lets the width be counter-scaled honestly
+   instead of being clamped to something that looks wrong at one end or the other.
+
+   Why counter-scaled at all, in BOTH directions. `1px * z` is a third of a pixel at the
+   overview — the node has no visible edge — and four pixels of picture frame at the working
+   zoom. Both ends are the same mistake, which is why this uses `chromeScale` (unclamped 1/z)
+   rather than `headScale` (clamped at 1); a title needs to grow with a small node, a hairline
+   never does.
+
+   Selection and focus are told apart by COLOUR, not thickness. A ring that doubles the frame
+   reads as a heavy border around a full-screen terminal, and the state it marks is already
+   unmistakable — a focused node is the one taking your keystrokes.
+
+   THREE screen pixels for the outer edge, ONE for the divider under the title. A node's
+   outline is what separates it from the canvas and from its neighbours, and on a 4K panel —
+   where a CSS pixel is physically small — anything thinner reads as a hairline. The divider
+   under the title is not separating anything from anything; it is a rule inside one box, and
+   at the same weight as the outer edge it competes with it. This is the whole width budget:
+   there is no second ring added to either.
+
+   One radius, not three. The outline consumes no layout, so the header and body corners sit
+   exactly on the node's; giving them their own value is what produced a wedge of node
+   background between two arcs that did not share a centre. */
+.canvas-node {
+  --node-chrome-w: calc(3px * var(--node-chrome-k, 1));
+  --node-divider-w: calc(1px * var(--node-chrome-k, 1));
+  --node-radius: calc(7px * var(--node-k, 1));
+  position: absolute; z-index: 2; display: flex; flex-direction: column;
+  outline: var(--node-chrome-w) solid var(--border-color, #3e3e42);
+  outline-offset: calc(-1 * var(--node-chrome-w));
+  border-radius: var(--node-radius);
+  background: var(--bg-secondary, #2d2d30);
+  color: var(--text-primary, #cccccc);
+}
+.canvas-node.selected { outline-color: var(--accent-color, #007acc); }
+.canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
+.canvas-node.dimmed { opacity: .26; }
+/* The header is TWO elements on purpose. The outer one is the layout box, and its height is
+   set per node from `headScale(zoom)` so the bar stops growing once it has reached its natural
+   size. The inner one holds the contents at their natural size and is scaled as a single
+   element — scaling title, badge, buttons, padding and gap individually would be six numbers
+   to keep in step, and the first one forgotten is the one that looks wrong. */
+.canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: var(--node-divider-w) solid var(--border-color, #3e3e42); border-radius: var(--node-radius) var(--node-radius) 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
+.canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
+.canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
+.canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
+/* The agent/CLI chip (item 6). Shares the shell badge's metrics so the two sit as a pair, and
+   differs only where the difference carries meaning: it is ACCENT-coloured and pill-shaped
+   because it is the live fact — what is running now — next to the static one the pane was
+   launched as. `max-width` + ellipsis so an unexpectedly long agent name can never push the
+   header's buttons out of the node; `flex: none` keeps the title the thing that shrinks. */
+.canvas-node-agent { flex: none; display: inline-flex; align-items: center; gap: 4px; max-width: 40%; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--tab-running-accent, #3aa6ff); border: 1px solid var(--tab-running-accent, #3aa6ff); border-radius: 999px; padding: 1px 6px; position: relative; z-index: 1; overflow: hidden; }
+.canvas-node-agent-icon { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 2px; object-fit: contain; }
+.canvas-node-agent-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* `min-height: 0` so the chip tier can squeeze this to zero height without the flex
+   auto-minimum forcing the node taller than CHIP_H. */
+.canvas-node-body { flex: 1; min-height: 0; overflow: hidden; border-radius: 0 0 var(--node-radius) var(--node-radius); background: var(--terminal-background, #0a0a0a); position: relative; }
+
+/* ---- The live terminal host --------------------------------------------- */
+
+/* RC2: the host keeps a CONSTANT CSS-pixel box for the whole canvas session, so pan,
+   zoom and every LOD tier change are invisible to `getComputedStyle`, `ResizeObserver`
+   and `FitAddon` — no fit, no `term.resize()`, no SIGWINCH into a ratatui/codex PTY.
+
+   That is why it is absolutely positioned at an explicit size instead of `100%` of
+   `.canvas-node-body`: the body SHRINKS at the chip tier (the header takes the whole
+   node), so a percentage host would resize a live terminal on a zoom-out. The body
+   clips it with `overflow: hidden` instead. Clipping does not change `offsetWidth`, so
+   `hasLayoutBox` still passes and `proposeDimensions()` still measures a real box.
+
+   The box is deliberately MUCH bigger than the node and scaled down into it: sized to the node
+   it was a ~40-column grid, which is why the font looked oversized, the scrollback came back
+   narrow, and no zoom reached a usable terminal. Zooming until this reaches scale 1 gives a
+   real terminal at the user's own font size.
+
+   `--node-host-w/h` is PER TERMINAL since `plan/017`, and is a pixel replica of the pane that
+   terminal came from. That is the whole fix for the duplicated-content bug: `proposeDimensions()`
+   reads `getComputedStyle(parentElement).width/height`, so a host whose computed box equals the
+   pane's yields the same cols/rows, and `FitAddon.fit()` takes its early return instead of
+   calling `terminal.resize()`. No resize, no SIGWINCH, no repaint — while every existing
+   guarantee (the FT rule, D10, R3, R7's observer) is left exactly as written and simply runs to
+   a no-op.
+
+   `--canvas-host-w/h` remains as the fallback for a terminal that has never been rendered and so
+   has no pane box worth copying. The pixel values come from CanvasMode; never hard-code them
+   here — two copies of this number is two chances to resize a live PTY from a style tweak. */
+.canvas-surface {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--node-host-w, var(--canvas-host-w));
+  height: var(--node-host-h, var(--canvas-host-h));
+  /* Per node, falling back to the default-width scale. A node of any width scales its host
+     correctly from this, which is also the entire implementation of the full-screen overlay:
+     an overlaid node is a node with a big world rect, and this puts its terminal at screen
+     scale 1 without a second host, a relocation or a fit. */
+  transform: scale(var(--node-surface-scale, var(--canvas-surface-scale)));
+  transform-origin: 0 0;
+  overflow: hidden;
+}
+.canvas-surface > .terminal-display { width: 100%; height: 100%; }
+
+/* ---- Snapshot tier (Task 10) -------------------------------------------- */
+
+/* A frozen picture of the screen, shown where a live engine would be wasted. It sits INSIDE
+   `.canvas-node-body` alongside the (hidden) live surface rather than replacing it — the host
+   must stay mounted and keep its box at every tier (`012` §6.5 RC2/RC4), so the two overlap and
+   the rule below is what makes the surface invisible underneath.
+
+   Not counter-scaled. This is content, not chrome: it stands in for the terminal, so it should
+   grow and shrink with the node exactly as the terminal it replaces would. */
+.canvas-node-snapshot {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--terminal-background, #0a0a0a);
+  pointer-events: none;
+}
+.canvas-node-snapshot pre {
+  margin: 0;
+  padding: 7px 9px;
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: #c8c8c8;
+  white-space: pre;
+}
+
+/* Below `live` the terminal is not painted — the snapshot above stands in for it.
+   `visibility`, never `display`, and never a size change: the host must keep its box. */
+.canvas-node[data-lod="snapshot"] .canvas-surface,
+.canvas-node[data-lod="chip"] .canvas-surface,
+.canvas-node[data-lod="group"] .canvas-surface { visibility: hidden; }
+
+/* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
+   not removed, so the terminal host inside it keeps a resolvable layout box. */
+.canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: var(--node-radius); cursor: zoom-in; }
+.canvas-node[data-lod="chip"] .canvas-node-head-inner { justify-content: center; }
+.canvas-node[data-lod="chip"] .canvas-port { display: none; }
+
+/* The running sweep. NOT the tab strip's rule, though it started as a copy of it.
+   TabManager tiles a 160px gradient with `repeat-x`, which shows exactly one band on a ~160px
+   tab and THREE on a 1440px overlaid node — three sweeps chasing each other, which is what a
+   "one thing is running" cue must never look like.
+
+   So the band is sized as a fraction of the header and translated across it exactly once per
+   period. The gradient peaks at 50%, so its head and tail ramps are the same length and the
+   band reads as symmetrical however wide the node is.
+
+   Task 14's sidebar rows join this selector list rather than getting a copy — a row is the
+   third surface to want the sweep, and a third copy is how the three drift. They are NOT folded
+   into a shared `.tf-sweep` class, because that would mean editing `CanvasNode`'s markup to
+   swap one class for another with no behavioural difference, and the sweep's tuning is
+   attached to the selector it was tuned against. A row gets it by carrying the same three
+   properties the header does — `position: relative`, `isolation: isolate`, `overflow: hidden` —
+   which is what makes the band's `z-index: -1` land above the background and below the text. */
+.canvas-node.running .canvas-node-head::after,
+.canvas-srow.running::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 0;
+  width: 55%; z-index: -1; pointer-events: none;
+  opacity: .42;
+  background-image: linear-gradient(90deg, transparent 0%, var(--tab-running-accent, #3aa6ff) 50%, transparent 100%);
+  animation: canvas-node-sweep 1.6s linear infinite;
+}
+@keyframes canvas-node-sweep {
+  /* Percentages here are of the BAND's own width, so -100% is fully off the left edge and
+     182% (= 100 / 0.55) is fully off the right — one crossing, no overlap with the next. */
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(182%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-node.running .canvas-node-head::after,
+  .canvas-srow.running::after { animation-duration: 3.2s; opacity: .14; }
+}
+
+/* ---- The full-screen overlay -------------------------------------------- */
+
+/* World-space, because `.canvas-world` sets `will-change: transform` and is a stacking
+   context — a backdrop outside it could never sit between the ordinary nodes and the
+   overlaid one. Above `.canvas-port` (6) so a neighbour's connection dots cannot punch
+   through it. */
+.canvas-overlay-backdrop {
+  position: absolute;
+  z-index: 15;
+  background: rgba(0, 0, 0, .58);
+  cursor: default;
+}
+.canvas-node.overlaid {
+  z-index: 20;
+  box-shadow: 0 18px 56px rgba(0, 0, 0, .62);
+}
+/* The focus ring would otherwise draw a second, thicker outline around the overlay — the node
+   is always focused while it is the overlay, so the two states always coincide here. */
+.canvas-node.overlaid { outline-color: var(--tab-running-accent, #3aa6ff); }
+.canvas-node.overlaid .canvas-node-head { cursor: default; }
+.canvas-node.overlaid .canvas-port { display: none; }
+
+/* ---- Header buttons ----------------------------------------------------- */
+
+/* "Enlarge on the canvas" and "open in its tab" — the two ways out of the overview.
+   NO `--node-k` here, deliberately: these live inside `.canvas-node-head-inner`, which is
+   already counter-scaled as a whole, so scaling them again would shrink them twice. Sized off
+   the header height so they cannot force it taller than HEAD_H. */
+.canvas-node-open {
+  flex: none; position: relative; z-index: 1;
+  width: 18px; height: 18px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--text-tertiary, #666666);
+  font-size: 11px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity .13s ease, color .13s ease, border-color .13s ease;
+}
+.canvas-node:hover .canvas-node-open,
+.canvas-node.selected .canvas-node-open,
+.canvas-node.overlaid .canvas-node-open,
+.canvas-node-open:focus-visible { opacity: 1; }
+.canvas-node-open:hover {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--border-color, #3e3e42);
+}
+
+/* The one destructive control in the header, so it is the one that reads as destructive on
+   hover — the two beside it move a terminal around, this one ends it. It shares
+   `.canvas-node-open`'s box so the three stay the same size and reveal together; only the
+   hover colour differs. */
+.canvas-node-close:hover {
+  color: var(--danger-color, #e81123);
+  border-color: var(--danger-color, #e81123);
+}
+
+/* ---- Canvas menus ------------------------------------------------------- */
+
+/* Scoped to `.canvas-menu` rather than added to `PaneContextMenu.css`, whose classes these
+   menus borrow but do not own — the pane and tab menus share that file and have no
+   destructive row. */
+.canvas-menu .context-menu-item.danger { color: var(--danger-color, #e81123); }
+.canvas-menu .context-menu-item.danger:hover:not(:disabled) { color: var(--danger-color, #e81123); }
+
+/* The shell-profile list (items 3 and 4). A workspace can have a dozen profiles configured, so
+   it scrolls rather than growing past the window — a menu opened near the bottom edge would
+   otherwise put its last entries out of reach. */
+.canvas-profile-menu { max-height: 60vh; overflow-y: auto; }
+/* Sized to the emoji it replaces, so a profile with a resolved binary icon and one without do
+   not sit at different heights in the same list. */
+.canvas-menu-icon-img { width: 14px; height: 14px; border-radius: 3px; object-fit: contain; }
+.canvas-menu-default {
+  margin-left: 8px; padding: 0 5px;
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-tertiary, #666666);
+  border: 1px solid var(--border-color, #3e3e42); border-radius: 2px;
+}
+
+/* ---- Connection ports --------------------------------------------------- */
+
+/* Sized through `--node-chrome-k` for the same reason as the frame above: at the working zoom
+   an uncapped 13px port is a 55px disc, four of which swamp the terminal they belong to.
+
+   10px with a 1.5px ring, not 13 with 2. These are connection handles for Task 18 and they are
+   only visible on hover or selection, so they should read as small targets rather than as
+   decoration — at 13/2 the ring was heavy enough to draw the eye away from the terminal.
+
+   Every length here is one of two numbers — the port's own size and half of it — so they are
+   derived from a single custom property rather than restated four times with the halving done
+   by hand. */
+.canvas-port { --port-size: calc(10px * var(--node-chrome-k, 1)); position: absolute; width: var(--port-size); height: var(--port-size); border-radius: 50%; background: var(--bg-primary, #141414); border: calc(1.5px * var(--node-chrome-k, 1)) solid var(--tab-running-accent, #3aa6ff); opacity: 0; transition: opacity .13s ease, transform .13s ease; cursor: crosshair; z-index: 6; }
+.canvas-node:hover .canvas-port, .canvas-node.selected .canvas-port { opacity: 1; }
+.canvas-port:hover { transform: scale(1.42); background: var(--tab-running-accent, #3aa6ff); }
+/* Centred on the border's CENTRE LINE, not on its inner edge.
+   An absolutely positioned child resolves against the PADDING box, whose edge is the INNER
+   edge of the border — so offsetting by half the port's own size leaves it sitting half a
+   border-width inside the line it is meant to straddle. Invisible while the border is a
+   hairline, obvious once it is not, and the sign is easy to get backwards: the port has to
+   move OUT by half a border, hence the `+`. */
+.canvas-port {
+  --port-offset: calc((var(--port-size) + var(--node-chrome-w)) / -2);
+  --port-centre: calc(50% - var(--port-size) / 2);
+}
+.canvas-port.n { top: var(--port-offset); left: var(--port-centre); }
+.canvas-port.e { right: var(--port-offset); top: var(--port-centre); }
+.canvas-port.s { bottom: var(--port-offset); left: var(--port-centre); }
+.canvas-port.w { left: var(--port-offset); top: var(--port-centre); }
+
+/* ---- Sidebar (Task 14) --------------------------------------------------- */
+
+/* A flex sibling of `.canvas-viewport`, before it, so it takes the left edge and the viewport
+   keeps `flex: 1`. Its width is inline from `canvasSlice`, which Task 15 makes draggable. */
+.canvas-sidebar {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border-color, #3e3e42);
+  background: var(--bg-secondary, #2d2d30);
+}
+.canvas-ssearch {
+  flex: none;
+  margin: 9px 9px 7px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 4px;
+  background: var(--bg-primary, #141414);
+  color: var(--text-primary, #cccccc);
+  font-size: 12px;
+  min-width: 0;
+}
+.canvas-ssearch::placeholder { color: var(--text-tertiary, #666666); }
+.canvas-ssearch:focus-visible { outline: 1px solid var(--accent-color, #007acc); outline-offset: 0; }
+
+.canvas-stree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 0 9px; }
+.canvas-sempty { padding: 14px 11px; color: var(--text-tertiary, #666666); font-size: 12px; }
+.canvas-sgroup { margin-top: 5px; }
+.canvas-sghead {
+  margin: 0;
+  padding: 5px 11px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--canvas-group-fg, #4ec9b0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.canvas-sgempty { margin: 0; padding: 2px 11px 4px 19px; font-size: 11px; font-style: italic; color: var(--text-tertiary, #666666); }
+.canvas-srows { margin: 0; padding: 0; list-style: none; }
+
+/* `position: relative` + `isolation: isolate` are what let the running sweep's `z-index: -1`
+   sit above the row's background and below its text — the same three properties
+   `.canvas-node-head` carries, and the reason the shared sweep rule works on both. */
+.canvas-srow {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px 4px 19px;
+  font-size: 12px;
+  color: var(--text-primary, #cccccc);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.canvas-srow:hover { background: var(--bg-tertiary, #3e3e42); }
+.canvas-srow.selected { background: var(--bg-tertiary, #3e3e42); box-shadow: inset 2px 0 0 var(--accent-color, #007acc); }
+.canvas-srow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
+.canvas-srow-title mark { background: rgba(240,160,32,.28); color: inherit; border-radius: 2px; }
+.canvas-srow-dis {
+  flex: none; position: relative; z-index: 1;
+  max-width: 45%; overflow: hidden; text-overflow: ellipsis;
+  font-size: 10px; color: var(--text-tertiary, #666666);
+}
+.canvas-srow.editing { padding: 2px 9px 2px 17px; }
+.canvas-srename {
+  width: 100%;
+  padding: 2px 5px;
+  border: 1px solid var(--accent-color, #007acc);
+  border-radius: 3px;
+  background: var(--bg-primary, #141414);
+  color: var(--text-primary, #cccccc);
+  font-size: 12px;
+  min-width: 0;
+}
+
+/* Resize handle and drag-to-regroup (Task 15). The handle is a flex sibling AFTER the sidebar,
+   so it sits on the seam and the viewport keeps `flex: 1`. */
+.canvas-sresize { width: 5px; flex: none; cursor: col-resize; background: transparent; transition: background-color .12s ease; }
+.canvas-sresize:hover, .canvas-sresize.active { background: var(--accent-color, #007acc); }
+.canvas-sgroup.drop { background: var(--menu-hover-background, #094771); color: #fff; }
+.canvas-srow.lifting { opacity: .35; }
+/* `position: fixed` in client coordinates so the ghost follows the cursor out over the canvas;
+   clipped to the sidebar it would vanish exactly when the drag left it. */
+.canvas-sghost { position: fixed; z-index: 100000; pointer-events: none; padding: 3px 10px; border: 1px solid var(--accent-color, #007acc); border-radius: 3px; background: var(--menu-hover-background, #094771); color: #fff; font-size: 12px; white-space: nowrap; }
+
+/* ---- Canvas chrome: the Arrange control (Task 13) ------------------------ */
+
+/* Screen space, not world space. It is a sibling of `.canvas-viewport` inside `.canvas-mode`,
+   NOT a child of `.canvas-world`, so it neither pans, zooms nor needs counter-scaling — the one
+   piece of canvas UI for which that is the right answer rather than an omission.
+
+   Top-right: the sidebar (Task 14) takes the left edge and the minimap (Task 23) the
+   bottom-right corner. The z-index only has to beat `.canvas-viewport`, which sets none; it is
+   stated rather than left to document order so a later insertion cannot silently bury it. */
+.canvas-toolbar {
+  position: absolute;
+  top: 11px;
+  right: 11px;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+}
+.canvas-tbtn {
+  display: flex;
+  align-items: center;
+  padding: 5px 11px;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 5px;
+  background: var(--bg-secondary, #2d2d30);
+  color: var(--text-secondary, #969696);
+  font-size: 11px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.canvas-tbtn:hover {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--text-tertiary, #666666);
+  background: var(--bg-tertiary, #3e3e42);
+}
+.canvas-tbtn:focus-visible {
+  outline: 2px solid var(--accent-color, #007acc);
+  outline-offset: 1px;
+}
+/* A toggle has to look different when it is on, or it reads as a button that did nothing. */
+.canvas-tbtn[aria-pressed="true"] {
+  color: var(--text-primary, #cccccc);
+  border-color: var(--accent-color, #007acc);
+}
+/* At the zoom clamps. `zoomAt` returns the viewport unchanged once `clampZoom` bites, so
+   without a visible state the button is indistinguishable from a broken one. */
+.canvas-tbtn:disabled {
+  opacity: .38;
+  cursor: default;
+}
+.canvas-tbtn:disabled:hover {
+  color: var(--text-secondary, #969696);
+  border-color: var(--border-color, #3e3e42);
+  background: var(--bg-secondary, #2d2d30);
+}
+/* The zoom pair. Square and glyph-sized rather than word-sized, so `−` and `+` read as one
+   control next to each other instead of as two very short words. */
+.canvas-tbtn-icon {
+  justify-content: center;
+  width: 27px;
+  padding: 5px 0;
+  font-size: 14px;
+  letter-spacing: 0;
+  line-height: 1;
+}
+/* Divides the two clusters: what acts on the WORKSPACE (List, Arrange) from what acts on the
+   VIEW (zoom, View All). Five undifferentiated buttons in a row read as one menu. */
+.canvas-tsep {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 1px;
+  background: var(--border-color, #3e3e42);
+}
+
+/* ---- Connection wires (Task 18) ----------------------------------------- */
+
+/* Both layers live in `.canvas-world`, so they pan and zoom with the nodes they join.
+   `overflow: visible` because the SVG viewport is a finite box and the world is not — without
+   it a wire leaving the box is clipped rather than drawn. */
+.canvas-wires {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 1;                 /* under `.canvas-node` (2) — occluded where it crosses one */
+}
+
+/* ABOVE every ordinary node, and this number is derived, not chosen. The node stack in this
+   file is: `.canvas-node` 2, `.canvas-port` 6, `.canvas-node.focused` 7. `plan/013` said 5,
+   which is under both the ports and the focused node — so the ghost, whose entire job is to
+   stay visible where a wire crosses a terminal, disappeared on the one node the user was
+   working in. Still below `.canvas-overlay-backdrop` (15): while a node is overlaid the wires
+   belong behind the dimming, not painted over it. */
+.canvas-wires.over { z-index: 8; }
+
+.canvas-wire {
+  fill: none;
+  stroke: var(--tab-running-accent, #3aa6ff);
+  /* Counter-scaled like every other piece of canvas chrome: a wire is a hairline at any zoom,
+     not a 2px line multiplied by the world transform. */
+  stroke-width: calc(2px * var(--node-chrome-k, 1));
+  stroke-linecap: round;
+  opacity: .62;
+}
+/* Agent-created connections read as provisional — design 010 §7.1. */
+.canvas-wire.agent { stroke: #E8825A; stroke-dasharray: calc(7px * var(--node-chrome-k, 1)) calc(5px * var(--node-chrome-k, 1)); }
+.canvas-wire.hot { opacity: 1; stroke-width: calc(3px * var(--node-chrome-k, 1)); }
+.canvas-wire.cold { opacity: .12; }
+/* The picked connection. Last in the file so it wins over `.cold` without `!important` — a
+   selection that dims because the pointer wandered onto another node is a selection the user
+   cannot see they still have. */
+.canvas-wire.selected {
+  opacity: 1;
+  stroke: var(--accent-color, #007acc);
+  stroke-width: calc(3px * var(--node-chrome-k, 1));
+}
+
+/* The click and right-click target. Invisible and far wider than the drawn stroke, because a
+   hairline is not a hit target. `stroke` rather than `all`: only the band around the line
+   should take the click, never the area the curve encloses. */
+.canvas-wire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: calc(14px * var(--node-chrome-k, 1));
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+/* ---- The selected connection's controls ---------------------------------- */
+
+/* Its own layer, ABOVE the masked over-layer (8) and the focused node (7), because both
+   handles sit exactly on a node's border — see the note in `CanvasWires`. Still under
+   `.canvas-overlay-backdrop` (15): a node blown up to fill the screen is not the moment to be
+   adjusting a wire behind it. The layer itself is transparent to the pointer; only the two
+   controls in it are not. */
+.canvas-wires.handles { z-index: 9; }
+.canvas-wire-handle,
+.canvas-wire-badge { pointer-events: all; }
+
+/* Authored in SCREEN pixels: the parent `<g>` carries the counter-scale, so nothing in here
+   multiplies by `--node-chrome-k` the way the world-space rules above have to. */
+.canvas-wire-handle {
+  fill: var(--bg-primary, #141414);
+  stroke: var(--accent-color, #007acc);
+  stroke-width: 2.5;
+  cursor: grab;
+}
+.canvas-wire-handle:hover { fill: var(--accent-color, #007acc); }
+
+/* While ANY wire drag is in flight, every wire surface stops taking the pointer.
+   `useWireDrag` resolves its drop target with `document.elementFromPoint(...).closest(
+   '.canvas-node')`, which answers with the TOPMOST element — so a control left interactive here
+   shadows the node underneath it and the drop is silently refused over that patch. The handles
+   are the acute case (they sit ON a node's border, which is exactly where a drop lands), and the
+   hit band is the long-standing one: dropping a wire on a node where another wire crosses it has
+   always failed for the same reason. */
+.canvas-mode.linking .canvas-wire-handle,
+.canvas-mode.linking .canvas-wire-badge,
+.canvas-mode.linking .canvas-wire-hit { pointer-events: none; }
+
+.canvas-wire-badge { cursor: pointer; }
+.canvas-wire-badge circle {
+  fill: var(--bg-primary, #141414);
+  stroke: var(--accent-color, #007acc);
+  stroke-width: 1.5;
+}
+.canvas-wire-badge path {
+  stroke: var(--text-primary, #d4d4d4);
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: none;
+}
+.canvas-wire-badge:hover circle { fill: var(--error-color, #f14c4c); stroke: var(--error-color, #f14c4c); }
+.canvas-wire-badge:hover path { stroke: #fff; }
+
+/* The wire being dragged out of a port, before it has a second endpoint. */
+.canvas-ghostwire {
+  fill: none;
+  stroke: var(--tab-running-accent, #3aa6ff);
+  stroke-width: calc(2px * var(--node-chrome-k, 1));
+  stroke-dasharray: calc(5px * var(--node-chrome-k, 1)) calc(4px * var(--node-chrome-k, 1));
+  opacity: .85;
+}
+
+/* The connection's own label. Counter-scaled like the node titles, so it stays readable at
+   every zoom instead of becoming either a smudge or a billboard. `paint-order: stroke` draws
+   the halo BEHIND the glyphs, which is what keeps the text legible over a dot grid or a frame
+   without the stroke eating into the letterforms. */
+.canvas-wire-label {
+  font-size: calc(11px * var(--node-chrome-k, 1));
+  fill: var(--text-primary, #d4d4d4);
+  stroke: var(--bg-primary, #141414);
+  stroke-width: calc(3px * var(--node-chrome-k, 1));
+  paint-order: stroke;
+  pointer-events: none;
+  user-select: none;
+}
+.canvas-wire-label.cold { opacity: .2; }
+
+/* While a link is being dragged every port is a target, so they all show themselves — not just
+   the hovered node's. Without this the user has to guess where the wire is allowed to land. */
+.canvas-mode.linking .canvas-port { opacity: 1; }
+.canvas-node.link-target { outline-color: var(--tab-running-accent, #3aa6ff); }
+
+/* The wire context menu reuses `PaneContextMenu.css` for its box and items; only the label
+   input is new. */
+.canvas-wire-label-input {
+  display: block;
+  width: calc(100% - 16px);
+  margin: 4px 8px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-primary, #d4d4d4);
+  background: var(--input-background, #1e1e1e);
+  border: 1px solid var(--accent-color, #007acc);
+  border-radius: 3px;
+  outline: none;
+}
+
+/* ---- Orientation: minimap and beacons (Task 23) --------------------------- */
+
+/* Both live in `CanvasViewport`'s `overlay` slot — inside `.canvas-viewport`, outside
+   `.canvas-world`. Screen space, but in VIEWPORT coordinates: the beacons are positioned by a
+   computed `left`/`top` from `worldToScreen`, and `.canvas-mode` starts ~255px further left
+   because the sidebar is its first flex child. `.canvas-toolbar` can live out there only
+   because it is anchored `right`, where the two frames coincide.
+
+   The minimap's WIDTH and HEIGHT are set inline from `CanvasMinimap.MINIMAP_W/H`, not here:
+   they are inputs to `minimapTransform`, so a copy in this file would be a second source of
+   truth for the projection and the failure would be a silently mis-scaled map. */
+.canvas-minimap {
+  position: absolute;
+  right: 11px;
+  bottom: 11px;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 5px;
+  background: rgba(20, 20, 20, .9);
+  cursor: pointer;
+}
+/* The minimap is in the tab order now — its arrow keys pan the view at the workspace's scale
+   rather than the screen's — so it needs to show when it is the thing the keys will reach.
+   `:focus-visible`, not `:focus`, or every click on it would leave a ring behind. */
+.canvas-minimap:focus-visible {
+  outline: 2px solid var(--accent-color, #007acc);
+  outline-offset: 1px;
+}
+.canvas-minigroup {
+  position: absolute;
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 2px;
+}
+.canvas-mininode {
+  position: absolute;
+  min-width: 2px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: var(--text-tertiary, #666666);
+}
+.canvas-mininode.running { background: var(--tab-running-accent, #3aa6ff); }
+/* Drawn last in the DOM, so it sits over the content without needing a z-index of its own —
+   which is also what makes it the hit target for the drag that pans the view.
+   `grab`/`grabbing` rather than the minimap's own `pointer`: it is the one part of this box you
+   move rather than aim at, and nothing else says so. `:active` needs no state and no re-render
+   — the press is held on this element for the whole gesture. */
+.canvas-miniview {
+  position: absolute;
+  border: 1.5px solid var(--accent-color, #007acc);
+  border-radius: 2px;
+  background: rgba(0, 122, 204, .13);
+  cursor: grab;
+}
+.canvas-miniview:active { cursor: grabbing; }
+
+/* Below the minimap's 20 so a beacon clamped into the bottom-right corner cannot cover it.
+   Centred on its clamped anchor — `BEACON_INSET` is sized against `BEACON_SIZE` so the overhang
+   stays inside the viewport; see `orientation.ts`. */
+.canvas-beacon {
+  position: absolute;
+  z-index: 19;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--tab-activity-accent, #f0a020);
+  border-radius: 50%;
+  background: rgba(240, 160, 32, .18);
+  color: var(--tab-activity-accent, #f0a020);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.canvas-beacon:hover { background: rgba(240, 160, 32, .34); }
+
+/* ---- Space-to-pan (the hand tool) --------------------------------------- */
+
+/* While Space is held the whole surface is a drag handle, so EVERY descendant has to say so —
+   a node header says `cursor: move`, a chip says `zoom-in`, a port says `crosshair`, and any
+   one of them left alone makes the mode look broken exactly where it is most useful.
+
+   The universal selector is (0,2,0) specific, which already beats every single-class rule it
+   overrides. It sits at the end of the file so it also wins the ties, against `.canvas-port:hover`
+   and friends — placement is doing real work here, not tidiness. */
+.canvas-viewport.space-pan,
+.canvas-viewport.space-pan * { cursor: grab; }
+.canvas-viewport.space-pan.panning,
+.canvas-viewport.space-pan.panning * { cursor: grabbing; }
+/* Text selection would otherwise start inside a node the moment the drag crosses it. */
+.canvas-viewport.space-pan * { user-select: none; }

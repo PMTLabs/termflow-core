@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict, comboKeyToken } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
@@ -285,6 +286,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setEnhancedKeyboard(baseline.enhancedKeyboard));
             dispatch(setCommandSuggestions(baseline.commandSuggestions));
             dispatch(setActivateTabOnApiCreate(baseline.activateTabOnApiCreate));
+            dispatch(setCanvasWheelMode(baseline.canvasWheelMode as CanvasWheelMode));
             dispatch(setDefaultEditor(baseline.defaultEditor));
         } else if (baseline.kind === 'shortcuts') {
             dispatch(setCustomKeybindings(Object.fromEntries(baseline.customKeybindings)));
@@ -1250,6 +1252,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 appears in the background without pulling you away from the tab you are
                 working in. Turn on to have new API/MCP tabs jump to the front. Splits
                 opened this way are always added in place and never change focus.
+            </span>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="canvas-wheel-mode">
+                    Mouse wheel in Canvas Mode
+                </label>
+                <select
+                    id="canvas-wheel-mode"
+                    className="setting-input"
+                    value={settings.canvasWheelMode}
+                    onChange={(e) => dispatch(setCanvasWheelMode(e.target.value as CanvasWheelMode))}
+                >
+                    <option value="zoom">Wheel zooms the canvas (default)</option>
+                    <option value="scroll">Wheel scrolls the canvas, Ctrl+wheel zooms</option>
+                </select>
+            </div>
+            <span className="help-text">
+                Applies to Canvas Mode only — a wheel inside a normal terminal pane is unchanged.
+                With “Wheel zooms” (default), Ctrl/Cmd+wheel is handed to the terminal under the
+                pointer and zooms its font. With “Wheel scrolls”, the wheel pans the workspace
+                (Shift+wheel pans sideways) and Ctrl/Cmd+wheel zooms the canvas instead — font
+                zoom then stays on Ctrl/Cmd+wheel in the terminal you are editing.
             </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="default-editor">
