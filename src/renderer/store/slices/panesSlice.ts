@@ -28,7 +28,21 @@ interface PanesState {
   paneTree: PaneNode | null;
   activePaneId: string | null;
   // Authoritative per-tab store powering cross-tab / detach moves.
-  treesByTabId: Record<string, PaneNode>;
+  //
+  // Three states, and the difference between the last two is load-bearing:
+  //   - key absent  → this tab has never been given a tree. TerminalContainer seeds one.
+  //   - value null  → the tab is OPEN and EMPTY. Every terminal it had was moved elsewhere.
+  //   - a PaneNode  → the tab's layout.
+  //
+  // `null` used to be expressed by DELETING the key, which made "emptied" and "never
+  // initialised" the same state — and TerminalContainer's seed effect, which exists for the
+  // second, therefore fired for the first. It manufactured a fresh root leaf carrying the
+  // tab's own id and so RESURRECTED the terminal that had just been dragged into another
+  // group, leaving one terminal in two groups at once. Arrange then placed the node in the
+  // last group claiming it and shrink-wrapped the other group's frame across the whole
+  // canvas. Design 010 §6.3 calls an emptied tab "already a legal state"; this is what
+  // makes that true.
+  treesByTabId: Record<string, PaneNode | null>;
   activeTabId: string | null;
   // Per-tab memory of the last active pane. Lets a tab switch restore focus to
   // the pane the cursor was on before leaving (falls back to the tab's first leaf).
@@ -61,8 +75,18 @@ function syncActive(state: PanesState): void {
   if (!state.activeTabId) return;
   if (state.paneTree) {
     state.treesByTabId[state.activeTabId] = state.paneTree;
-  } else {
-    delete state.treesByTabId[state.activeTabId];
+    return;
+  }
+  // An emptied tab keeps its KEY, holding null — exactly as `removePaneFromTab` does.
+  // Deleting it said "never initialised", which is the state TerminalContainer's seed net
+  // exists to fill, so closing an active tab's last pane through the legacy path
+  // resurrected the terminal it had just closed.
+  //
+  // Only ever DOWNGRADE an entry that already exists. A virtual tab (canvas, settings) is
+  // active with no tree of its own, and minting a null key for it would hand the canvas a
+  // phantom group frame for itself.
+  if (state.activeTabId in state.treesByTabId) {
+    state.treesByTabId[state.activeTabId] = null;
   }
 }
 
@@ -389,6 +413,26 @@ const panesSlice = createSlice({
     },
 
     /**
+     * Focus a pane in a tab that is not necessarily the active one.
+     *
+     * `focusPane` alone cannot express this. It writes `activePaneId`, which belongs to
+     * whichever tab is active NOW — and `setActiveTabId` overwrites it on arrival from
+     * `activePaneByTabId`. So dispatching `focusPane` either side of a tab switch is
+     * clobbered: before, because the switch restores the remembered pane; after, because
+     * TerminalContainer's activation effect runs a commit later and does the same.
+     *
+     * Writing the REMEMBERED pane is what survives, in either order. Canvas Mode's
+     * "open in its tab" affordance needs exactly that — the node you clicked names a
+     * pane in a tab you are not on yet.
+     */
+    focusPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId: string }>) => {
+      const { tabId, paneId } = action.payload;
+      if (!findLeaf(state.treesByTabId[tabId] ?? null, paneId)) return;
+      state.activePaneByTabId[tabId] = paneId;
+      if (state.activeTabId === tabId) state.activePaneId = paneId;
+    },
+
+    /**
      * Rename a pane in a specific tab. `tabId` is optional and defaults to the
      * active tab, so every existing caller (TerminalPane.handleNameSave) keeps
      * working unchanged.
@@ -488,7 +532,10 @@ const panesSlice = createSlice({
     },
 
     /** Store/overwrite a tab's authoritative tree (background or active). */
-    addTabTree: (state, action: PayloadAction<{ tabId: string; tree: PaneNode }>) => {
+    // `tree: null` installs the KEY for a tab that is open and empty. That is a real
+    // instruction — absent means "never initialised" and gets seeded, so restoring an
+    // emptied tab has to write the null rather than write nothing.
+    addTabTree: (state, action: PayloadAction<{ tabId: string; tree: PaneNode | null }>) => {
       const { tabId, tree } = action.payload;
       state.treesByTabId[tabId] = tree;
       if (state.activeTabId === tabId) state.paneTree = tree;
@@ -501,16 +548,34 @@ const panesSlice = createSlice({
      */
     insertPaneIntoTab: (
       state,
-      action: PayloadAction<{ tabId: string; targetPaneId: string; zone: DropZone; node: PaneNode }>,
+      action: PayloadAction<{ tabId: string; targetPaneId: string | null; zone: DropZone; node: PaneNode }>,
     ) => {
       const { tabId, targetPaneId, zone, node } = action.payload;
       const tree = state.treesByTabId[tabId];
-      if (!tree) return;
+      // An absent key is a tab with no layout to insert into. A key holding NULL is an open,
+      // empty tab — design 010 §6.3 keeps its frame on the canvas as a drop target, so a drop
+      // there has to land: the arriving pane simply becomes the tab's whole tree. Refusing it
+      // (the old `if (!tree) return`) made an emptied group a place you could drag out of and
+      // never back into, with no error to explain the refusal.
+      if (tree === undefined) return;
       const edge: EdgeZone = zone === 'center' ? 'right' : zone;
-      const next = insertByZone(tree, targetPaneId, node, edge);
+      const next = tree === null || targetPaneId === null
+        ? node
+        : insertByZone(tree, targetPaneId, node, edge);
       state.treesByTabId[tabId] = next;
-      if (state.activeTabId === tabId) state.paneTree = next;
-      state.activePaneId = node.id;
+      // `activePaneByTabId` is per tab, so it is always the arriving pane's. `paneTree` and
+      // `activePaneId` belong to the ACTIVE tab only (see `removePaneFromTab` below, which
+      // states the same invariant) — writing them for an insert into a BACKGROUND tab points
+      // the active tab's cursor at a pane that is not in it.
+      //
+      // This guard used to cover `paneTree` but not `activePaneId`. Unreachable until now: the
+      // only production caller was the cross-window drop in `dnd/detach.ts`, which always
+      // targets the receiving window's active tab. Canvas re-homing (`plan/013` Task 11) is the
+      // first caller that inserts into a background tab, and it fails without this.
+      if (state.activeTabId === tabId) {
+        state.paneTree = next;
+        state.activePaneId = node.id;
+      }
       state.activePaneByTabId[tabId] = node.id;
       // A newly inserted pane must be visible — drop any maximize on this tab.
       delete state.maximizedPaneByTabId[tabId];
@@ -526,11 +591,11 @@ const panesSlice = createSlice({
         delete state.maximizedPaneByTabId[tabId];
       }
       const { tree: pruned } = removeLeaf(tree, paneId);
-      if (pruned === null) {
-        delete state.treesByTabId[tabId];
-      } else {
-        state.treesByTabId[tabId] = pruned;
-      }
+      // An emptied tab keeps its KEY, holding null: it is open and has no terminals.
+      // Deleting it here is what let TerminalContainer seed the tab a second terminal —
+      // see the `treesByTabId` note. Callers that want the tab CLOSED when it empties
+      // (the cross-window detach) test for a null tree and dispatch `removeTab`.
+      state.treesByTabId[tabId] = pruned;
       // Only the active tab owns paneTree/activePaneId; fix them if its active pane vanished.
       if (state.activeTabId === tabId) {
         state.paneTree = pruned;
@@ -592,20 +657,26 @@ const panesSlice = createSlice({
       if (sourceTabId === targetTabId) return;
       const srcTree = state.treesByTabId[sourceTabId];
       const dstTree = state.treesByTabId[targetTabId];
-      if (!srcTree || !dstTree) return;
+      // The DESTINATION may legitimately be null — an open tab someone emptied by dragging
+      // its last terminal away is a drop target, not a missing tab. Only `undefined` (never
+      // initialised) is a refusal here. `insertPaneIntoTab` and `planRegroup` already made
+      // this distinction; this was the third caller of the same guard and it still read the
+      // empty tab as absent, so a tab-strip drag onto an emptied tab silently no-opped.
+      if (!srcTree || dstTree === undefined) return;
 
       const { tree: prunedSrc, removed } = removeLeaf(srcTree, sourcePaneId);
       if (!removed) return;
 
       // Cross-tab "center" has no swap semantics; treat it as an insert to the right.
       const edge: EdgeZone = zone === 'center' ? 'right' : zone;
-      const newDst = insertByZone(dstTree, targetPaneId, removed, edge);
+      const newDst = dstTree === null
+        ? removed
+        : insertByZone(dstTree, targetPaneId, removed, edge);
 
-      if (prunedSrc === null) {
-        delete state.treesByTabId[sourceTabId];
-      } else {
-        state.treesByTabId[sourceTabId] = prunedSrc;
-      }
+      // Null rather than a deleted key, as in `removePaneFromTab`. The tab-strip drag
+      // closes a source tab it empties (`PaneDragController.commitDrop`), which now reads
+      // that null instead of the key's absence.
+      state.treesByTabId[sourceTabId] = prunedSrc;
       state.treesByTabId[targetTabId] = newDst;
 
       // Moving a pane out clears a dangling maximize on the source tab; the
@@ -693,6 +764,7 @@ export const {
   resizePane,
   resizeFocusedPane,
   focusPane,
+  focusPaneInTab,
   renamePanes,
   setPaneTree,
   resetPanes,

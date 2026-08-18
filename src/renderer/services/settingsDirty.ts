@@ -19,6 +19,7 @@ export interface TrackedSettings {
   enhancedKeyboard: boolean;
   commandSuggestions: boolean;
   activateTabOnApiCreate: boolean;
+  canvasWheelMode: string;
   defaultEditor: string;
   defaultProfile: string;
   shellProfiles: Array<{ id: string; cwd?: string }>;
@@ -44,6 +45,7 @@ export type CategorySnapshot =
       enhancedKeyboard: boolean;
       commandSuggestions: boolean;
       activateTabOnApiCreate: boolean;
+      canvasWheelMode: string;
       defaultEditor: string;
     }
   | { kind: 'profiles'; defaultProfile: string; cwds: Array<{ id: string; cwd: string }> }
@@ -69,6 +71,7 @@ export function snapshotCategory(category: TrackedCategory, s: TrackedSettings):
         enhancedKeyboard: s.enhancedKeyboard,
         commandSuggestions: s.commandSuggestions,
         activateTabOnApiCreate: s.activateTabOnApiCreate,
+        canvasWheelMode: s.canvasWheelMode,
         defaultEditor: s.defaultEditor,
       };
     case 'profiles':

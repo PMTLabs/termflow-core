@@ -49,7 +49,7 @@ export interface OwnerChange {
 }
 
 /** Flatten every tab's pane tree into leaf -> owning tab. */
-export function collectLeafOwners(treesByTabId: Record<string, PaneNode>): LeafOwners {
+export function collectLeafOwners(treesByTabId: Record<string, PaneNode | null>): LeafOwners {
   const owners: LeafOwners = new Map();
   const walk = (node: PaneNode | null | undefined, tabId: string): void => {
     if (!node) return;
@@ -96,7 +96,7 @@ export function diffOwnerChanges(
 
 /** The slice of the store this needs — structural, so no import of the store. */
 interface PaneOwnershipStore {
-  getState: () => { panes: { treesByTabId: Record<string, PaneNode> } };
+  getState: () => { panes: { treesByTabId: Record<string, PaneNode | null> } };
   subscribe: (listener: () => void) => () => void;
 }
 
@@ -156,7 +156,7 @@ export function attachPaneOwnershipSync(store: PaneOwnershipStore): () => void {
   ownershipStore = store;
   // Trees are immutable per change (RTK/immer), so an identity check keeps every
   // unrelated dispatch — every keystroke-driven action — down to one comparison.
-  let lastTrees: Record<string, PaneNode> | null = null;
+  let lastTrees: Record<string, PaneNode | null> | null = null;
   let lastOwners: LeafOwners | null = null;
 
   return store.subscribe(() => {

@@ -1182,6 +1182,22 @@ pub async fn close_terminal(
         state.cleanup_terminal_state(&id);
         if let Some(tab_id) = tab_id {
             state.history_store.delete(&tab_id);
+            // ...and the canvas wires that named it. Nothing else ever deleted an edge on
+            // a terminal's death, so `canvas_edges` grew for the life of the profile and
+            // every `get_graph` deserialised the accumulated history.
+            //
+            // Keyed on the RENDERER id, which is the id space edges use — the same one
+            // `history_store` is keyed by, and deliberately not `id` (the backend handle).
+            // Targeted deletion rather than `prune_edges`: pruning takes a liveness set and
+            // would reap a restored-but-unspawned peer's edges, which is precisely the bug
+            // `get_graph` stopped filtering to avoid.
+            match state.canvas_store.delete_edges_for(&tab_id) {
+                Ok(0) => {}
+                Ok(n) => log::info!("Deleted {} canvas edge(s) for terminal {}", n, tab_id),
+                // Non-fatal: the terminal is closing either way, and a canvas store that
+                // cannot answer must not fail the close.
+                Err(e) => log::warn!("Failed to delete canvas edges for {}: {}", tab_id, e),
+            }
         }
     }
 

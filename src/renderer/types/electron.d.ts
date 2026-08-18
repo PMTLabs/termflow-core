@@ -292,6 +292,15 @@ export interface ElectronAPI {
   createDetachedWindow?: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow?: () => Promise<string>;
   getWindowLabel?: () => string;
+
+  // Canvas connection graph (plan/013 Tasks 17-18). One transport method rather than five
+  // named ones: the ONLY thing the two bridge implementations disagree about is the base URL
+  // and the bearer token, and that is exactly what this owns. The five typed calls live in
+  // `services/canvasGraph.ts`, where their shapes can be read as a set.
+  //
+  // `path` is relative to `/api` (e.g. `/canvas/graph`). Resolves to the parsed JSON body, or
+  // null for a 204. Rejects on a non-2xx so a caller can tell "no edges" from "no answer".
+  canvasApiRequest?: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
   beginGlobalPaneDrag?: (token: string, payload: any) => Promise<void>;
   claimGlobalPaneDrag?: (token: string) => Promise<any | null>;
   resolveOrphanGlobalDrag?: (token: string) => Promise<boolean>;

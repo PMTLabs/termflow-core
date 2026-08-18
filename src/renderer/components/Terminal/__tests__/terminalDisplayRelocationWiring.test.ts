@@ -13,11 +13,9 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { readSource } from '../../../utils/readSource';
 
-const SOURCE = fs.readFileSync(
-  path.join(__dirname, '..', 'TerminalDisplay.tsx'),
-  'utf8',
-);
+const SOURCE = readSource(path.join(__dirname, '..', 'TerminalDisplay.tsx'));
 
 describe('TerminalDisplay relocation wiring', () => {
   // §13 T14's last clause / §4.2: the render output is LITERALLY unchanged, and

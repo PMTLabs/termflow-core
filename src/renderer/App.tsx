@@ -3,7 +3,6 @@ import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
 import { TerminalContainer } from './components/TerminalContainer';
-import { CanvasMode } from './components/Canvas/CanvasMode';
 import { PaneDragProvider } from './components/Panes/dnd/PaneDragController';
 import { isDetachWindow, reconstructDetachedWindow, applyReattachByToken } from './components/Panes/dnd/detach';
 import { LayoutManager } from './components/LayoutManager';
@@ -29,6 +28,7 @@ import {
   setSmartCtrlC,
   setEnhancedKeyboard,
   setCommandSuggestions,
+  setCanvasWheelMode,
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
@@ -66,7 +66,6 @@ import { generateId } from './utils/id';
 const App: React.FC = () => {
   const dispatch = useDispatch();
   const tabs = useSelector((state: RootState) => state.tabs.tabs);
-  const canvasEnabled = useSelector((state: RootState) => state.canvas.enabled);
   const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
   // Single chokepoint: broadcast each tab's EFFECTIVE color schema (its own
@@ -569,6 +568,13 @@ const App: React.FC = () => {
         if (config.commandSuggestions !== undefined) {
           dispatch(setCommandSuggestions(config.commandSuggestions));
         }
+        // Validated against the union rather than trusted, unlike the booleans above: this one
+        // decides what the wheel DOES, so a hand-edited or stale value would leave the canvas in
+        // a mode no gesture matches — a wheel that silently does nothing, with a Settings
+        // dropdown showing no option selected to explain it.
+        if (config.canvasWheelMode === 'zoom' || config.canvasWheelMode === 'scroll') {
+          dispatch(setCanvasWheelMode(config.canvasWheelMode));
+        }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));
         }
@@ -937,6 +943,9 @@ const App: React.FC = () => {
         // P0-A (Task 5's emit): the unambiguous ids. `terminalId`/`tabId` above
         // are the legacy pair this event has always carried.
         processId?: string; rendererTerminalId?: string; owningTabId?: string;
+        // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
+        // the edge itself was already written by the backend before this event was emitted.
+        parentTerminalId?: string;
       };
       console.log('API: Creating terminal tab', options);
 
@@ -944,6 +953,33 @@ const App: React.FC = () => {
       const { processId, leafId, owningTabId } = resolveApiCreateIds(options);
       const tabId = owningTabId;
       const terminalId = processId;
+
+      // Fan the new node out from its caller, BEFORE the pane exists.
+      //
+      // The ordering is deliberate: `buildCanvasModel` reads `canvas.nodes` for a stored rect
+      // and seeds a position only when there is none, so writing the geometry first means the
+      // pane arrives and finds its place already chosen. Doing it afterwards would race the
+      // seeding and produce a visible jump from a seeded slot to the arc.
+      if (options.parentTerminalId && leafId) {
+        const { planAgentPlacement } = await import('./components/Canvas/agentSpawnPlacement');
+        const { buildCanvasModel } = await import('./components/Canvas/canvasSelectors');
+        const { setNodeGeom, setEdges } = await import('./store/slices/canvasSlice');
+        const state = store.getState();
+        const plan = planAgentPlacement(
+          buildCanvasModel(state),
+          state.canvas.edges,
+          options.parentTerminalId,
+          leafId,
+        );
+        if (plan) dispatch(setNodeGeom({ id: plan.terminalId, rect: plan.rect }));
+
+        // Refresh the edge mirror. `canvas.edges` is only filled by `fetchGraph()` when
+        // Canvas Mode MOUNTS (Task 18), so without this the wire the backend just wrote does
+        // not appear until the user toggles the canvas off and on — which is precisely the
+        // thing Task 20's acceptance check says must not be necessary.
+        const { fetchGraph } = await import('./services/canvasGraph');
+        void fetchGraph().then((graph) => { if (graph) dispatch(setEdges(graph.edges)); });
+      }
 
       // `store` is the file-scoped Redux store import (the same instance as
       // window.__REDUX_STORE__) — always defined, so no local alias/shadow.
@@ -1686,11 +1722,10 @@ const App: React.FC = () => {
       <PaneDragProvider>
         <TitleBar />
         <div className="app-body">
+          {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
+              by TerminalContainer alongside every other tab — see services/openCanvas.ts
+              and backlog/007 §4. */}
           <TerminalContainer />
-          {/* Rendered AFTER TerminalContainer, not instead of it: Task 9
-              re-parents live terminals out of that container and has to be able
-              to hand them back, so it must stay mounted underneath. */}
-          {canvasEnabled && <CanvasMode />}
         </div>
       </PaneDragProvider>
       <LayoutManager />

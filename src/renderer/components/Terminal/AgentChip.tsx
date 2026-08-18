@@ -1,6 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
-import { getAgentIcon } from '../../services/agentIconService';
+import React from 'react';
+import { useDetectedAgent } from './useDetectedAgent';
 import './AgentChip.css';
 
 interface AgentChipProps {
@@ -14,44 +13,14 @@ interface AgentChipProps {
  * the agent exits (detection clears within one tracker poll). Purely informational:
  * pointer-events are disabled so it never intercepts terminal selection/clicks.
  *
- * Detection comes from AgentSchemeTracker.getDetectedAgentForTerminal; we re-render
- * via the tracker's subscription (fires only when a detected agent or its exe path
- * changes). When the foreground exe is known we show its real binary icon (Phase 2,
- * backlog 016) — falling back to a running-dot when no icon is available (non-Windows
+ * Detection and icon resolution live in `useDetectedAgent`, shared with Canvas Mode's
+ * node-header chip (`CanvasNodeAgent`) — the two look nothing alike and answer the same
+ * question. When the foreground exe is known we show its real binary icon (Phase 2,
+ * backlog 016), falling back to a running-dot when no icon is available (non-Windows
  * without a themed icon, a protected process, or extraction failure).
  */
 export const AgentChip: React.FC<AgentChipProps> = ({ terminalId }) => {
-  const [agent, setAgent] = useState<string | null>(() =>
-    agentSchemeTracker.getDetectedAgentForTerminal(terminalId),
-  );
-  const [exe, setExe] = useState<string | null>(() =>
-    agentSchemeTracker.getDetectedAgentExeForTerminal(terminalId),
-  );
-  const [icon, setIcon] = useState<string | null>(null);
-
-  useEffect(() => {
-    const sync = () => {
-      setAgent(agentSchemeTracker.getDetectedAgentForTerminal(terminalId));
-      setExe(agentSchemeTracker.getDetectedAgentExeForTerminal(terminalId));
-    };
-    sync(); // reconcile immediately on mount / when the pane's terminalId changes
-    return agentSchemeTracker.subscribe(sync);
-  }, [terminalId]);
-
-  // Resolve the icon: a curated override for known agents (keyed by label), else the
-  // native binary icon for the exe (cached in the service). Reset to null first so a
-  // stale icon never lingers while the new one resolves; a late resolve after the
-  // agent/exe changed or the chip unmounted is dropped via `alive`.
-  useEffect(() => {
-    let alive = true;
-    setIcon(null);
-    getAgentIcon(exe, agent).then((url) => {
-      if (alive) setIcon(url);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [exe, agent]);
+  const { agent, icon } = useDetectedAgent(terminalId);
 
   if (!agent) return null;
 

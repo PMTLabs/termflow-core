@@ -4,8 +4,10 @@ import reducer, {
   splitPaneInTab,
   closePane,
   focusPane,
+  focusPaneInTab,
   resizeFocusedPane,
   setActiveTabId,
+  setPaneTree,
   addTabTree,
   removeTabTree,
   removePaneFromTab,
@@ -50,12 +52,42 @@ describe('panesSlice treesByTabId (additive mirror)', () => {
     expect(JSON.stringify(s.treesByTabId['tb-1'])).toEqual(JSON.stringify(s.paneTree));
   });
 
-  it('closePane on the only pane clears that tab tree and paneTree', () => {
+  // The tab is left EMPTY, not UNINITIALISED, and the difference is the whole bug: an
+  // absent key is what `planSeeds` fills in, so deleting it here meant closing an active
+  // tab's last pane immediately manufactured a replacement terminal for it.
+  it('closePane on the only pane empties that tab tree without deleting its key', () => {
     let s = withActive('tb-1');
     s = reducer(s, initializePane({ terminalId: 'tb-1' }));
     s = reducer(s, closePane(s.paneTree!.id));
-    expect(s.treesByTabId['tb-1']).toBeUndefined();
     expect(s.paneTree).toBeNull();
+    expect(s.treesByTabId['tb-1']).toBeNull();
+    expect('tb-1' in s.treesByTabId).toBe(true);
+  });
+
+  // syncActive only ever DOWNGRADES an entry that exists. A virtual tab (canvas, settings)
+  // is active with no tree of its own, and minting a null key for it would give the canvas
+  // a group frame for ITSELF.
+  //
+  // Driven through `setPaneTree(null)` deliberately: that reducer reaches `syncActive`
+  // unconditionally, and it is the real path — `TerminalContainer` dispatches exactly this
+  // when the active tab is closed. Routed through `closePane` instead, the reducer returns
+  // on its own `if (!state.paneTree)` guard and `syncActive` never runs at all, so the
+  // assertion holds no matter what `syncActive` does. It passed while the mutant lived.
+  it('syncActive does not mint a key for an active tab that never had one', () => {
+    let s = withActive('tb-canvas');
+    s = reducer(s, setPaneTree(null));
+    expect('tb-canvas' in s.treesByTabId).toBe(false);
+  });
+
+  // The positive control for the test above, through the SAME reducer: an entry that exists
+  // is downgraded to null. Without this pair, "never mint a key" would also be satisfied by
+  // a syncActive that had stopped writing anything.
+  it('syncActive downgrades an existing entry to null through the same path', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, addTabTree({ tabId: 'tb-1', tree: leaf('pn-1', 'tb-1') }));
+    s = reducer(s, setPaneTree(null));
+    expect('tb-1' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-1']).toBeNull();
   });
 
   it('removeTabTree drops the tab', () => {
@@ -172,6 +204,44 @@ describe('panesSlice movePaneToTab', () => {
     return s;
   };
 
+  /**
+   * An EMPTY destination is a destination.
+   *
+   * A tab someone emptied by dragging its last terminal away stays open and stays a drop
+   * target — that is the whole point of the null state. This guard read `!dstTree`, so null
+   * failed it exactly like a tab that does not exist, and dropping a pane onto the emptied
+   * tab's header silently did nothing. `insertPaneIntoTab` and `planRegroup` had already
+   * been taught the difference; this was the third caller of the same guard and it was
+   * missed, which is why the fix is asserted here rather than assumed from the other two.
+   */
+  it('moves a pane into a tab that is open and EMPTY', () => {
+    let s = srcAndDst();
+    s = reducer(s, addTabTree({ tabId: 'tb-empty', tree: null }));
+    const srcPane = s.treesByTabId['tb-1'].children![0];
+    s = reducer(s, movePaneToTab({
+      sourceTabId: 'tb-1', sourcePaneId: srcPane.id,
+      targetTabId: 'tb-empty', targetPaneId: 'pn-anything', zone: 'right',
+    }));
+    expect(s.treesByTabId['tb-empty']).not.toBeNull();
+    expect(s.treesByTabId['tb-empty'].terminalId).toBe('tb-1');
+    // ...and it really left the source, rather than being copied into both.
+    expect(s.treesByTabId['tb-1'].terminalId).toBe('tm-2');
+  });
+
+  // The negative half: `undefined` still means "no such tab" and is still refused. Without
+  // this, widening the guard to accept anything falsy would pass the test above.
+  it('refuses a destination tab that was never initialised', () => {
+    let s = srcAndDst();
+    const srcPane = s.treesByTabId['tb-1'].children![0];
+    const before = s.treesByTabId['tb-1'];
+    s = reducer(s, movePaneToTab({
+      sourceTabId: 'tb-1', sourcePaneId: srcPane.id,
+      targetTabId: 'tb-nope', targetPaneId: 'pn-anything', zone: 'right',
+    }));
+    expect('tb-nope' in s.treesByTabId).toBe(false);
+    expect(s.treesByTabId['tb-1']).toEqual(before);
+  });
+
   it('inserts into target tree and removes from source', () => {
     let s = srcAndDst();
     const srcPane = s.treesByTabId['tb-1'].children![0]; // p1 (tb-1)
@@ -187,12 +257,16 @@ describe('panesSlice movePaneToTab', () => {
     expect(s.treesByTabId['tb-1'].terminalId).toBe('tm-2');
   });
 
-  it('removePaneFromTab prunes a pane and deletes the tab when it empties', () => {
+  // The entry survives holding null — "open and empty" — rather than being deleted. Deleting
+  // it made an emptied tab look identical to one that had never been initialised, and
+  // TerminalContainer's seed effect then gave it a terminal it had just given away.
+  it('removePaneFromTab prunes a pane and leaves the tab entry null when it empties', () => {
     let s = withActive('tb-1');
     s = reducer(s, initializePane({ terminalId: 'tb-1' }));
     const onlyPane = s.paneTree!.id;
     s = reducer(s, removePaneFromTab({ tabId: 'tb-1', paneId: onlyPane }));
-    expect(s.treesByTabId['tb-1']).toBeUndefined();
+    expect('tb-1' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-1']).toBeNull();
     expect(s.paneTree).toBeNull();
     expect(s.activePaneId).toBeNull();
   });
@@ -222,7 +296,34 @@ describe('panesSlice movePaneToTab', () => {
     expect(s.activePaneId).toBe('pn-ext');
   });
 
-  it('deletes source tab tree when it empties', () => {
+  // An empty tab is a legal DESTINATION: design 010 §6.3 keeps an emptied group's frame on
+  // the canvas as a drop target, so the drop has to land somewhere. The arriving pane becomes
+  // the tab's whole tree. Refusing it left a group you could drag out of and never back into.
+  it('insertPaneIntoTab makes the arriving pane the whole tree of an emptied tab', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, initializePane({ terminalId: 'tb-1' }));
+    s = reducer(s, removePaneFromTab({ tabId: 'tb-1', paneId: s.paneTree!.id }));
+    expect(s.treesByTabId['tb-1']).toBeNull();
+
+    s = reducer(s, insertPaneIntoTab({
+      tabId: 'tb-1', targetPaneId: null, zone: 'right', node: leaf('pn-back', 'tm-back'),
+    }));
+    expect(s.treesByTabId['tb-1']!.type).toBe('terminal');
+    expect(s.treesByTabId['tb-1']!.terminalId).toBe('tm-back');
+  });
+
+  // A tab whose entry was never written has no layout to insert into — distinct from the null
+  // above, and still refused. Without this the two cases could collapse into one and the
+  // reducer would start manufacturing trees for tabs that are still starting up.
+  it('insertPaneIntoTab refuses a tab that has no entry at all', () => {
+    let s = withActive('tb-1');
+    s = reducer(s, insertPaneIntoTab({
+      tabId: 'tb-never', targetPaneId: null, zone: 'right', node: leaf('pn-x', 'tm-x'),
+    }));
+    expect('tb-never' in s.treesByTabId).toBe(false);
+  });
+
+  it('nulls the source tab tree when it empties', () => {
     let s = withActive('tb-1');
     s = reducer(s, initializePane({ terminalId: 'tb-1' }));
     const onlyPane = s.paneTree!.id;
@@ -231,8 +332,11 @@ describe('panesSlice movePaneToTab', () => {
       sourceTabId: 'tb-1', sourcePaneId: onlyPane,
       targetTabId: 'tb-2', targetPaneId: 'pn-q1', zone: 'left',
     }));
-    expect(s.treesByTabId['tb-1']).toBeUndefined();
-    expect(s.treesByTabId['tb-2'].children!.map(c => c.terminalId)).toEqual(['tb-1', 'tb-2']);
+    // Null, not deleted. `PaneDragController.commitDrop` reads exactly this to decide whether
+    // to close the source tab, so the tab-strip drag still closes a tab it empties.
+    expect('tb-1' in s.treesByTabId).toBe(true);
+    expect(s.treesByTabId['tb-1']).toBeNull();
+    expect(s.treesByTabId['tb-2']!.children!.map(c => c.terminalId)).toEqual(['tb-1', 'tb-2']);
   });
 });
 
@@ -645,5 +749,70 @@ describe('renamePanes tab scoping', () => {
     expect(unknownTab.treesByTabId['tb-alpha'].name).toBe('alpha');
     const unknownPane = reducer(before, renamePanes({ paneId: 'pn-nope', name: 'x' }));
     expect(unknownPane.treesByTabId['tb-alpha'].name).toBe('alpha');
+  });
+});
+
+/**
+ * `focusPaneInTab` exists because `focusPane` cannot express "focus a pane in a tab I am
+ * not on yet", and Canvas Mode's "open in its tab" affordance needs exactly that.
+ *
+ * `activePaneId` belongs to whichever tab is active NOW, and `setActiveTabId` overwrites
+ * it on arrival from `activePaneByTabId`. So `focusPane` either side of a tab switch is
+ * clobbered: before, by that restore; after, because TerminalContainer's activation effect
+ * runs a commit later and restores again. Writing the REMEMBERED pane is what survives —
+ * which makes these tests about ORDER INDEPENDENCE, not about one write.
+ */
+describe('focusPaneInTab', () => {
+  const twoPaneTab = (): PaneNode => ({
+    id: 'pn-root', type: 'split', direction: 'horizontal', children: [
+      leaf('pn-left', 'tm-l'), leaf('pn-right', 'tm-r'),
+    ],
+  });
+
+  const seeded = () => {
+    let s = reducer(init(), addTabTree({ tabId: 'tb-target', tree: twoPaneTab() }));
+    s = reducer(s, addTabTree({ tabId: 'tb-here', tree: leaf('pn-here', 'tm-h') }));
+    return reducer(s, setActiveTabId('tb-here'));
+  };
+
+  it('survives the tab switch that follows it', () => {
+    let s = reducer(seeded(), focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-right' }));
+    // Still on the other tab: the ACTIVE pane must not have moved yet.
+    expect(s.activePaneId).toBe('pn-here');
+
+    s = reducer(s, setActiveTabId('tb-target'));
+    expect(s.activePaneId).toBe('pn-right');
+  });
+
+  // Without this, the reducer could satisfy the case above by writing `activePaneId` and
+  // getting lucky with ordering. The `firstLeafId` fallback in `setActiveTabId` would
+  // otherwise land on 'pn-left' here.
+  it('is what makes the difference — plain focusPane is discarded by the switch', () => {
+    let s = reducer(seeded(), focusPane('pn-right'));
+    s = reducer(s, setActiveTabId('tb-target'));
+    expect(s.activePaneId).toBe('pn-left');
+  });
+
+  it('also moves the cursor immediately when the tab is already active', () => {
+    let s = reducer(seeded(), setActiveTabId('tb-target'));
+    s = reducer(s, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-right' }));
+    expect(s.activePaneId).toBe('pn-right');
+    expect(s.activePaneByTabId['tb-target']).toBe('pn-right');
+  });
+
+  // A canvas node can name a pane that has just been closed — the projection is a render
+  // behind the store. Remembering a dead pane id would make the tab open on nothing,
+  // because `setActiveTabId` only falls back when the remembered pane is absent.
+  it('ignores a pane that is not in that tab', () => {
+    const base = seeded();
+    const unknownPane = reducer(base, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-gone' }));
+    expect(unknownPane.activePaneByTabId['tb-target']).toBeUndefined();
+
+    // ...including one that exists, but in a DIFFERENT tab.
+    const wrongTab = reducer(base, focusPaneInTab({ tabId: 'tb-target', paneId: 'pn-here' }));
+    expect(wrongTab.activePaneByTabId['tb-target']).toBeUndefined();
+
+    const unknownTab = reducer(base, focusPaneInTab({ tabId: 'tb-nope', paneId: 'pn-right' }));
+    expect(unknownTab.activePaneByTabId['tb-nope']).toBeUndefined();
   });
 });

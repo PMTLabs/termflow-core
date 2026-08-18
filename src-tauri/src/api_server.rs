@@ -29,6 +29,7 @@ use crate::search_endpoints::{
     search, get_suggestions, clear_index, get_search_history
 };
 use crate::layout_endpoints::{get_layout, save_layout};
+use crate::canvas_endpoints;
 use futures::{sink::SinkExt, stream::StreamExt};
 use tauri::Emitter;
 use tokio::sync::broadcast;
@@ -127,6 +128,7 @@ fn cors_layer() -> CorsLayer {
             Method::GET,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])
@@ -228,6 +230,11 @@ pub async fn start_api_server(
         .route("/api/search/index", delete(clear_index))
         // Layout endpoints
         .route("/api/layout", get(get_layout).post(save_layout))
+        .route("/api/canvas/graph", get(canvas_endpoints::get_graph))
+        .route("/api/canvas/edges", post(canvas_endpoints::create_edge))
+        .route("/api/canvas/edges/:id", delete(canvas_endpoints::delete_edge).patch(canvas_endpoints::patch_edge))
+        .route("/api/canvas/nodes", put(canvas_endpoints::put_nodes))
+        .route("/api/terminals/:id/connections", get(canvas_endpoints::get_connections))
         // Test capture endpoints
         .route("/api/test/start", post(start_test_capture))
         .route("/api/test/stop", post(stop_test_capture))
@@ -465,6 +472,11 @@ struct CreateTerminalReq {
     #[serde(alias = "paneId")]
     pane_id: Option<String>,
     direction: Option<String>,
+    /// The terminal whose agent asked for this spawn, if any. Drives the canvas
+    /// auto-connect (`plan/013` Task 20). Accepts either id space — it is resolved
+    /// through `AppState::resolve_renderer_id` before it reaches the edge store.
+    #[serde(alias = "parentTerminalId")]
+    parent_terminal_id: Option<String>,
 }
 
 /// The two renderer identities an API-created terminal registers.
@@ -626,6 +638,42 @@ async fn create_terminal(
     );
     match spawned {
         Ok(id) => {
+            // Auto-connect: record that the calling agent spawned this terminal
+            // (`plan/013` Task 20, design 010 §7.1). Written HERE rather than in the
+            // renderer so the graph is correct even when no window is focused, or when
+            // Canvas Mode has never been opened.
+            //
+            // Both endpoints are renderer LEAF ids. `identity.renderer_terminal_id` is the
+            // leaf P0-A minted for this create — a fresh `tm-*` when the owning tab already
+            // held a live terminal, the tab's own `tb-*` when it did not (design/011 D7).
+            // Using `owning_tab_id` would point every split's edge at its tab's root pane,
+            // and would then be dropped as a self-edge whenever the caller IS that root pane.
+            if let Some(parent_raw) = payload.parent_terminal_id.as_deref() {
+                match state.resolve_renderer_id(parent_raw) {
+                    Some(parent_id) if parent_id != identity.renderer_terminal_id => {
+                        let edge = crate::canvas_store::CanvasEdge::new(
+                            parent_id,
+                            identity.renderer_terminal_id.clone(),
+                            None,
+                            "agent",
+                        );
+                        // Never fail the spawn for a graph write. Task 16 returns `Result`
+                        // precisely so this is a LOGGED failure rather than a silent one.
+                        if let Err(e) = state.canvas_store.insert_edge(&edge) {
+                            log::warn!("[CANVAS] auto-connect edge not stored: {}", e);
+                        }
+                    }
+                    Some(_) => log::debug!(
+                        "[CANVAS] auto-connect skipped: {} spawned itself",
+                        parent_raw
+                    ),
+                    None => log::warn!(
+                        "[CANVAS] auto-connect skipped: unknown parent {}",
+                        parent_raw
+                    ),
+                }
+            }
+
             // Notify the UI to create a tab for this new terminal. We BROADCAST (a
             // bare emit_to is documented as not reaching the JS listener here — see
             // commands.rs resolve_tab_drop) and carry the routing target in the
@@ -646,6 +694,10 @@ async fn create_terminal(
                 "owningTabId": identity.owning_tab_id.clone(),
                 "paneId": payload.pane_id,
                 "direction": payload.direction,
+                // PLACEMENT ONLY. The edge is already in the store by this point; the
+                // renderer needs this to fan the new node out from its caller, not to
+                // decide whether a connection exists.
+                "parentTerminalId": payload.parent_terminal_id,
                 "targetWindow": target_window
             })) {
                 log::warn!("Failed to emit api:createTerminalTab: {}", e);
@@ -1109,7 +1161,19 @@ async fn get_terminal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(terminal) = state.terminals.get(&id) {
-        (StatusCode::OK, Json(terminal_identity_json(terminal.value(), "default")))
+        let mut body = terminal_identity_json(terminal.value(), "default");
+        // Canvas identity, so an agent learns which node and group it is in one call
+        // (`plan/013` Task 19). Merged HERE rather than inside `terminal_identity_json`,
+        // which has three call sites: adding it there would put a canvas-registry lock and a
+        // SQLite query on EVERY entry of `list_terminals`, for a field that endpoint was never
+        // asked to carry.
+        if let Some(object) = body.as_object_mut() {
+            object.insert(
+                "node".to_string(),
+                crate::canvas_endpoints::canvas_node_json(&state, &id),
+            );
+        }
+        (StatusCode::OK, Json(body))
     } else {
         (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" })))
     }
@@ -3271,6 +3335,23 @@ mod tests {
         }
     }
 
+    /// The canvas `node` block belongs to `GET /api/terminals/:id` ALONE.
+    ///
+    /// `terminal_identity_json` has three call sites, and `list_terminals` is one of them. If
+    /// the block were built in here it would take the canvas-registry read lock and run a
+    /// SQLite query once PER TERMINAL on every list call — for a field that endpoint was never
+    /// asked to carry, and that no client reads from it. `plan/013` Task 19 described the
+    /// change as "after building the existing JSON", which reads as though the handler builds
+    /// its own object; it does not.
+    #[test]
+    fn the_shared_identity_payload_carries_no_canvas_node_block() {
+        let v = terminal_identity_json(&identity_sample(), "ui");
+        assert!(
+            v.get("node").is_none(),
+            "the node block must be merged at the get_terminal call site, not here —              otherwise list_terminals pays for it on every entry"
+        );
+    }
+
     /// Exact key names, asserted (design 011 §7 test 4). `tabId` stays a
     /// DEPRECATED alias of `terminalId` — redefining it would silently break
     /// every existing API/MCP client (D4).
@@ -4456,5 +4537,50 @@ mod tests {
             assert_eq!(req2.terminal_id.as_deref(), Some("t"));
             assert_eq!(req2.timeout_ms, Some(5000));
         }
+    }
+}
+
+#[cfg(test)]
+mod create_terminal_req_tests {
+    use super::*;
+
+    // Design §12: this codebase has already shipped a silent serde-key misroute once (the
+    // Fleet MCP `targetOS` bug), where a field deserialised to None and the feature simply
+    // did nothing. `parent_terminal_id` fails exactly that way — the spawn still succeeds and
+    // only the edge is missing.
+
+    #[test]
+    fn accepts_the_camel_case_wire_name() {
+        let r: CreateTerminalReq =
+            serde_json::from_str(r#"{"parentTerminalId":"pc-abc"}"#).unwrap();
+        assert_eq!(r.parent_terminal_id.as_deref(), Some("pc-abc"));
+    }
+
+    #[test]
+    fn accepts_the_snake_case_name() {
+        let r: CreateTerminalReq =
+            serde_json::from_str(r#"{"parent_terminal_id":"pc-abc"}"#).unwrap();
+        assert_eq!(r.parent_terminal_id.as_deref(), Some("pc-abc"));
+    }
+
+    #[test]
+    fn absent_parent_is_none_not_an_error() {
+        let r: CreateTerminalReq = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert!(r.parent_terminal_id.is_none());
+    }
+
+    #[test]
+    fn the_parent_field_does_not_disturb_the_tab_targeting_fields() {
+        // The MCP hop sends owningTabId, paneId and direction alongside the new field. A
+        // rename or a missing alias here is invisible at the HTTP boundary: the request still
+        // deserialises, and the pane just lands in the wrong tab.
+        let r: CreateTerminalReq = serde_json::from_str(
+            r#"{"owningTabId":"tb-1","paneId":"tm-2","direction":"horizontal","parentTerminalId":"pc-3"}"#,
+        )
+        .unwrap();
+        assert_eq!(r.owning_tab_id.as_deref(), Some("tb-1"));
+        assert_eq!(r.pane_id.as_deref(), Some("tm-2"));
+        assert_eq!(r.direction.as_deref(), Some("horizontal"));
+        assert_eq!(r.parent_terminal_id.as_deref(), Some("pc-3"));
     }
 }

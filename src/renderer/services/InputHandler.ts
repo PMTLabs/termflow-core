@@ -10,7 +10,7 @@ import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
 import { SHORTCUT_ACTIONS, canonicalizeCombo, comboKeyToken } from './shortcutActions';
-import { toggleCanvasMode } from '../store/slices/canvasSlice';
+import { toggleCanvasTab } from './openCanvas';
 
 export class InputHandler {
   private shortcuts: Map<string, () => void | Promise<void>>;
@@ -511,8 +511,11 @@ export class InputHandler {
     }
   };
 
+  // Canvas Mode is a tab, so "toggle" means go to it / come back from it — the same
+  // shape as openSettings above, and for the same reason: the tab, not this handler,
+  // owns whether the screen exists.
   private handleToggleCanvasMode = (): void => {
-    store.dispatch(toggleCanvasMode());
+    toggleCanvasTab();
   };
 
   // Public methods

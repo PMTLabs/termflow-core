@@ -19,11 +19,13 @@
  * Assertions match the real source syntax (a `\s*` between tokens, no literal
  * newlines) so a CRLF checkout cannot make them vacuous.
  */
-import * as fs from 'fs';
 import * as path from 'path';
+import { readSource } from '../utils/readSource';
 
-const read = (...parts: string[]) =>
-  fs.readFileSync(path.join(__dirname, '..', ...parts), 'utf8');
+// readSource, not fs.readFileSync: whether the checkout is CRLF is not a
+// property of the commit (the e2e job has no OS label), and every `\s`-spanning
+// assertion below silently stops matching under CRLF. See utils/readSource.
+const read = (...parts: string[]) => readSource(path.join(__dirname, '..', ...parts));
 
 const INDEX = read('index.tsx');
 const APP = read('App.tsx');
