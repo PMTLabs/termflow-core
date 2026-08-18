@@ -858,6 +858,7 @@ fn restore_windows(app: &tauri::AppHandle) {
     // --- slot 0 → the boot window ---
     let mut slot0 = records.remove(0);
     slot0.label = crate::window_registry::MAIN_LABEL.to_string();
+    tracker.bind(crate::window_registry::MAIN_LABEL, &slot0.id);
     if let Some(main) = app.get_webview_window(crate::window_registry::MAIN_LABEL) {
         apply_geometry(&main, &slot0, &monitors);
     }
@@ -867,6 +868,11 @@ fn restore_windows(app: &tauri::AppHandle) {
     for mut record in records {
         let label = format!("window-{}", uuid::Uuid::new_v4().simple());
         record.label = label.clone();
+        // Bind BEFORE building. The webview resolves its session id as its first
+        // action, and a binding published afterwards is a race whose losing side
+        // falls back to slot 0 — silently merging this window's tabs into the
+        // main window's session, which is the defect being fixed.
+        tracker.bind(&label, &record.id);
         match build_restored_window(app, &label, &record, &monitors) {
             Ok(window) => {
                 crate::context_menu::install(&window);

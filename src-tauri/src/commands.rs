@@ -1380,16 +1380,33 @@ pub async fn generate_api_token(
     Ok(token)
 }
 
-/// Give a freshly built window a stable id and record it, so a restart can
-/// recreate it (plan 018 Task 2).
+/// Reserve a stable session id for a window that is ABOUT to be built
+/// (plan 018 Task 2).
+///
+/// Must run BEFORE `builder.build()`. The webview begins loading the moment it
+/// is built, and its very first act is to resolve this id — a binding published
+/// afterwards is a race whose losing side falls back to slot 0, silently merging
+/// the new window into the main window's session. That is precisely the defect
+/// this feature exists to remove, so the ordering is load-bearing, not a
+/// micro-optimisation.
+pub fn reserve_window_id(app: &tauri::AppHandle, label: &str) -> Option<String> {
+    use tauri::Manager as _;
+    let state = app.try_state::<AppState>()?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    state.windows.bind(label, &id);
+    Some(id)
+}
+
+/// Record a just-built window's real geometry under its reserved id.
 ///
 /// Best-effort on geometry: a window that cannot report its position is still
-/// registered, using the builder's defaults. An unregistered window is one that
-/// silently never restores and whose renderer cannot resolve a storage key —
-/// strictly worse than one restored at the wrong coordinates.
-pub fn register_window_in_registry(
+/// recorded, using the builder's defaults. An unrecorded window is one that
+/// silently never restores — strictly worse than one restored at the wrong
+/// coordinates.
+pub fn record_new_window(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
+    id: String,
     fallback_size: (u32, u32),
 ) {
     use tauri::Manager as _;
@@ -1397,7 +1414,7 @@ pub fn register_window_in_registry(
     let pos = window.outer_position().ok();
     let size = window.inner_size().ok();
     state.windows.register(crate::window_registry::WindowRecord {
-        id: uuid::Uuid::new_v4().simple().to_string(),
+        id,
         label: window.label().to_string(),
         x: pos.map(|p| p.x).unwrap_or(0),
         y: pos.map(|p| p.y).unwrap_or(0),
@@ -1535,9 +1552,14 @@ pub async fn create_detached_window(
         }
     }
 
+    // Reserve BEFORE build (see reserve_window_id): a detached window saves its
+    // own session from the moment it mounts, so it must know its id by then.
+    let reserved = reserve_window_id(&app_handle, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
-    register_window_in_registry(&app_handle, &window, (900, 600));
+    if let Some(id) = reserved {
+        record_new_window(&app_handle, &window, id, (900, 600));
+    }
     refresh_menu(&app_handle);
     Ok(label)
 }
@@ -1583,9 +1605,13 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
         builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
+    // Reserve BEFORE build: the webview resolves its id as its first action.
+    let reserved = reserve_window_id(app, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
-    register_window_in_registry(app, &window, (1280, 800));
+    if let Some(id) = reserved {
+        record_new_window(app, &window, id, (1280, 800));
+    }
     Ok(label)
 }
 

@@ -482,6 +482,24 @@ mod tests {
     }
 
     #[test]
+    fn bind_resolves_an_id_before_any_record_exists() {
+        // Load-bearing ordering: a window's webview resolves its session id as
+        // its FIRST action, before the caller can read geometry off the built
+        // window. If the id were only available after `register`, the losing
+        // side of that race falls back to slot 0 and silently merges the new
+        // window into the main window's session.
+        let t = tracker("bind-first");
+        t.bind("window-a", "w1");
+        assert_eq!(t.id_for_label("window-a").as_deref(), Some("w1"));
+        assert!(t.snapshot().windows.is_empty(), "no record yet — only the binding");
+
+        // …and the later register must not mint a second id for that label.
+        t.register(rec("w1", "window-a"));
+        assert_eq!(t.id_for_label("window-a").as_deref(), Some("w1"));
+        assert_eq!(t.snapshot().windows.len(), 1);
+    }
+
+    #[test]
     fn register_persists_immediately_so_a_new_window_survives_a_crash() {
         let t = tracker("register");
         t.register(rec("w1", "window-a"));
