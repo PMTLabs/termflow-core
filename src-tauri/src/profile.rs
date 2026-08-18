@@ -8,6 +8,16 @@ pub const DEFAULT: &str = "default";
 /// Auto-selected for an elevated launch when no profile is named.
 pub const ELEVATED: &str = "elevated";
 
+/// A default profile baked in at BUILD time (`TERMFLOW_PROFILE=alt tauri build`),
+/// used when the launch names none. This is what makes the `:alt` package
+/// scripts a genuinely separate instance: its config, history DB, layout,
+/// recordings, lock, pipe and ports are all derived from the identity, so the
+/// side-by-side build never touches the main build's data — without the user
+/// remembering `--profile` on every launch.
+///
+/// `None` in every ordinary build, where the default profile is unchanged.
+const BAKED: Option<&str> = option_env!("TERMFLOW_PROFILE");
+
 /// Accept a profile name only if it is safe as a single path component and as
 /// part of a Win32 object name. A security boundary, not a convenience: the
 /// value reaches `Path::join`, a named-pipe name and a mutex name.
@@ -76,6 +86,17 @@ impl ProfileIdentity {
         elevated: Option<bool>,
         is_dev: bool,
     ) -> Result<Self, String> {
+        Self::resolve_with_baked(requested, BAKED, elevated, is_dev)
+    }
+
+    /// `baked` split out from the `option_env!` constant so the build-time
+    /// default is testable without recompiling under a different environment.
+    fn resolve_with_baked(
+        requested: Option<&str>,
+        baked: Option<&str>,
+        elevated: Option<bool>,
+        is_dev: bool,
+    ) -> Result<Self, String> {
         let integrity = match elevated {
             Some(true) => Integrity::High,
             Some(false) => Integrity::Medium,
@@ -83,8 +104,16 @@ impl ProfileIdentity {
         };
         let name = match requested {
             Some(raw) => sanitize(raw).ok_or_else(|| format!("invalid --profile value {raw:?}"))?,
-            None if integrity == Integrity::High => ELEVATED.to_string(),
-            None => DEFAULT.to_string(),
+            // A bad baked value is a build mistake, not a user typo, so it gets
+            // its own message -- but it still fails closed rather than falling
+            // back to the default profile and writing the main build's files.
+            None => match baked {
+                Some(raw) => sanitize(raw).ok_or_else(|| {
+                    format!("this build was compiled with an invalid TERMFLOW_PROFILE value {raw:?}")
+                })?,
+                None if integrity == Integrity::High => ELEVATED.to_string(),
+                None => DEFAULT.to_string(),
+            },
         };
         Ok(Self {
             channel: if is_dev { "dev" } else { "rel" },
@@ -325,6 +354,53 @@ mod tests {
         // profile. Refusing to launch is the safe failure.
         assert!(ProfileIdentity::resolve(Some("../etc"), Some(false), false).is_err());
         assert!(ProfileIdentity::resolve(Some(""), Some(false), false).is_err());
+    }
+
+    #[test]
+    fn a_baked_profile_becomes_the_default_for_that_build() {
+        // What makes the `:alt` build self-separating: no --profile on the
+        // command line, yet every artifact is scoped away from the main build.
+        let id = ProfileIdentity::resolve_with_baked(None, Some("alt"), Some(false), false).unwrap();
+        assert_eq!(id.name, "alt");
+        assert_eq!(id.key(), "rel.alt");
+        assert_eq!(id.scoped_file("history.db"), "history.alt.db");
+        assert_eq!(id.scoped_file("config.json"), "config.alt.json");
+        // ...and it must not claim the machine-wide fabric singletons.
+        assert!(!id.is_primary());
+    }
+
+    #[test]
+    fn an_explicit_profile_still_beats_the_baked_one() {
+        let id =
+            ProfileIdentity::resolve_with_baked(Some("work"), Some("alt"), Some(false), false)
+                .unwrap();
+        assert_eq!(id.name, "work");
+        // An elevated launch of a baked build keeps the baked name (as an
+        // explicit one survives elevation), only gaining the integrity tag.
+        let id = ProfileIdentity::resolve_with_baked(None, Some("alt"), Some(true), false).unwrap();
+        assert_eq!(id.key(), "rel.alt.high");
+    }
+
+    #[test]
+    fn an_invalid_baked_profile_refuses_to_launch() {
+        // Falling back to the default would silently write the MAIN build's
+        // config and history -- the exact collision the baked value exists to
+        // prevent.
+        assert!(ProfileIdentity::resolve_with_baked(None, Some("../etc"), Some(false), false)
+            .is_err());
+        assert!(ProfileIdentity::resolve_with_baked(None, Some(""), Some(false), false).is_err());
+    }
+
+    #[test]
+    fn no_baked_profile_leaves_todays_defaults_alone() {
+        assert_eq!(
+            ProfileIdentity::resolve_with_baked(None, None, Some(false), false).unwrap().name,
+            DEFAULT
+        );
+        assert_eq!(
+            ProfileIdentity::resolve_with_baked(None, None, Some(true), false).unwrap().name,
+            ELEVATED
+        );
     }
 
     #[test]

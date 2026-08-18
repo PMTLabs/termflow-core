@@ -161,3 +161,5 @@ releases-osx/*
 
 # Rust build output (CARGO_TARGET_DIR convention, e.g. target/sdd-test)
 /target/
+# Side-by-side `:pro:alt` build tree
+/target-pro-alt/

@@ -2,6 +2,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+  // `profile::BAKED` reads this with `option_env!`, which cargo does not track
+  // on its own; without this, flipping TERMFLOW_PROFILE would reuse a stale
+  // binary compiled for the other profile.
+  println!("cargo:rerun-if-env-changed=TERMFLOW_PROFILE");
   ensure_mcp_sidecar();
   tauri_build::build()
 }
