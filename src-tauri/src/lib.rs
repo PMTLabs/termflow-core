@@ -1391,6 +1391,10 @@ pub fn run() {
             let app = window.app_handle();
             if let Some(state) = app.try_state::<AppState>() {
                 state.window_titles.remove(window.label());
+                // Plan 018: a closed window must not be recreated at the next
+                // start. Persisted immediately, not debounced — the process may
+                // exit before any later tick.
+                state.windows.forget(window.label());
                 // If the window that just closed was the API/MCP target, re-point the
                 // active window at a still-live window and notify every window so their
                 // titlebar indicators don't strand on a dead label.
@@ -1439,6 +1443,27 @@ pub fn run() {
         // Focus changed — refresh so the active window's checkmark moves.
         if let WindowEvent::Focused(true) = event {
             commands::refresh_menu(window.app_handle());
+            if let Some(state) = window.app_handle().try_state::<AppState>() {
+                state.windows.note_focus(window.label());
+            }
+        }
+        // Plan 018: track geometry so windows come back where they were. Both
+        // events fire per frame while dragging, so the write is debounced inside
+        // the tracker — only the in-memory record updates here.
+        if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+            if let Some(state) = window.app_handle().try_state::<AppState>() {
+                if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                    state.windows.note_geometry(
+                        window.label(),
+                        pos.x,
+                        pos.y,
+                        size.width,
+                        size.height,
+                        window.is_maximized().unwrap_or(false),
+                    );
+                }
+                state.windows.persist_if_due();
+            }
         }
     })
     .build(gpu_preference::apply_to_context(context))

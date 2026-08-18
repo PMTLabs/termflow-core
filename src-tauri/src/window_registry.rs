@@ -14,8 +14,12 @@
 //! mutable artifact, so `--profile work` never sees the default profile's
 //! windows.
 
+use dashmap::DashMap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// Bump only for a BREAKING shape change. An unknown version loads as empty
 /// (see `load`), so an older build downgrading onto a newer file opens one
@@ -141,6 +145,137 @@ pub fn save(path: &Path, registry: &Registry) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(registry).map_err(|e| e.to_string())?;
     crate::app_config::write_atomic(path, &json)
+}
+
+/// Minimum gap between geometry writes. Dragging a window emits a `Moved` event
+/// per frame; without this the registry file would be rewritten ~60×/second for
+/// the whole duration of the drag.
+pub const GEOMETRY_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Is a debounced write due? Pure so the policy is testable without a clock.
+///
+/// `since` is the time elapsed since the last write, or `None` if nothing has
+/// been written yet — which must always write, otherwise the FIRST geometry
+/// change of a session is held indefinitely.
+pub fn debounce_due(dirty: bool, since: Option<Duration>) -> bool {
+    dirty && since.map_or(true, |d| d >= GEOMETRY_DEBOUNCE)
+}
+
+/// Live window bookkeeping: the registry, the `label → windowId` map the
+/// renderer resolves through, and the geometry write debounce.
+///
+/// One struct rather than three `AppState` fields, so the invariant "the map and
+/// the registry agree" has a single owner.
+pub struct WindowTracker {
+    path: PathBuf,
+    registry: Mutex<Registry>,
+    /// Tauri label → stable windowId. Rebuilt every launch; the registry is the
+    /// durable half.
+    ids: DashMap<String, String>,
+    dirty: AtomicBool,
+    last_write: Mutex<Option<Instant>>,
+}
+
+impl WindowTracker {
+    pub fn new(path: PathBuf, registry: Registry) -> Self {
+        Self {
+            path,
+            registry: Mutex::new(registry),
+            ids: DashMap::new(),
+            dirty: AtomicBool::new(false),
+            last_write: Mutex::new(None),
+        }
+    }
+
+    /// Load from the profile-scoped path.
+    pub fn load_default() -> Self {
+        let path = registry_path();
+        let registry = load(&path);
+        Self::new(path, registry)
+    }
+
+    pub fn snapshot(&self) -> Registry {
+        self.registry.lock().clone()
+    }
+
+    /// Bind a live window's label to its stable id. Called for every window,
+    /// whether recreated at boot or opened during the session.
+    pub fn bind(&self, label: &str, id: &str) {
+        self.ids.insert(label.to_string(), id.to_string());
+    }
+
+    /// The stable id for a live window, or `None` if the label was never bound.
+    ///
+    /// Deliberately NOT falling back to slot 0: a window that silently shared
+    /// slot 0's id would share its storage key, which is the entire bug this
+    /// module exists to fix. Callers must surface the miss.
+    pub fn id_for_label(&self, label: &str) -> Option<String> {
+        self.ids.get(label).map(|v| v.clone())
+    }
+
+    /// Register a window and persist immediately — a new window must survive a
+    /// crash before its first geometry tick.
+    pub fn register(&self, record: WindowRecord) {
+        self.bind(&record.label, &record.id);
+        self.registry.lock().upsert(record);
+        self.persist_now();
+    }
+
+    /// Drop a window. Persisted immediately: a closed window must not come back.
+    pub fn forget(&self, label: &str) {
+        let Some((_, id)) = self.ids.remove(label) else {
+            // Never registered (e.g. `drag-preview`) — nothing to forget.
+            return;
+        };
+        self.registry.lock().remove(&id);
+        self.persist_now();
+    }
+
+    /// Record a geometry change. In-memory always; the disk write is debounced.
+    pub fn note_geometry(&self, label: &str, x: i32, y: i32, width: u32, height: u32, maximized: bool) {
+        let Some(id) = self.id_for_label(label) else { return };
+        {
+            let mut reg = self.registry.lock();
+            let Some(rec) = reg.windows.iter_mut().find(|w| w.id == id) else { return };
+            // A maximized window reports the maximized rect; keeping the
+            // restored rect would make un-maximizing snap to fullscreen size.
+            if !maximized {
+                rec.x = x;
+                rec.y = y;
+                rec.width = width;
+                rec.height = height;
+            }
+            rec.maximized = maximized;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn note_focus(&self, label: &str) {
+        let Some(id) = self.id_for_label(label) else { return };
+        self.registry.lock().set_focused(&id);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Write iff dirty and the debounce has elapsed. Call from a periodic tick.
+    pub fn persist_if_due(&self) {
+        let since = self.last_write.lock().map(|t| t.elapsed());
+        if !debounce_due(self.dirty.load(Ordering::Relaxed), since) {
+            return;
+        }
+        self.persist_now();
+    }
+
+    /// Write unconditionally. Used on register/forget and before exit, where a
+    /// debounce would mean losing the very change we care about.
+    pub fn persist_now(&self) {
+        let registry = self.registry.lock().clone();
+        if let Err(e) = save(&self.path, &registry) {
+            log::warn!("failed to persist the window registry: {e}");
+            return;
+        }
+        self.dirty.store(false, Ordering::Relaxed);
+        *self.last_write.lock() = Some(Instant::now());
+    }
 }
 
 #[cfg(test)]
@@ -283,6 +418,131 @@ mod tests {
         reg.upsert(rec("w7", "detach-abc"));
         assert_eq!(reg.find_by_label("detach-abc").unwrap().id, "w7");
         assert!(reg.find_by_label("window-nope").is_none());
+    }
+
+    // --- WindowTracker ---
+
+    fn tracker(name: &str) -> WindowTracker {
+        let path = temp_dir(name).join("window-registry.json");
+        WindowTracker::new(path, Registry::default())
+    }
+
+    #[test]
+    fn an_unbound_label_resolves_to_none_never_to_slot_zero() {
+        let t = tracker("unbound");
+        t.register(rec("w0", "main"));
+        assert_eq!(t.id_for_label("main").as_deref(), Some("w0"));
+        // The whole defect being fixed is windows silently sharing one key.
+        // A miss must be a miss, so the caller can surface it.
+        assert_eq!(t.id_for_label("window-unknown"), None);
+    }
+
+    #[test]
+    fn register_persists_immediately_so_a_new_window_survives_a_crash() {
+        let t = tracker("register");
+        t.register(rec("w1", "window-a"));
+        assert_eq!(load(&t.path).windows.len(), 1);
+    }
+
+    #[test]
+    fn forget_removes_the_record_and_the_binding_and_persists() {
+        let t = tracker("forget");
+        t.register(rec("w0", "main"));
+        t.register(rec("w1", "window-a"));
+        t.forget("main");
+        assert_eq!(t.id_for_label("main"), None);
+        let on_disk = load(&t.path);
+        assert_eq!(on_disk.windows.len(), 1);
+        assert_eq!(on_disk.windows[0].id, "w1");
+    }
+
+    #[test]
+    fn forgetting_an_unregistered_label_is_a_noop() {
+        let t = tracker("forget-unreg");
+        t.register(rec("w0", "main"));
+        // `Destroyed` fires for windows we never register, notably drag-preview.
+        t.forget("drag-preview");
+        assert_eq!(t.snapshot().windows.len(), 1);
+    }
+
+    #[test]
+    fn geometry_updates_memory_but_defers_the_write() {
+        let t = tracker("geometry");
+        t.register(rec("w0", "main"));
+        t.note_geometry("main", 11, 22, 640, 480, false);
+
+        assert_eq!(t.snapshot().windows[0].x, 11, "memory updates immediately");
+        // register() wrote once; the debounce must swallow this follow-up.
+        t.persist_if_due();
+        assert_eq!(
+            load(&t.path).windows[0].x,
+            100,
+            "a geometry tick inside the debounce window must not hit the disk"
+        );
+        t.persist_now();
+        assert_eq!(load(&t.path).windows[0].x, 11, "a forced write always lands");
+    }
+
+    #[test]
+    fn a_maximized_window_keeps_its_restored_rect() {
+        let t = tracker("maximized");
+        t.register(rec("w0", "main"));
+        t.note_geometry("main", 0, 0, 3840, 2160, true);
+        let snap = t.snapshot();
+        assert!(snap.windows[0].maximized);
+        assert_eq!(
+            (snap.windows[0].width, snap.windows[0].x),
+            (1280, 100),
+            "storing the maximized rect would make un-maximizing snap to fullscreen size"
+        );
+    }
+
+    #[test]
+    fn geometry_for_an_unbound_label_is_ignored() {
+        let t = tracker("geometry-unbound");
+        t.register(rec("w0", "main"));
+        t.note_geometry("drag-preview", 1, 2, 3, 4, false);
+        assert_eq!(t.snapshot().windows.len(), 1);
+        assert_eq!(t.snapshot().windows[0].x, 100);
+    }
+
+    #[test]
+    fn note_focus_is_exclusive_across_windows() {
+        let t = tracker("focus");
+        t.register(rec("w0", "main"));
+        t.register(rec("w1", "window-a"));
+        t.note_focus("main");
+        t.note_focus("window-a");
+        let snap = t.snapshot();
+        assert_eq!(snap.windows.iter().filter(|w| w.focused).count(), 1);
+        assert!(snap.find_by_label("window-a").unwrap().focused);
+    }
+
+    #[test]
+    fn the_debounce_policy_always_allows_the_first_write() {
+        // `None` = nothing written yet. Holding the first change would defer it
+        // forever, since nothing else moves the clock forward.
+        assert!(debounce_due(true, None));
+        assert!(!debounce_due(false, None), "a clean registry is never written");
+        assert!(!debounce_due(true, Some(Duration::from_millis(10))));
+        assert!(debounce_due(true, Some(GEOMETRY_DEBOUNCE)));
+        assert!(debounce_due(true, Some(Duration::from_secs(5))));
+    }
+
+    #[test]
+    fn a_drag_burst_coalesces_into_a_single_write() {
+        let t = tracker("burst");
+        t.register(rec("w0", "main"));
+        for i in 0..60 {
+            t.note_geometry("main", i, i, 640, 480, false);
+            t.persist_if_due();
+        }
+        assert_eq!(
+            load(&t.path).windows[0].x,
+            100,
+            "60 move events inside one debounce window must produce zero extra writes"
+        );
+        assert_eq!(t.snapshot().windows[0].x, 59, "…while memory tracks the latest position");
     }
 
     #[test]

@@ -311,6 +311,11 @@ pub struct AppState<R: Runtime = Wry> {
     // The renderer reports this; the Window menu is built from it (race-free, vs.
     // reading back the freshly-set native title which may not have committed yet).
     pub window_titles: Arc<DashMap<String, String>>,
+    // Plan 018: the durable list of OS windows to recreate at startup, plus the
+    // live `label -> windowId` map the renderer resolves its storage key through.
+    // Rust owns this because it must know how many windows to create BEFORE any
+    // webview (and therefore any localStorage) exists.
+    pub windows: Arc<crate::window_registry::WindowTracker>,
     // Latest shell-reported working directory per terminal, parsed from OSC 9;9 / OSC 7
     // in the PTY output stream (backlog 004). This is the source of truth for cwd on
     // shells whose process cwd is NOT live — notably PowerShell, which doesn't update
@@ -424,6 +429,7 @@ impl<R: Runtime> Clone for AppState<R> {
             detach_payloads: self.detach_payloads.clone(),
             active_global_drag: self.active_global_drag.clone(),
             window_titles: self.window_titles.clone(),
+            windows: self.windows.clone(),
             terminal_cwds: self.terminal_cwds.clone(),
             history_store: self.history_store.clone(),
             history_dirty: self.history_dirty.clone(),
@@ -586,6 +592,7 @@ impl<R: Runtime> AppState<R> {
             detach_payloads: Arc::new(DashMap::new()),
             active_global_drag: Arc::new(Mutex::new(None)),
             window_titles: Arc::new(DashMap::new()),
+            windows: Arc::new(crate::window_registry::WindowTracker::load_default()),
             terminal_cwds: Arc::new(DashMap::new()),
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             history_dirty: Arc::new(DashMap::new()),

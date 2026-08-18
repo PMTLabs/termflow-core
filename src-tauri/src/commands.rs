@@ -1380,6 +1380,37 @@ pub async fn generate_api_token(
     Ok(token)
 }
 
+/// Give a freshly built window a stable id and record it, so a restart can
+/// recreate it (plan 018 Task 2).
+///
+/// Best-effort on geometry: a window that cannot report its position is still
+/// registered, using the builder's defaults. An unregistered window is one that
+/// silently never restores and whose renderer cannot resolve a storage key —
+/// strictly worse than one restored at the wrong coordinates.
+pub fn register_window_in_registry(
+    app: &tauri::AppHandle,
+    window: &tauri::WebviewWindow,
+    fallback_size: (u32, u32),
+) {
+    use tauri::Manager as _;
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let pos = window.outer_position().ok();
+    let size = window.inner_size().ok();
+    state.windows.register(crate::window_registry::WindowRecord {
+        id: uuid::Uuid::new_v4().simple().to_string(),
+        label: window.label().to_string(),
+        x: pos.map(|p| p.x).unwrap_or(0),
+        y: pos.map(|p| p.y).unwrap_or(0),
+        width: size.map(|s| s.width).unwrap_or(fallback_size.0),
+        height: size.map(|s| s.height).unwrap_or(fallback_size.1),
+        maximized: window.is_maximized().unwrap_or(false),
+        focused: false,
+    });
+    // A newly opened window takes focus; set it through the tracker so exactly
+    // one record carries the flag.
+    state.windows.note_focus(window.label());
+}
+
 // ----- Detach / cross-window pane handoff -----------------------------------
 //
 // The PTY processes live in this shared backend (AppState), so moving a pane to
@@ -1479,6 +1510,7 @@ pub async fn create_detached_window(
 
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    register_window_in_registry(&app_handle, &window, (900, 600));
     refresh_menu(&app_handle);
     Ok(label)
 }
@@ -1526,6 +1558,7 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
 
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    register_window_in_registry(app, &window, (1280, 800));
     Ok(label)
 }
 
