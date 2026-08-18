@@ -387,17 +387,21 @@ const App: React.FC = () => {
       }
     }
 
-    // A fresh "New Window" (File > New Window, or an "Open in TermFlow" folder window):
-    // don't restore the previous session — just open a single default terminal tab,
-    // rooted at ?path= when the window was opened for a folder.
+    // A fresh "New Window" (File > New Window, or an "Open in TermFlow" folder
+    // window) carries ?newWindow=1. That used to mean "skip session restore".
+    // It no longer does (plan 018): each window now has its OWN session key, so
+    // a brand-new window simply has nothing saved under its id — restoreState
+    // returns false and the decision table below opens a default tab, rooted at
+    // ?path= when the window was opened for a folder.
+    //
+    // Returning early here was actively harmful once keys became per-window: the
+    // save hooks in the mount effect are registered for EVERY window regardless,
+    // so a window that skipped restore still saved — meaning a restored session
+    // could be replaced by the default tab of a window that never read it.
     const bootParams = new URLSearchParams(window.location.search);
-    if (bootParams.has('newWindow')) {
-      const folderPath = bootParams.get('path') ?? undefined;
-      setupIPCListeners();
-      inputHandler.enable();
-      createDefaultTabIfNeeded(folderPath);
-      return;
-    }
+    const newWindowPath = bootParams.has('newWindow')
+      ? bootParams.get('path') ?? undefined
+      : undefined;
 
     // Check if we should restore last session (reuse the config fetched above)
     const shouldRestore = config?.restoreLastSession !== false; // Default to true
@@ -411,6 +415,9 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Failed to read pending open path:', error);
     }
+    // A window opened FOR a folder carries it in its own URL; the backend's
+    // one-shot pending path only ever applies to a cold launch.
+    pendingOpenPath = pendingOpenPath ?? newWindowPath;
 
     // Try to restore state if enabled
     let restored = false;
