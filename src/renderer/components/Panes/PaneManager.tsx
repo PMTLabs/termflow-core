@@ -15,6 +15,7 @@ import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { terminalService } from '../../services/TerminalService';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { closePaneNonBlocking } from '../../services/paneClose';
+import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -109,6 +110,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       removeFromUi: () => dispatch(closePane(paneId)),
       closeTerminal: (id) => terminalService.closeTerminal(id),
       clearCwdSnapshot,
+      releaseSurface: cleanupTerminalCache,
     });
   }, [dispatch, paneTree]);
 

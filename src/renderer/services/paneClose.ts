@@ -23,6 +23,13 @@ export interface ClosePaneDeps {
    *  clears the snapshot synchronously so a late write from the (now
    *  in-flight) backend close is dropped once the generation moves. */
   clearCwdSnapshot: (terminalId: string) => void;
+  /** Disposes the terminal's cached xterm engine — its Terminal, its scrollback, its
+   *  bridge subscriptions and, the reason this dep exists, its WebGL context.
+   *
+   *  REQUIRED, not optional: an optional dep lets a caller silently forget it, which
+   *  is exactly how this leaked in the first place. Injected rather than imported so
+   *  this helper stays free of terminal-core. */
+  releaseSurface: (terminalId: string) => void;
 }
 
 /**
@@ -36,7 +43,7 @@ export interface ClosePaneDeps {
  * fire-and-forget call remains the one and only PTY kill.
  */
 export function closePaneNonBlocking(deps: ClosePaneDeps): void {
-  const { terminalId, removeFromUi, closeTerminal, clearCwdSnapshot } = deps;
+  const { terminalId, removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface } = deps;
 
   // Remove the pane from the UI immediately — do not wait on the backend.
   removeFromUi();
@@ -46,6 +53,20 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   // Spec 045 §3.3: the pane is gone for good — drop its directory so the map
   // cannot grow without bound and a recycled id can't inherit it.
   clearCwdSnapshot(terminalId);
+
+  // ...and dispose the cached xterm engine for the same reason, in the same place.
+  // The cache is keyed by terminalId, so this is per TERMINAL — exactly what the
+  // tab-close path does per pane of the tab it closes (TabManager.closeOneTab),
+  // and it disposes before its own removeTab dispatch, so this ordering is the
+  // proven one rather than a new one.
+  //
+  // Without it the entry — Terminal, scrollback, bridge subs and WebGL context —
+  // outlives the pane. A renderer allows only ~16 GL contexts; past that the browser
+  // drops the OLDEST, which is the longest-running terminal, and webgl.ts disposes
+  // that addon without ever reloading it. The session's most-used terminal silently
+  // falls back to the DOM renderer, which re-renders full rows on every selection
+  // change: selection lags the cursor and scrolling stutters, worsening all day.
+  releaseSurface(terminalId);
 
   // Fire-and-forget: the backend PTY kill can take multiple seconds and must
   // never block the pane's disappearance. Errors are logged, not thrown —
