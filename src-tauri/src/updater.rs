@@ -68,7 +68,15 @@ fn check_and_download() -> Result<Option<UpdateInfo>, String> {
 /// relaunch. Graceful exit (vs `process::exit`) lets Tauri flush state first.
 fn apply(info: UpdateInfo) -> Result<(), String> {
     let um = manager()?;
-    um.wait_exit_then_apply_updates(&info, false, true, Vec::<String>::new())
+    // Carry the instance identity through the restart (plan 018 Task 10). This
+    // was `Vec::new()`, so `--profile work` came back as the DEFAULT profile —
+    // a different config file, a different window registry and an empty storage
+    // scope. The user reads that as the update having eaten their session.
+    let restart_args = crate::profile::relaunch_args(crate::profile::current());
+    if !restart_args.is_empty() {
+        log::info!("[UPDATE] relaunching with {restart_args:?}");
+    }
+    um.wait_exit_then_apply_updates(&info, false, true, restart_args)
         .map_err(|e| e.to_string())
 }
 

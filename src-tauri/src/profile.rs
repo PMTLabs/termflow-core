@@ -302,9 +302,95 @@ pub fn elevation() -> Option<bool> {
     Some(false)
 }
 
+/// The CLI arguments a relaunch of THIS process must carry to come back as the
+/// same instance (plan 018 Task 10).
+///
+/// The in-app updater relaunches with whatever it is given, and it was given
+/// nothing — so `--profile work` came back as the DEFAULT profile: a different
+/// config file, a different window registry, and an empty renderer storage
+/// scope. To the user that reads as "the update ate my session".
+///
+/// Derived from the resolved identity rather than echoed from `std::env::args`,
+/// which would also replay one-shot flags (`--path`, `--headless`) that must
+/// not survive a restart.
+///
+/// Elevation is deliberately NOT expressed here. It is a property of the process
+/// token, re-derived on launch, and the auto-selected `elevated` name comes with
+/// it — passing `--profile elevated` to a process that came back at medium
+/// integrity would mint a THIRD identity (`rel.elevated`) that owns nobody's
+/// data.
+pub fn relaunch_args(id: &ProfileIdentity) -> Vec<String> {
+    if is_default(&id.name) {
+        return Vec::new();
+    }
+    if id.name == ELEVATED && id.integrity == Integrity::High {
+        // Auto-derived from the token, not requested. It will be derived again.
+        return Vec::new();
+    }
+    vec!["--profile".to_string(), id.name.clone()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity(name: &str, integrity: Integrity) -> ProfileIdentity {
+        ProfileIdentity { channel: "rel", name: name.to_string(), integrity }
+    }
+
+    #[test]
+    fn the_default_profile_relaunches_with_no_args() {
+        // Byte-identical to today's behaviour for the overwhelmingly common case.
+        assert!(relaunch_args(&identity(DEFAULT, Integrity::Medium)).is_empty());
+    }
+
+    #[test]
+    fn a_named_profile_carries_itself_through_the_relaunch() {
+        assert_eq!(
+            relaunch_args(&identity("work", Integrity::Medium)),
+            vec!["--profile".to_string(), "work".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_named_profile_carries_through_even_when_elevated() {
+        // The NAME was requested; only the integrity is re-derived.
+        assert_eq!(
+            relaunch_args(&identity("work", Integrity::High)),
+            vec!["--profile".to_string(), "work".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_auto_elevated_name_is_left_to_be_re_derived() {
+        // `elevated` was never requested — it is what an elevated launch with no
+        // --profile resolves to. Passing it explicitly to a process that came
+        // back at medium integrity would mint `rel.elevated`, a third identity
+        // owning nobody's data.
+        assert!(relaunch_args(&identity(ELEVATED, Integrity::High)).is_empty());
+    }
+
+    #[test]
+    fn an_explicitly_named_elevated_profile_at_medium_still_carries() {
+        // Someone really did type `--profile elevated` and is not elevated.
+        // Dropping it would silently move them to the default profile.
+        assert_eq!(
+            relaunch_args(&identity(ELEVATED, Integrity::Medium)),
+            vec!["--profile".to_string(), ELEVATED.to_string()]
+        );
+    }
+
+    #[test]
+    fn every_relaunch_arg_survives_its_own_parser() {
+        // The args go back through clap on the next launch; one that sanitize()
+        // would reject is a relaunch that fails to start at all.
+        for name in ["work", "build-2_x", ELEVATED] {
+            let args = relaunch_args(&identity(name, Integrity::Medium));
+            if args.is_empty() { continue; }
+            assert_eq!(args[0], "--profile");
+            assert_eq!(sanitize_arg(&args[1]).as_deref(), Ok(name));
+        }
+    }
 
     #[test]
     fn ordinary_names_are_accepted_and_normalised() {
