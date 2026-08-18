@@ -1729,8 +1729,13 @@ pub async fn create_detached_window(
 }
 
 /// Open a fresh, empty app window (File > New Window). Unlike a detached window,
-/// it carries no payload: it boots with `?newWindow=1`, which skips session
-/// restore and opens a single default terminal tab.
+/// it carries no payload: it boots with `?newWindow=1` and opens a single
+/// default terminal tab.
+///
+/// `?newWindow=1` no longer means "skip session restore" (plan 018 Task 5). The
+/// window gets its own session id, finds nothing saved under it, and the normal
+/// post-restore decision opens the default tab. It still saves under that id, so
+/// this window is restored like any other on the next start.
 pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<String, String> {
     let label = format!("window-{}", uuid::Uuid::new_v4().simple());
     let mut url = "index.html?newWindow=1".to_string();
