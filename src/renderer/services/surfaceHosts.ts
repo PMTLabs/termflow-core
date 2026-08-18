@@ -79,6 +79,14 @@ export function useSurfaceHost(terminalId: string): HTMLElement | null {
   return useSyncExternalStore(subscribeSurfaceHosts, getSnapshot, getSnapshot);
 }
 
+/** Test-only: read a registration without a React render. Added for Canvas Mode's
+ *  `NodeTerminal` tests (`plan/013` Task 9), which need to assert WHICH element is
+ *  registered — the alternative was reaching into this module's private Map from
+ *  another file's test. */
+export function __getSurfaceHostForTest(terminalId: string): HTMLElement | null {
+  return hosts.get(terminalId) ?? null;
+}
+
 /** Test-only: drop all registrations and subscribers between cases. */
 export function __resetSurfaceHostsForTest(): void {
   hosts.clear();

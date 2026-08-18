@@ -65,6 +65,13 @@ const root = ReactDOM.createRoot(container);
 // Render app with Redux provider
 // Note: React.StrictMode removed to prevent duplicate terminal creation in development
 // StrictMode causes components to mount twice which was creating duplicate terminals
+// Canvas Mode's human-only verification gates, as one-line console commands
+// (`tf.help()`). Dev builds only — see services/devDiagnostics.ts.
+if (process.env.NODE_ENV === 'development') {
+  const { installDevDiagnostics } = await import('./services/devDiagnostics');
+  installDevDiagnostics();
+}
+
 root.render(
   <Provider store={store}>
     <App />

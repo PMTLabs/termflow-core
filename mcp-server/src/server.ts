@@ -83,10 +83,19 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 ),
                 paneId: z.string().optional().describe("Pane ID within the tab to split"),
                 direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction: 'horizontal' (split right) or 'vertical' (split bottom)"),
+                connectToCaller: z.boolean().optional().default(true).describe(
+                    "Draw a connection from YOUR terminal to the new one on the TermFlow canvas, " +
+                    "recording that you spawned it. Default true. Set false for a terminal that " +
+                    "is unrelated to your work."
+                ),
             },
         },
-        async ({ name, profile, cols, rows, cwd, owningTabId, tabId, paneId, direction }) => {
+        async ({ name, profile, cols, rows, cwd, owningTabId, tabId, paneId, direction, connectToCaller }) => {
             try {
+                // Every other tool resolves the caller via getCallerId(); this one did not,
+                // which is why agent-spawned terminals had no provenance. Absent identity is
+                // not an error here — provenance is a bonus, never a precondition for a spawn.
+                const parentTerminalId = connectToCaller === false ? undefined : getCallerId();
                 const response = await api.post(`/terminals`, {
                     name,
                     profile_id: profile,
@@ -97,6 +106,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                     tabId,
                     paneId,
                     direction,
+                    parentTerminalId,
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
@@ -274,6 +284,32 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
             try {
                 const id = resolveTerminalId("me", getCallerId());
                 const response = await api.get(`/terminals/${id}`);
+                return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+            }
+        }
+    );
+
+    // Tool: get_my_connections — the caller's own neighbours on the canvas.
+    server.registerTool(
+        "get_my_connections",
+        {
+            description:
+                "Get the terminals connected to YOUR OWN terminal on the TermFlow canvas — " +
+                "both connections you point at (outgoing) and connections pointing at you " +
+                "(incoming). Resolved from the X-Termflow-Terminal-Id header, like " +
+                "get_my_terminal. Each neighbour carries its nodeId, title, groupId, groupTitle, " +
+                "direction, origin (user or agent), optional label and createdAt. An empty " +
+                "`connections` array is a SUCCESSFUL result meaning nothing is connected to this " +
+                "terminal yet, not an error. Title and group fields are null until Canvas Mode " +
+                "has been opened at least once in this session — that is what publishes them.",
+        },
+        async () => {
+            try {
+                const id = resolveTerminalId("me", getCallerId());
+                const response = await api.get(`/terminals/${id}/connections`);
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);

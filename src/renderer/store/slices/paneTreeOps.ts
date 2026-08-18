@@ -178,7 +178,7 @@ export function swapLeaves(tree: PaneNode, aId: string, bId: string): PaneNode {
  * external (MCP/API) interaction to a tab when the backend event omits the tabId.
  */
 export function findTabIdByTerminalId(
-  treesByTabId: Record<string, PaneNode>,
+  treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,
 ): string | null {
   const contains = (node: PaneNode | null): boolean => {
@@ -206,7 +206,7 @@ export function findTabIdByTerminalId(
  * not found (fail-open: never silently drop a real notification).
  */
 export function isTerminalMuted(
-  treesByTabId: Record<string, PaneNode>,
+  treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,
 ): boolean {
   const find = (node: PaneNode | null): PaneNode | null => {
@@ -235,7 +235,7 @@ export function isTerminalMuted(
  * ask "which pane is this tab's selected one" without duplicating the rule.
  */
 export function getSelectedPaneId(
-  treesByTabId: Record<string, PaneNode>,
+  treesByTabId: Record<string, PaneNode | null>,
   activePaneByTabId: Record<string, string>,
   tabId: string,
 ): string | null {
@@ -280,7 +280,7 @@ export function getAllLeafIds(node: PaneNode | null): string[] {
  * or a split-pane terminal nested in a tree (resolved via findTabIdByTerminalId).
  */
 export function resolveExitedTabId(
-  treesByTabId: Record<string, PaneNode>,
+  treesByTabId: Record<string, PaneNode | null>,
   tabIds: string[],
   exitedTerminalId: string,
   isTerminalAlive: (terminalId: string) => boolean,
@@ -293,4 +293,26 @@ export function resolveExitedTabId(
   const tree = treesByTabId[tabId] ?? null;
   const stillRunning = getAllTerminalIds(tree).some(isTerminalAlive);
   return stillRunning ? null : tabId;
+}
+
+/**
+ * Does this tab have no panes left?
+ *
+ * `treesByTabId` holds three states — key absent (never initialised), null (open and empty),
+ * or a tree — and this collapses the first two, which is what a caller deciding "should the
+ * tab close now?" wants.
+ *
+ * Shared because the two callers that ask it — the cross-window detach and the tab-strip drag
+ * — held the same expression written out separately, testing `=== undefined` back when an
+ * emptied tab was expressed by DELETING its key. When that changed to null, both had to move
+ * together or the tab would silently stop closing. One rule, one place, one test.
+ *
+ * Canvas re-homing deliberately does NOT ask: design 010 §6.3 keeps an emptied group's frame
+ * on the canvas as a drop target, so its tab stays open and empty.
+ */
+export function tabHasNoPanes(
+  treesByTabId: Record<string, PaneNode | null>,
+  tabId: string,
+): boolean {
+  return treesByTabId[tabId] == null;
 }

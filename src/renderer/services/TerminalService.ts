@@ -206,6 +206,19 @@ class TerminalServiceClass {
 
     try {
       termDiag(() => `[TERM-DIAG] PTY resize -> ${cols}x${rows} (terminalId=${terminalId} processId=${process.id})`);
+      // Announced BEFORE the round-trip, so anything that has to brace for the SIGWINCH is
+      // already armed when the redraw comes back rather than a round-trip late.
+      //
+      // A resize is the one output cause that is never the program doing work: a TUI repaints
+      // its whole screen because the geometry changed, and the geometry changed because the
+      // user did something to the VIEW. RunningActivityTracker listens for this so that
+      // repaint cannot ring an unseen bell or animate the running sweep — see
+      // `notifyViewChangeBurst`. Dispatched as an event rather than calling the tracker
+      // directly because the tracker already imports this module; a direct call would be a
+      // cycle, and this mirrors how `pty:data` and `pty:exit` are published anyway.
+      window.dispatchEvent(new CustomEvent('pty:resize', {
+        detail: { processId: process.id, terminalId, cols, rows },
+      }));
       await window.electronAPI.resizeTerminal(process.id, cols, rows);
     } catch (error) {
       console.error('Failed to resize terminal:', error);

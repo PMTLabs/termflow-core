@@ -245,6 +245,36 @@ describe('tabsSlice setAutoTabTitle / updateTabTitle interaction', () => {
     const next = tabsReducer(stateWithTwoTabs(), setAutoTabTitle({ id: 'tb-missing', title: 'vim' }));
     expect(next.tabs.map(t => t.title)).toEqual(['A', 'B']);
   });
+
+  /**
+   * `cmd.exe` announces its own full path as its OSC title, so a "Command Prompt" tab renamed
+   * itself to `C:\WINDOWS\system32\cmd.exe` a frame after opening — and Canvas Mode labels a
+   * group frame with its tab's title, which is where it was finally noticed (2026-08-17).
+   *
+   * The rule itself lives in `services/autoTitle` with its own table of near-misses; what is
+   * pinned here is that the reducer consults it, and that refusing means KEEPING the name
+   * already in place rather than blanking it.
+   */
+  it('setAutoTabTitle refuses a title that is only the shell executable', () => {
+    const next = tabsReducer(
+      stateWithTwoTabs(),
+      setAutoTabTitle({ id: 'tb-1', title: 'C:\\WINDOWS\\system32\\cmd.exe' }),
+    );
+    expect(next.tabs.find(t => t.id === 'tb-1')?.title).toBe('A');
+  });
+
+  it('setAutoTabTitle refuses an empty title rather than leaving a nameless tab', () => {
+    const next = tabsReducer(stateWithTwoTabs(), setAutoTabTitle({ id: 'tb-1', title: '   ' }));
+    expect(next.tabs.find(t => t.id === 'tb-1')?.title).toBe('A');
+  });
+
+  it('setAutoTabTitle still adopts a working directory, which is the useful case', () => {
+    // Paired with the refusals above: a guard that rejected anything path-shaped would pass
+    // both of them and silently throw away every informative title a shell sets.
+    const dir = 'C:\\Users\\user\\projects';
+    const next = tabsReducer(stateWithTwoTabs(), setAutoTabTitle({ id: 'tb-1', title: dir }));
+    expect(next.tabs.find(t => t.id === 'tb-1')?.title).toBe(dir);
+  });
 });
 
 describe('tabsSlice addTab insertAfterId (context-menu "New Tab" insert-after)', () => {

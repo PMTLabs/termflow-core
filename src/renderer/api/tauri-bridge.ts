@@ -142,6 +142,8 @@ interface ElectronAPI {
   createDetachedWindow: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow: () => Promise<string>;
   getWindowLabel: () => string;
+  // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
+  canvasApiRequest: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
   // Cross-window drag broker (Phase 4)
   beginGlobalPaneDrag: (token: string, payload: any) => Promise<void>;
   claimGlobalPaneDrag: (token: string) => Promise<any | null>;
@@ -631,6 +633,23 @@ const tauriBridge: ElectronAPI = {
     } catch {
       return 'main';
     }
+  },
+
+  canvasApiRequest: async (path, init) => {
+    const method = init?.method ?? 'GET';
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers: {
+        ...buildAuthHeaders(),
+        ...(init?.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(init?.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    });
+    if (!response.ok) {
+      throw new Error(`Canvas API ${method} ${path} failed: ${response.status} ${response.statusText}`);
+    }
+    // DELETE answers 204 with no body; `.json()` on that throws.
+    return response.status === 204 ? null : response.json();
   },
   beginGlobalPaneDrag: async (token, payload) => {
     await invoke('begin_global_pane_drag', { token, payload });

@@ -1,6 +1,9 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_COLOR_SCHEMA_ID } from '../colorSchemas';
 import { EULA_ACCEPTED_KEY } from '../../legal';
+// Type-only, and imported rather than restated: the modes are the gesture rule's vocabulary, and
+// a second copy of the union here would let the two drift into a setting the canvas cannot read.
+import type { CanvasWheelMode } from '../../components/Canvas/canvasGestures';
 
 export interface ShellProfile {
   id: string;
@@ -74,6 +77,13 @@ interface SettingsState {
   // Backlog 011: command history suggestion popup (capture + popup). Default on.
   // Independent of scrollback history persistence (backlog 009).
   commandSuggestions: boolean;
+  // What the mouse wheel does in Canvas Mode (see CanvasWheelMode for the full rule):
+  //  - 'zoom' (default): the wheel zooms the canvas, and Ctrl/Cmd+wheel passes through to the
+  //    terminal under the pointer, where it zooms that terminal's font.
+  //  - 'scroll': the wheel scrolls the canvas and Ctrl/Cmd+wheel zooms it. Font zoom keeps the
+  //    chord inside the terminal that holds the keyboard, so editing one is unaffected.
+  // Canvas Mode only — a wheel in a normal pane is untouched by this setting either way.
+  canvasWheelMode: CanvasWheelMode;
   // Sparse map of shortcutActions.ts actionId -> user-chosen combo string.
   // Absent key = use that action's registry default. See
   // docs/041-keyboard-shortcuts-customization-design.md.
@@ -141,6 +151,7 @@ const initialState: SettingsState = {
   nonFocusedPaneOpacity: 50,
   agentColorSchemes: {},
   commandSuggestions: true,
+  canvasWheelMode: 'zoom',
   customKeybindings: {},
   keepRunningInBackground: false,
   launchAtLogin: false,
@@ -311,6 +322,14 @@ const settingsSlice = createSlice({
       }
     },
 
+    setCanvasWheelMode: (state, action: PayloadAction<CanvasWheelMode>) => {
+      state.canvasWheelMode = action.payload;
+      // Save to config file
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('canvasWheelMode', state.canvasWheelMode);
+      }
+    },
+
     // Bulk-replace the whole agent→schema map. Persists like the other setters
     // (used on config load — re-persisting the loaded value is idempotent, same
     // as setColorSchema/setFontSize — and on Settings "Discard Changes" revert).
@@ -448,6 +467,7 @@ export const {
   setColorSchema,
   setNonFocusedPaneOpacity,
   setCommandSuggestions,
+  setCanvasWheelMode,
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,

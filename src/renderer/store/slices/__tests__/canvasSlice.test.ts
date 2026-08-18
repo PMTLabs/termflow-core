@@ -1,6 +1,7 @@
 import canvasReducer, {
-  setCanvasEnabled, toggleCanvasMode, setViewport, setNodeGeom, setGroupGeom,
-  applyArrange, selectNode, focusNode, touchNode, setEdges, addEdge, removeEdge,
+  setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
+  applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
+  removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -10,36 +11,21 @@ const edge = (id: string, from: string, to: string): CanvasEdge =>
   ({ id, from, to, label: null, origin: 'user', createdAt: 1 });
 
 describe('canvasSlice', () => {
-  it('starts disabled with an identity viewport', () => {
+  it('starts at an identity viewport', () => {
     const s = init();
-    expect(s.enabled).toBe(false);
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });
-  });
-
-  it('toggles and sets mode', () => {
-    let s = canvasReducer(init(), toggleCanvasMode());
-    expect(s.enabled).toBe(true);
-    s = canvasReducer(s, toggleCanvasMode());
-    expect(s.enabled).toBe(false);
-    s = canvasReducer(s, setCanvasEnabled(true));
-    expect(s.enabled).toBe(true);
-  });
-
-  it('clears focus when leaving canvas mode', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, focusNode('tm-1'));
-    expect(s.focusedId).toBe('tm-1');
-    s = canvasReducer(s, setCanvasEnabled(false));
     expect(s.focusedId).toBeNull();
   });
 
-  // Both exits from canvas mode must hand input back, not just the explicit one.
-  it('clears focus when TOGGLING out of canvas mode too', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, focusNode('tm-1'));
-    s = canvasReducer(s, toggleCanvasMode());
-    expect(s.enabled).toBe(false);
-    expect(s.focusedId).toBeNull();
+  // Canvas Mode is a TAB, so whether it is on screen is `activeTab.shellType` and lives in
+  // the tabs slice alone. This slice used to carry an `enabled` mirror of that; keeping
+  // both would mean every tab switch that does not go through the canvas helpers — a click
+  // in the strip, Ctrl+Tab, closing the tab, session restore — is a path that can desync
+  // them. Asserted structurally, so re-adding the flag fails here rather than quietly
+  // reintroducing the second source of truth.
+  it('carries no enabled flag — the tab list is the only source of that truth', () => {
+    expect(init()).not.toHaveProperty('enabled');
+    expect(Object.keys(canvasReducer(init(), { type: '@@probe' }))).not.toContain('enabled');
   });
 
   it('stores node and group geometry', () => {
@@ -52,6 +38,25 @@ describe('canvasSlice', () => {
   it('stores the viewport', () => {
     const s = canvasReducer(init(), setViewport({ x: -12, y: 34, z: 0.75 }));
     expect(s.viewport).toEqual({ x: -12, y: 34, z: 0.75 });
+  });
+
+  /**
+   * The arrow keys pan RELATIVELY, which is the point: the handler that dispatches this listens
+   * on the window in the capture phase, and one that had to read `viewport` first would be torn
+   * down and re-registered on every frame of a mouse pan.
+   */
+  it('pans the viewport by a screen delta without being told where it was', () => {
+    let s = canvasReducer(init(), setViewport({ x: -12, y: 34, z: 0.75 }));
+    s = canvasReducer(s, panViewport({ dx: 96, dy: -40 }));
+    // Right and up on screen means the world moves the other way — `panBy` owns the inversion,
+    // and this asserts the reducer actually goes through it rather than adding.
+    expect(s.viewport).toEqual({ x: -12 - 96, y: 34 + 40, z: 0.75 });
+  });
+
+  it('accumulates across presses and leaves the zoom alone', () => {
+    let s = canvasReducer(init(), setViewport({ x: 0, y: 0, z: 0.4 }));
+    for (let i = 0; i < 3; i++) s = canvasReducer(s, panViewport({ dx: 10, dy: 0 }));
+    expect(s.viewport).toEqual({ x: -30, y: 0, z: 0.4 });
   });
 
   it('applies an arrange result wholesale, preserving node size', () => {
@@ -107,6 +112,22 @@ describe('canvasSlice', () => {
     expect(s.edges.map((e) => e.id)).toEqual(['ce-3']);
   });
 
+  it('updates an edge in place, preserving order', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b'), edge('ce-2', 'c', 'd')]));
+    s = canvasReducer(s, updateEdge({ ...edge('ce-1', 'a', 'b'), label: 'deploys to' }));
+    expect(s.edges.map((e) => e.id)).toEqual(['ce-1', 'ce-2']);
+    expect(s.edges[0].label).toBe('deploys to');
+  });
+
+  it('ignores an update for an edge it does not hold, rather than inserting it', () => {
+    // A PATCH response racing a delete would otherwise resurrect the wire: the label edit
+    // succeeds server-side, the delete lands first here, and appending on update puts it back
+    // with no row behind it.
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b')]));
+    s = canvasReducer(s, updateEdge({ ...edge('ce-9', 'x', 'y'), label: 'ghost' }));
+    expect(s.edges.map((e) => e.id)).toEqual(['ce-1']);
+  });
+
   it('clamps sidebar width', () => {
     expect(canvasReducer(init(), setSidebarWidth(10)).sidebarWidth).toBe(168);
     expect(canvasReducer(init(), setSidebarWidth(9999)).sidebarWidth).toBe(480);
@@ -153,7 +174,7 @@ describe('canvasSlice', () => {
     expect(s.focusedId).toBe('tm-live');
   });
 
-  it('hydrates persisted geometry but never persisted enabled/focus state', () => {
+  it('hydrates persisted geometry but never persisted focus state', () => {
     const s = canvasReducer(init(), hydrateCanvas({
       viewport: { x: 5, y: 6, z: 0.5 },
       nodes: { 'tm-1': { x: 1, y: 1, w: 340, h: 210 } },
@@ -163,7 +184,6 @@ describe('canvasSlice', () => {
     }));
     expect(s.viewport.z).toBe(0.5);
     expect(s.sidebarWidth).toBe(220);
-    expect(s.enabled).toBe(false);
     expect(s.focusedId).toBeNull();
   });
 
@@ -176,10 +196,252 @@ describe('canvasSlice', () => {
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });
   });
 
-  it('hydrating over a live canvas does not re-enable it', () => {
-    let s = canvasReducer(init(), setCanvasEnabled(true));
-    s = canvasReducer(s, hydrateCanvas({ viewport: { x: 1, y: 2, z: 1.5 } }));
-    expect(s.enabled).toBe(true); // hydrate must not touch the flag either way
+  // `focusedId` is the one piece of canvas state that grants a node an unconditional
+  // WebGL context (design 010 D8), and nothing in `hydrateCanvas` should be able to set
+  // it: a restored session must not be handing keystrokes to a node before the user has
+  // looked at the canvas.
+  it('cannot set focus through hydration, even over live focus', () => {
+    let s = canvasReducer(init(), focusNode('tm-1'));
+    s = canvasReducer(s, hydrateCanvas({ viewport: { x: 1, y: 2, z: 1.5 } } as never));
     expect(s.viewport.z).toBe(1.5);
+    expect(s.focusedId).toBe('tm-1'); // untouched either way — hydrate owns geometry only
+  });
+
+  /**
+   * The full-screen overlay. Kept separate from `focusedId` on purpose: focus is "this node
+   * has the keyboard", the overlay is "this node is enlarged", and Esc has to unwind them in
+   * that order — close the overlay, then release the keyboard.
+   */
+  describe('setOverlayNode', () => {
+    it('opens the overlay and gives the node the keyboard with it', () => {
+      const s = canvasReducer(init(), setOverlayNode('tm-1'));
+      expect(s.overlayId).toBe('tm-1');
+      // An overlay you cannot type into is a screenshot.
+      expect(s.focusedId).toBe('tm-1');
+      expect(s.recent[0]).toBe('tm-1');
+    });
+
+    it('closes without taking the keyboard away', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-1'));
+      s = canvasReducer(s, setOverlayNode(null));
+      expect(s.overlayId).toBeNull();
+      // You were working in that terminal a moment ago; shrinking the node is not a reason
+      // to stop. This is also what makes Esc's two-step unwind reachable.
+      expect(s.focusedId).toBe('tm-1');
+    });
+
+    it('starts closed', () => {
+      expect(init().overlayId).toBeNull();
+    });
+
+    // A terminal can close while its node is the overlay — the tab strip is still live on the
+    // canvas. Leaving the id set would cover the canvas with an overlay of nothing.
+    it('is cleared when its terminal goes away', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-gone'));
+      s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-other'], tabIds: [] }));
+      expect(s.overlayId).toBeNull();
+    });
+
+    it('survives a prune that keeps its terminal', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-live'));
+      s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-live'], tabIds: [] }));
+      expect(s.overlayId).toBe('tm-live');
+    });
+  });
+});
+
+describe('nearestGroupId — the tab strip marker (design 010 D9, §5.1)', () => {
+  it('holds the group the canvas is looking at, and null clears it', () => {
+    let s = canvasReducer(init(), setNearestGroup('tb-a'));
+    expect(s.nearestGroupId).toBe('tb-a');
+    // What CanvasMode's unmount dispatches. A marker that outlived the canvas would sit on
+    // the strip pointing at a group nobody is looking at.
+    s = canvasReducer(s, setNearestGroup(null));
+    expect(s.nearestGroupId).toBeNull();
+  });
+
+  it('is dropped when its tab closes', () => {
+    let s = canvasReducer(init(), setNearestGroup('tb-gone'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: [], tabIds: ['tb-live'] }));
+    expect(s.nearestGroupId).toBeNull();
+  });
+
+  it('survives a prune that keeps its tab', () => {
+    // Paired with the case above so "always null after a prune" cannot pass both.
+    let s = canvasReducer(init(), setNearestGroup('tb-live'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: [], tabIds: ['tb-live'] }));
+    expect(s.nearestGroupId).toBe('tb-live');
+  });
+
+  it('is checked against TABS, not terminals', () => {
+    // The two id spaces overlap without being interchangeable (design 011 D7). Checking this
+    // against `terminalIds` would clear the marker for every group whose tab id is not also a
+    // live leaf id — i.e. every split tab.
+    let s = canvasReducer(init(), setNearestGroup('tb-split'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-1', 'tm-2'], tabIds: ['tb-split'] }));
+    expect(s.nearestGroupId).toBe('tb-split');
+  });
+
+  it('is never persisted, so a session cannot boot with a stale marker', () => {
+    // `hydrateCanvas` takes a Partial<CanvasPersisted>, and `nearestGroupId` is deliberately
+    // not one of its fields — this asserts the restore path cannot set it even if a blob
+    // written by some future build carried the key.
+    let s = canvasReducer(init(), setNearestGroup('tb-a'));
+    s = canvasReducer(s, hydrateCanvas({ nearestGroupId: 'tb-b' } as never));
+    expect(s.nearestGroupId).toBe('tb-a');
+  });
+});
+
+/**
+ * Selecting a connection — the state behind "click the line, then delete it".
+ *
+ * The invariant that matters is that a node and a wire are never both selected. It is enforced
+ * in the reducers rather than by the callers because <kbd>Delete</kbd> has to mean exactly one
+ * thing, and `selectNode` is dispatched from a dozen places on this surface — every one of them
+ * a place the rule could be forgotten.
+ */
+describe('connection selection', () => {
+  it('starts with nothing selected', () => {
+    expect(init().selectedEdgeId).toBeNull();
+  });
+
+  it('selects and clears a connection', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    expect(s.selectedEdgeId).toBe('ce-1');
+    s = canvasReducer(s, selectEdge(null));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  it('takes the selection off a node', () => {
+    let s = canvasReducer(init(), selectNode('tm-1'));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    expect(s.selectedId).toBeNull();
+    expect(s.selectedEdgeId).toBe('ce-1');
+  });
+
+  it('takes the selection off a connection', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    s = canvasReducer(s, selectNode('tm-1'));
+    expect(s.selectedEdgeId).toBeNull();
+    expect(s.selectedId).toBe('tm-1');
+  });
+
+  /** A press on empty canvas dispatches `selectNode(null)` and nothing else. If that did not
+   *  clear the wire too, the canvas would show nothing selected while Delete still removed a
+   *  connection. */
+  it('clears the connection when the node selection is cleared', () => {
+    let s = canvasReducer(init(), selectEdge('ce-1'));
+    s = canvasReducer(s, selectNode(null));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  it('never leaves both selected, whatever the order', () => {
+    let s = init();
+    for (const action of [
+      selectNode('tm-1'), selectEdge('ce-1'), selectEdge('ce-2'), selectNode('tm-2'),
+      selectNode(null), selectEdge('ce-3'),
+    ]) {
+      s = canvasReducer(s, action);
+      expect({ node: s.selectedId, edge: s.selectedEdgeId }.node !== null
+        && s.selectedEdgeId !== null).toBe(false);
+    }
+  });
+
+  it('drops a selection whose connection was removed', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b'), edge('ce-2', 'b', 'c')]));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    s = canvasReducer(s, removeEdge('ce-2'));
+    expect(s.selectedEdgeId).toBe('ce-1');          // someone else's removal is not ours
+    s = canvasReducer(s, removeEdge('ce-1'));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+
+  /** The graph is refetched wholesale on every canvas session. A selection that survived would
+   *  name a row that no longer exists: the handles have nowhere to draw and Delete aims at
+   *  nothing. */
+  it('drops a selection the refetched graph no longer contains', () => {
+    let s = canvasReducer(init(), setEdges([edge('ce-1', 'a', 'b')]));
+    s = canvasReducer(s, selectEdge('ce-1'));
+    s = canvasReducer(s, setEdges([edge('ce-1', 'a', 'b'), edge('ce-9', 'c', 'd')]));
+    expect(s.selectedEdgeId).toBe('ce-1');          // still there, still selected
+    s = canvasReducer(s, setEdges([edge('ce-9', 'c', 'd')]));
+    expect(s.selectedEdgeId).toBeNull();
+  });
+});
+
+/**
+ * A group drag used to be one dispatch per member per pointer event — 101 Redux transitions
+ * per event for a 100-terminal group, each invalidating the canvas selector and re-running
+ * projection while the pointer was still moving.
+ */
+describe('moveGroupGeom', () => {
+  const rect = (x: number, y: number) => ({ x, y, w: 340, h: 210 });
+
+  it('moves the frame and every member in one transition', () => {
+    let s = init();
+    s = canvasReducer(s, setGroupGeom({ id: 'tb-1', rect: rect(0, 0) }));
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-a', rect: rect(10, 10) }));
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-b', rect: rect(10, 300) }));
+
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1',
+      frame: rect(100, 100),
+      nodes: { 'tm-a': rect(110, 110), 'tm-b': rect(110, 400) },
+    }));
+
+    expect(s.groups['tb-1']).toEqual(rect(100, 100));
+    expect(s.nodes['tm-a']).toEqual(rect(110, 110));
+    expect(s.nodes['tm-b']).toEqual(rect(110, 400));
+  });
+
+  // Only the named members move. A group drag must not disturb a node in another group.
+  it('leaves nodes it was not given alone', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-other', rect: rect(5, 5) }));
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1', frame: rect(0, 0), nodes: { 'tm-a': rect(1, 1) },
+    }));
+    expect(s.nodes['tm-other']).toEqual(rect(5, 5));
+  });
+
+  // Rects are taken WHOLE, unlike `applyArrange` which merges width/height from the previous
+  // entry. The caller derived these from the current rects, so re-reading would only mix a
+  // stale size into a fresh position.
+  it('takes the rect whole rather than merging the previous size', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-a', rect: { x: 0, y: 0, w: 999, h: 999 } }));
+    s = canvasReducer(s, moveGroupGeom({
+      tabId: 'tb-1', frame: rect(0, 0), nodes: { 'tm-a': rect(2, 2) },
+    }));
+    expect(s.nodes['tm-a']).toEqual(rect(2, 2));
+  });
+});
+
+/**
+ * The prune now runs on every pane close, not only when a tab disappears, so a run that
+ * finds nothing stale has to be a real no-op. `recent` was the one field that failed that:
+ * `filter` always returns a NEW array, and Immer reads the assignment as a change — handing
+ * every subscriber a fresh state object for a prune that pruned nothing.
+ */
+describe('pruneCanvasGeometry is inert when nothing is stale', () => {
+  it('returns the identical state object', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeGeom({ id: 'tm-live', rect: { x: 0, y: 0, w: 1, h: 1 } }));
+    s = canvasReducer(s, touchNode('tm-live'));
+    const before = s;
+    const after = canvasReducer(s, pruneCanvasGeometry({
+      terminalIds: ['tm-live'], tabIds: [],
+    }));
+    expect(after).toBe(before);
+  });
+
+  // ...and it still prunes when there IS something to prune, or the test above would pass
+  // on a reducer that had stopped working entirely.
+  it('still drops a dead id from recent', () => {
+    let s = init();
+    s = canvasReducer(s, touchNode('tm-gone'));
+    s = canvasReducer(s, touchNode('tm-live'));
+    s = canvasReducer(s, pruneCanvasGeometry({ terminalIds: ['tm-live'], tabIds: [] }));
+    expect(s.recent).toEqual(['tm-live']);
   });
 });

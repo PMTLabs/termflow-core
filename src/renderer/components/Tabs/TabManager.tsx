@@ -22,6 +22,7 @@ import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { resolveTabProcessIds, renameTabProcesses } from '../../services/tabProcessIds';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
+import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
 import { getCachedIcon, loadIcon } from '../../services/binaryIcons';
 import './TabManager.css';
@@ -301,6 +302,32 @@ const TabItem: React.FC<TabItemProps> = ({
   const tabTree = useSelector((state: RootState) => state.panes.treesByTabId[tab.id] ?? null);
   const processIds = resolveTabProcessIds(tabTree, tab.id);
 
+  /**
+   * Canvas Mode's "you are here" marker (design 010 D9, §5.1).
+   *
+   * Read here rather than threaded through `TabItemProps` because this component already
+   * subscribes for its pane tree, and the value is per-tab: passing it down would mean the
+   * parent re-rendering the whole strip on every pan.
+   *
+   * **Added to `active`, never replacing it.** The original plan had this take over the active
+   * highlight, which was right when the canvas was an overlay hiding some other tab. It is a
+   * tab now, so the active tab genuinely IS the canvas — moving the highlight off it would
+   * render the one tab filling the screen as inactive.
+   *
+   * Selects a boolean, not the id, so a pan between two OTHER groups does not re-render
+   * every tab in the strip.
+   *
+   * **Rendered as a LABELLED ICON, not a CSS rail** — see `.tab-canvas-here`. It first shipped
+   * as a 2px accent line along the bottom of the tab, and Tam's reaction on the first live run
+   * was "why does the first non-canvas tab have a border?" — the marker was visible and
+   * meaningless, which is worse than absent. This file had already written that lesson down
+   * (the reduced-motion note above `.tab-item.tab-running::after`: a static accent line "read
+   * as a stray border, not a 'running' signal") and every other per-tab status here — exited,
+   * background activity, unseen output, muted — is an icon carrying its own `title`. This one
+   * now is too.
+   */
+  const isCanvasHere = useSelector((state: RootState) => state.canvas.nearestGroupId === tab.id);
+
   return (
     <>
       <div
@@ -330,6 +357,9 @@ const TabItem: React.FC<TabItemProps> = ({
         >
           {tab.title}
         </span>
+        {isCanvasHere && (
+          <span className="tab-canvas-here" title="Canvas Mode is centred on this tab's group">◎</span>
+        )}
         {tab.hasBackgroundActivity && !tab.isActive && (
           <span className="tab-activity-dot" title="Background activity from an external (MCP/API) call">●</span>
         )}
@@ -571,15 +601,15 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   // Open the confirm for a close action. Computes the affected tabs, then fetches
   // their real running processes in the background.
   const handleCloseRequestKind = useCallback((tabId: string, kind: CloseKind) => {
-    // The Settings screen is a process-less tab: a clean one has nothing to
-    // confirm, so close it immediately; a dirty one is gated only by its own
-    // unsaved-changes guard (Save/Discard/Cancel). Either way it must never show
-    // the process-confirmation dialog. Single-tab close only — a batch close
-    // (others/right/left) that happens to include Settings falls through.
+    // Settings and Canvas are process-less tabs: neither can kill anything, so neither
+    // must ever show the process-confirmation dialog — it would list nothing. Settings
+    // additionally routes through its own unsaved-changes guard (Save/Discard/Cancel);
+    // the canvas has no such state, so it just closes. Single-tab close only — a batch
+    // close (others/right/left) that happens to include one of them falls through.
     if (kind === 'single') {
-      const settingsTab = store.getState().tabs.tabs.find((t) => t.id === tabId);
-      if (settingsTab?.shellType === 'settings') {
-        if (runSettingsGuard(() => closeOneTab(tabId))) return;
+      const target = store.getState().tabs.tabs.find((t) => t.id === tabId);
+      if (isVirtualTab(target?.shellType)) {
+        if (target?.shellType === SETTINGS_SHELL_TYPE && runSettingsGuard(() => closeOneTab(tabId))) return;
         closeOneTab(tabId);
         return;
       }

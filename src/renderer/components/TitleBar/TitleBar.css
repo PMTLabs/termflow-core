@@ -479,3 +479,29 @@
   border-bottom: none;
   opacity: 0.6;
 }
+
+/* Settings gear (plan/013 Task 21) — a semantic icon, so it uses the 24-viewBox stroke family
+   at a larger optical size than the 12x12 window glyphs beside it.
+
+   The explicit size is REQUIRED, not a preference: `.window-control-btn svg` above forces
+   12x12 on every child svg, and a 24-viewBox gear rendered into 12px is an unreadable smudge.
+   `gearIcon.test.ts` derives that relationship from this file rather than restating the
+   numbers, because the failure is silent — the icon still renders, just illegibly. */
+.window-control-btn.settings svg {
+  width: 15px;
+  height: 15px;
+}
+.window-control-btn.settings:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.window-control-btn.settings:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+/* On macOS the gear is not inside `.window-controls`, which is what gives its siblings their
+   height, so it takes the bar's height directly. */
+.window-control-btn.settings.is-mac {
+  height: 100%;
+}
+.light-theme .window-control-btn.settings:hover {
+  background-color: rgba(0, 0, 0, 0.06);
+}
