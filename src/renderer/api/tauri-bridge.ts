@@ -136,6 +136,10 @@ interface ElectronAPI {
   sendToMain: (channel: string, data: any) => void;
   checkConnectionHealth: () => Promise<Array<{name: string; url: string; healthy: boolean; active_clients?: number; conflict?: boolean}>>;
   confirmCloseApp: () => Promise<void>;
+  /** Plan 018: report that this window has persisted its session, so a quit can proceed. */
+  flushSessionAck: () => Promise<void>;
+  /** Plan 018: every window id the backend registry currently holds. */
+  listWindowSessionIds: () => Promise<string[]>;
   // Detach / cross-window pane handoff
   stashDetachPayload: (token: string, payload: any) => Promise<void>;
   takeDetachPayload: (token: string) => Promise<any | null>;
@@ -612,6 +616,15 @@ const tauriBridge: ElectronAPI = {
   // Exit the app after the user confirms in the in-app close dialog.
   confirmCloseApp: async () => {
     await invoke('confirm_close_app');
+  },
+
+  // Plan 018: the quit handshake, and the live window list the orphan sweep
+  // measures against.
+  flushSessionAck: async () => {
+    await invoke('flush_session_ack');
+  },
+  listWindowSessionIds: async () => {
+    return invoke('list_window_session_ids');
   },
 
   // Detach / cross-window pane handoff
