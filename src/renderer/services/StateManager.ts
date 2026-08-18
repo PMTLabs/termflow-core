@@ -11,7 +11,8 @@ import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { sessionStateKey } from './windowScope';
 
 export interface AppState {
   tabs: any[];
@@ -52,7 +53,12 @@ class StateManagerClass {
   // Getters, not fields: the profile is resolved during bootstrap and this
   // singleton may be constructed either side of that. The default profile keeps
   // the original key names, so existing saved state loads untouched.
-  private get STATE_KEY(): string { return stateKey(); }
+  // Per WINDOW, not just per instance (plan 018). Every window of one instance
+  // shares a WebView2 origin and therefore one localStorage; a single key meant
+  // each window's save blindly overwrote every other window's tabs, and only one
+  // window ever read it back. Slot 0 keeps the original bare key, so an existing
+  // single-window session still loads untouched.
+  private get STATE_KEY(): string { return sessionStateKey(); }
   private get LAYOUTS_KEY(): string { return layoutsKey(); }
 
   /**
