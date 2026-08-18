@@ -1,5 +1,5 @@
 import type { PaneNode } from '../store/slices/panesSlice';
-import { getAllTerminalIds } from '../store/slices/paneTreeOps';
+import { getAllTerminalIds, removeLeaf } from '../store/slices/paneTreeOps';
 import { generateId } from '../utils/id';
 
 /**
@@ -41,17 +41,57 @@ export function terminalsHomedElsewhere(
 }
 
 /**
+ * Drop every leaf whose terminal is already spoken for — by another tab (`taken`) or by an
+ * earlier leaf of this same tree. Returns null if nothing survives.
+ *
+ * A tree naming one terminal twice is malformed however it got that way: one PTY cannot be
+ * two panes, and rendering it as two mounts the same terminal in two places. Installing such
+ * a tree is never right, so this repairs the candidate rather than trusting or rejecting it
+ * wholesale — rejecting would orphan the leaves that were fine, which for a restored tree
+ * means losing a terminal that had nothing to do with the problem.
+ *
+ * This matters most for state that is ALREADY on disk. `saveAppState` persists the
+ * window-global mirror verbatim, so a session that hit the resurrection bug has the duplicate
+ * saved in localStorage and restores it on the next launch — where the entry arrives with no
+ * key and Rule 1 has nothing to say about it.
+ *
+ * The FIRST occurrence wins, and the walk is depth-first left-to-right, so the repair is
+ * deterministic: the same saved state always restores the same way.
+ */
+export function pruneDuplicateLeaves(tree: PaneNode, taken: Set<string>): PaneNode | null {
+  const seen = new Set(taken);
+  const offenders: string[] = [];
+  const walk = (n: PaneNode): void => {
+    if (n.type === 'terminal') {
+      if (!n.terminalId) return;
+      if (seen.has(n.terminalId)) offenders.push(n.id);
+      else seen.add(n.terminalId);
+      return;
+    }
+    (n.children ?? []).forEach(walk);
+  };
+  walk(tree);
+
+  let out: PaneNode | null = tree;
+  for (const paneId of offenders) {
+    if (!out) break;
+    out = removeLeaf(out, paneId).tree;
+  }
+  return out;
+}
+
+/**
  * The tree to install for `tab`, or null to leave it alone.
  *
  * Rule 1 — **an existing key means initialised, even when it holds null.** `null` is an open
  * tab with no terminals; only a tab whose key was never written gets seeded. This is the
  * rule that keeps a re-homed tab empty instead of refilling it.
  *
- * Rule 2 — **never install a tree naming a terminal another tab already owns.** Rule 1 alone
+ * Rule 2 — **never install a leaf naming a terminal another tab already owns.** Rule 1 alone
  * relies on the null surviving, and it does not always: `tabPanes` is a window-global mirror
  * that is upsert-only and gets persisted, and a layout restored from it arrives with no key
- * at all. So the candidate tree is checked against what the other tabs hold, whether it came
- * from that stale mirror or was manufactured here.
+ * at all. So the candidate is pruned against what the other tabs hold — and against itself,
+ * which is what repairs a duplicate already saved to disk by a session that hit the bug.
  */
 export function seedTreeFor(
   tab: SeedTab,
@@ -68,8 +108,5 @@ export function seedTreeFor(
     shellType: tab.shellType,
   };
 
-  const homed = terminalsHomedElsewhere(trees, tab.id);
-  if (getAllTerminalIds(candidate).some((id) => homed.has(id))) return null;
-
-  return candidate;
+  return pruneDuplicateLeaves(candidate, terminalsHomedElsewhere(trees, tab.id));
 }

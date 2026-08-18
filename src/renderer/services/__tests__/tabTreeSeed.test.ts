@@ -1,4 +1,5 @@
 import { seedTreeFor, terminalsHomedElsewhere } from '../tabTreeSeed';
+import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import type { PaneNode } from '../../store/slices/panesSlice';
 
 const leaf = (paneId: string, terminalId: string): PaneNode => ({
@@ -65,19 +66,54 @@ describe('seedTreeFor', () => {
     expect(seedTreeFor(TAB, { 'tb-b': null }, {})).toBeNull();
   });
 
-  // A mirror tree with SEVERAL panes, only one of which moved away. `some` is the rule, not
-  // `every`: installing this would still put `tm-moved` in two tabs at once. Every
-  // single-leaf case reads the same under either quantifier, so this is the one that
+  // A mirror tree with SEVERAL panes, only one of which moved away. The offending leaf is
+  // PRUNED and the rest of the tree installed — refusing the whole tree would orphan
+  // `tm-stayed`, which had nothing to do with the problem and would then belong to no tab at
+  // all. Every single-leaf case looks the same under either policy; this is the one that
   // separates them.
-  it('refuses a multi-pane mirror when only ONE of its leaves moved away', () => {
+  it('prunes the moved leaf from a multi-pane mirror and keeps the rest', () => {
     const stale: PaneNode = {
       id: 'pn-stale', type: 'split', direction: 'horizontal', size: 50,
       children: [leaf('pn-s1', 'tm-moved'), leaf('pn-s2', 'tm-stayed')],
     };
-    expect(seedTreeFor(TAB, { 'tb-a': leaf('pn-a', 'tm-moved') }, { 'tb-b': stale })).toBeNull();
-    // ...and accepts it when neither leaf is spoken for, so the refusal is about ownership
-    // rather than about the tree having more than one pane.
+    const seeded = seedTreeFor(TAB, { 'tb-a': leaf('pn-a', 'tm-moved') }, { 'tb-b': stale })!;
+    expect(seeded).not.toBeNull();
+    expect(getAllTerminalIds(seeded)).toEqual(['tm-stayed']);
+
+    // ...and it is left completely alone when neither leaf is spoken for, so the pruning is
+    // about ownership rather than about the tree having more than one pane.
     expect(seedTreeFor(TAB, { 'tb-a': leaf('pn-a', 'tm-other') }, { 'tb-b': stale })).toBe(stale);
+  });
+
+  /**
+   * The repair for state that is ALREADY on disk.
+   *
+   * A session that hit the resurrection bug saved a tree naming one terminal twice, and
+   * `saveAppState` persists the window mirror verbatim — so it comes back on the next launch
+   * with no key, where the "already initialised" rule has nothing to say about it. One PTY
+   * cannot be two panes, so the second copy is dropped and the tab comes up correct.
+   */
+  it('repairs a saved tree that names the same terminal twice', () => {
+    const corrupt: PaneNode = {
+      id: 'pn-root', type: 'split', direction: 'horizontal', size: 50,
+      children: [
+        leaf('pn-1', 'tb-b'),
+        { id: 'pn-inner', type: 'split', direction: 'vertical', size: 50,
+          children: [leaf('pn-2', 'tm-dupe'), leaf('pn-3', 'tm-dupe')] },
+      ],
+    };
+    const seeded = seedTreeFor(TAB, {}, { 'tb-b': corrupt })!;
+    expect(getAllTerminalIds(seeded)).toEqual(['tb-b', 'tm-dupe']);
+  });
+
+  it('keeps the FIRST copy, so the same saved state always restores the same way', () => {
+    const corrupt: PaneNode = {
+      id: 'pn-root', type: 'split', direction: 'horizontal', size: 50,
+      children: [leaf('pn-keep', 'tm-dupe'), leaf('pn-drop', 'tm-dupe')],
+    };
+    const seeded = seedTreeFor(TAB, {}, { 'tb-b': corrupt })!;
+    expect(seeded.type).toBe('terminal');
+    expect(seeded.id).toBe('pn-keep');
   });
 
   it('refuses a mirror tree whose leaves live in another tab now', () => {
