@@ -12,7 +12,8 @@ import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
-import { sessionStateKey } from './windowScope';
+import { sessionStateKey, isSlotZero } from './windowScope';
+import { unionKeepSet } from './sessionKeepSet';
 
 export interface AppState {
   tabs: any[];
@@ -174,28 +175,36 @@ class StateManagerClass {
       // restoreTabPanesInPlace to have run yet.
       await this.reconcileExistingTerminals(appState);
 
-      // Orphan sweep: drop persisted scrollback for any terminal no longer in the
-      // restored layout (closed tabs, crashed sessions, force-kills). Uses the same
-      // id set the reconcile walks — tab roots plus every terminal node in the saved
-      // pane trees. Best-effort; failure never blocks restore.
-      // ASSUMES a single persistent state (one STATE_KEY); the `?newWindow=1` path
-      // returns before restoreState runs, so no second window prunes with a partial
-      // keep-set. If multi-window independent saved layouts are ever added, this must
-      // union all windows' live terminals (or move the sweep server-side) first.
-      try {
-        const keep = new Set<string>();
-        (appState.tabs || []).forEach((t: any) => {
-          if (t?.id) keep.add(t.id);
-        });
-        const walkKeep = (node: any): void => {
-          if (!node) return;
-          if (node.type === 'terminal' && node.terminalId) keep.add(node.terminalId);
-          if (Array.isArray(node.children)) node.children.forEach(walkKeep);
-        };
-        Object.values(appState.tabPanes || {}).forEach(walkKeep);
-        await window.electronAPI?.pruneTerminalHistory?.([...keep]);
-      } catch (e) {
-        console.warn('StateManager: history prune skipped:', e);
+      // Orphan sweep: drop persisted scrollback for any terminal no longer in a
+      // saved layout (closed tabs, crashed sessions, force-kills).
+      //
+      // The keep-set is the UNION over EVERY window's session, not just this
+      // one's (plan 018 Task 7). Sessions are per-window now, and N windows boot
+      // concurrently — a sweep keyed on one window's layout would delete every
+      // other window's scrollback before those windows had read their own
+      // session. This is what the previous comment here required if per-window
+      // layouts were ever added.
+      //
+      // Only slot 0 sweeps: a correct union run N times is merely wasteful, but
+      // it is still N round-trips for no gain.
+      //
+      // Best-effort; failure never blocks restore.
+      if (isSlotZero()) {
+        try {
+          const keep = unionKeepSet(localStorage);
+          if (!keep.complete) {
+            // A window whose session would not parse is a window whose terminals
+            // we cannot name. Sweeping on a partial union deletes scrollback
+            // that cannot be recovered, so skip it entirely this time.
+            console.warn(
+              'StateManager: history prune skipped — at least one window session was unreadable',
+            );
+          } else {
+            await window.electronAPI?.pruneTerminalHistory?.([...keep.ids]);
+          }
+        } catch (e) {
+          console.warn('StateManager: history prune skipped:', e);
+        }
       }
 
       // Restore tabs

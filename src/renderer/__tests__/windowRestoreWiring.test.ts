@@ -77,7 +77,9 @@ describe('a new window persists its own session', () => {
 
   it('keeps StateManager on the per-window key', () => {
     const sm = read('services', 'StateManager.ts');
-    expect(sm).toContain("import { sessionStateKey } from './windowScope'");
+    // Match the SOURCE, not the exact named-import list: the list grows, and a
+    // tripwire that breaks on unrelated edits gets loosened until it is vacuous.
+    expect(sm).toMatch(/import\s*\{[^}]*sessionStateKey[^}]*\}\s*from\s*'\.\/windowScope'/);
     expect(sm).toMatch(/STATE_KEY\(\)\s*:\s*string\s*\{\s*return\s+sessionStateKey\(\);/);
     // The old profile-only key must be gone from the session path, or windows
     // silently collide again.
