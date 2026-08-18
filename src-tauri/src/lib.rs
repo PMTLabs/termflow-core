@@ -6,6 +6,7 @@ pub mod app_config;
 pub mod profile;
 pub mod instance_lock;
 pub mod net_ports;
+pub mod window_registry;
 mod history_store;
 pub mod network_commands;
 pub mod pty_manager;
