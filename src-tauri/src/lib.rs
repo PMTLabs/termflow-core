@@ -778,7 +778,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 // window is listening yet the user still lands on a visible window.
                 let _ = app.emit("tray:open-peers", ());
             }
-            "tray_quit" => app.exit(0),
+            // Give every window a chance to persist first (plan 018 Task 8):
+            // a bare exit(0) fires no CloseRequested, so no renderer would save.
+            "tray_quit" => commands::flush_then_exit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -1474,6 +1476,7 @@ pub fn run() {
         commands::confirm_close_app,
         commands::get_window_session_id,
         commands::list_window_session_ids,
+        commands::flush_session_ack,
         commands::stash_detach_payload,
         commands::take_detach_payload,
         commands::create_detached_window,

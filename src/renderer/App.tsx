@@ -246,6 +246,32 @@ const App: React.FC = () => {
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
+    // Quit handshake (plan 018 Task 8). A programmatic exit fires no
+    // CloseRequested and therefore no `beforeunload`, so without this the
+    // backend would tear the process down before this window ever persisted.
+    // Each window now owns data only IT can write, so an unflushed window loses
+    // its tabs outright. Ack afterwards so the backend can stop waiting; the
+    // ack is sent even if the save throws, because a quit that hangs is worse
+    // than one stale window.
+    let flushAlive = true;
+    let unlistenFlush: (() => void) | undefined;
+    listen('app:flush-session', () => {
+      void (async () => {
+        try {
+          await saveStateWithCwds(500);
+        } catch (e) {
+          console.warn('App: flush-session save failed; acking anyway', e);
+        }
+        try {
+          await window.electronAPI?.flushSessionAck?.();
+        } catch {
+          /* backend already gone */
+        }
+      })();
+    })
+      .then(fn => { if (flushAlive) unlistenFlush = fn; else fn(); })
+      .catch(() => { /* not a tauri window / event API unavailable */ });
+
     // OS session switch (RDP↔console connect / unlock) repaints every TUI at once —
     // a synchronized ConPTY burst that would falsely ring the unseen bell on every
     // tab when you return to the machine. The DOM visibilitychange event does NOT
@@ -333,6 +359,8 @@ const App: React.FC = () => {
 
       window.removeEventListener('beforeunload', handleBeforeUnload);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      flushAlive = false;
+      if (unlistenFlush) unlistenFlush();
       sessionAlive = false;
       if (unlistenSession) unlistenSession();
       resumeAlive = false;

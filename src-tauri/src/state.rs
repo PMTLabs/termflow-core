@@ -316,6 +316,13 @@ pub struct AppState<R: Runtime = Wry> {
     // Rust owns this because it must know how many windows to create BEFORE any
     // webview (and therefore any localStorage) exists.
     pub windows: Arc<crate::window_registry::WindowTracker>,
+    // Plan 018 Task 8: labels that have acknowledged `app:flush-session`. A
+    // programmatic exit bypasses every window's CloseRequested handler, so the
+    // renderers are asked to persist their sessions and answer here first.
+    pub flush_acks: Arc<DashMap<String, ()>>,
+    // Set once a flush-then-exit is underway, so a second Quit does not restart
+    // the wait — it exits immediately.
+    pub exiting: Arc<AtomicBool>,
     // Latest shell-reported working directory per terminal, parsed from OSC 9;9 / OSC 7
     // in the PTY output stream (backlog 004). This is the source of truth for cwd on
     // shells whose process cwd is NOT live — notably PowerShell, which doesn't update
@@ -430,6 +437,8 @@ impl<R: Runtime> Clone for AppState<R> {
             active_global_drag: self.active_global_drag.clone(),
             window_titles: self.window_titles.clone(),
             windows: self.windows.clone(),
+            flush_acks: self.flush_acks.clone(),
+            exiting: self.exiting.clone(),
             terminal_cwds: self.terminal_cwds.clone(),
             history_store: self.history_store.clone(),
             history_dirty: self.history_dirty.clone(),
@@ -593,6 +602,8 @@ impl<R: Runtime> AppState<R> {
             active_global_drag: Arc::new(Mutex::new(None)),
             window_titles: Arc::new(DashMap::new()),
             windows: Arc::new(crate::window_registry::WindowTracker::load_default()),
+            flush_acks: Arc::new(DashMap::new()),
+            exiting: Arc::new(AtomicBool::new(false)),
             terminal_cwds: Arc::new(DashMap::new()),
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             history_dirty: Arc::new(DashMap::new()),

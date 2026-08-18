@@ -14,6 +14,7 @@ import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
 import { sessionStateKey, isSlotZero } from './windowScope';
 import { unionKeepSet } from './sessionKeepSet';
+import { sweepOrphanSessions } from './sessionOrphans';
 
 export interface AppState {
   tabs: any[];
@@ -190,6 +191,17 @@ class StateManagerClass {
       //
       // Best-effort; failure never blocks restore.
       if (isSlotZero()) {
+        // Drop session blobs for windows that no longer exist FIRST, so their
+        // terminals fall out of the union below and their scrollback is
+        // actually reclaimed rather than kept alive by a dead window's blob.
+        // Skips itself if the backend cannot say which windows are live.
+        try {
+          const liveIds = (await window.electronAPI?.listWindowSessionIds?.()) ?? [];
+          sweepOrphanSessions(localStorage, liveIds);
+        } catch (e) {
+          console.warn('StateManager: orphan session sweep skipped:', e);
+        }
+
         try {
           const keep = unionKeepSet(localStorage);
           if (!keep.complete) {

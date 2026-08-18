@@ -1238,7 +1238,7 @@ pub fn diag_log(msg: String) {
 #[tauri::command]
 pub fn quit_app(app_handle: tauri::AppHandle) {
     log::info!("quit_app: exiting (EULA declined or explicit quit).");
-    app_handle.exit(0);
+    flush_then_exit(&app_handle);
 }
 
 /// Exit the app after the user confirms the close in the in-app dialog.
@@ -1255,7 +1255,10 @@ pub fn confirm_close_app(app_handle: tauri::AppHandle, window: tauri::Window) {
         .count();
     if count <= 1 {
         log::info!("Last window confirmed close; exiting app.");
-        app_handle.exit(0);
+        // This window has already saved (the renderer awaits saveStateWithCwds
+        // before invoking us), but any OTHER window still alive — a hidden one,
+        // or one mid-teardown — has not, and exit() would skip its unload.
+        flush_then_exit(&app_handle);
     } else {
         log::info!("Closing window '{}' ({} window(s) remain).", window.label(), count - 1);
         if let Err(e) = window.destroy() {
@@ -1453,6 +1456,151 @@ pub fn get_window_session_id(
 #[tauri::command]
 pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
     state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
+}
+
+// ----- Quit: give every window a chance to persist first ---------------------
+//
+// `AppHandle::exit` tears the process down without firing `CloseRequested` for
+// any window, so no renderer gets its `beforeunload`. That was survivable while
+// one shared key held the whole session — some window had almost certainly
+// written it recently. With per-window sessions (plan 018) each window owns data
+// only IT can write, so an unflushed window loses its tabs outright.
+
+/// How long a quit will wait for windows to persist. A quit that hangs is worse
+/// than a stale tab, so this is a hard ceiling, not a target.
+const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Ask every window to persist its session, then exit — or exit anyway once
+/// `FLUSH_TIMEOUT` elapses.
+pub fn flush_then_exit(app: &tauri::AppHandle) {
+    use tauri::{Emitter, Manager as _};
+
+    let Some(state) = app.try_state::<AppState>() else {
+        app.exit(0);
+        return;
+    };
+
+    // A second Quit while a flush is in flight means "I am done waiting".
+    if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log::info!("flush_then_exit: already flushing; exiting now.");
+        app.exit(0);
+        return;
+    }
+
+    let expected: Vec<String> = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.as_str() != "drag-preview")
+        .cloned()
+        .collect();
+    if expected.is_empty() {
+        app.exit(0);
+        return;
+    }
+
+    state.flush_acks.clear();
+    if let Err(e) = app.emit("app:flush-session", ()) {
+        // Nothing will ack, so do not make the user wait out the timeout.
+        log::warn!("flush_then_exit: could not ask windows to flush ({e}); exiting now.");
+        app.exit(0);
+        return;
+    }
+
+    let acks = state.flush_acks.clone();
+    let app = app.clone();
+    let want = expected.len();
+    tauri::async_runtime::spawn(async move {
+        let all_acked = wait_for_acks(&acks, want, FLUSH_TIMEOUT).await;
+        if all_acked {
+            log::info!("flush_then_exit: all {want} window(s) persisted; exiting.");
+        } else {
+            log::warn!(
+                "flush_then_exit: {}/{} window(s) persisted before the {}ms deadline; exiting anyway.",
+                acks.len(),
+                want,
+                FLUSH_TIMEOUT.as_millis()
+            );
+        }
+        app.exit(0);
+    });
+}
+
+/// Wait until `want` windows have acked, or `timeout` elapses. Returns whether
+/// every window acked.
+///
+/// Split out from `flush_then_exit` so the TIMEOUT path is testable: it is the
+/// branch that matters (a renderer that never answers must not wedge the quit)
+/// and the one a happy-path test would never reach.
+async fn wait_for_acks(
+    acks: &dashmap::DashMap<String, ()>,
+    want: usize,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if acks.len() >= want {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn a_window_that_never_acks_does_not_wedge_the_quit() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        acks.insert("main".into(), ());
+        let started = Instant::now();
+        // Two windows expected, one silent.
+        let all = wait_for_acks(&acks, 2, Duration::from_millis(120)).await;
+        assert!(!all, "must report the flush as incomplete");
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "must actually have waited for the deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "and must not wait past it — a quit that hangs is worse than a stale tab"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_acks_release_the_wait_early() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        let bg = acks.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            bg.insert("main".into(), ());
+            bg.insert("window-a".into(), ());
+        });
+        let started = Instant::now();
+        assert!(wait_for_acks(&acks, 2, Duration::from_secs(30)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait must end on the acks, not on the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn expecting_nobody_returns_immediately() {
+        let acks: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+        assert!(wait_for_acks(&acks, 0, Duration::from_secs(30)).await);
+    }
+}
+
+/// A window reporting that it has persisted its session (plan 018 Task 8).
+#[tauri::command]
+pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindow) {
+    state.flush_acks.insert(window.label().to_string(), ());
 }
 
 // ----- Detach / cross-window pane handoff -----------------------------------
