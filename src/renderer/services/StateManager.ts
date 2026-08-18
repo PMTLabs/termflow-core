@@ -673,8 +673,13 @@ class StateManagerClass {
             ...tab,
             isActive: false // Ensure tabs are not active initially
           }));
+          // `!== undefined`, not truthiness: a saved layout can legitimately hold `null`
+          // for a tab that is open and empty, and skipping that dispatch left the key
+          // absent — which TerminalContainer reads as "never initialised" and fills with a
+          // fresh terminal. Loading a layout then silently refilled the tab the user had
+          // deliberately emptied before saving it.
           const tabTree = sanitizedLayout.treesByTabId?.[tab.id];
-          if (tabTree) {
+          if (tabTree !== undefined) {
             dispatch(addTabTree({ tabId: tab.id, tree: tabTree }));
           }
         }

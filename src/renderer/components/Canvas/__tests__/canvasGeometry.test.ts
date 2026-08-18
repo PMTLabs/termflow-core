@@ -5,7 +5,7 @@ import {
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
   headFontSize, HEAD_FONT, MIN_TITLE_PX, MAX_HEAD_K, HEAD_GROWTH_PX,
   canvasMetrics, DEFAULT_METRICS, MIN_HOST_W, MAX_HOST_W, HOST_ASPECT,
-  CHIP_H, headSlack, paintedNodeH, paintedNodeRect,
+  CHIP_H, headSlack, paintedNodeH, paintedNodeRect, aimedNodeRect,
 } from '../canvasGeometry';
 import { PAD } from '../canvasLayout';
 
@@ -900,5 +900,65 @@ describe('paintedNodeRect', () => {
     expect(box.y).toBe(r.y);                                  // north: unchanged
     expect(box.y + box.h).toBeLessThan(r.y + r.h);             // south: pulled up
     expect(box.y + box.h / 2).toBeLessThan(r.y + r.h / 2);     // east/west: with it
+  });
+});
+
+/**
+ * The camera's half of the drawn-box rule.
+ *
+ * `paintedNodeRect` needs to be TOLD whether the node is a chip, because its callers hold a
+ * tier map for the current viewport. A camera does not: a fly-to changes the zoom, so the
+ * only rect worth aiming at is the one the node will have when the camera ARRIVES. Deriving
+ * the tier from `z` is what lets a caller pass its destination zoom and get that answer.
+ */
+describe('aimedNodeRect', () => {
+  const r: Rect = { x: 100, y: 200, w: NODE_W, h: NODE_H };
+  /** A zoom that puts the node's screen width inside the chip band [T_CHIP, T_SNAP). */
+  const zChip = (T_CHIP + 1) / NODE_W;
+  /** ...and one above zoom 1, where the header has shrunk and given height BACK. */
+  const zFull = 2;
+
+  it('agrees with paintedNodeRect once the tier is known', () => {
+    expect(aimedNodeRect(r, zFull)).toEqual(paintedNodeRect(r, zFull, false));
+    expect(aimedNodeRect(r, zChip)).toEqual(paintedNodeRect(r, zChip, true));
+  });
+
+  it('reads the chip tier off the zoom, so a chip aims at CHIP_H', () => {
+    expect(baseTier(r.w * zChip)).toBe('chip');
+    expect(aimedNodeRect(r, zChip).h).toBe(CHIP_H);
+  });
+
+  // The whole reason the camera cannot use `rect`: at a working zoom the drawn box is
+  // shorter by the slack the shrinking title bar gives back, so centring the reserved rect
+  // leaves the node sitting high by half of it.
+  it('is shorter than the reserved rect wherever the header has shrunk', () => {
+    expect(headSlack(zFull)).toBeGreaterThan(0);
+    expect(aimedNodeRect(r, zFull).h).toBe(r.h - headSlack(zFull));
+    expect(aimedNodeRect(r, zFull).h).toBeLessThan(r.h);
+  });
+
+  // ...and the sign flips below zoom 1, where the header GROWS and pushes the node past its
+  // slot instead. The aimed box follows it either way, which is the point of deriving the
+  // height rather than subtracting a constant.
+  it('is taller than the reserved rect below zoom 1', () => {
+    const zSmall = T_GPU / NODE_W;                 // ≈0.71: interactive, but zoomed out
+    expect(zSmall).toBeLessThan(1);
+    expect(headSlack(zSmall)).toBeLessThan(0);
+    expect(aimedNodeRect(r, zSmall).h).toBeGreaterThan(r.h);
+  });
+
+  it('never moves the node — only its height changes', () => {
+    const box = aimedNodeRect(r, zFull);
+    expect({ x: box.x, y: box.y, w: box.w }).toEqual({ x: r.x, y: r.y, w: r.w });
+  });
+
+  // Below the chip band the node paints nothing of its own, and its reserved rect is the
+  // only box left to aim at. Treating `group` as a chip would aim a fly-to at a 58-unit box
+  // for something that is not drawn at all.
+  it('does not treat a group-tier node as a chip', () => {
+    const zGroup = (T_CHIP - 1) / NODE_W;
+    expect(baseTier(r.w * zGroup)).toBe('group');
+    expect(aimedNodeRect(r, zGroup).h).not.toBe(CHIP_H);
+    expect(aimedNodeRect(r, zGroup)).toEqual(paintedNodeRect(r, zGroup, false));
   });
 });

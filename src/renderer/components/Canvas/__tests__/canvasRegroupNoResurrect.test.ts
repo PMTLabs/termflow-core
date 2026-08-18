@@ -1,7 +1,7 @@
 import panesReducer, {
   addTabTree, removePaneFromTab, insertPaneIntoTab, PaneNode,
 } from '../../../store/slices/panesSlice';
-import { seedTreeFor } from '../../../services/tabTreeSeed';
+import { planSeeds } from '../../../services/tabTreeSeed';
 import { planRegroup, findPaneIdByTerminalId } from '../canvasMutations';
 import { buildCanvasModel } from '../canvasSelectors';
 import { arrangeTarget } from '../animateLayout';
@@ -118,7 +118,7 @@ describe('re-homing a group\'s last terminal', () => {
   // Link 2: the seed effect must read that null as "initialised" and leave the tab alone.
   it('the seed effect refuses to refill the emptied tab', () => {
     const s = regroup(initialPanes());
-    expect(seedTreeFor(TABS[1], s.treesByTabId, {})).toBeNull();
+    expect(planSeeds([TABS[1]], s.treesByTabId, {})).toEqual([]);
   });
 
   // Link 2, the other route in: even with no entry at all — a layout restored from the
@@ -128,20 +128,23 @@ describe('re-homing a group\'s last terminal', () => {
     const s = regroup(initialPanes());
     const withoutEntry = { ...s.treesByTabId };
     delete withoutEntry['tb-b'];
-    expect(seedTreeFor(TABS[1], withoutEntry, {})).toBeNull();
+    // The tab is still INITIALISED — as empty. Planning nothing would leave the key absent,
+    // and the very next render would manufacture the terminal all over again.
+    expect(planSeeds([TABS[1]], withoutEntry, {})).toEqual([{ tabId: 'tb-b', tree: null }]);
 
     // ...and the stale mirror is refused for the same reason, not merely the manufactured leaf.
-    expect(seedTreeFor(TABS[1], withoutEntry, { 'tb-b': leaf('pn-stale', 'tb-b') })).toBeNull();
+    expect(planSeeds([TABS[1]], withoutEntry, { 'tb-b': leaf('pn-stale', 'tb-b') }))
+      .toEqual([{ tabId: 'tb-b', tree: null }]);
   });
 
   // A tab that genuinely has never been initialised still gets its tree, or every new tab
   // would come up blank. Without this the rule above could be satisfied by refusing always.
   it('still seeds a tab that has never been initialised', () => {
     const s = regroup(initialPanes());
-    const seed = seedTreeFor({ id: 'tb-new', title: 'New', shellType: 'powershell' },
+    const [plan] = planSeeds([{ id: 'tb-new', title: 'New', shellType: 'powershell' }],
       s.treesByTabId, {});
-    expect(seed).not.toBeNull();
-    expect(seed!.terminalId).toBe('tb-new');
+    expect(plan).toBeDefined();
+    expect(plan.tree!.terminalId).toBe('tb-new');
   });
 
   // The emptied group is still a DROP TARGET (design 010 §6.3), so a terminal has to be able

@@ -264,8 +264,17 @@ describe('stepping and zooming from the keyboard', () => {
   /** Only flies when the node is not already framed, and never changes the zoom. Centring a
    *  node you can already see yanks the viewport for nothing — on a key people hold down. */
   it('flies only when the target is off screen, at the zoom the user chose', () => {
-    expect(STEP).toContain('!isFullyVisible(vp, n.rect, size.w, size.h, FRAME_INSET)');
-    expect(STEP).toContain('centreOn(n.rect, size.w, size.h, vp.z, metrics.zMax)');
+    expect(STEP).toContain('!isFullyVisible(vp, aimedNodeRect(n.rect, vp.z), size.w, size.h, FRAME_INSET)');
+    expect(STEP).toContain('centreOn(aimedNodeRect(n.rect, vp.z), size.w, size.h, vp.z, metrics.zMax)');
+  });
+
+  /** Both calls POINT at the node, so both take the DRAWN box. The reserved rect carries up
+   *  to a title bar of slack the node does not paint, which centres it high and makes the
+   *  containment test trip on empty space — a fly-to for a node that was already fully
+   *  visible, on a key that repeats. Naming `n.rect` bare here is the regression. */
+  it('never aims at the reserved rect', () => {
+    expect(STEP).not.toContain('isFullyVisible(vp, n.rect');
+    expect(STEP).not.toContain('centreOn(n.rect');
   });
 
   it('selects the node it steps to', () => {

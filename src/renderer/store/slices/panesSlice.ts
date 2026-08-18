@@ -75,8 +75,18 @@ function syncActive(state: PanesState): void {
   if (!state.activeTabId) return;
   if (state.paneTree) {
     state.treesByTabId[state.activeTabId] = state.paneTree;
-  } else {
-    delete state.treesByTabId[state.activeTabId];
+    return;
+  }
+  // An emptied tab keeps its KEY, holding null — exactly as `removePaneFromTab` does.
+  // Deleting it said "never initialised", which is the state TerminalContainer's seed net
+  // exists to fill, so closing an active tab's last pane through the legacy path
+  // resurrected the terminal it had just closed.
+  //
+  // Only ever DOWNGRADE an entry that already exists. A virtual tab (canvas, settings) is
+  // active with no tree of its own, and minting a null key for it would hand the canvas a
+  // phantom group frame for itself.
+  if (state.activeTabId in state.treesByTabId) {
+    state.treesByTabId[state.activeTabId] = null;
   }
 }
 
@@ -522,7 +532,10 @@ const panesSlice = createSlice({
     },
 
     /** Store/overwrite a tab's authoritative tree (background or active). */
-    addTabTree: (state, action: PayloadAction<{ tabId: string; tree: PaneNode }>) => {
+    // `tree: null` installs the KEY for a tab that is open and empty. That is a real
+    // instruction — absent means "never initialised" and gets seeded, so restoring an
+    // emptied tab has to write the null rather than write nothing.
+    addTabTree: (state, action: PayloadAction<{ tabId: string; tree: PaneNode | null }>) => {
       const { tabId, tree } = action.payload;
       state.treesByTabId[tabId] = tree;
       if (state.activeTabId === tabId) state.paneTree = tree;
@@ -644,14 +657,21 @@ const panesSlice = createSlice({
       if (sourceTabId === targetTabId) return;
       const srcTree = state.treesByTabId[sourceTabId];
       const dstTree = state.treesByTabId[targetTabId];
-      if (!srcTree || !dstTree) return;
+      // The DESTINATION may legitimately be null — an open tab someone emptied by dragging
+      // its last terminal away is a drop target, not a missing tab. Only `undefined` (never
+      // initialised) is a refusal here. `insertPaneIntoTab` and `planRegroup` already made
+      // this distinction; this was the third caller of the same guard and it still read the
+      // empty tab as absent, so a tab-strip drag onto an emptied tab silently no-opped.
+      if (!srcTree || dstTree === undefined) return;
 
       const { tree: prunedSrc, removed } = removeLeaf(srcTree, sourcePaneId);
       if (!removed) return;
 
       // Cross-tab "center" has no swap semantics; treat it as an insert to the right.
       const edge: EdgeZone = zone === 'center' ? 'right' : zone;
-      const newDst = insertByZone(dstTree, targetPaneId, removed, edge);
+      const newDst = dstTree === null
+        ? removed
+        : insertByZone(dstTree, targetPaneId, removed, edge);
 
       // Null rather than a deleted key, as in `removePaneFromTab`. The tab-strip drag
       // closes a source tab it empties (`PaneDragController.commitDrop`), which now reads

@@ -3,6 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
   closePane,
+  removePaneFromTab,
   resizePane,
   focusPane,
   toggleMaximizePane,
@@ -90,11 +91,23 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
     closePaneNonBlocking({
       terminalId,
-      removeFromUi: () => dispatch(closePane(paneId)),
+      // Remove the pane from the tab that OWNS it, not from whichever tab is active.
+      //
+      // `closePane` mutates `state.paneTree` — the active tab's tree — but this component
+      // is mounted once per tab and routes by tree membership, so the two disagree for
+      // every tab that is not the active one. Canvas Mode makes that the normal case: the
+      // active tab is the canvas itself, which has no tree, so `closePane` returned on its
+      // first line. The PTY was killed and the pane stayed in the tree, leaving a dead node
+      // on the canvas that survived a save and reload. `removePaneFromTab` is the same
+      // operation scoped to a tab, and it already clears the maximize flag and repairs
+      // `activePaneId` when the tab it touches happens to be the active one.
+      removeFromUi: () => dispatch(
+        tabId ? removePaneFromTab({ tabId, paneId }) : closePane(paneId),
+      ),
       closeTerminal: (id) => terminalService.closeTerminal(id),
       clearCwdSnapshot,
     });
-  }, [dispatch, paneTree]);
+  }, [dispatch, paneTree, tabId]);
 
   // Spec 045 §3.4: Ctrl+Shift+W asks for a close; the dialog below confirms it,
   // exactly as the pane's (x) button does. PaneManager is mounted per tab

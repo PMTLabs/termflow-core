@@ -20,6 +20,7 @@ import { NodeSnapshot } from './NodeSnapshot';
 import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
+  aimedNodeRect,
   paintedNodeRect, zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
@@ -521,8 +522,11 @@ export const CanvasMode: React.FC = () => {
     if (!next) return;
     dispatch(selectNode(next));
     const n = model.nodes.find((x) => x.terminalId === next);
-    if (n && !isFullyVisible(vp, n.rect, size.w, size.h, FRAME_INSET)) {
-      flyTo(centreOn(n.rect, size.w, size.h, vp.z, metrics.zMax));
+    // `aimedNodeRect`, not `n.rect`: both calls POINT at the node, and the reserved rect
+    // carries up to a title bar of slack the node does not paint. Testing it made a fully
+    // visible node near the bottom edge report as clipped and fly for nothing.
+    if (n && !isFullyVisible(vp, aimedNodeRect(n.rect, vp.z), size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(aimedNodeRect(n.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
     }
   }, [model.nodes, selectedId, dispatch, vp, size, flyTo, metrics]);
 
@@ -603,7 +607,10 @@ export const CanvasMode: React.FC = () => {
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
     dispatch(selectNode(terminalId));
-    flyTo(centreOn(n.rect, size.w, size.h, Math.max(vp.z, ROW_FLY_ZOOM), metrics.zMax));
+    // The DESTINATION zoom, in both places: the drawn height is a function of the zoom the
+    // camera arrives at, not the one it leaves from.
+    const z = Math.max(vp.z, ROW_FLY_ZOOM);
+    flyTo(centreOn(aimedNodeRect(n.rect, z), size.w, size.h, z, metrics.zMax));
   }, [model.nodes, dispatch, flyTo, size, vp.z, metrics]);
 
   /** A minimap click: pan to that world point, keeping the zoom the user chose. A zero-size
@@ -678,8 +685,8 @@ export const CanvasMode: React.FC = () => {
     // cursor — flying to a node the user just placed where they were looking would yank the
     // viewport for nothing.
     dispatch(selectNode(plan.tab.id));
-    if (!isFullyVisible(vp, plan.rect, size.w, size.h, FRAME_INSET)) {
-      flyTo(centreOn(plan.rect, size.w, size.h, vp.z, metrics.zMax));
+    if (!isFullyVisible(vp, aimedNodeRect(plan.rect, vp.z), size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
     }
 
     // Then the wire, if this came from a port. Server-minted id only, exactly as the drag path
@@ -871,7 +878,9 @@ export const CanvasMode: React.FC = () => {
               // otherwise start from a screen-filling box and fling it across the world.
               onHeaderPointerDown={isOverlaid ? undefined : drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)}
               onDoubleClick={focusTerminal(n.terminalId)}
-              onChipClick={() => flyTo(centreOn(n.rect, size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax))}
+              onChipClick={() => flyTo(centreOn(
+                aimedNodeRect(n.rect, NODE_CHIP_ZOOM), size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
+              ))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}
               onClose={() => closeNode(n)}

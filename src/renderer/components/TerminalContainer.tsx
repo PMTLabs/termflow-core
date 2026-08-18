@@ -6,7 +6,7 @@ import { setPaneTree, setActiveTabId, addTabTree, removeTabTree } from '../store
 import { pruneCanvasGeometry } from '../store/slices/canvasSlice';
 import './TerminalContainer.css';
 import { clearTabPanesInPlace } from '../services/tabPanesStore';
-import { seedTreeFor } from '../services/tabTreeSeed';
+import { planSeeds } from '../services/tabTreeSeed';
 
 interface TabPaneMapping {
   [tabId: string]: any; // Store pane tree for each tab
@@ -52,14 +52,18 @@ export const TerminalContainer: React.FC = () => {
     const activeTab = tabs.find(t => t.id === activeTabId);
     if (isVirtualTab(activeTab?.shellType)) return;
 
-    const seed = seedTreeFor(
-      { id: activeTabId, title: activeTab?.title, shellType: activeTab?.shellType },
+    // `planSeeds` of one, so this path and the all-tabs path below cannot drift: a rule
+    // added to one is a rule the other gets. An empty result means "already initialised";
+    // a result holding a null TREE means "initialised and empty", which still has to be
+    // written, so the two are not interchangeable.
+    const [plan] = planSeeds(
+      [{ id: activeTabId, title: activeTab?.title, shellType: activeTab?.shellType }],
       treesByTabId,
       tabPanes,
     );
-    if (seed) {
-      tabPanes[activeTabId] = seed;
-      dispatch(addTabTree({ tabId: activeTabId, tree: seed }));
+    if (plan) {
+      tabPanes[activeTabId] = plan.tree;
+      dispatch(addTabTree({ tabId: activeTabId, tree: plan.tree }));
     }
   }, [activeTabId, tabs, treesByTabId, dispatch]);
 
@@ -125,17 +129,24 @@ export const TerminalContainer: React.FC = () => {
   // Ensure all tabs have a pane tree initialized (in the window map AND the
   // authoritative Redux store treesByTabId, which background tabs now render from).
   useEffect(() => {
-    tabs.forEach(tab => {
-      if (isVirtualTab(tab.shellType)) return;
-      // Seeds Redux AND the window map from one decision (covers API-/restore-created
-      // tabs). Returns null for a tab that is already initialised — including one that is
-      // initialised and EMPTY — and for a seed that would duplicate another tab's
-      // terminal. See services/tabTreeSeed.ts.
-      const seed = seedTreeFor(tab, treesByTabId, tabPanes);
-      if (!seed) return;
-      console.log('TerminalContainer: Pre-initializing pane tree for tab', tab.id);
-      tabPanes[tab.id] = seed;
-      dispatch(addTabTree({ tabId: tab.id, tree: seed }));
+    // Seeds Redux AND the window map from one decision (covers API-/restore-created tabs).
+    // Skips a tab that is already initialised — including one that is initialised and
+    // EMPTY — and prunes a seed that would duplicate another tab's terminal.
+    //
+    // The whole batch is planned in ONE call for a reason: `dispatch` does not update the
+    // `treesByTabId` this effect closed over, so deciding tab by tab checked every
+    // candidate against the same pre-loop snapshot, and two tabs naming the same terminal
+    // BOTH installed it — the exact state a session that hit the resurrection bug leaves on
+    // disk, i.e. the one input the repair exists for. See services/tabTreeSeed.ts.
+    const plans = planSeeds(
+      tabs.filter(tab => !isVirtualTab(tab.shellType)),
+      treesByTabId,
+      tabPanes,
+    );
+    plans.forEach(({ tabId, tree }) => {
+      console.log('TerminalContainer: Pre-initializing pane tree for tab', tabId);
+      tabPanes[tabId] = tree;
+      dispatch(addTabTree({ tabId, tree }));
     });
   }, [tabs, treesByTabId, dispatch]);
 

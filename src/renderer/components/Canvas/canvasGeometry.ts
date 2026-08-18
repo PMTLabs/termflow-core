@@ -123,6 +123,25 @@ export function paintedNodeRect(r: Rect, z: number, isChip: boolean): Rect {
 }
 
 /**
+ * The box a node paints at zoom `z` — what a CAMERA should aim at.
+ *
+ * Same split as everywhere else: layout places the reserved rect, anything that POINTS at a
+ * node uses the drawn box. Centring and visibility tests are pointing, so `n.rect` puts the
+ * camera on a box whose bottom `headSlack(z)` world units are not there — up to half a title
+ * bar of offset, and a containment test that trips on empty space below a node.
+ *
+ * It derives the tier from `z` instead of taking the current tier map, because that is the
+ * one thing a fly-to changes. The rect you want is the one the node will have when the
+ * camera ARRIVES, so a caller flying to a different zoom passes the DESTINATION zoom and
+ * gets the right answer without having to re-run `assignTiers` on a hypothetical viewport.
+ * Only `chip` matters here; a `group`-tier node paints nothing of its own, and its reserved
+ * rect is the only box left to aim at.
+ */
+export function aimedNodeRect(r: Rect, z: number): Rect {
+  return paintedNodeRect(r, z, baseTier(r.w * z) === 'chip');
+}
+
+/**
  * The title's font size in WORLD units, floored so it never renders below `MIN_TITLE_PX`.
  *
  * The bar alone cannot fix this. `headScale` is capped at `MAX_HEAD_K` by the frame's padding,

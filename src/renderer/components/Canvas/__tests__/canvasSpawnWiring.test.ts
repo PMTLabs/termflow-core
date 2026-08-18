@@ -114,8 +114,17 @@ describe('framing what was just created', () => {
    * off screen.
    */
   it('flies only when the node is not already framed, and uses the containment test', () => {
-    expect(spawnBody).toContain('if (!isFullyVisible(vp, plan.rect, size.w, size.h, FRAME_INSET))');
-    expect(spawnBody).toContain('flyTo(centreOn(plan.rect, size.w, size.h, vp.z, metrics.zMax))');
+    expect(spawnBody).toContain(
+      'if (!isFullyVisible(vp, aimedNodeRect(plan.rect, vp.z), size.w, size.h, FRAME_INSET))');
+    expect(spawnBody).toContain(
+      'flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax))');
+  });
+
+  /** ...and it frames the box the node DRAWS, not the slot layout reserved for it. Same rule
+   *  as every other consumer that points at a node rather than placing one. */
+  it('never aims at the reserved rect', () => {
+    expect(spawnBody).not.toContain('isFullyVisible(vp, plan.rect');
+    expect(spawnBody).not.toContain('centreOn(plan.rect');
   });
 
   /**

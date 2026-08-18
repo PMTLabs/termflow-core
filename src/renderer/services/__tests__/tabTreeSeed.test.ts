@@ -1,4 +1,4 @@
-import { seedTreeFor, terminalsHomedElsewhere } from '../tabTreeSeed';
+import { planSeeds, pruneDuplicateLeaves, terminalsHomedElsewhere } from '../tabTreeSeed';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import type { PaneNode } from '../../store/slices/panesSlice';
 
@@ -6,23 +6,28 @@ const leaf = (paneId: string, terminalId: string): PaneNode => ({
   id: paneId, type: 'terminal', terminalId,
 });
 
+const split = (paneId: string, ...children: PaneNode[]): PaneNode => ({
+  id: paneId, type: 'split', direction: 'horizontal', size: 50, children,
+});
+
 const TAB = { id: 'tb-b', title: 'PowerShell 7 4', shellType: 'powershell' };
+
+/** The single-tab answer, which is what most of these cases are about. */
+const seedOne = (
+  tab: { id: string; title?: string; shellType?: string },
+  trees: Record<string, PaneNode | null>,
+  tabPanes: Record<string, PaneNode | null | undefined>,
+) => planSeeds([tab], trees, tabPanes);
 
 describe('terminalsHomedElsewhere', () => {
   it('collects every leaf from the OTHER tabs', () => {
     const trees = {
-      'tb-a': {
-        id: 'pn-r', type: 'split' as const, direction: 'horizontal' as const, size: 50,
-        children: [leaf('pn-1', 'tb-a'), leaf('pn-2', 'tm-right')],
-      },
+      'tb-a': split('pn-r', leaf('pn-1', 'tb-a'), leaf('pn-2', 'tm-right')),
       'tb-b': leaf('pn-3', 'tb-b'),
     };
     expect([...terminalsHomedElsewhere(trees, 'tb-b')].sort()).toEqual(['tb-a', 'tm-right']);
   });
 
-  // Excluding the tab itself is what lets a tab be re-seeded from its OWN stale mirror after
-  // a reload. Include it and `seedTreeFor` would refuse every tab that already has a tree,
-  // which is a refusal that looks like success until a tab comes up blank.
   it('excludes the tab being asked about', () => {
     expect(terminalsHomedElsewhere({ 'tb-b': leaf('pn-3', 'tb-b') }, 'tb-b').has('tb-b'))
       .toBe(false);
@@ -34,22 +39,37 @@ describe('terminalsHomedElsewhere', () => {
   });
 });
 
-describe('seedTreeFor', () => {
+describe('pruneDuplicateLeaves', () => {
+  it('reports what it dropped, so the caller can say so out loud', () => {
+    const tree = split('pn-root', leaf('pn-keep', 'tm-dupe'), leaf('pn-drop', 'tm-dupe'));
+    const { tree: out, dropped } = pruneDuplicateLeaves(tree, new Set());
+    expect(dropped).toEqual([{ paneId: 'pn-drop', terminalId: 'tm-dupe' }]);
+    expect(getAllTerminalIds(out)).toEqual(['tm-dupe']);
+  });
+
+  it('reports nothing when there was nothing wrong', () => {
+    const tree = split('pn-root', leaf('pn-1', 'tm-a'), leaf('pn-2', 'tm-b'));
+    expect(pruneDuplicateLeaves(tree, new Set()).dropped).toEqual([]);
+  });
+});
+
+describe('planSeeds — one tab', () => {
   it('manufactures a root leaf for a tab with no entry', () => {
-    const seed = seedTreeFor(TAB, {}, {})!;
-    expect(seed.type).toBe('terminal');
-    expect(seed.terminalId).toBe('tb-b');
-    expect(seed.name).toBe('PowerShell 7 4');
-    expect(seed.shellType).toBe('powershell');
+    const [plan] = seedOne(TAB, {}, {});
+    expect(plan.tabId).toBe('tb-b');
+    expect(plan.tree!.type).toBe('terminal');
+    expect(plan.tree!.terminalId).toBe('tb-b');
+    expect(plan.tree!.name).toBe('PowerShell 7 4');
+    expect(plan.tree!.shellType).toBe('powershell');
   });
 
   it('falls back to a plain name when the tab has no title', () => {
-    expect(seedTreeFor({ id: 'tb-b' }, {}, {})!.name).toBe('Terminal');
+    expect(seedOne({ id: 'tb-b' }, {}, {})[0].tree!.name).toBe('Terminal');
   });
 
   it('prefers the window mirror over manufacturing', () => {
     const mirrored = leaf('pn-mirror', 'tm-mirror');
-    expect(seedTreeFor(TAB, {}, { 'tb-b': mirrored })).toBe(mirrored);
+    expect(seedOne(TAB, {}, { 'tb-b': mirrored })[0].tree).toBe(mirrored);
   });
 
   // The two states a key can be in, and they must be treated the SAME: both mean initialised.
@@ -57,69 +77,145 @@ describe('seedTreeFor', () => {
     ['a tree', leaf('pn-3', 'tb-b') as PaneNode | null],
     ['null — open and empty', null],
   ])('leaves a tab alone when its entry already holds %s', (_label, value) => {
-    expect(seedTreeFor(TAB, { 'tb-b': value }, {})).toBeNull();
+    expect(seedOne(TAB, { 'tb-b': value }, {})).toEqual([]);
   });
 
   // The distinction the whole module turns on: absent is NOT the same as null.
   it('an absent entry and a null entry differ', () => {
-    expect(seedTreeFor(TAB, {}, {})).not.toBeNull();
-    expect(seedTreeFor(TAB, { 'tb-b': null }, {})).toBeNull();
-  });
-
-  // A mirror tree with SEVERAL panes, only one of which moved away. The offending leaf is
-  // PRUNED and the rest of the tree installed — refusing the whole tree would orphan
-  // `tm-stayed`, which had nothing to do with the problem and would then belong to no tab at
-  // all. Every single-leaf case looks the same under either policy; this is the one that
-  // separates them.
-  it('prunes the moved leaf from a multi-pane mirror and keeps the rest', () => {
-    const stale: PaneNode = {
-      id: 'pn-stale', type: 'split', direction: 'horizontal', size: 50,
-      children: [leaf('pn-s1', 'tm-moved'), leaf('pn-s2', 'tm-stayed')],
-    };
-    const seeded = seedTreeFor(TAB, { 'tb-a': leaf('pn-a', 'tm-moved') }, { 'tb-b': stale })!;
-    expect(seeded).not.toBeNull();
-    expect(getAllTerminalIds(seeded)).toEqual(['tm-stayed']);
-
-    // ...and it is left completely alone when neither leaf is spoken for, so the pruning is
-    // about ownership rather than about the tree having more than one pane.
-    expect(seedTreeFor(TAB, { 'tb-a': leaf('pn-a', 'tm-other') }, { 'tb-b': stale })).toBe(stale);
+    expect(seedOne(TAB, {}, {})).toHaveLength(1);
+    expect(seedOne(TAB, { 'tb-b': null }, {})).toEqual([]);
   });
 
   /**
-   * The repair for state that is ALREADY on disk.
+   * A mirror that says "this tab is open and empty" is an ANSWER, not a gap.
    *
-   * A session that hit the resurrection bug saved a tree naming one terminal twice, and
-   * `saveAppState` persists the window mirror verbatim — so it comes back on the next launch
-   * with no key, where the "already initialised" rule has nothing to say about it. One PTY
-   * cannot be two panes, so the second copy is dropped and the tab comes up correct.
+   * `saveState` persists the window mirror rather than `treesByTabId`, and the mirror
+   * carries the null faithfully. Reading it as "nothing stored" and manufacturing a root
+   * leaf is how an emptied tab came back full on the next launch. The plan still has to be
+   * EMITTED — with a null tree — because writing nothing leaves the key absent, and absent
+   * is the state the seed net fills in on the very next render.
    */
+  it('installs the KEY for a mirror that is explicitly empty, and no terminal', () => {
+    expect(seedOne(TAB, {}, { 'tb-b': null })).toEqual([{ tabId: 'tb-b', tree: null }]);
+  });
+
+  it('prunes the moved leaf from a multi-pane mirror and keeps the rest', () => {
+    const stale = split('pn-stale', leaf('pn-s1', 'tm-moved'), leaf('pn-s2', 'tm-stayed'));
+    const [plan] = seedOne(TAB, { 'tb-a': leaf('pn-a', 'tm-moved') }, { 'tb-b': stale });
+    expect(getAllTerminalIds(plan.tree)).toEqual(['tm-stayed']);
+
+    // ...and it is left completely alone when neither leaf is spoken for, so the pruning is
+    // about ownership rather than about the tree having more than one pane.
+    expect(seedOne(TAB, { 'tb-a': leaf('pn-a', 'tm-other') }, { 'tb-b': stale })[0].tree)
+      .toBe(stale);
+  });
+
   it('repairs a saved tree that names the same terminal twice', () => {
-    const corrupt: PaneNode = {
-      id: 'pn-root', type: 'split', direction: 'horizontal', size: 50,
-      children: [
-        leaf('pn-1', 'tb-b'),
-        { id: 'pn-inner', type: 'split', direction: 'vertical', size: 50,
-          children: [leaf('pn-2', 'tm-dupe'), leaf('pn-3', 'tm-dupe')] },
-      ],
-    };
-    const seeded = seedTreeFor(TAB, {}, { 'tb-b': corrupt })!;
-    expect(getAllTerminalIds(seeded)).toEqual(['tb-b', 'tm-dupe']);
+    const corrupt = split(
+      'pn-root',
+      leaf('pn-1', 'tb-b'),
+      { id: 'pn-inner', type: 'split', direction: 'vertical', size: 50,
+        children: [leaf('pn-2', 'tm-dupe'), leaf('pn-3', 'tm-dupe')] },
+    );
+    expect(getAllTerminalIds(seedOne(TAB, {}, { 'tb-b': corrupt })[0].tree))
+      .toEqual(['tb-b', 'tm-dupe']);
   });
 
-  it('keeps the FIRST copy, so the same saved state always restores the same way', () => {
-    const corrupt: PaneNode = {
-      id: 'pn-root', type: 'split', direction: 'horizontal', size: 50,
-      children: [leaf('pn-keep', 'tm-dupe'), leaf('pn-drop', 'tm-dupe')],
-    };
-    const seeded = seedTreeFor(TAB, {}, { 'tb-b': corrupt })!;
-    expect(seeded.type).toBe('terminal');
-    expect(seeded.id).toBe('pn-keep');
-  });
-
-  it('refuses a mirror tree whose leaves live in another tab now', () => {
+  // A tab whose every leaf is spoken for is EMPTY, and it has to say so. Returning no plan
+  // would leave the key absent, and the next render would manufacture a fresh terminal —
+  // the resurrection this module exists to stop, one render later.
+  it('emits an empty tab rather than nothing when every leaf is taken', () => {
     const trees = { 'tb-a': leaf('pn-moved', 'tm-moved') };
-    expect(seedTreeFor(TAB, trees, { 'tb-b': leaf('pn-stale', 'tm-moved') })).toBeNull();
-    // A mirror naming only terminals nobody else owns is still fine.
-    expect(seedTreeFor(TAB, trees, { 'tb-b': leaf('pn-ok', 'tm-fresh') })).not.toBeNull();
+    expect(seedOne(TAB, trees, { 'tb-b': leaf('pn-stale', 'tm-moved') }))
+      .toEqual([{ tabId: 'tb-b', tree: null }]);
+    // A mirror naming only terminals nobody else owns is still installed as-is.
+    expect(seedOne(TAB, trees, { 'tb-b': leaf('pn-ok', 'tm-fresh') })[0].tree).not.toBeNull();
+  });
+});
+
+/**
+ * The batch is where the repair actually has to work.
+ *
+ * Seeding used to be decided per tab against the `treesByTabId` snapshot the effect closed
+ * over, and dispatching does not update that snapshot mid-loop. On a restore where two tabs
+ * both name terminal `T` — which is precisely the shape the resurrection bug saves to disk —
+ * each tab was checked against `{}` and BOTH installed `T`. The next render saw two keys and
+ * skipped them both, so the duplicate became permanent. The repair existed and could not fire
+ * on the one input it was written for.
+ */
+describe('planSeeds — the whole batch at once', () => {
+  const A = { id: 'tb-a' };
+  const B = { id: 'tb-b' };
+
+  it('gives a terminal claimed by two restored tabs to exactly one of them', () => {
+    const plans = planSeeds([A, B], {}, {
+      'tb-a': leaf('pn-a', 'tm-shared'),
+      'tb-b': leaf('pn-b', 'tm-shared'),
+    });
+    const homes = plans.flatMap((p) => getAllTerminalIds(p.tree).map(() => p.tabId));
+    expect(homes).toEqual(['tb-a']);
+    // Both tabs are still initialised — the loser is EMPTY, not absent, or the next render
+    // manufactures it a terminal and we are back where we started.
+    expect(plans.map((p) => p.tabId).sort()).toEqual(['tb-a', 'tb-b']);
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
+  /**
+   * WHICH tab keeps it is not a coin flip.
+   *
+   * A tab's root pane carries the tab's own id as its terminal id, so `tb-a` inside tab
+   * `tb-a` is the original and `tb-a` inside tab `tb-b` is the copy the bug made. Ordering
+   * the natural owner first is what makes the same corrupt save heal the same way on every
+   * machine — under plain first-wins the answer changed with whatever order `tabs` happened
+   * to be in.
+   */
+  it.each([
+    ['owner last', [B, A]],
+    ['owner first', [A, B]],
+  ])('gives it to the tab named after it, whatever the tab order (%s)', (_label, tabs) => {
+    const plans = planSeeds(tabs, {}, {
+      'tb-a': leaf('pn-a', 'tb-a'),
+      'tb-b': leaf('pn-b', 'tb-a'),
+    });
+    const winner = plans.find((p) => getAllTerminalIds(p.tree).includes('tb-a'));
+    expect(winner!.tabId).toBe('tb-a');
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
+  it('says out loud which pane it dropped', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      planSeeds([A, B], {}, {
+        'tb-a': leaf('pn-a', 'tb-a'),
+        'tb-b': leaf('pn-orphan', 'tb-a'),
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      const [message] = warn.mock.calls[0] as [string];
+      expect(message).toContain('pn-orphan');
+      expect(message).toContain('tb-b');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('lets an ALREADY INSTALLED tree beat any candidate', () => {
+    const plans = planSeeds([B], { 'tb-a': leaf('pn-a', 'tm-shared') }, {
+      'tb-b': leaf('pn-b', 'tm-shared'),
+    });
+    expect(plans).toEqual([{ tabId: 'tb-b', tree: null }]);
+  });
+
+  it('leaves unrelated tabs completely alone', () => {
+    const plans = planSeeds([A, B], {}, {
+      'tb-a': leaf('pn-a', 'tm-one'),
+      'tb-b': leaf('pn-b', 'tm-two'),
+    });
+    expect(plans.map((p) => getAllTerminalIds(p.tree))).toEqual(
+      expect.arrayContaining([['tm-one'], ['tm-two']]),
+    );
+  });
+
+  it('returns nothing at all when every tab is already initialised', () => {
+    expect(planSeeds([A, B], { 'tb-a': leaf('p', 'tb-a'), 'tb-b': null }, {})).toEqual([]);
   });
 });

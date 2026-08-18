@@ -12,7 +12,7 @@
  */
 
 import {
-  Rect, Viewport, isVisible, screenToWorld, worldToScreen,
+  Rect, Viewport, aimedNodeRect, isVisible, screenToWorld, worldToScreen,
 } from './canvasGeometry';
 import type { CanvasGroupModel, CanvasNodeModel } from './canvasSelectors';
 
@@ -232,7 +232,11 @@ export function beaconLayout(
   const byBucket = new Map<string, Beacon>();
   for (const n of nodes) {
     if (!n.isRunning) continue;
-    const p = beaconFor(vp, n.rect, vw, vh);
+    // The node's DRAWN box: a beacon both TESTS whether a node is off screen and points at
+    // where it is, and both answers come from what is painted rather than what is reserved.
+    // `beaconFor` stays a plain rect function — it is the caller that knows this rect
+    // belongs to a node.
+    const p = beaconFor(vp, aimedNodeRect(n.rect, vp.z), vw, vh);
     if (!p) continue;
     const key = `${Math.round(p.x / BEACON_BUCKET)},${Math.round(p.y / BEACON_BUCKET)}`;
     const existing = byBucket.get(key);

@@ -8,6 +8,7 @@ import { PAN_STEP_PX } from '../canvasGestures';
 import { GROUP_CHIP_ZOOM } from '../canvasSelectors';
 import {
   Viewport, Rect, NODE_W, NODE_H, CULL_MARGIN, isVisible, panBy, screenToWorld,
+  aimedNodeRect, headSlack,
 } from '../canvasGeometry';
 import type { CanvasGroupModel, CanvasNodeModel } from '../canvasSelectors';
 
@@ -415,6 +416,39 @@ describe('beaconLayout', () => {
     expect(out).toHaveLength(1);
     expect(out[0].terminalId).toBe('tm-a');
     expect(out[0].count).toBe(3);
+  });
+
+  /**
+   * A beacon answers "there is a running terminal you cannot see, this way", so the question
+   * it asks has to be about the box the node DRAWS, not the slot layout reserved for it.
+   *
+   * Above zoom 1 the header shrinks and hands height back, so the drawn box is shorter than
+   * its rect by `headSlack(z)`. That leaves a band where the slot still overlaps the viewport
+   * and the node itself does not — and in that band the old test said "visible", so the user
+   * got no marker for a terminal that was genuinely off screen. The node is placed above the
+   * viewport here so its bottom edge is what decides.
+   */
+  it('beacons a node whose DRAWN box has left the screen, though its slot has not', () => {
+    const z = 2;
+    const zoomed: Viewport = { x: 0, y: 0, z };
+    const slack = headSlack(z);
+    expect(slack).toBeGreaterThan(0);
+
+    // Sit the drawn bottom exactly one pixel past the cull margin. The reserved bottom is
+    // then `slack * z` pixels inside it — the whole band this test exists for.
+    const y = (-CULL_MARGIN - 1) / z - (NODE_H - slack);
+    const n = node('tm-above', 100, y);
+
+    expect(isVisible(zoomed, n.rect, 800, 600)).toBe(true);                     // the slot
+    expect(isVisible(zoomed, aimedNodeRect(n.rect, z), 800, 600)).toBe(false);  // the node
+    expect(beaconLayout([n], zoomed, 800, 600).map((b) => b.terminalId)).toEqual(['tm-above']);
+  });
+
+  // The other side of the same rule: a node that is genuinely on screen still gets no
+  // beacon, so "use the drawn box" cannot be satisfied by beaconing everything.
+  it('still stays quiet for a node that is fully in view', () => {
+    const zoomed: Viewport = { x: 0, y: 0, z: 2 };
+    expect(beaconLayout([node('tm-here', 50, 50)], zoomed, 800, 600)).toEqual([]);
   });
 
   it('keeps beacons that point in genuinely different directions', () => {

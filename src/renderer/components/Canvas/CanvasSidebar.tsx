@@ -7,6 +7,7 @@ import { updateTabTitle } from '../../store/slices/tabsSlice';
 import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
 import { useFlyTo } from './CanvasViewport';
 import { centreOn } from './viewportStyles';
+import { aimedNodeRect } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
@@ -139,7 +140,11 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
     dispatch(selectNode(terminalId));
-    flyTo(centreOn(n.rect, vw, vh, Math.max(zoom, ROW_FLY_ZOOM), metrics.zMax));
+    // The node's DRAWN box at the zoom we are flying to — see `aimedNodeRect`. Centring the
+    // reserved rect leaves the node sitting high by half its title-bar slack, and this row
+    // click is the gesture whose whole promise is "put that terminal in front of me".
+    const z = Math.max(zoom, ROW_FLY_ZOOM);
+    flyTo(centreOn(aimedNodeRect(n.rect, z), vw, vh, z, metrics.zMax));
   }, [model, dispatch, flyTo, vw, vh, zoom, metrics]);
 
   /**
