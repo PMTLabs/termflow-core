@@ -2808,19 +2808,15 @@ mod host_identity_tests {
 /// in-process and permanently blocked "Offload & Close" — the reported symptom in
 /// plan 019. The fix routes both through [`spawn_routed`].
 ///
-/// This test exists because the bug is a CLASS, not an instance: `spawn_routed` is
-/// the only thing that makes the host-vs-in-process decision, and nothing else in
-/// the type system stops a FOURTH spawn site from bypassing it and silently
-/// re-arming the trap (plan 019 §2.1).
+/// These tests exist because the bug is a CLASS, not an instance: `spawn_routed`
+/// is the only thing that makes the host-vs-in-process decision, and nothing in the
+/// type system stops a FOURTH spawn site — in any module, including one that does
+/// not exist yet — from bypassing it and silently re-arming the trap (plan 019
+/// §2.1). Source lines are CRLF-normalised: a source-derived assertion that matches
+/// a literal newline passes on a Linux runner and fails on a Windows checkout (the
+/// Rust twin of the `utils/readSource` e2e fix).
 #[cfg(test)]
 mod api_spawn_routing_tests {
-    /// CRLF is normalised first: a source-derived assertion that matches a literal
-    /// newline passes on a Linux runner and fails on a Windows checkout (the Rust
-    /// twin of the `utils/readSource` e2e fix).
-    fn api_server_source() -> String {
-        include_str!("api_server.rs").replace("\r\n", "\n")
-    }
-
     /// The API is the ONLY caller that supplies a name (an agent labelling its own
     /// terminal, e.g. `bl108-external-review`). `register_host_terminal` used to
     /// hardcode `Terminal-{shell}`, so routing the API through the host path
@@ -2850,23 +2846,117 @@ mod api_spawn_routing_tests {
         assert_eq!(super::terminal_display_name(Some(""), "cmd"), "Terminal-cmd");
     }
 
+    /// Does this line CALL `spawn_terminal`, however it was reached?
+    ///
+    /// Matches the fully-qualified form (`crate::pty_manager::spawn_terminal(`), the
+    /// bare form a `use crate::pty_manager::spawn_terminal;` import enables, and a
+    /// spaced `spawn_terminal (`. Rejects the definition itself, a longer identifier
+    /// that merely ends in the name, and comment prose — so a doc comment may still
+    /// say the word.
+    fn calls_spawn_terminal(line: &str) -> bool {
+        const NAME: &str = "spawn_terminal";
+        let code = line.trim_start();
+        if code.starts_with("//") || code.starts_with('*') {
+            return false;
+        }
+        let Some(pos) = code.find(NAME) else { return false };
+        let before = &code[..pos];
+        // `my_spawn_terminal(` is a different function.
+        if before.chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+        // `fn spawn_terminal(` is the declaration, not a call.
+        if before.trim_end().ends_with("fn") {
+            return false;
+        }
+        code[pos + NAME.len()..].trim_start().starts_with('(')
+    }
+
+    /// Every `.rs` file in the crate, read from the real source tree at test time.
+    ///
+    /// Deliberately NOT a hardcoded list, and deliberately not just `api_server.rs`:
+    /// a brand-new module is the easiest way to walk past this guard (external review
+    /// of PR #45, F-01), and a list maintained by hand cannot see a file nobody
+    /// remembered to add to it. Reading the directory means the audit's coverage is
+    /// derived from reality rather than asserted.
+    fn crate_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} to audit spawn sites ({e}) — this guard must FAIL loudly \
+                 rather than pass vacuously",
+                dir.display()
+            )
+        });
+        let mut sources = Vec::new();
+        for entry in entries {
+            let path = entry.expect("unreadable source dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {name} to audit spawn sites: {e}"))
+                .replace("\r\n", "\n");
+            sources.push((name, text));
+        }
+        assert!(
+            sources.len() > 20,
+            "found only {} source files — the audit is not seeing the real tree",
+            sources.len()
+        );
+        sources
+    }
+
+    /// The matcher is the load-bearing part, so pin it directly: every evasion form
+    /// must be caught, and every non-call must not be.
     #[test]
-    fn no_api_spawn_site_bypasses_the_router() {
-        let src = api_server_source();
-        let direct: Vec<String> = src
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains("pty_manager::spawn_terminal("))
-            .map(|(i, line)| format!("  api_server.rs:{}: {}", i + 1, line.trim()))
+    fn the_matcher_catches_every_way_of_calling_it() {
+        for call in [
+            "    let x = crate::pty_manager::spawn_terminal(",
+            "    let x = pty_manager::spawn_terminal(state, cols, rows);",
+            "    let x = spawn_terminal(state, cols, rows);", // after a `use` import
+            "    let x = spawn_terminal (state);",
+        ] {
+            assert!(calls_spawn_terminal(call), "missed a real call: {call}");
+        }
+        for not_a_call in [
+            "pub fn spawn_terminal(",
+            "    // spawn_terminal(state) is what this replaced",
+            "    /// see spawn_terminal(…) for the in-process path",
+            "    let x = my_spawn_terminal(state);",
+            "    let spec = build_spawn_spec(&id);",
+            "    // registers before spawn_terminal returns",
+        ] {
+            assert!(!calls_spawn_terminal(not_a_call), "false positive: {not_a_call}");
+        }
+    }
+
+    #[test]
+    fn no_module_outside_the_router_spawns_a_terminal_in_process() {
+        // `commands.rs` IS the router (it owns `spawn_routed` and its in-process
+        // `host_fallback`); `pty_manager.rs` declares the function. Every other
+        // module must go through `spawn_routed`.
+        const ALLOWED: [&str; 2] = ["commands.rs", "pty_manager.rs"];
+
+        let offenders: Vec<String> = crate_sources()
+            .iter()
+            .filter(|(name, _)| !ALLOWED.contains(&name.as_str()))
+            .flat_map(|(name, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| calls_spawn_terminal(line))
+                    .map(move |(i, line)| format!("  {}:{}: {}", name, i + 1, line.trim()))
+            })
             .collect();
 
         assert!(
-            direct.is_empty(),
-            "an API spawn site calls pty_manager::spawn_terminal directly instead of \
-             commands::spawn_routed. Terminals it creates are in-process, so they are \
-             lost by a hot-swap and `hotswap_preflight` refuses Offload & Close for as \
-             long as one is alive (plan 019):\n{}",
-            direct.join("\n")
+            offenders.is_empty(),
+            "a spawn site outside the router calls pty_manager::spawn_terminal directly \
+             instead of commands::spawn_routed. Terminals it creates are in-process, so \
+             they are lost by a hot-swap and `hotswap_preflight` refuses Offload & Close \
+             for as long as one is alive (plan 019):\n{}",
+            offenders.join("\n")
         );
     }
 }
