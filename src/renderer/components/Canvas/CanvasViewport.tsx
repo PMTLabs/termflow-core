@@ -242,10 +242,10 @@ export const CanvasViewport: React.FC<{
   /**
    * Right-click on empty canvas — the "create a terminal here" menu (Tam's item 3).
    *
-   * A node stops its own contextmenu, so this never sees one; the bail list is still needed
-   * for everything that does NOT have a handler of its own — a group chip, a group label, the
-   * minimap, a beacon — where a "new terminal here" menu would be answering a question about a
-   * different thing entirely.
+   * A node stops its own contextmenu, and so now does a group handle (its label and its chip
+   * open the group menu). The bail list still covers both, belt-and-braces, and is the only
+   * thing covering what has no handler at all — the minimap, a beacon — where a "new terminal
+   * here" menu would be answering a question about a different thing entirely.
    */
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     if (!onBackgroundContextMenu || !isBackground(e.target)) return;

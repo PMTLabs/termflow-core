@@ -24,7 +24,19 @@ export const CanvasGroupFrame: React.FC<{
   moving?: boolean;
   onLabelPointerDown?: (e: React.PointerEvent) => void;
   onChipClick?: () => void;
-}> = ({ group, zoom, collapsed, chipOffset, dropTarget, moving, onLabelPointerDown, onChipClick }) => {
+  /**
+   * Right-click on the group's HANDLE — its label, or its chip once collapsed.
+   *
+   * Deliberately not on the frame itself. The frame is a real box rather than a
+   * `pointer-events: none` outline, so it covers the canvas background across the whole interior
+   * of the group; a menu there would shadow the background's own "New terminal here" menu
+   * everywhere a group sits, which is the larger target and the one that spawns terminals.
+   */
+  onContextMenu?: (e: React.MouseEvent) => void;
+}> = ({
+  group, zoom, collapsed, chipOffset, dropTarget, moving,
+  onLabelPointerDown, onChipClick, onContextMenu,
+}) => {
   const { x, y } = group.rect;
   const { zMax } = useCanvasMetrics();
 
@@ -44,6 +56,7 @@ export const CanvasGroupFrame: React.FC<{
           transformOrigin: '0 0',
         }}
         onClick={onChipClick}
+        onContextMenu={onContextMenu}
         title={`Zoom in to ${group.title}`}
       >
         <span className="canvas-gchip-title">{group.title}</span>
@@ -79,8 +92,9 @@ export const CanvasGroupFrame: React.FC<{
             className="canvas-glabel"
             style={{ transform: `scale(${k})`, maxWidth: labelMaxWidth(box.w, k) }}
             onPointerDown={onLabelPointerDown}
+            onContextMenu={onContextMenu}
             // Carries the full title as well as the hint, because the label now ellipsises.
-            title={`${group.title} — drag to move this group and all its terminals`}
+            title={`${group.title} — drag to move this group and all its terminals, right-click to rename`}
           >
             {group.title}
           </span>

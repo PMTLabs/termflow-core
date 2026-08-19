@@ -425,6 +425,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.canvas-sghead:not(.editing) { cursor: default; }
+.canvas-sghead.editing { padding: 3px 9px 2px; overflow: visible; }
+/* The header is uppercased and letter-spaced, and both inherit into an <input> nested in it —
+   so the box would render `G A T E W A Y` while committing the `gateway` you actually typed.
+   The row's rename box needs none of this because rows are not uppercased. */
+.canvas-sghead .canvas-srename {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: 400;
+  color: var(--text-primary, #cccccc);
+}
 .canvas-sgempty { margin: 0; padding: 2px 11px 4px 19px; font-size: 11px; font-style: italic; color: var(--text-tertiary, #666666); }
 .canvas-srows { margin: 0; padding: 0; list-style: none; }
 
@@ -679,9 +690,11 @@
 .canvas-mode.linking .canvas-port { opacity: 1; }
 .canvas-node.link-target { outline-color: var(--tab-running-accent, #3aa6ff); }
 
-/* The wire context menu reuses `PaneContextMenu.css` for its box and items; only the label
-   input is new. */
-.canvas-wire-label-input {
+/* The wire and group context menus reuse `PaneContextMenu.css` for their box and items; only the
+   inline text box is new, and it is the same box in both — same width, margin and focus ring.
+   Joined rather than copied so restyling one cannot leave the other behind. */
+.canvas-wire-label-input,
+.canvas-group-name-input {
   display: block;
   width: calc(100% - 16px);
   margin: 4px 8px;

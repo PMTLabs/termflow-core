@@ -16,6 +16,9 @@ module.exports = {
   
   // Module paths
   moduleNameMapper: {
+    // ts-jest hands a stylesheet to the TypeScript parser, which dies on the first selector, so
+    // any component doing `import './Thing.css'` is unmountable without this.
+    '\\.(css|less|scss|sass)$': '<rootDir>/src/test/styleStub.js',
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@api/(.*)$': '<rootDir>/src/api/$1',
     '^@shell/(.*)$': '<rootDir>/src/shell/$1',

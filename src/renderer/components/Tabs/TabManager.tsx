@@ -1,14 +1,13 @@
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
-import { removeTab, setActiveTab, updateTabTitle, reorderTabs } from '../../store/slices/tabsSlice';
+import { removeTab, setActiveTab, reorderTabs } from '../../store/slices/tabsSlice';
 import { setShowLayoutManager } from '../../store/slices/layoutsSlice';
 import { NewTabDropdown } from '../NewTabDropdown';
 import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';
 import { TabContextMenu } from './TabContextMenu';
 import { TabRenamePopup } from './TabRenamePopup';
 import { terminalService } from '../../services/TerminalService';
-import { StateManager } from '../../services/StateManager';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { BellIcon } from '../UI/BellIcon';
 import { CloseSummary } from './CloseSummary';
@@ -19,7 +18,8 @@ import {
 } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
-import { resolveTabProcessIds, renameTabProcesses } from '../../services/tabProcessIds';
+import { resolveTabProcessIds } from '../../services/tabProcessIds';
+import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
@@ -670,25 +670,13 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     proceed();
   }, [dispatch]);
 
+  // The store title, the backend name of every live leaf process, and the save all live in
+  // `renameTab` now — Canvas Mode renames the same tabs from its group menu and its sidebar, and
+  // a second inline copy of that chain is a second chance to drop one of the three.
   const handleEditTitle = useCallback(async (id: string, title: string) => {
     console.log(`TabManager: handleEditTitle - id: ${id}, new title: "${title}"`);
-    dispatch(updateTabTitle({ id, title }));
-
-    // Also update the terminal name in the backend. Review 109 H3 / re-review
-    // 111 finding 3: an API-created tab's process lives under its `tm-*` leaf,
-    // not `id`, and a SPLIT tab has several live leaves. A tab title is
-    // tab-level, so name EVERY live leaf process; `id` is used only when the
-    // tab has no tree at all.
-    const tabTree = store.getState().panes.treesByTabId[id] ?? null;
-    const renamed = await renameTabProcesses(tabTree, id, title);
-    console.log(`TabManager: Renamed backend processes [${renamed.join(', ')}] to "${title}"`);
-
-    // Save state immediately after name change
-    setTimeout(() => {
-      StateManager.saveState();
-      console.log('TabManager: Saved state after title update');
-    }, 100);
-  }, [dispatch]);
+    await renameTab(id, title);
+  }, []);
 
   // Keep the latest tab order in a ref so the pointer-drag reorder callback
   // (created once) always resolves indices against the current order.

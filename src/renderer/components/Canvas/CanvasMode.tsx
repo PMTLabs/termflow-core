@@ -31,6 +31,7 @@ import { PortClick, useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
 import { CanvasWireMenu } from './CanvasWireMenu';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { CanvasGroupMenu } from './CanvasGroupMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, decideCanvasClose } from './canvasClose';
 import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
@@ -160,6 +161,9 @@ export const CanvasMode: React.FC = () => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{ node: CanvasNodeModel; x: number; y: number } | null>(null);
+  /** The group menu's target — a group IS a tab, so the identity it carries is the tab's, and
+   *  `title` is only the seed the rename box opens with. */
+  const [groupMenu, setGroupMenu] = useState<{ tabId: string; title: string; x: number; y: number } | null>(null);
   /**
    * The shell-profile menu, and where the terminal it creates should go.
    *
@@ -853,6 +857,15 @@ export const CanvasMode: React.FC = () => {
             moving={drag.movingTabId === g.tabId}
             onLabelPointerDown={drag.onGroupLabelPointerDown(g.tabId)}
             onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax))}
+            // `preventDefault` because nothing else suppresses the browser's own menu here: the
+            // viewport bails out on `.canvas-glabel` and `.canvas-gchip` without preventing
+            // anything. `stopPropagation` for the reason `CanvasNode` gives — the bail list and
+            // the stop are belt and braces, and the node already carries both.
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setGroupMenu({ tabId: g.tabId, title: g.title, x: e.clientX, y: e.clientY });
+            }}
           />
         ))}
         {overlay && (
@@ -1018,6 +1031,15 @@ export const CanvasMode: React.FC = () => {
             Close Terminal
           </CanvasMenuItem>
         </CanvasMenu>
+      )}
+      {groupMenu && (
+        <CanvasGroupMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          tabId={groupMenu.tabId}
+          title={groupMenu.title}
+          onClose={() => setGroupMenu(null)}
+        />
       )}
       {spawnMenu && (
         <CanvasProfileMenu
