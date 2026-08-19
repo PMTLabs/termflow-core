@@ -136,7 +136,26 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
 
     let control_port = state.fabric_control_port;
     let data_dir = fabric_data_dir(&app);
-    let cfg = state.network.read().clone();
+    let mut cfg = state.network.read().clone();
+    // `TERMFLOW_CORE_API_URL` must name the port we ACTUALLY bound, not the one that was
+    // configured. When a sibling instance holds the configured port we walk forward and
+    // serve elsewhere — and the sidecar was still being pointed at the configured number,
+    // i.e. at the OTHER app's core API, carrying OUR token. The boot path already patched
+    // the MCP sidecar this way (`lib.rs`, "Same for the fabric and the renderer"); the
+    // fabric and the renderer were the two that never got it.
+    //
+    // `None` REFUSES rather than falling back to the configured port: with no API of our
+    // own, that port is exactly where a sibling is listening, so the fallback would point
+    // the fabric at another app's core and authenticate to it with our token.
+    let effective_api = state.effective_endpoints.read().api_port;
+    let Some(api_port) = effective_api else {
+        return Err(
+            "this instance is serving no API port; refusing to start the fabric against the \
+             configured port, which may belong to another instance"
+                .to_string(),
+        );
+    };
+    cfg.api_port = api_port;
 
     let mut sidecar_command = app
         .shell()
@@ -217,7 +236,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
 
 /// True while the fabric child handle is present (cleared by [`shutdown_fabric`]).
 /// The SSE subscriber uses this to stop reconnecting once the fabric is shut down.
-fn fabric_alive<R: tauri::Runtime>(state: &AppState<R>) -> bool {
+pub(crate) fn fabric_alive<R: tauri::Runtime>(state: &AppState<R>) -> bool {
     fabric_installed(state)
 }
 

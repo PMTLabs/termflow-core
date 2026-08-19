@@ -47,7 +47,13 @@ class TerminalServiceClass {
 
     // Set up global listeners once
     window.electronAPI.onTerminalData((processId: string, data: string) => {
-      console.log(`TerminalService: Received terminal data for process ${processId}, length: ${data.length}`);
+      // Behind the diag gate, like every other hot-path trace in this file (see the
+      // PTY-resize trace below). This ran on EVERY chunk of PTY output, ungated, for
+      // the life of the session — and `termDiag` takes a thunk, so with diag off the
+      // template is never even built. An always-on log here is not free: with DevTools
+      // attached the console retains every message, so a long agent session grows the
+      // renderer's memory and slows the console down the longer it runs.
+      termDiag(() => `[TERM-DIAG] terminal data (processId=${processId} length=${data.length})`);
       // Always emit the event - let TerminalDisplay filter by processId
       window.dispatchEvent(new CustomEvent('pty:data', {
         detail: { processId, data }

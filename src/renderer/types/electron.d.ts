@@ -281,6 +281,10 @@ export interface ElectronAPI {
 
   // Quit the app after the user confirms the in-app close dialog (Tauri only)
   confirmCloseApp?: () => Promise<void>;
+  /** Plan 018: report that this window has persisted its session (quit handshake). */
+  flushSessionAck?: () => Promise<void>;
+  /** Plan 018: every window id the backend registry currently holds. */
+  listWindowSessionIds?: () => Promise<string[]>;
 
   // Detach / cross-window pane handoff (Tauri only)
   stashDetachPayload?: (token: string, payload: any) => Promise<void>;

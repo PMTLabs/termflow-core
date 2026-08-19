@@ -245,6 +245,32 @@ const App: React.FC = () => {
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
+    // Quit handshake (plan 018 Task 8). A programmatic exit fires no
+    // CloseRequested and therefore no `beforeunload`, so without this the
+    // backend would tear the process down before this window ever persisted.
+    // Each window now owns data only IT can write, so an unflushed window loses
+    // its tabs outright. Ack afterwards so the backend can stop waiting; the
+    // ack is sent even if the save throws, because a quit that hangs is worse
+    // than one stale window.
+    let flushAlive = true;
+    let unlistenFlush: (() => void) | undefined;
+    listen('app:flush-session', () => {
+      void (async () => {
+        try {
+          await saveStateWithCwds(500);
+        } catch (e) {
+          console.warn('App: flush-session save failed; acking anyway', e);
+        }
+        try {
+          await window.electronAPI?.flushSessionAck?.();
+        } catch {
+          /* backend already gone */
+        }
+      })();
+    })
+      .then(fn => { if (flushAlive) unlistenFlush = fn; else fn(); })
+      .catch(() => { /* not a tauri window / event API unavailable */ });
+
     // OS session switch (RDP↔console connect / unlock) repaints every TUI at once —
     // a synchronized ConPTY burst that would falsely ring the unseen bell on every
     // tab when you return to the machine. The DOM visibilitychange event does NOT
@@ -332,6 +358,8 @@ const App: React.FC = () => {
 
       window.removeEventListener('beforeunload', handleBeforeUnload);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      flushAlive = false;
+      if (unlistenFlush) unlistenFlush();
       sessionAlive = false;
       if (unlistenSession) unlistenSession();
       resumeAlive = false;
@@ -386,17 +414,21 @@ const App: React.FC = () => {
       }
     }
 
-    // A fresh "New Window" (File > New Window, or an "Open in TermFlow" folder window):
-    // don't restore the previous session — just open a single default terminal tab,
-    // rooted at ?path= when the window was opened for a folder.
+    // A fresh "New Window" (File > New Window, or an "Open in TermFlow" folder
+    // window) carries ?newWindow=1. That used to mean "skip session restore".
+    // It no longer does (plan 018): each window now has its OWN session key, so
+    // a brand-new window simply has nothing saved under its id — restoreState
+    // returns false and the decision table below opens a default tab, rooted at
+    // ?path= when the window was opened for a folder.
+    //
+    // Returning early here was actively harmful once keys became per-window: the
+    // save hooks in the mount effect are registered for EVERY window regardless,
+    // so a window that skipped restore still saved — meaning a restored session
+    // could be replaced by the default tab of a window that never read it.
     const bootParams = new URLSearchParams(window.location.search);
-    if (bootParams.has('newWindow')) {
-      const folderPath = bootParams.get('path') ?? undefined;
-      setupIPCListeners();
-      inputHandler.enable();
-      createDefaultTabIfNeeded(folderPath);
-      return;
-    }
+    const newWindowPath = bootParams.has('newWindow')
+      ? bootParams.get('path') ?? undefined
+      : undefined;
 
     // Check if we should restore last session (reuse the config fetched above)
     const shouldRestore = config?.restoreLastSession !== false; // Default to true
@@ -410,6 +442,9 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Failed to read pending open path:', error);
     }
+    // A window opened FOR a folder carries it in its own URL; the backend's
+    // one-shot pending path only ever applies to a cold launch.
+    pendingOpenPath = pendingOpenPath ?? newWindowPath;
 
     // Try to restore state if enabled
     let restored = false;

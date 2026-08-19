@@ -11,7 +11,13 @@ import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { stateKey, layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { apiBase } from '../api/apiBase';
+// `stateKey` is deliberately NOT imported: the session key is per WINDOW now
+// (plan 018), and the profile-only key would put every window back on one blob.
+import { sessionStateKey, isSlotZero } from './windowScope';
+import { unionKeepSet } from './sessionKeepSet';
+import { sweepOrphanSessions } from './sessionOrphans';
 import { CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, hydrateCanvas } from '../store/slices/canvasSlice';
 import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
 
@@ -141,7 +147,12 @@ class StateManagerClass {
   // Getters, not fields: the profile is resolved during bootstrap and this
   // singleton may be constructed either side of that. The default profile keeps
   // the original key names, so existing saved state loads untouched.
-  private get STATE_KEY(): string { return stateKey(); }
+  // Per WINDOW, not just per instance (plan 018). Every window of one instance
+  // shares a WebView2 origin and therefore one localStorage; a single key meant
+  // each window's save blindly overwrote every other window's tabs, and only one
+  // window ever read it back. Slot 0 keeps the original bare key, so an existing
+  // single-window session still loads untouched.
+  private get STATE_KEY(): string { return sessionStateKey(); }
   private get LAYOUTS_KEY(): string { return layoutsKey(); }
 
   /**
@@ -266,28 +277,47 @@ class StateManagerClass {
       // restoreTabPanesInPlace to have run yet.
       await this.reconcileExistingTerminals(appState);
 
-      // Orphan sweep: drop persisted scrollback for any terminal no longer in the
-      // restored layout (closed tabs, crashed sessions, force-kills). Uses the same
-      // id set the reconcile walks — tab roots plus every terminal node in the saved
-      // pane trees. Best-effort; failure never blocks restore.
-      // ASSUMES a single persistent state (one STATE_KEY); the `?newWindow=1` path
-      // returns before restoreState runs, so no second window prunes with a partial
-      // keep-set. If multi-window independent saved layouts are ever added, this must
-      // union all windows' live terminals (or move the sweep server-side) first.
-      try {
-        const keep = new Set<string>();
-        (appState.tabs || []).forEach((t: any) => {
-          if (t?.id) keep.add(t.id);
-        });
-        const walkKeep = (node: any): void => {
-          if (!node) return;
-          if (node.type === 'terminal' && node.terminalId) keep.add(node.terminalId);
-          if (Array.isArray(node.children)) node.children.forEach(walkKeep);
-        };
-        Object.values(appState.tabPanes || {}).forEach(walkKeep);
-        await window.electronAPI?.pruneTerminalHistory?.([...keep]);
-      } catch (e) {
-        console.warn('StateManager: history prune skipped:', e);
+      // Orphan sweep: drop persisted scrollback for any terminal no longer in a
+      // saved layout (closed tabs, crashed sessions, force-kills).
+      //
+      // The keep-set is the UNION over EVERY window's session, not just this
+      // one's (plan 018 Task 7). Sessions are per-window now, and N windows boot
+      // concurrently — a sweep keyed on one window's layout would delete every
+      // other window's scrollback before those windows had read their own
+      // session. This is what the previous comment here required if per-window
+      // layouts were ever added.
+      //
+      // Only slot 0 sweeps: a correct union run N times is merely wasteful, but
+      // it is still N round-trips for no gain.
+      //
+      // Best-effort; failure never blocks restore.
+      if (isSlotZero()) {
+        // Drop session blobs for windows that no longer exist FIRST, so their
+        // terminals fall out of the union below and their scrollback is
+        // actually reclaimed rather than kept alive by a dead window's blob.
+        // Skips itself if the backend cannot say which windows are live.
+        try {
+          const liveIds = (await window.electronAPI?.listWindowSessionIds?.()) ?? [];
+          sweepOrphanSessions(localStorage, liveIds);
+        } catch (e) {
+          console.warn('StateManager: orphan session sweep skipped:', e);
+        }
+
+        try {
+          const keep = unionKeepSet(localStorage);
+          if (!keep.complete) {
+            // A window whose session would not parse is a window whose terminals
+            // we cannot name. Sweeping on a partial union deletes scrollback
+            // that cannot be recovered, so skip it entirely this time.
+            console.warn(
+              'StateManager: history prune skipped — at least one window session was unreadable',
+            );
+          } else {
+            await window.electronAPI?.pruneTerminalHistory?.([...keep.ids]);
+          }
+        } catch (e) {
+          console.warn('StateManager: history prune skipped:', e);
+        }
       }
 
       // Canvas geometry (`plan/013` Task 22), before the tabs it describes exist — the
@@ -405,20 +435,21 @@ class StateManagerClass {
       Object.values(appState.tabPanes || {}).forEach(walk);
       if (wanted.size === 0) return;
 
-      // Resolve the ACTUAL API port — the user may have changed it in Settings, so
-      // hardcoding the dev/prod default would make this reconcile hit the wrong port
-      // and silently fall back to spawning duplicates (re-orphaning PTYs). Read it
-      // from the network config like the rest of the renderer; the dev/prod default
-      // is only a fallback if that call is unavailable.
-      let port = process.env.NODE_ENV === 'development' ? 42051 : 42031;
+      // Resolve the ACTUAL API port. This used to read the CONFIGURED one and fall back
+      // to the dev/prod default, and both are the same wrong answer under a second
+      // instance: every release profile is configured for 42031, only one of them owns
+      // it, and the reconcile would then read a SIBLING's terminal list. The owner check
+      // below caught that and bailed — safe, but it meant this reconcile never ran at all
+      // for a non-primary instance. `apiBase()` addresses the port we actually bound, and
+      // throws rather than guessing when there isn't one.
+      let base: string;
       try {
-        const cfg = await window.electronAPI?.getNetworkConfig?.();
-        if (cfg?.apiPort) port = cfg.apiPort;
+        base = await apiBase();
       } catch {
-        // keep the dev/prod default
+        return; // no API of our own to reconcile against
       }
       const token = localStorage.getItem(apiTokenKey());
-      const res = await fetch(`http://localhost:${port}/api/terminals`, {
+      const res = await fetch(`${base}/terminals`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!res.ok) return;
