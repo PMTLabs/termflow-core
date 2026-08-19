@@ -220,6 +220,8 @@ export class Terminal {
     options: Record<string, unknown>;
     disposed: boolean;
     element: HTMLElement;
+    /** Retained onRender subscribers — emitRender() re-fires these, as xterm does. */
+    renderCbs: Array<(el: HTMLElement) => void>;
     dispose(): void;
     onRender(cb: (el: HTMLElement) => void): Disposable;
   }[] = [];
@@ -259,14 +261,26 @@ export class Terminal {
     // onRender path is exercised and its px styling can be asserted.
     const element =
       typeof document !== 'undefined' ? document.createElement('div') : ({ style: {} } as HTMLElement);
+    // Real xterm RETAINS every onRender subscriber and re-fires it on each refresh
+    // pass (BufferDecorationRenderer._refreshStyle fires onRenderEmitter for every
+    // decoration, visible or not, as long as its element exists). Firing once at
+    // registration — as this mock used to — makes a permanent per-decoration
+    // subscription indistinguishable from a one-shot, which hid a real per-frame
+    // cost from the whole suite. Keep the callbacks and let emitRender() drive them.
+    const renderCbs: Array<(el: HTMLElement) => void> = [];
     const d = {
       options,
       disposed: false,
       element,
-      dispose(): void { d.disposed = true; },
+      renderCbs,
+      dispose(): void { d.disposed = true; renderCbs.length = 0; },
       onRender(cb: (el: HTMLElement) => void): Disposable {
         cb(element);
-        return makeDisposable(() => {});
+        renderCbs.push(cb);
+        return makeDisposable(() => {
+          const i = renderCbs.indexOf(cb);
+          if (i >= 0) renderCbs.splice(i, 1);
+        });
       },
     };
     this.decorations.push(d);
@@ -395,8 +409,15 @@ export class Terminal {
     });
   }
 
+  // One frame. Real xterm's refresh pass drives BOTH the terminal-level onRender
+  // and every live decoration's onRender, so a faithful frame must fire both —
+  // otherwise per-decoration work is invisible to tests.
   emitRender(): void {
     this.renderCallbacks.forEach((cb) => cb({ start: 0, end: Math.max(0, this.rows - 1) }));
+    for (const d of this.decorations) {
+      if (d.disposed) continue;
+      for (const cb of [...d.renderCbs]) cb(d.element);
+    }
   }
 
   onSelectionChange(cb: () => void): Disposable {

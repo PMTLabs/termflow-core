@@ -716,3 +716,56 @@ describe('design/012 §5.9 — retargetRail after the xterm element moves', () =
     }
   });
 });
+
+/**
+ * Per-frame cost of the rail.
+ *
+ * xterm re-fires EVERY live decoration's onRender on every refresh pass
+ * (BufferDecorationRenderer._refreshStyle), so a subscription taken out per
+ * decorated row runs its callback once per row, per frame. When that callback
+ * measures the region (getBoundingClientRect) and then writes element.style,
+ * the reads and writes interleave and each one forces a synchronous layout —
+ * O(rows^2) forced layouts per frame. It is invisible until a long session has
+ * accumulated regions, and it lands on the selection-drag and scroll paths,
+ * which render per mouse move.
+ */
+describe('per-frame rail cost', () => {
+  /** Like withRegion, but with a real rail: ensureRailLayer() needs term.element
+   *  inside a .terminal-display-wrapper, which withRegion never sets up — so the
+   *  rail is undefined there and positionRail returns before measuring anything. */
+  function withMountedRegion(height: number) {
+    const term = newTerm(80);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'terminal-display-wrapper';
+    document.body.appendChild(wrapper);
+    term.open(wrapper);
+    const t = new EndedRegionTracker(term);
+    t.setColors('#2a2a2a', '#7aa2f7');
+    t.onPrompt();
+    t.markProgramActive();
+    term.__setCursorLine(height);
+    t.onPrompt();
+    return { term, t };
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('measures the region once per frame, not once per decorated row', () => {
+    const ROWS = 40;
+    const { term, t } = withMountedRegion(ROWS);
+    // Guard the arrangement: without real wash rows the assertion below is vacuous.
+    expect(term.decorations.filter((d) => !d.disposed).length).toBe(ROWS);
+
+    const spy = jest.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+    term.emitRender(); // exactly one frame
+    const rectReads = spy.mock.calls.length;
+    spy.mockRestore();
+    t.dispose();
+
+    // One sweep of the region's rows is the honest cost. ROWS sweeps (ROWS^2
+    // reads) means every decoration re-ran the whole measurement.
+    expect(rectReads).toBeLessThanOrEqual(ROWS * 2);
+  });
+});

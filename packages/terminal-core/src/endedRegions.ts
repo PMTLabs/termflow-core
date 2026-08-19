@@ -124,6 +124,10 @@ interface Region {
   /** The rail <div> for this region (in the wrapper's rail layer), or undefined
    *  until the terminal is live / a screen exists. */
   railEl: HTMLElement | undefined;
+  /** One-shot subscription that places the rail on this region's FIRST wash render
+   *  (see placeRailOnce). Held so a repaint or a dispose can cancel one that has not
+   *  fired yet — leaving it alive would put the per-frame cost straight back. */
+  railSub: IDisposable | undefined;
   /** Reflow-invariant logical-line index of `start` / `end`, refreshed from the
    *  markers on cols-stable renders. A column-WIDEN leaves xterm's markers stale
    *  (reflowLarger emits nothing), so these let onResize re-derive the true rows. */
@@ -235,6 +239,7 @@ export class EndedRegionTracker {
         lineMarkers: [],
         decorations: [],
         railEl: undefined,
+        railSub: undefined,
         startLogical: logicalIndexOfRow(buffer, this.openStart.line),
         endLogical: logicalIndexOfRow(buffer, end.line),
         cachedAtLine: this.openStart.line,
@@ -465,6 +470,10 @@ export class EndedRegionTracker {
    * is bounded by the viewport, not the region.
    */
   private paint(region: Region): void {
+    // The one-shot is attached to a decoration we are about to dispose; drop it
+    // here too so a repaint never leaves a subscription on a dead decoration.
+    region.railSub?.dispose();
+    region.railSub = undefined;
     for (const d of region.decorations) d.dispose();
     region.decorations = [];
     for (const m of region.lineMarkers) m.dispose();
@@ -499,12 +508,22 @@ export class EndedRegionTracker {
         });
         if (wash) {
           region.decorations.push(wash);
-          // Re-place the rail whenever this wash row renders. term.onRender only
-          // fires on GRID changes, but a decoration renders on its own (creation,
-          // scroll, reflow) — and the region is created AFTER the prompt's grid
-          // render, so without this the rail would be placed before the wash exists
-          // and then never again. Disposed with the decoration.
-          wash.onRender?.(() => this.positionRail(region));
+          // Place the rail once, as soon as this region's wash actually renders.
+          // term.onRender only fires on GRID changes, and the region is created
+          // AFTER the prompt's grid render, so without a decoration-driven kick the
+          // rail would be positioned before any wash element exists and then not
+          // again until the next grid change.
+          //
+          // ONE one-shot, on the first row only — NOT one per row. xterm re-fires
+          // EVERY live decoration's onRender on EVERY refresh pass
+          // (BufferDecorationRenderer._refreshStyle), so a per-row subscription made
+          // positionRail run once per row per frame, and positionRail measures the
+          // whole region with getBoundingClientRect and then writes element.style —
+          // interleaved reads and writes, so each pass forced a synchronous layout.
+          // That is O(rows^2) forced layouts per frame, on the selection-drag and
+          // scroll paths. Steady-state re-placement is positionRails() on
+          // term.onRender, which is once per frame for all regions.
+          if (region.decorations.length === 1) this.placeRailOnce(region, wash);
         }
       }
     }
@@ -513,6 +532,31 @@ export class EndedRegionTracker {
     // (called on every render) places it against the wash's rendered top/bottom.
     if (this.railColor) this.ensureRail(region);
     this.positionRail(region);
+  }
+
+  /**
+   * Subscribe to ONE wash decoration's onRender, place the rail, and immediately
+   * drop the subscription — so this costs one measurement, not one per frame.
+   *
+   * The self-dispose has to tolerate xterm firing the callback SYNCHRONOUSLY from
+   * inside onRender() (a decoration whose element already exists renders at once):
+   * the returned disposable is not assigned yet at that point, so `fired` latches
+   * and the caller disposes after assignment instead.
+   */
+  private placeRailOnce(region: Region, wash: IDecoration): void {
+    region.railSub?.dispose();
+    region.railSub = undefined;
+    let fired = false;
+    const place = (): void => {
+      if (fired) return;
+      fired = true;
+      region.railSub?.dispose();
+      region.railSub = undefined;
+      this.positionRail(region);
+    };
+    const sub = wash.onRender?.(place);
+    if (fired) sub?.dispose();
+    else region.railSub = sub;
   }
 
   /** Re-place every region's rail against its wash. Called on each render/scroll. */
@@ -635,6 +679,8 @@ export class EndedRegionTracker {
   }
 
   private disposeRegion(r: Region): void {
+    r.railSub?.dispose();
+    r.railSub = undefined;
     for (const d of r.decorations) d.dispose();
     r.decorations = [];
     for (const m of r.lineMarkers) m.dispose();
