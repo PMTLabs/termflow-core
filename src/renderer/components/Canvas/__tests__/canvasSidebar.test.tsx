@@ -28,6 +28,25 @@ jest.mock('../../../services/cwdSnapshot', () => ({
   getAllCwdSnapshots: () => ({ 'tm-1': '/home/u/termflow-core', 'tm-3': '/home/u/termflow-site' }),
 }));
 
+/**
+ * `renameTab` is the real service, reaching the SAME store the Provider renders from.
+ *
+ * Bridged rather than mocked out: a rename that only calls a jest.fn passes with the service
+ * gutted, and the two halves this suite cares about — the tab title the strip reads and the
+ * backend name every live pane carries — are exactly what a mock would stop proving. The real
+ * `../../../store` module is replaced because importing it builds a second app store and
+ * attaches `paneOwnershipSync` to it.
+ */
+jest.mock('../../../store', () => ({
+  get store() { return store; },
+}));
+jest.mock('../../../services/StateManager', () => ({
+  StateManager: { saveState: jest.fn().mockResolvedValue(undefined) },
+}));
+jest.mock('../../../services/TerminalService', () => ({
+  terminalService: { getProcessIdForTerminal: (terminalId: string) => `proc-${terminalId}` },
+}));
+
 const rect = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
 const node = (terminalId: string, tabId: string, paneId: string, title: string): CanvasNodeModel => ({
   terminalId, tabId, paneId, title, shellType: 'zsh', rect: rect(0, 0),
@@ -60,6 +79,7 @@ const trees = (): Record<string, PaneNode> => ({
 let container: HTMLDivElement;
 let root: Root;
 let store: EnhancedStore;
+let updateTerminalName: jest.Mock;
 
 beforeAll(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -88,6 +108,9 @@ beforeEach(() => {
       },
     } as never,
   });
+
+  updateTerminalName = jest.fn().mockResolvedValue(true);
+  (window as unknown as { electronAPI: unknown }).electronAPI = { updateTerminalName };
 
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -248,6 +271,114 @@ describe('CanvasSidebar — rename', () => {
     render();
     commit(startEditing(1), '   ');
     expect(paneName('tb-a', 'pn-3')).toBe('server');
+  });
+
+  /**
+   * The half this path used to drop. Renaming the sole terminal of a tab renames the TAB, and a
+   * tab rename is tab-level — so the backend process has to be told, exactly as the tab strip
+   * tells it. Until `renameTab` existed this dispatched `updateTabTitle` and stopped, leaving
+   * the strip and the process list disagreeing until the next restart.
+   */
+  it('pushes a solo terminal\'s new tab name down to its backend process', async () => {
+    render();
+    commit(startEditing(2), 'frontend');
+    await act(async () => { await Promise.resolve(); });
+
+    expect(updateTerminalName).toHaveBeenCalledWith('proc-tm-3', 'frontend');
+  });
+});
+
+/**
+ * Renaming the GROUP, which is renaming its tab — the counterpart to the row rename above and
+ * the sidebar half of the same feature the canvas serves with its group menu.
+ */
+describe('CanvasSidebar — group rename', () => {
+  const heads = () => Array.from(container.querySelectorAll('.canvas-sghead')) as HTMLElement[];
+  const editHeader = (index: number) => {
+    act(() => { heads()[index].dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); });
+    return container.querySelector('.canvas-sghead .canvas-srename') as HTMLInputElement;
+  };
+  const commit = (input: HTMLInputElement, value: string) => {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+  };
+  const tabTitle = (id: string) =>
+    (store.getState() as { tabs: { tabs: { id: string; title: string }[] } })
+      .tabs.tabs.find((t) => t.id === id)?.title;
+
+  it('renames the tab the group stands for', () => {
+    render();
+    commit(editHeader(0), 'gateway');
+    expect(tabTitle('tb-a')).toBe('gateway');
+  });
+
+  it('leaves the other group alone', () => {
+    render();
+    commit(editHeader(0), 'gateway');
+    expect(tabTitle('tb-b')).toBe('web');
+  });
+
+  /** A tab title is tab-level, so every live pane of a SPLIT tab is renamed — `tb-a` has two. */
+  it('names every live backend process of the tab', async () => {
+    render();
+    commit(editHeader(0), 'gateway');
+    await act(async () => { await Promise.resolve(); });
+
+    expect(updateTerminalName.mock.calls).toEqual([
+      ['proc-tm-1', 'gateway'],
+      ['proc-tm-2', 'gateway'],
+    ]);
+  });
+
+  /**
+   * **The id-collision regression.** `tabTreeSeed` gives a renderer-created tab a root pane with
+   * `terminalId === tab.id`, so a solo tab's ROW is keyed by the very id its GROUP is keyed by.
+   * Held in the row's `editingId` slot, opening the header would open the row's editor too —
+   * two inputs, one of which silently renames the pane instead of the tab.
+   */
+  it('opens only the header on a tab whose solo terminal shares its id', () => {
+    const solo: CanvasModel = {
+      nodes: [node('tb-solo', 'tb-solo', 'pn-9', 'zsh')],
+      groups: [group('tb-solo', 'solo', ['tb-solo'])],
+    };
+    render(solo);
+    editHeader(0);
+
+    expect(container.querySelectorAll('.canvas-srename')).toHaveLength(1);
+    expect(container.querySelector('.canvas-srow.editing')).toBeNull();
+  });
+
+  it('cancels on Escape without renaming', () => {
+    render();
+    const input = editHeader(0);
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+      setter.call(input, 'discarded');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+
+    expect(tabTitle('tb-a')).toBe('api');
+    expect(container.querySelector('.canvas-srename')).toBeNull();
+  });
+
+  it('refuses a blank name rather than leaving an unnameable group', () => {
+    render();
+    commit(editHeader(0), '   ');
+    expect(tabTitle('tb-a')).toBe('api');
+  });
+
+  /** An emptied tab is still a tab and still a drop target (design §6.3), so it is still
+   *  nameable — its header is the only handle it has left. */
+  it('renames a group that has no terminals left', () => {
+    const emptied: CanvasModel = { nodes: [], groups: [group('tb-a', 'api', [])] };
+    render(emptied);
+    commit(editHeader(0), 'parked');
+    expect(tabTitle('tb-a')).toBe('parked');
   });
 });
 

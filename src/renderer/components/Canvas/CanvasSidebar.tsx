@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { selectNode } from '../../store/slices/canvasSlice';
 import { renamePanes } from '../../store/slices/panesSlice';
-import { updateTabTitle } from '../../store/slices/tabsSlice';
+import { renameTab } from '../../services/renameTab';
 import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
 import { useFlyTo } from './CanvasViewport';
 import { centreOn } from './viewportStyles';
@@ -124,6 +124,7 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
 
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
 
   // Row drag-to-regroup and the width handle (Task 15).
   const drag = useSidebarDrag(model);
@@ -165,9 +166,27 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
     // When the terminal IS the tab, the tab strip has to agree — design 010 §2.1 makes the pane
     // name the node's title, and a tab whose only pane was renamed would otherwise keep a title
     // nothing on the canvas still shows.
+    //
+    // Through `renameTab`, not a bare `updateTabTitle`: a tab rename is also the backend name of
+    // every live pane and a save, and dispatching the title alone left the strip and the process
+    // list disagreeing until the next restart.
     const g = model.groups.find((x) => x.tabId === n.tabId);
-    if (g && g.nodeIds.length === 1) dispatch(updateTabTitle({ id: n.tabId, title: trimmed }));
+    if (g && g.nodeIds.length === 1) void renameTab(n.tabId, trimmed);
   }, [model, dispatch]);
+
+  /**
+   * Renaming the GROUP is renaming its tab, so it goes through the same service the tab strip
+   * and the canvas group menu use — one chain, three entry points.
+   *
+   * Its own state slot, NOT the row's `editingId`. `tabTreeSeed` gives a renderer-created tab a
+   * root pane with `terminalId === tab.id`, so a solo tab's row is keyed by the same string as
+   * its group: shared, opening the header would open that row's editor alongside it, and the
+   * one you typed into might rename the pane rather than the tab.
+   */
+  const commitGroupRename = useCallback((tabId: string, title: string) => {
+    setEditingTabId(null);
+    void renameTab(tabId, title);
+  }, []);
 
   return (
     <>
@@ -197,7 +216,19 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
               className={`canvas-sgroup${drag.dropTabId === g.tabId ? ' drop' : ''}`}
               data-tab-id={g.tabId}
             >
-              <h3 className="canvas-sghead">{g.title}</h3>
+              <h3
+                className={`canvas-sghead${editingTabId === g.tabId ? ' editing' : ''}`}
+                onDoubleClick={() => setEditingTabId(g.tabId)}
+                title={editingTabId === g.tabId ? undefined : `${g.title} — double-click to rename`}
+              >
+                {editingTabId === g.tabId ? (
+                  <RenameInput
+                    initial={g.title}
+                    onCommit={(name) => commitGroupRename(g.tabId, name)}
+                    onCancel={() => setEditingTabId(null)}
+                  />
+                ) : g.title}
+              </h3>
               <ul className="canvas-srows">
                 {g.rows.map((r) => (
                   <Row
