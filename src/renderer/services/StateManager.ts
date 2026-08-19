@@ -12,6 +12,7 @@ import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { apiBase } from '../api/apiBase';
 // `stateKey` is deliberately NOT imported: the session key is per WINDOW now
 // (plan 018), and the profile-only key would put every window back on one blob.
 import { sessionStateKey, isSlotZero } from './windowScope';
@@ -434,20 +435,21 @@ class StateManagerClass {
       Object.values(appState.tabPanes || {}).forEach(walk);
       if (wanted.size === 0) return;
 
-      // Resolve the ACTUAL API port — the user may have changed it in Settings, so
-      // hardcoding the dev/prod default would make this reconcile hit the wrong port
-      // and silently fall back to spawning duplicates (re-orphaning PTYs). Read it
-      // from the network config like the rest of the renderer; the dev/prod default
-      // is only a fallback if that call is unavailable.
-      let port = process.env.NODE_ENV === 'development' ? 42051 : 42031;
+      // Resolve the ACTUAL API port. This used to read the CONFIGURED one and fall back
+      // to the dev/prod default, and both are the same wrong answer under a second
+      // instance: every release profile is configured for 42031, only one of them owns
+      // it, and the reconcile would then read a SIBLING's terminal list. The owner check
+      // below caught that and bailed — safe, but it meant this reconcile never ran at all
+      // for a non-primary instance. `apiBase()` addresses the port we actually bound, and
+      // throws rather than guessing when there isn't one.
+      let base: string;
       try {
-        const cfg = await window.electronAPI?.getNetworkConfig?.();
-        if (cfg?.apiPort) port = cfg.apiPort;
+        base = await apiBase();
       } catch {
-        // keep the dev/prod default
+        return; // no API of our own to reconcile against
       }
       const token = localStorage.getItem(apiTokenKey());
-      const res = await fetch(`http://localhost:${port}/api/terminals`, {
+      const res = await fetch(`${base}/terminals`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       if (!res.ok) return;

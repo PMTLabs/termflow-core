@@ -42,6 +42,15 @@ use crate::state::{AppState, McpProcessHandle};
 use clap::Parser;
 
 /// Gracefully shutdown the MCP server process
+/// Whether an MCP sidecar/legacy process is currently held.
+///
+/// Mirrors `fabric_manager::fabric_alive`. Needed so a restart that MOVES the API port does
+/// not resurrect a sidecar the user deliberately stopped — "the API moved" is a reason to
+/// re-point a running forwarder, never a reason to start one.
+pub(crate) fn mcp_alive(state: &AppState) -> bool {
+    state.mcp_process.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
     if let Ok(mut guard) = state.mcp_process.lock() {
         if let Some(child) = guard.take() {
@@ -235,11 +244,40 @@ async fn start_mcp_legacy(
 
 /// Kill any running MCP server, then (re)start it from the given config. Tries
 /// the bundled sidecar first and falls back to the legacy node path in dev.
+/// Returns whether an MCP server is now running and forwarding to OUR core API.
+///
+/// The boolean is load-bearing: callers publish `effective_endpoints.mcp_port` from it, and
+/// writing a port for a sidecar that never came up advertises an endpoint nobody serves.
 pub async fn respawn_mcp(
     app_handle: tauri::AppHandle,
     state: AppState,
     cfg: &app_config::NetworkConfig,
-) {
+) -> bool {
+    // Point the sidecar at the API port we ACTUALLY bound. The boot path patches this into
+    // the config it passes; every OTHER caller hands over the CONFIGURED one, and on a
+    // second instance those differ — so an apply, a token rotation or a Start would leave
+    // the sidecar forwarding every MCP tool call into the SIBLING app's terminals. Patched
+    // here rather than at each call site so a new caller cannot forget it; it is a no-op
+    // for the boot path, which already passes the same value.
+    //
+    // **`None` REFUSES rather than falling back to the configured port.** That fallback is
+    // the very bug this change exists to remove: with no API of our own, the configured port
+    // is precisely where a sibling instance is listening, so spawning a forwarder aimed at it
+    // hands another app our token and routes every tool call into its terminals.
+    let effective_api = state.effective_endpoints.read().api_port;
+    let Some(api_port) = effective_api else {
+        log::warn!(
+            "[MCP] Not started: this instance is serving no API port, and the configured one \
+             ({}) may belong to another instance",
+            cfg.api_port
+        );
+        shutdown_mcp_server(&state);
+        return false;
+    };
+    let mut patched = cfg.clone();
+    patched.api_port = api_port;
+    let cfg = &patched;
+
     shutdown_mcp_server(&state);
     // Let the previous process fully release its port before rebinding. The
     // sidecar handle is killed (not waited), so give it a generous margin to
@@ -248,11 +286,15 @@ pub async fn respawn_mcp(
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
     match start_mcp_sidecar(app_handle.clone(), state.clone(), cfg).await {
-        Ok(_) => return,
+        Ok(_) => return true,
         Err(e) => log::warn!("[MCP] Sidecar startup failed, falling back to legacy node path: {}", e),
     }
-    if let Err(e) = start_mcp_legacy(state, cfg).await {
-        log::error!("[MCP] Failed to start MCP server: {}", e);
+    match start_mcp_legacy(state, cfg).await {
+        Ok(_) => true,
+        Err(e) => {
+            log::error!("[MCP] Failed to start MCP server: {}", e);
+            false
+        }
     }
 }
 

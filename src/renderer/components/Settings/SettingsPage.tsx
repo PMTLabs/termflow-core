@@ -506,6 +506,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         }
     };
 
+    // Re-read what we're ACTUALLY serving on. Called after every operation that can move
+    // the listener (apply / stop / start), because the configured port and the bound one
+    // are different questions and only the second one is an address.
+    const refreshEffective = async () => {
+        try {
+            const eff = await window.electronAPI?.getEffectiveEndpoints?.();
+            if (eff) setEffective(eff);
+        } catch { /* keep the previous values */ }
+    };
+
     // Load network config + interfaces on mount.
     useEffect(() => {
         (async () => {
@@ -542,10 +552,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             // stay authorized once the network token is being enforced.
             if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
             // The restart re-binds, so the effective ports may have changed too.
-            try {
-                const eff = await window.electronAPI?.getEffectiveEndpoints?.();
-                if (eff) setEffective(eff);
-            } catch { /* keep the previous values */ }
+            await refreshEffective();
             dispatch(addToast({ message: 'Network settings applied — servers restarted.', type: 'success' }));
             setTimeout(() => { checkConnectionHealth(); }, 700);
         } catch (err) {
@@ -564,6 +571,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         setIsApplying(true);
         try {
             await window.electronAPI.stopServers(target as 'all' | 'api' | 'mcp');
+            // A stopped server owns no port, so the endpoints below must stop naming one.
+            await refreshEffective();
             dispatch(addToast({ message: `${TARGET_LABEL[target] ?? 'Servers'} stopped.`, type: 'success' }));
             window.dispatchEvent(new CustomEvent('ui:serverStatusRefresh'));
             setTimeout(() => { checkConnectionHealth(); }, 300);
@@ -580,6 +589,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         setIsApplying(true);
         try {
             await window.electronAPI.startServers(target as 'all' | 'api' | 'mcp');
+            // The restart re-binds, so the port it landed on may differ from the last one.
+            await refreshEffective();
             dispatch(addToast({ message: `${TARGET_LABEL[target] ?? 'Servers'} started.`, type: 'success' }));
             window.dispatchEvent(new CustomEvent('ui:serverStatusRefresh'));
             setTimeout(() => { checkConnectionHealth(); }, 800);
@@ -609,11 +620,24 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const maskedToken = token ? `${token.slice(0, 8)}${'•'.repeat(Math.max(0, token.length - 8))}` : '';
     const healthOf = (name: string) => connections.find((c) => c.name === name);
 
-    const renderCopy = (value: string, label?: string) => (
+    /**
+     * `enabled: false` for an endpoint we are NOT currently serving.
+     *
+     * The displayed port falls back to the configured one when this instance holds nothing
+     * (servers stopped, or suppressed for an elevated profile) — which is fine to LOOK at,
+     * and wrong to hand out: the configured port is exactly where a sibling instance is
+     * listening, so a copied URL would point an agent or a colleague at another app.
+     */
+    const renderCopy = (value: string, label?: string, enabled = true) => (
         <button
             className={`copy-btn ${copiedUrl === value ? 'copied' : ''}`}
+            disabled={!enabled}
             onClick={() => copyToClipboard(value)}
-            title={label ? `Copy ${label} URL` : 'Copy to clipboard'}
+            title={
+                enabled
+                    ? (label ? `Copy ${label} URL` : 'Copy to clipboard')
+                    : 'Not serving this endpoint right now — start the servers first'
+            }
         >
             {copiedUrl === value ? (
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1459,11 +1483,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                         </div>
                         <div className="connection-url">
                             <code>http://localhost:{liveApiPort}</code>
-                            {renderCopy(`http://localhost:${liveApiPort}`)}
+                            {renderCopy(`http://localhost:${liveApiPort}`, undefined, effective?.apiPort != null)}
                         </div>
                         <div className="connection-url subline">
                             <code>ws://localhost:{liveApiPort}/ws</code>
-                            {renderCopy(`ws://localhost:${liveApiPort}/ws`)}
+                            {renderCopy(`ws://localhost:${liveApiPort}/ws`, undefined, effective?.apiPort != null)}
                         </div>
                         <div className="port-row">
                             <label className="setting-label">Port</label>
@@ -1499,7 +1523,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                         </div>
                         <div className="connection-url">
                             <code>http://localhost:{liveMcpPort}/mcp</code>
-                            {renderCopy(`http://localhost:${liveMcpPort}/mcp`)}
+                            {renderCopy(`http://localhost:${liveMcpPort}/mcp`, undefined, effective?.mcpPort != null)}
                         </div>
                         <div className="port-row">
                             <label className="setting-label">Port</label>
@@ -1543,8 +1567,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                             <span className="nic-label">{iface.label}</span>
                                             <code className="nic-ip">{iface.ip}</code>
                                             <div className="nic-copy-actions">
-                                                {renderCopy(`http://${iface.ip}:${apiPort}`, 'API')}
-                                                {renderCopy(`http://${iface.ip}:${mcpPort}/mcp`, 'MCP')}
+                                                {/* live*, not the port INPUTS: those hold the configured value —
+                                                    and, mid-edit, an unsaved one — so a second instance handed out
+                                                    a LAN address pointing at the sibling that owns 42031. */}
+                                                {renderCopy(`http://${iface.ip}:${liveApiPort}`, 'API', effective?.apiPort != null)}
+                                                {renderCopy(`http://${iface.ip}:${liveMcpPort}/mcp`, 'MCP', effective?.mcpPort != null)}
                                             </div>
                                         </div>
                                     ))}
@@ -1605,9 +1632,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 </div>
 
                 {showMcpModal && (
+                    // This modal WRITES an agent's MCP config, so it must name the port this
+                    // instance actually serves: the configured one sends Claude/Codex/Gemini
+                    // to whichever instance owns 42032, which on a second profile is not us.
                     <McpConnectModal
                         interfaces={interfaces}
-                        mcpPort={mcpPort}
+                        mcpPort={liveMcpPort}
                         token={token}
                         onClose={() => setShowMcpModal(false)}
                     />

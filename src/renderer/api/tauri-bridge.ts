@@ -7,6 +7,7 @@ import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, Pairin
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { apiTokenKey } from '../services/profileScope';
+import { apiBase, invalidateApiBase } from './apiBase';
 
 export interface NetworkConfig {
   apiPort: number;
@@ -197,29 +198,21 @@ export const disposeBridgeListeners = (): void => {
 
 console.log('Initializing Tauri Bridge...');
 
-// Default matches this build's instance (dev backend = 42051, prod = 42031);
-// `let` so the resolver below can swap in a user-overridden port.
-const DEFAULT_API_PORT = process.env.NODE_ENV === 'development' ? 42051 : 42031;
-let API_PORT = DEFAULT_API_PORT;
-let API_BASE_URL = `http://localhost:${API_PORT}/api`;
+// The API base URL is resolved from the port the backend actually BOUND, not the
+// one it was configured with, and every call site awaits it — see `apiBase.ts`
+// for why a compiled-in default or the configured port is another instance's
+// server rather than a safe fallback.
 
-// Resolve the real (possibly user-overridden) API port from the backend once,
-// so the bridge talks to the correct port after a settings change/restart.
-// Call sites read API_BASE_URL at call time, so reassigning it here is enough.
-invoke<{ apiPort: number; authToken: string }>('get_network_config')
+// The auth token is per-instance CONFIG (not an address), so it still comes from
+// `get_network_config`. When exposed on the network the backend enforces it on ALL
+// requests, including this renderer's loopback calls; harmless in localhost mode.
+invoke<{ authToken: string }>('get_network_config')
   .then((cfg) => {
-    if (cfg?.apiPort) {
-      API_PORT = cfg.apiPort;
-      API_BASE_URL = `http://localhost:${API_PORT}/api`;
-    }
-    // When exposed on the network the backend enforces the token on ALL requests
-    // (including this renderer's loopback calls), so the renderer must send it.
-    // Harmless in localhost mode (auth is not enforced there).
     if (cfg?.authToken) {
       localStorage.setItem(apiTokenKey(), cfg.authToken);
     }
   })
-  .catch(() => { /* keep default */ });
+  .catch(() => { /* the token stays whatever a previous session stored */ });
 
 // Windows OS build number for xterm's `windowsPty.buildNumber` (the codex/ratatui ConPTY
 // rendering fix). Fetched once at startup and cached so terminals can read it
@@ -243,7 +236,7 @@ const buildAuthHeaders = (): Record<string, string> => {
 
 const tauriBridge: ElectronAPI = {
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
-    const response = await fetch(`${API_BASE_URL}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
+    const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {
         ...buildAuthHeaders(),
       },
@@ -262,7 +255,7 @@ const tauriBridge: ElectronAPI = {
     if (rows && rows > 0) params.set('rows', String(rows));
     const query = params.toString();
     const response = await fetch(
-      `${API_BASE_URL}/terminals/${terminalId}/snapshot${query ? `?${query}` : ''}`,
+      `${await apiBase()}/terminals/${terminalId}/snapshot${query ? `?${query}` : ''}`,
       { headers: { ...buildAuthHeaders() } }
     );
 
@@ -275,7 +268,7 @@ const tauriBridge: ElectronAPI = {
 
   getTerminalFullScrollback: async (terminalId) => {
     const response = await fetch(
-      `${API_BASE_URL}/terminals/${terminalId}/full-scrollback`,
+      `${await apiBase()}/terminals/${terminalId}/full-scrollback`,
       { headers: { ...buildAuthHeaders() } }
     );
 
@@ -289,7 +282,7 @@ const tauriBridge: ElectronAPI = {
   // Live foreground-process info for all terminals (across all windows). Callers
   // filter to the relevant tabs by mapping each terminal via TerminalService.
   getActiveProcesses: async () => {
-    const response = await fetch(`${API_BASE_URL}/processes`, {
+    const response = await fetch(`${await apiBase()}/processes`, {
       headers: { ...buildAuthHeaders() },
     });
     if (!response.ok) {
@@ -570,13 +563,18 @@ const tauriBridge: ElectronAPI = {
   getNetworkConfig: async () => invoke('get_network_config'),
   getEffectiveEndpoints: async () => invoke('get_effective_endpoints'),
   setNetworkConfig: async (apiPort, mcpPort, exposeOnNetwork) => {
+    // Invalidated on BOTH sides of the call. The native command rebinds the listener near
+    // its start and can then spend seconds respawning sidecars, so invalidating only
+    // afterwards leaves a window in which the old memo is live but the port behind it has
+    // already been released — and released is precisely when a sibling can take it.
+    invalidateApiBase();
     const cfg = await invoke<NetworkConfig>('set_network_config', { apiPort, mcpPort, exposeOnNetwork });
     // Re-point the bridge at the (possibly new) port so REST calls — terminal
-    // scrollback/snapshot — don't keep hitting the old one after the hot-restart.
-    if (cfg?.apiPort) {
-      API_PORT = cfg.apiPort;
-      API_BASE_URL = `http://localhost:${API_PORT}/api`;
-    }
+    // scrollback/snapshot, the canvas graph — don't keep hitting the old one after
+    // the hot-restart. Re-resolved from the backend rather than taken from `cfg`:
+    // what came back is the CONFIGURED port, and the restart is what decides which
+    // one is actually ours.
+    invalidateApiBase();
     if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
     return cfg;
   },
@@ -586,8 +584,19 @@ const tauriBridge: ElectronAPI = {
     return cfg;
   },
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),
-  stopServers: async (target = 'all') => { await invoke('stop_servers', { target }); },
-  startServers: async (target = 'all') => { await invoke('start_servers', { target }); },
+  // Both move (or remove) the listener, so the resolved base URL is stale afterwards.
+  // A stopped API clears its effective port precisely so this window cannot keep
+  // addressing a port a sibling instance is now free to take.
+  stopServers: async (target = 'all') => {
+    invalidateApiBase();
+    await invoke('stop_servers', { target });
+    invalidateApiBase();
+  },
+  startServers: async (target = 'all') => {
+    invalidateApiBase();
+    await invoke('start_servers', { target });
+    invalidateApiBase();
+  },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
@@ -650,7 +659,7 @@ const tauriBridge: ElectronAPI = {
 
   canvasApiRequest: async (path, init) => {
     const method = init?.method ?? 'GET';
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const response = await fetch(`${await apiBase()}${path}`, {
       method,
       headers: {
         ...buildAuthHeaders(),

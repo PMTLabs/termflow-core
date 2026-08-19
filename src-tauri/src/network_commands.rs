@@ -69,17 +69,6 @@ pub async fn probe_port_owner(port: u16, own_id: &str) -> PortOwner {
     }
 }
 
-/// Decide whether a bind to a probed port may proceed. A foreign owner is a hard
-/// conflict (we must not hijack); Free / OwnedBySelf are fine to (re)bind.
-pub fn classify_bind(owner: PortOwner) -> Result<(), String> {
-    match owner {
-        PortOwner::OwnedByOther => {
-            Err("Port is already in use by another instance".to_string())
-        }
-        _ => Ok(()),
-    }
-}
-
 /// Map a server's reported `/health` identity to `(healthy, conflict)` for a port we
 /// expect to own. `reported`: `None` = unreachable; `Some(id)` = reachable, with `id`
 /// the instanceId it advertised ("" if it didn't). Used for BOTH the API and MCP
@@ -92,13 +81,64 @@ pub fn classify_health_owner(reported: Option<&str>, our_id: &str) -> (bool, boo
     }
 }
 
-/// Send the shutdown signal to the currently-running API server (if any).
-pub(crate) fn stop_running_api(state: &AppState) {
+/// How a (re)bind must be sequenced. Pure, so the rule is testable without a socket.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RebindPlan {
+    /// Another instance holds the configured port: release ours, then walk forward from it.
+    WalkForward,
+    /// It is the address we are already serving: free it first, then take it back.
+    RebindOwn,
+    /// A different address that is available: bind it first, so a failure leaves the old
+    /// server untouched, then stop the old one.
+    BindThenStop,
+}
+
+/// Choose the sequence for rebinding `target`.
+///
+/// `serving` is the address we are ACTUALLY on — `None` when we hold nothing (stopped, or
+/// suppressed for an elevated profile). That distinction is the whole point: this used to
+/// compare `target` against the CONFIGURED address, so a second instance that owned nothing
+/// still matched "same address" and went down the stop-then-rebind path — onto a port a
+/// sibling was serving, which `SO_REUSEADDR` would have let it hijack rather than refuse.
+///
+/// Foreign ownership is checked FIRST and never yields `RebindOwn`: whatever we believe we
+/// are serving, a port another instance answers on is not ours to take.
+pub(crate) fn plan_rebind(
+    owner: &PortOwner,
+    target: SocketAddr,
+    serving: Option<SocketAddr>,
+) -> RebindPlan {
+    if *owner == PortOwner::OwnedByOther {
+        RebindPlan::WalkForward
+    } else if serving == Some(target) {
+        RebindPlan::RebindOwn
+    } else {
+        RebindPlan::BindThenStop
+    }
+}
+
+/// Send the shutdown signal to the currently-running API server (if any), and give up the
+/// port with it.
+///
+/// **The clear is part of stopping, not a separate step callers remember.** A stopped server
+/// owns nothing, and a sibling instance is free to take the port the moment we let go — so an
+/// `effective_endpoints` entry that outlives the listener stops meaning "our API" and starts
+/// meaning "whoever grabbed it next". Two of the three rebind paths stop the server before a
+/// FALLIBLE bind, so a failure there returned early and left exactly that stale entry behind;
+/// folding the clear in here is what makes that unrepresentable rather than a rule to follow.
+///
+/// The success path republishes the port it actually bound immediately afterwards, with no
+/// await in between, so no observer sees the gap.
+///
+/// Generic over the runtime purely so this rule is reachable from a `mock_app` test; every
+/// production caller passes the `Wry` state and infers it.
+pub(crate) fn stop_running_api<R: tauri::Runtime>(state: &AppState<R>) {
     if let Ok(mut guard) = state.api_shutdown.lock() {
         if let Some(tx) = guard.take() {
             let _ = tx.send(());
         }
     }
+    state.effective_endpoints.write().api_port = None;
 }
 
 /// Bind `addr` with `SO_REUSEADDR` set, so a same-port hot-restart can rebind
@@ -156,7 +196,12 @@ async fn bind_with_retry(addr: SocketAddr, port: u16) -> Result<tokio::net::TcpL
 
 /// (Re)start the Axum API server with the given config.
 ///
-/// Two paths, because the running server holds its own port:
+/// Three paths, because the running server holds its own port:
+/// - **Configured port owned by a sibling**: stop ours, then walk forward exactly as the
+///   boot path does. This used to be a hard error, and that made every Apply / Stop+Start
+///   fail on a second instance — whose own port is BY DEFINITION not the configured one,
+///   so it took this branch every single time. The instance was then left with no API at
+///   all until the app was relaunched.
 /// - **Same address** (token rotation, expose unchanged, or a save that doesn't
 ///   change the port): the old server MUST be stopped first to free the port,
 ///   then we bind (with a short retry while it releases). The brief no-server
@@ -165,39 +210,100 @@ async fn bind_with_retry(addr: SocketAddr, port: u16) -> Result<tokio::net::TcpL
 ///   bind the new listener FIRST so a busy target port returns an error with the
 ///   old server still running — never a "stopped old, failed new, no server" gap.
 ///
-/// `state.network` still holds the OLD config here (it's updated only after a
-/// successful restart), so it gives us the currently-bound address.
-///
 /// Callers must hold `state.network_op_lock` so two restarts can't interleave
 /// (which would race the single `api_shutdown` slot).
 pub async fn restart_api_server(state: AppState, cfg: &NetworkConfig) -> Result<(), String> {
-    let addr = SocketAddr::from((host_octets(cfg.expose_on_network), cfg.api_port));
-    // P0b: never (re)bind a port another instance owns — we'd hijack it via
-    // SO_REUSEADDR. Our own running server probes as OwnedBySelf, so a same-port
-    // hot-restart is unaffected; only a port CHANGE onto a foreign-owned port errors.
-    classify_bind(probe_port_owner(cfg.api_port, &state.instance_id).await)?;
+    let host = host_octets(cfg.expose_on_network);
+    let addr = SocketAddr::from((host, cfg.api_port));
+
+    // The address we are ACTUALLY serving on, which is the only one "same address" can
+    // sensibly mean. This read `network` (the CONFIGURED port) and so answered "same" for
+    // an address a second instance never held — sending it down the stop-then-rebind path
+    // for a port belonging to a sibling.
+    //
+    // `None` = we hold nothing (stopped, or suppressed for an elevated profile), which is
+    // never "the same address" as a port we are about to bind.
     let old_addr = {
         let net = state.network.read();
-        SocketAddr::from((host_octets(net.expose_on_network), net.api_port))
+        let effective = state.effective_endpoints.read().api_port;
+        effective.map(|port| SocketAddr::from((host_octets(net.expose_on_network), port)))
     };
+
+    // P0b: never (re)bind a port another instance owns — we'd hijack it via SO_REUSEADDR,
+    // which succeeds on a port someone else holds and cannot be used to detect a conflict.
+    let owner = probe_port_owner(cfg.api_port, &state.instance_id).await;
     log::info!(
-        "[NET] restart_api_server: target={} old={} same_addr={}",
-        addr, old_addr, addr == old_addr
+        "[NET] restart_api_server: target={} old={:?} owner={:?}",
+        addr, old_addr, owner
     );
 
-    let listener = if addr == old_addr {
-        // Same port/host — free it first, then rebind (SO_REUSEADDR via bind_with_retry).
-        stop_running_api(&state);
-        bind_with_retry(addr, cfg.api_port).await?
-    } else {
-        // New port/host — bind first (old server untouched on failure), then stop old.
-        // SO_REUSEADDR lets the new host bind even when it overlaps the old one
-        // (e.g. an expose toggle 127.0.0.1 <-> 0.0.0.0 on the same port).
-        let l = bind_reuseaddr(addr)
-            .map_err(|e| format!("Port {} is unavailable: {}", cfg.api_port, e))?;
-        stop_running_api(&state);
-        l
+    let picked = match plan_rebind(&owner, addr, old_addr) {
+        RebindPlan::WalkForward => {
+            // Someone else's port, so we walk the span for one that is free or already ours.
+            // `network` keeps the configured value; only `effective_endpoints` learns where
+            // we ended up.
+            //
+            // **Walk BEFORE stopping.** Stopping first is what lets the walk land back on the
+            // port we currently hold, but it spends a working server on a FALLIBLE scan: if
+            // every candidate is occupied the old code returned a conflict error with our
+            // server still up, and a stop-first walk would instead leave the instance with no
+            // API at all. So try to secure a replacement while still serving; only if that
+            // finds nothing do we release our own port and walk again — which is the case
+            // where the port we hold was the one worth reclaiming.
+            let walk = |state: AppState| async move {
+                crate::net_ports::bind_api_listener(
+                    host,
+                    cfg.api_port,
+                    crate::net_ports::DEFAULT_SPAN,
+                    &state.instance_id,
+                )
+                .await
+            };
+            match walk(state.clone()).await {
+                Some(picked) => {
+                    // Secured elsewhere — only now is the old listener expendable.
+                    stop_running_api(&state);
+                    picked
+                }
+                None => {
+                    stop_running_api(&state);
+                    walk(state.clone()).await.ok_or_else(|| {
+                        format!(
+                            "No free port in {}..{}",
+                            cfg.api_port,
+                            cfg.api_port.saturating_add(crate::net_ports::DEFAULT_SPAN)
+                        )
+                    })?
+                }
+            }
+        }
+        RebindPlan::RebindOwn => {
+            // Same port/host — free it first, then rebind (SO_REUSEADDR via bind_with_retry).
+            stop_running_api(&state);
+            let bound = bind_with_retry(addr, cfg.api_port).await?;
+            crate::net_ports::Picked { port: cfg.api_port, bound }
+        }
+        RebindPlan::BindThenStop => {
+            // New port/host — bind first (old server untouched on failure), then stop old.
+            // SO_REUSEADDR lets the new host bind even when it overlaps the old one
+            // (e.g. an expose toggle 127.0.0.1 <-> 0.0.0.0 on the same port).
+            let bound = bind_reuseaddr(addr)
+                .map_err(|e| format!("Port {} is unavailable: {}", cfg.api_port, e))?;
+            stop_running_api(&state);
+            crate::net_ports::Picked { port: cfg.api_port, bound }
+        }
     };
+
+    let crate::net_ports::Picked { port: bound_port, bound: listener } = picked;
+
+    // The bind succeeded, so this port is genuinely ours — publish it BEFORE the server
+    // that serves it, exactly as the boot path does.
+    //
+    // Without this, `effective_endpoints` only ever held the BOOT-time port: a later port
+    // change from Settings updated `network` (configured) and the listener, and left every
+    // consumer that routes by the effective port — the renderer, the fabric — pointing at
+    // the port we used to serve, which by then may belong to a sibling instance.
+    state.effective_endpoints.write().api_port = Some(bound_port);
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     if let Ok(mut guard) = state.api_shutdown.lock() {
@@ -270,19 +376,33 @@ pub async fn set_network_config(
     cfg.expose_on_network = expose_on_network;
 
     // Restart API first (this validates the port); only then publish + touch MCP.
+    //
+    // The EFFECTIVE port can move without the configured one changing — a sibling holding
+    // the configured port sends the restart down the walk-forward path. Both sidecars
+    // receive the core API URL by env at spawn, so "did the config change" is not the
+    // whole question: an unnoticed move leaves them forwarding to a port we no longer own.
+    let effective_before = state.effective_endpoints.read().api_port;
     restart_api_server((*state).clone(), &cfg).await?;
+    let effective_after = state.effective_endpoints.read().api_port;
+    let api_moved = effective_before != effective_after;
     // Publish the new config BEFORE the (possibly multi-second) respawn so the live
     // API auth gate and status reads see the new values immediately rather than the
     // stale ones during sidecar startup (matches rotate_auth_token's ordering).
     *state.network.write() = cfg.clone();
     // Only respawn the sidecar when its env actually changed — a no-op apply
     // shouldn't drop every client's in-memory MCP session.
-    if crate::mcp_respawn_needed(&old, &cfg) {
-        crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+    if crate::mcp_respawn_needed(&old, &cfg) || api_moved {
+        // Unlike the boot path there is no walk-forward fallback here, so a sidecar that
+        // came up is on exactly the configured port — but it still has to be RECORDED, or
+        // Settings keeps reporting the boot-time one. Recorded ONLY on success: publishing
+        // it regardless advertises an MCP endpoint that nothing serves, which the health
+        // probe then chases to whichever instance does hold that port.
+        let started = crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+        state.effective_endpoints.write().mcp_port = started.then_some(cfg.mcp_port);
     }
     // The fabric receives the core API URL + token via env at spawn only, so an api-port
     // change leaves it calling the core on a stale port (M6). Respawn it in lockstep.
-    if crate::fabric_manager::fabric_respawn_needed(&old, &cfg) {
+    if crate::fabric_manager::fabric_respawn_needed(&old, &cfg) || api_moved {
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
     }
 
@@ -312,7 +432,10 @@ pub async fn rotate_auth_token(
     // session (mcp_respawn_needed encodes exactly that).
     *state.network.write() = cfg.clone();
     if crate::mcp_respawn_needed(&old, &cfg) {
-        crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+        // The ports do not change here, but the sidecar can still fail to come back — and a
+        // rotation that leaves no MCP running must not keep advertising one.
+        let started = crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+        state.effective_endpoints.write().mcp_port = started.then_some(cfg.mcp_port);
     }
     // Unlike the MCP sidecar (token only matters in networked mode), the fabric ALWAYS
     // authenticates to the core with this token, so a rotation always leaves it stale (M6).
@@ -342,13 +465,30 @@ pub async fn stop_servers(state: State<'_, AppState>, target: String) -> Result<
     // Serialize with restart/apply so we can't race the api_shutdown slot.
     let _op = state.network_op_lock.lock().await;
     let (api, mcp) = targets(&target);
+    // A stopped server owns nothing, so its port leaves `effective_endpoints` with it — the
+    // API's clear lives inside `stop_running_api` (every stop needs it, including the ones
+    // inside a rebind). The MCP sidecar has no such choke point, so it is cleared here.
     if api {
         stop_running_api(&state);
     }
-    if mcp {
+    // Stopping the API takes its FORWARDERS with it. Both the MCP sidecar and the fabric
+    // receive the core API URL by env at spawn and keep using it for their whole life, so a
+    // stopped API leaves them addressing a port this instance no longer holds — one a
+    // sibling is free to bind, at which point their requests carry OUR token into ANOTHER
+    // app's terminals. Neither can do anything useful without the core anyway, so refusing
+    // is strictly better than pointing them somewhere wrong.
+    let stop_mcp = mcp || api;
+    if stop_mcp {
         crate::shutdown_mcp_server(&state);
+        state.effective_endpoints.write().mcp_port = None;
     }
-    log::info!("[NET] stop_servers: target={} (api={} mcp={})", target, api, mcp);
+    if api {
+        crate::fabric_manager::shutdown_fabric(&state);
+    }
+    log::info!(
+        "[NET] stop_servers: target={} (api={} mcp={} fabric={})",
+        target, api, stop_mcp, api
+    );
     Ok(())
 }
 
@@ -364,13 +504,47 @@ pub async fn start_servers(
     let _op = state.network_op_lock.lock().await;
     let (api, mcp) = targets(&target);
     let cfg = state.network.read().clone();
+    let effective_before = state.effective_endpoints.read().api_port;
     if api {
         restart_api_server((*state).clone(), &cfg).await?;
     }
-    if mcp {
-        crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+    let effective_after = state.effective_endpoints.read().api_port;
+    // Restarting ONLY the API can still move it — a sibling may hold the configured port,
+    // in which case we walk forward. Both sidecars forward to the core API by an env var
+    // fixed at spawn, so leaving them alone here would leave them addressing a port we no
+    // longer own: the MCP one is the same silent cross-instance reroute the boot path
+    // takes care to avoid.
+    let api_moved = effective_before != effective_after;
+    // `api_moved` alone must not RESURRECT a sidecar the user deliberately stopped: after
+    // "Stop all" then "Start API", the API goes None -> Some, which is a move, and MCP would
+    // come back although the target said api. Mirrors the fabric's own `was_running` guard.
+    let mcp_was_running = crate::mcp_alive(&state);
+    if mcp || (api_moved && mcp_was_running) {
+        // Only publish the port if a sidecar actually came up: writing it regardless
+        // advertises an MCP endpoint that nothing serves.
+        let started = crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
+        state.effective_endpoints.write().mcp_port = started.then_some(cfg.mcp_port);
     }
-    log::info!("[NET] start_servers: target={} (api={} mcp={})", target, api, mcp);
+    // The fabric is collateral when the API stops (it can only forward to the core), so
+    // bringing the API back has to bring it back too — `respawn_fabric` deliberately no-ops
+    // when nothing is running, which would otherwise make "Stop API" a one-way door for
+    // peering until the app was relaunched. Only the primary instance runs one; a failure
+    // is non-fatal, exactly as at boot (the open-core build has no fabric binary at all).
+    if api_moved {
+        if crate::fabric_manager::fabric_alive(&state) {
+            crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
+        } else if effective_after.is_some() && crate::profile::current().is_primary() {
+            if let Err(e) =
+                crate::fabric_manager::start_fabric(app.clone(), (*state).clone()).await
+            {
+                log::warn!("[FABRIC] not restarted with the API (peering unavailable): {e}");
+            }
+        }
+    }
+    log::info!(
+        "[NET] start_servers: target={} (api={} mcp={}) api_moved={}",
+        target, api, mcp, api_moved
+    );
     Ok(())
 }
 
@@ -384,17 +558,58 @@ mod port_owner_tests {
         assert_eq!(probe_port_owner(59999, "self-id").await, PortOwner::Free);
     }
 
-    #[test]
-    fn owned_by_other_is_conflict_error() {
-        assert!(classify_bind(PortOwner::OwnedByOther)
-            .unwrap_err()
-            .contains("another instance"));
+    fn loopback(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
     }
 
     #[test]
-    fn free_and_self_are_bindable() {
-        assert!(classify_bind(PortOwner::Free).is_ok());
-        assert!(classify_bind(PortOwner::OwnedBySelf).is_ok());
+    fn a_sibling_owned_port_is_never_rebound_directly() {
+        // Whatever we think we serve, a port another instance answers on is not ours.
+        for serving in [None, Some(loopback(42031)), Some(loopback(42035))] {
+            assert_eq!(
+                plan_rebind(&PortOwner::OwnedByOther, loopback(42031), serving),
+                RebindPlan::WalkForward,
+                "serving={serving:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn serving_nothing_is_not_the_same_address() {
+        // The bug: a stopped second instance compared the target against its CONFIGURED
+        // port, matched, and took the stop-then-rebind path onto a port it did not hold.
+        assert_eq!(
+            plan_rebind(&PortOwner::Free, loopback(42031), None),
+            RebindPlan::BindThenStop,
+        );
+    }
+
+    #[test]
+    fn only_the_address_we_actually_serve_is_rebound_in_place() {
+        // Configured 42031, actually serving 42035 (a sibling took the configured one at
+        // boot). Re-applying 42031 is a MOVE, not a rebind of what we hold.
+        assert_eq!(
+            plan_rebind(&PortOwner::Free, loopback(42031), Some(loopback(42035))),
+            RebindPlan::BindThenStop,
+        );
+        assert_eq!(
+            plan_rebind(&PortOwner::OwnedBySelf, loopback(42035), Some(loopback(42035))),
+            RebindPlan::RebindOwn,
+        );
+    }
+
+    #[test]
+    fn an_expose_toggle_on_the_same_port_is_a_move() {
+        // 127.0.0.1:42031 -> 0.0.0.0:42031 changes the host, so the new listener is bound
+        // first and the old one only stopped once that succeeded.
+        assert_eq!(
+            plan_rebind(
+                &PortOwner::OwnedBySelf,
+                SocketAddr::from(([0, 0, 0, 0], 42031)),
+                Some(loopback(42031)),
+            ),
+            RebindPlan::BindThenStop,
+        );
     }
 
     #[test]
@@ -407,5 +622,74 @@ mod port_owner_tests {
         assert_eq!(classify_health_owner(Some("other"), "me"), (false, true));
         // reachable but no identity (foreign / pre-identity build) → conflict
         assert_eq!(classify_health_owner(Some(""), "me"), (false, true));
+    }
+}
+
+// A stop must SURRENDER the port, not merely close the listener. Gated: needs tauri's `test`
+// feature (mock_app), which breaks the Windows test binary at loader time, so this runs on
+// Linux/macOS CI only:
+//   cargo test --features integration-tests
+// (see api_server.rs / commands.rs for the precedent.)
+#[cfg(all(test, feature = "integration-tests"))]
+mod stop_surrenders_port_tests {
+    use super::*;
+    use crate::state::AppState;
+
+    fn mock_state() -> (
+        tauri::App<tauri::test::MockRuntime>,
+        AppState<tauri::test::MockRuntime>,
+    ) {
+        let app = tauri::test::mock_app();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(tx, app.handle().clone(), NetworkConfig::defaults());
+        (app, state)
+    }
+
+    /// The invariant the rebind paths depend on. Both `WalkForward` and `RebindOwn` stop the
+    /// server BEFORE a fallible bind, so if stopping did not clear the port, a bind that then
+    /// failed would return early leaving `effective_endpoints` naming a port nothing of ours
+    /// is listening on — and which a sibling instance is free to take.
+    #[test]
+    fn stopping_the_api_clears_the_effective_port() {
+        let (_app, state) = mock_state();
+        state.effective_endpoints.write().api_port = Some(42035);
+
+        stop_running_api(&state);
+
+        assert_eq!(
+            state.effective_endpoints.read().api_port,
+            None,
+            "a stopped API still claimed a port; a failed rebind would leave that stale"
+        );
+    }
+
+    /// Stopping is idempotent and must not resurrect a port on the second call.
+    #[test]
+    fn stopping_twice_leaves_the_port_surrendered() {
+        let (_app, state) = mock_state();
+        state.effective_endpoints.write().api_port = Some(42035);
+
+        stop_running_api(&state);
+        stop_running_api(&state);
+
+        assert_eq!(state.effective_endpoints.read().api_port, None);
+    }
+
+    /// The API and MCP ports are surrendered independently — stopping the API must not blank
+    /// the MCP entry Settings reads, and vice versa.
+    #[test]
+    fn stopping_the_api_leaves_the_mcp_port_alone() {
+        let (_app, state) = mock_state();
+        {
+            let mut eff = state.effective_endpoints.write();
+            eff.api_port = Some(42035);
+            eff.mcp_port = Some(42036);
+        }
+
+        stop_running_api(&state);
+
+        let eff = state.effective_endpoints.read();
+        assert_eq!(eff.api_port, None);
+        assert_eq!(eff.mcp_port, Some(42036));
     }
 }

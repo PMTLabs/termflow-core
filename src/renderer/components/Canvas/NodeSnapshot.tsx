@@ -68,7 +68,7 @@ const NodeSnapshotImpl: React.FC<{ terminalId: string }> = ({ terminalId }) => {
 
       // Optional on the API surface, and guarded the same way `MainBridge` guards it — the
       // browser bridge and older hosts may not provide it. Going through `electronAPI` rather
-      // than `fetch` is what carries the bearer token and the configured API port; this is the
+      // than `fetch` is what carries the bearer token and the EFFECTIVE API port; this is the
       // same call `TerminalBridge.getSnapshot` makes, without standing up a bridge object per
       // node for one method.
       const getSnapshot = window.electronAPI?.getTerminalSnapshot;

@@ -1613,7 +1613,23 @@ async fn local_fleet_run(
     timeout_ms: u64,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let cfg = state.network.read().clone();
-    let url = format!("http://127.0.0.1:{}/api/fleet/local-run", cfg.api_port);
+    // The EFFECTIVE port, emphatically not the configured one. This posts a command to be
+    // RUN, with our bearer token attached: aimed at the configured port from a second
+    // instance it executes in the sibling app's terminal instead of ours — the loudest
+    // version of the wrong-instance bug, since it does not fail, it succeeds elsewhere.
+    // No port of our own means no local responder to proxy to; failing is the only honest
+    // answer, because the configured port is exactly where the wrong app is listening.
+    let api_port = state
+        .effective_endpoints
+        .read()
+        .api_port
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this instance is not serving an API port; cannot run locally".to_string(),
+            )
+        })?;
+    let url = format!("http://127.0.0.1:{}/api/fleet/local-run", api_port);
     // Give the loopback call the full command budget plus margin so it doesn't abort
     // before the responder's own timeout returns a live (done=false) handle.
     let client = crate::network_commands::localhost_client(timeout_ms.saturating_add(5_000))
