@@ -240,6 +240,19 @@ pub async fn respawn_mcp(
     state: AppState,
     cfg: &app_config::NetworkConfig,
 ) {
+    // Point the sidecar at the API port we ACTUALLY bound. The boot path patches this into
+    // the config it passes; every OTHER caller hands over the CONFIGURED one, and on a
+    // second instance those differ — so an apply, a token rotation or a Start would leave
+    // the sidecar forwarding every MCP tool call into the SIBLING app's terminals. Patched
+    // here rather than at each call site so a new caller cannot forget it; it is a no-op
+    // for the boot path, which already passes the same value.
+    let effective_api = state.effective_endpoints.read().api_port;
+    let mut patched = cfg.clone();
+    if let Some(port) = effective_api {
+        patched.api_port = port;
+    }
+    let cfg = &patched;
+
     shutdown_mcp_server(&state);
     // Let the previous process fully release its port before rebinding. The
     // sidecar handle is killed (not waited), so give it a generous margin to

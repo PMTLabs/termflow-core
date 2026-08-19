@@ -1298,9 +1298,28 @@ pub struct ConnectionHealth {
 
 #[tauri::command]
 pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<ConnectionHealth>, String> {
+    // Probe the ports we are ACTUALLY serving on, not the ones we were configured for.
+    //
+    // Under a second instance those differ (every release profile is configured for 42031;
+    // only the first to start binds it), and probing the configured port asked the wrong
+    // question in both directions: a healthy sibling on 42031 came back as a permanent
+    // "conflict" badge for an instance whose own API on 42035 was fine, and once our own
+    // server was stopped the same probe would have reported the sibling as OUR healthy one.
+    //
+    // `None` means we hold no port — stopped, or suppressed for an elevated profile — so
+    // there is nothing of OURS to probe and "offline" is the answer without asking anyone.
+    // The displayed URL still falls back to the configured port in that case: it is the
+    // number in Settings and the one a restart would try first.
+    let (effective_api, effective_mcp) = {
+        let eff = state.effective_endpoints.read();
+        (eff.api_port, eff.mcp_port)
+    };
     let (api_port, mcp_port) = {
         let net = state.network.read();
-        (net.api_port, net.mcp_port)
+        (
+            effective_api.unwrap_or(net.api_port),
+            effective_mcp.unwrap_or(net.mcp_port),
+        )
     };
     let mut results = Vec::new();
 
@@ -1314,15 +1333,19 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
     let client = crate::network_commands::localhost_client(1500)
         .ok_or_else(|| "failed to build HTTP client".to_string())?;
 
-    // Check API Server.
-    let api_reported: Option<String> =
-        match client.get(format!("http://localhost:{}/health", api_port)).send().await {
+    // Check API Server. `effective_api == None` short-circuits to offline rather than
+    // probing the configured port — whatever answers there while we hold nothing is by
+    // definition somebody else's server, and reporting it as ours would be a false green.
+    let api_reported: Option<String> = match effective_api {
+        None => None,
+        Some(port) => match client.get(format!("http://localhost:{}/health", port)).send().await {
             Ok(r) if r.status().is_success() => {
                 let j = r.json::<serde_json::Value>().await.unwrap_or_else(|_| serde_json::json!({}));
                 Some(j.get("instanceId").and_then(|v| v.as_str()).unwrap_or("").to_string())
             }
             _ => None,
-        };
+        },
+    };
     let (api_healthy, api_conflict) =
         crate::network_commands::classify_health_owner(api_reported.as_deref(), &our_id);
 
@@ -1335,8 +1358,9 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
     });
 
     // Check MCP Server — same ownership rule, plus activeSessions for the client count.
-    let (mcp_reported, mcp_clients): (Option<String>, Option<u32>) =
-        match client.get(format!("http://localhost:{}/health", mcp_port)).send().await {
+    let (mcp_reported, mcp_clients): (Option<String>, Option<u32>) = match effective_mcp {
+        None => (None, None),
+        Some(port) => match client.get(format!("http://localhost:{}/health", port)).send().await {
             Ok(r) if r.status().is_success() => {
                 let j = r.json::<serde_json::Value>().await.unwrap_or_else(|_| serde_json::json!({}));
                 let id = j.get("instanceId").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1344,7 +1368,8 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
                 (Some(id), sessions)
             }
             _ => (None, None),
-        };
+        },
+    };
     let (mcp_healthy, mcp_conflict) =
         crate::network_commands::classify_health_owner(mcp_reported.as_deref(), &our_id);
 

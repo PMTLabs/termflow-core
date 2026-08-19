@@ -136,7 +136,17 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
 
     let control_port = state.fabric_control_port;
     let data_dir = fabric_data_dir(&app);
-    let cfg = state.network.read().clone();
+    let mut cfg = state.network.read().clone();
+    // `TERMFLOW_CORE_API_URL` must name the port we ACTUALLY bound, not the one that was
+    // configured. When a sibling instance holds the configured port we walk forward and
+    // serve elsewhere — and the sidecar was still being pointed at the configured number,
+    // i.e. at the OTHER app's core API, carrying OUR token. The boot path already patched
+    // the MCP sidecar this way (`lib.rs`, "Same for the fabric and the renderer"); the
+    // fabric and the renderer were the two that never got it.
+    let effective_api = state.effective_endpoints.read().api_port;
+    if let Some(port) = effective_api {
+        cfg.api_port = port;
+    }
 
     let mut sidecar_command = app
         .shell()

@@ -506,6 +506,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         }
     };
 
+    // Re-read what we're ACTUALLY serving on. Called after every operation that can move
+    // the listener (apply / stop / start), because the configured port and the bound one
+    // are different questions and only the second one is an address.
+    const refreshEffective = async () => {
+        try {
+            const eff = await window.electronAPI?.getEffectiveEndpoints?.();
+            if (eff) setEffective(eff);
+        } catch { /* keep the previous values */ }
+    };
+
     // Load network config + interfaces on mount.
     useEffect(() => {
         (async () => {
@@ -542,10 +552,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             // stay authorized once the network token is being enforced.
             if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
             // The restart re-binds, so the effective ports may have changed too.
-            try {
-                const eff = await window.electronAPI?.getEffectiveEndpoints?.();
-                if (eff) setEffective(eff);
-            } catch { /* keep the previous values */ }
+            await refreshEffective();
             dispatch(addToast({ message: 'Network settings applied — servers restarted.', type: 'success' }));
             setTimeout(() => { checkConnectionHealth(); }, 700);
         } catch (err) {
@@ -564,6 +571,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         setIsApplying(true);
         try {
             await window.electronAPI.stopServers(target as 'all' | 'api' | 'mcp');
+            // A stopped server owns no port, so the endpoints below must stop naming one.
+            await refreshEffective();
             dispatch(addToast({ message: `${TARGET_LABEL[target] ?? 'Servers'} stopped.`, type: 'success' }));
             window.dispatchEvent(new CustomEvent('ui:serverStatusRefresh'));
             setTimeout(() => { checkConnectionHealth(); }, 300);
@@ -580,6 +589,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         setIsApplying(true);
         try {
             await window.electronAPI.startServers(target as 'all' | 'api' | 'mcp');
+            // The restart re-binds, so the port it landed on may differ from the last one.
+            await refreshEffective();
             dispatch(addToast({ message: `${TARGET_LABEL[target] ?? 'Servers'} started.`, type: 'success' }));
             window.dispatchEvent(new CustomEvent('ui:serverStatusRefresh'));
             setTimeout(() => { checkConnectionHealth(); }, 800);
