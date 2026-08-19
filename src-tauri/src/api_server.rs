@@ -623,19 +623,30 @@ async fn create_terminal(
         }
     };
 
-    let spawned = crate::pty_manager::spawn_terminal(
-        state.clone(),
-        cols,
-        rows,
-        shell_path,
-        shell_args,
-        shell_cwd,
-        shell_name.clone(),
-        terminal_name.clone(),
-        Some(identity.renderer_terminal_id.clone()),
-        Some(identity.owning_tab_id.clone()),
-        None, // API-created terminal: fresh session, no restored scrollback
-    );
+    // Routed like the renderer's own create: sidecar-hosted when the PTY host is
+    // available, in-process only as a fallback. Spawning DIRECTLY in-process here
+    // is what made every agent/MCP-created terminal un-offloadable — one of them
+    // alive was enough for `hotswap_preflight` to refuse Offload & Close, because
+    // a hot-swap really would have killed it (plan 019).
+    //
+    // No restored scrollback, as before: `resolve_api_spawn_identity` always mints
+    // a FRESH `tm-*` leaf, so the `stage_scrollback` inside the routed spawn can
+    // never find a stored row for it.
+    let spawned = crate::commands::spawn_routed(
+        &state,
+        crate::commands::SpawnRequest {
+            leaf_id: identity.renderer_terminal_id.clone(),
+            owning_tab_id: Some(identity.owning_tab_id.clone()),
+            cols,
+            rows,
+            shell_path,
+            shell_name: shell_name.clone(),
+            shell_args,
+            cwd: shell_cwd,
+            name: Some(terminal_name.clone()),
+        },
+    )
+    .await;
     match spawned {
         Ok(id) => {
             // Auto-connect: record that the calling agent spawned this terminal
@@ -683,9 +694,12 @@ async fn create_terminal(
             if let Err(e) = state.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": terminal_name,
                 "profile": shell_name,
-                // UNCHANGED: this key has always carried the backend PROCESS id
-                // here (unlike a REST response, where `terminalId` is the leaf).
-                // Mode 0 in App.tsx reads it as the process id.
+                // This key carries the backend PROCESS id (Mode 0 in App.tsx reads
+                // it as one), unlike a REST response where `terminalId` is the leaf.
+                // Since plan 019 the two COINCIDE for a sidecar-hosted terminal —
+                // the map key IS the leaf — and differ only on a fallback spawn, so
+                // read the key you need by NAME here, never by "the one that looks
+                // different from the others".
                 "terminalId": id,
                 "tabId": Some(identity.owning_tab_id.clone()),
                 // NEW, unambiguous names — see App.tsx Modes 0/1.
@@ -2223,19 +2237,27 @@ async fn fleet_local_run(
             // a fast-exiting shell's exit-path persist can run in that window and
             // file the final scrollback under the ephemeral pc- id.
             let fleet_tab_id = mint_renderer_id("tb");
-            let new_id = match crate::pty_manager::spawn_terminal(
-                state.clone(),
-                80,
-                24,
-                shell_path,
-                shell_args,
-                shell_cwd,
-                shell_name.clone(),
-                terminal_name.clone(),
-                Some(fleet_tab_id.clone()),
-                Some(fleet_tab_id.clone()),
-                None, // fleet terminal: fresh session, no restored scrollback
-            ) {
+            // Routed exactly like every other create (plan 019): a fleet terminal
+            // spawned in-process would block Offload & Close for as long as it lived.
+            // Its identity is UNCHANGED — it keeps the `tb-*` it minted itself as
+            // both owner and leaf, which design 011 §3 blesses precisely because it
+            // minted it ("no create may take a root leaf it did not itself mint").
+            let new_id = match crate::commands::spawn_routed(
+                &state,
+                crate::commands::SpawnRequest {
+                    leaf_id: fleet_tab_id.clone(),
+                    owning_tab_id: Some(fleet_tab_id.clone()),
+                    cols: 80,
+                    rows: 24,
+                    shell_path,
+                    shell_name: shell_name.clone(),
+                    shell_args,
+                    cwd: shell_cwd,
+                    name: Some(terminal_name.clone()),
+                },
+            )
+            .await
+            {
                 Ok(id) => id,
                 Err(e) => {
                     return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
@@ -2243,7 +2265,8 @@ async fn fleet_local_run(
                 }
             };
             // Make the fleet terminal VISIBLE as a labeled UI tab, mirroring
-            // create_terminal. The backend (`pc-`) id stays the map key.
+            // create_terminal. On the sidecar path the map key IS this leaf; only a
+            // fallback spawn still mints a separate `pc-` key.
             let target_window = state.resolve_active_window_label();
             if let Err(e) = state.app_handle.emit(
                 "api:createTerminalTab",
