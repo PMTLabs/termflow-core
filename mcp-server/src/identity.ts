@@ -5,9 +5,10 @@ export const ME_SENTINEL = "me" as const;
 export const TERMINAL_ID_HEADER = "x-termflow-terminal-id";
 
 /**
- * Allowed terminal-id alphabet. Backend ids are `pc-<hex>` (and tab ids `tb-…`);
- * this allowlist accepts those while rejecting anything that could manipulate a
- * REST path once interpolated (`/`, `..`, `?`, `#`, `%`, whitespace, …).
+ * Allowed terminal-id alphabet. Backend ids are the pane leaf (`tm-…`/`tb-…`) for
+ * a sidecar-hosted terminal and `pc-<hex>` for an in-process one; this allowlist
+ * accepts every form while rejecting anything that could manipulate a REST path
+ * once interpolated (`/`, `..`, `?`, `#`, `%`, whitespace, …).
  */
 const SAFE_TERMINAL_ID = /^[A-Za-z0-9_-]+$/;
 
@@ -39,7 +40,7 @@ export function resolveTerminalId(input: string, callerId: string | undefined): 
     if (!SAFE_TERMINAL_ID.test(resolved)) {
         throw new Error(
             `Invalid terminalId ${JSON.stringify(resolved)}: expected only [A-Za-z0-9_-] ` +
-                '(e.g. "pc-xxxxxxxxx").'
+                '(e.g. "tm-xxxxxxxxx").'
         );
     }
     return resolved;

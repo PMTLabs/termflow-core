@@ -206,23 +206,29 @@ pub async fn create_terminal(
         claim
     });
 
-    // Opt-in PTY-host sidecar path (Windows). Requires a stable tab_id as the
-    // reattach key; without one we fall through to the in-process path.
-    if crate::pty_host_client::enabled() {
-        if let Some(tid) = tab_id.clone() {
-            return create_host_terminal(
-                state.inner(),
-                tid,
-                owning_tab_id.clone(),
+    // The routed spawn (sidecar when available, in-process otherwise) requires a
+    // stable tab_id as the leaf / reattach key; without one we fall through to the
+    // legacy in-process path below, which lets `spawn_terminal` mint an ephemeral
+    // id. The `enabled()` gate now lives INSIDE `spawn_routed` so no caller can
+    // spawn without making the decision (plan 019 §2.1).
+    if let Some(tid) = tab_id.clone() {
+        return spawn_routed(
+            state.inner(),
+            SpawnRequest {
+                leaf_id: tid,
+                owning_tab_id: owning_tab_id.clone(),
                 cols,
                 rows,
                 shell_path,
                 shell_name,
                 shell_args,
-                shell_cwd,
-            )
-            .await;
-        }
+                cwd: shell_cwd,
+                // The renderer derives `Terminal-{shell}` itself; passing None
+                // keeps that one definition in `terminal_display_name`.
+                name: None,
+            },
+        )
+        .await;
     }
 
     // Restore path: if this renderer id has scrollback persisted from a prior
@@ -320,33 +326,70 @@ pub fn set_terminal_owning_tab(
     Ok(())
 }
 
-/// Spawn a terminal hosted by the PTY-host sidecar. The app terminalId IS the
-/// stable `tab_id` (the reattach key), so the sidecar session, the output
-/// broadcast id, and the vt100 screen key all align — live routing works with
-/// no change to the output pipeline, and reattach-by-tab_id after a hot-swap is
-/// consistent. On failure, falls back to the in-process spawn path.
-#[allow(clippy::too_many_arguments)]
-async fn create_host_terminal(
-    state: &AppState,
-    id: String,
-    owning_tab_id: Option<String>,
-    cols: u16,
-    rows: u16,
-    shell_path: Option<String>,
-    shell_name: String,
-    shell_args: Option<Vec<String>>,
-    cwd: Option<String>,
-) -> Result<String, String> {
+/// Everything a spawn needs, independent of WHO asked for it — the renderer
+/// (`create_terminal`), the REST/MCP API (`api_server::create_terminal`), or the
+/// fleet responder (`api_server::fleet_local_run`).
+pub(crate) struct SpawnRequest {
+    /// The renderer leaf id. On the sidecar path this IS the map key, the sidecar
+    /// session id, the output-broadcast id and the vt100 screen key
+    /// (`commands.rs:188-192`) — every caller must therefore already own a stable
+    /// leaf before it gets here (design 011 §3: "no create may take a root leaf it
+    /// did not itself mint").
+    pub leaf_id: String,
+    pub owning_tab_id: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    pub shell_path: Option<String>,
+    pub shell_name: String,
+    pub shell_args: Option<Vec<String>>,
+    pub cwd: Option<String>,
+    /// Caller-supplied display name; `None` derives `Terminal-{shell_name}`.
+    pub name: Option<String>,
+}
+
+/// THE spawn decision, for every caller.
+///
+/// Host-owned when the PTY-host sidecar is enabled and reachable, in-process
+/// otherwise. The app terminalId IS the stable leaf (the reattach key), so the
+/// sidecar session, the output broadcast id, and the vt100 screen key all align —
+/// live routing works with no change to the output pipeline, and reattach-by-leaf
+/// after a hot-swap is consistent.
+///
+/// **This function is the only place that makes that choice.** The
+/// `pty_host_client::enabled()` gate used to sit in the *caller*
+/// (`create_terminal`), which is exactly why the two API spawn sites could skip it
+/// and leave every agent-created terminal in-process — blocking Offload & Close
+/// for as long as one was alive (plan 019). A new spawn site must call this, not
+/// `pty_manager::spawn_terminal`; `api_spawn_routing_tests` enforces that.
+pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<String, String> {
+    let SpawnRequest {
+        leaf_id: id,
+        owning_tab_id,
+        cols,
+        rows,
+        shell_path,
+        shell_name,
+        shell_args,
+        cwd,
+        name,
+    } = req;
+
+    // Deliberately off (Unix default, or the `TERMFLOW_PTY_HOST=0` kill-switch):
+    // in-process is the intended behaviour here, not a degraded one.
+    if !crate::pty_host_client::enabled() {
+        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
+    }
     // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
     // to the in-process path immediately — no host state is registered.
     if let Err(e) = state.ensure_pty_host().await {
-        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, &e);
+        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e);
     }
     let client = match state.pty_host_clone() {
         Some(c) => c,
         None => {
             return host_fallback(
                 state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd,
+                name.as_deref(),
                 "pty-host not connected",
             )
         }
@@ -364,7 +407,7 @@ async fn create_host_terminal(
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
-        register_host_terminal(state, &id, owning_tab_id.as_deref(), pid, &shell_name, cols, rows, prompt_hook);
+        register_host_terminal(state, &id, owning_tab_id.as_deref(), pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -388,7 +431,7 @@ async fn create_host_terminal(
     // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
-    register_host_terminal(state, &id, owning_tab_id.as_deref(), 0, &shell_name, cols, rows, prompt_hook);
+    register_host_terminal(state, &id, owning_tab_id.as_deref(), 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -412,7 +455,7 @@ async fn create_host_terminal(
         Err(e) => {
             // Undo the provisional registration, then fall back in-process.
             state.cleanup_terminal_state(&id);
-            host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, &e)
+            host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
         }
     }
 }
@@ -428,14 +471,30 @@ fn host_identity(id: &str, owning_tab_id: Option<&str>) -> (String, String) {
     (id.to_string(), owning_tab_id.unwrap_or(id).to_string())
 }
 
+/// The display name a spawn registers: the caller's, or the derived default.
+///
+/// Only the API/MCP path supplies one (`payload.name`, e.g. an agent labelling its
+/// own terminal); the renderer derives the same `Terminal-{shell}` string this
+/// falls back to. Both in-process and host-owned spawns route through here so a
+/// caller-supplied name cannot be dropped by taking one path rather than the other
+/// — it used to be, on every fallback (plan 019 §4).
+fn terminal_display_name(name: Option<&str>, shell_name: &str) -> String {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => format!("Terminal-{}", shell_name),
+    }
+}
+
 /// Register a host-owned terminal's routing state: authoritative screen, host
 /// ownership, and the Terminal record (keyed by the stable id == tab_id).
+#[allow(clippy::too_many_arguments)]
 fn register_host_terminal(
     state: &AppState,
     id: &str,
     owning_tab_id: Option<&str>,
     pid: u32,
     shell_name: &str,
+    name: Option<&str>,
     cols: u16,
     rows: u16,
     prompt_hook: bool,
@@ -449,7 +508,7 @@ fn register_host_terminal(
             id: id.to_string(),
             pid,
             shell: shell_name.to_string(),
-            name: format!("Terminal-{}", shell_name),
+            name: terminal_display_name(name, shell_name),
             created_at: chrono::Local::now().to_rfc3339(),
             cols,
             rows,
@@ -504,10 +563,17 @@ fn host_fallback(
     shell_name: String,
     shell_args: Option<Vec<String>>,
     cwd: Option<String>,
+    name: Option<&str>,
     reason: &str,
 ) -> Result<String, String> {
-    log::warn!("pty-host unavailable ({reason}); falling back to in-process");
-    let name = format!("Terminal-{}", shell_name);
+    // A sidecar that is switched OFF is not a failure — on Unix that is still the
+    // default, so warning here would fire on every single spawn.
+    if crate::pty_host_client::enabled() {
+        log::warn!("pty-host unavailable ({reason}); falling back to in-process");
+    } else {
+        log::debug!("spawning {tab_id} in-process ({reason})");
+    }
+    let name = terminal_display_name(name, &shell_name);
     // Seed + register the tab_id via spawn_terminal (both land before the reader
     // thread starts), then stage the renderer's one-shot prefix under the new id.
     let history_prefix = restore_prefix(state, tab_id);
@@ -2732,6 +2798,166 @@ mod host_identity_tests {
     fn a_missing_owner_degrades_to_the_leaf_not_to_none() {
         let (_, owner) = host_identity("tm-9f2c1a4b7", None);
         assert_eq!(owner, "tm-9f2c1a4b7");
+    }
+}
+
+/// The offload guard `hotswap_preflight` refuses whenever ANY live terminal is
+/// in-process, because a hot-swap would kill it. Two API spawn sites
+/// (`api_server::create_terminal` and `api_server::fleet_local_run`) used to call
+/// `pty_manager::spawn_terminal` directly, so every agent/MCP-created terminal was
+/// in-process and permanently blocked "Offload & Close" — the reported symptom in
+/// plan 019. The fix routes both through [`spawn_routed`].
+///
+/// These tests exist because the bug is a CLASS, not an instance: `spawn_routed`
+/// is the only thing that makes the host-vs-in-process decision, and nothing in the
+/// type system stops a FOURTH spawn site — in any module, including one that does
+/// not exist yet — from bypassing it and silently re-arming the trap (plan 019
+/// §2.1). Source lines are CRLF-normalised: a source-derived assertion that matches
+/// a literal newline passes on a Linux runner and fails on a Windows checkout (the
+/// Rust twin of the `utils/readSource` e2e fix).
+#[cfg(test)]
+mod api_spawn_routing_tests {
+    /// The API is the ONLY caller that supplies a name (an agent labelling its own
+    /// terminal, e.g. `bl108-external-review`). `register_host_terminal` used to
+    /// hardcode `Terminal-{shell}`, so routing the API through the host path
+    /// without this would silently rename every agent terminal — and that name is
+    /// what `list_terminals` returns for agents to find themselves by
+    /// (`api_server.rs` `terminal_identity_json`).
+    #[test]
+    fn a_caller_supplied_name_survives_the_routed_spawn() {
+        assert_eq!(
+            super::terminal_display_name(Some("bl108-external-review"), "powershell"),
+            "bl108-external-review",
+        );
+    }
+
+    /// The renderer passes `None` and expects the derived default — one definition
+    /// for both spawn paths, so a fallback can no longer rename a terminal.
+    #[test]
+    fn no_name_derives_the_shell_default() {
+        assert_eq!(super::terminal_display_name(None, "powershell"), "Terminal-powershell");
+    }
+
+    /// A blank/whitespace name is a missing name, not an empty title: an untitled
+    /// terminal in the tab strip would otherwise be indistinguishable from a bug.
+    #[test]
+    fn a_blank_name_falls_back_to_the_default() {
+        assert_eq!(super::terminal_display_name(Some("   "), "cmd"), "Terminal-cmd");
+        assert_eq!(super::terminal_display_name(Some(""), "cmd"), "Terminal-cmd");
+    }
+
+    /// Does this line CALL `spawn_terminal`, however it was reached?
+    ///
+    /// Matches the fully-qualified form (`crate::pty_manager::spawn_terminal(`), the
+    /// bare form a `use crate::pty_manager::spawn_terminal;` import enables, and a
+    /// spaced `spawn_terminal (`. Rejects the definition itself, a longer identifier
+    /// that merely ends in the name, and comment prose — so a doc comment may still
+    /// say the word.
+    fn calls_spawn_terminal(line: &str) -> bool {
+        const NAME: &str = "spawn_terminal";
+        let code = line.trim_start();
+        if code.starts_with("//") || code.starts_with('*') {
+            return false;
+        }
+        let Some(pos) = code.find(NAME) else { return false };
+        let before = &code[..pos];
+        // `my_spawn_terminal(` is a different function.
+        if before.chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            return false;
+        }
+        // `fn spawn_terminal(` is the declaration, not a call.
+        if before.trim_end().ends_with("fn") {
+            return false;
+        }
+        code[pos + NAME.len()..].trim_start().starts_with('(')
+    }
+
+    /// Every `.rs` file in the crate, read from the real source tree at test time.
+    ///
+    /// Deliberately NOT a hardcoded list, and deliberately not just `api_server.rs`:
+    /// a brand-new module is the easiest way to walk past this guard (external review
+    /// of PR #45, F-01), and a list maintained by hand cannot see a file nobody
+    /// remembered to add to it. Reading the directory means the audit's coverage is
+    /// derived from reality rather than asserted.
+    fn crate_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {} to audit spawn sites ({e}) — this guard must FAIL loudly \
+                 rather than pass vacuously",
+                dir.display()
+            )
+        });
+        let mut sources = Vec::new();
+        for entry in entries {
+            let path = entry.expect("unreadable source dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {name} to audit spawn sites: {e}"))
+                .replace("\r\n", "\n");
+            sources.push((name, text));
+        }
+        assert!(
+            sources.len() > 20,
+            "found only {} source files — the audit is not seeing the real tree",
+            sources.len()
+        );
+        sources
+    }
+
+    /// The matcher is the load-bearing part, so pin it directly: every evasion form
+    /// must be caught, and every non-call must not be.
+    #[test]
+    fn the_matcher_catches_every_way_of_calling_it() {
+        for call in [
+            "    let x = crate::pty_manager::spawn_terminal(",
+            "    let x = pty_manager::spawn_terminal(state, cols, rows);",
+            "    let x = spawn_terminal(state, cols, rows);", // after a `use` import
+            "    let x = spawn_terminal (state);",
+        ] {
+            assert!(calls_spawn_terminal(call), "missed a real call: {call}");
+        }
+        for not_a_call in [
+            "pub fn spawn_terminal(",
+            "    // spawn_terminal(state) is what this replaced",
+            "    /// see spawn_terminal(…) for the in-process path",
+            "    let x = my_spawn_terminal(state);",
+            "    let spec = build_spawn_spec(&id);",
+            "    // registers before spawn_terminal returns",
+        ] {
+            assert!(!calls_spawn_terminal(not_a_call), "false positive: {not_a_call}");
+        }
+    }
+
+    #[test]
+    fn no_module_outside_the_router_spawns_a_terminal_in_process() {
+        // `commands.rs` IS the router (it owns `spawn_routed` and its in-process
+        // `host_fallback`); `pty_manager.rs` declares the function. Every other
+        // module must go through `spawn_routed`.
+        const ALLOWED: [&str; 2] = ["commands.rs", "pty_manager.rs"];
+
+        let offenders: Vec<String> = crate_sources()
+            .iter()
+            .filter(|(name, _)| !ALLOWED.contains(&name.as_str()))
+            .flat_map(|(name, text)| {
+                text.lines()
+                    .enumerate()
+                    .filter(|(_, line)| calls_spawn_terminal(line))
+                    .map(move |(i, line)| format!("  {}:{}: {}", name, i + 1, line.trim()))
+            })
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "a spawn site outside the router calls pty_manager::spawn_terminal directly \
+             instead of commands::spawn_routed. Terminals it creates are in-process, so \
+             they are lost by a hot-swap and `hotswap_preflight` refuses Offload & Close \
+             for as long as one is alive (plan 019):\n{}",
+            offenders.join("\n")
+        );
     }
 }
 

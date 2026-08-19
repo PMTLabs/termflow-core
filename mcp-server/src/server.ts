@@ -58,8 +58,11 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         {
             description:
                 "Spawn a new terminal process (supports split panel layout). Terminal ids come " +
-                "in three flavours and are NOT interchangeable: `terminalId`/`processId` (`pc-…`) " +
-                "addresses the PTY for every other tool; `owningTabId` (`tb-…`) names a TAB; and " +
+                "in three flavours and are NOT interchangeable: `terminalId`/`processId` " +
+                "addresses the PTY for every other tool — always read it from a response, never " +
+                "construct it: it EQUALS the pane leaf below for a sidecar-hosted terminal, and " +
+                "is a separate `pc-…` id only when the PTY host was unavailable at spawn; " +
+                "`owningTabId` (`tb-…`) names a TAB; and " +
                 "the `terminalId` field of a terminal-detail response is the renderer PANE leaf. " +
                 "That leaf id has two FORMS, which describe who minted it, NOT the pane's shape: " +
                 "`tb-…` is minted for a renderer-created tab root (leaf == owning tab), `tm-…` is " +
