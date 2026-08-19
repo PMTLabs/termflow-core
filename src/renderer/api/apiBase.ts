@@ -28,6 +28,16 @@ import type { EffectiveEndpoints } from '../types/electron';
 export const RESOLVE_POLL_MS = 100;
 
 /**
+ * How long a SINGLE probe may take before it is abandoned.
+ *
+ * The deadline below is checked between probes, so without this an `invoke` that never
+ * settles — an IPC wedge, a host tearing down — is never timed out by it: the loop simply
+ * stops at the await and every REST consumer waits forever. Generous for a loopback IPC
+ * round trip, and abandoning a slow probe costs only one extra poll.
+ */
+export const PROBE_TIMEOUT_MS = 2_000;
+
+/**
  * How long the FIRST resolution may wait for the bind.
  *
  * The listener is bound from a task spawned in `setup()`, so the bundle can easily load
@@ -62,12 +72,13 @@ export async function resolveApiPort(
 ): Promise<number | null> {
   const deadline = deps.now() + timeoutMs;
   for (;;) {
-    let port: number | null = null;
-    try {
-      port = await deps.effectivePort();
-    } catch {
-      port = null;
-    }
+    // Raced rather than awaited: a probe that never settles must not outlive the deadline.
+    // A rejection and an abandonment both read as "not yet", which is what keeps a slow
+    // start indistinguishable from a slow answer — and both are retried, not fatal.
+    const port = await Promise.race([
+      deps.effectivePort().catch(() => null),
+      deps.wait(PROBE_TIMEOUT_MS).then(() => null),
+    ]);
     if (typeof port === 'number' && port > 0) return port;
     if (deps.now() >= deadline) return null;
     await deps.wait(RESOLVE_POLL_MS);
@@ -92,6 +103,15 @@ const liveDeps: ResolveDeps = {
 let pending: Promise<number> | null = null;
 /** Whether a resolution has ever run to completion — see the timeout choice below. */
 let attempted = false;
+/**
+ * Bumped by every invalidation, so a resolution can tell whether it is still the current one.
+ *
+ * Without it the state machine is not linearizable, and both ways of losing that race route
+ * wrongly: a resolution started before a rebind would hand its caller the port we have since
+ * RELEASED — which is exactly the port a sibling is free to take — and its failure handler
+ * would clear a memo a newer resolution had already filled, throwing away a correct answer.
+ */
+let generation = 0;
 
 /**
  * The port this window's API server is listening on.
@@ -114,9 +134,17 @@ export function apiPort(): Promise<number> {
     );
   }
   if (!pending) {
+    const mine = generation;
+    /** Has an invalidation happened since this resolution started? */
+    const superseded = () => mine !== generation;
     pending = resolveApiPort(liveDeps, attempted ? 0 : RESOLVE_TIMEOUT_MS).then(
       (port) => {
         attempted = true;
+        // A port learned before a rebind is a port we may no longer hold. Refusing sends the
+        // caller back through a fresh resolution rather than at an address someone else owns.
+        if (superseded()) {
+          throw new Error('TermFlow API moved while this request was resolving; retry.');
+        }
         if (port === null) {
           pending = null;
           throw new Error(
@@ -128,7 +156,9 @@ export function apiPort(): Promise<number> {
       },
       (e) => {
         attempted = true;
-        pending = null;
+        // Only clear the memo if it is still OURS: a superseded failure that cleared it
+        // would discard a newer resolution's correct answer.
+        if (!superseded()) pending = null;
         throw e;
       },
     );
@@ -150,10 +180,12 @@ export async function apiBase(): Promise<string> {
  */
 export function invalidateApiBase(): void {
   pending = null;
+  generation += 1;
 }
 
 /** Reset both the memo and the first-attempt flag. Tests only. */
 export function __resetApiBaseForTests(): void {
   pending = null;
   attempted = false;
+  generation = 0;
 }

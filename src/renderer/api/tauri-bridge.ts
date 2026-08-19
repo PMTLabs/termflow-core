@@ -563,6 +563,11 @@ const tauriBridge: ElectronAPI = {
   getNetworkConfig: async () => invoke('get_network_config'),
   getEffectiveEndpoints: async () => invoke('get_effective_endpoints'),
   setNetworkConfig: async (apiPort, mcpPort, exposeOnNetwork) => {
+    // Invalidated on BOTH sides of the call. The native command rebinds the listener near
+    // its start and can then spend seconds respawning sidecars, so invalidating only
+    // afterwards leaves a window in which the old memo is live but the port behind it has
+    // already been released — and released is precisely when a sibling can take it.
+    invalidateApiBase();
     const cfg = await invoke<NetworkConfig>('set_network_config', { apiPort, mcpPort, exposeOnNetwork });
     // Re-point the bridge at the (possibly new) port so REST calls — terminal
     // scrollback/snapshot, the canvas graph — don't keep hitting the old one after
@@ -583,10 +588,12 @@ const tauriBridge: ElectronAPI = {
   // A stopped API clears its effective port precisely so this window cannot keep
   // addressing a port a sibling instance is now free to take.
   stopServers: async (target = 'all') => {
+    invalidateApiBase();
     await invoke('stop_servers', { target });
     invalidateApiBase();
   },
   startServers: async (target = 'all') => {
+    invalidateApiBase();
     await invoke('start_servers', { target });
     invalidateApiBase();
   },

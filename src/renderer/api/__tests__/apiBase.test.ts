@@ -1,4 +1,4 @@
-import { resolveApiPort, RESOLVE_POLL_MS, ResolveDeps } from '../apiBase';
+import { resolveApiPort, RESOLVE_POLL_MS, PROBE_TIMEOUT_MS, ResolveDeps } from '../apiBase';
 
 /**
  * The rule under test is a NEGATIVE one: the renderer must never address the configured
@@ -7,13 +7,23 @@ import { resolveApiPort, RESOLVE_POLL_MS, ResolveDeps } from '../apiBase';
  * the SOURCE of the number or the refusal to produce one.
  */
 
-/** A clock and a `wait` that advance the same virtual time, so nothing sleeps. */
+/**
+ * A clock and a `wait` that advance the same virtual time, so nothing sleeps.
+ *
+ * `wait` serves two roles in the resolver: the poll interval BETWEEN probes, and the losing
+ * leg of the per-probe timeout race. Only the first is elapsed time. Modelling the race leg
+ * as "never fires" is what these probes do in reality — they answer — and keeps the virtual
+ * clock measuring poll intervals, which is the unit the deadline is expressed in. The one
+ * test that needs the timeout to WIN lives in apiBaseMemo.test.ts, on Jest's own timers.
+ */
 function fakeTime() {
   let t = 0;
   return {
     now: () => t,
-    wait: async (ms: number) => {
+    wait: (ms: number): Promise<void> => {
+      if (ms === PROBE_TIMEOUT_MS) return new Promise<void>(() => { /* the probe wins */ });
       t += ms;
+      return Promise.resolve();
     },
     advance: (ms: number) => {
       t += ms;

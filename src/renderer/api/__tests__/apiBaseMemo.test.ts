@@ -21,6 +21,7 @@ import {
   __resetApiBaseForTests,
   RESOLVE_TIMEOUT_MS,
   RESOLVE_POLL_MS,
+  PROBE_TIMEOUT_MS,
 } from '../apiBase';
 
 // Fake timers: the first resolution deliberately polls for RESOLVE_TIMEOUT_MS before
@@ -107,6 +108,63 @@ describe('apiBase memo', () => {
     delete (window as any).__TAURI_INTERNALS__;
     await expect(apiPort()).rejects.toThrow(/Tauri host/i);
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  // A resolution that started before an invalidation raced the rebind. Both ways of losing
+  // that race route wrongly, so both are pinned.
+  describe('superseded resolutions', () => {
+    it('never hands back a port learned before the invalidation', async () => {
+      // The old port is not merely stale — once released it is the port a sibling instance
+      // is free to bind, so answering with it is the original bug in miniature.
+      let release!: (v: { apiPort: number; mcpPort: null }) => void;
+      invokeMock.mockReturnValueOnce(new Promise((r) => { release = r; }));
+
+      const inFlight = apiPort();
+      const settled = inFlight.then(
+        (value) => ({ ok: true as const, value }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+      invalidateApiBase(); // Settings applied; the listener moved
+      release(effective(42035)); // ...the old answer arrives afterwards
+      await jest.advanceTimersByTimeAsync(0);
+
+      const outcome = await settled;
+      expect(outcome.ok).toBe(false);
+      expect(String((outcome as { error: Error }).error)).toMatch(/moved/i);
+    });
+
+    it('does not clear a newer memo when it settles', async () => {
+      // A stale attempt still polling: the backend has not answered with a port yet.
+      invokeMock.mockResolvedValue(effective(null));
+      const stale = apiPort();
+      const staleSettled = stale.catch(() => 'rejected');
+
+      // A newer resolution supersedes it and succeeds.
+      invalidateApiBase();
+      invokeMock.mockResolvedValue(effective(42041));
+      await expect(apiPort()).resolves.toBe(42041);
+
+      // Let the stale attempt finish. It is superseded, so it must reject WITHOUT touching
+      // the shared memo — clearing it would throw away an answer already known to be right.
+      await jest.advanceTimersByTimeAsync(RESOLVE_TIMEOUT_MS + RESOLVE_POLL_MS);
+      await staleSettled;
+
+      const before = invokeMock.mock.calls.length;
+      await expect(apiPort()).resolves.toBe(42041);
+      expect(invokeMock.mock.calls.length).toBe(before);
+    });
+
+    it('abandons a probe that never settles instead of waiting forever', async () => {
+      // The deadline is only consulted BETWEEN probes, so an `invoke` that never resolves
+      // would otherwise wedge every REST consumer for the life of the window.
+      invokeMock.mockReturnValue(new Promise(() => { /* never settles */ }));
+      const p = apiPort();
+      const settled = p.then(() => 'resolved', () => 'rejected');
+
+      await jest.advanceTimersByTimeAsync(RESOLVE_TIMEOUT_MS + PROBE_TIMEOUT_MS);
+      await expect(settled).resolves.toBe('rejected');
+    });
   });
 
   it('does not re-run the boot-race wait on every later attempt', async () => {

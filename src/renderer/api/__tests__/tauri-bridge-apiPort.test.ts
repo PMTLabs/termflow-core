@@ -110,6 +110,29 @@ describe('tauri-bridge REST calls address the bound port', () => {
     expect(commands).toContain('get_effective_endpoints');
   });
 
+  // Each of these is a separate invalidation call site, and a shared test would let two of
+  // them be deleted while it still passed on the third.
+  it.each([
+    ['stopServers', () => tauriBridge.stopServers!('all')],
+    ['startServers', () => tauriBridge.startServers!('all')],
+  ])('%s drops the memo so the next call re-reads the port', async (_name, act) => {
+    await tauriBridge.getActiveProcesses!();
+    expect(urlOf(0)).toContain(`:${BOUND}/`);
+
+    // Stopping clears the effective port server-side; starting re-binds and may land
+    // somewhere else entirely. Either way the memo from before is no longer an address.
+    const MOVED = 42043;
+    invokeMock.mockImplementation((cmd: string) =>
+      cmd === 'get_effective_endpoints'
+        ? Promise.resolve({ apiPort: MOVED, mcpPort: null })
+        : Promise.resolve(undefined),
+    );
+    await act();
+
+    await tauriBridge.getActiveProcesses!();
+    expect(urlOf(1)).toContain(`:${MOVED}/`);
+  });
+
   it('re-resolves after the servers are restarted', async () => {
     await tauriBridge.getActiveProcesses!();
     expect(urlOf(0)).toContain(`:${BOUND}/`);
