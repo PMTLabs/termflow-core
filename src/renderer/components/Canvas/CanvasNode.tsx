@@ -21,8 +21,16 @@ import { CanvasNodeAgent } from './CanvasNodeAgent';
  *   returns a plausible, wrong `{cols:12, rows:6}`. Three `fit()` call sites are
  *   unguarded against that (`012` §6.5 RC3 / H10).
  *
- * So culling and tier demotion are expressed as `visibility` only, via the `hidden`
- * prop, and the body stays in the tree at every tier.
+ * So culling and tier demotion are expressed as `visibility` — plus
+ * `content-visibility: hidden`, which is what makes the hiding actually stop WORK — via
+ * the `hidden` prop, and the body stays in the tree at every tier.
+ *
+ * `visibility` alone hides pixels without pausing anything: the node still intersects the
+ * viewport, so xterm's RenderService keeps rendering into a node nobody can see. That is
+ * invisible for a CULLED node (off-screen, so it stops intersecting and pauses by itself)
+ * but not for the two on-screen cases `isHidden` also covers — a whole-canvas collapse,
+ * and the `group` tier. `content-visibility` skips the subtree while keeping its layout
+ * box, so it buys the pause without the `display:none` hazard above.
  */
 export const CanvasNode: React.FC<{
   node: CanvasNodeModel;
@@ -109,6 +117,10 @@ export const CanvasNode: React.FC<{
         width: w,
         height: nodeH,
         visibility: hidden ? 'hidden' : undefined,
+        // Pairs with the line above — see the note at the top of this file. Kept on the
+        // NODE rather than the surface because the two on-screen cases `isHidden` covers
+        // (whole-canvas collapse, `group` tier) hide the whole node, chrome included.
+        contentVisibility: hidden ? 'hidden' : undefined,
         // The host's CSS box, per node. It is a replica of this terminal's PANE box, which is
         // what makes the relocation fit find the same cols/rows it already had (`plan/017`).
         // These must be real pixel lengths and must never be a percentage of the node: the body

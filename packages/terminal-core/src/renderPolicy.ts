@@ -3,6 +3,34 @@ import type { Terminal } from '@xterm/xterm';
 import { terminalCache, resetTerminalRendering, type TerminalCacheEntry } from './cache';
 import { loadWebGLAddon } from './webgl';
 
+/**
+ * The browser's own WebGL context ceiling, per RENDERER PROCESS.
+ *
+ * Measured in Chromium: a page allocated 20 contexts and 16 survived. Allocation past the
+ * ceiling **does not fail** — `getContext` keeps returning a live context and the browser
+ * silently force-loses the OLDEST one instead, which is whichever terminal has been open
+ * longest. So the overrun is invisible until a user notices one pane stopped being smooth.
+ *
+ * **Per renderer process, not global.** A second page in a genuinely separate renderer
+ * process allocated its own 20 and took nothing from the first, which stayed at 16. Each
+ * Tauri window gets its own renderer (observed: three windows, three renderer processes;
+ * launching a fourth instance added exactly one more), so each window owns a full budget
+ * and nothing needs to be coordinated between them.
+ *
+ * An earlier revision of this file shared a budget across windows through localStorage, on
+ * the strength of a measurement that used two Playwright pages in the SAME renderer
+ * process — which only ever demonstrated this per-process cap. That is retracted: it
+ * throttled windows against a ceiling they were not competing for, and the cost of being
+ * wrong in that direction is every terminal past the limit painting on the DOM renderer,
+ * which is ~2.3x more CPU per repaint than WebGL.
+ *
+ * Two are held back from the terminal budget. Nothing else in the app asks for a context
+ * today, so the reserve is insurance rather than accounting: at exactly 16 any future
+ * WebGL surface — a chart, a preview — would be paid for by evicting a live terminal, and
+ * that is the one failure this constant exists to prevent.
+ */
+export const MAX_WEBGL_PER_RENDERER = 14;
+
 /** design/013 D1. There is no 'parked' — every terminal is permanently mounted. */
 export type RenderPolicy = 'webgl' | 'dom';
 
@@ -254,6 +282,17 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
     return 'dom';
   }
 
+  // The renderer ceiling is enforced HERE rather than in the reconciler, because this is
+  // the one function every promotion goes through — the reconciler, the diagnostics
+  // toggle, and any future caller. Gating it in the reconciler instead would let each new
+  // caller opt out by construction. Refusing returns 'dom', which callers already handle
+  // as a failed promotion (D3 / CALLER-DROP); it is not an error.
+  if (countActiveWebGLAddons() >= MAX_WEBGL_PER_RENDERER) {
+    entry.webglAddon = null;
+    entry.useWebGL = false;
+    return 'dom';
+  }
+
   // Promotion. loadWebGLAddon installs the SAME onContextLoss handler the create
   // path uses (webgl.ts) — required, or a context loss on a promoted terminal
   // leaves a dead addon on the entry (spec test 8). It returns null rather than
@@ -332,10 +371,24 @@ export function getCanvasWebGLBudget(): number | null {
  * exceeds the budget and the reconciler never has to chase a context it did not
  * approve.
  *
- * `true` whenever no budget is armed, which is every ordinary launch — arming is
- * what changes behaviour, so nothing outside a canvas session is affected.
+ * TWO ceilings, and they are not the same thing. The canvas budget is a policy this app
+ * chooses and arms only for a canvas session; `MAX_WEBGL_PER_RENDERER` is the browser's
+ * own limit and applies always, canvas or not.
+ *
+ * This used to read "`true` whenever no budget is armed, which is every ordinary launch"
+ * — and that was the defect, not a description of one: on an ordinary launch nothing
+ * bounded context creation at all, so a window with enough tabs walked past the browser's
+ * cap and had its OLDEST terminal's context force-lost, silently. Corrected here so the
+ * doc cannot be read as licence to skip the unconditional check below.
  */
 export function webglAllowedAtCreation(): boolean {
+  // The renderer ceiling is checked FIRST and unconditionally, including on an ordinary
+  // launch with no canvas session. That is the case the old code missed entirely: outside
+  // canvas mode this returned `true` forever, so a window with twenty tabs created twenty
+  // contexts against a cap of sixteen and the browser answered by force-losing the oldest
+  // terminal's context. Refusing the twentieth instead costs that ONE terminal the GPU
+  // renderer; letting it through costs the user's longest-running terminal, silently.
+  if (countActiveWebGLAddons() >= MAX_WEBGL_PER_RENDERER) return false;
   if (canvasWebGLBudget === null) return true;
   return countActiveWebGLAddons() < canvasWebGLBudget;
 }

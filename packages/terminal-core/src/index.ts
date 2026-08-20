@@ -57,6 +57,9 @@ export {
   getQuarantinedWebGLAddonCount,
   hasLayoutBox,
   fitIfLaidOut,
+  // The browser's per-renderer WebGL ceiling. Exported so a diagnostic can report how
+  // close this window is to it — going over does not error, it evicts the oldest context.
+  MAX_WEBGL_PER_RENDERER,
 } from './renderPolicy';
 export type { RenderPolicy } from './renderPolicy';
 export {

@@ -231,10 +231,19 @@
 }
 
 /* Below `live` the terminal is not painted — the snapshot above stands in for it.
-   `visibility`, never `display`, and never a size change: the host must keep its box. */
+   `visibility`, never `display`, and never a size change: the host must keep its box.
+
+   `content-visibility: hidden` is what makes "not painted" TRUE. `visibility: hidden`
+   alone only stops the pixels reaching the screen: the element still intersects the
+   viewport, so xterm's own IntersectionObserver never pauses its RenderService and an
+   on-screen snapshot/chip node keeps repainting its terminal at full cost behind the
+   picture standing in for it. That made `MAX_INTERACTIVE` a paint budget that never bit,
+   and it is what `010` already asks for — "here 'not intersecting' means 'not painted'".
+   Still never `display: none` (`012` §6.5 RC3): this keeps the host's layout box, which
+   `.canvas-surface`'s explicit --node-host-w/h sizing makes safe. */
 .canvas-node[data-lod="snapshot"] .canvas-surface,
 .canvas-node[data-lod="chip"] .canvas-surface,
-.canvas-node[data-lod="group"] .canvas-surface { visibility: hidden; }
+.canvas-node[data-lod="group"] .canvas-surface { visibility: hidden; content-visibility: hidden; }
 
 /* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
    not removed, so the terminal host inside it keeps a resolvable layout box. */
