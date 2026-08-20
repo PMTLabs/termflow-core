@@ -2337,8 +2337,11 @@ async fn fleet_local_run(
 
     // Resolve the target terminal: reuse when the id is present AND live;
     // otherwise spawn a NEW persistent terminal from the default profile.
-    let terminal_id = match payload.terminal_id.as_ref() {
-        Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
+    let terminal_id = match payload.terminal_id.as_ref().map(|t| state.resolve_ref(t)) {
+        // Normalised first: a fleet caller naming a terminal by the DURABLE `tm-`
+        // id we reported to it would otherwise miss the `pc-`-keyed map and take
+        // the not-found arm below (design 014 §A3).
+        Some(tid) if state.terminals.contains_key(&tid) => tid,
         // An explicit terminalId that is no longer live must NOT silently spawn a new
         // terminal: a stale per-terminal Control grant (left when a fleet terminal was
         // closed outside FleetClose) would otherwise run fresh commands after fleet_exec
