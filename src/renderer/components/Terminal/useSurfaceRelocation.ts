@@ -56,7 +56,7 @@ export interface SurfaceRelocationParams<E extends RelocatableEngine> {
 
 export function useSurfaceRelocation<E extends RelocatableEngine>(
   params: SurfaceRelocationParams<E>,
-): { engineMounted: () => void; engineGeneration: number } {
+): { engineMounted: () => void; engineGeneration: number; host: HTMLElement | null } {
   const { terminalId, engineRef, paneRef } = params;
   const host = useSurfaceHost(terminalId);
   const [engineGeneration, setEngineGeneration] = useState(0);
@@ -110,10 +110,14 @@ export function useSurfaceRelocation<E extends RelocatableEngine>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host, engineGeneration]);
 
-  // `engineGeneration` is exposed as well as consumed (`plan/020` §5). It is the only signal
-  // this component has that `engineRef.current` is populated AND is the engine belonging to the
-  // CURRENT terminalId — the same H12/review-098-A1 hazard this hook already guards for itself.
-  // Any other effect that reaches through `engineRef` to configure the engine has to re-run on
-  // it, or it configures whichever engine happened to be in the ref when it last ran.
-  return { engineMounted, engineGeneration };
+  // Both of these are exposed as well as consumed (`plan/020` §5), and together they are "the
+  // relocation state" — the two things any OTHER effect that configures the engine has to
+  // re-run on, because this hook's own effect re-runs on exactly them:
+  //
+  //  - `engineGeneration` is the only signal that `engineRef.current` is populated AND is the
+  //    engine belonging to the CURRENT terminalId (the H12 / review 098 A1 hazard above).
+  //  - `host` changing IS a relocation, and `relocateTo({ paneChrome: !host })` overwrites the
+  //    chrome flag from its own argument. An effect that owns that flag and does not watch this
+  //    is silently overruled on every canvas round trip.
+  return { engineMounted, engineGeneration, host };
 }

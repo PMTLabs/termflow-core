@@ -10,6 +10,7 @@ import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
+import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -244,7 +245,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // `engineMounted` is a stable useCallback the engine effect below calls right
   // after mount() — that bump is what makes relocation-at-mount reachable at all
   // (hazard H12, measured by spike 004 Q1).
-  const { engineMounted, engineGeneration } = useSurfaceRelocation({
+  const { engineMounted, engineGeneration, host: relocationHost } = useSurfaceRelocation({
     terminalId,
     engineRef,
     paneRef: terminalRef,
@@ -273,21 +274,16 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     },
   });
 
-  // The overlay's engine gate — see the block comment above `overlaidOnCanvas`. It lives here
-  // rather than up there because `engineGeneration` is declared by the hook above.
-  useEffect(() => {
-    if (!overlaidOnCanvas) return;
-    // Captured, for the same reason the relocation effect captures its engine: at cleanup time
-    // the ref can already hold a different one, and re-gating that one is not this effect's job.
-    const engine = engineRef.current;
-    engine?.setChromeHostActive(true);
-    return () => {
-      engine?.setChromeHostActive(false);
-      // The engine stops emitting, but the popup's REACT state is this hook's, and a popup left
-      // open would keep drawing in a node that has shrunk back to a thumbnail.
-      suggestRef.current.close();
-    };
-  }, [overlaidOnCanvas, engineGeneration]);
+  // The overlay's engine gate. Extracted to its own hook so its DEPENDENCIES can be tested —
+  // they are the whole feature, and this component cannot be mounted under the root Jest config
+  // (see `useOverlayChromeGate.ts` for the round trip that a missing one broke).
+  useOverlayChromeGate({
+    engineRef,
+    overlaid: overlaidOnCanvas,
+    host: relocationHost,
+    engineGeneration,
+    closePopup: () => suggestRef.current.close(),
+  });
 
   // Create the engine + mount it once per terminalId. Reattach existing process
   // when available. Cleanup → unmount() (NOT dispose — preserve the cache).

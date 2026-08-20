@@ -203,40 +203,32 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
     expect(SOURCE.slice(at, at + 120)).toContain('clearSurfaceChrome(terminalId, owner)');
   });
 
-  it('opens the engine gate only while this terminal is the overlay', () => {
-    expect(SOURCE).toContain('s.canvas.overlayId === terminalId');
-    expect(SOURCE).toContain('engine?.setChromeHostActive(true);');
-    expect(SOURCE).toContain('engine?.setChromeHostActive(false);');
-  });
-
   /**
-   * The same H12 / review-098-A1 hazard the relocation effect is built around, one effect along.
+   * The gate itself lives in `useOverlayChromeGate`, where its behaviour — above all its
+   * dependency list — is tested for real against a fake engine. What is left to guard HERE is
+   * that this component still feeds it the right three inputs.
    *
-   * This effect reaches through `engineRef` to configure the engine, and it is declared ABOVE
-   * the engine effect — so on a fresh instance the ref is still null, and when `TerminalPane`'s
-   * reuse path changes `terminalId` on a mounted `TerminalDisplay` it re-runs BEFORE the ref is
-   * swapped. Both leave the incoming engine gated shut with nothing to indicate it. Keying on
-   * `engineGeneration` is what makes the ref trustworthy; CAPTURING the engine is what stops the
-   * cleanup re-gating a different one.
+   * `host` is the one worth naming. It is not decoration: every change of it is a relocation,
+   * and `relocateTo({ paneChrome: !host })` overwrites the very flag the gate owns. Dropping it
+   * is what left a returned overlay drawing a popup the engine had stopped listening to.
    */
-  it('keys the gate on the engine generation and captures the engine', () => {
-    const at = SOURCE.indexOf('engine?.setChromeHostActive(true);');
+  it('drives the overlay gate from the overlay flag, the host and the engine generation', () => {
+    expect(SOURCE).toContain('s.canvas.overlayId === terminalId');
+    const at = SOURCE.indexOf('useOverlayChromeGate({');
     expect(at).toBeGreaterThanOrEqual(0);
-    expect(SOURCE.slice(0, at)).toContain('const engine = engineRef.current;');
-    expect(SOURCE.slice(at)).toContain('}, [overlaidOnCanvas, engineGeneration]);');
-    expect(SOURCE).toContain('const { engineMounted, engineGeneration } = useSurfaceRelocation({');
+    const call = SOURCE.slice(at, SOURCE.indexOf('});', at));
+    expect(call).toContain('overlaid: overlaidOnCanvas,');
+    expect(call).toContain('host: relocationHost,');
+    expect(call).toContain('engineGeneration,');
+    expect(call).toContain('closePopup: () => suggestRef.current.close(),');
   });
 
-  /**
-   * Closing the overlay has to close the POPUP too. The engine stops emitting, but the popup's
-   * React state belongs to `useCommandSuggest` here — an open one would keep drawing inside a
-   * node that has just shrunk back to a thumbnail. Exactly the `onRelocated` rule, one surface
-   * along.
-   */
-  it('closes the popup when the overlay closes', () => {
-    const at = SOURCE.indexOf('engine?.setChromeHostActive(false);');
-    expect(at).toBeGreaterThanOrEqual(0);
-    expect(SOURCE.slice(at, at + 260)).toContain('suggestRef.current.close();');
+  // And the host it passes is the relocation's own, not a second subscription that could
+  // disagree with it about when the surface moved.
+  it('takes the host from the relocation hook itself', () => {
+    expect(SOURCE).toContain(
+      'const { engineMounted, engineGeneration, host: relocationHost } = useSurfaceRelocation({',
+    );
   });
 
   // And the render tree really is unchanged: the chrome is still rendered HERE for the pane.
