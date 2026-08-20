@@ -119,6 +119,12 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // never leave a stranger armed. `arm_siblings` is itself all-or-nothing and
     // rolls back what it armed, so reaching the next line means every sibling is
     // prepared (design 014 §B3).
+    // RE-ENUMERATE. The check above ran before a download that can take minutes,
+    // and a profile launched during it would not be in that snapshot — so it
+    // would never be armed, and the apply would kill its GUI with an unarmed
+    // host, destroying exactly the shells this mechanism exists to save. The
+    // earlier list is a fail-fast courtesy; THIS one is the one we act on.
+    let siblings = crate::net_ports::live_siblings_now(&own);
     let armed_siblings =
         crate::sibling_coord::arm_siblings(&siblings, crate::sibling_coord::http_call).await?;
     if !armed_siblings.is_empty() {

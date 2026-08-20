@@ -816,3 +816,63 @@ describe('focusPaneInTab', () => {
     expect(unknownTab.activePaneByTabId['tb-nope']).toBeUndefined();
   });
 });
+
+/**
+ * Splitting a pane must carry its identity fields onto the leaf that KEEPS the
+ * terminal. Found by external review of PR #49 (fabric `docs/review/169`).
+ *
+ * Dropping `seededForTabId` here silently undoes `planSeeds` Rule 3: split a
+ * tab, drag both panes away, and nothing anywhere still names the emptied tab —
+ * so the next restore manufactures it a brand-new shell. That is the
+ * resurrection bug, reached by a different route.
+ */
+describe('splitPane carries identity fields onto the surviving leaf', () => {
+  const seeded: PaneNode = {
+    id: 'pn-root',
+    type: 'terminal',
+    terminalId: 'tm-original',
+    seededForTabId: 'tb-a',
+    sessionKey: 'tb-legacy01',
+  };
+
+  const splitIt = () => {
+    let s = reducer(undefined, { type: '@@INIT' } as any);
+    s = reducer(s, addTabTree({ tabId: 'tb-a', tree: seeded }));
+    s = reducer(s, setActiveTabId('tb-a'));
+    return reducer(s, splitPaneInTab({
+      tabId: 'tb-a', paneId: 'pn-root', direction: 'horizontal',
+    } as any));
+  };
+
+  const findByTerminal = (node: PaneNode | null, terminalId: string): PaneNode | null => {
+    if (!node) return null;
+    if (node.terminalId === terminalId) return node;
+    for (const c of node.children ?? []) {
+      const f = findByTerminal(c, terminalId);
+      if (f) return f;
+    }
+    return null;
+  };
+
+  it('keeps seededForTabId on the pane that keeps the terminal', () => {
+    const s = splitIt();
+    const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
+    expect(original).not.toBeNull();
+    expect(original!.seededForTabId).toBe('tb-a');
+  });
+
+  it('keeps the migrated sessionKey on the pane that keeps the terminal', () => {
+    const s = splitIt();
+    const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
+    expect(original!.sessionKey).toBe('tb-legacy01');
+  });
+
+  it('does not copy either field onto the NEW sibling', () => {
+    const s = splitIt();
+    const tree = s.treesByTabId['tb-a']!;
+    const fresh = (tree.children ?? []).find((c) => c.terminalId !== 'tm-original');
+    expect(fresh).toBeDefined();
+    expect(fresh!.seededForTabId).toBeUndefined();
+    expect(fresh!.sessionKey).toBeUndefined();
+  });
+});

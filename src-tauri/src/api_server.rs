@@ -2373,6 +2373,12 @@ async fn fleet_local_run(
             // a fast-exiting shell's exit-path persist can run in that window and
             // file the final scrollback under the ephemeral pc- id.
             let fleet_tab_id = mint_renderer_id("tb");
+            // A SEPARATE tm- leaf. Design 011 let this path use its own tb- as
+            // its leaf, which was safe then because it minted the id itself. Design
+            // 014 A1 is stricter: EVERY live terminal carries a tm- leaf, so a
+            // field labelled terminal never shows a tab id. Reusing one id for
+            // tab, leaf and owner is the collapse this design removes.
+            let fleet_leaf_id = mint_renderer_id("tm");
             // Routed exactly like every other create (plan 019): a fleet terminal
             // spawned in-process would block Offload & Close for as long as it lived.
             // Its identity is UNCHANGED — it keeps the `tb-*` it minted itself as
@@ -2381,7 +2387,7 @@ async fn fleet_local_run(
             let new_id = match crate::commands::spawn_routed(
                 &state,
                 crate::commands::SpawnRequest {
-                    leaf_id: fleet_tab_id.clone(),
+                    leaf_id: fleet_leaf_id.clone(),
                     session_key: None,
                     owning_tab_id: Some(fleet_tab_id.clone()),
                     cols: 80,
@@ -2413,7 +2419,7 @@ async fn fleet_local_run(
                     "terminalId": new_id,
                     "tabId": Some(fleet_tab_id.clone()),
                     "processId": new_id,
-                    "rendererTerminalId": fleet_tab_id.clone(),
+                    "rendererTerminalId": fleet_leaf_id.clone(),
                     "owningTabId": fleet_tab_id.clone(),
                     "paneId": serde_json::Value::Null,
                     "direction": serde_json::Value::Null,
@@ -2514,8 +2520,11 @@ async fn batch_execute_prompt(
         }
     }
 
-    let ids: Vec<String> = dedup_preserve_order(&body.terminal_ids)
-        .iter().map(|i| state.resolve_ref(i)).collect();
+    // Pairs of (id the caller sent, id our maps use). The RESPONSE must echo the
+    // caller's id: a client that sent tm- and got pc- back cannot correlate the
+    // result with its request, and the pc- is meaningless to it after a restart.
+    let ids: Vec<(String, String)> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| (i.clone(), state.resolve_ref(i))).collect();
     let req = ExecutePromptReq {
         prompt: body.prompt.clone(),
         cli_type: body.cli_type.clone(),
@@ -2525,14 +2534,14 @@ async fn batch_execute_prompt(
 
     let mut results = Vec::with_capacity(ids.len());
     let mut succeeded = 0usize;
-    for id in &ids {
-        match send_prompt_to_terminal(&state, id, &req).await {
+    for (requested, resolved) in &ids {
+        match send_prompt_to_terminal(&state, resolved, &req).await {
             Ok(_) => {
                 succeeded += 1;
-                results.push(json!({ "terminalId": id, "success": true }));
+                results.push(json!({ "terminalId": requested, "success": true }));
             }
             Err((_, msg)) => {
-                results.push(json!({ "terminalId": id, "success": false, "error": msg }));
+                results.push(json!({ "terminalId": requested, "success": false, "error": msg }));
             }
         }
     }
@@ -2554,18 +2563,19 @@ async fn batch_write_terminal(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "terminalIds must be a non-empty array" })));
     }
 
-    let ids: Vec<String> = dedup_preserve_order(&body.terminal_ids)
-        .iter().map(|i| state.resolve_ref(i)).collect();
+    // Same as batch execute: resolve for the lookup, echo what the caller sent.
+    let ids: Vec<(String, String)> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| (i.clone(), state.resolve_ref(i))).collect();
     let mut results = Vec::with_capacity(ids.len());
     let mut succeeded = 0usize;
-    for id in &ids {
-        match write_data_to_terminal(&state, id, &body.data) {
+    for (requested, resolved) in &ids {
+        match write_data_to_terminal(&state, resolved, &body.data) {
             Ok(()) => {
                 succeeded += 1;
-                results.push(json!({ "terminalId": id, "success": true }));
+                results.push(json!({ "terminalId": requested, "success": true }));
             }
             Err((_, msg)) => {
-                results.push(json!({ "terminalId": id, "success": false, "error": msg }));
+                results.push(json!({ "terminalId": requested, "success": false, "error": msg }));
             }
         }
     }
@@ -3459,7 +3469,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // absent (legacy pattern-only subscribe, e.g. the terminal-monitor
                         // client sending just `payload.patterns`), leave the filter at `All`
                         // so the connection keeps receiving every terminal's output.
-                        let ids = parse_subscribe_ids(&value);
+                        // Normalised: the filter is matched against ChannelPayload.id,
+                        // which is a pc- process id, but a client subscribes with the
+                        // tm- id the API reported to it. Unnormalised, the filter matches
+                        // nothing and the socket goes silent (design 014 A3).
+                        let ids = parse_subscribe_ids(&value)
+                            .map(|l| l.iter().map(|i| state.resolve_ref(i)).collect::<Vec<_>>());
                         if let Some(ref list) = ids {
                             if let Ok(mut f) = filter.lock() {
                                 f.set(list.clone());
@@ -3476,7 +3491,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let action = value["payload"]["action"].as_str().unwrap_or("");
                         match action {
                             "terminal:input" => {
-                                let terminal_id = value["payload"]["terminalId"].as_str().unwrap_or("");
+                                // Normalised for the same reason as the REST handlers:
+                                // a client sends the tm- id it was given, the maps are
+                                // keyed by pc- (design 014 A3).
+                                let terminal_id = &state.resolve_ref(
+                                    value["payload"]["terminalId"].as_str().unwrap_or(""),
+                                );
                                 let data = value["payload"]["data"].as_str().unwrap_or("");
 
                                 use std::io::Write;

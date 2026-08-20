@@ -136,6 +136,14 @@ function splitLeafInTree(
         terminalId: node.terminalId,
         name: node.name || `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`,
         shellType: node.shellType,
+        // Carry BOTH identity fields onto the leaf that keeps this terminal.
+        // Dropping `seededForTabId` here would silently undo `planSeeds` Rule 3:
+        // split a tab, drag both panes away, and nothing anywhere still names
+        // the emptied tab — so it gets manufactured a brand-new shell on the
+        // next restore. Dropping `sessionKey` would orphan a migrated pane's
+        // armed host session (design 014 §A2).
+        seededForTabId: node.seededForTabId,
+        sessionKey: node.sessionKey,
         // Carry the pane-level mute onto the leaf that KEEPS this terminal, so a
         // muted pane stays muted when split. The new sibling starts unmuted.
         notifyMuted: node.notifyMuted,
