@@ -173,15 +173,17 @@ const TARGETS = [
 function main() {
   const root = path.resolve(__dirname, '..');
   let changed = 0;
+  let found = 0;
 
   for (const rel of TARGETS) {
     const file = path.join(root, rel);
     if (!fs.existsSync(file)) {
-      // Not fatal on its own: a consumer may install without the CJS bundle. A bundle that is
-      // PRESENT but unpatchable is fatal, below.
+      // Not fatal on its own: a build may ship only one of the two module formats. Finding
+      // NEITHER is fatal — see below.
       console.warn(`[xterm-coords-patch] skipped (not found): ${rel}`);
       continue;
     }
+    found++;
     const src = fs.readFileSync(file, 'utf8');
     const { source, status, problems } = applyPatch(src);
 
@@ -207,6 +209,20 @@ function main() {
     fs.renameSync(tmp, file);
     changed++;
     console.log(`[xterm-coords-patch] patched: ${rel}`);
+  }
+
+  // Finding NO bundle at all is a silent no-op dressed as a success, and it is the exact shape
+  // of failure this patch is most vulnerable to: the app builds, every test passes, and canvas
+  // clicks quietly land on the wrong row. It happens if `@xterm/xterm` is ever hoisted above
+  // this package or isolated in a nested `node_modules` — a layout change, not a code change,
+  // so nothing else would flag it. Warn per missing file, but refuse to exit 0 having done
+  // nothing.
+  if (found === 0) {
+    throw new Error(
+      `[xterm-coords-patch] found none of the target bundles under ${root}. @xterm/xterm has ` +
+      `probably moved (hoisted, or nested in another package's node_modules) — update TARGETS. ` +
+      `Exiting successfully here would ship unpatched pointer arithmetic with a green suite.`,
+    );
   }
 
   console.log(`[xterm-coords-patch] done (${changed} file(s) rewritten)`);

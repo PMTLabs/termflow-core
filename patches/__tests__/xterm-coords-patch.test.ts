@@ -290,9 +290,24 @@ describe('the shipped bundles', () => {
    * Safe to assert against disk: every CI job runs `bun install --frozen-lockfile` with no
    * `node_modules` cache, so postinstall always runs.
    */
+  /**
+   * At least one bundle must be WHERE WE LOOK FOR IT.
+   *
+   * The per-target case below tolerates a missing file, because a build may ship only one
+   * module format — but that tolerance is also a hole: if `@xterm/xterm` were hoisted above
+   * this package, every target would be missing, each per-target case would return early and
+   * pass, and the app would ship pristine pointer arithmetic with a green suite. Safe to
+   * assert unconditionally: jest itself lives in `node_modules`, so if this test is running at
+   * all, `node_modules` exists.
+   */
+  it('finds the bundles where the patch looks for them', () => {
+    const present = TARGETS.filter((rel: string) => fs.existsSync(path.join(ROOT, rel)));
+    expect(present.length).toBeGreaterThan(0);
+  });
+
   it.each(TARGETS)('%s is patched on disk, not merely patchable', (rel: string) => {
     const file = path.join(ROOT, rel);
-    if (!fs.existsSync(file)) return; // no install in this checkout; nothing to assert
+    if (!fs.existsSync(file)) return; // this format not shipped; the case above covers "none"
     const source = fs.readFileSync(file, 'utf8');
 
     // 'already' is the ONLY passing state: postinstall has run and every marker is in the file.
