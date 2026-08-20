@@ -1351,6 +1351,19 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The pty-host session key for one of OUR process ids.
+    ///
+    /// Every call that crosses into the host must go through this: the host knows
+    /// a terminal only by its session key, which since design 014 is a different
+    /// string from the process id our maps are keyed by. Addressing the host with
+    /// a process id silently does nothing — the host has never heard of it.
+    ///
+    /// Reads the key off the terminal record rather than the index, so it stays
+    /// correct for a migrated terminal whose key is its old `tb-` id.
+    fn session_key_for(&self, id: &str) -> Option<String> {
+        self.terminals.get(id).map(|t| t.session_key.clone())
+    }
+
     /// If `id` is host-owned AND the client is connected, forward the write and
     /// return true. Returns false when disconnected so the caller surfaces the
     /// failure instead of reporting a false success for dropped input.
@@ -1358,9 +1371,10 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        let Some(session_key) = self.session_key_for(id) else { return false };
         match self.pty_host_client().as_ref() {
             Some(c) => {
-                c.write_stdin(id, bytes);
+                c.write_stdin(&session_key, bytes);
                 true
             }
             None => false,
@@ -1372,9 +1386,10 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        let Some(session_key) = self.session_key_for(id) else { return false };
         match self.pty_host_client().as_ref() {
             Some(c) => {
-                c.resize(id, cols, rows);
+                c.resize(&session_key, cols, rows);
                 true
             }
             None => false,
@@ -1391,14 +1406,18 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        // Resolve BEFORE the removals below drop the record we read it from.
+        let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
         match self.pty_host_client().as_ref() {
-            Some(c) if c.is_alive() => c.close(id),
+            Some(c) if c.is_alive() => c.close(&session_key),
             _ => {
-                self.host_close_pending.insert(id.to_string(), ());
+                // Pending closes are replayed against the HOST later, so they
+                // must be recorded in the host id space.
+                self.host_close_pending.insert(session_key.clone(), ());
             }
         }
         self.host_terminals.remove(id);
-        self.host_stream_offsets.remove(id);
+        self.host_stream_offsets.remove(&session_key);
         true
     }
 

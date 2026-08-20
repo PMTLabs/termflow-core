@@ -636,6 +636,8 @@ async fn create_terminal(
         &state,
         crate::commands::SpawnRequest {
             leaf_id: identity.renderer_terminal_id.clone(),
+            // Freshly minted leaf, so nothing legacy to preserve.
+            session_key: None,
             owning_tab_id: Some(identity.owning_tab_id.clone()),
             cols,
             rows,
@@ -2246,6 +2248,7 @@ async fn fleet_local_run(
                 &state,
                 crate::commands::SpawnRequest {
                     leaf_id: fleet_tab_id.clone(),
+                    session_key: None,
                     owning_tab_id: Some(fleet_tab_id.clone()),
                     cols: 80,
                     rows: 24,

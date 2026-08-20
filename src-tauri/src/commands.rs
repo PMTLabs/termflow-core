@@ -216,6 +216,10 @@ pub async fn create_terminal(
             state.inner(),
             SpawnRequest {
                 leaf_id: tid,
+                // The host key follows the leaf. Task 6 threads the renderer's
+                // persisted `sessionKey` through here, which is what lets a
+                // MIGRATED pane still find its armed session (design 014 §A2.1).
+                session_key: None,
                 owning_tab_id: owning_tab_id.clone(),
                 cols,
                 rows,
@@ -330,12 +334,21 @@ pub fn set_terminal_owning_tab(
 /// (`create_terminal`), the REST/MCP API (`api_server::create_terminal`), or the
 /// fleet responder (`api_server::fleet_local_run`).
 pub(crate) struct SpawnRequest {
-    /// The renderer leaf id. On the sidecar path this IS the map key, the sidecar
-    /// session id, the output-broadcast id and the vt100 screen key
-    /// (`commands.rs:188-192`) — every caller must therefore already own a stable
-    /// leaf before it gets here (design 011 §3: "no create may take a root leaf it
-    /// did not itself mint").
+    /// The renderer leaf id (`tm-`). DURABLE: it is the `terminal_history` primary
+    /// key and the id MCP hands out, so it must survive a restart. Every caller
+    /// must already own a stable leaf before it gets here (design 011 §3: "no
+    /// create may take a root leaf it did not itself mint").
+    ///
+    /// Since design 014 this is NO LONGER the map key, the sidecar session id or
+    /// the screen key — those are the process id and the session key below.
     pub leaf_id: String,
+    /// What the pty-host knows this session as, when it differs from the leaf.
+    ///
+    /// `None` means "same as the leaf", which is the case for everything created
+    /// on this build. It is `Some` only for a terminal migrated from a pre-014
+    /// build, whose host session is still keyed by the old `tb-` id and would be
+    /// orphaned by a rename — the protocol has no rename verb (design 014 §A2).
+    pub session_key: Option<String>,
     pub owning_tab_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -364,6 +377,7 @@ pub(crate) struct SpawnRequest {
 pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<String, String> {
     let SpawnRequest {
         leaf_id: id,
+        session_key,
         owning_tab_id,
         cols,
         rows,
@@ -406,38 +420,48 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // Reattach path: the sidecar still holds this session (survived a hot-swap).
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
-    if let Some((_, pid)) = state.host_reattach_pending.remove(&id) {
-        register_host_terminal(state, &id, owning_tab_id.as_deref(), pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+    // The host addresses this terminal by its SESSION key, which is the leaf for
+    // anything created on this build and the old `tb-` id for a migrated one.
+    let session_key = session_key.unwrap_or_else(|| id.clone());
+
+    if let Some((_, pid)) = state.host_reattach_pending.remove(&session_key) {
+        let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
+        let process_id = ident.process_id.clone();
+        register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
-        state.reattach_prompt_hooks.insert(id.clone(), prompt_hook);
+        state.reattach_prompt_hooks.insert(process_id.clone(), prompt_hook);
         // Seed + stage BEFORE attach releases the replay ring, so restored
         // history precedes the ring bytes in the parser (see stage_scrollback).
-        stage_scrollback(state, &id, &id);
+        // History is keyed by the LEAF; the parser it seeds is keyed by the
+        // PROCESS id — the two are no longer the same string.
+        stage_scrollback(state, &id, &process_id);
         // RP-3: transactional when the host supports it (AttachAck), silently
         // legacy otherwise. A confirmed-dead session still completes reattach —
         // the replayed ring + Exit tombstone render the final state honestly.
-        match client.attach_confirmed(&id, 0).await {
-            Some(true) => log::info!("[HOTSWAP] reattached {id} (pid {pid}, host-confirmed alive)"),
-            Some(false) => log::warn!("[HOTSWAP] reattached {id} but host reports it not alive"),
-            None => log::info!("[HOTSWAP] reattached {id} (pid {pid}, legacy attach)"),
+        match client.attach_confirmed(&session_key, 0).await {
+            Some(true) => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, host-confirmed alive)"),
+            Some(false) => log::warn!("[HOTSWAP] reattached {session_key} but host reports it not alive"),
+            None => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, legacy attach)"),
         }
-        client.nudge_repaint(&id, cols, rows);
-        return Ok(id);
+        client.nudge_repaint(&session_key, cols, rows);
+        return Ok(process_id);
     }
 
     // Fresh spawn: register routing state (screen + terminal + host ownership)
     // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
-    register_host_terminal(state, &id, owning_tab_id.as_deref(), 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+    let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
+    let process_id = ident.process_id.clone();
+    register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
-    stage_scrollback(state, &id, &id);
+    stage_scrollback(state, &id, &process_id);
     let spec = pty_manager::build_spawn_spec(
-        &id,
+        &session_key,
         shell_path.as_deref(),
         &shell_name,
         shell_args.as_deref(),
@@ -445,30 +469,68 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         cols,
         rows,
     );
-    match client.spawn_session(&id, &spec).await {
+    match client.spawn_session(&session_key, &spec).await {
         Ok(pid) => {
-            if let Some(mut t) = state.terminals.get_mut(&id) {
+            if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
             }
-            Ok(id)
+            Ok(process_id)
         }
         Err(e) => {
-            // Undo the provisional registration, then fall back in-process.
-            state.cleanup_terminal_state(&id);
+            // Undo the provisional registration, then fall back in-process. Clean
+            // up by the PROCESS id — that is what was registered.
+            state.cleanup_terminal_state(&process_id);
             host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
         }
     }
 }
 
-/// The identities a sidecar-hosted terminal registers: `(map_key_and_leaf, owner)`.
+/// Every identity a hosted terminal carries.
 ///
-/// On this path the app terminalId IS the DashMap key, the sidecar session id,
-/// the output-broadcast id and the vt100 screen key — that alignment is the
-/// reattach contract (`commands.rs:188-192`) and P0-A leaves it untouched.
-/// The only new thing is the owner, which defaults to the leaf (correct for a
-/// root/solo pane, and the pre-P0-A behaviour for everything else).
-fn host_identity(id: &str, owning_tab_id: Option<&str>) -> (String, String) {
-    (id.to_string(), owning_tab_id.unwrap_or(id).to_string())
+/// Replaces the old `(map_key_and_leaf, owner)` tuple, whose very shape encoded
+/// the collapse design 014 removes: one string served as DashMap key, sidecar
+/// session id, output-broadcast id and vt100 screen key simultaneously, which is
+/// why a "Terminal ID" and a "Process ID" displayed the same `tb-` value.
+pub(crate) struct HostIdentity {
+    /// `pc-` — the key for every per-terminal `AppState` map. Minted PER RUN and
+    /// never persisted or handed to the pty-host.
+    pub process_id: String,
+    /// `tm-` — durable, and the `terminal_history` primary key. `None` for a
+    /// headless spawn with no renderer pane (design 011 §5).
+    pub leaf: Option<String>,
+    /// `tb-` — the owning tab.
+    pub owner: String,
+    /// What the pty-host knows this session as. NEVER minted here: only the
+    /// caller knows whether this is a migrated pre-014 session whose key must
+    /// not move (design 014 §A2).
+    pub session_key: String,
+}
+
+/// Derive the four identities for a hosted terminal.
+///
+/// `session_key` is the host's; `leaf` is the renderer's. They are equal for
+/// anything created on this build and differ only after a migration.
+fn host_identity(
+    session_key: &str,
+    leaf: Option<&str>,
+    owning_tab_id: Option<&str>,
+) -> HostIdentity {
+    HostIdentity {
+        process_id: crate::state::mint_process_id(),
+        leaf: leaf.map(str::to_string),
+        owner: resolve_owner(session_key, leaf, owning_tab_id),
+        session_key: session_key.to_string(),
+    }
+}
+
+/// The owning tab for a spawn: the caller's, else the leaf, else the session key.
+///
+/// Split out because the in-process fallback needs the owner WITHOUT minting a
+/// process id (`pty_manager::spawn_terminal` mints its own). One definition, so
+/// the two paths cannot drift — they did before, which is how a caller-supplied
+/// name got dropped on every fallback (plan 019 §4).
+fn resolve_owner(session_key: &str, leaf: Option<&str>, owning_tab_id: Option<&str>) -> String {
+    owning_tab_id.or(leaf).unwrap_or(session_key).to_string()
 }
 
 /// The display name a spawn registers: the caller's, or the derived default.
@@ -486,12 +548,15 @@ fn terminal_display_name(name: Option<&str>, shell_name: &str) -> String {
 }
 
 /// Register a host-owned terminal's routing state: authoritative screen, host
-/// ownership, and the Terminal record (keyed by the stable id == tab_id).
+/// ownership, and the Terminal record.
+///
+/// Keyed by the PROCESS id (`pc-`), not the leaf. Before design 014 these were
+/// the same string; splitting them is what lets a terminal id and a process id
+/// be told apart by an MCP caller.
 #[allow(clippy::too_many_arguments)]
 fn register_host_terminal(
     state: &AppState,
-    id: &str,
-    owning_tab_id: Option<&str>,
+    ident: &HostIdentity,
     pid: u32,
     shell_name: &str,
     name: Option<&str>,
@@ -499,15 +564,15 @@ fn register_host_terminal(
     rows: u16,
     prompt_hook: bool,
 ) {
-    let (leaf, owner) = host_identity(id, owning_tab_id);
+    let id = ident.process_id.as_str();
+    let leaf = ident.leaf.clone();
+    let owner = ident.owner.clone();
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), ());
     // Index BEFORE the terminal becomes observable: the pty-host translates every
     // inbound frame through `process_for_session`, so a frame arriving between the
-    // spawn and this call would be dropped as an unknown session. Today all three
-    // ids are the same string, so this is an identity mapping; Task 4 makes it a
-    // real one (design 014 §A3).
-    state.identity.index(id, Some(&leaf), id);
+    // spawn and this call would be dropped as an unknown session.
+    state.identity.index(id, leaf.as_deref(), &ident.session_key);
     state.terminals.insert(
         id.to_string(),
         crate::state::Terminal {
@@ -519,11 +584,9 @@ fn register_host_terminal(
             cols,
             rows,
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
-            renderer_terminal_id: Some(leaf),
+            renderer_terminal_id: leaf,
             owning_tab_id: Some(owner),
-            // Task 1 keeps this equal to the map key, which today IS the leaf, so
-            // behaviour is unchanged. Task 4 splits them (design 014 §A2).
-            session_key: id.to_string(),
+            session_key: ident.session_key.clone(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook,
@@ -586,9 +649,10 @@ fn host_fallback(
     // Seed + register the tab_id via spawn_terminal (both land before the reader
     // thread starts), then stage the renderer's one-shot prefix under the new id.
     let history_prefix = restore_prefix(state, tab_id);
-    // Same rule as register_host_terminal: the leaf is the id, the owner
-    // defaults to the leaf. One definition, two call sites.
-    let (leaf, owner) = host_identity(tab_id, owning_tab_id);
+    // In-process fallback: `spawn_terminal` mints its own `pc-` id, so only the
+    // leaf and the owner are needed here — see `resolve_owner`.
+    let leaf = tab_id.to_string();
+    let owner = resolve_owner(tab_id, Some(tab_id), owning_tab_id);
     let fallback_id = pty_manager::spawn_terminal(
         state.clone(),
         cols,
@@ -2785,34 +2849,64 @@ mod freedesktop_icon_tests {
 mod host_identity_tests {
     use super::host_identity;
 
-    /// On the PTY-host sidecar path the DashMap KEY *is* the renderer leaf
-    /// (`commands.rs:188-192`), and `host_terminals` / `host_reattach_pending` /
-    /// `host_stream_offsets` / `host_close_pending` (`state.rs:235,240,260,270`)
-    /// are all keyed by that same value. P0-A must not move it — hot-swap
-    /// reattach depends on it (ground-truth correction C2).
+    /// **AMENDED by design 014.** These tests previously asserted that the DashMap
+    /// key *is* the renderer leaf — true before 014, and the exact collapse that
+    /// made "Terminal ID" and "Process ID" display the same `tb-` value. The map
+    /// key is now a minted `pc-`.
+    ///
+    /// What did NOT change, and is still asserted below: the **session key** stays
+    /// the leaf. That is the hot-swap reattach key (ground-truth correction C2),
+    /// and moving it would orphan every armed session — the pty-host protocol has
+    /// no rename verb (design 014 §A2).
     #[test]
-    fn a_split_pane_keeps_its_leaf_as_the_map_and_reattach_key() {
-        let (key, owner) = host_identity("tm-9f2c1a4b7", Some("tb-4e8d0c2f1"));
-        assert_eq!(key, "tm-9f2c1a4b7", "the sidecar reattach key must stay the leaf");
-        assert_eq!(owner, "tb-4e8d0c2f1");
+    fn the_map_key_is_a_minted_process_id_not_the_leaf() {
+        let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
+        assert!(h.process_id.starts_with("pc-"), "map key must be pc-, got {}", h.process_id);
+        assert_ne!(h.process_id, h.session_key, "the 014 §A1 separation");
+        assert_ne!(h.process_id, h.owner);
     }
 
-    /// A root/solo pane owns itself — the invariant that made the old collapse
-    /// invisible until an API split existed (design 011 §3).
     #[test]
-    fn a_root_pane_owns_itself_when_no_owner_is_supplied() {
-        let (key, owner) = host_identity("tb-4e8d0c2f1", None);
-        assert_eq!(key, "tb-4e8d0c2f1");
-        assert_eq!(owner, "tb-4e8d0c2f1");
+    fn the_session_key_still_tracks_the_leaf_so_reattach_survives() {
+        let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
+        assert_eq!(h.session_key, "tm-9f2c1a4b7", "the sidecar reattach key must not move");
+        assert_eq!(h.leaf.as_deref(), Some("tm-9f2c1a4b7"));
+        assert_eq!(h.owner, "tb-4e8d0c2f1");
     }
 
-    /// A renderer that predates P0-A sends no owner; a split pane then falls
-    /// back to owning itself. That is the OLD behaviour, preserved — it is no
-    /// worse than today, and Task 10 makes the renderer always send one.
+    /// The upgrade case: the pane tree now says `tm-new`, but the host still
+    /// knows this session as `tb-old`. Renaming it would lose the session.
+    #[test]
+    fn a_migrated_terminal_keeps_its_legacy_session_key_while_the_leaf_moves() {
+        let h = host_identity("tb-old00001", Some("tm-new00001"), Some("tb-old00001"));
+        assert_eq!(h.session_key, "tb-old00001", "reattach key MUST NOT move");
+        assert_eq!(h.leaf.as_deref(), Some("tm-new00001"));
+        assert!(h.process_id.starts_with("pc-"));
+    }
+
+    /// Two spawns must never collide on the map key.
+    #[test]
+    fn each_spawn_mints_a_distinct_process_id() {
+        let a = host_identity("tm-a", Some("tm-a"), None);
+        let b = host_identity("tm-b", Some("tm-b"), None);
+        assert_ne!(a.process_id, b.process_id);
+    }
+
+    /// A root/solo pane owns itself when no owner is supplied — preserved from
+    /// design 011 §3, and still the fallback for a renderer that sends none.
     #[test]
     fn a_missing_owner_degrades_to_the_leaf_not_to_none() {
-        let (_, owner) = host_identity("tm-9f2c1a4b7", None);
-        assert_eq!(owner, "tm-9f2c1a4b7");
+        let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), None);
+        assert_eq!(h.owner, "tm-9f2c1a4b7");
+    }
+
+    /// A headless spawn has no renderer pane, so no leaf — and must not invent
+    /// one (design 011 §5 keeps such terminals out of the history table).
+    #[test]
+    fn a_headless_spawn_has_no_leaf_and_owns_its_session() {
+        let h = host_identity("pc-headless", None, None);
+        assert!(h.leaf.is_none(), "must not invent a leaf");
+        assert_eq!(h.owner, "pc-headless");
     }
 }
 
@@ -2921,6 +3015,75 @@ mod api_spawn_routing_tests {
             sources.len()
         );
         sources
+    }
+
+    /// The pty-host methods that ADDRESS a specific session. Every one of them
+    /// must be handed an id in the HOST's id space.
+    const HOST_ADDRESSED: [&str; 6] = [
+        "write_stdin",
+        "resize",
+        "close",
+        "nudge_repaint",
+        "attach_confirmed",
+        "spawn_session",
+    ];
+
+    /// The first argument of `call`, with `&` and whitespace stripped.
+    fn first_arg(code: &str, after: usize) -> String {
+        let rest = &code[after..];
+        let end = rest.find([',', ')']).unwrap_or(rest.len());
+        rest[..end].trim().trim_start_matches('&').trim().to_string()
+    }
+
+    /// **Every call that crosses into the pty-host must be addressed in the host's
+    /// id space**, never with one of our process ids.
+    ///
+    /// Since design 014 the process id (`pc-`) and the session key are different
+    /// strings. Addressing the host with a process id does not error — the host
+    /// has simply never heard of it, so the write, resize or close silently does
+    /// nothing. That is invisible in every test that does not run a real host,
+    /// which is why this is asserted from source.
+    ///
+    /// The rule is POSITIVE (the argument must name the host's space) rather than
+    /// a blocklist of bad names: a blocklist cannot see a new variable someone
+    /// invents. The host's space is named either `session_key` (ours) or `tab_id`
+    /// (the protocol's own field name for the same thing).
+    #[test]
+    fn every_host_addressed_call_uses_the_host_id_space() {
+        let mut checked = 0;
+        for (name, text) in crate_sources() {
+            // The client module DEFINES these methods; its parameters are the
+            // host's space by construction.
+            if name == "pty_host_client.rs" {
+                continue;
+            }
+            for line in text.lines() {
+                let code = line.trim_start();
+                if code.starts_with("//") || code.starts_with('*') {
+                    continue;
+                }
+                for method in HOST_ADDRESSED {
+                    for prefix in ["c.", "client."] {
+                        let pat = format!("{prefix}{method}(");
+                        let Some(pos) = code.find(&pat) else { continue };
+                        let arg = first_arg(code, pos + pat.len());
+                        checked += 1;
+                        assert!(
+                            arg.contains("session_key") || arg.contains("tab_id"),
+                            "{name}: `{prefix}{method}` is addressed with `{arg}`, which is not \
+                             the host's id space. The host knows this terminal only by its \
+                             session key; a process id silently does nothing (design 014 §A2).\n  \
+                             line: {code}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 5,
+            "only {checked} host-addressed calls found — the guard is not seeing the real tree, \
+             so it would pass vacuously"
+        );
     }
 
     /// The matcher is the load-bearing part, so pin it directly: every evasion form
