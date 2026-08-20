@@ -464,6 +464,9 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     stage_scrollback(state, &id, &process_id);
     let spec = pty_manager::build_spawn_spec(
         &session_key,
+        // The LEAF, not the session key: this is what the child shell reads as
+        // TERMFLOW_TERMINAL_ID to identify itself to MCP (design 014 A6.1).
+        Some(&id),
         shell_path.as_deref(),
         &shell_name,
         shell_args.as_deref(),

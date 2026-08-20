@@ -90,6 +90,23 @@ pub const HOST_CONTROL_ENV: &[&str] = &[
 /// `{seen:true, armed:false}` on reattach. A hookless shell (cmd, remote ssh)
 /// reports false and keeps the ungated heuristic — seeding it would gate it
 /// forever (no OSC ever re-arms it).
+/// The value of `TERMFLOW_TERMINAL_ID` — the identity an in-terminal agent reads
+/// to address **itself** over MCP (`get_my_terminal`, the `"me"` shorthand).
+///
+/// The **leaf**, because it is the durable id (design 014 §A3) and survives a
+/// restart, unlike the per-run `pc-`. A headless spawn has no leaf and falls
+/// back to the process id — such a terminal has no pane for an agent to sit in.
+///
+/// Before design 014 the two spawn paths disagreed: the sidecar path injected
+/// the leaf and the in-process path injected the `pc-`, the drift
+/// `canvas_store.rs` routes around via `resolve_renderer_id`. Worse, a
+/// renderer-created leaf WAS the tab id, so this variable — named `TERMINAL_ID` —
+/// handed agents a `tb-`, and an agent in a two-pane tab could not say which of
+/// the two terminals it was.
+pub(crate) fn identity_env_value(leaf: Option<&str>, process_id: &str) -> String {
+    leaf.unwrap_or(process_id).to_string()
+}
+
 pub fn shell_emits_prompt_osc(
     shell_path: Option<&str>,
     shell_name: &str,
@@ -116,8 +133,15 @@ pub fn shell_emits_prompt_osc(
     is_powershell && !has_command_flag
 }
 
+/// Build the host spawn spec.
+///
+/// `tab_id` is the pty-host SESSION key; `leaf` is the renderer leaf. They are
+/// equal for anything created on this build and differ for a migrated terminal,
+/// which is why `TERMFLOW_TERMINAL_ID` takes the leaf specifically
+/// (design 014 §A6.1).
 pub fn build_spawn_spec(
     tab_id: &str,
+    leaf: Option<&str>,
     shell_path: Option<&str>,
     shell_name: &str,
     shell_args: Option<&[String]>,
@@ -136,7 +160,7 @@ pub fn build_spawn_spec(
     let env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
-        ("TERMFLOW_TERMINAL_ID".to_string(), tab_id.to_string()),
+        ("TERMFLOW_TERMINAL_ID".to_string(), identity_env_value(leaf, tab_id)),
         ("TERM_PROGRAM".to_string(), "TermFlow".to_string()),
         (
             "TERM_PROGRAM_VERSION".to_string(),
@@ -784,7 +808,7 @@ pub fn spawn_terminal(
 
     cmd_builder.env("TERM", "xterm-256color");
     cmd_builder.env("COLORTERM", "truecolor");
-    cmd_builder.env("TERMFLOW_TERMINAL_ID", &id);
+    cmd_builder.env("TERMFLOW_TERMINAL_ID", identity_env_value(renderer_terminal_id.as_deref(), &id));
 
     // Identify ourselves — and stop leaking the identity of whatever terminal the
     // APP was launched from. Same inheritance mechanism as COLORTERM above, but
@@ -1445,6 +1469,7 @@ mod cwd_tests {
     fn build_spawn_spec_injects_identity_scrubs_foreign_and_wraps_ps() {
         let spec = super::build_spawn_spec(
             "pc-abc123",
+            None,
             Some("powershell.exe"),
             "powershell",
             None,
@@ -1456,6 +1481,10 @@ mod cwd_tests {
         assert!(spec
             .env
             .iter()
+            // AMENDED by design 014 §A6.1: the value is the LEAF when there is
+            // one. This call passes `None` (a headless spawn with no renderer
+            // pane), so it still falls back to the process id — which is what
+            // this assertion now pins.
             .any(|(k, v)| k == "TERMFLOW_TERMINAL_ID" && v == "pc-abc123"));
         assert!(spec
             .env
@@ -1481,6 +1510,7 @@ mod cwd_tests {
         let args = vec!["-Command".to_string(), "echo hi".to_string()];
         let spec = super::build_spawn_spec(
             "pc-x",
+            None,
             Some("pwsh.exe"),
             "pwsh",
             Some(&args),
@@ -1507,7 +1537,7 @@ mod cwd_tests {
         assert!(!shell_emits_prompt_osc(Some("C:\\Windows\\System32\\cmd.exe"), "cmd", None));
         assert!(!shell_emits_prompt_osc(Some("/bin/bash"), "bash", None));
         // Decision must match build_spawn_spec's actual injection.
-        let spec = super::build_spawn_spec("t", Some("powershell.exe"), "powershell", None, None, 80, 24);
+        let spec = super::build_spawn_spec("t", None, Some("powershell.exe"), "powershell", None, None, 80, 24);
         assert_eq!(
             spec.args.iter().any(|a| a.contains("]9;9;")),
             shell_emits_prompt_osc(Some("powershell.exe"), "powershell", None),
@@ -1694,5 +1724,61 @@ mod cwd_tests {
         // looking for one — at exit time that pid is dead and possibly recycled.
         terminal_cwds.insert("other".to_string(), "D:\\elsewhere".to_string());
         assert!(exit_cwd_for(&terminal_cwds, "t-1").is_none());
+    }
+}
+
+/// `TERMFLOW_TERMINAL_ID` — the identity an in-terminal agent reads to address
+/// ITSELF over MCP. Design 014 §A6.1.
+#[cfg(test)]
+mod identity_env_tests {
+    use super::{build_spawn_spec, identity_env_value};
+
+    fn spec_identity(leaf: Option<&str>, session_key: &str) -> String {
+        let spec = build_spawn_spec(session_key, leaf, Some("pwsh.exe"), "pwsh", None, None, 80, 24);
+        spec.env
+            .iter()
+            .find(|(k, _)| k == "TERMFLOW_TERMINAL_ID")
+            .map(|(_, v)| v.clone())
+            .expect("every spawn must carry an identity")
+    }
+
+    #[test]
+    fn the_identity_var_carries_the_leaf_not_the_process_id() {
+        assert_eq!(identity_env_value(Some("tm-9f2c1a4b7"), "pc-abc123def"), "tm-9f2c1a4b7");
+    }
+
+    /// A headless API/fleet spawn has no renderer pane, so no leaf. Falling back
+    /// to the process id is correct — there is no agent sitting in a pane there.
+    #[test]
+    fn a_headless_spawn_falls_back_to_the_process_id() {
+        assert_eq!(identity_env_value(None, "pc-abc123def"), "pc-abc123def");
+    }
+
+    /// THE reported bug, pinned. A tab id in a variable named `TERMINAL_ID` is
+    /// what leaves an agent in a two-pane tab unable to say which terminal it is.
+    #[test]
+    fn the_identity_var_is_never_a_tab_id() {
+        let v = identity_env_value(Some("tm-9f2c1a4b7"), "pc-abc123def");
+        assert!(!v.starts_with("tb-"), "TERMFLOW_TERMINAL_ID must never carry a tab id, got {v}");
+    }
+
+    /// A MIGRATED terminal: the host session key is still the old `tb-`, but the
+    /// agent must see the new `tm-` leaf. Passing the session key here would put
+    /// a tab-shaped id back into the variable.
+    #[test]
+    fn a_migrated_terminal_reports_its_new_leaf_not_its_legacy_session_key() {
+        assert_eq!(spec_identity(Some("tm-new00001"), "tb-old00001"), "tm-new00001");
+    }
+
+    /// **The drift `canvas_store.rs:5-8` documents.** Asserting the two paths
+    /// AGREE, rather than asserting each one's value separately — separate
+    /// assertions are exactly what let them diverge in the first place.
+    #[test]
+    fn both_spawn_paths_inject_the_same_value_for_the_same_terminal() {
+        let leaf = Some("tm-9f2c1a4b7");
+        let process_id = "pc-abc123def";
+        // The in-process path calls `identity_env_value` directly; the host path
+        // routes through `build_spawn_spec`. Same inputs must give same output.
+        assert_eq!(spec_identity(leaf, process_id), identity_env_value(leaf, process_id));
     }
 }
