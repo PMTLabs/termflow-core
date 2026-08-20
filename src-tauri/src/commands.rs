@@ -503,8 +503,17 @@ pub(crate) struct HostIdentity {
     /// `tm-` — durable, and the `terminal_history` primary key. `None` for a
     /// headless spawn with no renderer pane (design 011 §5).
     pub leaf: Option<String>,
-    /// `tb-` — the owning tab.
-    pub owner: String,
+    /// `tb-` — the owning tab, or `None` when the caller did not supply one.
+    ///
+    /// **Never derived.** It used to fall back to the leaf, on the design 011 rule
+    /// that "a root/solo pane owns itself" — true only while a renderer-created root
+    /// leaf WAS its tab id. After design 014 every leaf is a `tm-`, so that fallback
+    /// filed a TERMINAL id as an owning TAB id for any spawn whose pane tree had not
+    /// been committed yet. `reassertOwnerAfterSpawn` corrects it a moment later, but
+    /// until then activity routes at a tab that does not exist and
+    /// `get_terminal_detail` reports a leaf as `owningTabId`. `None` is the honest
+    /// answer and the renderer supplies the real one.
+    pub owner: Option<String>,
     /// What the pty-host knows this session as. NEVER minted here: only the
     /// caller knows whether this is a migrated pre-014 session whose key must
     /// not move (design 014 §A2).
@@ -528,14 +537,18 @@ fn host_identity(
     }
 }
 
-/// The owning tab for a spawn: the caller's, else the leaf, else the session key.
+/// The owning tab for a spawn: the caller's, or nothing.
 ///
 /// Split out because the in-process fallback needs the owner WITHOUT minting a
 /// process id (`pty_manager::spawn_terminal` mints its own). One definition, so
 /// the two paths cannot drift — they did before, which is how a caller-supplied
 /// name got dropped on every fallback (plan 019 §4).
-fn resolve_owner(session_key: &str, leaf: Option<&str>, owning_tab_id: Option<&str>) -> String {
-    owning_tab_id.or(leaf).unwrap_or(session_key).to_string()
+///
+/// Takes `session_key` and `leaf` still, because both were once fallbacks here and
+/// a reader needs to see that their absence is deliberate: neither is a tab, so
+/// neither can stand in for one (design 014 §A3).
+fn resolve_owner(_session_key: &str, _leaf: Option<&str>, owning_tab_id: Option<&str>) -> Option<String> {
+    owning_tab_id.map(str::to_string)
 }
 
 /// The display name a spawn registers: the caller's, or the derived default.
@@ -590,7 +603,7 @@ fn register_host_terminal(
             rows,
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
             renderer_terminal_id: leaf,
-            owning_tab_id: Some(owner),
+            owning_tab_id: owner,
             session_key: ident.session_key.clone(),
             last_input_source: None,
             last_input_at: None,
@@ -668,7 +681,7 @@ fn host_fallback(
         shell_name,
         name,
         Some(leaf),
-        Some(owner),
+        owner,
         history_prefix.clone(),
     )?;
     if let Some(prefix) = history_prefix {
@@ -3012,7 +3025,7 @@ mod host_identity_tests {
         let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
         assert!(h.process_id.starts_with("pc-"), "map key must be pc-, got {}", h.process_id);
         assert_ne!(h.process_id, h.session_key, "the 014 §A1 separation");
-        assert_ne!(h.process_id, h.owner);
+        assert_ne!(Some(h.process_id.clone()), h.owner);
     }
 
     #[test]
@@ -3020,7 +3033,7 @@ mod host_identity_tests {
         let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
         assert_eq!(h.session_key, "tm-9f2c1a4b7", "the sidecar reattach key must not move");
         assert_eq!(h.leaf.as_deref(), Some("tm-9f2c1a4b7"));
-        assert_eq!(h.owner, "tb-4e8d0c2f1");
+        assert_eq!(h.owner.as_deref(), Some("tb-4e8d0c2f1"));
     }
 
     /// The upgrade case: the pane tree now says `tm-new`, but the host still
@@ -3041,21 +3054,35 @@ mod host_identity_tests {
         assert_ne!(a.process_id, b.process_id);
     }
 
-    /// A root/solo pane owns itself when no owner is supplied — preserved from
-    /// design 011 §3, and still the fallback for a renderer that sends none.
+    /// A missing owner stays missing. Design 011 §3 let it "degrade to the leaf" on
+    /// the rule that a root/solo pane owns itself — which held only while a root leaf
+    /// WAS its tab id. After 014 that fallback files a TERMINAL id as an owning TAB
+    /// id, which is not a degraded answer but a wrong one: it names a tab that does
+    /// not exist. The renderer sends the real owner (and re-sends it after the spawn
+    /// when its pane tree lands), so `None` is the correct interim value.
     #[test]
-    fn a_missing_owner_degrades_to_the_leaf_not_to_none() {
+    fn a_missing_owner_stays_none_rather_than_degrading_to_the_leaf() {
         let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), None);
-        assert_eq!(h.owner, "tm-9f2c1a4b7");
+        assert_eq!(h.owner, None);
+        assert_eq!(h.leaf.as_deref(), Some("tm-9f2c1a4b7"), "the leaf itself is unaffected");
     }
 
     /// A headless spawn has no renderer pane, so no leaf — and must not invent
-    /// one (design 011 §5 keeps such terminals out of the history table).
+    /// one (design 011 §5 keeps such terminals out of the history table). It has no
+    /// tab either, so it must not invent an owner from its session key.
     #[test]
-    fn a_headless_spawn_has_no_leaf_and_owns_its_session() {
+    fn a_headless_spawn_invents_neither_a_leaf_nor_an_owner() {
         let h = host_identity("pc-headless", None, None);
         assert!(h.leaf.is_none(), "must not invent a leaf");
-        assert_eq!(h.owner, "pc-headless");
+        assert_eq!(h.owner, None, "a pc- session key is not a tab");
+    }
+
+    /// The caller's owner is still carried through untouched — the deletion above
+    /// removed the INVENTED values, not the real one.
+    #[test]
+    fn a_supplied_owner_is_carried_through() {
+        let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
+        assert_eq!(h.owner.as_deref(), Some("tb-4e8d0c2f1"));
     }
 }
 

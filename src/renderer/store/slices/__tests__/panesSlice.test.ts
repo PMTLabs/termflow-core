@@ -835,14 +835,44 @@ describe('splitPane carries identity fields onto the surviving leaf', () => {
     sessionKey: 'tb-legacy01',
   };
 
-  const splitIt = () => {
-    let s = reducer(undefined, { type: '@@INIT' } as any);
-    s = reducer(s, addTabTree({ tabId: 'tb-a', tree: seeded }));
-    s = reducer(s, setActiveTabId('tb-a'));
-    return reducer(s, splitPaneInTab({
-      tabId: 'tb-a', paneId: 'pn-root', direction: 'horizontal',
-    } as any));
-  };
+  /**
+   * **Every split entry point, not just one.** There are THREE ways a pane splits and
+   * TWO implementations behind them, and the first version of this suite exercised only
+   * `splitPaneInTab`. `splitPaneWithTab` — the one the pane split BUTTONS and the pane
+   * context menu use, i.e. the way a user actually splits — dropped both fields, and the
+   * green suite said nothing. Running one table over all three is what stops a fourth
+   * entry point (or a second implementation) drifting again.
+   *
+   * Keep this table exhaustive: if you add a split action, add it here.
+   */
+  const ENTRY_POINTS: ReadonlyArray<{ name: string; action: () => unknown }> = [
+    {
+      // Pane split buttons / pane context menu, via services/paneActions.splitPaneById.
+      name: 'splitPaneWithTab (UI split button)',
+      action: () => ({
+        type: splitPaneWithTab.fulfilled.type,
+        payload: {
+          paneId: 'pn-root',
+          direction: 'horizontal',
+          position: 'after',
+          shellType: 'default',
+          newTerminalId: 'tm-new',
+          uniqueTitle: 'Bottom',
+          uniqueOriginalTitle: 'Top',
+        },
+      }),
+    },
+    {
+      // Keyboard shortcut (App.tsx / InputHandler).
+      name: 'splitPane (keyboard shortcut)',
+      action: () => splitPane({ paneId: 'pn-root', direction: 'horizontal', terminalId: 'tm-new' }),
+    },
+    {
+      // API / MCP split (App.tsx modes 1 and 2).
+      name: 'splitPaneInTab (API/MCP)',
+      action: () => splitPaneInTab({ tabId: 'tb-a', paneId: 'pn-root', direction: 'horizontal' } as any),
+    },
+  ];
 
   const findByTerminal = (node: PaneNode | null, terminalId: string): PaneNode | null => {
     if (!node) return null;
@@ -854,25 +884,42 @@ describe('splitPane carries identity fields onto the surviving leaf', () => {
     return null;
   };
 
-  it('keeps seededForTabId on the pane that keeps the terminal', () => {
-    const s = splitIt();
-    const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
-    expect(original).not.toBeNull();
-    expect(original!.seededForTabId).toBe('tb-a');
-  });
+  describe.each(ENTRY_POINTS)('$name', ({ action }) => {
+    const splitIt = () => {
+      let s = reducer(undefined, { type: '@@INIT' } as any);
+      s = reducer(s, addTabTree({ tabId: 'tb-a', tree: seeded }));
+      s = reducer(s, setActiveTabId('tb-a'));
+      return reducer(s, action() as any);
+    };
 
-  it('keeps the migrated sessionKey on the pane that keeps the terminal', () => {
-    const s = splitIt();
-    const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
-    expect(original!.sessionKey).toBe('tb-legacy01');
-  });
+    /**
+     * Dropping `seededForTabId` silently undoes `planSeeds` Rule 3 AND the duplicate-leaf
+     * ownership tiebreak: after design 014 no leaf carries its tab's id, so this field is
+     * the ONLY thing left that names a tab as its terminals' owner. Lose it on split and
+     * `claimsItsOwnId` returns false for that tab forever after — the repair falls back to
+     * `tabs` order, and an emptied tab is no longer recognised as emptied.
+     */
+    it('keeps seededForTabId on the pane that keeps the terminal', () => {
+      const s = splitIt();
+      const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
+      expect(original).not.toBeNull();
+      expect(original!.seededForTabId).toBe('tb-a');
+    });
 
-  it('does not copy either field onto the NEW sibling', () => {
-    const s = splitIt();
-    const tree = s.treesByTabId['tb-a']!;
-    const fresh = (tree.children ?? []).find((c) => c.terminalId !== 'tm-original');
-    expect(fresh).toBeDefined();
-    expect(fresh!.seededForTabId).toBeUndefined();
-    expect(fresh!.sessionKey).toBeUndefined();
+    /** Dropping `sessionKey` orphans a migrated pane's armed host session (design 014 §A2.1). */
+    it('keeps the migrated sessionKey on the pane that keeps the terminal', () => {
+      const s = splitIt();
+      const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
+      expect(original!.sessionKey).toBe('tb-legacy01');
+    });
+
+    it('does not copy either field onto the NEW sibling', () => {
+      const s = splitIt();
+      const tree = s.treesByTabId['tb-a']!;
+      const fresh = (tree.children ?? []).find((c) => c.terminalId !== 'tm-original');
+      expect(fresh).toBeDefined();
+      expect(fresh!.seededForTabId).toBeUndefined();
+      expect(fresh!.sessionKey).toBeUndefined();
+    });
   });
 });

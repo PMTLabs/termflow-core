@@ -108,6 +108,42 @@ function syncActive(state: PanesState): void {
 }
 
 /**
+ * The leaf that KEEPS an existing terminal when its pane is split.
+ *
+ * **Shared because there are two split implementations and they drifted.** A split
+ * turns the original leaf node into a `split` container, so the terminal it held has
+ * to be re-homed onto a fresh child node — and every field that describes the
+ * TERMINAL (rather than the pane's position) must come with it. `splitLeafInTree`
+ * below carried them; `splitPaneWithTab.fulfilled` — the reducer behind the pane
+ * split BUTTONS, i.e. how a user actually splits — carried only `notifyMuted`, so an
+ * ordinary UI split silently stripped both identity fields.
+ *
+ * What each field costs if dropped:
+ * - `seededForTabId` — after design 014 no leaf carries its tab's id, so this is the
+ *   ONLY record that a tab owns its terminals. Lose it and `tabTreeSeed.claimsItsOwnId`
+ *   returns false for that tab forever: the duplicate-leaf tiebreak degrades to `tabs`
+ *   order, and `planSeeds` Rule 3 stops recognising the tab as one that was emptied —
+ *   which is the resurrection bug (design 010 §6.3) reached by another route.
+ * - `sessionKey` — orphans a migrated pane's armed pty-host session (design 014 §A2).
+ * - `notifyMuted` — a muted pane silently unmutes itself when split.
+ *
+ * Both callers must go through here. `panesSlice.test.ts` runs one table over every
+ * split entry point so a third cannot quietly grow its own copy.
+ */
+function survivingLeaf(node: PaneNode, fallbackName: string): PaneNode {
+  return {
+    id: generateId('pn'),
+    type: 'terminal',
+    terminalId: node.terminalId,
+    name: node.name || fallbackName,
+    shellType: node.shellType,
+    seededForTabId: node.seededForTabId,
+    sessionKey: node.sessionKey,
+    notifyMuted: node.notifyMuted,
+  };
+}
+
+/**
  * Split the terminal leaf `paneId` inside `tree` (mutated in place) into a
  * [original, new] split. Returns the new pane's id, or null if `paneId` was
  * not found as a terminal leaf. Shared by `splitPane` (active tab) and
@@ -130,24 +166,10 @@ function splitLeafInTree(
         name: name || `Terminal ${direction === 'horizontal' ? 'Bottom' : 'Right'}`,
         shellType,
       };
-      const originalPane: PaneNode = {
-        id: generateId('pn'),
-        type: 'terminal',
-        terminalId: node.terminalId,
-        name: node.name || `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`,
-        shellType: node.shellType,
-        // Carry BOTH identity fields onto the leaf that keeps this terminal.
-        // Dropping `seededForTabId` here would silently undo `planSeeds` Rule 3:
-        // split a tab, drag both panes away, and nothing anywhere still names
-        // the emptied tab — so it gets manufactured a brand-new shell on the
-        // next restore. Dropping `sessionKey` would orphan a migrated pane's
-        // armed host session (design 014 §A2).
-        seededForTabId: node.seededForTabId,
-        sessionKey: node.sessionKey,
-        // Carry the pane-level mute onto the leaf that KEEPS this terminal, so a
-        // muted pane stays muted when split. The new sibling starts unmuted.
-        notifyMuted: node.notifyMuted,
-      };
+      const originalPane = survivingLeaf(
+        node,
+        node.name || `Terminal ${direction === 'horizontal' ? 'Top' : 'Left'}`,
+      );
       node.type = 'split';
       node.direction = direction;
       node.size = 50;
@@ -737,15 +759,11 @@ const panesSlice = createSlice({
             shellType: shellType,
           };
           
-          // Convert current terminal pane to split pane
-          const originalPane: PaneNode = {
-            id: generateId('pn'),
-            type: 'terminal',
-            terminalId: node.terminalId,
-            name: node.name || uniqueOriginalTitle,
-            // Keep the pane-level mute with the terminal it belongs to.
-            notifyMuted: node.notifyMuted,
-          };
+          // Convert current terminal pane to split pane. Goes through the SAME
+          // helper `splitLeafInTree` uses — this reducer carried only `notifyMuted`
+          // and dropped `seededForTabId`/`sessionKey`, which is how an ordinary UI
+          // split silently unmade a tab's ownership record. See `survivingLeaf`.
+          const originalPane = survivingLeaf(node, uniqueOriginalTitle);
 
           node.type = 'split';
           node.direction = direction;
