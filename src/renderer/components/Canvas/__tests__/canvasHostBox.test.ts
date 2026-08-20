@@ -100,9 +100,13 @@ describe('canvas node layout box', () => {
   });
 
   it('still parses rules nested inside an @media block', () => {
+    // `plan/020` §3: this used to be the running sweep's reduced-motion override, which was
+    // deleted along with the sweep itself (Req 5). `.canvas-node-dot`'s own reduced-motion
+    // override — still real, still nested inside `@media (prefers-reduced-motion: reduce)` —
+    // is the same shape of example.
     const canvas = path.join(RENDERER, 'components/Canvas/Canvas.css');
     const selectors = rulesIn(canvas).map((r) => r.selector);
-    expect(selectors).toContain('.canvas-node.running .canvas-node-head::after');
+    expect(selectors).toContain('.canvas-node-dot');
   });
 });
 

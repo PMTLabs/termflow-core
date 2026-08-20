@@ -11,6 +11,7 @@ import { aimedNodeRect } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
+import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -106,6 +107,9 @@ const Row: React.FC<RowProps> = ({
       onDoubleClick={onDoubleClick}
       title={row.disambiguator ? `${row.title} — ${row.disambiguator}` : row.title}
     >
+      {/* The tab strip's own icon, reused (Req 6, `plan/020` §3) — `.canvas-srow.running`
+          above is what makes it blink; the icon itself is unconditional, same as a tab's. */}
+      <ShellProfileIcon shellType={row.shellType} />
       <span className="canvas-srow-title"><Title row={row} /></span>
       {row.disambiguator && <span className="canvas-srow-dis">{row.disambiguator}</span>}
       {/* The tab strip's own indicator, reused rather than restyled (design 010 §9). */}

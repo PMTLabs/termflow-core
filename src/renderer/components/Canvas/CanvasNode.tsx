@@ -167,6 +167,12 @@ export const CanvasNode: React.FC<{
                 fontSize: headFontSize(zoom),
               }}
         >
+          {/* Req 7 (`plan/020` §3) — replaces the old header-wide sweep with a small dot, cheap
+              enough to animate on every node at once. Its own EXISTENCE is the running state
+              (unlike the sidebar's icon, which always renders and is blinked by a CSS ancestor
+              selector instead): a busy node mounts it, an idle one never does, so the mutation
+              check for this is "hard-code it to always render", not "hide it with CSS". */}
+          {!isChip && node.isRunning && <span className="canvas-node-dot" />}
           <span className="canvas-node-title">{node.title}</span>
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node

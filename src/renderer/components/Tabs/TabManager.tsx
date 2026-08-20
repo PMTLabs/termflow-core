@@ -24,7 +24,7 @@ import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
-import { getCachedIcon, loadIcon } from '../../services/binaryIcons';
+import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import './TabManager.css';
 
 /** A pending tab-close awaiting confirmation (single tab or a bulk set). */
@@ -193,6 +193,7 @@ interface TabItemProps {
     id: string;
     title: string;
     icon?: string;
+    shellType: string;
     isActive: boolean;
     isDirty?: boolean;
     processId?: number;
@@ -208,8 +209,6 @@ interface TabItemProps {
   /** Whether the context-menu "Move to New Window" is offered (only with >1 tab;
       a single tab can still be dragged onto ANOTHER window). */
   canDetach: boolean;
-  /** Real binary icon (data URL) for the tab's shell, when available. */
-  iconUrl?: string;
   onClose: (id: string) => void;
   /** Browser-style close action (single/right/left/others) → confirm flow. */
   onCloseKind: (id: string, kind: CloseKind) => void;
@@ -234,7 +233,6 @@ const TabItem: React.FC<TabItemProps> = ({
   tab,
   requestReorder,
   canDetach,
-  iconUrl,
   onClose,
   onCloseKind,
   onSelect,
@@ -347,9 +345,7 @@ const TabItem: React.FC<TabItemProps> = ({
       >
         {tab.exited
           ? <span className="tab-exited-icon" title="Process exited — kept open for review">⊘</span>
-          : iconUrl
-            ? <img className="tab-icon-img" src={iconUrl} alt="" />
-            : tab.icon && <span className="tab-icon">{tab.icon}</span>}
+          : <ShellProfileIcon shellType={tab.shellType} emoji={tab.icon} />}
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"
@@ -434,33 +430,7 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   });
   const tabSizingMode = useSelector((state: RootState) => state.settings.tabSizingMode);
   const fixedTabWidth = useSelector((state: RootState) => state.settings.fixedTabWidth);
-  const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const tabsArray = [...tabs]; // Convert to array for indexing
-
-  // Resolve a tab's shell binary path (via its profile) so we can show the real
-  // executable icon instead of the generic emoji.
-  const profilePathForTab = useCallback(
-    (shellType: string) => shellProfiles.find(p => p.id === shellType)?.path,
-    [shellProfiles]
-  );
-
-  // Lazily load each tab's real binary icon; bump a tick to re-render when one
-  // arrives. Shared cache means flyout-opened icons are reused here for free.
-  const [, setIconTick] = React.useState(0);
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      let changed = false;
-      for (const tab of tabs) {
-        const path = profilePathForTab(tab.shellType);
-        if (!path || getCachedIcon(path)) continue;
-        const url = await loadIcon(path);
-        if (url) changed = true;
-      }
-      if (changed && !cancelled) setIconTick(t => t + 1);
-    })();
-    return () => { cancelled = true; };
-  }, [tabs, profilePathForTab]);
 
   // Horizontal scrolling of the tab strip (only used in 'scroll' mode). We track
   // whether either edge can scroll so the arrow buttons can hide/disable when
@@ -814,7 +784,6 @@ export const TabManager: React.FC<TabManagerProps> = () => {
                 tab={tab}
                 requestReorder={requestReorder}
                 canDetach={tabsArray.length > 1}
-                iconUrl={getCachedIcon(profilePathForTab(tab.shellType))}
                 onClose={handleCloseRequest}
                 onCloseKind={handleCloseRequestKind}
                 onSelect={handleSelectTab}

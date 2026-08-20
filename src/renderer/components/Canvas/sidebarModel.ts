@@ -8,6 +8,10 @@ export interface SidebarRow {
   matchEnd: number;
   /** Set only when another terminal shares this title. */
   disambiguator: string | null;
+  /** The terminal's shell (`CanvasNodeModel.shellType`, itself `leaf.shellType || tab.shellType`)
+   *  — threaded through so the row can show the same profile icon a tab does (Req 6, `plan/020`
+   *  §3), via `ShellProfileIcon`. */
+  shellType: string;
   /** Per-TERMINAL, from `CanvasNodeModel.isRunning` (Req 8, plan/020 §2) — this row's own
    *  pane, not its tab's. */
   isRunning: boolean;
@@ -99,6 +103,7 @@ export function buildSidebarTree(
         matchStart,
         matchEnd: matchStart < 0 ? -1 : matchStart + q.length,
         disambiguator: disambiguate(n),
+        shellType: n.shellType,
         isRunning: n.isRunning,
         hasUnseenOutput: n.hasUnseenOutput,
       });

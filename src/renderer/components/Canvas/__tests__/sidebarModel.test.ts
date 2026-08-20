@@ -165,6 +165,17 @@ describe('buildSidebarTree', () => {
     expect(row.hasUnseenOutput).toBe(true);
   });
 
+  // Req 6 (plan/020 §3): the row needs its terminal's shell so it can show the same profile
+  // icon a tab does (`ShellProfileIcon`). Two DIFFERENT shells, so a row that just echoed one
+  // constant back could not satisfy this.
+  it('carries each row\'s own shellType through for the profile icon', () => {
+    const mixed = [node('tm-1', 'tb-a', 'zsh', 'pwsh'), node('tm-2', 'tb-a', 'server', 'bash')];
+    const t = buildSidebarTree(mixed, [group('tb-a', 'api', ['tm-1', 'tm-2'])], '', {});
+    const rows = t[0].rows;
+    expect(rows.find((r) => r.terminalId === 'tm-1')!.shellType).toBe('pwsh');
+    expect(rows.find((r) => r.terminalId === 'tm-2')!.shellType).toBe('bash');
+  });
+
   // Req 8 (plan/020 §2/§2.3): sidebarModel just passes CanvasNodeModel.isRunning through, so
   // once that field is per-terminal (canvasSelectors), the same asymmetry must survive into
   // the sidebar rows — two rows of the SAME group, only one busy.
