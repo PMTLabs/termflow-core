@@ -105,7 +105,11 @@ export const CanvasNode: React.FC<{
         dimmed ? 'dimmed' : '',
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
-        node.isRunning ? 'running' : '',
+        // No `running` class. It existed only to carry the header-wide sweep deleted in
+        // `plan/020` §3, and a busy node now says so with the dot below — whose own existence
+        // IS the state. A class with no rule reads as a styling hook that works, and the next
+        // person to reach for it finds out otherwise. The sidebar keeps ITS `.running`, because
+        // there the icon renders either way and only an ancestor selector can blink it.
       ].filter(Boolean).join(' ')}
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}

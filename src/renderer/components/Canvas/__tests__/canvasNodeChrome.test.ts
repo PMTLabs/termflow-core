@@ -41,6 +41,29 @@ function ruleFor(selector: string): string {
   return found.body;
 }
 
+/**
+ * Every `@keyframes` block in the file, by name.
+ *
+ * Braces are matched by COUNTING, because a keyframes block contains rules of its own. A regex
+ * that stops at the first `}` reads only the `from` step — which for a translate animation is
+ * usually the one that looks stationary, so the parser would report a moving band as still.
+ * `rules()` above deliberately skips `@`-prefixed heads, so this is the only way to see them.
+ */
+function keyframes(): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of CSS.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
+    const start = m.index! + m[0].length;
+    let depth = 1;
+    let i = start;
+    for (; i < CSS.length && depth > 0; i += 1) {
+      if (CSS[i] === '{') depth += 1;
+      else if (CSS[i] === '}') depth -= 1;
+    }
+    out.set(m[1], CSS.slice(start, i - 1));
+  }
+  return out;
+}
+
 /** Lengths that draw chrome. Excludes `0px`, which has no size to scale. */
 const BARE_PX = /(?<![\w-])(\d*\.?\d+)px/g;
 
@@ -154,10 +177,41 @@ describe('no canvas surface carries a sweep animation', () => {
     expect(CSS).not.toMatch(/@keyframes\s+[\w-]*sweep/i);
   });
 
-  // ...and catches it being reintroduced under a NEW name, or borrowed from the tab strip's,
-  // by shape rather than by name: a sweep is a gradient tiled with `background-repeat` or
-  // scrolled with `background-position`, on a `.canvas-node` or `.canvas-srow` rule.
-  it('no canvas-node or canvas-srow rule tiles or scrolls a background', () => {
+  // ...and catches it being reintroduced under a NEW name, on a NEW selector, by MECHANISM.
+  //
+  // The first version of this test checked for `background-repeat` / `background-position` —
+  // the tab strip's tiling technique, which the rule actually deleted here never used. It moved
+  // a fixed-width gradient band with `transform: translateX` in its keyframes, so the exact
+  // deleted effect could come back on `.canvas-node-head-inner::after` under a keyframe called
+  // `canvas-node-crawl` and every assertion in this block would still have passed. A guard that
+  // names one technique only guards that technique.
+  //
+  // What the requirement actually says is that a canvas busy cue is CHEAP: an opacity blink on a
+  // small element, not something that moves. So that is what is asserted — any keyframe a canvas
+  // surface animates must not translate anything or scroll a background, whatever it is called.
+  it('no canvas surface animates anything that MOVES', () => {
+    const frames = keyframes();
+    const animated = rules()
+      .filter((r) => /\.canvas-node|\.canvas-srow/.test(r.selector))
+      .flatMap((r) => {
+        const decl = /animation:\s*([^;]+)/.exec(r.body)?.[1] ?? '';
+        return [...frames.keys()]
+          .filter((name) => new RegExp(`(?<![\\w-])${name}(?![\\w-])`).test(decl))
+          .map((name) => ({ selector: r.selector, name }));
+      });
+    // Guard on the guard: if this resolved nothing the loop below would assert nothing, and a
+    // renamed keyframe or a broken parser would read as "no canvas surface moves".
+    expect(animated.length).toBeGreaterThan(0);
+    for (const { selector, name } of animated) {
+      const body = frames.get(name)!;
+      expect({ selector, name, moves: /transform|background-position|\bleft\b|\bright\b/.test(body) })
+        .toEqual({ selector, name, moves: false });
+    }
+  });
+
+  // The tab strip's technique too, kept from the first version — it is still a way back in, just
+  // not the one the deleted rule used.
+  it('no canvas surface tiles or scrolls a background', () => {
     const surfaceRules = rules().filter((r) => /\.canvas-node|\.canvas-srow/.test(r.selector));
     expect(surfaceRules.length).toBeGreaterThan(0); // guard on the guard — the filter must hit something
     for (const r of surfaceRules) {
