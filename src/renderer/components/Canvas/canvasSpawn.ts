@@ -1,6 +1,8 @@
 import { Rect, NODE_W, NODE_H } from './canvasGeometry';
 import { arcPlacement } from './agentPlacement';
 import { buildNewTabFields, NewTabFields, ShellProfileLike } from '../../services/newTabActions';
+import type { PaneNode } from '../../store/slices/panesSlice';
+import { generateId } from '../../utils/id';
 
 /**
  * Creating a terminal FROM the canvas — Tam's items 3 and 4 (right-click the background, or
@@ -11,6 +13,21 @@ import { buildNewTabFields, NewTabFields, ShellProfileLike } from '../../service
 export interface CanvasSpawn {
   /** Ready for `addTab`. `isActive: false` is not a detail — see below. */
   tab: NewTabFields & { isActive: false };
+  /**
+   * The `tm-` leaf the new tab's root pane carries — and therefore the CANVAS NODE's id,
+   * since `buildCanvasModel` keys a node by `leaf.terminalId`. Everything that addresses the
+   * new node (`setNodeGeom`, `selectNode`, `connectWhenReady`) must use this, never `tab.id`.
+   *
+   * Minted here so it is knowable before the tab is added, which the geometry-first ordering
+   * below requires. Until design 014 a renderer-created tab's root leaf WAS its tab id, so
+   * `tab.id` served as the node id for free and this field did not need to exist.
+   */
+  leafId: string;
+  /**
+   * The root pane tree to install alongside `addTab`, so `tabTreeSeed.planSeeds` finds the tab
+   * already initialised instead of manufacturing a second root under a leaf we never saw.
+   */
+  tree: PaneNode;
   /** Where the node goes, written through `setNodeGeom` BEFORE `addTab`. */
   rect: Rect;
 }
@@ -56,5 +73,19 @@ export function planCanvasSpawn(
   existingTitles: string[],
   rect: Rect,
 ): CanvasSpawn {
-  return { tab: { ...buildNewTabFields(profile, existingTitles), isActive: false }, rect };
+  const tab = { ...buildNewTabFields(profile, existingTitles), isActive: false as const };
+  const leafId = generateId('tm');
+  // Mirrors what `tabTreeSeed.candidateFor` would build for this tab, including
+  // `seededForTabId` — the field that records ownership now that a root leaf no longer carries
+  // its tab's id (design 014 §A6.0). Omitting it would leave `planSeeds` Rule 3 unable to tell
+  // this tab from one whose only terminal was dragged away.
+  const tree: PaneNode = {
+    id: generateId('pn'),
+    type: 'terminal',
+    terminalId: leafId,
+    seededForTabId: tab.id,
+    name: tab.title,
+    shellType: tab.shellType,
+  };
+  return { tab, leafId, tree, rect };
 }
