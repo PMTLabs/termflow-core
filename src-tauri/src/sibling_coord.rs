@@ -35,11 +35,12 @@ pub enum Reachability {
 /// Deliberately a pure function of the record: the decision is testable without
 /// a socket, and the socket work in `arm_siblings` has nothing to decide.
 pub fn reachability(rec: &InstanceRecord) -> Reachability {
-    match (rec.api_port, rec.token.as_deref()) {
-        (None, _) => Reachability::NoPort,
-        (Some(_), None) => Reachability::NoToken,
-        (Some(_), Some(t)) if t.is_empty() => Reachability::NoToken,
-        (Some(port), Some(t)) => Reachability::Reachable { port, token: t.to_string() },
+    let Some(port) = rec.api_port else { return Reachability::NoPort };
+    match rec.token.as_deref() {
+        // An empty token is a MISSING token, not a valid one: sending `Bearer `
+        // would read the resulting 401 as the sibling refusing to arm.
+        Some(t) if !t.is_empty() => Reachability::Reachable { port, token: t.to_string() },
+        _ => Reachability::NoToken,
     }
 }
 
