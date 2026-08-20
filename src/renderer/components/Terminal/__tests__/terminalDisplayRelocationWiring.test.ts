@@ -192,6 +192,32 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
   });
 
   /**
+   * `plan/021` R2 — the context-menu TRIGGER is published too.
+   *
+   * `nodeTerminal.test.tsx` proves the overlay calls `chrome.openContextMenu`, and
+   * `surfaceChrome.test.tsx` proves the registry carries it. The half neither can see is that
+   * this component still PUBLISHES it, and publishes something that actually opens the menu —
+   * the failure is silent, because a right-click on the overlay would simply do nothing while
+   * every other test stays green.
+   *
+   * The callback is also asserted to be STABLE. `same()` compares published callbacks by
+   * identity, so a fresh arrow per render would notify every subscriber on every keystroke and
+   * re-render every node on the canvas — the exact failure `surfaceChrome`'s header warns about.
+   */
+  it('publishes the context-menu trigger, as a stable callback that opens the menu', () => {
+    expect(SOURCE).toContain('openContextMenu: openContextMenuAt,');
+    expect(SOURCE).toContain('const openContextMenuAt = useCallback((x: number, y: number) => {');
+    const at = SOURCE.indexOf('const openContextMenuAt = useCallback');
+    expect(SOURCE.slice(at, at + 200)).toContain('setContextMenu({ x, y });');
+    // Declared BEFORE the publish effect reads it — a `const` declared after would be in that
+    // effect's temporal dead zone and throw on the first render.
+    expect(at).toBeLessThan(SOURCE.indexOf('setSurfaceChrome(terminalId, chromeOwner.current, {'));
+    // And the pane's own right-click still goes through it, so the two surfaces cannot drift
+    // into opening different menus.
+    expect(SOURCE).toContain('openContextMenuAt(e.clientX, e.clientY);');
+  });
+
+  /**
    * The cleanup must capture the owner, for the same reason the engine effect captures the pane
    * (099 T1-F3): a ref read inside a teardown closure is read at TEARDOWN time. Here that is
    * merely stale rather than null — but `clearSurfaceChrome` is identity-checked against it, so
