@@ -204,6 +204,29 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
    * identity, so a fresh arrow per render would notify every subscriber on every keystroke and
    * re-render every node on the canvas — the exact failure `surfaceChrome`'s header warns about.
    */
+  /**
+   * `plan/021` R2 — the menu's ITEMS are scoped to the surface, not just its trigger.
+   *
+   * Once the menu became reachable from the canvas overlay, the four pane-tree actions it leads
+   * with became wrong in a way the text actions are not. Copy/Paste/Clear act on the engine,
+   * which is the same engine wherever it is drawn; `splitPaneById` acts on a pane tree in a tab
+   * that is off screen, so picking "New Pane Right" from the overlay silently re-lays-out a
+   * background tab and spawns a PTY while nothing changes on the surface that was clicked.
+   *
+   * Keyed on the RELOCATION HOST — non-null exactly when the surface is drawn somewhere other
+   * than its pane — and not on the overlay flag, which would leave these live on a focused
+   * ordinary node for the same reason.
+   */
+  it('offers the pane-tree actions only while the surface is in its own pane', () => {
+    expect(SOURCE).toContain('...(paneId && !relocationHost ? [');
+    // The text actions are NOT gated: they act on the engine, so they are correct on every
+    // surface. Pairing the negative with a positive is what stops an over-broad gate passing.
+    const copyAt = SOURCE.indexOf("label: 'Copy',");
+    expect(copyAt).toBeGreaterThan(SOURCE.indexOf('...(paneId && !relocationHost ? ['));
+    expect(SOURCE.slice(copyAt, copyAt + 400)).toContain("label: 'Paste',");
+    expect(SOURCE.slice(copyAt, copyAt + 400)).not.toContain('relocationHost');
+  });
+
   it('publishes the context-menu trigger, as a stable callback that opens the menu', () => {
     expect(SOURCE).toContain('openContextMenu: openContextMenuAt,');
     expect(SOURCE).toContain('const openContextMenuAt = useCallback((x: number, y: number) => {');

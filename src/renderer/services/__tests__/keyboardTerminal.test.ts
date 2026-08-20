@@ -72,10 +72,17 @@ describe('resolveKeyboardTerminalId', () => {
   });
 
   it('is not fooled by another virtual tab', () => {
-    // Settings is virtual too, and hosts no terminals — but it is not the canvas, so the
-    // pane tree remains the right answer for a paste fired from it.
-    expect(resolveKeyboardTerminalId(state({ activeTabId: 'tb-settings', focusedId: 'tm-a' })))
-      .toBe('tm-b');
+    // Settings is virtual too, and it is NOT the canvas — so a remembered canvas focus must not
+    // be handed out while Settings is on screen.
+    //
+    // The pane state here is the one Settings actually produces, and getting that right is the
+    // point: virtual tabs are never seeded into `treesByTabId`, and `setActiveTabId` mirrors
+    // `paneTree` from that map, so BOTH pane fields are null — exactly as they are for the
+    // canvas. A fixture that left the pane tree populated would assert an answer (`tm-b`) that
+    // production can never produce, and would quietly stop guarding anything.
+    const s = state({ activeTabId: 'tb-settings', focusedId: 'tm-a', activePaneId: null, paneTree: null });
+    expect(resolveKeyboardTerminalId(s)).toBeNull();
+    expect(resolveKeyboardTerminalId(s)).not.toBe('tm-a');
   });
 
   it('resolves nothing without an active pane or a tree', () => {

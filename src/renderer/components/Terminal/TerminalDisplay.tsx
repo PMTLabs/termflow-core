@@ -614,7 +614,18 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     const offerSelectionMode = selectionMode || (engine?.isMouseTrackingActive() ?? false);
 
     return [
-      ...(paneId ? [
+      // Pane-tree actions, and ONLY while the surface is actually in its pane (`plan/021` R2).
+      //
+      // The menu became reachable from the canvas overlay, where these four are wrong in a way
+      // the text actions are not: Copy/Paste/Clear act on the engine, which is the same engine
+      // wherever it is drawn, but these act on a pane tree in a tab that is off screen. Picked
+      // from the overlay, "New Pane Right" silently re-lays-out a background tab and spawns a
+      // PTY, and nothing visible happens on the surface the user clicked.
+      //
+      // `relocationHost` is the accurate test — it is non-null exactly when the terminal is
+      // drawn somewhere other than its pane — rather than `overlaidOnCanvas`, which would leave
+      // these live on a focused ordinary node for the same reason.
+      ...(paneId && !relocationHost ? [
         {
           label: 'New Pane Right',
           icon: '➡️',
