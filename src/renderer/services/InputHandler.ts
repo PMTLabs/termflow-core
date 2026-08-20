@@ -6,6 +6,7 @@ import { terminalService } from './TerminalService';
 import { pasteToTerminal } from '@termflow/terminal-core';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
+import { resolveKeyboardTerminalId } from './keyboardTerminal';
 import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
@@ -447,19 +448,11 @@ export class InputHandler {
     const state = store.getState();
     let targetId = id;
 
-    // If no ID provided (e.g. from global shortcut), find the terminalId of the active pane
-    if (!targetId && state.panes.activePaneId && state.panes.paneTree) {
-      const findTerminalId = (node: any): string | null => {
-        if (node.id === state.panes.activePaneId) return node.terminalId || null;
-        if (node.children) {
-          for (const child of node.children) {
-            const result = findTerminalId(child);
-            if (result) return result;
-          }
-        }
-        return null;
-      };
-      targetId = findTerminalId(state.panes.paneTree) || undefined;
+    // If no ID provided (e.g. from global shortcut), ask which terminal has the keyboard.
+    // That is NOT the same as "the active pane" once Canvas Mode is open — see
+    // `resolveKeyboardTerminalId`.
+    if (!targetId) {
+      targetId = resolveKeyboardTerminalId(state) ?? undefined;
     }
 
     if (targetId) {
@@ -478,22 +471,9 @@ export class InputHandler {
   }
 
   private handleClearTerminal = (): void => {
-    const state = store.getState();
-    let targetId: string | undefined;
-
-    if (state.panes.activePaneId && state.panes.paneTree) {
-      const findTerminalId = (node: any): string | null => {
-        if (node.id === state.panes.activePaneId) return node.terminalId || null;
-        if (node.children) {
-          for (const child of node.children) {
-            const result = findTerminalId(child);
-            if (result) return result;
-          }
-        }
-        return null;
-      };
-      targetId = findTerminalId(state.panes.paneTree) || undefined;
-    }
+    // Same resolution as paste, and for the same reason: this is a global shortcut with no DOM
+    // target, so "the active pane" is the wrong question while the canvas holds the keyboard.
+    const targetId = resolveKeyboardTerminalId(store.getState()) ?? undefined;
 
     if (targetId) {
       // Send clear command using terminalService
