@@ -515,6 +515,9 @@ fn register_host_terminal(
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
             renderer_terminal_id: Some(leaf),
             owning_tab_id: Some(owner),
+            // Task 1 keeps this equal to the map key, which today IS the leaf, so
+            // behaviour is unchanged. Task 4 splits them (design 014 §A2).
+            session_key: id.to_string(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook,

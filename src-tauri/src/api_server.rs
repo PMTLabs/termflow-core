@@ -3368,6 +3368,7 @@ mod tests {
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
             renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
             owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            session_key: "tm-9f2c1a4b7".into(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook: true,

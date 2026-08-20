@@ -883,6 +883,10 @@ pub fn spawn_terminal(
         backend: TerminalBackend::PortablePty,
         renderer_terminal_id,
         owning_tab_id,
+        // In-process: there is no pty-host session, so the key this terminal is
+        // known by IS its own id. Task 4 (design 014 §A2) splits the host path's
+        // three identities; this path has no host to disagree with.
+        session_key: id.clone(),
         last_input_source: None,
         last_input_at: None,
         // Mirrors the injected-hook decision above, so reattach can re-arm the

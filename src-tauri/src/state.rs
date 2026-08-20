@@ -80,6 +80,25 @@ pub struct Terminal {
     /// it lived only in the renderer's `panesSlice.treesByTabId`.
     #[serde(default)]
     pub owning_tab_id: Option<String>,
+    /// The **pty-host session key** — what `Control::Attach` must be given to find
+    /// this terminal's session again after a hot-swap (`pty-host/src/manager.rs`,
+    /// where the protocol calls it `tab_id`).
+    ///
+    /// Historically this was implicitly `Terminal.id`, which was itself the leaf:
+    /// one string served as map key, sidecar session id, broadcast id and screen
+    /// key all at once. Making it explicit is what lets the leaf become a `tm-`
+    /// and the id become a `pc-` WITHOUT touching the pty-host — whose protocol
+    /// has no rename verb, so a renamed leaf would orphan a live session
+    /// (design 014 §A2).
+    ///
+    /// `== renderer_terminal_id` for anything created on this build. It differs
+    /// ONLY for a terminal migrated from a pre-014 build, where it keeps the old
+    /// `tb-` key so an already-armed session still reattaches after the upgrade.
+    ///
+    /// Empty when deserialising a pre-014 payload; callers treat empty as
+    /// "fall back to the leaf".
+    #[serde(default)]
+    pub session_key: String,
     /// Source of the most recent PTY write: "user" (Tauri invoke = keystrokes/
     /// paste) or "api" (REST/MCP input/execute). Drives the per-agent color-scheme
     /// revert-vs-sticky decision (see docs/plan/007-agent-color-schemes-plan.md).
@@ -94,6 +113,16 @@ pub struct Terminal {
     /// prompt gate and stop the history popup leaking into an agent CLI's input.
     #[serde(default)]
     pub prompt_hook: bool,
+}
+
+/// Mint a process id: `pc-` + 9 chars, matching the renderer's `utils/id.ts`
+/// shape so every id space looks alike apart from its prefix.
+///
+/// PER RUN, deliberately. A process id identifies one PTY run and must not
+/// survive a restart — that is exactly what makes `tm-` (the durable leaf) the
+/// id MCP hands out to agents instead (design 014 §A3).
+pub fn mint_process_id() -> String {
+    format!("pc-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..9])
 }
 
 fn default_terminal_cols() -> u16 {
@@ -1966,10 +1995,60 @@ mod terminal_identity_serde_tests {
             backend: TerminalBackend::PortablePty,
             renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
             owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            session_key: "tm-9f2c1a4b7".into(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook: false,
         }
+    }
+
+    /// Design 014 §A2: the four spaces must be simultaneously representable and
+    /// must survive a round trip. `session_key` differs from the leaf ONLY for a
+    /// terminal migrated from a pre-014 build, which is the case pinned here.
+    #[test]
+    fn every_identity_round_trips_including_a_migrated_session_key() {
+        let mut t = sample();
+        t.session_key = "tb-4e8d0c2f1".into(); // migrated: host still knows the old key
+
+        let v = serde_json::to_value(&t).expect("serialize");
+        assert_eq!(v["id"], "pc-abc123def");
+        assert_eq!(v["tab_id"], "tm-9f2c1a4b7", "leaf must still emit as `tab_id`");
+        assert_eq!(v["owning_tab_id"], "tb-4e8d0c2f1");
+        assert_eq!(v["session_key"], "tb-4e8d0c2f1");
+
+        let back: Terminal = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
+        assert_eq!(back.session_key, "tb-4e8d0c2f1");
+        assert_eq!(back.id, "pc-abc123def");
+    }
+
+    /// A `Terminal` serialised by the PREVIOUS build has no `session_key` at all.
+    /// It must deserialise rather than panic — otherwise a persisted payload from
+    /// an older version bricks startup.
+    #[test]
+    fn a_pre_014_payload_without_session_key_still_deserialises() {
+        let json = serde_json::json!({
+            "id": "tb-old00000",
+            "pid": 7,
+            "shell": "pwsh",
+            "name": "n",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "cols": 80,
+            "rows": 24,
+            "tab_id": "tb-old00000"
+        });
+        let t: Terminal = serde_json::from_value(json).expect("legacy payload must deserialise");
+        assert_eq!(t.session_key, "", "missing session_key defaults; callers fall back to the leaf");
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tb-old00000"));
+    }
+
+    #[test]
+    fn mint_process_id_is_prefixed_and_unique() {
+        let a = super::mint_process_id();
+        let b = super::mint_process_id();
+        assert!(a.starts_with("pc-"), "got {a}");
+        assert_ne!(a, b, "two mints must not collide");
+        assert_eq!(a.len(), "pc-".len() + 9, "9 chars after the prefix, matching utils/id.ts");
     }
 
     /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
@@ -2047,6 +2126,7 @@ mod retarget_owning_tab_tests {
                 shell: "pwsh".into(),
                 name: "Terminal-pwsh".into(),
                 created_at: "2026-08-15T10:00:00+07:00".into(),
+                session_key: "tm-x".into(),
                 cols: 80,
                 rows: 24,
                 backend: TerminalBackend::PortablePty,
