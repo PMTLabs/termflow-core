@@ -378,9 +378,15 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         },
         async ({ machineId, terminalId }) => {
             try {
+                // Resolved like every other tool. This one passed the raw argument
+                // straight through, so `"me"` was sent verbatim (404 instead of the
+                // caller's own screen) and a `tb-`/`pn-` id got a bare not-found
+                // rather than the message naming the field to use. It is also the
+                // tool an agent reaches for most, so the gap was the most visible one.
+                const id = resolveTerminalId(terminalId, getCallerId());
                 const response = await api.post(`/fleet/screen`, {
                     ...(machineId !== undefined && { machineId }),
-                    terminalId,
+                    terminalId: id,
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {

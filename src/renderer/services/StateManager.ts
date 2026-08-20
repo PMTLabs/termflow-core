@@ -987,33 +987,42 @@ class StateManagerClass {
       if (newNode.type === 'terminal') {
         if (newNode.terminalId) {
           const oldTerminalId = newNode.terminalId;
-          // If it was matching the old tab ID (main terminal of that tab)
-          if (tabIdMap.has(newNode.terminalId)) {
-            newNode.terminalId = tabIdMap.get(newNode.terminalId)!;
-          } else if (newNode.terminalId === tabId) {
-            // DESIGN 014 MIGRATION — a pre-014 tab's ROOT leaf, which carried the
-            // tab's own `tb-` id. That equality is the whole reason a field
-            // labelled "Terminal ID" showed a `tb-`, and why an agent in a
-            // two-pane tab could not say which terminal it meant. Mint the `tm-`
-            // the tab would get today.
-            //
-            // The old id is kept as `sessionKey`: the pty-host still knows this
-            // session by it and its protocol has NO rename verb, so moving the
-            // leaf without recording the old key orphans an armed session
-            // (design 014 §A2). `seededForTabId` records the ownership the
-            // equality used to imply, which `tabTreeSeed` Rule 3 and the
-            // duplicate-leaf tiebreak both depend on.
-            //
-            // Reuses an existing mapping when present because `sanitizeNode`
-            // runs TWICE over the same logical tree (see the guard below) and
-            // `generateId` is non-deterministic — minting twice would put a
-            // different id on each pass.
+          // DESIGN 014 MIGRATION — ONE rule: a live leaf is a `tm-`, so anything
+          // else is pre-014 and gets migrated. This was three narrower branches,
+          // and each gap was silent:
+          //   - keyed on `terminalId === tabId`, so a pre-014 root leaf DRAGGED
+          //     into another tab never matched its host tab's id and stayed a
+          //     `tb-` forever;
+          //   - a legacy (UUID) tab id was rewritten to the tab's NEW `tb-` id,
+          //     i.e. it minted a fresh `tb-` leaf — the exact id shape 014 removed;
+          //   - a non-prefixed split leaf minted without consulting
+          //     `terminalIdMap`, so the two passes below produced different ids.
+          //
+          // The old id is kept as `sessionKey`: the pty-host still knows this
+          // session by it and its protocol has NO rename verb, so moving the leaf
+          // without recording the old key orphans an armed session (design 014 §A2).
+          //
+          // Reuses an existing mapping because `sanitizeNode` runs TWICE over the
+          // same logical tree (see the guard below) and `generateId` is
+          // non-deterministic — minting twice would put a different id on each pass.
+          if (!oldTerminalId.startsWith('tm-')) {
             newNode.terminalId = terminalIdMap.get(oldTerminalId) ?? generateId('tm');
             if (newNode.sessionKey === undefined) newNode.sessionKey = oldTerminalId;
-            if (newNode.seededForTabId === undefined) newNode.seededForTabId = tabId;
-          } else if (!newNode.terminalId.startsWith('tm-') && !newNode.terminalId.startsWith('tb-')) {
-            // Split terminal ID that is not tb- or tm-
-            newNode.terminalId = generateId('tm');
+            // `seededForTabId` records the ownership the id equality used to imply,
+            // which `tabTreeSeed` Rule 3 and the duplicate-leaf tiebreak depend on.
+            // Set ONLY when the old id was a TAB id, i.e. this really was a tab's
+            // root leaf. A plain split leaf never owned a tab, and claiming one for
+            // it here would hand `claimsItsOwnId` a false owner.
+            const bornAsTab =
+              tabIdMap.get(oldTerminalId) ??
+              (oldTerminalId.startsWith('tb-') || oldTerminalId.startsWith('tab-')
+                ? oldTerminalId
+                : oldTerminalId === tabId
+                  ? tabId
+                  : undefined);
+            if (newNode.seededForTabId === undefined && bornAsTab !== undefined) {
+              newNode.seededForTabId = bornAsTab;
+            }
           }
           // GUARD (blast-radius review 092 B1): `sanitizeNode` runs TWICE over
           // the same logical tree — once inside the `tabPanes` loop below

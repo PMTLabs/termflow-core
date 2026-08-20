@@ -6,7 +6,7 @@ import { movePaneWithinTab, movePaneToTab } from '../../../store/slices/panesSli
 import { setActiveTab, removeTab } from '../../../store/slices/tabsSlice';
 import { PaneNode } from '../../../store/slices/panesSlice';
 import { computeZone } from './zone';
-import { tabHasNoPanes } from '../../../store/slices/paneTreeOps';
+import { tabHasNoPanes, findLeaf, terminalIdentityOf } from '../../../store/slices/paneTreeOps';
 import { PaneDragSource, PaneDragState, PaneDropTarget } from './types';
 import { PaneDragLayer } from './PaneDragLayer';
 import { PaneDropOverlay } from './PaneDropOverlay';
@@ -20,6 +20,35 @@ import {
 import './dnd.css';
 
 const THRESHOLD = 5; // px the pointer must travel before a press becomes a drag
+
+/**
+ * The leaf to hand another window, read from the LIVE pane tree.
+ *
+ * **Not rebuilt from `PaneDragSource`.** That struct carries only what the title bar
+ * needed for the drag preview — `terminalId`, `name`, `shellType` — so a node assembled
+ * from it silently arrived in the destination window without `sessionKey`,
+ * `seededForTabId` or `notifyMuted`: a migrated pane's armed pty-host session orphaned,
+ * a tab's ownership record destroyed, a muted pane unmuted. Review 170 finding 1, and
+ * the same defect class as the split and swap paths.
+ *
+ * Reading the tree instead of widening `PaneDragSource` is deliberate: the tree is the
+ * authority on what a pane holds, and a seventh terminal-bound field then travels with
+ * no change here at all.
+ *
+ * The fallback covers only a source pane the tree cannot name, where losing the drag
+ * outright would be worse than losing the extra fields — this is exactly the old
+ * behaviour, kept for that one case rather than as the normal path.
+ */
+function leafForDrag(s: PaneDragSource): PaneNode {
+  const live = findLeaf(store.getState().panes.treesByTabId[s.sourceTabId] ?? null, s.sourcePaneId);
+  return {
+    id: s.sourcePaneId,
+    type: 'terminal',
+    ...(live
+      ? terminalIdentityOf(live)
+      : { terminalId: s.terminalId, name: s.name, shellType: s.shellType }),
+  };
+}
 const DWELL_MS = 400; // hover-over-tab dwell before activating it (Phase 2)
 const ORPHAN_DELAY_MS = 160; // give a destination window a chance to claim before we open a new window
 
@@ -231,9 +260,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const api = window.electronAPI;
       if (outsideWindow && api?.beginGlobalPaneDrag && !globalSourceRef.current) {
         const s = press.source;
-        const leaf: PaneNode = {
-          id: s.sourcePaneId, type: 'terminal', terminalId: s.terminalId, name: s.name, shellType: s.shellType,
-        };
+        const leaf = leafForDrag(s);
         const token = newDetachToken();
         globalSourceRef.current = {
           token, sourceTabId: s.sourceTabId, sourcePaneId: s.sourcePaneId, terminalId: s.terminalId,
@@ -301,7 +328,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const s = d.source;
           void detachPaneToNewWindow({
             sourceTabId: s.sourceTabId,
-            paneNode: { id: s.sourcePaneId, type: 'terminal', terminalId: s.terminalId, name: s.name, shellType: s.shellType },
+            paneNode: leafForDrag(s),
             cursor: { x: sx, y: sy },
           });
         }

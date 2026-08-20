@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { assertTerminalRef, resolveTerminalId } from "./identity";
 
 /**
@@ -72,5 +74,65 @@ describe("resolveTerminalId enforces the id space", () => {
 
     it("still rejects a path-manipulating value for being hostile, not for its prefix", () => {
         expect(() => resolveTerminalId("../../etc/passwd", undefined)).toThrow(/expected only/);
+    });
+});
+
+/**
+ * Every tool that accepts a `terminalId` must run it through `resolveTerminalId`.
+ *
+ * `get_terminal_screen` did not: it passed the raw argument to `/fleet/screen`, so the
+ * `"me"` sentinel was sent literally, the alphabet check never ran, and a `tb-`/`pn-` id
+ * came back as a bare not-found instead of the message naming the right field. Ten tools
+ * were correct and one was not, which is precisely the shape a per-call-site gate has —
+ * so this asserts the RULE over the whole file rather than adding an eleventh example.
+ *
+ * Review 170, finding 5.
+ */
+describe("no MCP tool addresses a terminal without resolving the id", () => {
+    const SRC = readFileSync(join(import.meta.dir, "server.ts"), "utf8").replace(/\r\n/g, "\n");
+
+    /** Each `server.registerTool("name", …)` block, sliced to the next registration. */
+    function toolBlocks(): Array<{ name: string; body: string }> {
+        const starts = [...SRC.matchAll(/server\.registerTool\(\s*\n?\s*"([a-z_]+)"/g)];
+        return starts.map((m, i) => ({
+            name: m[1],
+            body: SRC.slice(m.index!, i + 1 < starts.length ? starts[i + 1].index! : SRC.length),
+        }));
+    }
+
+    it("found the tool registrations it is reading", () => {
+        // Or every assertion below passes vacuously.
+        expect(toolBlocks().length).toBeGreaterThanOrEqual(10);
+    });
+
+    it("resolves terminalId in every tool that declares one", () => {
+        const offenders = toolBlocks()
+            .filter((t) => /terminalId: z\./.test(t.body))
+            .filter((t) => !/resolveTerminalId\(/.test(t.body))
+            .map((t) => t.name);
+        expect(offenders).toEqual([]);
+    });
+
+    /**
+     * ...and the RESOLVED value is the one forwarded.
+     *
+     * The test above only proves the call is present. A tool that resolves and then
+     * forwards the raw argument anyway passes it — verified by mutation, which is how
+     * this second assertion came to exist. After the resolve, the raw `terminalId` may
+     * appear only as a property KEY (`terminalId: id`); any bare use means the
+     * unresolved value is still reaching the backend.
+     */
+    it("never forwards the RAW argument to the backend", () => {
+        // Two precise shapes, because a loose "is `terminalId` mentioned after the
+        // resolve" rule false-positives on execute_command, which legitimately
+        // re-reads the argument to choose between its fleet / array / single
+        // branches (and resolves on all three).
+        //   - a payload shorthand line `terminalId,`  -> the raw value as a property
+        //   - `${terminalId}` in a template path      -> the raw value in the URL
+        const offenders = toolBlocks()
+            .filter((t) => /terminalId: z\./.test(t.body))
+            .filter((t) => /^\s*terminalId,\s*$/m.test(t.body) || t.body.includes("${terminalId}"))
+            .map((t) => t.name);
+        expect(offenders).toEqual([]);
     });
 });

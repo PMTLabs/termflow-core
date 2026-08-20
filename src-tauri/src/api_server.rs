@@ -380,12 +380,12 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 ///
 /// Key contract (design 011 §4), all of it load-bearing for existing clients:
 ///   `id` / `processId` — the PTY routing key. Unchanged.
-///   `terminalId`       — the renderer LEAF. Two id FORMS, describing who minted
-///                        the leaf and NOT the pane's shape: `tb-*` for a
-///                        renderer-created tab root (leaf == owner), `tm-*` for
-///                        split panes AND for every API-created terminal,
-///                        including a solo root. Root/solo/split is determined
-///                        only by the pane-tree structure, never by the prefix.
+///   `terminalId`       — the renderer LEAF, always `tm-*` since design 014,
+///                        whoever minted it: tab root, split pane or API-created
+///                        terminal alike. It is NEVER its tab's id (that equality
+///                        is what 014 removed), and it never says anything about
+///                        the pane's shape — root/solo/split is determined only by
+///                        the pane-tree structure, never by the prefix.
 ///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
 ///                        so no existing API/MCP client breaks. Removing it is
 ///                        a major-version change, explicitly not done here.
@@ -613,8 +613,20 @@ fn resolve_api_spawn_identity(
         Some(id) if id.starts_with("tb-") => id.to_string(),
         Some(id) if id.starts_with("tm-") => {
             return Err(format!(
-                "'{id}' is a pane (leaf) id, not a tab id — pass the owning tab id \
+                "'{id}' is a TERMINAL (leaf) id, not a tab id — pass the owning tab id \
                  (the `owningTabId` field of GET /api/terminals/{{id}})"
+            ))
+        }
+        // A PANE id. Rejected explicitly rather than falling through to the mint
+        // below: silently minting a tab put the caller's terminal in a brand-new
+        // tab instead of the one they named, which reads as "the API ignored me"
+        // and gives no clue why. Design 014 gave each space its own prefix so the
+        // wrong one can be NAMED — saying which it is IS the fix.
+        Some(id) if id.starts_with("pn-") => {
+            return Err(format!(
+                "'{id}' is a PANE id, not a tab id — pass the owning tab id (the \
+                 `owningTabId` field of GET /api/terminals/{{id}}), or use `paneId` \
+                 to split a specific pane"
             ))
         }
         // Absent, blank, or an unrecognised format: mint one, as before.
@@ -743,8 +755,8 @@ async fn create_terminal(
             // Canvas Mode has never been opened.
             //
             // Both endpoints are renderer LEAF ids. `identity.renderer_terminal_id` is the
-            // leaf P0-A minted for this create — a fresh `tm-*` when the owning tab already
-            // held a live terminal, the tab's own `tb-*` when it did not (design/011 D7).
+            // leaf minted for this create — always a `tm-*` since design 014, whether or not
+            // the owning tab already held a live terminal (011 D7's tab-id case is gone).
             // Using `owning_tab_id` would point every split's edge at its tab's root pane,
             // and would then be dropped as a self-edge whenever the caller IS that root pane.
             if let Some(parent_raw) = payload.parent_terminal_id.as_deref() {
@@ -3628,15 +3640,21 @@ mod tests {
         assert_eq!(v["promptHook"], json!(true));
     }
 
-    /// design 011 §7 test 5: leaf == owner for a RENDERER-created tab root.
-    /// Not a general root-pane invariant — an API-created root's leaf is a
-    /// `tm-*` owned by a different `tb-*` id, so leaf != owner there.
+    /// Design 011 §7 test 5 asserted `leaf == owner` for a renderer-created tab
+    /// root. **Design 014 §A1 supersedes it**: every root leaf is a minted `tm-`
+    /// now, so the two are never equal — and a test still demanding the equality
+    /// argues for the very defect the design removed. Inverted rather than
+    /// deleted, because "these two ids are DIFFERENT" is the invariant that
+    /// replaced it and it deserves to be pinned.
     #[test]
-    fn a_renderer_created_root_reports_the_same_value_for_leaf_and_owner() {
+    fn a_renderer_created_root_reports_a_leaf_distinct_from_its_owner() {
         let mut t = identity_sample();
-        t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
+        t.renderer_terminal_id = Some("tm-9f2c1a4b7".into());
+        t.owning_tab_id = Some("tb-4e8d0c2f1".into());
         let v = terminal_identity_json(&t, "ui");
-        assert_eq!(v["terminalId"], v["owningTabId"]);
+        assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_ne!(v["terminalId"], v["owningTabId"]);
     }
 
     /// Correction C1: before P0-A `tab_id` was never None, so this shape could

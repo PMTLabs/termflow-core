@@ -4,12 +4,10 @@
  * The payload (api_server.rs `external_activity_payload`) carries up to four
  * ids, and only one of them is a TAB:
  *   `terminalId` / `processId`     — the backend PTY id (`pc-*` in-process).
- *   `tabId` / `rendererTerminalId` — the renderer LEAF. Two id FORMS, naming who
- *                                    minted the leaf and NOT the pane's shape:
- *                                    `tb-*` for a renderer-created tab root
- *                                    (leaf == owner), `tm-*` for split panes AND
- *                                    for every API-created terminal, including a
- *                                    solo root. Shape comes from the pane tree.
+ *   `tabId` / `rendererTerminalId` — the renderer LEAF, always `tm-*` since
+ *                                    design 014 and never its tab's id, whoever
+ *                                    minted it. Shape comes from the pane tree,
+ *                                    never from the prefix.
  *   `owningTabId`                  — the tab. NEW in P0-A.
  *
  * `flagTabActivity` (tabsSlice.ts:133-141) resolves its argument against

@@ -204,8 +204,26 @@ export function planSeeds(
   // Tabs some OTHER tab's pane was seeded for. A pending tab has no key, so any
   // match here can only be a pane that moved away — which proves the tab was
   // initialised once and then emptied, not that it is new.
+  //
+  // Built from the STORED MIRROR as well as the installed trees, and deliberately
+  // before any ordering decision — this must not depend on which tab the loop
+  // reaches first.
+  //
+  // It used to read `trees` alone, which made Rule 3's post-014 signal inert on the
+  // exact path it exists for. A cold restore arrives with `trees` empty, so the set
+  // was empty; and accumulating it inside the loop does not rescue that, because
+  // `claimsItsOwnId` calls `candidateFor`, which MANUFACTURES a candidate for an
+  // uninitialised tab — and a manufactured candidate always declares itself its own
+  // owner. So an emptied tab sorts to the FRONT, ahead of the tab whose tree carries
+  // the evidence that it was emptied, and is judged before that evidence is read.
+  //
+  // `tabPanes` already holds that evidence at call time, so reading it up front is
+  // both order-independent and one pass. A pane in its OWN tab's mirror adds that tab
+  // here harmlessly: Rule 3 only consults this set when `tabPanes[tab.id]` is
+  // `undefined`, which cannot be true for a tab whose mirror we just read.
   const seededElsewhere = new Set<string>();
   for (const tree of Object.values(trees)) collectSeededFor(tree, seededElsewhere);
+  for (const tree of Object.values(tabPanes)) collectSeededFor(tree ?? null, seededElsewhere);
 
   // Natural owners first; `sort` is stable, so everything else keeps `tabs` order.
   const ordered = [...pending].sort(
@@ -256,6 +274,9 @@ export function planSeeds(
     // Everything it named was already spoken for. The tab is open and empty, and saying so
     // explicitly is what stops the next render manufacturing a fresh terminal for it.
     for (const terminalId of getAllTerminalIds(tree)) taken.add(terminalId);
+    // BOTH sets, or Rule 3 sees only the tabs that were already installed before
+    // this batch began — which on a cold restore is none of them.
+    collectSeededFor(tree, seededElsewhere);
     out.push({ tabId: tab.id, tree });
   }
   return out;

@@ -1,6 +1,6 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { generateId } from '../../utils/id';
-import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, EdgeZone } from './paneTreeOps';
+import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
 export interface PaneNode {
@@ -134,12 +134,9 @@ function survivingLeaf(node: PaneNode, fallbackName: string): PaneNode {
   return {
     id: generateId('pn'),
     type: 'terminal',
-    terminalId: node.terminalId,
+    // Built from the ONE list rather than re-typed here — see TERMINAL_BOUND_FIELDS.
+    ...terminalIdentityOf(node),
     name: node.name || fallbackName,
-    shellType: node.shellType,
-    seededForTabId: node.seededForTabId,
-    sessionKey: node.sessionKey,
-    notifyMuted: node.notifyMuted,
   };
 }
 

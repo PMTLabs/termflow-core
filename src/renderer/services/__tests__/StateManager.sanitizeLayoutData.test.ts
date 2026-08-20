@@ -153,3 +153,68 @@ describe('sanitizeLayoutData — pre-014 root leaf migration', () => {
     expect(renames.size).toBe(1);
   });
 });
+
+/**
+ * Design 014 migration coverage — the three shapes the narrow branches missed.
+ *
+ * The rule is now "a live leaf is a `tm-`, so anything else is pre-014 and migrates".
+ * Each case below was silently skipped when the migration was keyed on
+ * `terminalId === tabId` plus a legacy-tab-id remap. Found by agy in review 170
+ * (finding 4).
+ */
+describe('sanitizeLayoutData migrates every pre-014 leaf shape', () => {
+  const treeOf = (out: any, tabId: string) => out.tabPanes[tabId];
+
+  /**
+   * Scenario B — a pre-014 ROOT leaf that was dragged into another tab before the save.
+   * `tb-1 !== tb-2`, so the equality never matched and the leaf stayed a `tb-`: a live
+   * terminal in the one id space design 014 cleared, which prefix-strict consumers reject.
+   */
+  it('migrates a tb- root leaf that now lives in a DIFFERENT tab', () => {
+    const out = (StateManager as any).sanitizeLayoutData({
+      tabs: [{ id: 'tb-2', title: 'Two' }],
+      tabPanes: { 'tb-2': { id: 'pn-x', type: 'terminal', terminalId: 'tb-1' } },
+    });
+    const leaf = treeOf(out, 'tb-2');
+    expect(leaf.terminalId).toMatch(/^tm-/);
+    expect(leaf.sessionKey).toBe('tb-1');
+    // Born in tb-1, not in the tab it was dropped into.
+    expect(leaf.seededForTabId).toBe('tb-1');
+  });
+
+  /**
+   * Scenario C — a non-prefixed split leaf. It minted without consulting
+   * `terminalIdMap`, and `sanitizeNode` runs twice, so the two passes disagreed.
+   */
+  it('gives a non-prefixed split leaf ONE id across both sanitize passes', () => {
+    const out = (StateManager as any).sanitizeLayoutData({
+      tabs: [{ id: 'tb-1', title: 'One' }],
+      tabPanes: { 'tb-1': { id: 'pn-a', type: 'terminal', terminalId: 'legacy-split-9' } },
+      paneTree: { id: 'pn-a', type: 'terminal', terminalId: 'legacy-split-9' },
+    });
+    expect(treeOf(out, 'tb-1').terminalId).toMatch(/^tm-/);
+    expect(out.paneTree.terminalId).toBe(treeOf(out, 'tb-1').terminalId);
+  });
+
+  /** ...and it must NOT claim to own a tab. Only a real root leaf did. */
+  it('does not invent an owner for a leaf that was never a tab id', () => {
+    const out = (StateManager as any).sanitizeLayoutData({
+      tabs: [{ id: 'tb-1', title: 'One' }],
+      tabPanes: { 'tb-1': { id: 'pn-a', type: 'terminal', terminalId: 'legacy-split-9' } },
+    });
+    expect(treeOf(out, 'tb-1').seededForTabId).toBeUndefined();
+  });
+
+  /** An id already in the modern space is left completely alone — idempotency. */
+  it('leaves a tm- leaf untouched, so re-running is a no-op', () => {
+    const out = (StateManager as any).sanitizeLayoutData({
+      tabs: [{ id: 'tb-1', title: 'One' }],
+      tabPanes: {
+        'tb-1': { id: 'pn-a', type: 'terminal', terminalId: 'tm-already01', sessionKey: 'tb-old' },
+      },
+    });
+    const leaf = treeOf(out, 'tb-1');
+    expect(leaf.terminalId).toBe('tm-already01');
+    expect(leaf.sessionKey).toBe('tb-old');
+  });
+});
