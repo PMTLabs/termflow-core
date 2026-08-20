@@ -124,7 +124,15 @@ interface ElectronAPI {
   restartForUpdate: () => Promise<void>;
   /// Preflight for the offload/hot-swap: resolves if it would keep all terminals
   /// alive, rejects with the reason if it would currently be refused.
+  ///
+  /// THIS instance only. A sibling profile is not consulted: offload arms our own
+  /// pty-host and exits this process, so it cannot reach one (design 014 B1.2).
   hotswapAvailable: () => Promise<void>;
+  /// Preflight for a Velopack update: ours PLUS every sibling, because the apply
+  /// kills every process under the install root. Rejects naming any sibling that
+  /// cannot be prepared. Deliberately separate from hotswapAvailable — the two
+  /// verdicts differ, and sharing one made the panel disagree with the button.
+  updateAvailable: () => Promise<void>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
   /// The running app's version (from the Tauri config at build time).
@@ -602,6 +610,10 @@ const tauriBridge: ElectronAPI = {
     invalidateApiBase();
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
+  updateAvailable: async () => {
+    await invoke('update_available');
+  },
+
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
   updateAndRestart: async () => { await invoke('update_and_restart'); },

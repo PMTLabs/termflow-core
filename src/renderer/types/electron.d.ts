@@ -272,6 +272,10 @@ export interface ElectronAPI {
   /** Preflight: resolves if an offload would keep all terminals alive, rejects
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;
+  /** Preflight for a Velopack update: ours PLUS every sibling, because the
+   *  apply kills every process under the install root. Separate from
+   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4). */
+  updateAvailable?: () => Promise<void>;
   /** Check for a Velopack update. `unavailable` = no updater in this build. */
   checkForUpdates?: () => Promise<UpdateStatus>;
   /** Download + arm + apply a Velopack update, keeping terminals alive. */
