@@ -62,15 +62,26 @@ const PRISTINE = new RegExp(
   'return\\[(\\w+)\\.clientX-\\2\\.left-\\6,\\8\\.clientY-\\2\\.top-\\7\\]\\}',
 );
 
+/** The same pattern, global, purely to COUNT matches — see the ambiguity check below. Built
+ *  from `PRISTINE.source` so the two can never drift apart. */
+const PRISTINE_ALL = new RegExp(PRISTINE.source, 'g');
+
 /**
  * Rewrite one bundle's source. Pure — takes and returns a string — so the test can exercise
  * the arithmetic on a fixture without a node_modules tree.
  *
- * Returns `{ source, status }` where status is 'patched' | 'already' | 'nomatch'.
+ * Returns `{ source, status }` where status is 'patched' | 'already' | 'nomatch' | 'ambiguous'.
  */
 function applyPatch(source) {
   if (source.includes(MARKER)) return { source, status: 'already' };
-  if (!PRISTINE.test(source)) return { source, status: 'nomatch' };
+
+  // Exactly one occurrence, asserted the way `xterm-dim-patch.js` asserts its own `count`.
+  // `String.replace` with a non-global pattern rewrites only the FIRST match, so a bundle that
+  // grew a second copy of this helper would be half-patched — half the pointer paths corrected
+  // and half not, which is worse than either extreme and invisible from the outside.
+  const matches = source.match(PRISTINE_ALL);
+  if (!matches) return { source, status: 'nomatch' };
+  if (matches.length !== 1) return { source, status: 'ambiguous' };
 
   // The two scale factors are bound alongside the existing locals, so the injection stays a
   // single declaration list and the function body keeps its original shape.
@@ -120,6 +131,13 @@ function main() {
         `[xterm-coords-patch] ${rel} matches neither the pristine nor the patched shape of ` +
         `getCoordsRelativeToElement. @xterm/xterm was probably upgraded and reminified — ` +
         `re-derive the pattern before shipping, or canvas pointer input silently regresses.`,
+      );
+    }
+    if (status === 'ambiguous') {
+      throw new Error(
+        `[xterm-coords-patch] ${rel} contains more than one match for ` +
+        `getCoordsRelativeToElement. Only the first would be rewritten, leaving some pointer ` +
+        `paths corrected and some not — re-derive the pattern before shipping.`,
       );
     }
     if (status === 'already') {

@@ -156,6 +156,16 @@ describe('xterm coords patch — idempotency and failure', () => {
     expect(result.status).toBe('nomatch');
     expect(result.source).toBe(garbage);
   });
+
+  it('refuses a source with more than one match rather than half-patching it', () => {
+    // `String.replace` with a non-global pattern rewrites only the FIRST match, so a bundle
+    // that grew a second copy of the helper would come out with half its pointer paths
+    // corrected and half not — worse than either extreme, and invisible from outside.
+    const twice = `${PRISTINE_MJS}\n${PRISTINE_CJS}`;
+    const result = applyPatch(twice);
+    expect(result.status).toBe('ambiguous');
+    expect(result.source).toBe(twice);
+  });
 });
 
 describe('xterm coords patch — the shipped bundles', () => {
