@@ -123,6 +123,51 @@ describe('leaving hands the keyboard back', () => {
   });
 });
 
+/**
+ * `plan/020` §4 — the overlay survives a trip to another tab.
+ *
+ * `TerminalContainer` mounts `CanvasMode` only while its tab is active, so every tab switch runs
+ * the unmount cleanup. That cleanup used to close the overlay too, which is why coming back
+ * showed a plain canvas.
+ *
+ * The two facts it clears are not the same kind of fact, and that is the whole distinction:
+ *   - `focusedId` is INPUT OWNERSHIP. It must go — a stale one keeps granting a node the `gpu`
+ *     tier from a canvas nobody is looking at.
+ *   - `overlayId` is WHICH NODE IS ENLARGED, a view fact belonging to the canvas tab, no more
+ *     transient than the viewport or the node geometry beside it.
+ *
+ * Source-derived because nothing here can mount `CanvasMode`, and because the failure is silent:
+ * re-adding one dispatch to the cleanup restores the bug with every test still green.
+ */
+describe('the overlay outlives a tab switch', () => {
+  /** The unmount cleanup — the effect whose body is a returned teardown closure. */
+  const CLEANUP = (() => {
+    const at = MODE.indexOf('useEffect(() => () => {');
+    expect(at).toBeGreaterThanOrEqual(0);
+    return MODE.slice(at, MODE.indexOf('}, [dispatch]);', at));
+  })();
+
+  it('still releases the keyboard and the group marker', () => {
+    expect(CLEANUP).toContain('dispatch(focusNode(null));');
+    expect(CLEANUP).toContain('dispatch(setNearestGroup(null));');
+  });
+
+  it('does not close the overlay on the way out', () => {
+    expect(CLEANUP).not.toContain('setOverlayNode');
+  });
+
+  /**
+   * And the other half: an overlay restored without its focus is the screenshot
+   * `setOverlayNode`'s own comment warns about — the pointer gate stays down, so the terminal
+   * under it takes neither keys nor clicks. Pairing the two is what makes "the overlay remains
+   * open" mean "the overlay still works".
+   */
+  it('re-grants focus to a restored overlay on the way back in', () => {
+    expect(MODE).toContain('overlayAtMount');
+    expect(MODE).toMatch(/dispatch\(focusNode\(overlayAtMount\.current\)\)/);
+  });
+});
+
 describe('the canvas keys', () => {
   it('are gated on the canvas holding the keyboard', () => {
     // Every rule in `canvasKeyAction` is a bare key or a Shift key. While a node is focused they

@@ -12,12 +12,19 @@ import { NodeTerminal } from '../NodeTerminal';
 import {
   __getSurfaceHostForTest, __resetSurfaceHostsForTest,
 } from '../../../services/surfaceHosts';
+import {
+  setSurfaceChrome, __resetSurfaceChromeForTest,
+} from '../../../services/surfaceChrome';
 
 let container: HTMLDivElement;
 let root: Root;
 
 beforeAll(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  // jsdom implements no scrolling at all, and `CommandSuggestPopup` keeps its selected row in
+  // view on every selection change. Stubbed rather than avoided: the popup is what this file
+  // now renders, and the alternative is not rendering the real component.
+  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
 });
 
 beforeEach(() => {
@@ -118,5 +125,87 @@ describe('NodeTerminal', () => {
     const all = container.querySelectorAll<HTMLElement>('.terminal-display');
     expect(all).toHaveLength(2);
     expect(__getSurfaceHostForTest('tm-dup')).toBe(all[1]);
+  });
+});
+
+/**
+ * `plan/020` §5 — the overlay carries the pane's floating chrome.
+ *
+ * `TerminalDisplay` publishes the state; this renders it. The pairing that matters is
+ * overlaid-vs-not: an ordinary node draws its surface below 1:1 inside a clipping box, so the
+ * same popup there would be both shrunken and cut off. Every positive below has its negative.
+ */
+describe('NodeTerminal chrome (overlay only)', () => {
+  const CHROME = {
+    atBottom: true,
+    suggest: { open: false, items: [], selectedIndex: 0, focused: false, anchor: null },
+    scrollToBottom: jest.fn(),
+    pickSuggestion: jest.fn(),
+  };
+  const owner = {};
+
+  const renderNode = (overlaid: boolean) =>
+    act(() => {
+      root.render(<NodeTerminal terminalId="tm-c" focused overlaid={overlaid} />);
+    });
+
+  const button = () => container.querySelector('.scroll-to-bottom-button');
+  const popup = () => container.querySelector('.command-suggest-popup');
+
+  afterEach(() => __resetSurfaceChromeForTest());
+
+  it('draws nothing at all when no host is publishing chrome', () => {
+    renderNode(true);
+    expect(button()).toBeNull();
+    expect(popup()).toBeNull();
+  });
+
+  it('shows the scroll-to-bottom button only once scrolled away', () => {
+    setSurfaceChrome('tm-c', owner, { ...CHROME, atBottom: true });
+    renderNode(true);
+    // Pinned to the tail: the button exists as a component but renders nothing.
+    expect(button()).toBeNull();
+
+    act(() => { setSurfaceChrome('tm-c', owner, { ...CHROME, atBottom: false }); });
+    expect(button()).not.toBeNull();
+  });
+
+  it('does NOT show it on an ordinary node', () => {
+    setSurfaceChrome('tm-c', owner, { ...CHROME, atBottom: false });
+    renderNode(false);
+    expect(button()).toBeNull();
+  });
+
+  it('renders the suggest popup, inside the surface wrapper that anchors it', () => {
+    setSurfaceChrome('tm-c', owner, {
+      ...CHROME,
+      suggest: { open: true, items: ['git status'], selectedIndex: 0, focused: true, anchor: null },
+    });
+    renderNode(true);
+    const el = popup();
+    expect(el).not.toBeNull();
+    // `CommandSuggestPopup` places itself against `offsetParent`, so it has to be a child of the
+    // wrapper that carries the terminal's box — the same relationship it has in the pane.
+    expect(el!.parentElement).toBe(container.querySelector('.canvas-surface'));
+    expect(el!.textContent).toContain('git status');
+  });
+
+  it('does NOT render the popup on an ordinary node', () => {
+    setSurfaceChrome('tm-c', owner, {
+      ...CHROME,
+      suggest: { open: true, items: ['git status'], selectedIndex: 0, focused: true, anchor: null },
+    });
+    renderNode(false);
+    expect(popup()).toBeNull();
+  });
+
+  it('leaves the host contract untouched', () => {
+    setSurfaceChrome('tm-c', owner, { ...CHROME, atBottom: false });
+    renderNode(true);
+    // The chrome is a SIBLING of the host, never inside it: `FitAddon` measures the host, and
+    // an extra child there is a box that moves with the terminal's own geometry.
+    const host = container.querySelector<HTMLElement>('.terminal-display')!;
+    expect(host.children).toHaveLength(0);
+    expect(__getSurfaceHostForTest('tm-c')).toBe(host);
   });
 });

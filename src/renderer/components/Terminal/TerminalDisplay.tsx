@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { nudgeZoom, resetZoom } from '../../store/slices/zoomSlice';
 import { Terminal } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
@@ -19,7 +19,8 @@ import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
 import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
-import { store } from '../../store';
+import { store, RootState } from '../../store';
+import { setSurfaceChrome, clearSurfaceChrome } from '../../services/surfaceChrome';
 import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
@@ -173,6 +174,69 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const suggest = useCommandSuggest(engineRef, () => getCwdSnapshot(terminalId));
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
+
+  /**
+   * `plan/020` §5 — the pane's floating chrome, published so the Canvas overlay can draw it.
+   *
+   * This component's own render tree is UNCHANGED, deliberately: the chrome stays a sibling of
+   * `.terminal-display` here, and `NodeTerminal` renders the same two components from the
+   * published state when the terminal is overlaid. A portal would have been the obvious way and
+   * is closed — see `surfaceChrome.ts` and `terminalDisplayRelocationWiring.test.ts`.
+   *
+   * Stable callbacks: they are compared by identity when deciding whether a publish is a real
+   * change, so a fresh arrow per render would notify on every keystroke.
+   */
+  const scrollToBottomCb = useCallback(() => {
+    engineRef.current?.scrollToBottom();
+    engineRef.current?.focus();
+  }, []);
+  // One token per component instance, so a stale unmount cleanup cannot wipe the registration
+  // a remount has already made under the same terminalId.
+  const chromeOwner = useRef({});
+  useEffect(() => {
+    setSurfaceChrome(terminalId, chromeOwner.current, {
+      atBottom,
+      suggest: {
+        open: suggest.open,
+        items: suggest.items,
+        selectedIndex: suggest.selectedIndex,
+        focused: suggest.focused,
+        anchor: suggest.anchor,
+      },
+      scrollToBottom: scrollToBottomCb,
+      pickSuggestion: suggest.pick,
+    });
+  }, [
+    terminalId, atBottom, scrollToBottomCb, suggest.pick,
+    suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
+  ]);
+  useEffect(() => {
+    const owner = chromeOwner.current;
+    return () => clearSurfaceChrome(terminalId, owner);
+  }, [terminalId]);
+
+  /**
+   * And the gate that decides whether the popup may open at all (design 012 §8.1).
+   *
+   * It is normally set by WHERE the surface went — `relocateTo({ paneChrome })` — because until
+   * now the pane was the only surface that drew chrome. Opening the overlay moves nothing
+   * (`plan/017` decision C: the same host, a bigger world rect), so there is no relocation to
+   * carry the change and the host has to say so directly.
+   *
+   * Ordered after the relocation hook on purpose: a relocation overwrites the flag from its own
+   * argument, so leaving the canvas re-gates the engine without this effect having to notice.
+   */
+  const overlaidOnCanvas = useSelector((s: RootState) => s.canvas.overlayId === terminalId);
+  useEffect(() => {
+    if (!overlaidOnCanvas) return;
+    engineRef.current?.setChromeHostActive(true);
+    return () => {
+      engineRef.current?.setChromeHostActive(false);
+      // The engine stops emitting, but the popup's REACT state is this hook's, and a popup left
+      // open would keep drawing in a node that has shrunk back to a thumbnail.
+      suggestRef.current.close();
+    };
+  }, [overlaidOnCanvas]);
 
   // Canvas Mode surface relocation (design 012 §4.2). Placed here because its
   // callbacks close over dispatch (:85), setContextMenu (:123), setPathPicker
@@ -648,13 +712,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         onContextMenu={handleContextMenu}
         data-terminal-id={terminalId}
       />
-      <ScrollToBottomButton
-        visible={!atBottom}
-        onClick={() => {
-          engineRef.current?.scrollToBottom();
-          engineRef.current?.focus();
-        }}
-      />
+      <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
       {searchOpen && (
         <TerminalSearchBar
           onSearchNext={searchNextCb}

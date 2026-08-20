@@ -153,3 +153,101 @@ describe('design/012 §8.1 — the suggest gate', () => {
     expect(emitted).toEqual(['git st', 'git status']);
   });
 });
+
+/**
+ * `plan/020` §5 — the Canvas overlay draws the popup, so it may open there.
+ *
+ * The gate's premise is "nobody is rendering this terminal's chrome", and until now that was
+ * decided entirely by the last relocation. The overlay falsifies the premise without relocating
+ * anything: `plan/017` decision C makes an overlaid node the SAME host at 1:1, so there is no
+ * move to carry the change, and the renderer renders the popup itself from `surfaceChrome`.
+ *
+ * Every assertion above still stands — a plain canvas node has no chrome and stays gated. These
+ * only add the case where a host says otherwise.
+ */
+describe('plan/020 §5 — a host that DOES draw the chrome', () => {
+  it('restores emission on a chromeless host when the overlay opens', () => {
+    const emitted: string[] = [];
+    const engine = new TerminalEngine(makeFakeBridge(), {
+      cacheKey: 'ch-on',
+      onInputLineChanged: (t) => emitted.push(t),
+    });
+    engine.mount(makeContainer());
+    (engine as any).paneChromeActive = false;       // relocated onto a canvas node
+
+    (engine as any).emitInputLine('git st');
+    expect(emitted).toEqual([]);                    // still gated: a node draws nothing
+
+    engine.setChromeHostActive(true);               // the overlay opens
+    (engine as any).emitInputLine('git st');
+    expect(emitted).toEqual(['git st']);
+  });
+
+  /**
+   * The dedup is the trap. `emitInputLine` returns early when the text matches the last line it
+   * sent, and the gated call above does NOT update that record — but a line sent BEFORE the
+   * canvas trip does. Without the reset, opening an overlay on a terminal whose input line has
+   * not changed since leaves the popup shut until the user edits it, which reads as the feature
+   * being broken exactly where it was just added.
+   */
+  it('re-emits the current line, so the popup can open on an unchanged input', () => {
+    const emitted: string[] = [];
+    const engine = new TerminalEngine(makeFakeBridge(), {
+      cacheKey: 'ch-dedup',
+      onInputLineChanged: (t) => emitted.push(t),
+    });
+    engine.mount(makeContainer());
+
+    (engine as any).emitInputLine('git st');        // in the pane
+    (engine as any).paneChromeActive = false;       // onto the canvas
+    engine.setChromeHostActive(true);               // overlay opens; same input line
+    (engine as any).emitInputLine('git st');
+
+    expect(emitted).toEqual(['git st', 'git st']);
+  });
+
+  it('closes the popup and re-gates when the overlay closes', () => {
+    const emitted: string[] = [];
+    const engine = new TerminalEngine(makeFakeBridge(), {
+      cacheKey: 'ch-off',
+      onInputLineChanged: (t) => emitted.push(t),
+    });
+    engine.mount(makeContainer());
+    (engine as any).paneChromeActive = false;
+    engine.setChromeHostActive(true);
+    engine.setSuggestPopupState('passive');
+    expect((engine as any).suggestState).toBe('passive');
+
+    engine.setChromeHostActive(false);              // overlay closes; node draws nothing again
+    // The state must not outlive the surface that was showing it, or the engine keeps claiming
+    // Up/Down/Tab/Enter for a popup that is no longer on screen.
+    expect((engine as any).suggestState).toBe('closed');
+    (engine as any).emitInputLine('git status');
+    expect(emitted).toEqual([]);
+  });
+
+  // A no-op call must stay a no-op: it is driven by a React effect, so it runs on renders that
+  // changed nothing. Clearing the popup on one of those would close it under the user's hands.
+  it('leaves an open popup alone when the value has not changed', () => {
+    const engine = new TerminalEngine(makeFakeBridge(), { cacheKey: 'ch-noop' });
+    engine.mount(makeContainer());
+    (engine as any).paneChromeActive = false;
+    engine.setChromeHostActive(true);
+    engine.setSuggestPopupState('passive');
+
+    engine.setChromeHostActive(true);
+    expect((engine as any).suggestState).toBe('passive');
+  });
+
+  // The gate is still the gate. A relocation states where the surface went, and that answer
+  // wins over any overlay the previous host had declared — leaving the canvas ends the overlay.
+  it('is overwritten by the next relocation', () => {
+    const engine = new TerminalEngine(makeFakeBridge(), { cacheKey: 'ch-reloc' });
+    engine.mount(makeContainer());
+    (engine as any).paneChromeActive = false;
+    engine.setChromeHostActive(true);
+
+    engine.relocateTo(makeContainer(), { paneChrome: false });
+    expect((engine as any).paneChromeActive).toBe(false);
+  });
+});

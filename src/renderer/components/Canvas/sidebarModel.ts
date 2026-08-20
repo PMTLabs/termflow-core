@@ -8,7 +8,10 @@ export interface SidebarRow {
   matchEnd: number;
   /** Set only when another terminal shares this title. */
   disambiguator: string | null;
+  /** Per-TERMINAL, from `CanvasNodeModel.isRunning` (Req 8, plan/020 §2) — this row's own
+   *  pane, not its tab's. */
   isRunning: boolean;
+  /** Still TAB-level (plan/020 §0 D2, §6) — a known remaining instance, not an oversight. */
   hasUnseenOutput: boolean;
 }
 

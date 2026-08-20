@@ -461,15 +461,35 @@ export const CanvasMode: React.FC = () => {
   // tab — so the unmount itself is the only reliable place to clear it. A stale
   // `focusedId` would keep granting a node the `gpu` tier (design 010 D8) from a canvas
   // nobody is looking at.
+  //
+  // `overlayId` is deliberately NOT cleared here (`plan/020` §4), and the difference between
+  // the two is the point. `focusedId` is INPUT OWNERSHIP, which the canvas gives up the moment
+  // it leaves the screen. `overlayId` is WHICH NODE IS ENLARGED — a view fact of this tab, no
+  // more transient than the viewport or the node geometry sitting beside it in this slice, and
+  // clearing it made every tab switch throw away an overlay the user had opened on purpose.
+  // A node that dies while the canvas is away still takes its overlay with it: the prune in
+  // `pruneCanvas` owns that, which is the right place for "the terminal is gone".
   useEffect(() => () => {
     if (focusRaf.current) cancelAnimationFrame(focusRaf.current);
     focusRaf.current = null;
     dispatch(focusNode(null));
-    dispatch(setOverlayNode(null));
     // Same edge, same reason (design 010 §5.1). The tab strip's "you are here" marker means
     // "the group you are looking at"; there is no such group once the canvas is not on screen,
     // and a marker left behind would point at one from a canvas nobody is in.
     dispatch(setNearestGroup(null));
+  }, [dispatch]);
+
+  // The other half of that split (`plan/020` §4). Coming back with `overlayId` set but
+  // `focusedId` cleared would restore the overlay as a picture: `NodeTerminal`'s pointer gate
+  // stays shut without `focused`, so the terminal under it takes neither keys nor clicks — the
+  // "overlay you cannot type into is a screenshot" case `setOverlayNode` already names.
+  //
+  // Read from a ref so this runs once, on the way in, with the value the canvas was left with.
+  // Not focus theft: the user just activated this tab, and the effect above has already put the
+  // caret in that terminal a frame later.
+  const overlayAtMount = useRef(overlayId);
+  useEffect(() => {
+    if (overlayAtMount.current) dispatch(focusNode(overlayAtMount.current));
   }, [dispatch]);
 
   /**
@@ -927,7 +947,8 @@ export const CanvasMode: React.FC = () => {
               {/* RC4: mounted for EVERY node, at every tier, for the whole canvas
                   session. The tier ladder and the cull margin decide what a node
                   PAINTS; they never decide where `term.element` lives. */}
-              <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId} />
+              <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId}
+                overlaid={isOverlaid} />
               {/* The exact opposite rule, and for the exact opposite reason: this one is
                   culled hard, because what it owns is a timer rather than a terminal. */}
               {snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}

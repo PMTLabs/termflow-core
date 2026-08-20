@@ -173,3 +173,59 @@ describe('TerminalDisplay relocation wiring', () => {
     expect(body).toContain("type: 'error'");
   });
 });
+
+/**
+ * `plan/020` §5 — this component now PUBLISHES its floating chrome so the Canvas overlay can
+ * draw it, and the shape of that is the whole reason the feature was buildable at all.
+ *
+ * The render tree above stays byte-identical, which is what keeps `no portal` true and keeps the
+ * pane rendering its own chrome exactly as before. Everything new is a publish, not a move.
+ *
+ * Same tripwire caveat as the rest of this file: the component cannot be mounted here. The
+ * REGISTRY's behaviour is covered by `surfaceChrome.test.tsx` and the consumer's by
+ * `nodeTerminal.test.tsx`; this guards that the producer still feeds them.
+ */
+describe('plan/020 §5 — publishing the surface chrome', () => {
+  it('publishes to the registry, with a per-instance owner token', () => {
+    expect(SOURCE).toContain('setSurfaceChrome(terminalId, chromeOwner.current, {');
+    expect(SOURCE).toContain('const chromeOwner = useRef({});');
+  });
+
+  /**
+   * The cleanup must capture the owner, for the same reason the engine effect captures the pane
+   * (099 T1-F3): a ref read inside a teardown closure is read at TEARDOWN time. Here that is
+   * merely stale rather than null — but `clearSurfaceChrome` is identity-checked against it, so
+   * a stale token silently turns the unregister into a no-op and leaks the registration.
+   */
+  it('captures the owner for the unregister rather than reading the ref late', () => {
+    const at = SOURCE.indexOf('const owner = chromeOwner.current;');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(SOURCE.slice(at, at + 120)).toContain('clearSurfaceChrome(terminalId, owner)');
+  });
+
+  it('opens the engine gate only while this terminal is the overlay', () => {
+    expect(SOURCE).toContain('s.canvas.overlayId === terminalId');
+    expect(SOURCE).toContain('engineRef.current?.setChromeHostActive(true);');
+    expect(SOURCE).toContain('engineRef.current?.setChromeHostActive(false);');
+  });
+
+  /**
+   * Closing the overlay has to close the POPUP too. The engine stops emitting, but the popup's
+   * React state belongs to `useCommandSuggest` here — an open one would keep drawing inside a
+   * node that has just shrunk back to a thumbnail. Exactly the `onRelocated` rule, one surface
+   * along.
+   */
+  it('closes the popup when the overlay closes', () => {
+    const at = SOURCE.indexOf('engineRef.current?.setChromeHostActive(false);');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(SOURCE.slice(at, at + 260)).toContain('suggestRef.current.close();');
+  });
+
+  // And the render tree really is unchanged: the chrome is still rendered HERE for the pane.
+  // A publish that replaced the local render would blank the affordance in every ordinary tab.
+  it('still renders its own chrome for the pane', () => {
+    expect(SOURCE).toContain('<ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />');
+    expect(SOURCE).toContain('{suggest.open && (');
+    expect(SOURCE).not.toContain('createPortal');
+  });
+});

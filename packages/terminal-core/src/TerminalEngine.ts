@@ -3592,6 +3592,42 @@ export class TerminalEngine {
     this.suggestState = this.paneChromeActive ? state : 'closed';
   }
 
+  /**
+   * Declare whether SOME host is currently rendering this terminal's chrome
+   * (`plan/020` §5) — without relocating, which is the whole point.
+   *
+   * The flag above is set by `relocateTo({ paneChrome })`, i.e. by WHERE the
+   * surface went. That was a sound proxy while the pane was the only surface
+   * that drew chrome: a canvas node is a bare host, so nothing could draw the
+   * popup, so emitting the input line would have claimed Up/Down/Tab/Enter for
+   * a popup rendered inside the OFF-SCREEN pane — the exact failure
+   * `engine.suggest-gate.test.ts` pins.
+   *
+   * The Canvas overlay breaks the proxy: it is the same host, at 1:1, and it
+   * DOES render the popup (from `surfaceChrome`). Opening it moves nothing —
+   * `plan/017` decision C makes an overlay a node with a bigger world rect, no
+   * second host, no relocation, no fit — so there is no relocation to carry the
+   * change and the host has to say so directly.
+   *
+   * The gate itself is unchanged, and so is its meaning: "is anyone drawing the
+   * popup". Only the answer is now allowed to come from somewhere other than
+   * the last relocation. A later `relocateTo` overwrites this from its own
+   * argument, which is correct — leaving the canvas ends the overlay too, and
+   * the caller re-asserts.
+   *
+   * Turning it OFF closes the popup, for the same reason `relocateTo` does at
+   * R10: the state must not outlive the surface that was showing it.
+   */
+  setChromeHostActive(active: boolean): void {
+    if (this.paneChromeActive === active) return;
+    this.paneChromeActive = active;
+    if (!active) this.suggestState = 'closed';
+    // Emission is deduped against the last line sent. A host that comes back
+    // must be able to receive the line it missed, or the popup stays shut until
+    // the user edits the input — which reads as "suggestions are broken here".
+    this.lastEmittedInput = '';
+  }
+
   /** Insert a history command at the prompt: move the cursor to the end of the
    *  typed input (Right × suffix, covering mid-line cursors), erase the WHOLE
    *  input with DELs, then write the command. Shell-agnostic; does NOT run it. */

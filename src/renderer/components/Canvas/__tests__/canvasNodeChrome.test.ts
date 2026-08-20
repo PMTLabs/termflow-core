@@ -315,3 +315,51 @@ describe('node corners are one radius', () => {
     expect(ruleFor('.canvas-node-body')).toMatch(/overflow:\s*hidden/);
   });
 });
+
+/**
+ * `plan/020` §1 — the bottom-anchoring lift, and the one thing about it that can silently break.
+ *
+ * `surfaceShift` is unit-tested against real numbers, but it computes a length in the NODE's
+ * unscaled pixels. Whether that length lands correctly is decided entirely by where it sits in
+ * the `transform` list, and CSS applies transform functions RIGHT TO LEFT. Written after the
+ * scale it is a move in the parent's coordinate space, which is what the number means; written
+ * before it, the same number is multiplied by the scale — off by 3x on a portrait pane, and
+ * still zero in every case where the shift is zero, so the mistake hides wherever anyone would
+ * think to look for it.
+ *
+ * Nothing executes a stylesheet, so this is derived from the file.
+ */
+describe('the surface is lifted, not letterboxed', () => {
+  const surface = ruleFor('.canvas-surface');
+
+  it('applies the shift in the node\'s own pixels, after the scale', () => {
+    const transform = /transform:\s*([^;]+);/.exec(surface)?.[1].replace(/\s+/g, ' ');
+    expect(transform).toBeTruthy();
+    const translateAt = transform!.indexOf('translateY');
+    const scaleAt = transform!.indexOf('scale(');
+    expect(translateAt).toBeGreaterThanOrEqual(0);
+    expect(scaleAt).toBeGreaterThanOrEqual(0);
+    // Right-to-left: the scale must be applied FIRST, so it must be written LAST.
+    expect(translateAt).toBeLessThan(scaleAt);
+  });
+
+  // The var has to carry a fallback. A node that never sets it — a test render, or the chip
+  // tier — would otherwise make the whole transform invalid and drop the SCALE with it, which
+  // renders every host at full pane size inside a 320px node.
+  it('falls back to no shift when a node does not set one', () => {
+    expect(surface).toMatch(/var\(--node-surface-shift,\s*0px\)/);
+  });
+
+  // The lift replaces a clip; it must not become a second one. `.canvas-surface` keeps its own
+  // `overflow: hidden` so the lifted-out rows are cut at the surface, not painted over chrome.
+  it('still clips its own overflow', () => {
+    expect(surface).toMatch(/overflow:\s*hidden/);
+  });
+
+  // `plan/017` §5.2: the border-box chain only holds because this element has neither.
+  // A border here shifts every canvas terminal by a column.
+  it('takes no padding or border, which would resize a live PTY', () => {
+    expect(surface).not.toMatch(/(?<![\w-])padding\s*:/);
+    expect(surface).not.toMatch(/(?<![\w-])border\s*:/);
+  });
+});

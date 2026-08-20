@@ -52,11 +52,17 @@ export interface Tab {
 interface TabsState {
   tabs: Tab[];
   activeTabId: string | null;
+  // Terminal ids currently producing output fast enough to count as "busy" — the per-PANE
+  // sibling of each Tab's `isRunning`. Written by `setRunningActivity` in the SAME dispatch
+  // as `isRunning`, so the two levels can never disagree for a rendered frame (plan/020 §2,
+  // Req 8). Transient live status driven by RunningActivityTracker — never persisted.
+  runningTerminalIds: string[];
 }
 
 const initialState: TabsState = {
   tabs: [],
   activeTabId: null,
+  runningTerminalIds: [],
 };
 
 const tabsSlice = createSlice({
@@ -155,11 +161,16 @@ const tabsSlice = createSlice({
       tab.hasUnseenOutput = true;
     },
 
-    setRunningTabs: (state, action: PayloadAction<string[]>) => {
-      const running = new Set(action.payload);
+    // Req 8 (plan/020 §2): ONE action writes both busy levels — `tab.isRunning` (tab header,
+    // unchanged meaning) and `runningTerminalIds` (the per-pane truth Canvas Mode needs).
+    // Must stay a single action: two separate dispatches would render an intermediate frame
+    // where the tab says busy and none of its panes do.
+    setRunningActivity: (state, action: PayloadAction<{ tabIds: string[]; terminalIds: string[] }>) => {
+      const running = new Set(action.payload.tabIds);
       state.tabs.forEach(tab => {
         tab.isRunning = running.has(tab.id);
       });
+      state.runningTerminalIds = action.payload.terminalIds;
     },
 
     markTabExited: (state, action: PayloadAction<{ tabId: string; exitCode: number | null }>) => {
@@ -253,5 +264,5 @@ const tabsSlice = createSlice({
   },
 });
 
-export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
+export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
 export default tabsSlice.reducer;

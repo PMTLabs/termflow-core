@@ -138,9 +138,14 @@ function buildModel(
   trees: Record<string, PaneNode | null>,
   stored: Record<string, Rect>,
   storedGroups: Record<string, Rect>,
+  runningTerminalIds: string[] = [],
 ): CanvasModel {
   const nodes: CanvasNodeModel[] = [];
   const groups: CanvasGroupModel[] = [];
+  // Per-PANE truth (Req 8, plan/020 §2): RunningActivityTracker already buffers output
+  // per-processId (per-pane), and now publishes it this far rather than collapsing to
+  // one boolean per tab and fanning that back out onto every node in it.
+  const running = new Set(runningTerminalIds);
 
   let frameCursorX = 60;
   for (const rect of Object.values(storedGroups)) {
@@ -207,10 +212,12 @@ function buildModel(
         title: leaf.name || tab.title || 'Terminal',
         shellType: leaf.shellType || tab.shellType || '',
         rect: rects[i],
-        // Running/unseen are TAB-level facts in the store, so every node in a tab
-        // shares them. Per-pane activity would need RunningActivityTracker to
-        // publish per-terminal state, which it does not.
-        isRunning: !!tab.isRunning,
+        // Per-terminal (Req 8, plan/020 §2): this node reports its OWN process's activity,
+        // not its tab's — a two-pane tab with only one pane busy no longer lights up both.
+        isRunning: running.has(id),
+        // hasUnseenOutput stays TAB-level, deliberately (plan/020 §0 D2, §6 "known remaining
+        // instance"): per-pane clearing semantics ("viewing which pane clears it?") are
+        // undefined, so every node in a tab still shares the tab's unseen flag.
         hasUnseenOutput: !!tab.hasUnseenOutput,
       });
     });
@@ -226,7 +233,9 @@ function buildModel(
       title: tab.title,
       rect: fitGroupFrame(placed) ?? frame,
       nodeIds,
-      anyRunning: !!tab.isRunning,
+      // Any MEMBER terminal running (Req 8) — strictly more accurate than the old
+      // tab.isRunning proxy, and still the same field/meaning to a reader.
+      anyRunning: nodeIds.some((nid) => running.has(nid)),
     });
   }
 
@@ -241,6 +250,7 @@ export const selectCanvasModel = createSelector(
     (s: RootState) => s.panes.treesByTabId,
     (s: RootState) => s.canvas.nodes,
     (s: RootState) => s.canvas.groups,
+    (s: RootState) => s.tabs.runningTerminalIds,
   ],
   buildModel,
 );
@@ -251,6 +261,7 @@ export function buildCanvasModel(state: RootState): CanvasModel {
     state.panes.treesByTabId,
     state.canvas.nodes,
     state.canvas.groups,
+    state.tabs.runningTerminalIds,
   );
 }
 

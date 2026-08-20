@@ -103,6 +103,36 @@ export function paintedNodeH(h: number, z: number, isChip: boolean): number {
 }
 
 /**
+ * How far to LIFT a width-fitted surface so its bottom meets the node body's bottom
+ * (`plan/020` §1). Never positive.
+ *
+ * The surface scales into the body by width alone — `--node-surface-scale` is `nodeW / host.w`,
+ * from `transform-origin: 0 0`. That is exactly right for the SESSION fallback box, whose height
+ * is derived through `HOST_ASPECT` so it lands on `BODY_H` (see the note there: "A mismatch
+ * letterboxes every node"). It is not right for the per-terminal box `plan/017` introduced, which
+ * is a replica of a real PANE and carries whatever aspect that pane has. A portrait pane scales
+ * to a height taller than the body, and `.canvas-node-body`'s `overflow: hidden` takes the
+ * difference off the BOTTOM — which is where a terminal's newest rows are.
+ *
+ * So the preview clipped precisely the output the user opened the canvas to see. Lifting is the
+ * only correction that keeps the glyphs the same size as every other node: fitting by height
+ * instead would render a 400x1200 pane at ~4px rows in a 53px column, uncut and unreadable.
+ *
+ * A surface SHORTER than the body is left alone — a terminal's first row belongs at the top.
+ *
+ * Cheap enough to call from render, and it must be: the node is resizable, so the answer is a
+ * function of the current width and caching it would strand the shift at the old size.
+ *
+ * This is a transform on the replica and nothing else. `getComputedStyle` still reports the same
+ * box, so `FitAddon.proposeDimensions()` still reads the same three inputs and `fit()` still
+ * takes its early return — `plan/017`'s "a canvas terminal is never resized" is untouched.
+ */
+export function surfaceShift(host: { w: number; h: number }, nodeW: number, bodyH: number): number {
+  if (host.w <= 0) return 0;
+  return Math.min(0, bodyH - host.h * (nodeW / host.w));
+}
+
+/**
  * How far a node's drawn bottom sits ABOVE its rect's, in world units. Negative below zoom 1,
  * where the growing header pushes the node down past its slot instead — which is why
  * `HEAD_GROWTH_PX` is capped by the frame's padding.

@@ -153,6 +153,26 @@ export function computeRunningTabIds(
   return Array.from(tabIds);
 }
 
+/**
+ * The per-PANE sibling of `computeRunningTabIds` (Req 8, plan/020 §2). Maps running processIds
+ * to the set of owning terminalIds, de-duplicated — stopping one resolution step earlier
+ * (`getTerminalIdForProcess`, not the tab walk on top of it), which is exactly the granularity
+ * `RunningActivityTracker` already buffers output at (`buffers` is keyed by processId) but used
+ * to throw away by rolling straight up to the tab. `resolveTerminal` returns the terminalId for
+ * a processId, or null if it does not resolve (e.g. the pane tree hasn't seeded it yet).
+ */
+export function computeRunningTerminalIds(
+  runningProcessIds: string[],
+  resolveTerminal: (processId: string) => string | null,
+): string[] {
+  const terminalIds = new Set<string>();
+  for (const pid of runningProcessIds) {
+    const terminalId = resolveTerminal(pid);
+    if (terminalId) terminalIds.add(terminalId);
+  }
+  return Array.from(terminalIds);
+}
+
 /** One process's most recent output timestamp (its persistent lastOutputAt). */
 export interface UnseenInput {
   processId: string;

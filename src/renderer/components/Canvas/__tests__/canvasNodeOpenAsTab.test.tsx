@@ -490,4 +490,28 @@ describe('per-node host box', () => {
     expect(Number(node().style.getPropertyValue('--node-surface-scale')))
       .toBeCloseTo(node0.rect.w / DEFAULT_METRICS.hostW, 9);
   });
+
+  /**
+   * `plan/020` §1. The same trap as the box above, one property along: a `CanvasNode` that never
+   * published `--node-surface-shift` would take the stylesheet's `0px` fallback arm and restore
+   * the clipping in full, behind a green suite. So the portrait case asserts a NON-ZERO value
+   * computed from the box — a `0px` hard-coded by a broken node cannot satisfy it.
+   */
+  it('lifts a portrait pane off the bottom of the body', () => {
+    // Taller than it is wide, so the width-fit scale overflows the body.
+    const PORTRAIT = { w: 400, h: 1200 };
+    renderWith(PORTRAIT);
+    const shift = parseFloat(node().style.getPropertyValue('--node-surface-shift'));
+    const scaledH = PORTRAIT.h * (node0.rect.w / PORTRAIT.w);
+    const bodyH = node0.rect.h - HEAD_H;
+    expect(scaledH).toBeGreaterThan(bodyH); // the precondition — this pane really does overflow
+    expect(shift).toBeLessThan(0);
+    expect(shift).toBeCloseTo(bodyH - scaledH, 6);
+  });
+
+  // Paired with the negative, so the assertion above cannot pass by lifting everything.
+  it('does not lift a surface that already fits', () => {
+    renderWith({ w: 1600, h: 300 });
+    expect(parseFloat(node().style.getPropertyValue('--node-surface-shift'))).toBe(0);
+  });
 });

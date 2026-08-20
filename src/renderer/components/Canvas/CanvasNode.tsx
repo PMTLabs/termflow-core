@@ -1,5 +1,5 @@
 import React from 'react';
-import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH } from './canvasGeometry';
+import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
@@ -132,6 +132,11 @@ export const CanvasNode: React.FC<{
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
         ['--node-surface-scale' as string]: `${w / host.w}`,
+        // The scale above fits by WIDTH, so a portrait pane's replica is taller than the body
+        // and the body clips the overflow off the bottom — where the newest rows are. This
+        // lifts it back (`plan/020` §1). Zero whenever the surface already fits, and provably
+        // zero in the overlay, whose `h` is `hostH * w / hostW + HEAD_H` by construction.
+        ['--node-surface-shift' as string]: `${surfaceShift(host, w, h - HEAD_H)}px`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}

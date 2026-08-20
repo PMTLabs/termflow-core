@@ -197,8 +197,16 @@
   /* Per node, falling back to the default-width scale. A node of any width scales its host
      correctly from this, which is also the entire implementation of the full-screen overlay:
      an overlaid node is a node with a big world rect, and this puts its terminal at screen
-     scale 1 without a second host, a relocation or a fit. */
-  transform: scale(var(--node-surface-scale, var(--canvas-surface-scale)));
+     scale 1 without a second host, a relocation or a fit.
+
+     ORDER IS LOAD-BEARING (`plan/020` §1). The scale fits by WIDTH, so a portrait pane's
+     replica is taller than the body and gets clipped from the bottom — where the newest rows
+     are. `--node-surface-shift` lifts it back, and it is written in the NODE's unscaled pixels,
+     so it has to apply AFTER the scale: in `transform` the rightmost function is applied first,
+     which makes `translateY` here a move in the parent's coordinate space. Swap the two and the
+     lift is silently multiplied by the scale. Zero whenever the surface already fits. */
+  transform: translateY(var(--node-surface-shift, 0px))
+             scale(var(--node-surface-scale, var(--canvas-surface-scale)));
   transform-origin: 0 0;
   overflow: hidden;
 }

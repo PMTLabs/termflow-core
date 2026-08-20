@@ -1,6 +1,7 @@
 import {
   isRunningFromEvents,
   computeRunningTabIds,
+  computeRunningTerminalIds,
   computeUnseenUpdate,
   canvasIsShowing,
   isEchoChunk,
@@ -60,6 +61,38 @@ describe('computeRunningTabIds', () => {
   it('includes multiple distinct tabs', () => {
     const resolve = (pid: string) => (pid === 'p1' ? 'tb-1' : 'tb-2');
     expect(computeRunningTabIds(['p1', 'p2'], resolve).sort()).toEqual(['tb-1', 'tb-2']);
+  });
+});
+
+/**
+ * The per-PANE sibling of `computeRunningTabIds` — Req 8 (plan/020 §2). Stops one resolution
+ * step earlier (processId -> terminalId, not all the way to tabId), so a two-pane tab with
+ * only one pane busy can say exactly which one.
+ */
+describe('computeRunningTerminalIds', () => {
+  it('two panes of one tab, only one busy -> exactly one terminalId returned', () => {
+    // Both p1 and p2 belong to tab tb-1 (one two-pane tab), but only p1 is producing output.
+    const resolveTerminal = (pid: string) => (pid === 'p1' ? 'tm-1' : pid === 'p2' ? 'tm-2' : null);
+    expect(computeRunningTerminalIds(['p1'], resolveTerminal)).toEqual(['tm-1']);
+  });
+
+  it('drops processIds that do not resolve to a terminal', () => {
+    const resolveTerminal = (pid: string) => (pid === 'p1' ? 'tm-1' : null);
+    expect(computeRunningTerminalIds(['p1', 'p2'], resolveTerminal)).toEqual(['tm-1']);
+  });
+
+  it('de-duplicates when the same terminal is reported twice', () => {
+    const resolveTerminal = () => 'tm-1';
+    expect(computeRunningTerminalIds(['p1', 'p2'], resolveTerminal)).toEqual(['tm-1']);
+  });
+
+  it('includes multiple distinct terminals', () => {
+    const resolveTerminal = (pid: string) => (pid === 'p1' ? 'tm-1' : 'tm-2');
+    expect(computeRunningTerminalIds(['p1', 'p2'], resolveTerminal).sort()).toEqual(['tm-1', 'tm-2']);
+  });
+
+  it('returns nothing for an empty input', () => {
+    expect(computeRunningTerminalIds([], () => 'tm-1')).toEqual([]);
   });
 });
 
