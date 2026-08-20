@@ -1351,6 +1351,30 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Normalise any caller-supplied terminal reference to this run's map key.
+    ///
+    /// A `tm-` leaf is resolved through the identity index; anything else is
+    /// returned unchanged and looked up directly.
+    ///
+    /// **Why every terminal lookup must go through this.** Design 014 re-keyed
+    /// the per-terminal maps from the leaf to a minted `pc-`, but the API keeps
+    /// reporting the leaf as `terminalId` — it is the DURABLE id, and the one
+    /// MCP hands agents precisely because a `pc-` does not survive a restart. So
+    /// a client that reads `terminalId` back and addresses it — the documented
+    /// round trip — would hit a map keyed by something else and 404.
+    ///
+    /// Tolerant rather than strict on purpose: both id spaces resolve here, and
+    /// the "that is a tab id, use `owningTabId`" rejection lives at the MCP
+    /// layer, where the agent that made the mistake actually reads the message.
+    pub fn resolve_ref(&self, id: &str) -> String {
+        if id.starts_with("tm-") {
+            if let Some(process_id) = self.identity.process_for_leaf(id) {
+                return process_id;
+            }
+        }
+        id.to_string()
+    }
+
     /// The pty-host session key for one of OUR process ids.
     ///
     /// Every call that crosses into the host must go through this: the host knows

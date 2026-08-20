@@ -391,6 +391,64 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 ///                        a major-version change, explicitly not done here.
 ///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
 ///                        headless (no-renderer-pane) terminal.
+/// Resolve any caller-supplied terminal reference to THIS RUN's process id.
+///
+/// Prefix-dispatched deliberately. Before design 014 the id spaces overlapped —
+/// a renderer-created tab's root leaf *was* its tab id — so the only way to
+/// reject a tab id passed where a terminal was meant was documentation
+/// (`mcp-server/src/server.ts` spent 25 lines explaining it). Now the prefix IS
+/// the type, and an agent holding a `tb-` for a two-pane tab gets told so.
+///
+/// Wrong SPACE is a 400: the caller has a bug we can name. Right space but
+/// absent is a 404: the terminal is simply gone. Collapsing those would make a
+/// stale `pc-` (per-run, so stale after any restart) look like a client bug.
+pub fn resolve_terminal_ref(
+    state: &AppState,
+    id: &str,
+) -> Result<String, (StatusCode, String)> {
+    let resolved = match classify_terminal_ref(id)? {
+        // `tm-` is the DURABLE id and the one MCP hands out, so it resolves
+        // through the index rather than being a map key itself.
+        TerminalRef::Leaf => state.identity.process_for_leaf(id),
+        TerminalRef::Process => state.terminals.contains_key(id).then(|| id.to_string()),
+    };
+    resolved.ok_or_else(|| (StatusCode::NOT_FOUND, format!("no live terminal for `{id}`")))
+}
+
+/// Which id space a caller-supplied reference belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalRef {
+    /// `tm-` — durable across restarts.
+    Leaf,
+    /// `pc-` (or a legacy id) — this run only.
+    Process,
+}
+
+/// The SHAPE half of resolution, split out so it is testable without an
+/// `AppState` (the `tauri::test` feature crashes the Windows test binary).
+///
+/// Rejection is by prefix, never by liveness: a tab id that happens to match no
+/// live terminal must still be told it is a tab id, or the caller learns
+/// nothing and retries the same mistake.
+pub fn classify_terminal_ref(id: &str) -> Result<TerminalRef, (StatusCode, String)> {
+    if id.starts_with("tb-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "`{id}` is a TAB id, not a terminal. Pass a terminal id (`tm-…`) or a process \
+                 id (`pc-…`); to name a tab, use the `owningTabId` field."
+            ),
+        ));
+    }
+    if id.starts_with("pn-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("`{id}` is a PANE id, not a terminal. Pass a terminal id (`tm-…`)."),
+        ));
+    }
+    Ok(if id.starts_with("tm-") { TerminalRef::Leaf } else { TerminalRef::Process })
+}
+
 fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
     json!({
         "id": t.id,
@@ -398,6 +456,12 @@ fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json:
         "terminalId": t.renderer_terminal_id,
         "tabId": t.renderer_terminal_id,
         "owningTabId": t.owning_tab_id,
+        // Diagnostic only — nothing addresses a terminal by this. It is the
+        // pty-host's own key, equal to `terminalId` except for a terminal
+        // migrated from a pre-014 build, where it is the legacy `tb-`
+        // (design 014 §A5). Exposed so a support question about a terminal that
+        // will not reattach is answerable without reading the host's state.
+        "sessionKey": t.session_key,
         "name": t.name,
         "profile": t.shell,
         "status": "running",
@@ -755,6 +819,11 @@ async fn delete_terminal(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Take the pid first (guard drops at end of statement, before cleanup).
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return Json(json!({ "error": "Terminal not found" }));
@@ -787,6 +856,11 @@ async fn resize_terminal(
     Path(id): Path<String>,
     Json(payload): Json<ResizeReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Host-owned terminals resize via the sidecar.
@@ -931,6 +1005,11 @@ async fn write_terminal(
     Path(id): Path<String>,
     Json(payload): Json<WriteReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match write_data_to_terminal(&state, &id, &payload.data) {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         // Preserve the original handler's exact behavior: "not found" returned
@@ -975,6 +1054,11 @@ async fn get_terminal_size(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
         Json(json!({ "cols": terminal.cols, "rows": terminal.rows })).into_response()
     } else {
@@ -988,6 +1072,11 @@ async fn get_terminal_output(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<OutputQuery>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Clone the chunks under a brief inner lock (Arc cloned via get_history, so
     // no DashMap shard guard is held here), then render with NO locks held —
     // rendering replays up to ~1MB through a vt100 parser, and doing that under
@@ -1052,6 +1141,11 @@ async fn get_terminal_snapshot(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Restore replay (one-shot): when a previous-session scrollback prefix is staged,
     // serve it ALONE — do NOT append the freshly-spawned shell's current screen.
     // That screen comes from `contents_formatted()`, which BEGINS with an
@@ -1099,6 +1193,11 @@ async fn get_terminal_full_scrollback(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match state.full_scrollback_snapshot(&id) {
         Some(mut bytes) => {
             // Re-assert live input modes (mouse tracking, bracketed paste, focus
@@ -1198,6 +1297,11 @@ async fn get_terminal(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
         let mut body = terminal_identity_json(terminal.value(), "default");
         // Canvas identity, so an agent learns which node and group it is in one call
@@ -1852,7 +1956,7 @@ async fn fleet_screen(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(terminal) = state.terminals.get(&body.terminal_id) else {
+            let Some(terminal) = state.terminals.get(&state.resolve_ref(&body.terminal_id)) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
             let title = terminal.name.clone();
@@ -1860,7 +1964,7 @@ async fn fleet_screen(
             // Plain text, not the replayable blob: this screen is read by a human or
             // an agent, and a full-screen TUI's formatted snapshot is mostly truecolor
             // SGR and cursor-op noise with the words buried in it.
-            let screen = state.screen_text(&body.terminal_id).unwrap_or_default();
+            let screen = state.screen_text(&state.resolve_ref(&body.terminal_id)).unwrap_or_default();
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -1908,14 +2012,14 @@ async fn fleet_close(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
+            let Some(pid) = state.terminals.get(&state.resolve_ref(&body.terminal_id)).map(|t| t.pid) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
             // Host-owned → close via the sidecar; else kill the local tree.
-            if !state.host_close(&body.terminal_id) {
+            if !state.host_close(&state.resolve_ref(&body.terminal_id)) {
                 crate::pty_manager::kill_process_tree(pid);
             }
-            state.cleanup_terminal_state(&body.terminal_id);
+            state.cleanup_terminal_state(&state.resolve_ref(&body.terminal_id));
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -2144,6 +2248,11 @@ async fn execute_prompt(
     Path(id): Path<String>,
     Json(payload): Json<ExecutePromptReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match send_prompt_to_terminal(&state, &id, &payload).await {
         Ok(body) => (StatusCode::OK, Json(body)),
         Err((code, msg)) => (code, Json(json!({ "error": msg }))),
@@ -2402,7 +2511,8 @@ async fn batch_execute_prompt(
         }
     }
 
-    let ids = dedup_preserve_order(&body.terminal_ids);
+    let ids: Vec<String> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| state.resolve_ref(i)).collect();
     let req = ExecutePromptReq {
         prompt: body.prompt.clone(),
         cli_type: body.cli_type.clone(),
@@ -2441,7 +2551,8 @@ async fn batch_write_terminal(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "terminalIds must be a non-empty array" })));
     }
 
-    let ids = dedup_preserve_order(&body.terminal_ids);
+    let ids: Vec<String> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| state.resolve_ref(i)).collect();
     let mut results = Vec::with_capacity(ids.len());
     let mut succeeded = 0usize;
     for id in &ids {
@@ -2589,6 +2700,11 @@ async fn get_process_metrics(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Copy the pid out so the DashMap guard drops before any await.
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "Process not found" })));
@@ -2937,6 +3053,11 @@ async fn resize_with_reflow(
     Path(id): Path<String>,
     Json(payload): Json<ResizeReflowReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Resize-reflow request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Check if terminal exists and get its backend type
@@ -3057,6 +3178,11 @@ async fn capture_terminal_content(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<CapturePaneQuery>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Capture content request for terminal {}", id);
 
     let backend = match state.get_terminal_backend(&id) {
@@ -4721,5 +4847,68 @@ mod create_terminal_req_tests {
         assert_eq!(r.pane_id.as_deref(), Some("tm-2"));
         assert_eq!(r.direction.as_deref(), Some("horizontal"));
         assert_eq!(r.parent_terminal_id.as_deref(), Some("pc-3"));
+    }
+}
+
+
+/// Prefix-dispatched terminal resolution (design 014 §A3).
+#[cfg(test)]
+mod classify_terminal_ref_tests {
+    use super::{classify_terminal_ref, TerminalRef};
+    use axum::http::StatusCode;
+
+    /// A tab id where a terminal is meant — THE reported MCP failure. Before
+    /// design 014 this could not even be DETECTED: a renderer-created tab's root
+    /// leaf WAS its tab id, so `tb-…` was a legitimate terminal reference for
+    /// some panes and meaningless for others, and an agent in a two-pane tab had
+    /// no way to say which terminal it meant.
+    #[test]
+    fn a_tab_id_is_rejected_and_names_the_field_to_use_instead() {
+        let err = classify_terminal_ref("tb-4e8d0c2f1").expect_err("a tab id is not a terminal");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("TAB id"), "must say what it IS: {}", err.1);
+        assert!(err.1.contains("owningTabId"), "must name the right field: {}", err.1);
+        assert!(err.1.contains("tm-"), "must name the right id space: {}", err.1);
+    }
+
+    #[test]
+    fn a_pane_id_is_rejected_and_names_the_field_to_use_instead() {
+        let err = classify_terminal_ref("pn-4k2j9x1qa").expect_err("a pane id is not a terminal");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("PANE id"), "{}", err.1);
+        assert!(err.1.contains("tm-"), "{}", err.1);
+    }
+
+    #[test]
+    fn a_leaf_id_classifies_as_the_durable_space() {
+        assert_eq!(classify_terminal_ref("tm-9f2c1a4b7").unwrap(), TerminalRef::Leaf);
+    }
+
+    #[test]
+    fn a_process_id_classifies_as_the_per_run_space() {
+        assert_eq!(classify_terminal_ref("pc-abc123def").unwrap(), TerminalRef::Process);
+    }
+
+    /// Rejection is by SHAPE, not by liveness: a tab id matching nothing live
+    /// must still be told it is a tab id, or the caller retries the same
+    /// mistake with no idea why it failed.
+    #[test]
+    fn a_tab_id_is_rejected_even_when_nothing_is_live() {
+        assert_eq!(classify_terminal_ref("tb-anything").unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// An id from before the prefixes existed must still route rather than 400 —
+    /// rejecting it would break clients holding ids from an older build.
+    #[test]
+    fn an_unprefixed_legacy_id_is_treated_as_a_process_id() {
+        assert_eq!(classify_terminal_ref("legacy-id-0001").unwrap(), TerminalRef::Process);
+    }
+
+    /// The prefixes must not leak onto ids that merely start similarly.
+    #[test]
+    fn the_prefix_rules_are_exact() {
+        assert_eq!(classify_terminal_ref("tbx-0000").unwrap(), TerminalRef::Process);
+        assert_eq!(classify_terminal_ref("pnx-0000").unwrap(), TerminalRef::Process);
+        assert_eq!(classify_terminal_ref("tmx-0000").unwrap(), TerminalRef::Process);
     }
 }
