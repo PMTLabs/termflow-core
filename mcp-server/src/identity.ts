@@ -5,12 +5,47 @@ export const ME_SENTINEL = "me" as const;
 export const TERMINAL_ID_HEADER = "x-termflow-terminal-id";
 
 /**
- * Allowed terminal-id alphabet. Backend ids are the pane leaf (`tm-…`/`tb-…`) for
- * a sidecar-hosted terminal and `pc-<hex>` for an in-process one; this allowlist
- * accepts every form while rejecting anything that could manipulate a REST path
- * once interpolated (`/`, `..`, `?`, `#`, `%`, whitespace, …).
+ * Allowed terminal-id alphabet. Backend ids are the pane leaf (`tm-…`) and this
+ * run's process id (`pc-…`); this allowlist accepts every form while rejecting
+ * anything that could manipulate a REST path once interpolated (`/`, `..`, `?`,
+ * `#`, `%`, whitespace, …).
  */
 const SAFE_TERMINAL_ID = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Reject an id from a space that does not name a terminal.
+ *
+ * Design 014 gave each identity its own prefix, so the prefix IS the type:
+ * `tm-` terminal (durable), `pc-` process (this run only), `tb-` tab, `pn-` pane.
+ * Before that a renderer-created tab's root leaf WAS its tab id, so `tb-…` was a
+ * valid terminal reference for some panes and meaningless for others — an agent
+ * in a two-pane tab had no way to say which terminal it meant, and this file
+ * carried 25 lines of prose trying to explain the ambiguity instead.
+ *
+ * Enforced HERE rather than only at the REST layer because this is where the
+ * agent reads the error. The REST layer stays deliberately tolerant so a client
+ * holding a legacy id still works (design 014 §A3).
+ *
+ * Rejection is by SHAPE, not by liveness: a tab id that happens to match no live
+ * terminal must still be told it is a tab id, or the caller retries the same
+ * mistake with no idea why.
+ */
+export function assertTerminalRef(id: string): void {
+    if (id.startsWith("tb-")) {
+        throw new Error(
+            `${JSON.stringify(id)} is a TAB id, not a terminal. Pass a terminal id ` +
+                '("tm-…", from a response\'s `terminalId`) or a process id ("pc-…"). ' +
+                "To name a tab — e.g. to open a pane in it — use the `owningTabId` field."
+        );
+    }
+    if (id.startsWith("pn-")) {
+        throw new Error(
+            `${JSON.stringify(id)} is a PANE id, not a terminal. Pass a terminal id ` +
+                '("tm-…", from a response\'s `terminalId`). `paneId` is only for naming ' +
+                "which pane to split."
+        );
+    }
+}
 
 /**
  * Resolve a tool's terminalId argument. "me" resolves to the caller's own
@@ -43,6 +78,9 @@ export function resolveTerminalId(input: string, callerId: string | undefined): 
                 '(e.g. "tm-xxxxxxxxx").'
         );
     }
+    // Shape check AFTER the alphabet check, so a hostile value is rejected for
+    // being hostile rather than for its prefix.
+    assertTerminalRef(resolved);
     return resolved;
 }
 
