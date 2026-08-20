@@ -2,15 +2,34 @@ import type { Terminal } from '@xterm/xterm';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { terminalCache, resetTerminalRendering, type TerminalCacheEntry } from './cache';
 import { loadWebGLAddon } from './webgl';
-import {
-  GLOBAL_WEBGL_CEILING,
-  headroom,
-  otherWindowsUsage,
-  publishOwnUsage,
-  clearOwnUsage,
-  setLedgerWindowId,
-  startLedgerHeartbeat,
-} from './webglLedger';
+
+/**
+ * The browser's own WebGL context ceiling, per RENDERER PROCESS.
+ *
+ * Measured in Chromium: a page allocated 20 contexts and 16 survived. Allocation past the
+ * ceiling **does not fail** — `getContext` keeps returning a live context and the browser
+ * silently force-loses the OLDEST one instead, which is whichever terminal has been open
+ * longest. So the overrun is invisible until a user notices one pane stopped being smooth.
+ *
+ * **Per renderer process, not global.** A second page in a genuinely separate renderer
+ * process allocated its own 20 and took nothing from the first, which stayed at 16. Each
+ * Tauri window gets its own renderer (observed: three windows, three renderer processes;
+ * launching a fourth instance added exactly one more), so each window owns a full budget
+ * and nothing needs to be coordinated between them.
+ *
+ * An earlier revision of this file shared a budget across windows through localStorage, on
+ * the strength of a measurement that used two Playwright pages in the SAME renderer
+ * process — which only ever demonstrated this per-process cap. That is retracted: it
+ * throttled windows against a ceiling they were not competing for, and the cost of being
+ * wrong in that direction is every terminal past the limit painting on the DOM renderer,
+ * which is ~2.3x more CPU per repaint than WebGL.
+ *
+ * Two are held back from the terminal budget. Nothing else in the app asks for a context
+ * today, so the reserve is insurance rather than accounting: at exactly 16 any future
+ * WebGL surface — a chart, a preview — would be paid for by evicting a live terminal, and
+ * that is the one failure this constant exists to prevent.
+ */
+export const MAX_WEBGL_PER_RENDERER = 14;
 
 /** design/013 D1. There is no 'parked' — every terminal is permanently mounted. */
 export type RenderPolicy = 'webgl' | 'dom';
@@ -260,20 +279,15 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
     // canvasOwned: this IS the canvas policy layer, so the demotion must not
     // invalidate canvas's own snapshot (review 124 / D6).
     resetTerminalRendering(terminalId, { canvasOwned: true });
-    // Tell the siblings at once. Waiting for the heartbeat would leave this window claiming
-    // a context it just released for up to HEARTBEAT_MS, and the direction that matters is
-    // that a DEMOTION frees budget for another window as soon as it happens.
-    publishOwnUsage(countActiveWebGLAddons());
     return 'dom';
   }
 
-  // The cross-window ceiling is enforced HERE rather than in the reconciler, because this
-  // is the one function every promotion goes through — the reconciler, the diagnostics
+  // The renderer ceiling is enforced HERE rather than in the reconciler, because this is
+  // the one function every promotion goes through — the reconciler, the diagnostics
   // toggle, and any future caller. Gating it in the reconciler instead would let each new
-  // caller opt out by construction, which is exactly how the per-window budget came to be
-  // the only one being honoured. Refusing returns 'dom', which callers already handle as a
-  // failed promotion (D3 / CALLER-DROP); it is not an error.
-  if (!globalCeilingAllows()) {
+  // caller opt out by construction. Refusing returns 'dom', which callers already handle
+  // as a failed promotion (D3 / CALLER-DROP); it is not an error.
+  if (countActiveWebGLAddons() >= MAX_WEBGL_PER_RENDERER) {
     entry.webglAddon = null;
     entry.useWebGL = false;
     return 'dom';
@@ -294,7 +308,6 @@ export function setTerminalRenderPolicy(terminalId: string, want: RenderPolicy):
   }
   entry.webglAddon = addon;
   entry.useWebGL = true;
-  publishOwnUsage(countActiveWebGLAddons());
   // Renderer swap can change cell metrics; re-measure, but only when it is safe to.
   fitIfLaidOut(entry);
   return 'webgl';
@@ -362,62 +375,15 @@ export function getCanvasWebGLBudget(): number | null {
  * what changes behaviour, so nothing outside a canvas session is affected.
  */
 export function webglAllowedAtCreation(): boolean {
-  // The GLOBAL ceiling is checked FIRST and unconditionally, including on an ordinary
-  // launch with no canvas session. That is not belt-and-braces — it is the case the old
-  // code missed entirely: outside canvas mode this function returned `true` forever, so a
-  // user with twenty tabs got twenty contexts against a browser ceiling near sixteen, and
-  // the browser answered by silently evicting the oldest terminal's context.
-  if (!globalCeilingAllows()) return false;
+  // The renderer ceiling is checked FIRST and unconditionally, including on an ordinary
+  // launch with no canvas session. That is the case the old code missed entirely: outside
+  // canvas mode this returned `true` forever, so a window with twenty tabs created twenty
+  // contexts against a cap of sixteen and the browser answered by force-losing the oldest
+  // terminal's context. Refusing the twentieth instead costs that ONE terminal the GPU
+  // renderer; letting it through costs the user's longest-running terminal, silently.
+  if (countActiveWebGLAddons() >= MAX_WEBGL_PER_RENDERER) return false;
   if (canvasWebGLBudget === null) return true;
   return countActiveWebGLAddons() < canvasWebGLBudget;
-}
-
-/**
- * Is there room under the CROSS-WINDOW ceiling for one more context?
- *
- * Publishes this window's own count before reading the others', so the value siblings see
- * is current at exactly the moment contention matters. Two windows racing can still both
- * see room; that fails soft, in the same way it does today, and the heartbeat closes the
- * gap within `HEARTBEAT_MS`.
- */
-function globalCeilingAllows(): boolean {
-  const own = countActiveWebGLAddons();
-  publishOwnUsage(own);
-  return headroom(own, otherWindowsUsage(), GLOBAL_WEBGL_CEILING) > 0;
-}
-
-/**
- * Join the cross-window ledger. Called once per renderer realm, by the app, with an id
- * unique across every window AND instance sharing this browser process.
- *
- * Inert until called: a host that never calls it (tests, the mirror/grid embedders) keeps
- * the pre-existing single-realm behaviour rather than silently gaining a budget it has no
- * identity for.
- */
-export function initWebGLLedger(windowId: string): void {
-  setLedgerWindowId(windowId);
-  publishOwnUsage(countActiveWebGLAddons(), true);
-  startLedgerHeartbeat(countActiveWebGLAddons);
-  armLedgerRelease();
-}
-
-/**
- * Drop this window's ledger entry on teardown so siblings reclaim its budget immediately
- * instead of waiting out `STALE_MS`.
- *
- * Same reasoning and the same event as `armBudgetRelease` below: a reload or a cross-window
- * detach tears the realm down inside a SURVIVING browser process, and `pagehide` is the last
- * point our code runs there. Registered lazily so this module keeps its no-top-level-execution
- * property, which the import cycle with cache.ts depends on.
- */
-let ledgerReleaseArmed = false;
-function armLedgerRelease(): void {
-  if (ledgerReleaseArmed) return;
-  if (typeof window === 'undefined') return;
-  ledgerReleaseArmed = true;
-  window.addEventListener('pagehide', () => {
-    clearOwnUsage();
-  });
 }
 
 /**

@@ -33,17 +33,6 @@ if (isTauri) {
   const windowId = await initWindowScope(invoke);
   console.log('Window:', windowId);
 
-  // Join the cross-window WebGL ledger, now that BOTH halves of the identity are known.
-  //
-  // The id must be unique across every window AND every instance sharing this browser
-  // process, because that is the scope the browser's ~16-context ceiling is enforced at:
-  // allocating past it does not fail, it silently evicts the OLDEST context, which is some
-  // other window's longest-running terminal. `windowId` alone repeats across instances
-  // (both would be slot zero, `w0`); the profile scope is what separates them, and the
-  // single-instance lock is what stops two instances sharing one profile scope.
-  const { initWebGLLedger } = require('@termflow/terminal-core');
-  initWebGLLedger(`${profile.scope}#${windowId}`);
-
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
 } else if (!(window as any).electronAPI) {
