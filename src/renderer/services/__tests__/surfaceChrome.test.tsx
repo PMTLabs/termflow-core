@@ -21,12 +21,14 @@ import {
 
 const noop = () => {};
 const pick = () => {};
+const openMenu = () => {};
 
 const state = (over: Partial<SurfaceChromeState> = {}): SurfaceChromeState => ({
   atBottom: true,
   suggest: { open: false, items: [], selectedIndex: 0, focused: false, anchor: null },
   scrollToBottom: noop,
   pickSuggestion: pick,
+  openContextMenu: openMenu,
   ...over,
 });
 
@@ -83,13 +85,31 @@ describe('surfaceChrome registry', () => {
     expect(notifications).toBe(2);
   });
 
-  it('treats a changed callback identity as a change', () => {
+  it.each([
+    ['scrollToBottom', { scrollToBottom: () => {} }],
+    ['pickSuggestion', { pickSuggestion: () => {} }],
+    // Added with the context-menu trigger (`plan/021` R2). Every published callback needs its
+    // own case: one left out of `same()` is a stale closure the overlay keeps calling, and
+    // nothing else would notice.
+    ['openContextMenu', { openContextMenu: () => {} }],
+  ])('treats a changed %s identity as a change', (_name, over) => {
     const owner = {};
     let notifications = 0;
     subscribeSurfaceChrome(() => { notifications += 1; });
     setSurfaceChrome('tm-1', owner, state());
-    setSurfaceChrome('tm-1', owner, state({ scrollToBottom: () => {} }));
+    setSurfaceChrome('tm-1', owner, state(over as Partial<SurfaceChromeState>));
     expect(notifications).toBe(2);
+  });
+
+  it('still no-ops when every field, callbacks included, is unchanged', () => {
+    // The paired negative for the case above: with a fresh arrow per publish this would notify
+    // on every keystroke, and every canvas node re-renders on every notification.
+    const owner = {};
+    let notifications = 0;
+    subscribeSurfaceChrome(() => { notifications += 1; });
+    setSurfaceChrome('tm-1', owner, state());
+    setSurfaceChrome('tm-1', owner, state());
+    expect(notifications).toBe(1);
   });
 
   it('lets a new owner take the slot, and ignores the old one clearing it', () => {

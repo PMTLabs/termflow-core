@@ -206,12 +206,20 @@ export interface UnseenInput {
  * they need identical handling:
  *
  *   - the source is MUTED (its tab is muted, or its own pane is muted); or
- *   - CANVAS MODE IS SHOWING, in which case the user is looking at every terminal
- *     at once and nothing is unseen (see `canvasIsShowing`).
+ *   - the source IS THE TERMINAL SHOWN IN THE CANVAS OVERLAY — the one canvas
+ *     surface rendered at 1:1, so the only one the user is genuinely reading (see
+ *     `overlaySuppressedTerminal`).
+ *
+ * **Not "the canvas is open".** That was the rule until `plan/021` R3, and it
+ * suppressed every terminal in the window for as long as the canvas stayed up —
+ * the whole notification feature, off. A canvas node is a PREVIEW, often a few
+ * percent of natural size and not painting at all below the `live` tier; it is
+ * not "seen". If you are writing a THIRD caller of this function, take the
+ * predicate from `overlaySuppressedTerminal`, not from `canvasIsShowing`.
  *
  * A suppressed source is excluded from `toFlag` (no bell / toast / OS notification
  * / chime — everything downstream hangs off the flag) but its mark STILL advances,
- * exactly like the active-tab case, so leaving the canvas — or unmuting later —
+ * exactly like the active-tab case, so closing the overlay — or unmuting later —
  * never rings a backlog of output the user has already watched go by. Defaults to
  * "never suppressed" for callers/tests that don't pass it.
  *
@@ -227,8 +235,10 @@ export interface UnseenInput {
  * firing a toast and a chime, while the user is looking straight at it on the canvas. Reported
  * from live testing, 2026-08-16: "very annoying".
  *
- * The canvas shows every terminal in the window at once, so while it is up, "seen" is not one
- * tab — it is all of them.
+ * **This is NOT a suppression predicate on its own** — it used to be, and that was `plan/021` R3:
+ * a blanket "nothing may notify while the canvas is up" silenced every terminal in the window
+ * for as long as the canvas stayed open. See `overlaySuppressedTerminal` below for the rule that
+ * replaced it, and why the premise was too strong.
  *
  * Takes the tab list rather than a `shellType` so the caller cannot pass the wrong tab's kind;
  * `activeTabId` is looked up here.
@@ -239,6 +249,48 @@ export function canvasIsShowing(
 ): boolean {
   if (!activeTabId) return false;
   return tabs.some((t) => t.id === activeTabId && t.shellType === CANVAS_SHELL_TYPE);
+}
+
+/**
+ * Which ONE terminal, if any, the user is currently watching closely enough that its own
+ * busy→idle transition must not notify (`plan/021` R4). `null` means "suppress nothing".
+ *
+ * **Why the canvas being open is not enough.** The rule this replaces was "the canvas shows
+ * every terminal at once, so while it is up, seen is not one tab — it is all of them". That
+ * over-claims: a canvas node is a PREVIEW, typically a few percent of natural size, and below
+ * the `live` tier it is not painting at all. Treating a thumbnail the user is not reading as
+ * "seen" silenced the notification the user opened the app to get. The premise holds for exactly
+ * one surface — the OVERLAY, the single canvas surface rendered at 1:1 (`plan/020` §5) — so that
+ * is the only terminal this returns.
+ *
+ * **Both conditions are load-bearing, and the second is the subtle one.** `overlayId` is
+ * deliberately NOT cleared when the user leaves the canvas tab (`plan/020` §4: it records WHICH
+ * NODE IS ENLARGED, a view fact that must survive a tab switch). So `overlayId` alone would keep
+ * suppressing a terminal long after the user had switched to another tab and could no longer see
+ * it — a value made to survive an event silently changes the meaning of everything keyed on it.
+ * The canvas must actually be on screen for its overlay to count as "being watched".
+ *
+ * Returns the RENDERER LEAF id (`tb-*` / `tm-*`), which is the id space canvas nodes are keyed
+ * by; callers holding a `pc-*` process id must map it first (see
+ * `terminalService.getTerminalIdForProcess`).
+ *
+ * **These two conditions are a PROXY for "an overlay is actually being drawn at 1:1", and
+ * `CanvasMode` has a third:** it also needs `hostBoxes[overlayId]`, which is not populated on
+ * the mount commit — so for a frame or two after the canvas is activated with an overlay
+ * remembered, this says "suppressed" while the node is still drawing as an ordinary preview.
+ * Deliberately not modelled, because that window is already covered twice over:
+ * `CanvasMode` arms `notifyViewChangeBurst()` in a `useLayoutEffect` on mount, which freezes
+ * ALL detection for `VIEW_CHANGE_COOLDOWN_MS` (2.5s) before any child renders, and
+ * `pruneCanvasGeometry` nulls `overlayId` outright if it ever names a terminal that is no
+ * longer live. Threading the host boxes into the tracker to close a gap nothing can fall
+ * through would buy a dependency, not a fix.
+ */
+export function overlaySuppressedTerminal(
+  tabs: readonly { id: string; shellType?: string | null }[],
+  activeTabId: string | null,
+  overlayId: string | null,
+): string | null {
+  return canvasIsShowing(tabs, activeTabId) ? overlayId : null;
 }
 
 export function computeUnseenUpdate(

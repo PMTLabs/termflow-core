@@ -10,13 +10,15 @@
 const dispatch = jest.fn();
 const subscribe = jest.fn(() => () => {});
 const mockState: {
-  tabs: { tabs: Array<{ id: string; isActive: boolean; title?: string }> };
+  tabs: { activeTabId: string | null; tabs: Array<{ id: string; isActive: boolean; title?: string; shellType?: string }> };
   settings: { shellProfiles: Array<{ id: string; name: string }>; defaultProfile: string; customKeybindings: Record<string, string> };
-  panes: { activePaneId: string | null; activeTabId: string | null };
+  panes: { activePaneId: string | null; activeTabId: string | null; paneTree: unknown };
+  canvas: { focusedId: string | null };
 } = {
-  tabs: { tabs: [{ id: 'tb-1', isActive: true, title: 'Bash' }] },
+  tabs: { activeTabId: 'tb-1', tabs: [{ id: 'tb-1', isActive: true, title: 'Bash' }] },
   settings: { shellProfiles: [{ id: 'bash', name: 'Bash' }, { id: 'zsh', name: 'Zsh' }], defaultProfile: 'zsh', customKeybindings: {} },
-  panes: { activePaneId: 'p-1', activeTabId: 'tb-1' },
+  panes: { activePaneId: 'p-1', activeTabId: 'tb-1', paneTree: { id: 'p-1', type: 'terminal', terminalId: 'tm-pane' } },
+  canvas: { focusedId: null },
 };
 jest.mock('../../store', () => ({
   store: {
@@ -28,13 +30,17 @@ jest.mock('../../store', () => ({
 // Settings-dirty guard is exercised by handleCloseRequest, not here → pass-through.
 jest.mock('../settingsNavGuard', () => ({ runSettingsGuard: () => false }));
 // Heavy / browser-only collaborators pulled in at module load — stub them out.
-jest.mock('@termflow/terminal-core', () => ({ pasteToTerminal: jest.fn() }));
-jest.mock('../TerminalService', () => ({ terminalService: {} }));
+// `pasteToTerminal` returns true for "the terminal is mounted, xterm took it"; InputHandler
+// falls back to a raw PTY write when it returns false, so the default matters.
+jest.mock('@termflow/terminal-core', () => ({ pasteToTerminal: jest.fn(() => true) }));
+const writeToTerminal = jest.fn(() => Promise.resolve());
+jest.mock('../TerminalService', () => ({ terminalService: { writeToTerminal: (...a: unknown[]) => writeToTerminal(...(a as [])) } }));
 jest.mock('../../utils/clipboard', () => ({ readClipboardText: jest.fn() }));
 const openSettingsTab = jest.fn();
 jest.mock('../openSettings', () => ({ openSettingsTab: () => openSettingsTab() }));
 
 import { inputHandler, InputHandler } from '../InputHandler';
+import { pasteToTerminal } from '@termflow/terminal-core';
 import { removeTab, addTab } from '../../store/slices/tabsSlice';
 import { resizeFocusedPane } from '../../store/slices/panesSlice';
 
@@ -328,12 +334,96 @@ describe('InputHandler Ctrl+Shift+W routing', () => {
     const requests: Event[] = [];
     const listener = (e: Event) => requests.push(e);
     window.addEventListener('ui:requestPaneClose', listener);
-    mockState.panes = { activePaneId: null, activeTabId: 'tb-1' };
+    mockState.panes = { activePaneId: null, activeTabId: 'tb-1', paneTree: null };
     try {
       pressShortcut('W', { ctrlKey: true, shiftKey: true });
     } finally {
       window.removeEventListener('ui:requestPaneClose', listener);
     }
     expect(requests).toEqual([]);
+  });
+});
+
+/**
+ * `plan/021` R2 — the WIRING, not the resolver.
+ *
+ * `keyboardTerminal.test.ts` proves `resolveKeyboardTerminalId` returns the right id. These
+ * prove the two shortcuts actually ASK it and route where it says. That is a separate failure:
+ * a call site that resolved correctly and then wrote to the wrong place — or never called the
+ * resolver at all — would pass every pure test and only show up by hand.
+ */
+describe('InputHandler terminal-text targets across Canvas Mode', () => {
+  const PANE_TREE = { id: 'p-1', type: 'terminal', terminalId: 'tm-pane' };
+
+  /** An ordinary terminal tab on screen, one pane focused. */
+  const onPane = () => {
+    mockState.tabs = { activeTabId: 'tb-1', tabs: [{ id: 'tb-1', isActive: true }] };
+    mockState.panes = { activePaneId: 'p-1', activeTabId: 'tb-1', paneTree: PANE_TREE };
+    mockState.canvas = { focusedId: null };
+  };
+
+  /**
+   * Canvas Mode on screen. Note what the pane state looks like: virtual tabs are never seeded
+   * into `treesByTabId`, so `paneTree` and `activePaneId` are BOTH null — the old walk had
+   * nothing to find, which is why paste silently did nothing.
+   */
+  const onCanvas = (focusedId: string | null) => {
+    mockState.tabs = {
+      activeTabId: 'tb-canvas',
+      tabs: [{ id: 'tb-1', isActive: false }, { id: 'tb-canvas', isActive: true, shellType: 'canvas' }],
+    };
+    mockState.panes = { activePaneId: null, activeTabId: 'tb-canvas', paneTree: null };
+    mockState.canvas = { focusedId };
+  };
+
+  beforeEach(() => {
+    (pasteToTerminal as jest.Mock).mockClear();
+    writeToTerminal.mockClear();
+    onPane();
+  });
+
+  it('pastes into the focused pane in an ordinary tab', () => {
+    inputHandler.handlePasteText('hello');
+    expect(pasteToTerminal).toHaveBeenCalledWith('tm-pane', 'hello');
+  });
+
+  it('pastes into the FOCUSED CANVAS NODE while Canvas Mode is on screen', () => {
+    onCanvas('tm-canvas');
+    inputHandler.handlePasteText('hello');
+    expect(pasteToTerminal).toHaveBeenCalledWith('tm-canvas', 'hello');
+  });
+
+  it('pastes nowhere when the canvas is up with no node focused', () => {
+    onCanvas(null);
+    inputHandler.handlePasteText('hello');
+    expect(pasteToTerminal).not.toHaveBeenCalled();
+    expect(writeToTerminal).not.toHaveBeenCalled();
+  });
+
+  it('still honours an explicitly supplied target id', () => {
+    // The drop/API path passes the terminal directly and must not be re-resolved.
+    onCanvas('tm-canvas');
+    inputHandler.handlePasteText('hello', 'tm-explicit');
+    expect(pasteToTerminal).toHaveBeenCalledWith('tm-explicit', 'hello');
+  });
+
+  it('falls back to a raw PTY write when the terminal is not mounted', () => {
+    (pasteToTerminal as jest.Mock).mockReturnValueOnce(false);
+    onCanvas('tm-canvas');
+    inputHandler.handlePasteText('hello');
+    expect(writeToTerminal).toHaveBeenCalledWith('tm-canvas', 'hello');
+  });
+
+  it('clears the focused canvas node, not the background pane', () => {
+    // Clear-terminal carried its own copy of the same walk, so it needs its own pin: the two
+    // call sites can drift apart again.
+    onCanvas('tm-canvas');
+    pressShortcut('X', { ctrlKey: true, shiftKey: true });
+    expect(writeToTerminal).toHaveBeenCalledWith('tm-canvas', '\x0c');
+  });
+
+  it('clears the focused pane in an ordinary tab', () => {
+    pressShortcut('X', { ctrlKey: true, shiftKey: true });
+    expect(writeToTerminal).toHaveBeenCalledWith('tm-pane', '\x0c');
   });
 });

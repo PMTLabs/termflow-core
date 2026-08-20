@@ -141,6 +141,7 @@ describe('NodeTerminal chrome (overlay only)', () => {
     suggest: { open: false, items: [], selectedIndex: 0, focused: false, anchor: null },
     scrollToBottom: jest.fn(),
     pickSuggestion: jest.fn(),
+    openContextMenu: jest.fn(),
   };
   const owner = {};
 
@@ -207,5 +208,69 @@ describe('NodeTerminal chrome (overlay only)', () => {
     const host = container.querySelector<HTMLElement>('.terminal-display')!;
     expect(host.children).toHaveLength(0);
     expect(__getSurfaceHostForTest('tm-c')).toBe(host);
+  });
+
+  /**
+   * `plan/021` R2 — the TEXT context menu.
+   *
+   * Unlike the popup and the button, this one is a TRIGGER rather than a rendered thing: the
+   * menu is portaled to `document.body` by `TerminalDisplay`, so all that has to cross is the
+   * right-click. What can go wrong is that it never crosses (the node's own menu opens
+   * instead) or that BOTH open.
+   */
+  describe('context menu trigger', () => {
+    const rightClick = (el: Element) => {
+      const ev = new MouseEvent('contextmenu', {
+        bubbles: true, cancelable: true, clientX: 120, clientY: 340,
+      });
+      act(() => { el.dispatchEvent(ev); });
+      return ev;
+    };
+
+    it('hands a right-click on the overlaid terminal to the pane\'s menu', () => {
+      const openContextMenu = jest.fn();
+      setSurfaceChrome('tm-c', owner, { ...CHROME, openContextMenu });
+      renderNode(true);
+      const ev = rightClick(container.querySelector('.terminal-display')!);
+      // Viewport coordinates, straight through: `ContextMenu` is `position: fixed`.
+      expect(openContextMenu).toHaveBeenCalledWith(120, 340);
+      expect(ev.defaultPrevented).toBe(true);
+    });
+
+    it('stops the event so the NODE menu does not open behind it', () => {
+      // The node binds its own `onContextMenu` on `.canvas-node`, an ancestor of this host.
+      // Without `stopPropagation` a right-click on a glyph opens two menus at once.
+      const onNodeMenu = jest.fn();
+      const openContextMenu = jest.fn();
+      setSurfaceChrome('tm-c', owner, { ...CHROME, openContextMenu });
+      act(() => {
+        root.render(
+          <div onContextMenu={onNodeMenu}>
+            <NodeTerminal terminalId="tm-c" focused overlaid />
+          </div>,
+        );
+      });
+      rightClick(container.querySelector('.terminal-display')!);
+      expect(openContextMenu).toHaveBeenCalledTimes(1);
+      expect(onNodeMenu).not.toHaveBeenCalled();
+    });
+
+    it('leaves an ordinary node\'s right-click alone', () => {
+      // Paired negative. An ordinary node renders below 1:1 and never publishes chrome, so the
+      // node's own menu — arrange, close, overlay — is the correct one there.
+      const onNodeMenu = jest.fn();
+      const openContextMenu = jest.fn();
+      setSurfaceChrome('tm-c', owner, { ...CHROME, openContextMenu });
+      act(() => {
+        root.render(
+          <div onContextMenu={onNodeMenu}>
+            <NodeTerminal terminalId="tm-c" focused overlaid={false} />
+          </div>,
+        );
+      });
+      rightClick(container.querySelector('.terminal-display')!);
+      expect(openContextMenu).not.toHaveBeenCalled();
+      expect(onNodeMenu).toHaveBeenCalledTimes(1);
+    });
   });
 });
