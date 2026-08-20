@@ -810,6 +810,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           paneId={paneId}
           paneName={name || 'Terminal'}
           terminalId={terminalId}
+          // The tab this pane lives in NOW — resolved from the tree rather than
+          // inferred from the leaf, which stopped implying it in design 014.
+          owningTabId={
+            terminalId
+              ? findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || undefined
+              : undefined
+          }
           processId={processId}
           onClose={handleCloseContextMenu}
         />

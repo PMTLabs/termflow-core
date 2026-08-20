@@ -19,6 +19,11 @@ interface PaneContextMenuProps {
   paneId: string;
   paneName: string;
   terminalId?: string;
+  /** The tab this pane CURRENTLY lives in (`tb-`). Shown as its own labelled
+   *  row because it is a separate identity from `terminalId` — before design
+   *  014 the two were the same string for a tab's root pane, which is what made
+   *  a field labelled "Terminal ID" display a `tb-` value. */
+  owningTabId?: string;
   processId?: string;
   onClose: () => void;
 }
@@ -29,6 +34,7 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   paneId,
   paneName,
   terminalId,
+  owningTabId,
   processId,
   onClose,
 }) => {
@@ -144,7 +150,13 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   };
 
   const handleCopyInfo = () => {
-    const info = `Pane: ${paneName}\nPane ID: ${paneId}${terminalId ? `\nTerminal ID: ${terminalId}` : ''}${processId ? `\nProcess ID: ${processId}` : ''}`;
+    const info = [
+      `Pane: ${paneName}`,
+      `Pane ID: ${paneId}`,
+      terminalId && `Terminal ID: ${terminalId}`,
+      owningTabId && `Owning Tab ID: ${owningTabId}`,
+      processId && `Process ID: ${processId}`,
+    ].filter(Boolean).join('\n');
     navigator.clipboard.writeText(info).then(() => {
       console.log('Pane info copied to clipboard');
       onClose();
@@ -171,6 +183,7 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       <div className="context-menu-info">
         <CopyableInfoRow label="Pane ID:" value={paneId} />
         {terminalId && <CopyableInfoRow label="Terminal ID:" value={terminalId} />}
+        {owningTabId && <CopyableInfoRow label="Owning Tab ID:" value={owningTabId} />}
         {processId && <CopyableInfoRow label="Process ID:" value={processId} />}
       </div>
       <div className="context-menu-divider" />
