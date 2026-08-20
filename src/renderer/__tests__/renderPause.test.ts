@@ -112,8 +112,13 @@ describe('layer 3 — a hidden canvas NODE pauses its terminal', () => {
   });
 
   it('still never uses display to hide a node', () => {
-    // Matches the STYLE object only; the file's prose explains why display:none is banned.
-    expect(src).not.toMatch(/display:\s*hidden\s*\?/);
+    // Scoped to the STYLE OBJECT, not the file: the prose above it explains at length why
+    // display:none is banned, and matching the whole file would fire on that explanation.
+    const style = src.slice(src.indexOf('style={{'), src.indexOf('onPointerDown'));
+    // Both spellings. An earlier version only matched the `hidden ?` ternary, which let a
+    // plain `display: 'none'` through — the form someone is most likely to reach for.
+    expect(style).not.toMatch(/display:\s*hidden\s*\?/);
+    expect(style).not.toMatch(/display:\s*['"]none['"]/);
   });
 });
 
@@ -135,9 +140,14 @@ describe('layer 4 — a pane hidden by MAXIMIZE pauses its terminal', () => {
     expect(style).toMatch(/height:\s*'100%'/);
   });
 
-  it('reads the style object it claims to read', () => {
+  // Not a test of SplitPane — a test of the slice above it. If `hiddenStyle` is renamed the
+  // slice silently becomes empty and every assertion on it passes vacuously, so this is the
+  // guard that turns that into a failure instead.
+  it('the slice it asserts on is non-empty and really is hiddenStyle', () => {
+    const style = src.slice(src.indexOf('const hiddenStyle'), src.indexOf('const pane1Style'));
     expect(src.indexOf('const hiddenStyle')).toBeGreaterThan(-1);
-    expect(src.indexOf('const pane1Style')).toBeGreaterThan(src.indexOf('const hiddenStyle'));
+    expect(style.length).toBeGreaterThan(0);
+    expect(style).toContain('position');
   });
 });
 

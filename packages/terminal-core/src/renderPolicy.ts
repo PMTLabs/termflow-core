@@ -371,8 +371,15 @@ export function getCanvasWebGLBudget(): number | null {
  * exceeds the budget and the reconciler never has to chase a context it did not
  * approve.
  *
- * `true` whenever no budget is armed, which is every ordinary launch — arming is
- * what changes behaviour, so nothing outside a canvas session is affected.
+ * TWO ceilings, and they are not the same thing. The canvas budget is a policy this app
+ * chooses and arms only for a canvas session; `MAX_WEBGL_PER_RENDERER` is the browser's
+ * own limit and applies always, canvas or not.
+ *
+ * This used to read "`true` whenever no budget is armed, which is every ordinary launch"
+ * — and that was the defect, not a description of one: on an ordinary launch nothing
+ * bounded context creation at all, so a window with enough tabs walked past the browser's
+ * cap and had its OLDEST terminal's context force-lost, silently. Corrected here so the
+ * doc cannot be read as licence to skip the unconditional check below.
  */
 export function webglAllowedAtCreation(): boolean {
   // The renderer ceiling is checked FIRST and unconditionally, including on an ordinary
