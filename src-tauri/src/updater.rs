@@ -88,7 +88,17 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // terminal is in-process / the sidecar can't survive, refuse now.
     log::info!("[UPDATE] update_and_restart: running survivability preflight");
     crate::commands::hotswap_preflight(state)?;
-    crate::commands::sibling_instance_preflight()?;
+    // Siblings are CHECKED here but not armed until after the download. Velopack
+    // kills every process under the install root, so a sibling loses its GUI to
+    // our apply — but its pty-host lives outside that root and survives, so its
+    // shells only die if it never armed. Refusing outright (the old behaviour)
+    // was a coordination gap, not a safety floor (design 014 §B1).
+    let own = crate::profile::current().key();
+    let siblings = crate::net_ports::live_siblings_now(&own);
+    if let Some(reason) = crate::sibling_coord::describe_unarmable(&siblings) {
+        log::warn!("[UPDATE] refused: {reason}");
+        return Err(reason);
+    }
 
     // Check + download off the async runtime.
     let info = tokio::task::spawn_blocking(check_and_download)
@@ -103,12 +113,37 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         info.TargetFullRelease.Version
     );
 
-    // Arm the host so shells survive, and wait for the ack BEFORE applying.
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    // Arm the SIBLINGS first, then ourselves.
+    //
+    // Deliberately AFTER the download: a failed or unavailable download must
+    // never leave a stranger armed. `arm_siblings` is itself all-or-nothing and
+    // rolls back what it armed, so reaching the next line means every sibling is
+    // prepared (design 014 §B3).
+    let armed_siblings =
+        crate::sibling_coord::arm_siblings(&siblings, crate::sibling_coord::http_call).await?;
+    if !armed_siblings.is_empty() {
+        log::info!("[UPDATE] armed {} sibling(s): {armed_siblings:?}", armed_siblings.len());
+    }
+
+    // Arm our own host so shells survive, and wait for the ack BEFORE applying.
+    let client = match state.pty_host_clone() {
+        Some(c) => c,
+        None => {
+            // We armed strangers for an update that cannot now proceed. Put them
+            // back before returning, or each holds a 600s window it never asked for.
+            let _ = crate::sibling_coord::disarm_siblings(
+                &siblings, &armed_siblings, &crate::sibling_coord::http_call,
+            ).await;
+            return Err("pty-host not connected — nothing to keep alive".to_string());
+        }
+    };
     let token = crate::pty_host_client::resolve_token();
-    client.arm_detach(600, &token).await?;
+    if let Err(e) = client.arm_detach(600, &token).await {
+        let _ = crate::sibling_coord::disarm_siblings(
+            &siblings, &armed_siblings, &crate::sibling_coord::http_call,
+        ).await;
+        return Err(e);
+    }
 
     // Launch the updater (it waits for our exit), then quit gracefully so Tauri
     // flushes tab/session state the relaunched app reattaches by `tab_id`. If the
@@ -122,6 +157,12 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     {
         log::warn!("[UPDATE] updater failed to launch after arming ({e}); disarming");
         client.disarm().await;
+        // Same obligation for the siblings we armed. Disarming ourselves and
+        // leaving them armed would be the asymmetry this rollback exists to
+        // avoid — they armed for OUR update, and it is not happening.
+        let _ = crate::sibling_coord::disarm_siblings(
+            &siblings, &armed_siblings, &crate::sibling_coord::http_call,
+        ).await;
         return Err(e);
     }
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");

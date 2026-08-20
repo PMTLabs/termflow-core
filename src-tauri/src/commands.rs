@@ -682,23 +682,6 @@ fn host_fallback(
 /// alive, WITHOUT performing it. `Ok(())` ⇒ the offload would proceed; `Err`
 /// carries the reason it would be refused. Used by the Settings preflight so the
 /// UI only warns when the action is actually blocked.
-/// Refuse an update/restart while another TermFlow instance is running.
-///
-/// The Velopack apply kills every process under the install root, not just the
-/// one asking — and a sibling has NOT armed its pty-host, so its shells die with
-/// it. `hotswap_preflight` only guarantees THIS instance's terminals survive.
-pub fn sibling_instance_preflight() -> Result<(), String> {
-    let own = crate::profile::current().key();
-    let siblings = crate::net_ports::live_siblings_now(&own);
-    match crate::net_ports::describe_sibling_block(&siblings) {
-        Some(msg) => {
-            log::warn!("[UPDATE] refused: {msg}");
-            Err(msg)
-        }
-        None => Ok(()),
-    }
-}
-
 /// Could **Offload & Close** run right now, keeping every terminal alive?
 ///
 /// This instance's terminals ONLY. A sibling profile is deliberately not
@@ -2933,11 +2916,16 @@ mod preflight_wiring_tests {
     #[test]
     fn offload_does_not_consult_siblings() {
         let body = fn_body(&source(), "pub async fn restart_for_update");
-        assert!(
-            !body.contains("sibling_instance_preflight"),
-            "Offload & Close must not run the sibling check — it performs no payload swap \
-             and cannot reach another instance (design 014 §B1.2). Body:\n{body}"
-        );
+        // Named against the LIVE sibling APIs, not the removed
+        // `sibling_instance_preflight`: a guard that watches for a function
+        // nobody can call any more is trivially true and guards nothing.
+        for api in ["live_siblings_now", "describe_unarmable", "arm_siblings", "update_preflight"] {
+            assert!(
+                !body.contains(api),
+                "Offload & Close must not consult siblings (`{api}` found) — it performs no \
+                 payload swap and cannot reach another instance (design 014 §B1.2). Body:\n{body}"
+            );
+        }
         assert!(
             body.contains("offload_preflight"),
             "Offload must still guard THIS instance's terminals. Body:\n{body}"

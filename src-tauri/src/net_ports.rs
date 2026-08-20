@@ -225,28 +225,6 @@ pub fn live_siblings_now(own_key: &str) -> Vec<InstanceRecord> {
     })
 }
 
-/// Why an update must not proceed right now, or `None` if it may.
-///
-/// Velopack's `Update.exe apply --root …` kills EVERY process running from under
-/// the install root before swapping the payload — not just the one that asked
-/// for the update. A sibling instance has not armed its pty-host, so its shells
-/// die with it and its unsaved scrollback goes with them. Refusing is the only
-/// safe answer; the user closes the others and retries.
-pub fn describe_sibling_block(siblings: &[InstanceRecord]) -> Option<String> {
-    if siblings.is_empty() {
-        return None;
-    }
-    let mut names: Vec<String> = siblings
-        .iter()
-        .map(|s| format!("{} (pid {})", s.profile, s.pid))
-        .collect();
-    names.sort();
-    Some(format!(
-        "Another TermFlow instance is running: {}. Updating would close it and lose its \
-         terminals. Close it and try again.",
-        names.join(", ")
-    ))
-}
 
 /// Create a file only this user — and, when elevated, only a process at the same
 /// integrity level — can read.
@@ -459,22 +437,6 @@ mod tests {
         assert_ne!(record_file_name("rel.work"), record_file_name("rel.work.high"));
     }
 
-    #[test]
-    fn an_update_is_blocked_only_while_a_sibling_is_live() {
-        assert_eq!(describe_sibling_block(&[]), None);
-        let rec = |profile: &str, pid| InstanceRecord {
-            profile: profile.into(),
-            pid,
-            api_port: None,
-            mcp_port: None,
-            token: None,
-        };
-        let msg = describe_sibling_block(&[rec("rel.work", 41), rec("rel.elevated.high", 9)])
-            .expect("a live sibling must block");
-        // Name them: "an instance is running" with no name leaves the user hunting.
-        assert!(msg.contains("rel.work (pid 41)"), "got: {msg}");
-        assert!(msg.contains("rel.elevated.high (pid 9)"), "got: {msg}");
-    }
 
     #[test]
     fn a_restricted_record_round_trips_through_the_filesystem() {
