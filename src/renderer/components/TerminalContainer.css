@@ -15,12 +15,27 @@
   visibility: hidden;
   pointer-events: none;
   opacity: 0;
+  /* THE RENDER PAUSE, and it is not interchangeable with the three above.
+     xterm's RenderService observes its screen element with an IntersectionObserver and
+     sets `_isPaused` when it stops intersecting — but a `visibility: hidden` element
+     still INTERSECTS, and so does an `opacity: 0` one. Measured: a background tab on
+     `visibility: hidden` rendered every byte it received, at exactly the rate the visible
+     tab did (79 renders / 8s, both). `content-visibility: hidden` is what actually makes
+     the subtree non-intersecting, and it took total renderer CPU from 6.61s to 3.00s per
+     20s with twelve background terminals streaming.
+     NOT `display: none`, which would also pause: that collapses the host to 0x0, and
+     `FitAddon.proposeDimensions()` then resolves to a bogus {cols:12, rows:6} rather than
+     failing (design/010). `content-visibility` preserves the layout box — verified against
+     a percentage-sized host — so every geometry path keeps measuring what it measures now.
+     Parsing is unaffected; only painting defers, and re-showing costs one full refresh. */
+  content-visibility: hidden;
 }
 
 .tab-content.active {
   visibility: visible;
   pointer-events: auto;
   opacity: 1;
+  content-visibility: visible;
 }
 
 .terminal-container.empty {

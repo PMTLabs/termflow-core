@@ -57,8 +57,16 @@ export {
   getQuarantinedWebGLAddonCount,
   hasLayoutBox,
   fitIfLaidOut,
+  // Cross-window WebGL ceiling (see webglLedger). The app names this window once at
+  // startup; without that call the ledger stays inert and the budget is per-realm, which
+  // is the behaviour that let two windows overrun the browser's shared context limit.
+  initWebGLLedger,
 } from './renderPolicy';
 export type { RenderPolicy } from './renderPolicy';
+export {
+  GLOBAL_WEBGL_CEILING,
+  otherWindowsUsage,
+} from './webglLedger';
 export {
   reconcileRenderPolicies,
   snapshotRenderPolicies,

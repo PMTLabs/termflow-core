@@ -88,6 +88,14 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
     position: 'absolute',
     visibility: 'hidden',
     pointerEvents: 'none',
+    // The sibling stays at 100%x100% and absolutely positioned, so it is still ON SCREEN
+    // as far as the viewport is concerned — and `visibility: hidden` does not stop an
+    // element intersecting. Without this, xterm's RenderService never pauses and the
+    // hidden sibling repaints every byte it receives for as long as a pane stays
+    // maximized, which is precisely the "PTY keeps running underneath" case above.
+    // `content-visibility` keeps the 100%x100% box, so FitAddon still measures what it
+    // measured before and the sibling comes back at the right size.
+    contentVisibility: 'hidden',
     width: '100%',
     height: '100%',
   };

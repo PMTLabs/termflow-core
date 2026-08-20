@@ -1,6 +1,7 @@
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
+pub mod webview_power;
 pub mod session_notify;
 pub mod app_config;
 pub mod profile;
@@ -1620,6 +1621,10 @@ pub fn run() {
         // so it no longer lists it.
         if let WindowEvent::Destroyed = event {
             let app = window.app_handle();
+            // Outside the AppState block on purpose: this cache is a plain module-level
+            // call filter, and a label reused by a later window must not inherit this
+            // one's "already hidden" and skip its first real put_IsVisible.
+            crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
                 state.window_titles.remove(window.label());
                 // Plan 018: a closed window must not be recreated at the next
@@ -1680,6 +1685,24 @@ pub fn run() {
             commands::refresh_menu(window.app_handle());
             if let Some(state) = window.app_handle().try_state::<AppState>() {
                 state.windows.note_focus(window.label());
+            }
+        }
+
+        // Hand WebView2 the "not on screen" signal while minimized, which it does not work
+        // out for itself the way a standalone Chromium window does (see `webview_power`).
+        //
+        // Tauri exposes no Minimized event, so this listens to every event that can mean
+        // the minimized state just changed and asks the window itself. Deliberately MORE
+        // triggers than strictly needed: a missed hide costs some CPU, a missed restore
+        // shows a blank window, so the restore path must not depend on one event arriving.
+        // `webview_power::sync` filters repeats, which matters because Moved/Resized fire
+        // per frame during a drag.
+        if matches!(
+            event,
+            WindowEvent::Focused(_) | WindowEvent::Moved(_) | WindowEvent::Resized(_)
+        ) {
+            if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+                crate::webview_power::sync(&w);
             }
         }
         // Plan 018: track geometry so windows come back where they were. Both
