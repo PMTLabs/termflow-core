@@ -139,7 +139,7 @@ export interface ElectronAPI {
   getActiveProcesses?: () => Promise<ActiveProcess[]>;
 
   // Terminal management
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
   /**
    * Windows: make the calling window the owner of this shell's ConPTY
    * pseudo-console window, so console-app dialogs parented to
@@ -272,6 +272,12 @@ export interface ElectronAPI {
   /** Preflight: resolves if an offload would keep all terminals alive, rejects
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;
+  /** Move persisted scrollback between renderer leaves (design 014 migration). */
+  renameTerminalHistory?: (from: string, to: string) => Promise<void>;
+  /** Preflight for a Velopack update: ours PLUS every sibling, because the
+   *  apply kills every process under the install root. Separate from
+   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4). */
+  updateAvailable?: () => Promise<void>;
   /** Check for a Velopack update. `unavailable` = no updater in this build. */
   checkForUpdates?: () => Promise<UpdateStatus>;
   /** Download + arm + apply a Velopack update, keeping terminals alive. */

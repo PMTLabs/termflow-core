@@ -859,11 +859,12 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     // A split-pane terminal's exit is surfaced inline by the "[Process exited]"
     // banner the TerminalDisplay listener writes; here we decide the tab-level
-    // affordance. A RENDERER-created tab's root pane carries terminalId === tabId,
-    // so that case resolves directly; every other pane — a split, or the root of an
-    // API-created tab, which carries a `tm-` leaf like any other pane (design 011,
-    // option A) — is resolved via its tree by findTabIdByTerminalId. The direct
-    // check is a fast path, never the only one.
+    // affordance. Every pane — root or split — is resolved via its tree by
+    // findTabIdByTerminalId. `resolveExitedTabId` still carries a `tabIds.includes`
+    // fast path for the era when a renderer-created root's leaf WAS its tab id;
+    // design 014 makes that unreachable, and it is kept only because several of
+    // its tests drive it with an empty tree map (harmless — it can return a wrong
+    // tab only if a terminal id and a tab id collide, which they no longer can).
     // Either way, the tab only counts as exited once EVERY terminal in its tree
     // has no live process — a lone sibling exiting leaves a multi-pane tab
     // running, but the LAST pane to exit (root or not) must still trigger the
@@ -1119,13 +1120,12 @@ const App: React.FC = () => {
         const terminalService = (window as any).terminalService;
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
 
-        // For pane terminals, wait longer as they need to be created
-        let isPaneTerminal = false;
-        let maxRetries = 5;
-        if (newestTerminalId) {
-          isPaneTerminal = (newestTerminalId as string).startsWith('tm-') || (newestTerminalId as string).startsWith('pane-terminal-');
-          maxRetries = isPaneTerminal ? 20 : 5; // 2 seconds for pane terminals, 500ms for others
-        }
+        // 2 seconds. This used to be 20 retries for a `tm-`/`pane-terminal-` leaf
+        // and 5 for anything else, on the theory that only a split pane had to be
+        // spawned before its process existed. Design 014 mints a `tm-` leaf for
+        // EVERY pane, so the short budget became unreachable — every terminal is
+        // now spawned by the pane that carries it.
+        const maxRetries = 20;
         const retryDelay = 100;
 
         if (!processId && newestTerminalId) {
@@ -1524,13 +1524,12 @@ const App: React.FC = () => {
         // Try to get process ID (wait longer for pane terminals)
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
 
-        // For pane terminals, wait longer as they need to be created
-        let isPaneTerminal = false;
-        let maxRetries = 5;
-        if (newestTerminalId) {
-          isPaneTerminal = (newestTerminalId as string).startsWith('tm-') || (newestTerminalId as string).startsWith('pane-terminal-');
-          maxRetries = isPaneTerminal ? 20 : 5; // 2 seconds for pane terminals, 500ms for others
-        }
+        // 2 seconds. This used to be 20 retries for a `tm-`/`pane-terminal-` leaf
+        // and 5 for anything else, on the theory that only a split pane had to be
+        // spawned before its process existed. Design 014 mints a `tm-` leaf for
+        // EVERY pane, so the short budget became unreachable — every terminal is
+        // now spawned by the pane that carries it.
+        const maxRetries = 20;
         const retryDelay = 100;
 
         if (!processId && newestTerminalId) {

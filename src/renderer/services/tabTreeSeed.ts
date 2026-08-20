@@ -123,7 +123,13 @@ function candidateFor(
   return {
     id: generateId('pn'),
     type: 'terminal' as const,
-    terminalId: tab.id,
+    // A fresh `tm-` leaf, NOT `tab.id` (design 014 §A1). Before 014 a tab's root
+    // pane carried the tab's own id, which is why a field labelled "Terminal ID"
+    // displayed a `tb-` and an agent in a two-pane tab could not say which
+    // terminal it meant. `seededForTabId` below carries the ownership that equality
+    // used to imply.
+    terminalId: generateId('tm'),
+    seededForTabId: tab.id,
     name: tab.title || 'Terminal',
     shellType: tab.shellType,
   };
@@ -139,7 +145,29 @@ function candidateFor(
  * on every machine.
  */
 function claimsItsOwnId(tab: SeedTab, tabPanes: Record<string, PaneNode | null | undefined>): boolean {
-  return getAllTerminalIds(candidateFor(tab, tabPanes)).includes(tab.id);
+  const candidate = candidateFor(tab, tabPanes);
+  // Post-014: ownership is recorded explicitly, because a root leaf no longer
+  // carries its tab's id. Checked FIRST so a migrated tree is judged by the fact
+  // rather than by the equality it no longer satisfies.
+  if (declaresOwner(candidate, tab.id)) return true;
+  // Pre-014 trees restored from disk: the root leaf IS the tab id. Keeping this
+  // fallback is what stops the repair regressing to `tabs` order for anyone
+  // upgrading with existing saved state.
+  return getAllTerminalIds(candidate).includes(tab.id);
+}
+
+/** Does any pane in `node` declare `tabId` as the tab it was seeded for? */
+function declaresOwner(node: PaneNode | null, tabId: string): boolean {
+  if (!node) return false;
+  if (node.seededForTabId === tabId) return true;
+  return (node.children ?? []).some((child) => declaresOwner(child, tabId));
+}
+
+/** Collect every `seededForTabId` recorded anywhere in `node` into `out`. */
+function collectSeededFor(node: PaneNode | null, out: Set<string>): void {
+  if (!node) return;
+  if (node.seededForTabId) out.add(node.seededForTabId);
+  (node.children ?? []).forEach((child) => collectSeededFor(child, out));
 }
 
 /**
@@ -173,6 +201,30 @@ export function planSeeds(
     for (const terminalId of getAllTerminalIds(tree)) taken.add(terminalId);
   }
 
+  // Tabs some OTHER tab's pane was seeded for. A pending tab has no key, so any
+  // match here can only be a pane that moved away — which proves the tab was
+  // initialised once and then emptied, not that it is new.
+  //
+  // Built from the STORED MIRROR as well as the installed trees, and deliberately
+  // before any ordering decision — this must not depend on which tab the loop
+  // reaches first.
+  //
+  // It used to read `trees` alone, which made Rule 3's post-014 signal inert on the
+  // exact path it exists for. A cold restore arrives with `trees` empty, so the set
+  // was empty; and accumulating it inside the loop does not rescue that, because
+  // `claimsItsOwnId` calls `candidateFor`, which MANUFACTURES a candidate for an
+  // uninitialised tab — and a manufactured candidate always declares itself its own
+  // owner. So an emptied tab sorts to the FRONT, ahead of the tab whose tree carries
+  // the evidence that it was emptied, and is judged before that evidence is read.
+  //
+  // `tabPanes` already holds that evidence at call time, so reading it up front is
+  // both order-independent and one pass. A pane in its OWN tab's mirror adds that tab
+  // here harmlessly: Rule 3 only consults this set when `tabPanes[tab.id]` is
+  // `undefined`, which cannot be true for a tab whose mirror we just read.
+  const seededElsewhere = new Set<string>();
+  for (const tree of Object.values(trees)) collectSeededFor(tree, seededElsewhere);
+  for (const tree of Object.values(tabPanes)) collectSeededFor(tree ?? null, seededElsewhere);
+
   // Natural owners first; `sort` is stable, so everything else keeps `tabs` order.
   const ordered = [...pending].sort(
     (a, b) => Number(claimsItsOwnId(b, tabPanes)) - Number(claimsItsOwnId(a, tabPanes)),
@@ -185,6 +237,26 @@ export function planSeeds(
   // including the ones claimed earlier in THIS batch — and against itself.
   const out: SeedPlan[] = [];
   for (const tab of ordered) {
+    // Rule 3 — never MANUFACTURE a terminal for a tab that was emptied.
+    //
+    // Before design 014 this was enforced by accident: the manufactured leaf was
+    // `tab.id`, which is the very id the departing terminal carried, so Rule 2
+    // pruned it. Once a root leaf is a fresh `tm-` there is no collision left to
+    // catch it, and an emptied tab would silently come back holding a brand-new
+    // shell — the resurrection bug again, by a different route.
+    //
+    // Two signals, one per era, because restored state can be either shape:
+    //   - `taken.has(tab.id)`  — legacy: the tab's own id is still a live leaf
+    //                            somewhere, so it moved away.
+    //   - `seededElsewhere`    — post-014: a pane elsewhere names this tab as the
+    //                            one it was seeded for.
+    // Only applies to the manufacture branch; a stored mirror is an answer and is
+    // handled by Rule 2 below.
+    if (tabPanes[tab.id] === undefined && (taken.has(tab.id) || seededElsewhere.has(tab.id))) {
+      out.push({ tabId: tab.id, tree: null });
+      continue;
+    }
+
     const candidate = candidateFor(tab, tabPanes);
     // Stored as explicitly empty. Install the key so Rule 1 protects it from here on.
     if (candidate === null) {
@@ -202,6 +274,9 @@ export function planSeeds(
     // Everything it named was already spoken for. The tab is open and empty, and saying so
     // explicitly is what stops the next render manufacturing a fresh terminal for it.
     for (const terminalId of getAllTerminalIds(tree)) taken.add(terminalId);
+    // BOTH sets, or Rule 3 sees only the tabs that were already installed before
+    // this batch began — which on a cold restore is none of them.
+    collectSeededFor(tree, seededElsewhere);
     out.push({ tabId: tab.id, tree });
   }
   return out;

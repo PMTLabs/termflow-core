@@ -69,7 +69,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab',
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined,
     );
   });
 
@@ -78,8 +78,33 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
   it('omits the owner when the caller does not know one', async () => {
     await terminalService.createTerminal('tb-solo-1');
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined,
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined,
     );
+  });
+
+  // Design 014 §A2.1, and the same trap 011 §6 named for `owningTabId`: the
+  // session key must reach the backend AT SPAWN. A pane migrated from a pre-014
+  // build has a fresh `tm-` leaf but its armed host session is still keyed by
+  // the old `tb-` id, so dropping this argument orphans that session — silently,
+  // because a fresh spawn looks exactly like a successful one.
+  it('forwards a migrated session key to the bridge', async () => {
+    await terminalService.createTerminal(
+      'tm-migrated-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab', 'tb-legacy01',
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01',
+    );
+  });
+
+  // Every pane created on this build: the host key follows the leaf, so there is
+  // nothing legacy to carry and the argument must stay absent rather than being
+  // defaulted to the leaf (which would make a real migration indistinguishable).
+  it('omits the session key for a pane created on this build', async () => {
+    await terminalService.createTerminal(
+      'tm-fresh-leaf', 'default', undefined, undefined, undefined, undefined, 'tb-owner-tab',
+    );
+    const call = createTerminal.mock.calls[0];
+    expect(call[7]).toBeUndefined();
   });
 });
 

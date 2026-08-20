@@ -147,7 +147,17 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     expect(el?.getAttribute('data-terminal-id')).not.toBe(tabId);
   });
 
-  it('contrast case: a plain renderer-created tab with no pre-seeded tree still defaults terminalId to tab.id', async () => {
+  // AMENDED by design 014 — the contrast this case existed to draw is GONE, and
+  // removing it is the point of the change.
+  //
+  // It used to assert that a renderer-created tab defaults its root leaf to
+  // `tab.id` while an API-created one carries a `tm-`. That split is precisely
+  // what made "Terminal ID" show a `tb-` for some panes and a `tm-` for others,
+  // and left an MCP caller holding a `tb-` unable to say which terminal in a
+  // two-pane tab it meant. Both paths now mint a `tm-`; the case is kept, with
+  // its assertion inverted, so the unification stays pinned rather than being
+  // silently dropped along with the test.
+  it('a plain renderer-created tab also mints a tm- leaf, never the tab id', async () => {
     const store = makeStore();
     const tabId = 'tb-rendertab1';
 
@@ -160,7 +170,9 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
 
     const el = container.querySelector(`[data-testid="pane-manager-${tabId}"]`);
     expect(el).not.toBeNull();
-    expect(el?.getAttribute('data-terminal-id')).toBe(tabId);
+    const leaf = el?.getAttribute('data-terminal-id');
+    expect(leaf).toMatch(/^tm-/);
+    expect(leaf).not.toBe(tabId);
   });
 });
 

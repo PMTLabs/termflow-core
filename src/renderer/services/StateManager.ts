@@ -242,7 +242,20 @@ class StateManagerClass {
       }
 
       const rawState = JSON.parse(savedState);
-      const appState: AppState = this.sanitizeLayoutData(rawState);
+      // Leaf renames performed by sanitisation — chiefly the design-014
+      // migration of a pre-014 `tb-` root leaf to a minted `tm-`.
+      const leafRenames = new Map<string, string>();
+      const appState: AppState = this.sanitizeLayoutData(rawState, leafRenames);
+      // Move the persisted scrollback to follow the renamed leaves, BEFORE any
+      // tab, pane or reattach exists. `terminal_history` is keyed by the leaf,
+      // so a pane whose leaf moved would otherwise come back blank — silently,
+      // because a missing row reads as "nothing saved yet", not as an error.
+      //
+      // Awaited, not fired-and-forgotten: a reattach that wins the race reads
+      // the OLD key and restores nothing. Failures are logged and swallowed —
+      // losing one pane's scrollback is bad, but aborting restore over it would
+      // leave the session unopened, which is worse.
+      await this.migrateHistoryForRenamedLeaves(leafRenames);
       console.log(`Restoring state from ${new Date(appState.timestamp).toLocaleString()}`);
       
       // Check if state is not too old (24 hours)
@@ -888,6 +901,30 @@ class StateManagerClass {
   /**
    * Helper to sanitize state and layouts to ensure they use correct prefixed IDs and avoid GUIDs.
    */
+  /**
+   * Move persisted scrollback so it follows leaves that sanitisation renamed.
+   *
+   * Sequential rather than `Promise.all`: every call takes the same SQLite
+   * mutex, so concurrency buys nothing and a burst would contend with the 30s
+   * scrollback flush holding that mutex over multi-MB blobs.
+   *
+   * Never throws. A row that will not move costs one pane its restored
+   * scrollback; letting that abort `restoreState` would cost the whole session.
+   */
+  private async migrateHistoryForRenamedLeaves(renames: Map<string, string>): Promise<void> {
+    if (renames.size === 0) return;
+    const rename = window.electronAPI?.renameTerminalHistory;
+    if (!rename) return; // browser/dev bridge without the command — nothing to do
+    console.log(`StateManager: migrating scrollback for ${renames.size} renamed leaf/leaves`);
+    for (const [from, to] of renames) {
+      try {
+        await rename(from, to);
+      } catch (err) {
+        console.warn(`StateManager: could not move scrollback ${from} -> ${to}:`, err);
+      }
+    }
+  }
+
   private sanitizeLayoutData<T extends {
     tabs: any[];
     activeTabId: string | null;
@@ -896,7 +933,7 @@ class StateManagerClass {
     tabPanes?: { [tabId: string]: any };
     terminalCwds?: { [terminalId: string]: string };
     treesByTabId?: { [tabId: string]: any };
-  }>(data: T): T {
+  }>(data: T, renamesOut?: Map<string, string>): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
     const terminalIdMap = new Map<string, string>();
@@ -950,14 +987,42 @@ class StateManagerClass {
       if (newNode.type === 'terminal') {
         if (newNode.terminalId) {
           const oldTerminalId = newNode.terminalId;
-          // If it was matching the old tab ID (main terminal of that tab)
-          if (tabIdMap.has(newNode.terminalId)) {
-            newNode.terminalId = tabIdMap.get(newNode.terminalId)!;
-          } else if (newNode.terminalId === tabId) {
-            // Keep it if it matches the new tab ID
-          } else if (!newNode.terminalId.startsWith('tm-') && !newNode.terminalId.startsWith('tb-')) {
-            // Split terminal ID that is not tb- or tm-
-            newNode.terminalId = generateId('tm');
+          // DESIGN 014 MIGRATION — ONE rule: a live leaf is a `tm-`, so anything
+          // else is pre-014 and gets migrated. This was three narrower branches,
+          // and each gap was silent:
+          //   - keyed on `terminalId === tabId`, so a pre-014 root leaf DRAGGED
+          //     into another tab never matched its host tab's id and stayed a
+          //     `tb-` forever;
+          //   - a legacy (UUID) tab id was rewritten to the tab's NEW `tb-` id,
+          //     i.e. it minted a fresh `tb-` leaf — the exact id shape 014 removed;
+          //   - a non-prefixed split leaf minted without consulting
+          //     `terminalIdMap`, so the two passes below produced different ids.
+          //
+          // The old id is kept as `sessionKey`: the pty-host still knows this
+          // session by it and its protocol has NO rename verb, so moving the leaf
+          // without recording the old key orphans an armed session (design 014 §A2).
+          //
+          // Reuses an existing mapping because `sanitizeNode` runs TWICE over the
+          // same logical tree (see the guard below) and `generateId` is
+          // non-deterministic — minting twice would put a different id on each pass.
+          if (!oldTerminalId.startsWith('tm-')) {
+            newNode.terminalId = terminalIdMap.get(oldTerminalId) ?? generateId('tm');
+            if (newNode.sessionKey === undefined) newNode.sessionKey = oldTerminalId;
+            // `seededForTabId` records the ownership the id equality used to imply,
+            // which `tabTreeSeed` Rule 3 and the duplicate-leaf tiebreak depend on.
+            // Set ONLY when the old id was a TAB id, i.e. this really was a tab's
+            // root leaf. A plain split leaf never owned a tab, and claiming one for
+            // it here would hand `claimsItsOwnId` a false owner.
+            const bornAsTab =
+              tabIdMap.get(oldTerminalId) ??
+              (oldTerminalId.startsWith('tb-') || oldTerminalId.startsWith('tab-')
+                ? oldTerminalId
+                : oldTerminalId === tabId
+                  ? tabId
+                  : undefined);
+            if (newNode.seededForTabId === undefined && bornAsTab !== undefined) {
+              newNode.seededForTabId = bornAsTab;
+            }
           }
           // GUARD (blast-radius review 092 B1): `sanitizeNode` runs TWICE over
           // the same logical tree — once inside the `tabPanes` loop below
@@ -1027,6 +1092,14 @@ class StateManagerClass {
 
     if (data.treesByTabId) {
       (result as any).treesByTabId = sanitizedTreesByTabId;
+    }
+
+    // Surface the leaf renames so the caller can move the persisted scrollback
+    // rows to match (design 014 §A4). Deliberately the SAME map `remapCwds`
+    // consumes: the cwd and the history must follow a leaf together, or a
+    // migrated pane comes back with one and not the other.
+    if (renamesOut) {
+      for (const [from, to] of terminalIdMap) renamesOut.set(from, to);
     }
 
     return result;

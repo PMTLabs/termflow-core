@@ -102,6 +102,50 @@ describe('planCanvasSpawn', () => {
     expect(plan.tab.id).toMatch(/^tb-/);
   });
 
+  /**
+   * **The node id is the LEAF, and the plan has to mint it.**
+   *
+   * A canvas node is keyed by `leaf.terminalId` (`canvasSelectors.buildCanvasModel`), and
+   * `setNodeGeom` / `selectNode` / `connectWhenReady` all address nodes. Before design 014 a
+   * renderer-created tab's root leaf WAS its tab id, so `plan.tab.id` served as the node id and
+   * the spawn could run before any pane existed. Every root leaf is a minted `tm-` now, so the
+   * tab id addresses no node at all: the geometry lands under a key nothing reads (the node
+   * appears in a seeded slot instead of where the user pointed), the selection matches nothing,
+   * and `connectWhenReady` waits out its full ten seconds for a terminal id that will never
+   * register — losing the wire the port click asked for.
+   *
+   * Minting here rather than letting `tabTreeSeed` do it is what makes the leaf knowable BEFORE
+   * the tab is added, which the geometry-first ordering requires.
+   */
+  it('mints the root leaf, so the node has an id before any pane exists', () => {
+    const plan = planCanvasSpawn(profile, [], rect);
+    expect(plan.leafId).toMatch(/^tm-/);
+    expect(plan.leafId).not.toBe(plan.tab.id);
+  });
+
+  /**
+   * ...and ships the tree that carries it, so `planSeeds` finds the tab already initialised
+   * rather than manufacturing a second root under a different leaf. `seededForTabId` is what
+   * records the ownership the old id equality used to imply (design 014 §A6.0) — without it
+   * `planSeeds` Rule 3 cannot tell this tab from one whose terminal was dragged away.
+   */
+  it('ships a root pane tree that declares its owner', () => {
+    const plan = planCanvasSpawn(profile, [], rect);
+    expect(plan.tree).toMatchObject({
+      type: 'terminal',
+      terminalId: plan.leafId,
+      seededForTabId: plan.tab.id,
+    });
+    expect(plan.tree.id).toMatch(/^pn-/);
+    expect(plan.tree.name).toBe(plan.tab.title);
+    expect(plan.tree.shellType).toBe(plan.tab.shellType);
+  });
+
+  it('mints a fresh leaf every time', () => {
+    expect(planCanvasSpawn(profile, [], rect).leafId)
+      .not.toBe(planCanvasSpawn(profile, [], rect).leafId);
+  });
+
   it('keeps the title unique against the tabs already open', () => {
     expect(planCanvasSpawn(profile, [], rect).tab.title).toBe('PowerShell');
     expect(planCanvasSpawn(profile, ['PowerShell'], rect).tab.title).toBe('PowerShell 1');

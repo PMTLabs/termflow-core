@@ -45,7 +45,7 @@ interface ElectronAPI {
   getTerminalSnapshot: (terminalId: string, cols?: number, rows?: number) => Promise<TerminalSnapshot>;
   getTerminalFullScrollback: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
   /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
@@ -124,7 +124,18 @@ interface ElectronAPI {
   restartForUpdate: () => Promise<void>;
   /// Preflight for the offload/hot-swap: resolves if it would keep all terminals
   /// alive, rejects with the reason if it would currently be refused.
+  ///
+  /// THIS instance only. A sibling profile is not consulted: offload arms our own
+  /// pty-host and exits this process, so it cannot reach one (design 014 B1.2).
   hotswapAvailable: () => Promise<void>;
+  /// Move persisted scrollback from an old renderer leaf to a new one, for the
+  /// design-014 migration of pre-014 tb- root leaves (StateManager restore).
+  renameTerminalHistory: (from: string, to: string) => Promise<void>;
+  /// Preflight for a Velopack update: ours PLUS every sibling, because the apply
+  /// kills every process under the install root. Rejects naming any sibling that
+  /// cannot be prepared. Deliberately separate from hotswapAvailable — the two
+  /// verdicts differ, and sharing one made the panel disagree with the button.
+  updateAvailable: () => Promise<void>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
   /// The running app's version (from the Tauri config at build time).
@@ -293,7 +304,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -305,6 +316,10 @@ const tauriBridge: ElectronAPI = {
       // Tauri maps camelCase JS keys onto snake_case Rust parameters, so this
       // reaches `create_terminal(… owning_tab_id: Option<String>)`.
       owningTabId,
+      // The pty-host session key for a MIGRATED pane, whose host session is
+      // still keyed by its old `tb-` id. Undefined for every pane created on
+      // this build, where the host key follows the leaf (design 014 A2.1).
+      sessionKey,
     });
   },
 
@@ -598,7 +613,14 @@ const tauriBridge: ElectronAPI = {
     invalidateApiBase();
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
+  updateAvailable: async () => {
+    await invoke('update_available');
+  },
+
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
+  renameTerminalHistory: async (from: string, to: string) => {
+    await invoke('rename_terminal_history', { from, to });
+  },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
   updateAndRestart: async () => { await invoke('update_and_restart'); },
   // `@tauri-apps/api/app`'s getVersion() is exactly this invoke; calling it

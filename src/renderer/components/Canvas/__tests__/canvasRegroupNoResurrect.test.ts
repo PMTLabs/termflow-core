@@ -144,7 +144,11 @@ describe('re-homing a group\'s last terminal', () => {
     const [plan] = planSeeds([{ id: 'tb-new', title: 'New', shellType: 'powershell' }],
       s.treesByTabId, {});
     expect(plan).toBeDefined();
-    expect(plan.tree!.terminalId).toBe('tb-new');
+    // AMENDED by design 014: a manufactured root leaf is a fresh `tm-`, never the
+    // tab's own id. What still matters here is that a genuinely new tab DOES get
+    // a tree — otherwise Rule 3 above could satisfy itself by refusing always.
+    expect(plan.tree!.terminalId).toMatch(/^tm-/);
+    expect(plan.tree!.seededForTabId).toBe('tb-new');
   });
 
   // The emptied group is still a DROP TARGET (design 010 §6.3), so a terminal has to be able

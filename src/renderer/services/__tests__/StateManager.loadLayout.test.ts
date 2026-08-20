@@ -242,7 +242,12 @@ describe('StateManager.loadLayout deferred-write safety (re-review 111 finding 2
 
     const state = store.getState() as any;
     expect(state.panes.treesByTabId['tb-b'].terminalId).toBe('tm-b-leaf');
-    expect(state.panes.treesByTabId['tb-a'].terminalId).toBe('tb-a');
+    // AMENDED by design 014: tb-a's ROOT leaf is migrated to a minted `tm-`,
+    // with the old id preserved as `sessionKey`. This test is about WHICH TAB
+    // each tree lands under, so identify tb-a's tree by the preserved key
+    // instead of by an equality the migration deliberately removes.
+    expect(state.panes.treesByTabId['tb-a'].terminalId).toMatch(/^tm-/);
+    expect(state.panes.treesByTabId['tb-a'].sessionKey).toBe('tb-a');
   });
 
   it('installs an OLD-format layout tree under the saved active tab id, not through the mirror', async () => {
@@ -267,7 +272,10 @@ describe('StateManager.loadLayout deferred-write safety (re-review 111 finding 2
 
     const state = store.getState() as any;
     expect(state.panes.treesByTabId['tb-old-a']).toBeTruthy();
-    expect(state.panes.treesByTabId['tb-old-a'].terminalId).toBe('tb-old-a');
+    // AMENDED by design 014, as above: identified by its preserved sessionKey
+    // now, not by a leaf id that equals its own tab.
+    expect(state.panes.treesByTabId['tb-old-a'].terminalId).toMatch(/^tm-/);
+    expect(state.panes.treesByTabId['tb-old-a'].sessionKey).toBe('tb-old-a');
     // And it was never leaked into the tab the user switched to.
     expect(state.panes.treesByTabId['tb-old-b']).toBeUndefined();
   });

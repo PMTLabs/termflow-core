@@ -9,7 +9,7 @@ import {
   CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
   setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen,
 } from '../../store/slices/canvasSlice';
-import { focusPaneInTab } from '../../store/slices/panesSlice';
+import { addTabTree, focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
 import { CanvasViewport, useFlyTo } from './CanvasViewport';
 import { CanvasSidebar, ROW_FLY_ZOOM } from './CanvasSidebar';
@@ -689,8 +689,14 @@ export const CanvasMode: React.FC = () => {
    * from a seeded slot to the place the user actually pointed at. This is the same ordering
    * `App.tsx` uses for an agent-spawned terminal, and for the same reason.
    *
-   * A renderer-created tab's root pane carries `terminalId === tab.id`, which is what makes the
-   * new tab's id usable as the node id here, before any pane has been built.
+   * **The node id is `plan.leafId`, never `plan.tab.id`.** This used to be the tab id, and that
+   * worked only because a renderer-created tab's root pane carried `terminalId === tab.id`.
+   * Design 014 mints a `tm-` leaf for every root, so the tab id now addresses no node at all —
+   * the geometry would land under a key nothing reads, the selection would match nothing, and
+   * `connectWhenReady` would wait out its full timeout for a terminal that never registers.
+   * `planCanvasSpawn` mints the leaf up front precisely so it is knowable here, before any pane
+   * has been built, and ships the tree that carries it (installed with `addTabTree` below, so
+   * `planSeeds` does not manufacture a second root under a leaf we never saw).
    */
   const spawn = useCallback((profile: ShellProfileLike) => {
     const menu = spawnMenu;
@@ -709,8 +715,9 @@ export const CanvasMode: React.FC = () => {
       : spawnRectAt(menu.at!);
 
     const plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
-    dispatch(setNodeGeom({ id: plan.tab.id, rect: plan.rect }));
+    dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
     dispatch(addTab(plan.tab));
+    dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
 
     // Select it, and bring it into view if it is not already framed — Tam's requested flow is
     // click port → create → connect → LOOK AT IT → type. A port spawn fans a full node-width
@@ -722,7 +729,7 @@ export const CanvasMode: React.FC = () => {
     // Guarded rather than unconditional, because the background spawn puts the node under the
     // cursor — flying to a node the user just placed where they were looking would yank the
     // viewport for nothing.
-    dispatch(selectNode(plan.tab.id));
+    dispatch(selectNode(plan.leafId));
     if (!isFullyVisible(vp, aimedNodeRect(plan.rect, vp.z), size.w, size.h, FRAME_INSET)) {
       flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
     }
@@ -746,7 +753,7 @@ export const CanvasMode: React.FC = () => {
           abandoned: () => !mounted.current,
         },
         source.terminalId,
-        plan.tab.id,
+        plan.leafId,
       ).then((edge) => {
         if (edge) dispatch(addEdge(edge));
       });

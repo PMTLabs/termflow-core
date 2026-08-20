@@ -54,13 +54,31 @@ describe('pruneDuplicateLeaves', () => {
 });
 
 describe('planSeeds — one tab', () => {
-  it('manufactures a root leaf for a tab with no entry', () => {
+  // AMENDED by design 014. This previously asserted `terminalId === 'tb-b'`,
+  // the pre-014 rule that a tab's root pane carries the tab's own id. That
+  // equality is what made a field labelled "Terminal ID" show a `tb-` value and
+  // left an agent in a two-pane tab unable to say which terminal it meant.
+  // Ownership is now carried explicitly by `seededForTabId` instead of implied by
+  // the id.
+  it('manufactures a root leaf with a fresh tm- id, owned by the tab', () => {
     const [plan] = seedOne(TAB, {}, {});
     expect(plan.tabId).toBe('tb-b');
     expect(plan.tree!.type).toBe('terminal');
-    expect(plan.tree!.terminalId).toBe('tb-b');
+    expect(plan.tree!.terminalId).toMatch(/^tm-/);
+    expect(plan.tree!.terminalId).not.toBe('tb-b');
+    expect(plan.tree!.seededForTabId).toBe('tb-b');
     expect(plan.tree!.name).toBe('PowerShell 7 4');
     expect(plan.tree!.shellType).toBe('powershell');
+  });
+
+  it('gives two tabs two different root leaves', () => {
+    const a = seedOne({ id: 'tb-a' }, {}, {})[0].tree!.terminalId;
+    const b = seedOne({ id: 'tb-b' }, {}, {})[0].tree!.terminalId;
+    expect(a).not.toBe(b);
+  });
+
+  it('leaves sessionKey unset — only the migration sets it', () => {
+    expect(seedOne(TAB, {}, {})[0].tree!.sessionKey).toBeUndefined();
   });
 
   it('falls back to a plain name when the tab has no title', () => {
@@ -182,6 +200,30 @@ describe('planSeeds — the whole batch at once', () => {
     expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
   });
 
+  /**
+   * The SAME determinism, for post-014 trees.
+   *
+   * The test above feeds legacy-shaped mirrors whose leaves are `tb-` ids, so it
+   * exercises the id-equality fallback. Once roots carry a `tm-` leaf that
+   * equality never holds, and without an explicit owner this repair silently
+   * degrades to `tabs` order — the coin flip the whole function exists to remove.
+   * A regression here is invisible: the repair still runs and still produces a
+   * plan, just a different one depending on tab order.
+   */
+  it.each([
+    ['owner last', ['tb-b', 'tb-a']],
+    ['owner first', ['tb-a', 'tb-b']],
+  ])('honours an explicit seededForTabId whatever the tab order (%s)', (_label, order) => {
+    const tabs = order.map((id) => ({ id }));
+    const plans = planSeeds(tabs as any, {}, {
+      'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-shared01', seededForTabId: 'tb-a' },
+      'tb-b': { id: 'pn-b', type: 'terminal', terminalId: 'tm-shared01' },
+    } as any);
+    const winner = plans.find((p) => getAllTerminalIds(p.tree).includes('tm-shared01'));
+    expect(winner!.tabId).toBe('tb-a');
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
   it('says out loud which pane it dropped', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -217,5 +259,66 @@ describe('planSeeds — the whole batch at once', () => {
 
   it('returns nothing at all when every tab is already initialised', () => {
     expect(planSeeds([A, B], { 'tb-a': leaf('p', 'tb-a'), 'tb-b': null }, {})).toEqual([]);
+  });
+});
+
+/**
+ * Rule 3 on a COLD restore — the path it exists for, and the one it was not running on.
+ *
+ * `taken` and `seededElsewhere` are both "what the other tabs already hold", and both must
+ * grow as the batch installs trees. Only `taken` did. Seeding `seededElsewhere` from `trees`
+ * alone is enough for a warm call (some tabs already initialised) and does nothing at all on
+ * a restore, where `trees` is `{}`: the set started empty and, with nothing adding to it,
+ * stayed empty for every tab in the batch. Rule 3's post-014 signal was therefore inert
+ * exactly when the legacy `taken.has(tab.id)` signal is also dead — no leaf carries a tab's
+ * id after design 014 — so an emptied tab was protected by nothing.
+ *
+ * Found by agy in review 170 (finding 3).
+ */
+describe('planSeeds Rule 3 sees tabs seeded earlier in the SAME batch', () => {
+  // Tab B was emptied by dragging its terminal into tab A. The proof is the pane in A that
+  // still names B as the tab it was born for.
+  const paneFromB: PaneNode = {
+    id: 'pn-moved', type: 'terminal', terminalId: 'tm-moved001', seededForTabId: 'tb-b',
+  };
+  const tabA = { id: 'tb-a', title: 'A', shellType: 'powershell' };
+  const tabB = { id: 'tb-b', title: 'B', shellType: 'powershell' };
+
+  it('does not manufacture a shell for a tab emptied into another tab in the same batch', () => {
+    // COLD restore: nothing installed yet, so `trees` is empty — the whole point.
+    const plans = planSeeds([tabA, tabB], {}, { 'tb-a': paneFromB, 'tb-b': undefined });
+    const forB = plans.find((p) => p.tabId === 'tb-b');
+    expect(forB).toBeDefined();
+    expect(forB!.tree).toBeNull();
+  });
+
+  it('still installs the tab that actually holds the pane', () => {
+    const plans = planSeeds([tabA, tabB], {}, { 'tb-a': paneFromB, 'tb-b': undefined });
+    const forA = plans.find((p) => p.tabId === 'tb-a');
+    expect(getAllTerminalIds(forA!.tree)).toEqual(['tm-moved001']);
+  });
+
+  // Order must not decide it. `ordered` puts natural owners first, so B can be visited
+  // before A — the accumulation has to be what protects B, not luck in the sort.
+  it('holds whichever order the tabs arrive in', () => {
+    const plans = planSeeds([tabB, tabA], {}, { 'tb-a': paneFromB, 'tb-b': undefined });
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
+  // The warm path must keep working: a tab already in `trees` is the case the original
+  // seeding covered, and it is still the first thing checked.
+  it('still honours a pane seeded elsewhere that was already installed', () => {
+    const plans = planSeeds([tabB], { 'tb-a': paneFromB }, { 'tb-b': undefined });
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
+  // ...and a genuinely NEW tab must still get its shell. A guard that suppressed every
+  // manufacture would pass all four tests above and break the app.
+  it('still manufactures for a tab nothing has ever named', () => {
+    const fresh = { id: 'tb-new', title: 'New', shellType: 'powershell' };
+    const plans = planSeeds([tabA, fresh], {}, { 'tb-a': paneFromB, 'tb-new': undefined });
+    const forNew = plans.find((p) => p.tabId === 'tb-new')!;
+    expect(forNew.tree).not.toBeNull();
+    expect(forNew.tree!.terminalId).toMatch(/^tm-/);
   });
 });

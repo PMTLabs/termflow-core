@@ -182,10 +182,12 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
    * Renaming the GROUP is renaming its tab, so it goes through the same service the tab strip
    * and the canvas group menu use — one chain, three entry points.
    *
-   * Its own state slot, NOT the row's `editingId`. `tabTreeSeed` gives a renderer-created tab a
-   * root pane with `terminalId === tab.id`, so a solo tab's row is keyed by the same string as
-   * its group: shared, opening the header would open that row's editor alongside it, and the
-   * one you typed into might rename the pane rather than the tab.
+   * Its own state slot, NOT the row's `editingId`. That was originally forced: `tabTreeSeed`
+   * gave a renderer-created tab a root pane with `terminalId === tab.id`, so a solo tab's row
+   * was keyed by the same string as its group — shared, opening the header would open that
+   * row's editor alongside it, and the one you typed into might rename the pane rather than the
+   * tab. Design 014 mints a distinct `tm-` leaf for every root, so the collision is gone; the
+   * separate slot stays because a row editor and a group editor are still different things.
    */
   const commitGroupRename = useCallback((tabId: string, title: string) => {
     setEditingTabId(null);

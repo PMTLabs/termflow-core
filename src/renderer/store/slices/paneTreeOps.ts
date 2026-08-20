@@ -4,6 +4,65 @@ import { generateId } from '../../utils/id';
 /** Edge zones for an insert (center is handled separately via swapLeaves). */
 export type EdgeZone = 'left' | 'right' | 'top' | 'bottom';
 
+/**
+ * Every `PaneNode` field that describes the TERMINAL a pane holds, as opposed to the
+ * pane's position in the tree (`id`, `type`, `direction`, `size`, `children`).
+ *
+ * **One list, because this defect class has now appeared four times.** Whenever a
+ * terminal is re-homed onto a different node — split, swap, cross-window drag, detach
+ * — every field here has to travel with it, and each site that hand-listed the fields
+ * dropped a different subset:
+ *
+ * | site | dropped |
+ * |---|---|
+ * | `splitPaneWithTab` | `seededForTabId`, `sessionKey`, `shellType` |
+ * | `swapLeaves` | `seededForTabId`, `sessionKey`, `notifyMuted` |
+ * | cross-window drag / detach | `seededForTabId`, `sessionKey`, `notifyMuted` |
+ *
+ * Each loss is silent and each is durable: `sessionKey` orphans a migrated pane's
+ * armed pty-host session, `seededForTabId` destroys the only record that a tab owns
+ * its terminals (design 014 removed the id equality that used to imply it), and
+ * `notifyMuted` un-mutes a pane the user muted.
+ *
+ * `paneTreeOps.test.ts` derives this list from `PaneNode`'s own declaration, so adding
+ * a seventh per-terminal field without adding it here fails the suite.
+ */
+export const TERMINAL_BOUND_FIELDS = [
+  'terminalId',
+  'name',
+  'shellType',
+  'notifyMuted',
+  'sessionKey',
+  'seededForTabId',
+] as const;
+
+/** The terminal-bound half of a pane node — everything that must follow the terminal. */
+export type TerminalIdentity = Pick<PaneNode, (typeof TERMINAL_BOUND_FIELDS)[number]>;
+
+/** Lift the terminal-bound fields off a node. Absent fields stay absent. */
+export function terminalIdentityOf(node: PaneNode): TerminalIdentity {
+  const out: TerminalIdentity = {};
+  for (const key of TERMINAL_BOUND_FIELDS) {
+    if (node[key] !== undefined) Object.assign(out, { [key]: node[key] });
+  }
+  return out;
+}
+
+/**
+ * Write `identity` onto `node`, mutating it, and CLEAR any terminal-bound field the
+ * identity does not carry.
+ *
+ * The clear is the point: a swap that only assigns present fields leaves the target's
+ * own `sessionKey`/`notifyMuted` in place, so the incoming terminal silently inherits
+ * the outgoing one's state. That is finding 2 of review 170.
+ */
+export function assignTerminalIdentity(node: PaneNode, identity: TerminalIdentity): void {
+  for (const key of TERMINAL_BOUND_FIELDS) {
+    if (identity[key] === undefined) delete node[key];
+    else Object.assign(node, { [key]: identity[key] });
+  }
+}
+
 const clone = (n: PaneNode): PaneNode => JSON.parse(JSON.stringify(n));
 
 export function findLeaf(tree: PaneNode | null, paneId: string): PaneNode | null {
@@ -19,11 +78,11 @@ export function findLeaf(tree: PaneNode | null, paneId: string): PaneNode | null
 }
 
 /**
- * The renderer terminal id (leaf, e.g. `tb-*`/`tm-*`) that a tab's OWN root
- * pane carries, for a solo (unsplit) tab whose tree is a single terminal node.
+ * The renderer terminal id (leaf, always `tm-*`) that a tab's OWN root pane
+ * carries, for a solo (unsplit) tab whose tree is a single terminal node.
  *
- * Review 109 H3: for a renderer-created tab this equals `tab.id`, but for an
- * API-created tab it is the backend-minted `tm-*` root leaf — NOT `tab.id`.
+ * Review 109 H3: this is NEVER `tab.id`. It once was for a renderer-created tab,
+ * which is exactly the equality design 014 removed — every root leaf is minted.
  * Callers that need "the terminal this tab is currently showing" (process
  * lookup for Copy Tab Info / rename) must resolve through this rather than
  * assuming `tab.id` is a live leaf. Returns `null` for a split tree (no single
@@ -161,13 +220,13 @@ export function swapLeaves(tree: PaneNode, aId: string, bId: string): PaneNode {
   const a = findLeaf(root, aId);
   const b = findLeaf(root, bId);
   if (a && b) {
-    const tmp = { terminalId: a.terminalId, name: a.name, shellType: a.shellType };
-    a.terminalId = b.terminalId;
-    a.name = b.name;
-    a.shellType = b.shellType;
-    b.terminalId = tmp.terminalId;
-    b.name = tmp.name;
-    b.shellType = tmp.shellType;
+    // The WHOLE terminal-bound set, not the three fields this used to name. Swapping a
+    // subset left `sessionKey`/`seededForTabId`/`notifyMuted` on the node the terminal
+    // just LEFT, so each terminal inherited the other's — a migrated pane's armed host
+    // session was orphaned and a muted pane silently swapped its mute with its sibling.
+    const aIdentity = terminalIdentityOf(a);
+    assignTerminalIdentity(a, terminalIdentityOf(b));
+    assignTerminalIdentity(b, aIdentity);
   }
   return root;
 }
@@ -177,6 +236,36 @@ export function swapLeaves(tree: PaneNode, aId: string, bId: string): PaneNode {
  * leaf with the given terminalId, or null if no tab owns it. Used to attribute an
  * external (MCP/API) interaction to a tab when the backend event omits the tabId.
  */
+/**
+ * The pty-host session key recorded on the pane holding `terminalId`, if any.
+ *
+ * `undefined` means "the host knows this session by the leaf itself", which is
+ * true for every pane created on this build. A value is present only on a pane
+ * MIGRATED from a pre-014 build, where the leaf became a fresh `tm-` but the
+ * host still knows the session by the old `tb-` id — the pty-host protocol has
+ * no rename verb, so moving that key would orphan an armed session
+ * (design 014 §A2).
+ */
+export function findSessionKeyByTerminalId(
+  treesByTabId: Record<string, PaneNode | null>,
+  terminalId: string,
+): string | undefined {
+  const search = (node: PaneNode | null): string | undefined => {
+    if (!node) return undefined;
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node.sessionKey;
+    for (const c of node.children ?? []) {
+      const found = search(c);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  for (const tree of Object.values(treesByTabId)) {
+    const found = search(tree);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 export function findTabIdByTerminalId(
   treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,

@@ -28,7 +28,9 @@ pub async fn start_recording(
     State(state): State<AppState>,
     Json(payload): Json<StartRecordingReq>,
 ) -> impl IntoResponse {
-    let terminal_id = payload.terminal_id;
+    // Normalised: a client records the terminal by the tm- id the API gave it,
+    // while the maps are keyed by the per-run pc- (design 014 A3).
+    let terminal_id = state.resolve_ref(&payload.terminal_id);
     let options = payload.options.unwrap_or_default();
     
     // Check if terminal exists to get metadata

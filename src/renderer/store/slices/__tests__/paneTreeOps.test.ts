@@ -1,10 +1,14 @@
+import path from 'path';
+import { readSource } from '../../../utils/readSource';
 import { PaneNode } from '../panesSlice';
 import {
   removeLeaf,
   insertByZone,
   swapLeaves,
+  TERMINAL_BOUND_FIELDS,
   findLeaf,
   findTabIdByTerminalId,
+  findSessionKeyByTerminalId,
   getAllTerminalIds,
   getSelectedPaneId,
   isTerminalMuted,
@@ -360,5 +364,131 @@ describe('tabHasNoPanes', () => {
     const trees = { 'tab-1': leafNode, 'tab-2': null };
     expect(tabHasNoPanes(trees, 'tab-1')).toBe(false);
     expect(tabHasNoPanes(trees, 'tab-2')).toBe(true);
+  });
+});
+
+describe('findSessionKeyByTerminalId', () => {
+  const leaf = (id: string, terminalId: string, sessionKey?: string): PaneNode =>
+    ({ id, type: 'terminal', terminalId, ...(sessionKey ? { sessionKey } : {}) });
+
+  // Every pane created on this build: the host knows the session by the leaf.
+  it('returns undefined when the pane records no session key', () => {
+    const trees = { 'tb-a': leaf('pn-1', 'tm-aaaaaaaaa') };
+    expect(findSessionKeyByTerminalId(trees, 'tm-aaaaaaaaa')).toBeUndefined();
+  });
+
+  // A pane migrated from a pre-014 build: the host still knows the old tb- id,
+  // and dropping this is what would orphan an armed session.
+  it('returns the migrated key when the pane records one', () => {
+    const trees = { 'tb-a': leaf('pn-1', 'tm-new00001', 'tb-old00001') };
+    expect(findSessionKeyByTerminalId(trees, 'tm-new00001')).toBe('tb-old00001');
+  });
+
+  it('finds a key on a nested split leaf, not only a root', () => {
+    const trees = {
+      'tb-a': {
+        id: 'pn-root', type: 'split' as const, direction: 'horizontal' as const, size: 50,
+        children: [leaf('pn-1', 'tm-a'), leaf('pn-2', 'tm-b', 'tb-legacy01')],
+      },
+    };
+    expect(findSessionKeyByTerminalId(trees, 'tm-b')).toBe('tb-legacy01');
+  });
+
+  it('searches every tab, not just the first', () => {
+    const trees = {
+      'tb-a': leaf('pn-1', 'tm-a'),
+      'tb-b': leaf('pn-2', 'tm-b', 'tb-legacy02'),
+    };
+    expect(findSessionKeyByTerminalId(trees, 'tm-b')).toBe('tb-legacy02');
+  });
+
+  it('returns undefined for a terminal that is not in any tree', () => {
+    expect(findSessionKeyByTerminalId({ 'tb-a': leaf('pn-1', 'tm-a') }, 'tm-ghost'))
+      .toBeUndefined();
+  });
+
+  it('tolerates a null tree', () => {
+    expect(findSessionKeyByTerminalId({ 'tb-a': null }, 'tm-a')).toBeUndefined();
+  });
+});
+
+/**
+ * The terminal-bound field set, and the sites that must carry it.
+ *
+ * Four separate places re-homed a terminal onto a different node while hand-listing the
+ * fields to copy, and each dropped a different subset — the split button, `swapLeaves`,
+ * cross-window drag, and detach. The list now lives once in `TERMINAL_BOUND_FIELDS`.
+ *
+ * The first test DERIVES the expected list from `PaneNode`'s own declaration rather than
+ * restating it, because a hand-written list is exactly what failed here: adding a seventh
+ * per-terminal field and forgetting one call site is invisible, and a test that repeats
+ * the list would go stale in the same commit that introduces the bug.
+ */
+describe('TERMINAL_BOUND_FIELDS covers every per-terminal field on PaneNode', () => {
+  /** Fields that describe the pane's PLACE in the tree, not the terminal it holds. */
+  const STRUCTURAL = new Set(['id', 'type', 'direction', 'size', 'children']);
+
+  it('names every PaneNode field that is not structural', () => {
+    const src = readSource(path.resolve(__dirname, '../panesSlice.ts'));
+    const body = src.slice(
+      src.indexOf('export interface PaneNode {'),
+      src.indexOf('\n}', src.indexOf('export interface PaneNode {')),
+    );
+    expect(body).toContain('terminalId?: string');
+    // Every `name?: type;` / `name: type;` declared at one indent level inside the
+    // interface, with comments and doc blocks ignored.
+    const declared = [...body.matchAll(/^ {2}([a-zA-Z][a-zA-Z0-9]*)\??:/gm)].map((m) => m[1]);
+    expect(declared.length).toBeGreaterThan(5); // the parse found something real
+    const perTerminal = declared.filter((f) => !STRUCTURAL.has(f));
+    expect([...perTerminal].sort()).toEqual([...TERMINAL_BOUND_FIELDS].sort());
+  });
+});
+
+describe('swapLeaves moves the WHOLE terminal identity', () => {
+  const a: PaneNode = {
+    id: 'pn-a', type: 'terminal', terminalId: 'tm-a', name: 'A', shellType: 'powershell',
+    sessionKey: 'tb-legacy-a', seededForTabId: 'tb-1', notifyMuted: true,
+  };
+  const b: PaneNode = { id: 'pn-b', type: 'terminal', terminalId: 'tm-b', name: 'B' };
+  const tree: PaneNode = {
+    id: 'pn-root', type: 'split', direction: 'horizontal', size: 50, children: [a, b],
+  };
+
+  const swapped = () => swapLeaves(tree, 'pn-a', 'pn-b');
+  const at = (t: PaneNode, paneId: string) => findLeaf(t, paneId)!;
+
+  it('carries every field with the terminal, not just three of them', () => {
+    const node = at(swapped(), 'pn-b');
+    expect(node.terminalId).toBe('tm-a');
+    expect(node.sessionKey).toBe('tb-legacy-a');
+    expect(node.seededForTabId).toBe('tb-1');
+    expect(node.notifyMuted).toBe(true);
+    expect(node.shellType).toBe('powershell');
+  });
+
+  /**
+   * The half that a subset-swap gets wrong in the OTHER direction: node A keeps its own
+   * `sessionKey` while now holding terminal `tm-b`, so restarting `tm-b` hands the host
+   * `tm-a`'s key. Clearing absent fields is what stops the inheritance.
+   */
+  it('does not leave the departed terminal fields behind on the other node', () => {
+    const node = at(swapped(), 'pn-a');
+    expect(node.terminalId).toBe('tm-b');
+    expect(node.sessionKey).toBeUndefined();
+    expect(node.seededForTabId).toBeUndefined();
+    expect(node.notifyMuted).toBeUndefined();
+    expect(node.shellType).toBeUndefined();
+  });
+
+  it('leaves the pane ids and tree shape alone — only the terminals move', () => {
+    const t = swapped();
+    expect(t.children!.map((c) => c.id)).toEqual(['pn-a', 'pn-b']);
+    expect(t.id).toBe('pn-root');
+  });
+
+  it('does not mutate the input tree', () => {
+    const before = JSON.stringify(tree);
+    swapLeaves(tree, 'pn-a', 'pn-b');
+    expect(JSON.stringify(tree)).toBe(before);
   });
 });

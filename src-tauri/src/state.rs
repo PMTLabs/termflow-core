@@ -80,6 +80,25 @@ pub struct Terminal {
     /// it lived only in the renderer's `panesSlice.treesByTabId`.
     #[serde(default)]
     pub owning_tab_id: Option<String>,
+    /// The **pty-host session key** — what `Control::Attach` must be given to find
+    /// this terminal's session again after a hot-swap (`pty-host/src/manager.rs`,
+    /// where the protocol calls it `tab_id`).
+    ///
+    /// Historically this was implicitly `Terminal.id`, which was itself the leaf:
+    /// one string served as map key, sidecar session id, broadcast id and screen
+    /// key all at once. Making it explicit is what lets the leaf become a `tm-`
+    /// and the id become a `pc-` WITHOUT touching the pty-host — whose protocol
+    /// has no rename verb, so a renamed leaf would orphan a live session
+    /// (design 014 §A2).
+    ///
+    /// `== renderer_terminal_id` for anything created on this build. It differs
+    /// ONLY for a terminal migrated from a pre-014 build, where it keeps the old
+    /// `tb-` key so an already-armed session still reattaches after the upgrade.
+    ///
+    /// Empty when deserialising a pre-014 payload; callers treat empty as
+    /// "fall back to the leaf".
+    #[serde(default)]
+    pub session_key: String,
     /// Source of the most recent PTY write: "user" (Tauri invoke = keystrokes/
     /// paste) or "api" (REST/MCP input/execute). Drives the per-agent color-scheme
     /// revert-vs-sticky decision (see docs/plan/007-agent-color-schemes-plan.md).
@@ -94,6 +113,35 @@ pub struct Terminal {
     /// prompt gate and stop the history popup leaking into an agent CLI's input.
     #[serde(default)]
     pub prompt_hook: bool,
+}
+
+/// The pty-host session key for `t`, applying the documented empty-string fallback.
+///
+/// `Terminal.session_key` is `#[serde(default)]`, so a payload written by a
+/// pre-014 build deserialises with `""`. The field's contract says callers treat
+/// empty as "fall back to the leaf" — but a fallback that is only DOCUMENTED is
+/// not a fallback. Sending `""` to the pty-host does not error: the host simply
+/// has no session by that name, so the write, resize or close is silently
+/// dropped and the terminal appears frozen.
+///
+/// Falls back to the leaf, then to the process id — the same order the pre-014
+/// code used when all three were one string, so a legacy record resolves to
+/// exactly the key the host already knows it by.
+pub fn session_key_of(t: &Terminal) -> String {
+    if !t.session_key.is_empty() {
+        return t.session_key.clone();
+    }
+    t.renderer_terminal_id.clone().unwrap_or_else(|| t.id.clone())
+}
+
+/// Mint a process id: `pc-` + 9 chars, matching the renderer's `utils/id.ts`
+/// shape so every id space looks alike apart from its prefix.
+///
+/// PER RUN, deliberately. A process id identifies one PTY run and must not
+/// survive a restart — that is exactly what makes `tm-` (the durable leaf) the
+/// id MCP hands out to agents instead (design 014 §A3).
+pub fn mint_process_id() -> String {
+    format!("pc-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..9])
 }
 
 fn default_terminal_cols() -> u16 {
@@ -367,6 +415,9 @@ pub struct AppState<R: Runtime = Wry> {
     // `shell_writer_channels`. write/resize/close/repaint route to the client
     // for these; everything else is unchanged.
     pub host_terminals: Arc<DashMap<String, ()>>,
+    /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
+    /// type so it is unit-testable without a Tauri AppHandle.
+    pub identity: crate::identity_index::IdentityIndex,
     // Sessions the sidecar still held when we connected (survived a hot-swap),
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
@@ -458,6 +509,7 @@ impl<R: Runtime> Clone for AppState<R> {
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            identity: self.identity.clone(),
             host_reattach_pending: self.host_reattach_pending.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
@@ -639,6 +691,7 @@ impl<R: Runtime> AppState<R> {
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            identity: crate::identity_index::IdentityIndex::new(),
             host_reattach_pending: Arc::new(DashMap::new()),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
@@ -1017,30 +1070,44 @@ impl<R: Runtime> AppState<R> {
         let deps = crate::pty_host_client::PtyHostDeps {
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
-            on_exit: Arc::new(move |tab_id: String, exit_cwd: Option<String>| {
+            on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
                 use tauri::Emitter;
                 // Mirror the in-process reader's exit path: capture cwd (from the
                 // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
-                    .or_else(|| st_exit.terminal_cwds.get(&tab_id).map(|r| r.value().clone()));
+                    .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
                 // Persist the final parser state BEFORE cleanup discards it — the
                 // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store.
-                st_exit.persist_terminal_history(&tab_id, chrono::Utc::now().timestamp_millis());
-                st_exit.host_terminals.remove(&tab_id);
-                st_exit.host_stream_offsets.remove(&tab_id);
-                st_exit.cleanup_terminal_state(&tab_id);
+                // last moments never reach the history store. Takes the PROCESS id
+                // and derives the history key from the terminal's leaf itself.
+                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
+                st_exit.host_terminals.remove(&process_id);
+                // Ring bookkeeping is keyed by the SESSION, not the process: it is
+                // the host's own offset and lives in the host's id space.
+                st_exit.host_stream_offsets.remove(&session_key);
+                // Drop the identity lookups LAST among the removals but before the
+                // emit — a leaked entry would route a later terminal's output at a
+                // process id that no longer exists.
+                st_exit.identity.unindex(&process_id);
+                st_exit.cleanup_terminal_state(&process_id);
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
-                    serde_json::json!({ "id": tab_id, "exitCode": 0, "cwd": cwd }),
+                    serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
                 );
                 // Same as the in-process path: release the app window if a dialog
                 // this shell owned took it down with it (see console_window).
                 crate::console_window::unstick_all(&st_exit.app_handle);
             }),
-            on_gap: Arc::new(move |tab_id: String| {
-                st_gap.host_repaint(&tab_id);
+            on_gap: Arc::new(move |process_id: String| {
+                st_gap.host_repaint(&process_id);
             }),
+            // Session key -> process id. The host speaks its own id space; every
+            // inbound frame is translated here before it reaches our maps
+            // (design 014 §A3). An unknown session is DROPPED, never echoed.
+            resolve_process: {
+                let st = self.clone();
+                Arc::new(move |k: &str| st.identity.process_for_session(k))
+            },
             on_disconnect: Arc::new(move || {
                 // Only act if THIS connection is still the current one — a stale
                 // old client's disconnect must not clobber a reconnected client.
@@ -1091,6 +1158,13 @@ impl<R: Runtime> AppState<R> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
+                // Same translation as the recovery pass: `meta.tab_id` is a
+                // SESSION key and `host_terminals` is keyed by process id, so the
+                // ownership test below must go through this map. Comparing them
+                // directly makes every live pane look unowned, which queues it for
+                // adoption and lets a concurrent create re-adopt a LIVE session at
+                // offset 0 straight into its parser (review 007 F-1).
+                let owned_sessions = self.host_sessions_by_key();
                 for meta in &surviving {
                     // A close that couldn't reach the host while the pipe was
                     // down: deliver it now instead of re-adopting the session.
@@ -1107,7 +1181,7 @@ impl<R: Runtime> AppState<R> {
                     // live tabs are still registered; queueing them would let a
                     // concurrent create re-adopt one at offset 0 straight into
                     // its live parser (review 007 F-1).
-                    if !self.host_terminals.contains_key(&meta.tab_id) {
+                    if !owned_sessions.contains_key(&meta.tab_id) {
                         self.host_reattach_pending.insert(meta.tab_id.clone(), meta.pid);
                     }
                 }
@@ -1136,8 +1210,15 @@ impl<R: Runtime> AppState<R> {
     pub fn teardown_host_terminal(&self, id: &str) {
         use tauri::Emitter;
         self.persist_terminal_history(id, chrono::Utc::now().timestamp_millis());
+        // Resolve the session key BEFORE `cleanup_terminal_state` drops the record
+        // it lives on. `host_stream_offsets` is the HOST's ring bookkeeping and is
+        // keyed by the session, not by our process id — removing it by `id` leaks
+        // the entry (design 014 §A2).
+        let session_key = self.session_key_for(id);
         self.host_terminals.remove(id);
-        self.host_stream_offsets.remove(id);
+        if let Some(key) = session_key {
+            self.host_stream_offsets.remove(&key);
+        }
         self.cleanup_terminal_state(id);
         let _ = self.app_handle.emit(
             "terminal:exit",
@@ -1157,8 +1238,14 @@ impl<R: Runtime> AppState<R> {
         // Single-flight (see host_recovering): a second flap queues here and
         // re-snapshots offsets once the first pass is done.
         let _recover_guard = self.host_recovering.lock().await;
-        let tabs: Vec<String> =
-            self.host_terminals.iter().map(|e| e.key().clone()).collect();
+        // This whole pass runs in the HOST's id space: `plan_reattach` matches
+        // against `SessionMeta.tab_id` and `host_stream_offsets` is keyed the
+        // same way. `host_terminals` is keyed by our `pc-` process id since
+        // design 014, so comparing the two directly matches NOTHING and sends
+        // every live terminal to teardown — i.e. a transient pipe drop
+        // (sleep/wake) would destroy every shell. Translate once, here.
+        let by_session = self.host_sessions_by_key();
+        let tabs: Vec<String> = by_session.keys().cloned().collect();
         if tabs.is_empty() {
             return;
         }
@@ -1241,7 +1328,16 @@ impl<R: Runtime> AppState<R> {
             // The pane may have been closed while the pipe was down (host_close
             // couldn't deliver Close then). Finish the close now instead of
             // reattaching a session nobody owns — else it lingers as a zombie.
-            if !self.host_terminals.contains_key(&a.tab_id) {
+            // `a.tab_id` is a SESSION key; ownership lives under the process id.
+            let Some(process_id) = by_session.get(&a.tab_id).cloned() else {
+                log::info!(
+                    "[HOTSWAP] {} was closed while disconnected; closing its host session",
+                    a.tab_id
+                );
+                client.close(&a.tab_id);
+                continue;
+            };
+            if !self.host_terminals.contains_key(&process_id) {
                 log::info!(
                     "[HOTSWAP] {} was closed while disconnected; closing its host session",
                     a.tab_id
@@ -1265,9 +1361,11 @@ impl<R: Runtime> AppState<R> {
                     a.from_offset
                 ),
             }
+            // Dimensions live under the PROCESS id; the nudge goes to the host,
+            // so it stays addressed by the session key.
             let (cols, rows) = self
                 .terminals
-                .get(&a.tab_id)
+                .get(&process_id)
                 .map(|t| (t.cols, t.rows))
                 .unwrap_or((80, 24));
             client.nudge_repaint(&a.tab_id, cols, rows);
@@ -1281,13 +1379,17 @@ impl<R: Runtime> AppState<R> {
                 log::warn!("[HOTSWAP] recovery superseded mid-teardown; aborting pass");
                 return;
             }
-            if !self.host_terminals.contains_key(&t) {
+            // `t` is a SESSION key; teardown operates on the process id.
+            let Some(process_id) = by_session.get(&t).cloned() else {
+                continue; // pane already closed while disconnected — nothing to tear down
+            };
+            if !self.host_terminals.contains_key(&process_id) {
                 continue; // pane already closed while disconnected — nothing to tear down
             }
             log::warn!(
                 "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
             );
-            self.teardown_host_terminal(&t);
+            self.teardown_host_terminal(&process_id);
         }
     }
 
@@ -1303,6 +1405,63 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Every host-owned terminal as `session_key -> process_id`.
+    ///
+    /// **The pty-host speaks only session keys.** `host_terminals`,
+    /// `terminals` and the screens are keyed by our per-run `pc-` id since
+    /// design 014, while `SessionMeta.tab_id` and `host_stream_offsets` are in
+    /// the host's space. Anything that compares a host answer against our
+    /// registrations must go through this map, or every comparison silently
+    /// fails and the terminal looks dead to us while being perfectly alive.
+    pub fn host_sessions_by_key(&self) -> std::collections::HashMap<String, String> {
+        self.host_terminals
+            .iter()
+            .filter_map(|e| {
+                let process_id = e.key().clone();
+                self.terminals
+                    .get(&process_id)
+                    .map(|t| (session_key_of(&t), process_id))
+            })
+            .collect()
+    }
+
+    /// Normalise any caller-supplied terminal reference to this run's map key.
+    ///
+    /// A `tm-` leaf is resolved through the identity index; anything else is
+    /// returned unchanged and looked up directly.
+    ///
+    /// **Why every terminal lookup must go through this.** Design 014 re-keyed
+    /// the per-terminal maps from the leaf to a minted `pc-`, but the API keeps
+    /// reporting the leaf as `terminalId` — it is the DURABLE id, and the one
+    /// MCP hands agents precisely because a `pc-` does not survive a restart. So
+    /// a client that reads `terminalId` back and addresses it — the documented
+    /// round trip — would hit a map keyed by something else and 404.
+    ///
+    /// Tolerant rather than strict on purpose: both id spaces resolve here, and
+    /// the "that is a tab id, use `owningTabId`" rejection lives at the MCP
+    /// layer, where the agent that made the mistake actually reads the message.
+    pub fn resolve_ref(&self, id: &str) -> String {
+        if id.starts_with("tm-") {
+            if let Some(process_id) = self.identity.process_for_leaf(id) {
+                return process_id;
+            }
+        }
+        id.to_string()
+    }
+
+    /// The pty-host session key for one of OUR process ids.
+    ///
+    /// Every call that crosses into the host must go through this: the host knows
+    /// a terminal only by its session key, which since design 014 is a different
+    /// string from the process id our maps are keyed by. Addressing the host with
+    /// a process id silently does nothing — the host has never heard of it.
+    ///
+    /// Reads the key off the terminal record rather than the index, so it stays
+    /// correct for a migrated terminal whose key is its old `tb-` id.
+    fn session_key_for(&self, id: &str) -> Option<String> {
+        self.terminals.get(id).map(|t| session_key_of(&t))
+    }
+
     /// If `id` is host-owned AND the client is connected, forward the write and
     /// return true. Returns false when disconnected so the caller surfaces the
     /// failure instead of reporting a false success for dropped input.
@@ -1310,9 +1469,10 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        let Some(session_key) = self.session_key_for(id) else { return false };
         match self.pty_host_client().as_ref() {
             Some(c) => {
-                c.write_stdin(id, bytes);
+                c.write_stdin(&session_key, bytes);
                 true
             }
             None => false,
@@ -1324,9 +1484,10 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        let Some(session_key) = self.session_key_for(id) else { return false };
         match self.pty_host_client().as_ref() {
             Some(c) => {
-                c.resize(id, cols, rows);
+                c.resize(&session_key, cols, rows);
                 true
             }
             None => false,
@@ -1343,14 +1504,18 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
+        // Resolve BEFORE the removals below drop the record we read it from.
+        let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
         match self.pty_host_client().as_ref() {
-            Some(c) if c.is_alive() => c.close(id),
+            Some(c) if c.is_alive() => c.close(&session_key),
             _ => {
-                self.host_close_pending.insert(id.to_string(), ());
+                // Pending closes are replayed against the HOST later, so they
+                // must be recorded in the host id space.
+                self.host_close_pending.insert(session_key.clone(), ());
             }
         }
         self.host_terminals.remove(id);
-        self.host_stream_offsets.remove(id);
+        self.host_stream_offsets.remove(&session_key);
         true
     }
 
@@ -1360,10 +1525,17 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
-        let dims = self.terminals.get(id).map(|t| (t.cols, t.rows));
-        if let Some((cols, rows)) = dims {
+        // `id` is the PROCESS id (our map key); the host only knows this terminal
+        // by its session key, so the nudge must be addressed in the host's id
+        // space (design 014 §A2). Reading both from the same record keeps them
+        // consistent even for a migrated terminal, where they differ.
+        let info = self
+            .terminals
+            .get(id)
+            .map(|t| (t.cols, t.rows, t.session_key.clone()));
+        if let Some((cols, rows, session_key)) = info {
             if let Some(c) = self.pty_host_client().as_ref() {
-                c.nudge_repaint(id, cols, rows);
+                c.nudge_repaint(&session_key, cols, rows);
             }
         }
         true
@@ -1465,6 +1637,11 @@ impl<R: Runtime> AppState<R> {
         // TOCTOU window if this method removes `terminals` before
         // `terminal_history`.
         self.terminals.remove(id);
+        // Alongside `terminals`, and for the same reason: the identity lookups are
+        // an index OF that map, so an entry outliving its terminal would resolve a
+        // durable id to a process that no longer exists. One remover, at the same
+        // choke point every other per-terminal map is torn down from.
+        self.identity.unindex(id);
         self.shell_writer_channels.remove(id);
         self.ptys.remove(id);
         self.terminal_screens.remove(id);
@@ -1966,10 +2143,60 @@ mod terminal_identity_serde_tests {
             backend: TerminalBackend::PortablePty,
             renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
             owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            session_key: "tm-9f2c1a4b7".into(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook: false,
         }
+    }
+
+    /// Design 014 §A2: the four spaces must be simultaneously representable and
+    /// must survive a round trip. `session_key` differs from the leaf ONLY for a
+    /// terminal migrated from a pre-014 build, which is the case pinned here.
+    #[test]
+    fn every_identity_round_trips_including_a_migrated_session_key() {
+        let mut t = sample();
+        t.session_key = "tb-4e8d0c2f1".into(); // migrated: host still knows the old key
+
+        let v = serde_json::to_value(&t).expect("serialize");
+        assert_eq!(v["id"], "pc-abc123def");
+        assert_eq!(v["tab_id"], "tm-9f2c1a4b7", "leaf must still emit as `tab_id`");
+        assert_eq!(v["owning_tab_id"], "tb-4e8d0c2f1");
+        assert_eq!(v["session_key"], "tb-4e8d0c2f1");
+
+        let back: Terminal = serde_json::from_value(v).expect("deserialize");
+        assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
+        assert_eq!(back.session_key, "tb-4e8d0c2f1");
+        assert_eq!(back.id, "pc-abc123def");
+    }
+
+    /// A `Terminal` serialised by the PREVIOUS build has no `session_key` at all.
+    /// It must deserialise rather than panic — otherwise a persisted payload from
+    /// an older version bricks startup.
+    #[test]
+    fn a_pre_014_payload_without_session_key_still_deserialises() {
+        let json = serde_json::json!({
+            "id": "tb-old00000",
+            "pid": 7,
+            "shell": "pwsh",
+            "name": "n",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "cols": 80,
+            "rows": 24,
+            "tab_id": "tb-old00000"
+        });
+        let t: Terminal = serde_json::from_value(json).expect("legacy payload must deserialise");
+        assert_eq!(t.session_key, "", "missing session_key defaults; callers fall back to the leaf");
+        assert_eq!(t.renderer_terminal_id.as_deref(), Some("tb-old00000"));
+    }
+
+    #[test]
+    fn mint_process_id_is_prefixed_and_unique() {
+        let a = super::mint_process_id();
+        let b = super::mint_process_id();
+        assert!(a.starts_with("pc-"), "got {a}");
+        assert_ne!(a, b, "two mints must not collide");
+        assert_eq!(a.len(), "pc-".len() + 9, "9 chars after the prefix, matching utils/id.ts");
     }
 
     /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
@@ -2047,6 +2274,7 @@ mod retarget_owning_tab_tests {
                 shell: "pwsh".into(),
                 name: "Terminal-pwsh".into(),
                 created_at: "2026-08-15T10:00:00+07:00".into(),
+                session_key: "tm-x".into(),
                 cols: 80,
                 rows: 24,
                 backend: TerminalBackend::PortablePty,
@@ -2169,5 +2397,66 @@ mod history_key_tests {
     #[test]
     fn a_process_id_is_never_a_history_key() {
         assert_eq!(history_key(Some("pc-abc123def")), None);
+    }
+}
+
+/// The empty-`session_key` fallback, and the host-id-space mapping.
+///
+/// Both were found by external review of PR #49 (fabric `docs/review/169`).
+#[cfg(test)]
+mod session_key_fallback_tests {
+    use super::{session_key_of, Terminal};
+
+    fn terminal(id: &str, leaf: Option<&str>, session_key: &str) -> Terminal {
+        Terminal {
+            id: id.into(),
+            pid: 1,
+            shell: "pwsh".into(),
+            name: "n".into(),
+            created_at: "2026-08-20T00:00:00+00:00".into(),
+            cols: 80,
+            rows: 24,
+            backend: crate::tmux_manager::TerminalBackend::PortablePty,
+            renderer_terminal_id: leaf.map(str::to_string),
+            owning_tab_id: None,
+            session_key: session_key.into(),
+            last_input_source: None,
+            last_input_at: None,
+            prompt_hook: false,
+        }
+    }
+
+    #[test]
+    fn a_present_session_key_is_used_as_is() {
+        assert_eq!(session_key_of(&terminal("pc-1", Some("tm-a"), "tb-legacy")), "tb-legacy");
+    }
+
+    /// A pre-014 payload deserialises with `session_key == ""`. Sending that to
+    /// the pty-host does NOT error — the host simply has no session by that
+    /// name, so writes/resizes/closes are silently dropped and the terminal
+    /// looks frozen. The fallback must therefore be code, not a doc comment.
+    #[test]
+    fn an_empty_session_key_falls_back_to_the_leaf() {
+        assert_eq!(session_key_of(&terminal("pc-1", Some("tm-a"), "")), "tm-a");
+    }
+
+    /// A headless pre-014 record has neither. Falling back to the process id
+    /// matches what the host was given when all three were one string.
+    #[test]
+    fn an_empty_session_key_with_no_leaf_falls_back_to_the_process_id() {
+        assert_eq!(session_key_of(&terminal("pc-1", None, "")), "pc-1");
+    }
+
+    /// The fallback must never produce an empty string — that is the value the
+    /// host silently ignores, which is the whole failure mode.
+    #[test]
+    fn the_fallback_never_yields_an_empty_key() {
+        for t in [
+            terminal("pc-1", Some("tm-a"), ""),
+            terminal("pc-1", None, ""),
+            terminal("pc-1", Some("tm-a"), "tb-x"),
+        ] {
+            assert!(!session_key_of(&t).is_empty(), "an empty key is silently dropped by the host");
+        }
     }
 }

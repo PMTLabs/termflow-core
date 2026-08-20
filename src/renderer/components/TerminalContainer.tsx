@@ -183,8 +183,9 @@ export const TerminalContainer: React.FC = () => {
         // Keep a single-pane tab's pane name in step with the tab title (renames).
         // `type === 'terminal'` alone already scopes this to the solo/root pane
         // (a split tab's tree is a 'split' node here, never 'terminal') — an
-        // additional `terminalId === tab.id` check is over-narrow now that an
-        // API-created tab's root pane carries a `tm-` leaf, not the tab's own id.
+        // additional `terminalId === tab.id` check would match nothing at all,
+        // since design 014 gives every root pane a minted `tm-` leaf rather than
+        // the tab's own id.
         if (
           displayPaneTree &&
           displayPaneTree.type === 'terminal' &&

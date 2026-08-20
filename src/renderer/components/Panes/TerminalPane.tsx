@@ -5,7 +5,7 @@ import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
 import { renamePanes, setPaneMuted } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, findLeaf, getSelectedPaneId } from '../../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, findLeaf, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
@@ -97,10 +97,15 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     }
   }, [name, isEditing]);
 
-  // Get the tab to find its shell type
-  const tab = useSelector((state: RootState) =>
-    state.tabs.tabs.find(t => t.id === terminalId)
-  );
+  // The tab this pane lives in. Resolved through the pane tree, NOT by matching
+  // `t.id === terminalId`: that equality only ever held for a renderer-created
+  // tab root, and design 014 removed it — every leaf is now a minted `tm-`, so
+  // the old lookup silently matched nothing for every pane in the app.
+  const tab = useSelector((state: RootState) => {
+    if (!terminalId) return undefined;
+    const owner = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
+    return owner ? state.tabs.tabs.find(t => t.id === owner) : undefined;
+  });
 
   // Get the default profile from settings
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
@@ -143,13 +148,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     dispatch(setPaneMuted({ paneId, muted: !paneMuted }));
   };
   // Mirrors the shellType fallback the create/reattach effects below use (shellType
-  // prop > tab's stored shellType > defaultProfile > 'default') — passed down so the
-  // engine can gate the Ctrl+Backspace/Ctrl+Delete word-delete shim off the real
-  // shell (decideWordDeleteShim in terminal-core). A separate computation rather
-  // than reusing the effects' local consts, which aren't in scope at render time.
-  const isSplitPaneId = !!terminalId && (terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-'));
-  const finalShellTypeForDisplay =
-    shellType || (isSplitPaneId ? (defaultProfile || 'default') : (tab?.shellType || defaultProfile || 'default'));
+  // prop > defaultProfile > 'default') — passed down so the engine can gate the
+  // Ctrl+Backspace/Ctrl+Delete word-delete shim off the real shell
+  // (decideWordDeleteShim in terminal-core). A separate computation rather than
+  // reusing the effects' local consts, which aren't in scope at render time.
+  //
+  // There used to be a root-vs-split branch here (`tm-`/`pane-terminal-` => split,
+  // else the tab's stored shellType). Design 014 mints a `tm-` leaf for EVERY pane,
+  // so the split arm is the only arm — the pane node's own `shellType`, which the
+  // seed copies from the tab, is what carries a tab's profile down now.
+  const finalShellTypeForDisplay = shellType || defaultProfile || 'default';
 
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
@@ -206,13 +214,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       return;
     }
 
-    // Check if this is a tab terminal and the tab no longer exists (only relevant
-    // when we'd otherwise CREATE a new terminal — handled after the reuse check).
-    const isTabTerminal = terminalId.startsWith('tb-') || terminalId.startsWith('tab-');
-    if (isTabTerminal && !tab) {
-      console.log(`TerminalPane: Tab ${terminalId} no longer exists, skipping terminal creation`);
-      return;
-    }
+    // A "this leaf IS a tab, and that tab is gone" guard stood here, keyed on
+    // `terminalId.startsWith('tb-'|'tab-')`. Design 014 mints a `tm-` leaf for every
+    // pane, so it could never fire again. It is NOT generalised to `if (!tab)`: a
+    // pane renders from the `tabPanes` window mirror before its tree reaches
+    // `treesByTabId`, so an unresolved owner means "not committed yet", not "tab
+    // gone" — treating it as the latter strands the pane on "Initializing".
 
     // Synchronous lock check - prevents race conditions
     if (terminalInitLock.get(terminalId)) {
@@ -240,10 +247,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     terminalInitLock.set(terminalId, true);
     console.log(`TerminalPane: Acquired initialization lock for ${terminalId}`);
 
-    // For split panes (no tab), use the shellType prop if provided, otherwise default
-    // For tab-based terminals, use the tab's shell type
-    const isSplitPane = terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
-    const finalShellType = shellType || (isSplitPane ? (defaultProfile || 'default') : (tab?.shellType || defaultProfile || 'default'));
+    // The pane's own shellType wins; otherwise the configured default. The seed
+    // copies a tab's profile onto its root leaf, so there is nothing a root needs
+    // here that a split does not (design 014 — every leaf is a minted `tm-`).
+    const finalShellType = shellType || defaultProfile || 'default';
 
     // Resolve CWD — FIRST-SPAWN precedence (spec 045 §3.3):
     //   1. a cwd inherited from a pane split (backlog 004) — the user's most
@@ -257,24 +264,27 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const profile = shellProfiles.find(p => p.id === finalShellType);
     const cwd = takeInitialCwd(terminalId) ?? getCwdSnapshot(terminalId) ?? profile?.cwd;
 
-    console.log(`TerminalPane: Terminal ${terminalId} - isSplitPane: ${isSplitPane}, tab exists: ${!!tab}, tab shellType: ${tab?.shellType}, defaultProfile: ${defaultProfile}, shellType prop: ${shellType}, final shellType: ${finalShellType}, cwd: ${cwd}`);
+    console.log(`TerminalPane: Terminal ${terminalId} - owning tab: ${tab?.id ?? '(uncommitted)'}, defaultProfile: ${defaultProfile}, shellType prop: ${shellType}, final shellType: ${finalShellType}, cwd: ${cwd}`);
 
     // Determine the terminal name - prioritize the pane name, then tab title
     const terminalName = name || tab?.title || 'Terminal';
     console.log(`TerminalPane: Determining name - pane name: "${name}", tab title: "${tab?.title}", final: "${terminalName}"`);
 
-    // Ownership lives only in the pane tree, so resolve it here. For a
-    // RENDERER-created tab root, the leaf id IS its tab id, so the
-    // `|| terminalId` fallback is correct for a solo pane and for a pane
-    // whose tree has not been committed yet. It does NOT hold for an
-    // API-created root (a `tm-*` leaf owned by a different `tb-*` id) —
-    // that case is resolved by the `findTabIdByTerminalId` lookup instead.
+    // Ownership lives only in the pane tree, so resolve it here — and send
+    // NOTHING when the tree has not been committed yet. The old `|| terminalId`
+    // fallback leaned on a renderer root's leaf being its own tab id; after
+    // design 014 that id is a `tm-`, so the fallback would file a terminal id
+    // as an owning TAB id and route this pane's activity at a tab that does not
+    // exist. Undefined is self-healing instead: `reassertOwnerAfterSpawn` below
+    // pushes the real owner the moment the tree lands, whichever order they
+    // arrive in (see paneOwnership.ts).
     const owningTabId =
-      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
+      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) ?? undefined;
 
     // Create the promise and store it immediately
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
+      findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -349,7 +359,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       }
       // Don't reset the global map on unmount - terminal persists across component lifecycle
     };
-  }, [terminalId, tab?.shellType, defaultProfile]); // Only depend on terminalId, shellType, and defaultProfile
+    // Deliberately narrow: re-spawning is keyed on the leaf and the profile that
+    // decides the shell, nothing else. `tab?.shellType` used to sit here and is
+    // gone with the branch that read it — leaving it would re-run this effect on
+    // a tab profile change now that `tab` actually resolves (design 014).
+  }, [terminalId, defaultProfile]);
 
   useEffect(() => {
     const handleClick = () => {
@@ -473,13 +487,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     if (!terminalId) return;
     if (isRestartingRef.current) return;
     isRestartingRef.current = true;
-    const isSplitPane =
-      terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
-    const finalShellType =
-      shellType ||
-      (isSplitPane
-        ? defaultProfile || 'default'
-        : tab?.shellType || defaultProfile || 'default');
+    // Same collapse as the create path: after design 014 every leaf is a `tm-`,
+    // so the root arm of the old root-vs-split branch was unreachable.
+    const finalShellType = shellType || defaultProfile || 'default';
     const profile = shellProfiles.find(p => p.id === finalShellType);
     // Spec 045 §3.3 — RESTART precedence: the directory the shell died in wins,
     // then a cwd inherited from a split, then the profile default. This is
@@ -492,9 +502,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // (see App.tsx handleTerminalProcessExit / resolveExitedTabId), even for
     // a non-root pane's terminalId — so resolve the owning tab rather than
     // assuming terminalId === tab.id. Resolved up front so it can also be
-    // forwarded to the backend at spawn (design 011 §6).
+    // forwarded to the backend at spawn (design 011 §6). No `|| terminalId`
+    // fallback, for the reason the create path above gives: post-014 that would
+    // be a terminal id masquerading as a tab id.
     const ownerTabId =
-      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || terminalId;
+      findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) ?? undefined;
 
     try {
       const newPid = await terminalService.createTerminal(
@@ -505,6 +517,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         undefined,
         undefined,
         ownerTabId,
+        // A restart must reuse the MIGRATED session key, not mint one: the host
+        // still knows this session by its old id (design 014 A2.1).
+        findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
       );
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
@@ -514,13 +529,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       clearCwdSnapshot(terminalId);
       // A restarted session is a fresh shell — return its zoom to 100%.
       dispatch(resetZoom(terminalId));
-      dispatch(clearTabExited(ownerTabId));
+      if (ownerTabId) dispatch(clearTabExited(ownerTabId));
     } catch (error) {
       console.error('TerminalPane: Failed to restart session:', error);
     } finally {
       isRestartingRef.current = false;
     }
-  }, [terminalId, shellType, defaultProfile, tab?.shellType, tab?.title, shellProfiles, name, dispatch]);
+  }, [terminalId, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch]);
 
   const handleDismissBanner = useCallback(() => setClosedInfo(null), []);
 
@@ -806,6 +821,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           paneId={paneId}
           paneName={name || 'Terminal'}
           terminalId={terminalId}
+          // The tab this pane lives in NOW — resolved from the tree rather than
+          // inferred from the leaf, which stopped implying it in design 014.
+          owningTabId={
+            terminalId
+              ? findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) || undefined
+              : undefined
+          }
           processId={processId}
           onClose={handleCloseContextMenu}
         />

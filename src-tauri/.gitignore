@@ -14,3 +14,4 @@ pty-protocol/Cargo.lock
 
 # Isolated build dir used to compile while the app exe is running-locked
 target-verify/
+target-check/

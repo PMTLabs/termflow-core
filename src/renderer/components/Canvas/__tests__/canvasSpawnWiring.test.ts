@@ -56,6 +56,39 @@ describe('creating a terminal from the canvas', () => {
   });
 
   /**
+   * **Every node reference is the LEAF, not the tab.**
+   *
+   * A canvas node is keyed by `leaf.terminalId` (`buildCanvasModel`). This handler addressed
+   * nodes by `plan.tab.id` and was correct only while a renderer-created tab's root leaf WAS
+   * its tab id. Design 014 mints a `tm-` for every root, so each of the three uses broke in a
+   * different and individually quiet way: the geometry under a key nothing reads (the node
+   * appears in a seeded slot, then never moves), a selection that matches nothing, and a
+   * `connectWhenReady` that polls its full ten seconds for a terminal id that never registers
+   * and then drops the wire the port click asked for.
+   *
+   * Asserted as a total ban on `plan.tab.id` outside `addTab`, not as three separate positive
+   * matches: a fourth node reference added later would otherwise reintroduce the bug silently.
+   */
+  it('addresses the new node by its leaf id, never by the tab id', () => {
+    expect(spawnBody).toContain('dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));');
+    const tabIdUses = spawnBody.match(/plan\.tab\.id/g) ?? [];
+    // Exactly one: the `addTabTree` that installs the tree under its tab.
+    expect(tabIdUses).toHaveLength(1);
+    expect(spawnBody).toContain('dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));');
+  });
+
+  /**
+   * The tree ships with the tab because the leaf has to be decided before the geometry is
+   * written. Leaving it to `tabTreeSeed` would mint a DIFFERENT leaf a render later, under
+   * which none of the three references above resolve — the same failure by a slower route.
+   */
+  it('installs the planned tree so the seed does not mint a second root', () => {
+    const tab = spawnBody.indexOf('dispatch(addTab(');
+    const tree = spawnBody.indexOf('dispatch(addTabTree(');
+    expect(tree).toBeGreaterThan(tab);
+  });
+
+  /**
    * The tab object must be the one `planCanvasSpawn` built, because that is where
    * `isActive: false` comes from — and activating the new tab deactivates the canvas, unmounts
    * `CanvasMode`, and drops the user out of the workspace onto the terminal they just made.
@@ -103,7 +136,7 @@ describe('creating a terminal from the canvas', () => {
  */
 describe('framing what was just created', () => {
   it('selects the new node', () => {
-    expect(spawnBody).toContain('dispatch(selectNode(plan.tab.id));');
+    expect(spawnBody).toContain('dispatch(selectNode(plan.leafId));');
   });
 
   /**

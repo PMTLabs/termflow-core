@@ -202,12 +202,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Preflight: null = available (offload will keep terminals alive → hide the
     // caveat); a string = the reason it's currently blocked (show it).
     const [hotswapBlockedReason, setHotswapBlockedReason] = useState<string | null>(null);
+    // Independent of the offload reason. The two checks are genuinely
+    // different since design 014 B: offload cannot reach a sibling, update
+    // can. Sharing one string is what let the panel show one verdict while
+    // the button enforced another (014 B4).
+    const [updateBlockedReason, setUpdateBlockedReason] = useState<string | null>(null);
     const refreshHotswapPreflight = useCallback(async () => {
         try {
             await window.electronAPI?.hotswapAvailable?.();
             setHotswapBlockedReason(null);
         } catch (err) {
             setHotswapBlockedReason(String(err));
+        }
+        try {
+            await window.electronAPI?.updateAvailable?.();
+            setUpdateBlockedReason(null);
+        } catch (err) {
+            setUpdateBlockedReason(String(err));
         }
     }, []);
     // Velopack auto-update status. 'unavailable'/'notInstalled' ⇒ this build has
@@ -1692,13 +1703,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                 your terminals running — they reattach to the new version automatically.
                             </p>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                                <button className="save-btn apply-btn" onClick={doUpdateAndRestart} disabled={applyingUpdate}>
+                                <button className="save-btn apply-btn" onClick={doUpdateAndRestart} disabled={applyingUpdate || !!updateBlockedReason}>
                                     {applyingUpdate ? 'Updating…' : `Update to ${updateStatus.version} & Restart`}
                                 </button>
                                 <button className="link-btn" onClick={() => void refreshUpdateStatus()} disabled={checkingUpdate || applyingUpdate}>
                                     Re-check
                                 </button>
                             </div>
+                            {updateBlockedReason && (
+                                <p className="help-text" data-testid="update-blocked" style={{ marginTop: 12, color: 'var(--warning, #d08770)' }}>
+                                    ⚠ {updateBlockedReason}
+                                </p>
+                            )}
                         </>
                     ) : (
                         <p className="help-text">
@@ -1727,7 +1743,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     <button
                         className="save-btn apply-btn"
                         onClick={() => setOffloadArmed(true)}
-                        disabled={offloading}
+                        disabled={offloading || !!hotswapBlockedReason}
                     >
                         Offload &amp; Close…
                     </button>
@@ -1743,7 +1759,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     </div>
                 )}
                 {hotswapBlockedReason && (
-                    <p className="help-text" style={{ marginTop: 12, color: 'var(--warning, #d08770)' }}>
+                    <p className="help-text" data-testid="offload-blocked" style={{ marginTop: 12, color: 'var(--warning, #d08770)' }}>
                         ⚠ Offload isn’t available right now: {hotswapBlockedReason}. The action is
                         refused so nothing is lost.
                     </p>

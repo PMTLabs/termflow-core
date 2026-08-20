@@ -35,7 +35,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "list_terminals",
         {
-            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine. Each entry also carries `terminalId` (the renderer pane) and `owningTabId` (its tab).",
+            description: "List active terminal sessions across the fleet. Each entry includes machineId, os, and deviceName; local terminals are tagged with this machine. Each entry also carries `terminalId` (`tm-`, the terminal — durable across restarts) and `owningTabId` (`tb-`, its tab).",
         },
         async () => {
             try {
@@ -57,19 +57,20 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         "create_terminal",
         {
             description:
-                "Spawn a new terminal process (supports split panel layout). Terminal ids come " +
-                "in three flavours and are NOT interchangeable: `terminalId`/`processId` " +
-                "addresses the PTY for every other tool — always read it from a response, never " +
-                "construct it: it EQUALS the pane leaf below for a sidecar-hosted terminal, and " +
-                "is a separate `pc-…` id only when the PTY host was unavailable at spawn; " +
-                "`owningTabId` (`tb-…`) names a TAB; and " +
-                "the `terminalId` field of a terminal-detail response is the renderer PANE leaf. " +
-                "That leaf id has two FORMS, which describe who minted it, NOT the pane's shape: " +
-                "`tb-…` is minted for a renderer-created tab root (leaf == owning tab), `tm-…` is " +
-                "minted for split panes AND for every API-created terminal, including one that is " +
-                "the solo root of its own tab. Never infer root/solo/split from the prefix — a " +
-                "`tm-…` leaf is very often a solo root. Use `owningTabId` for tab identity and the " +
-                "pane-tree structure for shape.",
+                "Spawn a new terminal process (supports split panel layout). " +
+                "Every identity has its own prefix, and the prefix IS the type: " +
+                "`tm-…` a TERMINAL (a pane's terminal — this is what you address, and it " +
+                "survives an app restart); " +
+                "`pc-…` a PROCESS (one PTY run — valid only for this run of the app, so never " +
+                "save one across a restart); " +
+                "`tb-…` a TAB; " +
+                "`pn-…` a PANE. " +
+                "Passing an id from the wrong space is rejected with a message naming the right " +
+                "field, so you never silently address the wrong thing. Read ids from responses " +
+                "rather than constructing them. " +
+                "One thing the prefix does NOT tell you: whether a pane is a root, a solo pane " +
+                "or a split. A `tm-…` terminal is very often the only pane in its tab. Use " +
+                "`owningTabId` for tab identity and the pane-tree structure for shape.",
             inputSchema: {
                 name: z.string().optional().describe("Name of the terminal session"),
                 profile: z.string().optional().describe("Shell profile ID (e.g., 'powershell', 'cmd', 'git-bash'). Defaults to system default."),
@@ -82,7 +83,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 ),
                 tabId: z.string().optional().describe(
                     "DEPRECATED alias of owningTabId. Must be a TAB id (`tb-…`); passing a " +
-                    "pane id (`tm-…`) is rejected with 400 — use owningTabId instead."
+                    "terminal id (`tm-…`) is rejected with 400 — use owningTabId instead."
                 ),
                 paneId: z.string().optional().describe("Pane ID within the tab to split"),
                 direction: z.enum(["horizontal", "vertical"]).optional().describe("Split direction: 'horizontal' (split right) or 'vertical' (split bottom)"),
@@ -254,7 +255,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
     server.registerTool(
         "get_terminal_detail",
         {
-            description: "Get detailed information about a specific terminal session, including its renderer pane id (`terminalId`) and the tab that owns it (`owningTabId`). `tabId` is a deprecated alias of `terminalId` and is NOT a tab id for a split pane.",
+            description: "Get detailed information about a specific terminal session, including its renderer pane id (`terminalId`) and the tab that owns it (`owningTabId`). `tabId` is a DEPRECATED alias of `terminalId` — it always carries a `tm-` terminal id and is never a tab id. Use `owningTabId` for the tab.",
             inputSchema: {
                 terminalId: z.string().describe(`The ID of the terminal session to retrieve. ${ME_HINT}`),
             },
@@ -377,9 +378,15 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         },
         async ({ machineId, terminalId }) => {
             try {
+                // Resolved like every other tool. This one passed the raw argument
+                // straight through, so `"me"` was sent verbatim (404 instead of the
+                // caller's own screen) and a `tb-`/`pn-` id got a bare not-found
+                // rather than the message naming the field to use. It is also the
+                // tool an agent reaches for most, so the gap was the most visible one.
+                const id = resolveTerminalId(terminalId, getCallerId());
                 const response = await api.post(`/fleet/screen`, {
                     ...(machineId !== undefined && { machineId }),
-                    terminalId,
+                    terminalId: id,
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {

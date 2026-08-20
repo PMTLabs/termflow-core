@@ -148,6 +148,21 @@ pub fn auth_required(integrity: crate::profile::Integrity, expose: bool) -> bool
     expose || integrity == crate::profile::Integrity::High
 }
 
+/// Routes that require a bearer token **regardless** of `auth_required`.
+///
+/// D1 leaves a NORMAL instance's loopback API unauthenticated so curl, the MCP
+/// sidecar and user scripts stay zero-friction. That trade is fine for terminal
+/// verbs, whose blast radius is this user's own shells. It is not fine for a
+/// verb that changes another process's shutdown semantics: `/api/hotswap/arm`
+/// makes a sibling hold a detach window it never asked for, and any local
+/// process could call it.
+///
+/// The cost of requiring a token here is zero — the only legitimate caller is a
+/// sibling instance, which already holds the token from our `InstanceRecord`.
+pub fn route_always_requires_token(path: &str) -> bool {
+    path.starts_with("/api/hotswap/")
+}
+
 /// Start the API server on an already-bound listener. Binding happens in the
 /// caller so a bind failure is surfaced BEFORE the old server is torn down
 /// (no "silent success with no server" window).
@@ -209,6 +224,10 @@ pub async fn start_api_server(
         .route("/api/fleet/screen", post(fleet_screen))
         .route("/api/fleet/close", post(fleet_close))
         // System info endpoints
+        // Sibling coordination for an update (design 014 §B3). Token-gated
+        // unconditionally — see `route_always_requires_token`.
+        .route("/api/hotswap/arm", post(hotswap_arm))
+        .route("/api/hotswap/disarm", post(hotswap_disarm))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
         // Process endpoints
@@ -254,10 +273,13 @@ pub async fn start_api_server(
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let auth_net = auth_net.clone();
             async move {
-                if !require_auth {
+                let path = req.uri().path().to_string();
+                // Checked BEFORE the `!require_auth` early return below — that
+                // return is exactly what would otherwise leave these routes wide
+                // open on a normal instance (design 014 §B-D5).
+                if !require_auth && !route_always_requires_token(&path) {
                     return next.run(req).await;
                 }
-                let path = req.uri().path().to_string();
                 // Health stays open so the Settings page can always poll status.
                 if path == "/health" || path == "/api/health" {
                     return next.run(req).await;
@@ -358,17 +380,75 @@ fn health_body(instance_id: &str) -> serde_json::Value {
 ///
 /// Key contract (design 011 §4), all of it load-bearing for existing clients:
 ///   `id` / `processId` — the PTY routing key. Unchanged.
-///   `terminalId`       — the renderer LEAF. Two id FORMS, describing who minted
-///                        the leaf and NOT the pane's shape: `tb-*` for a
-///                        renderer-created tab root (leaf == owner), `tm-*` for
-///                        split panes AND for every API-created terminal,
-///                        including a solo root. Root/solo/split is determined
-///                        only by the pane-tree structure, never by the prefix.
+///   `terminalId`       — the renderer LEAF, always `tm-*` since design 014,
+///                        whoever minted it: tab root, split pane or API-created
+///                        terminal alike. It is NEVER its tab's id (that equality
+///                        is what 014 removed), and it never says anything about
+///                        the pane's shape — root/solo/split is determined only by
+///                        the pane-tree structure, never by the prefix.
 ///   `tabId`            — DEPRECATED alias of `terminalId`. Kept byte-identical
 ///                        so no existing API/MCP client breaks. Removing it is
 ///                        a major-version change, explicitly not done here.
 ///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
 ///                        headless (no-renderer-pane) terminal.
+/// Resolve any caller-supplied terminal reference to THIS RUN's process id.
+///
+/// Prefix-dispatched deliberately. Before design 014 the id spaces overlapped —
+/// a renderer-created tab's root leaf *was* its tab id — so the only way to
+/// reject a tab id passed where a terminal was meant was documentation
+/// (`mcp-server/src/server.ts` spent 25 lines explaining it). Now the prefix IS
+/// the type, and an agent holding a `tb-` for a two-pane tab gets told so.
+///
+/// Wrong SPACE is a 400: the caller has a bug we can name. Right space but
+/// absent is a 404: the terminal is simply gone. Collapsing those would make a
+/// stale `pc-` (per-run, so stale after any restart) look like a client bug.
+pub fn resolve_terminal_ref(
+    state: &AppState,
+    id: &str,
+) -> Result<String, (StatusCode, String)> {
+    let resolved = match classify_terminal_ref(id)? {
+        // `tm-` is the DURABLE id and the one MCP hands out, so it resolves
+        // through the index rather than being a map key itself.
+        TerminalRef::Leaf => state.identity.process_for_leaf(id),
+        TerminalRef::Process => state.terminals.contains_key(id).then(|| id.to_string()),
+    };
+    resolved.ok_or_else(|| (StatusCode::NOT_FOUND, format!("no live terminal for `{id}`")))
+}
+
+/// Which id space a caller-supplied reference belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalRef {
+    /// `tm-` — durable across restarts.
+    Leaf,
+    /// `pc-` (or a legacy id) — this run only.
+    Process,
+}
+
+/// The SHAPE half of resolution, split out so it is testable without an
+/// `AppState` (the `tauri::test` feature crashes the Windows test binary).
+///
+/// Rejection is by prefix, never by liveness: a tab id that happens to match no
+/// live terminal must still be told it is a tab id, or the caller learns
+/// nothing and retries the same mistake.
+pub fn classify_terminal_ref(id: &str) -> Result<TerminalRef, (StatusCode, String)> {
+    if id.starts_with("tb-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "`{id}` is a TAB id, not a terminal. Pass a terminal id (`tm-…`) or a process \
+                 id (`pc-…`); to name a tab, use the `owningTabId` field."
+            ),
+        ));
+    }
+    if id.starts_with("pn-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("`{id}` is a PANE id, not a terminal. Pass a terminal id (`tm-…`)."),
+        ));
+    }
+    Ok(if id.starts_with("tm-") { TerminalRef::Leaf } else { TerminalRef::Process })
+}
+
 fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
     json!({
         "id": t.id,
@@ -376,6 +456,12 @@ fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json:
         "terminalId": t.renderer_terminal_id,
         "tabId": t.renderer_terminal_id,
         "owningTabId": t.owning_tab_id,
+        // Diagnostic only — nothing addresses a terminal by this. It is the
+        // pty-host's own key, equal to `terminalId` except for a terminal
+        // migrated from a pre-014 build, where it is the legacy `tb-`
+        // (design 014 §A5). Exposed so a support question about a terminal that
+        // will not reattach is answerable without reading the host's state.
+        "sessionKey": t.session_key,
         "name": t.name,
         "profile": t.shell,
         "status": "running",
@@ -527,8 +613,20 @@ fn resolve_api_spawn_identity(
         Some(id) if id.starts_with("tb-") => id.to_string(),
         Some(id) if id.starts_with("tm-") => {
             return Err(format!(
-                "'{id}' is a pane (leaf) id, not a tab id — pass the owning tab id \
+                "'{id}' is a TERMINAL (leaf) id, not a tab id — pass the owning tab id \
                  (the `owningTabId` field of GET /api/terminals/{{id}})"
+            ))
+        }
+        // A PANE id. Rejected explicitly rather than falling through to the mint
+        // below: silently minting a tab put the caller's terminal in a brand-new
+        // tab instead of the one they named, which reads as "the API ignored me"
+        // and gives no clue why. Design 014 gave each space its own prefix so the
+        // wrong one can be NAMED — saying which it is IS the fix.
+        Some(id) if id.starts_with("pn-") => {
+            return Err(format!(
+                "'{id}' is a PANE id, not a tab id — pass the owning tab id (the \
+                 `owningTabId` field of GET /api/terminals/{{id}}), or use `paneId` \
+                 to split a specific pane"
             ))
         }
         // Absent, blank, or an unrecognised format: mint one, as before.
@@ -636,6 +734,8 @@ async fn create_terminal(
         &state,
         crate::commands::SpawnRequest {
             leaf_id: identity.renderer_terminal_id.clone(),
+            // Freshly minted leaf, so nothing legacy to preserve.
+            session_key: None,
             owning_tab_id: Some(identity.owning_tab_id.clone()),
             cols,
             rows,
@@ -655,8 +755,8 @@ async fn create_terminal(
             // Canvas Mode has never been opened.
             //
             // Both endpoints are renderer LEAF ids. `identity.renderer_terminal_id` is the
-            // leaf P0-A minted for this create — a fresh `tm-*` when the owning tab already
-            // held a live terminal, the tab's own `tb-*` when it did not (design/011 D7).
+            // leaf minted for this create — always a `tm-*` since design 014, whether or not
+            // the owning tab already held a live terminal (011 D7's tab-id case is gone).
             // Using `owning_tab_id` would point every split's edge at its tab's root pane,
             // and would then be dropped as a self-edge whenever the caller IS that root pane.
             if let Some(parent_raw) = payload.parent_terminal_id.as_deref() {
@@ -731,6 +831,11 @@ async fn delete_terminal(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Take the pid first (guard drops at end of statement, before cleanup).
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return Json(json!({ "error": "Terminal not found" }));
@@ -763,6 +868,11 @@ async fn resize_terminal(
     Path(id): Path<String>,
     Json(payload): Json<ResizeReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Host-owned terminals resize via the sidecar.
@@ -907,6 +1017,11 @@ async fn write_terminal(
     Path(id): Path<String>,
     Json(payload): Json<WriteReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match write_data_to_terminal(&state, &id, &payload.data) {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         // Preserve the original handler's exact behavior: "not found" returned
@@ -951,6 +1066,11 @@ async fn get_terminal_size(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
         Json(json!({ "cols": terminal.cols, "rows": terminal.rows })).into_response()
     } else {
@@ -964,6 +1084,11 @@ async fn get_terminal_output(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<OutputQuery>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Clone the chunks under a brief inner lock (Arc cloned via get_history, so
     // no DashMap shard guard is held here), then render with NO locks held —
     // rendering replays up to ~1MB through a vt100 parser, and doing that under
@@ -1028,6 +1153,11 @@ async fn get_terminal_snapshot(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Restore replay (one-shot): when a previous-session scrollback prefix is staged,
     // serve it ALONE — do NOT append the freshly-spawned shell's current screen.
     // That screen comes from `contents_formatted()`, which BEGINS with an
@@ -1075,6 +1205,11 @@ async fn get_terminal_full_scrollback(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match state.full_scrollback_snapshot(&id) {
         Some(mut bytes) => {
             // Re-assert live input modes (mouse tracking, bracketed paste, focus
@@ -1174,6 +1309,11 @@ async fn get_terminal(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
         let mut body = terminal_identity_json(terminal.value(), "default");
         // Canvas identity, so an agent learns which node and group it is in one call
@@ -1828,7 +1968,7 @@ async fn fleet_screen(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(terminal) = state.terminals.get(&body.terminal_id) else {
+            let Some(terminal) = state.terminals.get(&state.resolve_ref(&body.terminal_id)) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
             let title = terminal.name.clone();
@@ -1836,7 +1976,7 @@ async fn fleet_screen(
             // Plain text, not the replayable blob: this screen is read by a human or
             // an agent, and a full-screen TUI's formatted snapshot is mostly truecolor
             // SGR and cursor-op noise with the words buried in it.
-            let screen = state.screen_text(&body.terminal_id).unwrap_or_default();
+            let screen = state.screen_text(&state.resolve_ref(&body.terminal_id)).unwrap_or_default();
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -1884,14 +2024,14 @@ async fn fleet_close(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(pid) = state.terminals.get(&body.terminal_id).map(|t| t.pid) else {
+            let Some(pid) = state.terminals.get(&state.resolve_ref(&body.terminal_id)).map(|t| t.pid) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
             // Host-owned → close via the sidecar; else kill the local tree.
-            if !state.host_close(&body.terminal_id) {
+            if !state.host_close(&state.resolve_ref(&body.terminal_id)) {
                 crate::pty_manager::kill_process_tree(pid);
             }
-            state.cleanup_terminal_state(&body.terminal_id);
+            state.cleanup_terminal_state(&state.resolve_ref(&body.terminal_id));
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -2120,6 +2260,11 @@ async fn execute_prompt(
     Path(id): Path<String>,
     Json(payload): Json<ExecutePromptReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     match send_prompt_to_terminal(&state, &id, &payload).await {
         Ok(body) => (StatusCode::OK, Json(body)),
         Err((code, msg)) => (code, Json(json!({ "error": msg }))),
@@ -2204,8 +2349,11 @@ async fn fleet_local_run(
 
     // Resolve the target terminal: reuse when the id is present AND live;
     // otherwise spawn a NEW persistent terminal from the default profile.
-    let terminal_id = match payload.terminal_id.as_ref() {
-        Some(tid) if state.terminals.contains_key(tid) => tid.clone(),
+    let terminal_id = match payload.terminal_id.as_ref().map(|t| state.resolve_ref(t)) {
+        // Normalised first: a fleet caller naming a terminal by the DURABLE `tm-`
+        // id we reported to it would otherwise miss the `pc-`-keyed map and take
+        // the not-found arm below (design 014 §A3).
+        Some(tid) if state.terminals.contains_key(&tid) => tid,
         // An explicit terminalId that is no longer live must NOT silently spawn a new
         // terminal: a stale per-terminal Control grant (left when a fleet terminal was
         // closed outside FleetClose) would otherwise run fresh commands after fleet_exec
@@ -2237,6 +2385,12 @@ async fn fleet_local_run(
             // a fast-exiting shell's exit-path persist can run in that window and
             // file the final scrollback under the ephemeral pc- id.
             let fleet_tab_id = mint_renderer_id("tb");
+            // A SEPARATE tm- leaf. Design 011 let this path use its own tb- as
+            // its leaf, which was safe then because it minted the id itself. Design
+            // 014 A1 is stricter: EVERY live terminal carries a tm- leaf, so a
+            // field labelled terminal never shows a tab id. Reusing one id for
+            // tab, leaf and owner is the collapse this design removes.
+            let fleet_leaf_id = mint_renderer_id("tm");
             // Routed exactly like every other create (plan 019): a fleet terminal
             // spawned in-process would block Offload & Close for as long as it lived.
             // Its identity is UNCHANGED — it keeps the `tb-*` it minted itself as
@@ -2245,7 +2399,8 @@ async fn fleet_local_run(
             let new_id = match crate::commands::spawn_routed(
                 &state,
                 crate::commands::SpawnRequest {
-                    leaf_id: fleet_tab_id.clone(),
+                    leaf_id: fleet_leaf_id.clone(),
+                    session_key: None,
                     owning_tab_id: Some(fleet_tab_id.clone()),
                     cols: 80,
                     rows: 24,
@@ -2276,7 +2431,7 @@ async fn fleet_local_run(
                     "terminalId": new_id,
                     "tabId": Some(fleet_tab_id.clone()),
                     "processId": new_id,
-                    "rendererTerminalId": fleet_tab_id.clone(),
+                    "rendererTerminalId": fleet_leaf_id.clone(),
                     "owningTabId": fleet_tab_id.clone(),
                     "paneId": serde_json::Value::Null,
                     "direction": serde_json::Value::Null,
@@ -2377,7 +2532,11 @@ async fn batch_execute_prompt(
         }
     }
 
-    let ids = dedup_preserve_order(&body.terminal_ids);
+    // Pairs of (id the caller sent, id our maps use). The RESPONSE must echo the
+    // caller's id: a client that sent tm- and got pc- back cannot correlate the
+    // result with its request, and the pc- is meaningless to it after a restart.
+    let ids: Vec<(String, String)> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| (i.clone(), state.resolve_ref(i))).collect();
     let req = ExecutePromptReq {
         prompt: body.prompt.clone(),
         cli_type: body.cli_type.clone(),
@@ -2387,14 +2546,14 @@ async fn batch_execute_prompt(
 
     let mut results = Vec::with_capacity(ids.len());
     let mut succeeded = 0usize;
-    for id in &ids {
-        match send_prompt_to_terminal(&state, id, &req).await {
+    for (requested, resolved) in &ids {
+        match send_prompt_to_terminal(&state, resolved, &req).await {
             Ok(_) => {
                 succeeded += 1;
-                results.push(json!({ "terminalId": id, "success": true }));
+                results.push(json!({ "terminalId": requested, "success": true }));
             }
             Err((_, msg)) => {
-                results.push(json!({ "terminalId": id, "success": false, "error": msg }));
+                results.push(json!({ "terminalId": requested, "success": false, "error": msg }));
             }
         }
     }
@@ -2416,17 +2575,19 @@ async fn batch_write_terminal(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "terminalIds must be a non-empty array" })));
     }
 
-    let ids = dedup_preserve_order(&body.terminal_ids);
+    // Same as batch execute: resolve for the lookup, echo what the caller sent.
+    let ids: Vec<(String, String)> = dedup_preserve_order(&body.terminal_ids)
+        .iter().map(|i| (i.clone(), state.resolve_ref(i))).collect();
     let mut results = Vec::with_capacity(ids.len());
     let mut succeeded = 0usize;
-    for id in &ids {
-        match write_data_to_terminal(&state, id, &body.data) {
+    for (requested, resolved) in &ids {
+        match write_data_to_terminal(&state, resolved, &body.data) {
             Ok(()) => {
                 succeeded += 1;
-                results.push(json!({ "terminalId": id, "success": true }));
+                results.push(json!({ "terminalId": requested, "success": true }));
             }
             Err((_, msg)) => {
-                results.push(json!({ "terminalId": id, "success": false, "error": msg }));
+                results.push(json!({ "terminalId": requested, "success": false, "error": msg }));
             }
         }
     }
@@ -2436,6 +2597,53 @@ async fn batch_write_terminal(
         "results": results,
         "summary": { "total": total, "succeeded": succeeded, "failed": total - succeeded }
     })))
+}
+
+/// How long a sibling holds its detach window after being armed for our update.
+///
+/// Matches the value `update_and_restart` arms ITSELF with. A shorter window
+/// would expire while the apply is still running and lose the very shells this
+/// exists to save.
+const SIBLING_ARM_SECS: u64 = 600;
+
+/// Arm this instance's pty-host so its shells survive a sibling's update.
+///
+/// Called BY another instance, not by this one's UI. Velopack's apply kills our
+/// GUI along with the updating instance; arming is what lets our shells outlive
+/// it and reattach on the next launch (design 014 §B1).
+///
+/// Idempotent: a duplicate arm re-arms the same window, which is harmless and
+/// keeps the caller's retry logic simple.
+async fn hotswap_arm(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(client) = state.pty_host_clone() else {
+        // No host means no shells to save; say so rather than claiming success,
+        // so the caller can tell "prepared" from "nothing to prepare".
+        return (StatusCode::SERVICE_UNAVAILABLE, "pty-host not connected").into_response();
+    };
+    let token = crate::pty_host_client::resolve_token();
+    match client.arm_detach(SIBLING_ARM_SECS, &token).await {
+        Ok(_) => {
+            log::info!("[HOTSWAP] armed at a sibling's request ({SIBLING_ARM_SECS}s)");
+            (StatusCode::OK, "armed").into_response()
+        }
+        Err(e) => {
+            log::warn!("[HOTSWAP] refused a sibling's arm request: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
+}
+
+/// Release a detach window armed by `hotswap_arm`.
+///
+/// The other half of the obligation: an update that arms siblings and then FAILS
+/// must put them back, or every sibling holds a 600s window it never asked for.
+/// Idempotent — disarming an unarmed host is a no-op.
+async fn hotswap_disarm(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(client) = state.pty_host_clone() else {
+        return (StatusCode::OK, "nothing to disarm").into_response();
+    };
+    client.disarm().await;
+    (StatusCode::OK, "disarmed").into_response()
 }
 
 async fn get_system_info() -> impl IntoResponse {
@@ -2517,6 +2725,11 @@ async fn get_process_metrics(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     // Copy the pid out so the DashMap guard drops before any await.
     let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "Process not found" })));
@@ -2865,6 +3078,11 @@ async fn resize_with_reflow(
     Path(id): Path<String>,
     Json(payload): Json<ResizeReflowReq>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Resize-reflow request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Check if terminal exists and get its backend type
@@ -2985,6 +3203,11 @@ async fn capture_terminal_content(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<CapturePaneQuery>,
 ) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    let id = state.resolve_ref(&id);
     log::info!("Capture content request for terminal {}", id);
 
     let backend = match state.get_terminal_backend(&id) {
@@ -3258,7 +3481,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         // absent (legacy pattern-only subscribe, e.g. the terminal-monitor
                         // client sending just `payload.patterns`), leave the filter at `All`
                         // so the connection keeps receiving every terminal's output.
-                        let ids = parse_subscribe_ids(&value);
+                        // Normalised: the filter is matched against ChannelPayload.id,
+                        // which is a pc- process id, but a client subscribes with the
+                        // tm- id the API reported to it. Unnormalised, the filter matches
+                        // nothing and the socket goes silent (design 014 A3).
+                        let ids = parse_subscribe_ids(&value)
+                            .map(|l| l.iter().map(|i| state.resolve_ref(i)).collect::<Vec<_>>());
                         if let Some(ref list) = ids {
                             if let Ok(mut f) = filter.lock() {
                                 f.set(list.clone());
@@ -3275,7 +3503,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         let action = value["payload"]["action"].as_str().unwrap_or("");
                         match action {
                             "terminal:input" => {
-                                let terminal_id = value["payload"]["terminalId"].as_str().unwrap_or("");
+                                // Normalised for the same reason as the REST handlers:
+                                // a client sends the tm- id it was given, the maps are
+                                // keyed by pc- (design 014 A3).
+                                let terminal_id = &state.resolve_ref(
+                                    value["payload"]["terminalId"].as_str().unwrap_or(""),
+                                );
                                 let data = value["payload"]["data"].as_str().unwrap_or("");
 
                                 use std::io::Write;
@@ -3368,6 +3601,7 @@ mod tests {
             backend: crate::tmux_manager::TerminalBackend::PortablePty,
             renderer_terminal_id: Some("tm-9f2c1a4b7".into()),
             owning_tab_id: Some("tb-4e8d0c2f1".into()),
+            session_key: "tm-9f2c1a4b7".into(),
             last_input_source: None,
             last_input_at: None,
             prompt_hook: true,
@@ -3406,15 +3640,21 @@ mod tests {
         assert_eq!(v["promptHook"], json!(true));
     }
 
-    /// design 011 §7 test 5: leaf == owner for a RENDERER-created tab root.
-    /// Not a general root-pane invariant — an API-created root's leaf is a
-    /// `tm-*` owned by a different `tb-*` id, so leaf != owner there.
+    /// Design 011 §7 test 5 asserted `leaf == owner` for a renderer-created tab
+    /// root. **Design 014 §A1 supersedes it**: every root leaf is a minted `tm-`
+    /// now, so the two are never equal — and a test still demanding the equality
+    /// argues for the very defect the design removed. Inverted rather than
+    /// deleted, because "these two ids are DIFFERENT" is the invariant that
+    /// replaced it and it deserves to be pinned.
     #[test]
-    fn a_renderer_created_root_reports_the_same_value_for_leaf_and_owner() {
+    fn a_renderer_created_root_reports_a_leaf_distinct_from_its_owner() {
         let mut t = identity_sample();
-        t.renderer_terminal_id = Some("tb-4e8d0c2f1".into());
+        t.renderer_terminal_id = Some("tm-9f2c1a4b7".into());
+        t.owning_tab_id = Some("tb-4e8d0c2f1".into());
         let v = terminal_identity_json(&t, "ui");
-        assert_eq!(v["terminalId"], v["owningTabId"]);
+        assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
+        assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
+        assert_ne!(v["terminalId"], v["owningTabId"]);
     }
 
     /// Correction C1: before P0-A `tab_id` was never None, so this shape could
@@ -3825,6 +4065,33 @@ mod tests {
         assert!(!auth_required(Integrity::Medium, false));
         assert!(auth_required(Integrity::Medium, true));
         assert!(auth_required(Integrity::High, true));
+    }
+
+    /// Design 014 §B-D5. `auth_required` is false for a normal, non-exposed
+    /// instance, so its loopback API is unauthenticated — fine for terminal
+    /// verbs, not fine for one that changes another process's shutdown
+    /// semantics. Any local process could otherwise arm a sibling.
+    #[test]
+    fn the_hotswap_routes_always_require_a_token() {
+        assert!(route_always_requires_token("/api/hotswap/arm"));
+        assert!(route_always_requires_token("/api/hotswap/disarm"));
+    }
+
+    /// ...and ordinary routes keep D1's zero-friction loopback, or this would
+    /// be a silent breaking change for curl and the MCP sidecar.
+    #[test]
+    fn ordinary_routes_keep_the_unauthenticated_loopback() {
+        for path in ["/api/terminals", "/api/health", "/health", "/api/system/info", "/api/fleet/terminals"] {
+            assert!(!route_always_requires_token(path), "{path} must not become token-gated");
+        }
+    }
+
+    /// The prefix must not leak onto a route that merely starts similarly — a
+    /// blanket `contains("hotswap")` would catch unrelated future paths.
+    #[test]
+    fn the_always_token_rule_is_scoped_to_the_hotswap_prefix() {
+        assert!(!route_always_requires_token("/api/terminals/hotswap"));
+        assert!(!route_always_requires_token("/api/hotswapping"));
     }
 
     #[test]
@@ -4621,5 +4888,68 @@ mod create_terminal_req_tests {
         assert_eq!(r.pane_id.as_deref(), Some("tm-2"));
         assert_eq!(r.direction.as_deref(), Some("horizontal"));
         assert_eq!(r.parent_terminal_id.as_deref(), Some("pc-3"));
+    }
+}
+
+
+/// Prefix-dispatched terminal resolution (design 014 §A3).
+#[cfg(test)]
+mod classify_terminal_ref_tests {
+    use super::{classify_terminal_ref, TerminalRef};
+    use axum::http::StatusCode;
+
+    /// A tab id where a terminal is meant — THE reported MCP failure. Before
+    /// design 014 this could not even be DETECTED: a renderer-created tab's root
+    /// leaf WAS its tab id, so `tb-…` was a legitimate terminal reference for
+    /// some panes and meaningless for others, and an agent in a two-pane tab had
+    /// no way to say which terminal it meant.
+    #[test]
+    fn a_tab_id_is_rejected_and_names_the_field_to_use_instead() {
+        let err = classify_terminal_ref("tb-4e8d0c2f1").expect_err("a tab id is not a terminal");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("TAB id"), "must say what it IS: {}", err.1);
+        assert!(err.1.contains("owningTabId"), "must name the right field: {}", err.1);
+        assert!(err.1.contains("tm-"), "must name the right id space: {}", err.1);
+    }
+
+    #[test]
+    fn a_pane_id_is_rejected_and_names_the_field_to_use_instead() {
+        let err = classify_terminal_ref("pn-4k2j9x1qa").expect_err("a pane id is not a terminal");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("PANE id"), "{}", err.1);
+        assert!(err.1.contains("tm-"), "{}", err.1);
+    }
+
+    #[test]
+    fn a_leaf_id_classifies_as_the_durable_space() {
+        assert_eq!(classify_terminal_ref("tm-9f2c1a4b7").unwrap(), TerminalRef::Leaf);
+    }
+
+    #[test]
+    fn a_process_id_classifies_as_the_per_run_space() {
+        assert_eq!(classify_terminal_ref("pc-abc123def").unwrap(), TerminalRef::Process);
+    }
+
+    /// Rejection is by SHAPE, not by liveness: a tab id matching nothing live
+    /// must still be told it is a tab id, or the caller retries the same
+    /// mistake with no idea why it failed.
+    #[test]
+    fn a_tab_id_is_rejected_even_when_nothing_is_live() {
+        assert_eq!(classify_terminal_ref("tb-anything").unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// An id from before the prefixes existed must still route rather than 400 —
+    /// rejecting it would break clients holding ids from an older build.
+    #[test]
+    fn an_unprefixed_legacy_id_is_treated_as_a_process_id() {
+        assert_eq!(classify_terminal_ref("legacy-id-0001").unwrap(), TerminalRef::Process);
+    }
+
+    /// The prefixes must not leak onto ids that merely start similarly.
+    #[test]
+    fn the_prefix_rules_are_exact() {
+        assert_eq!(classify_terminal_ref("tbx-0000").unwrap(), TerminalRef::Process);
+        assert_eq!(classify_terminal_ref("pnx-0000").unwrap(), TerminalRef::Process);
+        assert_eq!(classify_terminal_ref("tmx-0000").unwrap(), TerminalRef::Process);
     }
 }

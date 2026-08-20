@@ -293,10 +293,11 @@ const TabItem: React.FC<TabItemProps> = ({
   };
 
   // Get process IDs from terminal service. Review 109 H3 / re-review 111
-  // finding 3: an API-created tab's process is registered under its real `tm-*`
-  // leaf, never `tab.id` — and once such a tab is SPLIT there are several live
-  // leaves. Resolve every leaf the tab's tree declares (`tab.id` is used only
-  // when the tab has no tree at all).
+  // finding 3: a tab's process is registered under its real `tm-*` leaf, never
+  // `tab.id` — that is true of EVERY tab since design 014, not just API-created
+  // ones — and once a tab is SPLIT there are several live leaves. Resolve every
+  // leaf the tab's tree declares (`tab.id` is used only when the tab has no
+  // tree at all, where it now matches nothing; see collectTabCloseTerminalIds).
   const tabTree = useSelector((state: RootState) => state.panes.treesByTabId[tab.id] ?? null);
   const processIds = resolveTabProcessIds(tabTree, tab.id);
 
@@ -491,11 +492,11 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     // The terminals this tab still owns — the tree when we have one, else the
     // tab-id fallback. Deliberately NOT "tree + tab id": a pane dragged into
     // another tab (or window) takes its terminal with it while this tab keeps
-    // its id, and a RENDERER-originated root pane's terminalId IS the tab id.
-    // See collectTabCloseTerminalIds — including the residual risk it documents
-    // for an API-created tab (root leaf is `tm-`, not `id`) if `tabPanes` above
-    // were ever null/unpopulated for it; believed unreachable given Mode 0's
-    // synchronous seed, per App.tsx / TerminalContainer.tsx.
+    // its id. See collectTabCloseTerminalIds — including the residual risk it
+    // documents for the no-tree fallback, which since design 014 applies to
+    // every tab rather than only API-created ones (no root leaf is the tab's
+    // own id any more). Believed unreachable: the tree is seeded synchronously
+    // before a tab is closable, per App.tsx / TerminalContainer.tsx.
     for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
       console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
       terminalService.closeTerminal(terminalId).catch((error) => {

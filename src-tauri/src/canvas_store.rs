@@ -4,8 +4,12 @@ use std::path::Path;
 use std::sync::Mutex;
 
 /// A relationship between two terminals, keyed by RENDERER ids (`tb-`/`tm-`).
-/// Callers must normalise through `AppState::resolve_renderer_id` first — the
-/// two PTY spawn paths inject different id spaces into `TERMFLOW_TERMINAL_ID`.
+/// Callers must normalise through `AppState::resolve_renderer_id` first.
+///
+/// The two PTY spawn paths USED to inject different id spaces into
+/// `TERMFLOW_TERMINAL_ID` (one the leaf, one the `pc-`); since design 014 A6.1
+/// both inject the leaf. The normalisation stays for terminals registered
+/// before that change, and for a caller holding a `pc-` process id.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanvasEdge {

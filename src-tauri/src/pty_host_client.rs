@@ -28,10 +28,22 @@ use tokio::sync::oneshot;
 pub struct PtyHostDeps {
     pub output_tx: broadcast::Sender<ChannelPayload>,
     pub output_produced: Arc<AtomicU64>,
-    /// Called on child exit: (tab_id, exit_cwd). Wire to cleanup + terminal:exit.
-    pub on_exit: Arc<dyn Fn(String, Option<String>) + Send + Sync>,
-    /// Called on an output discontinuity: (tab_id). Wire to a repaint nudge.
+    /// Called on child exit: `(process_id, session_key, exit_cwd)`.
+    /// Wire to cleanup + terminal:exit.
+    ///
+    /// Takes BOTH ids because the two are no longer the same string (design 014
+    /// §A1) and the exit path needs each for a different map: `process_id` keys
+    /// the terminal/screen/cwd state, while `session_key` keys the host's own
+    /// ring bookkeeping (`host_stream_offsets`).
+    pub on_exit: Arc<dyn Fn(String, String, Option<String>) + Send + Sync>,
+    /// Called on an output discontinuity: `(process_id)`. Wire to a repaint nudge.
     pub on_gap: Arc<dyn Fn(String) + Send + Sync>,
+    /// pty-host session key → this run's process id.
+    ///
+    /// The host tags every inbound frame with its OWN session key, but our maps
+    /// are keyed by process id. Injected rather than read from `AppState` so this
+    /// module stays decoupled (and unit-testable without a Tauri AppHandle).
+    pub resolve_process: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
     /// Called when the pipe closes unexpectedly (sidecar died / connection
     /// lost). Wire to surface a SessionClosedBanner on every host-owned pane.
     pub on_disconnect: Arc<dyn Fn() + Send + Sync>,
@@ -43,6 +55,24 @@ pub struct PtyHostDeps {
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
+
+/// Map a pty-host session key to the process id our maps are keyed by.
+///
+/// Returns `None` for an unknown session, and every caller DROPS that frame.
+/// Falling back to the raw session key is precisely what design 014 §A2 exists
+/// to remove: it would route a stale session's bytes into whatever map entry
+/// happens to share its name — the silent mis-routing that made a tab id and a
+/// terminal id indistinguishable in the first place.
+///
+/// A thin wrapper over the lookup on purpose: it gives the routing rule a name
+/// and a test, so the "never fall back" decision is pinned somewhere rather than
+/// living implicitly in three call sites.
+pub(crate) fn route_inbound(
+    session_key: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    lookup(session_key)
+}
 
 /// True when the PTY-host sidecar path is active.
 ///
@@ -329,19 +359,34 @@ where
         loop {
             match read_frame(&mut rd).await {
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
+                    // Ring bookkeeping stays in the HOST's id space — it is the
+                    // host's own offset, and reattach replays from it.
                     deps.stream_offsets
                         .insert(tab_id.clone(), offset + bytes.len() as u64);
-                    let _ = deps.output_tx.send(ChannelPayload {
-                        id: tab_id,
-                        data: bytes,
-                    });
-                    deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        Some(id) => {
+                            let _ = deps.output_tx.send(ChannelPayload { id, data: bytes });
+                            deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                        }
+                        None => log::warn!(
+                            "pty-host: dropping Stdout for unknown session {tab_id}"
+                        ),
+                    }
                 }
                 Ok(Some(Frame::Data(Data::Gap { tab_id, .. }))) => {
-                    (deps.on_gap)(tab_id);
+                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        Some(id) => (deps.on_gap)(id),
+                        None => log::warn!("pty-host: dropping Gap for unknown session {tab_id}"),
+                    }
                 }
                 Ok(Some(Frame::Data(Data::Exit { tab_id, exit_cwd }))) => {
-                    (deps.on_exit)(tab_id, exit_cwd);
+                    // An exit for an unknown session still has cleanup value, but
+                    // there is no process-keyed state to clean, so drop it rather
+                    // than inventing an id.
+                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        Some(id) => (deps.on_exit)(id, tab_id, exit_cwd),
+                        None => log::warn!("pty-host: dropping Exit for unknown session {tab_id}"),
+                    }
                 }
                 Ok(Some(Frame::Resp(resp))) => {
                     let req = resp_req(&resp);
@@ -1421,12 +1466,52 @@ mod tests {
         let deps = PtyHostDeps {
             output_tx: tx,
             output_produced: produced.clone(),
-            on_exit: Arc::new(|_, _| {}),
+            on_exit: Arc::new(|_, _, _| {}),
             on_gap: Arc::new(|_| {}),
             on_disconnect: Arc::new(|| {}),
             stream_offsets: Arc::new(dashmap::DashMap::new()),
+            // Identity mapping: these tests predate the id split and assert the
+            // pipe/framing behaviour, not the routing. A resolver that knows every
+            // session keeps them measuring what they were written to measure.
+            resolve_process: Arc::new(|k: &str| Some(k.to_string())),
         };
         (deps, rx, produced)
+    }
+
+    /// Design 014 §A3: the host speaks its own id space and every inbound frame
+    /// is translated before it reaches our maps.
+    #[test]
+    fn route_inbound_maps_a_session_key_to_its_process_id() {
+        let got = route_inbound("tb-legacy01", |k| {
+            (k == "tb-legacy01").then(|| "pc-live0001".to_string())
+        });
+        assert_eq!(got.as_deref(), Some("pc-live0001"));
+    }
+
+    /// The "never fall back" rule. Echoing the session key back would route a
+    /// stale session's bytes into whatever map entry shares its name — the exact
+    /// silent mis-routing design 014 exists to remove.
+    #[test]
+    fn route_inbound_drops_an_unknown_session_rather_than_echoing_it() {
+        assert_eq!(route_inbound("tb-ghost001", |_| None), None);
+    }
+
+    /// Holds for every terminal created on this build, which is why introducing
+    /// the translation is a no-op until the ids actually diverge.
+    #[test]
+    fn route_inbound_is_identity_while_session_key_equals_process_id() {
+        let got = route_inbound("pc-same0001", |k| Some(k.to_string()));
+        assert_eq!(got.as_deref(), Some("pc-same0001"));
+    }
+
+    /// A migrated terminal: the host still calls it `tb-old`, our maps call it
+    /// `pc-new`. Bytes must land on the process id.
+    #[test]
+    fn route_inbound_translates_a_migrated_sessions_legacy_key() {
+        let got = route_inbound("tb-old00001", |k| {
+            (k == "tb-old00001").then(|| "pc-new00001".to_string())
+        });
+        assert_eq!(got.as_deref(), Some("pc-new00001"), "a migrated session must still route");
     }
 
     #[tokio::test]
