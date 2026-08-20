@@ -2744,6 +2744,7 @@ mod scrollback_restore_tests {
                 backend: crate::tmux_manager::TerminalBackend::PortablePty,
                 renderer_terminal_id: Some(id.to_string()),
                 owning_tab_id: Some(id.to_string()),
+                session_key: id.to_string(),
                 last_input_source: None,
                 last_input_at: None,
                 prompt_hook: false,
