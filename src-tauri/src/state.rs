@@ -1051,30 +1051,44 @@ impl<R: Runtime> AppState<R> {
         let deps = crate::pty_host_client::PtyHostDeps {
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
-            on_exit: Arc::new(move |tab_id: String, exit_cwd: Option<String>| {
+            on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
                 use tauri::Emitter;
                 // Mirror the in-process reader's exit path: capture cwd (from the
                 // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
-                    .or_else(|| st_exit.terminal_cwds.get(&tab_id).map(|r| r.value().clone()));
+                    .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
                 // Persist the final parser state BEFORE cleanup discards it — the
                 // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store.
-                st_exit.persist_terminal_history(&tab_id, chrono::Utc::now().timestamp_millis());
-                st_exit.host_terminals.remove(&tab_id);
-                st_exit.host_stream_offsets.remove(&tab_id);
-                st_exit.cleanup_terminal_state(&tab_id);
+                // last moments never reach the history store. Takes the PROCESS id
+                // and derives the history key from the terminal's leaf itself.
+                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
+                st_exit.host_terminals.remove(&process_id);
+                // Ring bookkeeping is keyed by the SESSION, not the process: it is
+                // the host's own offset and lives in the host's id space.
+                st_exit.host_stream_offsets.remove(&session_key);
+                // Drop the identity lookups LAST among the removals but before the
+                // emit — a leaked entry would route a later terminal's output at a
+                // process id that no longer exists.
+                st_exit.identity.unindex(&process_id);
+                st_exit.cleanup_terminal_state(&process_id);
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
-                    serde_json::json!({ "id": tab_id, "exitCode": 0, "cwd": cwd }),
+                    serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
                 );
                 // Same as the in-process path: release the app window if a dialog
                 // this shell owned took it down with it (see console_window).
                 crate::console_window::unstick_all(&st_exit.app_handle);
             }),
-            on_gap: Arc::new(move |tab_id: String| {
-                st_gap.host_repaint(&tab_id);
+            on_gap: Arc::new(move |process_id: String| {
+                st_gap.host_repaint(&process_id);
             }),
+            // Session key -> process id. The host speaks its own id space; every
+            // inbound frame is translated here before it reaches our maps
+            // (design 014 §A3). An unknown session is DROPPED, never echoed.
+            resolve_process: {
+                let st = self.clone();
+                Arc::new(move |k: &str| st.identity.process_for_session(k))
+            },
             on_disconnect: Arc::new(move || {
                 // Only act if THIS connection is still the current one — a stale
                 // old client's disconnect must not clobber a reconnected client.
@@ -1394,10 +1408,17 @@ impl<R: Runtime> AppState<R> {
         if !self.is_host_owned(id) {
             return false;
         }
-        let dims = self.terminals.get(id).map(|t| (t.cols, t.rows));
-        if let Some((cols, rows)) = dims {
+        // `id` is the PROCESS id (our map key); the host only knows this terminal
+        // by its session key, so the nudge must be addressed in the host's id
+        // space (design 014 §A2). Reading both from the same record keeps them
+        // consistent even for a migrated terminal, where they differ.
+        let info = self
+            .terminals
+            .get(id)
+            .map(|t| (t.cols, t.rows, t.session_key.clone()));
+        if let Some((cols, rows, session_key)) = info {
             if let Some(c) = self.pty_host_client().as_ref() {
-                c.nudge_repaint(id, cols, rows);
+                c.nudge_repaint(&session_key, cols, rows);
             }
         }
         true
@@ -1499,6 +1520,11 @@ impl<R: Runtime> AppState<R> {
         // TOCTOU window if this method removes `terminals` before
         // `terminal_history`.
         self.terminals.remove(id);
+        // Alongside `terminals`, and for the same reason: the identity lookups are
+        // an index OF that map, so an entry outliving its terminal would resolve a
+        // durable id to a process that no longer exists. One remover, at the same
+        // choke point every other per-terminal map is torn down from.
+        self.identity.unindex(id);
         self.shell_writer_channels.remove(id);
         self.ptys.remove(id);
         self.terminal_screens.remove(id);

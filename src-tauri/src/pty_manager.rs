@@ -872,6 +872,10 @@ pub fn spawn_terminal(
     // master, and screen parser are all in place — otherwise a concurrent
     // delete could clean up half-constructed state and the remaining inserts
     // would resurrect orphaned entries no cleanup path ever removes.
+    // Index alongside registration so a `tm-` lookup resolves for in-process
+    // terminals too (design 014 §A3). This path never reaches the pty-host, so
+    // its session key is its own id.
+    app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
     app_state.terminals.insert(id.clone(), Terminal {
         id: id.clone(),
         pid,

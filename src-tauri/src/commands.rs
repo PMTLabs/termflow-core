@@ -502,6 +502,12 @@ fn register_host_terminal(
     let (leaf, owner) = host_identity(id, owning_tab_id);
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), ());
+    // Index BEFORE the terminal becomes observable: the pty-host translates every
+    // inbound frame through `process_for_session`, so a frame arriving between the
+    // spawn and this call would be dropped as an unknown session. Today all three
+    // ids are the same string, so this is an identity mapping; Task 4 makes it a
+    // real one (design 014 §A3).
+    state.identity.index(id, Some(&leaf), id);
     state.terminals.insert(
         id.to_string(),
         crate::state::Terminal {
