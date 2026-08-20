@@ -148,6 +148,21 @@ pub fn auth_required(integrity: crate::profile::Integrity, expose: bool) -> bool
     expose || integrity == crate::profile::Integrity::High
 }
 
+/// Routes that require a bearer token **regardless** of `auth_required`.
+///
+/// D1 leaves a NORMAL instance's loopback API unauthenticated so curl, the MCP
+/// sidecar and user scripts stay zero-friction. That trade is fine for terminal
+/// verbs, whose blast radius is this user's own shells. It is not fine for a
+/// verb that changes another process's shutdown semantics: `/api/hotswap/arm`
+/// makes a sibling hold a detach window it never asked for, and any local
+/// process could call it.
+///
+/// The cost of requiring a token here is zero — the only legitimate caller is a
+/// sibling instance, which already holds the token from our `InstanceRecord`.
+pub fn route_always_requires_token(path: &str) -> bool {
+    path.starts_with("/api/hotswap/")
+}
+
 /// Start the API server on an already-bound listener. Binding happens in the
 /// caller so a bind failure is surfaced BEFORE the old server is torn down
 /// (no "silent success with no server" window).
@@ -209,6 +224,10 @@ pub async fn start_api_server(
         .route("/api/fleet/screen", post(fleet_screen))
         .route("/api/fleet/close", post(fleet_close))
         // System info endpoints
+        // Sibling coordination for an update (design 014 §B3). Token-gated
+        // unconditionally — see `route_always_requires_token`.
+        .route("/api/hotswap/arm", post(hotswap_arm))
+        .route("/api/hotswap/disarm", post(hotswap_disarm))
         .route("/api/system/info", get(get_system_info))
         .route("/api/system/metrics", get(get_system_metrics))
         // Process endpoints
@@ -254,10 +273,13 @@ pub async fn start_api_server(
         .layer(middleware::from_fn(move |req: Request, next: Next| {
             let auth_net = auth_net.clone();
             async move {
-                if !require_auth {
+                let path = req.uri().path().to_string();
+                // Checked BEFORE the `!require_auth` early return below — that
+                // return is exactly what would otherwise leave these routes wide
+                // open on a normal instance (design 014 §B-D5).
+                if !require_auth && !route_always_requires_token(&path) {
                     return next.run(req).await;
                 }
-                let path = req.uri().path().to_string();
                 // Health stays open so the Settings page can always poll status.
                 if path == "/health" || path == "/api/health" {
                     return next.run(req).await;
@@ -2441,6 +2463,53 @@ async fn batch_write_terminal(
     })))
 }
 
+/// How long a sibling holds its detach window after being armed for our update.
+///
+/// Matches the value `update_and_restart` arms ITSELF with. A shorter window
+/// would expire while the apply is still running and lose the very shells this
+/// exists to save.
+const SIBLING_ARM_SECS: u64 = 600;
+
+/// Arm this instance's pty-host so its shells survive a sibling's update.
+///
+/// Called BY another instance, not by this one's UI. Velopack's apply kills our
+/// GUI along with the updating instance; arming is what lets our shells outlive
+/// it and reattach on the next launch (design 014 §B1).
+///
+/// Idempotent: a duplicate arm re-arms the same window, which is harmless and
+/// keeps the caller's retry logic simple.
+async fn hotswap_arm(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(client) = state.pty_host_clone() else {
+        // No host means no shells to save; say so rather than claiming success,
+        // so the caller can tell "prepared" from "nothing to prepare".
+        return (StatusCode::SERVICE_UNAVAILABLE, "pty-host not connected").into_response();
+    };
+    let token = crate::pty_host_client::resolve_token();
+    match client.arm_detach(SIBLING_ARM_SECS, &token).await {
+        Ok(_) => {
+            log::info!("[HOTSWAP] armed at a sibling's request ({SIBLING_ARM_SECS}s)");
+            (StatusCode::OK, "armed").into_response()
+        }
+        Err(e) => {
+            log::warn!("[HOTSWAP] refused a sibling's arm request: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        }
+    }
+}
+
+/// Release a detach window armed by `hotswap_arm`.
+///
+/// The other half of the obligation: an update that arms siblings and then FAILS
+/// must put them back, or every sibling holds a 600s window it never asked for.
+/// Idempotent — disarming an unarmed host is a no-op.
+async fn hotswap_disarm(State(state): State<AppState>) -> impl IntoResponse {
+    let Some(client) = state.pty_host_clone() else {
+        return (StatusCode::OK, "nothing to disarm").into_response();
+    };
+    client.disarm().await;
+    (StatusCode::OK, "disarmed").into_response()
+}
+
 async fn get_system_info() -> impl IntoResponse {
     Json(json!({
         "platform": std::env::consts::OS,
@@ -3829,6 +3898,33 @@ mod tests {
         assert!(!auth_required(Integrity::Medium, false));
         assert!(auth_required(Integrity::Medium, true));
         assert!(auth_required(Integrity::High, true));
+    }
+
+    /// Design 014 §B-D5. `auth_required` is false for a normal, non-exposed
+    /// instance, so its loopback API is unauthenticated — fine for terminal
+    /// verbs, not fine for one that changes another process's shutdown
+    /// semantics. Any local process could otherwise arm a sibling.
+    #[test]
+    fn the_hotswap_routes_always_require_a_token() {
+        assert!(route_always_requires_token("/api/hotswap/arm"));
+        assert!(route_always_requires_token("/api/hotswap/disarm"));
+    }
+
+    /// ...and ordinary routes keep D1's zero-friction loopback, or this would
+    /// be a silent breaking change for curl and the MCP sidecar.
+    #[test]
+    fn ordinary_routes_keep_the_unauthenticated_loopback() {
+        for path in ["/api/terminals", "/api/health", "/health", "/api/system/info", "/api/fleet/terminals"] {
+            assert!(!route_always_requires_token(path), "{path} must not become token-gated");
+        }
+    }
+
+    /// The prefix must not leak onto a route that merely starts similarly — a
+    /// blanket `contains("hotswap")` would catch unrelated future paths.
+    #[test]
+    fn the_always_token_rule_is_scoped_to_the_hotswap_prefix() {
+        assert!(!route_always_requires_token("/api/terminals/hotswap"));
+        assert!(!route_always_requires_token("/api/hotswapping"));
     }
 
     #[test]
