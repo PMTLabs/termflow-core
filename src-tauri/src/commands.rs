@@ -1178,6 +1178,31 @@ pub async fn add_command_history(
     .map_err(|e| e.to_string())
 }
 
+/// Move persisted scrollback from a pre-014 `tb-` root leaf to its new `tm-`.
+///
+/// Called by `StateManager`'s restore-time migration, once per renamed leaf and
+/// **before any reattach**, so a pane finds its history under the id it will
+/// actually use. Without it a migrated pane comes back blank — silently, because
+/// a missing row reads as "nothing saved yet" rather than as an error.
+///
+/// Blocking worker for the same contention reason as `add_command_history`: the
+/// 30s scrollback flush holds this same mutex while writing multi-MB blobs.
+///
+/// Never fails the caller. A history row that will not move is a cosmetic loss
+/// for one pane; aborting the migration would leave the pane tree half-renamed,
+/// which is worse.
+#[tauri::command]
+pub async fn rename_terminal_history(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let store = state.history_store.clone();
+    tokio::task::spawn_blocking(move || store.rename_renderer_id(&from, &to))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Backlog 011: remove one command from the history (Shift+Delete on a
 /// suggestion). Blocking worker for the same contention reason as add.
 #[tauri::command]

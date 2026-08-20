@@ -172,6 +172,48 @@ impl HistoryStore {
         }
     }
 
+    /// Move one terminal's scrollback from an old renderer leaf to a new one.
+    ///
+    /// The design-014 migration: a pre-014 tab's root pane carried the tab's own
+    /// `tb-` id as its leaf, and that leaf is this table's PRIMARY KEY. When the
+    /// renderer rewrites the leaf to a `tm-`, the row has to come with it or the
+    /// pane silently loses every line of restored scrollback — silently, because
+    /// a missing row reads as "nothing saved yet", not as an error.
+    ///
+    /// `INSERT OR IGNORE` + `DELETE`, deliberately **not** `UPDATE`:
+    /// - a plain `UPDATE ... SET renderer_id = ?` onto an already-occupied key
+    ///   violates the PRIMARY KEY and fails the whole statement;
+    /// - `INSERT OR REPLACE` would succeed by **destroying the occupant's**
+    ///   scrollback, which is worse than doing nothing.
+    ///
+    /// So an occupied destination WINS and the source is dropped. That can only
+    /// happen on a mint collision or a re-run against an already-migrated store,
+    /// and in both cases the destination is the newer, correct row.
+    ///
+    /// A missing source row is a no-op, not an error: a cold tab that never
+    /// produced output has no history, and its leaf still needs renaming.
+    pub fn rename_renderer_id(&self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let guard = self.conn.lock().unwrap();
+        let Some(conn) = guard.as_ref() else { return };
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO terminal_history (renderer_id, data, updated_at)
+             SELECT ?2, data, updated_at FROM terminal_history WHERE renderer_id = ?1",
+            rusqlite::params![from, to],
+        ) {
+            log::warn!("[HISTORY] rename copy failed {} -> {}: {}", from, to, e);
+            return; // leave the source intact rather than losing it
+        }
+        if let Err(e) = conn.execute(
+            "DELETE FROM terminal_history WHERE renderer_id = ?1",
+            rusqlite::params![from],
+        ) {
+            log::warn!("[HISTORY] rename cleanup failed for {}: {}", from, e);
+        }
+    }
+
     /// Delete every row whose renderer_id is NOT in `keep` (startup orphan sweep).
     pub fn prune(&self, keep: &HashSet<String>) {
         let guard = self.conn.lock().unwrap();
@@ -381,7 +423,7 @@ impl HistoryStore {
 mod tests {
     use super::*;
 
-    fn temp_db() -> std::path::PathBuf {
+    pub(super) fn temp_db() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let mut p = std::env::temp_dir();
@@ -659,5 +701,80 @@ mod tests {
             !text.contains("stale pre-codex line"),
             "content cleared before exit must not reappear, got:\n{text}"
         );
+    }
+}
+
+/// The design-014 leaf rename (`tb-` root leaf -> minted `tm-`).
+#[cfg(test)]
+mod rename_renderer_id_tests {
+    use super::*;
+
+    fn store() -> HistoryStore {
+        let s = HistoryStore::new();
+        s.init(&super::tests::temp_db());
+        s
+    }
+
+    #[test]
+    fn the_row_moves_and_the_old_key_is_gone() {
+        let s = store();
+        s.upsert("tb-old00001", &["scrollback-A".into()], 1);
+        s.rename_renderer_id("tb-old00001", "tm-new00001");
+        assert_eq!(s.get("tm-new00001"), Some(vec!["scrollback-A".into()]));
+        assert_eq!(s.get("tb-old00001"), None, "the old key must not survive");
+    }
+
+    #[test]
+    fn other_rows_are_untouched() {
+        let s = store();
+        s.upsert("tb-old00001", &["A".into()], 1);
+        s.upsert("tm-other0001", &["B".into()], 1);
+        s.rename_renderer_id("tb-old00001", "tm-new00001");
+        assert_eq!(s.get("tm-other0001"), Some(vec!["B".into()]));
+    }
+
+    /// A cold tab has no history row, but its leaf still gets renamed. This must
+    /// not be an error or the whole migration aborts on the first empty tab.
+    #[test]
+    fn renaming_a_missing_row_is_a_noop() {
+        let s = store();
+        s.rename_renderer_id("tb-absent001", "tm-new00002");
+        assert_eq!(s.get("tm-new00002"), None);
+    }
+
+    /// An occupied destination WINS. `INSERT OR REPLACE` would have succeeded
+    /// here by destroying the occupant's scrollback — strictly worse than
+    /// leaving the migration incomplete.
+    #[test]
+    fn an_occupied_destination_is_never_overwritten() {
+        let s = store();
+        s.upsert("tb-old00002", &["SOURCE".into()], 1);
+        s.upsert("tm-taken0001", &["DESTINATION".into()], 1);
+        s.rename_renderer_id("tb-old00002", "tm-taken0001");
+        assert_eq!(
+            s.get("tm-taken0001"),
+            Some(vec!["DESTINATION".into()]),
+            "a mint collision must never eat the occupant's scrollback"
+        );
+    }
+
+    /// Running the migration twice must not lose the row the first run moved.
+    #[test]
+    fn a_second_run_is_idempotent() {
+        let s = store();
+        s.upsert("tb-old00003", &["A".into()], 1);
+        s.rename_renderer_id("tb-old00003", "tm-new00003");
+        s.rename_renderer_id("tb-old00003", "tm-new00003");
+        assert_eq!(s.get("tm-new00003"), Some(vec!["A".into()]));
+    }
+
+    /// A no-op rename must not delete the row it was asked to keep — the
+    /// obvious way to write this function loses data on `from == to`.
+    #[test]
+    fn renaming_a_key_onto_itself_keeps_the_row() {
+        let s = store();
+        s.upsert("tm-same0001", &["KEEP".into()], 1);
+        s.rename_renderer_id("tm-same0001", "tm-same0001");
+        assert_eq!(s.get("tm-same0001"), Some(vec!["KEEP".into()]));
     }
 }

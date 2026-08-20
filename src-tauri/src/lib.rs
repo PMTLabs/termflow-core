@@ -1511,6 +1511,7 @@ pub fn run() {
         commands::close_terminal,
         commands::prune_terminal_history,
         commands::add_command_history,
+        commands::rename_terminal_history,
         commands::load_command_history,
         commands::delete_command_history,
         commands::add_command_dir_usage,

@@ -128,6 +128,9 @@ interface ElectronAPI {
   /// THIS instance only. A sibling profile is not consulted: offload arms our own
   /// pty-host and exits this process, so it cannot reach one (design 014 B1.2).
   hotswapAvailable: () => Promise<void>;
+  /// Move persisted scrollback from an old renderer leaf to a new one, for the
+  /// design-014 migration of pre-014 tb- root leaves (StateManager restore).
+  renameTerminalHistory: (from: string, to: string) => Promise<void>;
   /// Preflight for a Velopack update: ours PLUS every sibling, because the apply
   /// kills every process under the install root. Rejects naming any sibling that
   /// cannot be prepared. Deliberately separate from hotswapAvailable — the two
@@ -615,6 +618,9 @@ const tauriBridge: ElectronAPI = {
   },
 
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
+  renameTerminalHistory: async (from: string, to: string) => {
+    await invoke('rename_terminal_history', { from, to });
+  },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
   updateAndRestart: async () => { await invoke('update_and_restart'); },
   // `@tauri-apps/api/app`'s getVersion() is exactly this invoke; calling it
