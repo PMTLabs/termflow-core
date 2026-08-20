@@ -5,6 +5,7 @@ import {
   swapLeaves,
   findLeaf,
   findTabIdByTerminalId,
+  findSessionKeyByTerminalId,
   getAllTerminalIds,
   getSelectedPaneId,
   isTerminalMuted,
@@ -360,5 +361,50 @@ describe('tabHasNoPanes', () => {
     const trees = { 'tab-1': leafNode, 'tab-2': null };
     expect(tabHasNoPanes(trees, 'tab-1')).toBe(false);
     expect(tabHasNoPanes(trees, 'tab-2')).toBe(true);
+  });
+});
+
+describe('findSessionKeyByTerminalId', () => {
+  const leaf = (id: string, terminalId: string, sessionKey?: string): PaneNode =>
+    ({ id, type: 'terminal', terminalId, ...(sessionKey ? { sessionKey } : {}) });
+
+  // Every pane created on this build: the host knows the session by the leaf.
+  it('returns undefined when the pane records no session key', () => {
+    const trees = { 'tb-a': leaf('pn-1', 'tm-aaaaaaaaa') };
+    expect(findSessionKeyByTerminalId(trees, 'tm-aaaaaaaaa')).toBeUndefined();
+  });
+
+  // A pane migrated from a pre-014 build: the host still knows the old tb- id,
+  // and dropping this is what would orphan an armed session.
+  it('returns the migrated key when the pane records one', () => {
+    const trees = { 'tb-a': leaf('pn-1', 'tm-new00001', 'tb-old00001') };
+    expect(findSessionKeyByTerminalId(trees, 'tm-new00001')).toBe('tb-old00001');
+  });
+
+  it('finds a key on a nested split leaf, not only a root', () => {
+    const trees = {
+      'tb-a': {
+        id: 'pn-root', type: 'split' as const, direction: 'horizontal' as const, size: 50,
+        children: [leaf('pn-1', 'tm-a'), leaf('pn-2', 'tm-b', 'tb-legacy01')],
+      },
+    };
+    expect(findSessionKeyByTerminalId(trees, 'tm-b')).toBe('tb-legacy01');
+  });
+
+  it('searches every tab, not just the first', () => {
+    const trees = {
+      'tb-a': leaf('pn-1', 'tm-a'),
+      'tb-b': leaf('pn-2', 'tm-b', 'tb-legacy02'),
+    };
+    expect(findSessionKeyByTerminalId(trees, 'tm-b')).toBe('tb-legacy02');
+  });
+
+  it('returns undefined for a terminal that is not in any tree', () => {
+    expect(findSessionKeyByTerminalId({ 'tb-a': leaf('pn-1', 'tm-a') }, 'tm-ghost'))
+      .toBeUndefined();
+  });
+
+  it('tolerates a null tree', () => {
+    expect(findSessionKeyByTerminalId({ 'tb-a': null }, 'tm-a')).toBeUndefined();
   });
 });

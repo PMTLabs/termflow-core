@@ -45,7 +45,7 @@ interface ElectronAPI {
   getTerminalSnapshot: (terminalId: string, cols?: number, rows?: number) => Promise<TerminalSnapshot>;
   getTerminalFullScrollback: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
   /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
@@ -293,7 +293,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -305,6 +305,10 @@ const tauriBridge: ElectronAPI = {
       // Tauri maps camelCase JS keys onto snake_case Rust parameters, so this
       // reaches `create_terminal(… owning_tab_id: Option<String>)`.
       owningTabId,
+      // The pty-host session key for a MIGRATED pane, whose host session is
+      // still keyed by its old `tb-` id. Undefined for every pane created on
+      // this build, where the host key follows the leaf (design 014 A2.1).
+      sessionKey,
     });
   },
 

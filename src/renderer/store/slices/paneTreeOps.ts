@@ -177,6 +177,36 @@ export function swapLeaves(tree: PaneNode, aId: string, bId: string): PaneNode {
  * leaf with the given terminalId, or null if no tab owns it. Used to attribute an
  * external (MCP/API) interaction to a tab when the backend event omits the tabId.
  */
+/**
+ * The pty-host session key recorded on the pane holding `terminalId`, if any.
+ *
+ * `undefined` means "the host knows this session by the leaf itself", which is
+ * true for every pane created on this build. A value is present only on a pane
+ * MIGRATED from a pre-014 build, where the leaf became a fresh `tm-` but the
+ * host still knows the session by the old `tb-` id — the pty-host protocol has
+ * no rename verb, so moving that key would orphan an armed session
+ * (design 014 §A2).
+ */
+export function findSessionKeyByTerminalId(
+  treesByTabId: Record<string, PaneNode | null>,
+  terminalId: string,
+): string | undefined {
+  const search = (node: PaneNode | null): string | undefined => {
+    if (!node) return undefined;
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node.sessionKey;
+    for (const c of node.children ?? []) {
+      const found = search(c);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  for (const tree of Object.values(treesByTabId)) {
+    const found = search(tree);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
 export function findTabIdByTerminalId(
   treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,

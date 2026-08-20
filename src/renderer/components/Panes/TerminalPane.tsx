@@ -5,7 +5,7 @@ import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
 import { renamePanes, setPaneMuted } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, findLeaf, getSelectedPaneId } from '../../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, findLeaf, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
@@ -275,6 +275,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // Create the promise and store it immediately
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
+      findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -505,6 +506,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         undefined,
         undefined,
         ownerTabId,
+        // A restart must reuse the MIGRATED session key, not mint one: the host
+        // still knows this session by its old id (design 014 A2.1).
+        findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
       );
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);

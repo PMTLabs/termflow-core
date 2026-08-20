@@ -131,6 +131,11 @@ pub async fn create_terminal(
     // `resolve_api_spawn_identity`, distinct from `owning_tab_id` (option A).
     // Optional so a renderer that predates P0-A still works.
     owning_tab_id: Option<String>,
+    // The pty-host session key for a MIGRATED pane (design 014 §A2.1). `None`
+    // means the host key follows the leaf, which is the case for every pane
+    // created on this build. Threaded through so a pane whose leaf the migration
+    // rewrote still reattaches to its already-armed session.
+    session_key: Option<String>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
     let mut shell_name = "default".to_string();
@@ -216,10 +221,7 @@ pub async fn create_terminal(
             state.inner(),
             SpawnRequest {
                 leaf_id: tid,
-                // The host key follows the leaf. Task 6 threads the renderer's
-                // persisted `sessionKey` through here, which is what lets a
-                // MIGRATED pane still find its armed session (design 014 §A2.1).
-                session_key: None,
+                session_key: session_key.clone(),
                 owning_tab_id: owning_tab_id.clone(),
                 cols,
                 rows,
