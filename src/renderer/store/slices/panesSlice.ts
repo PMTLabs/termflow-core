@@ -19,6 +19,23 @@ export interface PaneNode {
   // when the pane is closed — no orphaned side-state. A tab-level mute
   // (tabsSlice) overrides this and suppresses every pane regardless.
   notifyMuted?: boolean;
+  /** The pty-host session key, when it differs from `terminalId`.
+   *
+   *  `undefined` means "same as `terminalId`", which is the case for every pane
+   *  created on this build. It is set only by the pre-014 migration, where the
+   *  leaf becomes a fresh `tm-` but the host still knows the session by its old
+   *  `tb-` id — renaming it there would orphan an armed session, because the
+   *  pty-host protocol has no rename verb (design 014 §A2). */
+  sessionKey?: string;
+  /** The tab this pane was seeded for.
+   *
+   *  Recorded because design 014 removed the equality `root leaf === tab.id`,
+   *  which `tabTreeSeed.claimsItsOwnId` used as its ownership tiebreak when the
+   *  same terminal appears in two tabs' persisted mirrors. Without an explicit
+   *  owner that repair degrades to `tabs` order — a coin-flip, and the exact
+   *  non-determinism that function exists to remove. Legacy trees have no value
+   *  here and fall back to the id equality. */
+  seededForTabId?: string;
 }
 
 export type DropZone = EdgeZone | 'center';

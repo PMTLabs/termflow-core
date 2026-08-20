@@ -54,13 +54,31 @@ describe('pruneDuplicateLeaves', () => {
 });
 
 describe('planSeeds — one tab', () => {
-  it('manufactures a root leaf for a tab with no entry', () => {
+  // AMENDED by design 014. This previously asserted `terminalId === 'tb-b'`,
+  // the pre-014 rule that a tab's root pane carries the tab's own id. That
+  // equality is what made a field labelled "Terminal ID" show a `tb-` value and
+  // left an agent in a two-pane tab unable to say which terminal it meant.
+  // Ownership is now carried explicitly by `seededForTabId` instead of implied by
+  // the id.
+  it('manufactures a root leaf with a fresh tm- id, owned by the tab', () => {
     const [plan] = seedOne(TAB, {}, {});
     expect(plan.tabId).toBe('tb-b');
     expect(plan.tree!.type).toBe('terminal');
-    expect(plan.tree!.terminalId).toBe('tb-b');
+    expect(plan.tree!.terminalId).toMatch(/^tm-/);
+    expect(plan.tree!.terminalId).not.toBe('tb-b');
+    expect(plan.tree!.seededForTabId).toBe('tb-b');
     expect(plan.tree!.name).toBe('PowerShell 7 4');
     expect(plan.tree!.shellType).toBe('powershell');
+  });
+
+  it('gives two tabs two different root leaves', () => {
+    const a = seedOne({ id: 'tb-a' }, {}, {})[0].tree!.terminalId;
+    const b = seedOne({ id: 'tb-b' }, {}, {})[0].tree!.terminalId;
+    expect(a).not.toBe(b);
+  });
+
+  it('leaves sessionKey unset — only the migration sets it', () => {
+    expect(seedOne(TAB, {}, {})[0].tree!.sessionKey).toBeUndefined();
   });
 
   it('falls back to a plain name when the tab has no title', () => {
@@ -178,6 +196,30 @@ describe('planSeeds — the whole batch at once', () => {
       'tb-b': leaf('pn-b', 'tb-a'),
     });
     const winner = plans.find((p) => getAllTerminalIds(p.tree).includes('tb-a'));
+    expect(winner!.tabId).toBe('tb-a');
+    expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
+  });
+
+  /**
+   * The SAME determinism, for post-014 trees.
+   *
+   * The test above feeds legacy-shaped mirrors whose leaves are `tb-` ids, so it
+   * exercises the id-equality fallback. Once roots carry a `tm-` leaf that
+   * equality never holds, and without an explicit owner this repair silently
+   * degrades to `tabs` order — the coin flip the whole function exists to remove.
+   * A regression here is invisible: the repair still runs and still produces a
+   * plan, just a different one depending on tab order.
+   */
+  it.each([
+    ['owner last', ['tb-b', 'tb-a']],
+    ['owner first', ['tb-a', 'tb-b']],
+  ])('honours an explicit seededForTabId whatever the tab order (%s)', (_label, order) => {
+    const tabs = order.map((id) => ({ id }));
+    const plans = planSeeds(tabs as any, {}, {
+      'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-shared01', seededForTabId: 'tb-a' },
+      'tb-b': { id: 'pn-b', type: 'terminal', terminalId: 'tm-shared01' },
+    } as any);
+    const winner = plans.find((p) => getAllTerminalIds(p.tree).includes('tm-shared01'));
     expect(winner!.tabId).toBe('tb-a');
     expect(plans.find((p) => p.tabId === 'tb-b')!.tree).toBeNull();
   });

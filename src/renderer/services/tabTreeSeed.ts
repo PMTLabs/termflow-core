@@ -123,7 +123,13 @@ function candidateFor(
   return {
     id: generateId('pn'),
     type: 'terminal' as const,
-    terminalId: tab.id,
+    // A fresh `tm-` leaf, NOT `tab.id` (design 014 §A1). Before 014 a tab's root
+    // pane carried the tab's own id, which is why a field labelled "Terminal ID"
+    // displayed a `tb-` and an agent in a two-pane tab could not say which
+    // terminal it meant. `seededForTabId` below carries the ownership that equality
+    // used to imply.
+    terminalId: generateId('tm'),
+    seededForTabId: tab.id,
     name: tab.title || 'Terminal',
     shellType: tab.shellType,
   };
@@ -139,7 +145,29 @@ function candidateFor(
  * on every machine.
  */
 function claimsItsOwnId(tab: SeedTab, tabPanes: Record<string, PaneNode | null | undefined>): boolean {
-  return getAllTerminalIds(candidateFor(tab, tabPanes)).includes(tab.id);
+  const candidate = candidateFor(tab, tabPanes);
+  // Post-014: ownership is recorded explicitly, because a root leaf no longer
+  // carries its tab's id. Checked FIRST so a migrated tree is judged by the fact
+  // rather than by the equality it no longer satisfies.
+  if (declaresOwner(candidate, tab.id)) return true;
+  // Pre-014 trees restored from disk: the root leaf IS the tab id. Keeping this
+  // fallback is what stops the repair regressing to `tabs` order for anyone
+  // upgrading with existing saved state.
+  return getAllTerminalIds(candidate).includes(tab.id);
+}
+
+/** Does any pane in `node` declare `tabId` as the tab it was seeded for? */
+function declaresOwner(node: PaneNode | null, tabId: string): boolean {
+  if (!node) return false;
+  if (node.seededForTabId === tabId) return true;
+  return (node.children ?? []).some((child) => declaresOwner(child, tabId));
+}
+
+/** Collect every `seededForTabId` recorded anywhere in `node` into `out`. */
+function collectSeededFor(node: PaneNode | null, out: Set<string>): void {
+  if (!node) return;
+  if (node.seededForTabId) out.add(node.seededForTabId);
+  (node.children ?? []).forEach((child) => collectSeededFor(child, out));
 }
 
 /**
@@ -173,6 +201,12 @@ export function planSeeds(
     for (const terminalId of getAllTerminalIds(tree)) taken.add(terminalId);
   }
 
+  // Tabs some OTHER tab's pane was seeded for. A pending tab has no key, so any
+  // match here can only be a pane that moved away — which proves the tab was
+  // initialised once and then emptied, not that it is new.
+  const seededElsewhere = new Set<string>();
+  for (const tree of Object.values(trees)) collectSeededFor(tree, seededElsewhere);
+
   // Natural owners first; `sort` is stable, so everything else keeps `tabs` order.
   const ordered = [...pending].sort(
     (a, b) => Number(claimsItsOwnId(b, tabPanes)) - Number(claimsItsOwnId(a, tabPanes)),
@@ -185,6 +219,26 @@ export function planSeeds(
   // including the ones claimed earlier in THIS batch — and against itself.
   const out: SeedPlan[] = [];
   for (const tab of ordered) {
+    // Rule 3 — never MANUFACTURE a terminal for a tab that was emptied.
+    //
+    // Before design 014 this was enforced by accident: the manufactured leaf was
+    // `tab.id`, which is the very id the departing terminal carried, so Rule 2
+    // pruned it. Once a root leaf is a fresh `tm-` there is no collision left to
+    // catch it, and an emptied tab would silently come back holding a brand-new
+    // shell — the resurrection bug again, by a different route.
+    //
+    // Two signals, one per era, because restored state can be either shape:
+    //   - `taken.has(tab.id)`  — legacy: the tab's own id is still a live leaf
+    //                            somewhere, so it moved away.
+    //   - `seededElsewhere`    — post-014: a pane elsewhere names this tab as the
+    //                            one it was seeded for.
+    // Only applies to the manufacture branch; a stored mirror is an answer and is
+    // handled by Rule 2 below.
+    if (tabPanes[tab.id] === undefined && (taken.has(tab.id) || seededElsewhere.has(tab.id))) {
+      out.push({ tabId: tab.id, tree: null });
+      continue;
+    }
+
     const candidate = candidateFor(tab, tabPanes);
     // Stored as explicitly empty. Install the key so Rule 1 protects it from here on.
     if (candidate === null) {
