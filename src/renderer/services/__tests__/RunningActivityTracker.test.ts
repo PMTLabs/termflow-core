@@ -13,16 +13,19 @@ import {
 const dispatch = jest.fn();
 // Mutable store state so unseen tests can vary activeTabId / already-unseen tabs.
 // (Prefixed `mock*` so jest's hoisted factory may reference it.)
-const mockTabsState: { activeTabId: string | null; tabs: Array<{ id: string; hasUnseenOutput?: boolean; notifyMuted?: boolean }> } = {
+const mockTabsState: { activeTabId: string | null; tabs: Array<{ id: string; hasUnseenOutput?: boolean; notifyMuted?: boolean; shellType?: string | null }> } = {
   activeTabId: null,
   tabs: [],
 };
+// Canvas view state. Only `overlayId` reaches the tracker — it is the one terminal the user
+// may be watching at 1:1, and therefore the only one whose own busy→idle must not notify.
+const mockCanvasState: { overlayId: string | null } = { overlayId: null };
 // Holder so tests can fire the store-change callback the tracker subscribes with.
 const mockStoreSub: { cb: (() => void) | null } = { cb: null };
 jest.mock('../../store', () => ({
   store: {
     dispatch: (action: unknown) => dispatch(action),
-    getState: () => ({ panes: { treesByTabId: {} }, tabs: mockTabsState }),
+    getState: () => ({ panes: { treesByTabId: {} }, tabs: mockTabsState, canvas: mockCanvasState }),
     subscribe: (cb: () => void) => {
       mockStoreSub.cb = cb;
       return () => { mockStoreSub.cb = null; };
@@ -129,6 +132,7 @@ describe('RunningActivityTracker resize handling', () => {
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
     mockMutedTerminals.clear();
+    mockCanvasState.overlayId = null;
     runningActivityTracker.start(0); // no startup grace — steady-state behavior
   });
 
@@ -185,6 +189,7 @@ describe('RunningActivityTracker unseen-output marking (bell)', () => {
     mockTabsState.tabs = [];
     mockPaneTree.ready = true;
     mockMutedTerminals.clear();
+    mockCanvasState.overlayId = null;
     runningActivityTracker.start(0); // no startup grace — steady-state behavior
   });
 
@@ -602,6 +607,122 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
       const { bells, done } = collect();
       emitData('p1', 4);
       emitExit('p1', undefined); // event carried no terminalId
+      done();
+      expect(bells).toHaveLength(0);
+    });
+  });
+
+  /**
+   * `plan/021` R3 + R4.
+   *
+   * R3: suppression used to be "the canvas tab is active", full stop — a window-wide blackout
+   * that silenced every terminal for as long as the canvas stayed open. R4 is the rule that
+   * replaced it: exactly the one terminal shown in the OVERLAY, the single canvas surface
+   * rendered at 1:1, goes quiet; everything else notifies as it always did.
+   *
+   * These are the first tests to reach this branch at all. The pure-function tests in
+   * `runningActivity.test.ts` only ever exercised `computeUnseenUpdate` with a stand-in
+   * predicate, so the tracker's own predicate — which is where both R3 and R4 live, on TWO
+   * separate bell-emitting paths — had no coverage and the blanket suppression could have been
+   * changed to anything without a test noticing.
+   */
+  describe('canvas overlay suppression', () => {
+    const collect = () => {
+      const bells: Array<{ tabId: string }> = [];
+      const h = (e: Event) => bells.push((e as CustomEvent).detail);
+      window.addEventListener('activity:bell', h);
+      return { bells, done: () => window.removeEventListener('activity:bell', h) };
+    };
+
+    /** Put Canvas Mode on screen. It is a TAB, so it becomes the active one. */
+    const showCanvas = (overlayId: string | null = null) => {
+      mockTabsState.tabs = [
+        { id: 'tb-canvas', shellType: 'canvas' },
+        { id: 'tb-1' },
+        { id: 'tb-2' },
+      ];
+      mockCanvasState.overlayId = overlayId;
+      switchActiveTab('tb-canvas');
+    };
+
+    it('bells every terminal while the canvas is open with NO overlay (R3)', () => {
+      // The regression itself. Under the old rule this produced silence, because no terminal
+      // tab can be the active one once the canvas — itself a tab — is showing.
+      showCanvas(null);
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitData('p2', 4);
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId).sort()).toEqual(['tb-1', 'tb-2']);
+    });
+
+    it('bells on the exit path too while the canvas is open with no overlay (R3)', () => {
+      showCanvas(null);
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', 'tm-1');
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+    });
+
+    it('silences ONLY the overlaid terminal, and its neighbour still bells (R4)', () => {
+      showCanvas('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4); // the terminal on screen at 1:1
+      emitData('p2', 4); // a background terminal
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-2']);
+    });
+
+    it('silences the overlaid terminal on the exit path, and its neighbour still bells (R4)', () => {
+      // The exit path is a SECOND writer of the same bell. A suppression that lived only in
+      // the settle path would leak a notification for the terminal the user is watching.
+      showCanvas('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', 'tm-1');
+      emitData('p2', 4);
+      emitExit('p2', 'tm-2');
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-2']);
+    });
+
+    it('silences the overlaid terminal on exit even when the event omits terminalId', () => {
+      // Same shape as the muted-pane regression above: the gate must resolve the terminalId
+      // from the processId rather than trusting the event to carry one.
+      showCanvas('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      emitExit('p1', undefined);
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    it('stops suppressing once the user leaves the canvas, even though overlayId survives', () => {
+      // `overlayId` is deliberately NOT cleared on the way out (`plan/020` §4) — it records
+      // which node is enlarged, and that has to survive a tab switch. So the suppression
+      // cannot be keyed on `overlayId` alone: the user is no longer looking at that terminal
+      // once another tab is on screen, and it must ring again.
+      showCanvas('tm-1');
+      switchActiveTab('tb-2');            // away from the canvas; overlayId still 'tm-1'
+      expect(mockCanvasState.overlayId).toBe('tm-1');
+      const { bells, done } = collect();
+      emitData('p1', 4);
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+    });
+
+    it('keeps the mute rules working while an overlay is open', () => {
+      // The two suppressions are independent; narrowing one must not disarm the other.
+      showCanvas('tm-1');
+      mockMutedTerminals.add('tm-2');
+      const { bells, done } = collect();
+      emitData('p1', 4); // overlaid  → silent
+      emitData('p2', 4); // muted     → silent
+      jest.advanceTimersByTime(SETTLE_MS);
       done();
       expect(bells).toHaveLength(0);
     });

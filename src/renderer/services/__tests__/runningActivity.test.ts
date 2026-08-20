@@ -4,6 +4,7 @@ import {
   computeRunningTerminalIds,
   computeUnseenUpdate,
   canvasIsShowing,
+  overlaySuppressedTerminal,
   isEchoChunk,
   isSubmitInput,
   shouldCountForRunning,
@@ -308,12 +309,14 @@ describe('canvasIsShowing — the D1a notification regression', () => {
   });
 
   /**
-   * The behaviour the whole fix is for, stated end to end.
+   * The SUPPRESSION MECHANISM, stated end to end: a suppressed source is not flagged, but its
+   * mark still advances so the same output cannot ring in arrears once suppression lifts.
    *
-   * Under D1a the canvas is a tab, so `activeTabId` is the canvas and NO terminal tab is
-   * exempt — every running terminal rang the unseen bell, fired a toast and a chime while the
-   * user was looking straight at it. Suppression turns the flag off; advancing the mark is what
-   * stops the same output ringing in arrears the moment they leave the canvas.
+   * The predicate here is a stand-in (`() => true`), and deliberately so — WHICH sources are
+   * suppressed is the caller's business, and it has changed: `canvasIsShowing` was briefly the
+   * whole answer, which silenced every terminal for as long as the canvas stayed open
+   * (`plan/021` R3). See `overlaySuppressedTerminal` below for the rule that replaced it. The
+   * mechanism this exercises is unaffected either way.
    */
   it('flags nothing while the canvas is up, but still accounts for the output', () => {
     const resolve = () => 'tb-work';
@@ -339,5 +342,43 @@ describe('canvasIsShowing — the D1a notification regression', () => {
       () => false,
     );
     expect(toFlag).toEqual(['tb-work']);
+  });
+});
+
+/**
+ * `plan/021` R3 + R4 — how wide the canvas suppression is allowed to be.
+ *
+ * R3 was the blackout: "the canvas tab is active" suppressed every terminal in the window.
+ * R4 is the replacement: exactly the one terminal shown in the overlay at 1:1.
+ */
+describe('overlaySuppressedTerminal', () => {
+  const tabs = [
+    { id: 'tb-work', shellType: 'pwsh' },
+    { id: 'tb-canvas', shellType: 'canvas' },
+  ];
+
+  it('names the overlaid terminal while the canvas is on screen', () => {
+    expect(overlaySuppressedTerminal(tabs, 'tb-canvas', 'tm-7')).toBe('tm-7');
+  });
+
+  it('suppresses NOTHING when the canvas is open with no overlay (R3)', () => {
+    // The regression: every terminal in the window went silent for as long as the canvas was
+    // up. A canvas node is a preview — often a few percent of natural size, and not painting
+    // at all below the `live` tier — so it is not "seen".
+    expect(overlaySuppressedTerminal(tabs, 'tb-canvas', null)).toBeNull();
+  });
+
+  it('suppresses nothing once the user has left the canvas, even with an overlay remembered', () => {
+    // The subtle half. `overlayId` deliberately SURVIVES a tab switch (`plan/020` §4), so a
+    // rule keyed on it alone keeps a terminal silent long after the user stopped looking at
+    // it. Both conditions have to hold.
+    expect(overlaySuppressedTerminal(tabs, 'tb-work', 'tm-7')).toBeNull();
+    expect(overlaySuppressedTerminal(tabs, null, 'tm-7')).toBeNull();
+  });
+
+  it('is not fooled by another virtual tab', () => {
+    const withSettings = [...tabs, { id: 'tb-settings', shellType: 'settings' }];
+    // Settings shows no terminals at all, so nothing behind it is "seen".
+    expect(overlaySuppressedTerminal(withSettings, 'tb-settings', 'tm-7')).toBeNull();
   });
 });

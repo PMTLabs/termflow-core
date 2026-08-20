@@ -7,7 +7,7 @@ import {
   computeRunningTabIds,
   computeRunningTerminalIds,
   computeUnseenUpdate,
-  canvasIsShowing,
+  overlaySuppressedTerminal,
   shouldCountForRunning,
   isSubmitInput,
   WINDOW_MS,
@@ -285,10 +285,17 @@ class RunningActivityTrackerClass {
     if (!tabId) return;
     const tabsState = store.getState().tabs;
     if (tabId === tabsState.activeTabId) return;
-    // Same rule as the unseen pass: the canvas is showing every terminal, so a process that
-    // exits while it is up exited in front of the user. Without this an exit-settled bell
-    // still rings for every tab, since none of them is the active one under D1a.
-    if (canvasIsShowing(tabsState.tabs, tabsState.activeTabId)) return;
+    // Same rule as the unseen pass (`plan/021` R4), and it must stay the same rule: this path
+    // is a SECOND writer of the identical bell, so a suppression that lived only in
+    // `markUnseen` would leak an exit-settled notification for the very terminal the user is
+    // watching. What it must NOT do is go silent merely because the canvas is open — that was
+    // R3, and it cost every other terminal its notification.
+    const overlaidTerminalId = overlaySuppressedTerminal(
+      tabsState.tabs,
+      tabsState.activeTabId,
+      store.getState().canvas.overlayId,
+    );
+    if (overlaidTerminalId !== null && effectiveTerminalId === overlaidTerminalId) return;
     // Mute gate: suppress this exit-settled bell if the tab is muted, or the
     // exiting pane itself is muted (an unmuted sibling in the same tab is
     // unaffected). Mirrors the suppression check in computeUnseenUpdate.
@@ -402,15 +409,24 @@ class RunningActivityTrackerClass {
     // sources, so unmuting later — or leaving the canvas — doesn't ring a backlog.
     const mutedTabIds = new Set(tabsState.tabs.filter(t => t.notifyMuted).map(t => t.id));
     const treesByTabId = store.getState().panes.treesByTabId;
-    // Canvas Mode shows every terminal in the window at once, so while it is the active tab
-    // NOTHING is unseen — see `canvasIsShowing` for why this is not covered by the active-tab
-    // exemption. Read once per tick rather than per source: it is a property of the window.
-    const onCanvas = canvasIsShowing(tabsState.tabs, tabsState.activeTabId);
+    // The ONE terminal the user is watching at 1:1 in the canvas overlay, or null (`plan/021`
+    // R4). Read once per tick rather than per source: it is a property of the window, not of
+    // the output. This replaced a blanket "the canvas is up, so nothing may notify" — see
+    // `overlaySuppressedTerminal` for why that premise was too strong.
+    //
+    // It is a LEAF id, so the comparison needs the process resolved first; the pane-mute check
+    // below was already paying for that lookup, so this costs nothing new.
+    const overlaidTerminalId = overlaySuppressedTerminal(
+      tabsState.tabs,
+      tabsState.activeTabId,
+      store.getState().canvas.overlayId,
+    );
     const isSuppressed = (processId: string, tabId: string): boolean => {
-      if (onCanvas) return true;
       if (mutedTabIds.has(tabId)) return true;
       const terminalId = terminalService.getTerminalIdForProcess(processId);
-      return terminalId ? isTerminalMuted(treesByTabId, terminalId) : false;
+      if (!terminalId) return false;
+      if (terminalId === overlaidTerminalId) return true;
+      return isTerminalMuted(treesByTabId, terminalId);
     };
     const { toFlag, marks, causalByTab } = computeUnseenUpdate(
       outputs,
