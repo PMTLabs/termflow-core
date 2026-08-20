@@ -1,3 +1,4 @@
+pub mod sibling_coord;
 pub mod identity_index;
 pub mod state;
 pub mod console_window;
@@ -1483,6 +1484,7 @@ pub fn run() {
         commands::set_terminal_owning_tab,
         commands::restart_for_update,
         commands::hotswap_available,
+        commands::update_available,
         commands::take_reattach_prompt_hook,
         commands::probe_reattach_prompt_gate,
         commands::check_for_updates,

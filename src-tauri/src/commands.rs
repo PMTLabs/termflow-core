@@ -699,6 +699,42 @@ pub fn sibling_instance_preflight() -> Result<(), String> {
     }
 }
 
+/// Could **Offload & Close** run right now, keeping every terminal alive?
+///
+/// This instance's terminals ONLY. A sibling profile is deliberately not
+/// consulted: offload arms our own pty-host and calls `app_handle.exit(0)`, so
+/// it cannot reach another instance at all. It used to run the sibling check
+/// too, which is why running `rel` while `rel.alt` was alive refused with
+/// "Updating would close it and lose its terminals" — a message about an update
+/// this command does not perform (design 014 §B1.2).
+pub fn offload_preflight(state: &AppState) -> Result<(), String> {
+    hotswap_preflight(state)
+}
+
+/// Could an **update** run right now without losing anyone's terminals?
+///
+/// Ours, plus every sibling — because Velopack's apply kills every process under
+/// the install root, and a sibling that has not armed its pty-host loses its
+/// shells with its GUI. Unlike offload, that reach is real, so the check is real.
+pub fn update_preflight(state: &AppState) -> Result<(), String> {
+    hotswap_preflight(state)?;
+    let own = crate::profile::current().key();
+    let siblings = crate::net_ports::live_siblings_now(&own);
+    crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
+}
+
+/// The Settings preflight for Offload & Close.
+///
+/// Both this and `restart_for_update` call `offload_preflight`, so the verdict
+/// the panel SHOWS cannot disagree with the one the button ENFORCES. They did
+/// disagree: this command ran only `hotswap_preflight` while the button ran the
+/// sibling check as well, so the panel green-lit an action that then refused as
+/// a toast after the click (design 014 §B4).
+#[tauri::command]
+pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
+    update_preflight(&state)
+}
+
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
     let client = state
         .pty_host_clone()
@@ -728,7 +764,7 @@ pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
 /// when the offload would keep all terminals alive; Err with the reason if not.
 #[tauri::command]
 pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
-    hotswap_preflight(&state)
+    offload_preflight(&state)
 }
 
 /// What the core-restart hot-swap drain hands the renderer to re-seed the
@@ -844,10 +880,12 @@ pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String
 
 #[tauri::command]
 pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String> {
-    hotswap_preflight(&state)?;
-    // Same reasoning as the update path: a sibling instance would be killed by
-    // whatever swaps the binary, taking its unarmed shells with it.
-    sibling_instance_preflight()?;
+    // Offload ONLY. No sibling check: this command arms our own pty-host and
+    // exits this process — it performs no payload swap and cannot reach another
+    // instance. The check that used to be here justified itself with "whatever
+    // swaps the binary", which is a rebuild this command does not perform, and
+    // it is what made a live `rel.alt` refuse `rel`'s offload (design 014 §B1.2).
+    offload_preflight(&state)?;
     let client = state
         .pty_host_clone()
         .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
@@ -2844,6 +2882,99 @@ mod freedesktop_icon_tests {
             Some(big.as_path())
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+/// The offload/update preflight split (design 014 §B4).
+///
+/// `AppState` needs a Tauri `AppHandle`, and the `tauri::test` feature crashes
+/// the test binary on Windows, so these assert the WIRING from source. That is
+/// the right level anyway: the bug was never in what a preflight computed, it
+/// was in which preflight each caller ran.
+#[cfg(test)]
+mod preflight_wiring_tests {
+    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    ///
+    /// Brace counting rather than "the next N lines": a body that grows would
+    /// silently fall out of a line-window and the assertion would pass by
+    /// measuring nothing.
+    fn fn_body(src: &str, signature: &str) -> String {
+        let start = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let rest = &src[start..];
+        let open = rest.find('{').expect("no body");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[open..open + i + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{signature}`");
+    }
+
+    fn source() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
+            .replace("\r\n", "\n")
+    }
+
+    /// THE reported bug. Offload arms our own host and exits this process; it
+    /// cannot reach a sibling, so a live `rel.alt` must never refuse `rel`'s
+    /// offload.
+    #[test]
+    fn offload_does_not_consult_siblings() {
+        let body = fn_body(&source(), "pub async fn restart_for_update");
+        assert!(
+            !body.contains("sibling_instance_preflight"),
+            "Offload & Close must not run the sibling check — it performs no payload swap \
+             and cannot reach another instance (design 014 §B1.2). Body:\n{body}"
+        );
+        assert!(
+            body.contains("offload_preflight"),
+            "Offload must still guard THIS instance's terminals. Body:\n{body}"
+        );
+    }
+
+    /// The asymmetry that produced the report: the panel showed offload as
+    /// available while the button ran a stricter check, so the refusal arrived
+    /// as a toast after the click. One shared function, so they cannot diverge.
+    #[test]
+    fn the_settings_preflight_runs_the_same_check_the_button_enforces() {
+        let src = source();
+        let shown = fn_body(&src, "pub fn hotswap_available");
+        let enforced = fn_body(&src, "pub async fn restart_for_update");
+        assert!(shown.contains("offload_preflight"), "panel must use the shared check: {shown}");
+        assert!(enforced.contains("offload_preflight"), "button must use the shared check");
+    }
+
+    /// Update's reach IS real — Velopack kills every process under the install
+    /// root — so it must still consider siblings, unlike offload.
+    #[test]
+    fn update_still_considers_siblings() {
+        let body = fn_body(&source(), "pub fn update_preflight");
+        assert!(body.contains("live_siblings_now"), "update must enumerate siblings: {body}");
+        assert!(body.contains("hotswap_preflight"), "update must also guard our own terminals");
+    }
+
+    /// The two preflights must stay DIFFERENT functions. Collapsing them back
+    /// into one is how the sibling check would silently return to offload.
+    #[test]
+    fn the_two_preflights_are_distinct() {
+        let src = source();
+        let offload = fn_body(&src, "pub fn offload_preflight");
+        assert!(
+            !offload.contains("live_siblings_now") && !offload.contains("sibling"),
+            "offload_preflight must not consult siblings at all: {offload}"
+        );
     }
 }
 
