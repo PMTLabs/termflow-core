@@ -173,3 +173,69 @@ describe('TerminalDisplay relocation wiring', () => {
     expect(body).toContain("type: 'error'");
   });
 });
+
+/**
+ * `plan/020` §5 — this component now PUBLISHES its floating chrome so the Canvas overlay can
+ * draw it, and the shape of that is the whole reason the feature was buildable at all.
+ *
+ * The render tree above stays byte-identical, which is what keeps `no portal` true and keeps the
+ * pane rendering its own chrome exactly as before. Everything new is a publish, not a move.
+ *
+ * Same tripwire caveat as the rest of this file: the component cannot be mounted here. The
+ * REGISTRY's behaviour is covered by `surfaceChrome.test.tsx` and the consumer's by
+ * `nodeTerminal.test.tsx`; this guards that the producer still feeds them.
+ */
+describe('plan/020 §5 — publishing the surface chrome', () => {
+  it('publishes to the registry, with a per-instance owner token', () => {
+    expect(SOURCE).toContain('setSurfaceChrome(terminalId, chromeOwner.current, {');
+    expect(SOURCE).toContain('const chromeOwner = useRef({});');
+  });
+
+  /**
+   * The cleanup must capture the owner, for the same reason the engine effect captures the pane
+   * (099 T1-F3): a ref read inside a teardown closure is read at TEARDOWN time. Here that is
+   * merely stale rather than null — but `clearSurfaceChrome` is identity-checked against it, so
+   * a stale token silently turns the unregister into a no-op and leaks the registration.
+   */
+  it('captures the owner for the unregister rather than reading the ref late', () => {
+    const at = SOURCE.indexOf('const owner = chromeOwner.current;');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(SOURCE.slice(at, at + 120)).toContain('clearSurfaceChrome(terminalId, owner)');
+  });
+
+  /**
+   * The gate itself lives in `useOverlayChromeGate`, where its behaviour — above all its
+   * dependency list — is tested for real against a fake engine. What is left to guard HERE is
+   * that this component still feeds it the right three inputs.
+   *
+   * `host` is the one worth naming. It is not decoration: every change of it is a relocation,
+   * and `relocateTo({ paneChrome: !host })` overwrites the very flag the gate owns. Dropping it
+   * is what left a returned overlay drawing a popup the engine had stopped listening to.
+   */
+  it('drives the overlay gate from the overlay flag, the host and the engine generation', () => {
+    expect(SOURCE).toContain('s.canvas.overlayId === terminalId');
+    const at = SOURCE.indexOf('useOverlayChromeGate({');
+    expect(at).toBeGreaterThanOrEqual(0);
+    const call = SOURCE.slice(at, SOURCE.indexOf('});', at));
+    expect(call).toContain('overlaid: overlaidOnCanvas,');
+    expect(call).toContain('host: relocationHost,');
+    expect(call).toContain('engineGeneration,');
+    expect(call).toContain('closePopup: () => suggestRef.current.close(),');
+  });
+
+  // And the host it passes is the relocation's own, not a second subscription that could
+  // disagree with it about when the surface moved.
+  it('takes the host from the relocation hook itself', () => {
+    expect(SOURCE).toContain(
+      'const { engineMounted, engineGeneration, host: relocationHost } = useSurfaceRelocation({',
+    );
+  });
+
+  // And the render tree really is unchanged: the chrome is still rendered HERE for the pane.
+  // A publish that replaced the local render would blank the affordance in every ordinary tab.
+  it('still renders its own chrome for the pane', () => {
+    expect(SOURCE).toContain('<ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />');
+    expect(SOURCE).toContain('{suggest.open && (');
+    expect(SOURCE).not.toContain('createPortal');
+  });
+});

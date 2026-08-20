@@ -30,7 +30,8 @@ jest.mock('../../store', () => ({
   },
 }));
 jest.mock('../../store/slices/tabsSlice', () => ({
-  setRunningTabs: (ids: string[]) => ({ type: 'tabs/setRunningTabs', payload: ids }),
+  setRunningActivity: (payload: { tabIds: string[]; terminalIds: string[] }) =>
+    ({ type: 'tabs/setRunningActivity', payload }),
   markUnseenOutput: (payload: { tabId: string }) => ({ type: 'tabs/markUnseenOutput', payload }),
 }));
 // terminalId is derived from processId in the mock: p1→tm-1, p2→tm-2, p3→tm-3.
@@ -96,12 +97,20 @@ function burstAllTerminals(): void {
   }
 }
 
-/** Collect the tabId payloads of every setRunningTabs dispatch so far. */
-function runningPayloads(): string[][] {
+/** Collect the full {tabIds, terminalIds} payloads of every setRunningActivity dispatch so far. */
+function runningActivityPayloads(): Array<{ tabIds: string[]; terminalIds: string[] }> {
   return dispatch.mock.calls
     .map(([action]) => action)
-    .filter((a: any) => a?.type === 'tabs/setRunningTabs')
-    .map((a: any) => [...a.payload].sort());
+    .filter((a: any) => a?.type === 'tabs/setRunningActivity')
+    .map((a: any) => ({
+      tabIds: [...a.payload.tabIds].sort(),
+      terminalIds: [...a.payload.terminalIds].sort(),
+    }));
+}
+
+/** Collect just the tabId payloads of every setRunningActivity dispatch so far. */
+function runningPayloads(): string[][] {
+  return runningActivityPayloads().map((p) => p.tabIds);
 }
 
 /** Collect the tabIds of every markUnseenOutput dispatch so far. */
@@ -140,6 +149,18 @@ describe('RunningActivityTracker resize handling', () => {
     jest.advanceTimersByTime(EVAL_INTERVAL_MS);
     // The redraw burst is dropped: no tab is ever marked running.
     expect(runningPayloads().every(p => p.length === 0)).toBe(true);
+  });
+
+  // Req 8 (plan/020 §2): the tracker must publish BOTH levels in the SAME dispatch — the
+  // tab-level tabIds (unchanged) and the new per-terminal terminalIds Canvas Mode needs.
+  it('dispatches per-terminal runningTerminalIds alongside tab-level tabIds, in ONE action', () => {
+    burstAllTerminals();
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    const payload = runningActivityPayloads().find((p) => p.tabIds.length > 0);
+    expect(payload).toBeDefined();
+    expect(payload!.tabIds).toEqual(['tb-1', 'tb-2']);
+    // p1→tm-1 and p2→tm-2 are the only two terminals with output in this burst.
+    expect(payload!.terminalIds).toEqual(['tm-1', 'tm-2']);
   });
 
   it('recovers and flags running again once the resize cooldown has elapsed', () => {

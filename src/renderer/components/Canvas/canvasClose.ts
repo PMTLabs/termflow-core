@@ -30,10 +30,14 @@ export interface CanvasCloseRequest {
  * `confirm` is per-TERMINAL liveness, which is the whole point of the request Tam made
  * ("always confirm unless there is no process on it").
  *
- * It deliberately does NOT read `node.isRunning`. That field is projected from `tab.isRunning`
- * — `buildModel` says so in as many words — so every node in a tab carries the same value, and
- * on a split tab it answers a question about the tab while looking like an answer about the
- * node. `isAlive` is the predicate `App.tsx` already trusts for exactly this
+ * It deliberately does NOT read `node.isRunning`, and the reason changed with `plan/020` §2
+ * without changing the conclusion. That field used to be projected from `tab.isRunning`, so on a
+ * split tab it answered a question about the TAB while looking like an answer about the node;
+ * it is now genuinely per-terminal, so that objection is gone. The remaining one is the real
+ * one: `isRunning` means "producing output right now", and this asks "is there a process at
+ * all" — a shell sitting at an idle prompt is not running and must still be confirmed.
+ *
+ * `isAlive` is the predicate `App.tsx` already trusts for exactly this
  * (`terminalService.getProcessIdForTerminal`, which `TerminalService` deletes on `pty:exit`),
  * so the canvas and the exit path cannot drift apart.
  */

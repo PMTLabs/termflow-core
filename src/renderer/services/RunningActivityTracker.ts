@@ -1,10 +1,11 @@
 import { store } from '../store';
-import { setRunningTabs, markUnseenOutput } from '../store/slices/tabsSlice';
+import { setRunningActivity, markUnseenOutput } from '../store/slices/tabsSlice';
 import { findTabIdByTerminalId, isTerminalMuted } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
 import {
   isRunningFromEvents,
   computeRunningTabIds,
+  computeRunningTerminalIds,
   computeUnseenUpdate,
   canvasIsShowing,
   shouldCountForRunning,
@@ -38,6 +39,7 @@ class RunningActivityTrackerClass {
   private buffers = new Map<string, OutputEvent[]>(); // processId → recent output events
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastRunning = new Set<string>(); // last dispatched running tabIds
+  private lastRunningTerminals = new Set<string>(); // last dispatched running terminalIds (per-pane, Req 8)
   private suppressUntil = 0; // ignore output until this time after a resize/reconnect
   // processId → newest output timestamp already counted toward the unseen bell.
   // Ensures each output chunk flags a tab at most once (see computeUnseenUpdate).
@@ -97,6 +99,7 @@ class RunningActivityTrackerClass {
     }
     this.buffers.clear();
     this.lastRunning.clear();
+    this.lastRunningTerminals.clear();
     this.unseenMark.clear();
     this.lastOutputAt.clear();
     this.lastInputAt.clear();
@@ -339,15 +342,32 @@ class RunningActivityTrackerClass {
       tabCache.set(processId, tabId);
       return tabId;
     };
+    // The per-PANE resolution (Req 8, plan/020 §2) — one step earlier than the tab walk
+    // above, so a two-pane tab with only one pane busy can say exactly which one.
+    const terminalCache = new Map<string, string | null>();
+    const resolveTerminalOnce = (processId: string): string | null => {
+      const cached = terminalCache.get(processId);
+      if (cached !== undefined) return cached;
+      const terminalId = terminalService.getTerminalIdForProcess(processId) ?? null;
+      terminalCache.set(processId, terminalId);
+      return terminalId;
+    };
     const next = new Set(computeRunningTabIds(runningProcessIds, resolveOnce));
-    if (!setsEqual(next, this.lastRunning)) {
+    const nextTerminals = new Set(computeRunningTerminalIds(runningProcessIds, resolveTerminalOnce));
+    // ONE dispatch for both levels — two separate dispatches would render an intermediate
+    // frame where the tab says busy and none of its panes do (plan/020 §2.2).
+    if (!setsEqual(next, this.lastRunning) || !setsEqual(nextTerminals, this.lastRunningTerminals)) {
       this.lastRunning = next;
-      store.dispatch(setRunningTabs(Array.from(next)));
+      this.lastRunningTerminals = nextTerminals;
+      store.dispatch(setRunningActivity({
+        tabIds: Array.from(next),
+        terminalIds: Array.from(nextTerminals),
+      }));
     }
     // Unseen-output bell: built from lastOutputAt (NOT the 1s running window) so it
     // can wait UNSEEN_DEBOUNCE_MS for output to settle. Output on an INACTIVE tab
     // flags it once settled (sticky until the tab is focused). Dispatched in the
-    // SAME synchronous pass as setRunningTabs so React-Redux batches both into one
+    // SAME synchronous pass as setRunningActivity so React-Redux batches both into one
     // render. Runs after the suppressUntil guard, so a redraw burst never marks unseen.
     const outputs: UnseenInput[] = [];
     for (const [processId, last] of this.lastOutputAt) outputs.push({ processId, newest: last });

@@ -5,7 +5,7 @@ import {
   HEAD_H, BODY_H, headScale, overlayGeometry, OVERLAY_MARGIN,
   headFontSize, HEAD_FONT, MIN_TITLE_PX, MAX_HEAD_K, HEAD_GROWTH_PX,
   canvasMetrics, DEFAULT_METRICS, MIN_HOST_W, MAX_HOST_W, HOST_ASPECT,
-  CHIP_H, headSlack, paintedNodeH, paintedNodeRect, aimedNodeRect,
+  CHIP_H, headSlack, paintedNodeH, paintedNodeRect, aimedNodeRect, surfaceShift,
 } from '../canvasGeometry';
 import { PAD } from '../canvasLayout';
 
@@ -960,5 +960,69 @@ describe('aimedNodeRect', () => {
     expect(baseTier(r.w * zGroup)).toBe('group');
     expect(aimedNodeRect(r, zGroup).h).not.toBe(CHIP_H);
     expect(aimedNodeRect(r, zGroup)).toEqual(paintedNodeRect(r, zGroup, false));
+  });
+});
+
+/**
+ * `plan/020` §1 — the preview must not cut off its newest output.
+ *
+ * `plan/017` froze each terminal's host box to its own PANE's rect, but the surface scale stayed
+ * width-only (`w / host.w`) with `transform-origin: 0 0`. A portrait pane therefore scales to a
+ * height taller than the node body, and `.canvas-node-body`'s `overflow: hidden` clips the
+ * excess — a terminal's newest rows are at the BOTTOM, so what gets clipped is exactly the
+ * output the user came to look at.
+ *
+ * `surfaceShift` is the correction: lift the surface so its bottom meets the body's bottom.
+ */
+describe('surfaceShift — the preview keeps its newest rows', () => {
+  // The body is EXACTLY `h - HEAD_H` at every zoom (see `paintedNodeH`), so that is the box a
+  // surface has to fit into.
+  const bodyOf = (h: number) => h - HEAD_H;
+
+  it('does not move a surface that already fits', () => {
+    // A host with the node body's own aspect scales to exactly BODY_H — which is the fallback
+    // box's whole reason for existing (`HOST_ASPECT`).
+    expect(surfaceShift({ w: HOST_W, h: HOST_H }, NODE_W, bodyOf(NODE_H))).toBe(0);
+  });
+
+  it('lifts a portrait pane so its bottom meets the body bottom', () => {
+    const host = { w: 400, h: 1200 }; // a tall, narrow split pane
+    const bodyH = bodyOf(NODE_H);
+    const scaledH = host.h * (NODE_W / host.w);
+    // The bug, stated as a precondition: unshifted, this overflows the body.
+    expect(scaledH).toBeGreaterThan(bodyH);
+    expect(surfaceShift(host, NODE_W, bodyH)).toBeCloseTo(bodyH - scaledH, 9);
+    // And the lift is what puts the surface's bottom edge exactly on the body's.
+    expect(scaledH + surfaceShift(host, NODE_W, bodyH)).toBeCloseTo(bodyH, 9);
+  });
+
+  it('never pushes a surface DOWN', () => {
+    // A wide, short pane (a horizontal split) scales to less than the body. Its first row
+    // belongs at the top, where a terminal's first row goes — so this stays 0, not positive.
+    const host = { w: 1600, h: 300 };
+    const bodyH = bodyOf(NODE_H);
+    expect(host.h * (NODE_W / host.w)).toBeLessThan(bodyH);
+    expect(surfaceShift(host, NODE_W, bodyH)).toBe(0);
+  });
+
+  it('leaves the OVERLAY exactly where it is', () => {
+    // `overlayGeometry` returns `h = hostH * worldW / hostW + HEAD_H`, so an overlaid node's
+    // body IS the scaled surface height by construction. The overlay is the one canvas surface
+    // at 1:1, and a shift there would show as a jump the moment it opens.
+    for (const host of [{ w: 400, h: 1200 }, { w: 1600, h: 300 }, { w: HOST_W, h: HOST_H }]) {
+      const vp: Viewport = { x: 0, y: 0, z: 1 };
+      const g = overlayGeometry(vp, 2560, 1400, {
+        hostW: host.w, hostH: host.h, surfaceScale: NODE_W / host.w,
+      });
+      expect(surfaceShift(host, g.rect.w, g.rect.h - HEAD_H)).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('tracks a node resized after entering Canvas Mode', () => {
+    // A node is resizable, so this is a function of the CURRENT width and is never cached.
+    // A wider node scales the surface up, so it overflows more and must lift further.
+    const host = { w: 400, h: 1200 };
+    const bodyH = bodyOf(NODE_H);
+    expect(surfaceShift(host, NODE_W * 2, bodyH)).toBeLessThan(surfaceShift(host, NODE_W / 2, bodyH));
   });
 });

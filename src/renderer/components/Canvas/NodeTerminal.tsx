@@ -1,5 +1,8 @@
 import React, { useCallback } from 'react';
 import { setSurfaceHost, clearSurfaceHost } from '../../services/surfaceHosts';
+import { useSurfaceChrome } from '../../services/surfaceChrome';
+import { ScrollToBottomButton } from '../Terminal/ScrollToBottomButton';
+import { CommandSuggestPopup } from '../Terminal/CommandSuggestPopup';
 
 /**
  * Hosts a live terminal inside a canvas node.
@@ -26,7 +29,10 @@ import { setSurfaceHost, clearSurfaceHost } from '../../services/surfaceHosts';
 const NodeTerminalImpl: React.FC<{
   terminalId: string;
   focused: boolean;
-}> = ({ terminalId, focused }) => {
+  /** True while this node IS the overlay — the one canvas surface rendered at 1:1, and so the
+   *  only one that can carry the pane's floating chrome (`plan/020` §5). */
+  overlaid?: boolean;
+}> = ({ terminalId, focused, overlaid = false }) => {
   // The ref identity MUST be stable across renders (012 D5). A fresh arrow every render
   // makes React detach and re-attach on every commit — clear + re-register churn, and
   // each churn is a relocation of a live terminal.
@@ -40,6 +46,20 @@ const NodeTerminalImpl: React.FC<{
     [terminalId],
   );
 
+  /**
+   * The pane's floating chrome, published by `TerminalDisplay` (`plan/020` §5).
+   *
+   * OVERLAY ONLY, and the geometry is the reason. An ordinary node renders its surface through
+   * `--node-surface-scale`, well below 1, and `.canvas-surface` clips what leaves its box — a
+   * popup there would draw at a fraction of its size and be cut off by the node's own edge. The
+   * overlay is the one canvas surface at 1:1, so it is the one where this chrome is both legible
+   * and correctly placed: `CommandSuggestPopup` measures against `offsetParent`, which is this
+   * wrapper, exactly as it is the pane's wrapper on the other side.
+   *
+   * Nodes that are not the overlay pass `null` and so never subscribe.
+   */
+  const chrome = useSurfaceChrome(overlaid ? terminalId : null);
+
   return (
     <div className="terminal-display-wrapper canvas-surface">
       <div
@@ -48,6 +68,18 @@ const NodeTerminalImpl: React.FC<{
         ref={hostRef}
         style={{ pointerEvents: focused ? 'auto' : 'none' }}
       />
+      {chrome && (
+        <ScrollToBottomButton visible={!chrome.atBottom} onClick={chrome.scrollToBottom} />
+      )}
+      {chrome?.suggest.open && (
+        <CommandSuggestPopup
+          suggestions={chrome.suggest.items}
+          selectedIndex={chrome.suggest.selectedIndex}
+          focused={chrome.suggest.focused}
+          anchor={chrome.suggest.anchor}
+          onPick={chrome.pickSuggestion}
+        />
+      )}
     </div>
   );
 };

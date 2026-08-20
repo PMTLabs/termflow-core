@@ -197,8 +197,16 @@
   /* Per node, falling back to the default-width scale. A node of any width scales its host
      correctly from this, which is also the entire implementation of the full-screen overlay:
      an overlaid node is a node with a big world rect, and this puts its terminal at screen
-     scale 1 without a second host, a relocation or a fit. */
-  transform: scale(var(--node-surface-scale, var(--canvas-surface-scale)));
+     scale 1 without a second host, a relocation or a fit.
+
+     ORDER IS LOAD-BEARING (`plan/020` §1). The scale fits by WIDTH, so a portrait pane's
+     replica is taller than the body and gets clipped from the bottom — where the newest rows
+     are. `--node-surface-shift` lifts it back, and it is written in the NODE's unscaled pixels,
+     so it has to apply AFTER the scale: in `transform` the rightmost function is applied first,
+     which makes `translateY` here a move in the parent's coordinate space. Swap the two and the
+     lift is silently multiplied by the scale. Zero whenever the surface already fits. */
+  transform: translateY(var(--node-surface-shift, 0px))
+             scale(var(--node-surface-scale, var(--canvas-surface-scale)));
   transform-origin: 0 0;
   overflow: hidden;
 }
@@ -251,39 +259,44 @@
 .canvas-node[data-lod="chip"] .canvas-node-head-inner { justify-content: center; }
 .canvas-node[data-lod="chip"] .canvas-port { display: none; }
 
-/* The running sweep. NOT the tab strip's rule, though it started as a copy of it.
-   TabManager tiles a 160px gradient with `repeat-x`, which shows exactly one band on a ~160px
-   tab and THREE on a 1440px overlaid node — three sweeps chasing each other, which is what a
-   "one thing is running" cue must never look like.
-
-   So the band is sized as a fraction of the header and translated across it exactly once per
-   period. The gradient peaks at 50%, so its head and tail ramps are the same length and the
-   band reads as symmetrical however wide the node is.
-
-   Task 14's sidebar rows join this selector list rather than getting a copy — a row is the
-   third surface to want the sweep, and a third copy is how the three drift. They are NOT folded
-   into a shared `.tf-sweep` class, because that would mean editing `CanvasNode`'s markup to
-   swap one class for another with no behavioural difference, and the sweep's tuning is
-   attached to the selector it was tuned against. A row gets it by carrying the same three
-   properties the header does — `position: relative`, `isolation: isolate`, `overflow: hidden` —
-   which is what makes the band's `z-index: -1` land above the background and below the text. */
-.canvas-node.running .canvas-node-head::after,
-.canvas-srow.running::after {
-  content: ''; position: absolute; top: 0; bottom: 0; left: 0;
-  width: 55%; z-index: -1; pointer-events: none;
-  opacity: .42;
-  background-image: linear-gradient(90deg, transparent 0%, var(--tab-running-accent, #3aa6ff) 50%, transparent 100%);
-  animation: canvas-node-sweep 1.6s linear infinite;
+/* Busy indicators — `plan/020` §3 (Reqs 5-7).
+ *
+ * The header-wide sweep that used to live here is GONE from every canvas surface. It was one
+ * rule shared by a canvas node header and a sidebar row (see the git history of this file for
+ * what it looked like), and it cost a full-width gradient repainting on every frame, forever,
+ * for every busy node and row on the canvas at once. The tab strip keeps its own sweep
+ * (`TabManager.css` `.tab-item.tab-running::after`) — that is one element, not N — and every
+ * canvas surface gets a small, cheap, ANIMATED alternative instead: still a live cue, not a
+ * static accent (the tab strip's own reduced-motion note explains why a static accent is the
+ * wrong trade — see below).
+ *
+ * ONE keyframe for both, so they cannot drift into two different "busy" looks:
+ *  - `.canvas-node-dot` (Req 7) — `CanvasNode` mounts this span only while `node.isRunning`
+ *    (per-terminal since Req 8), so its own EXISTENCE is the running state; no `.running`
+ *    ancestor selector is needed for this one.
+ *  - `.shell-profile-icon` inside a running `.canvas-srow` (Req 6) — `ShellProfileIcon` always
+ *    renders, busy or not, so the blink has to be scoped by the row's own `.running` class
+ *    instead of by the icon's existence.
+ */
+.canvas-node-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--tab-running-accent, #3aa6ff);
+  animation: canvas-busy-blink 1.1s ease-in-out infinite;
 }
-@keyframes canvas-node-sweep {
-  /* Percentages here are of the BAND's own width, so -100% is fully off the left edge and
-     182% (= 100 / 0.55) is fully off the right — one crossing, no overlap with the next. */
-  from { transform: translateX(-100%); }
-  to   { transform: translateX(182%); }
+.canvas-srow.running .shell-profile-icon {
+  animation: canvas-busy-blink 1.1s ease-in-out infinite;
 }
+@keyframes canvas-busy-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .3; }
+}
+/* Same call the tab strip's sweep already made (`TabManager.css`): keep the cue ANIMATED
+   rather than dropping to a static accent, which reads as a stray dot/border rather than a
+   "running" signal. Slowing it is enough here — unlike the old sweep, this was never a bright
+   moving band, so there is no separate opacity ceiling left to lower. */
 @media (prefers-reduced-motion: reduce) {
-  .canvas-node.running .canvas-node-head::after,
-  .canvas-srow.running::after { animation-duration: 3.2s; opacity: .14; }
+  .canvas-node-dot,
+  .canvas-srow.running .shell-profile-icon { animation-duration: 2.4s; }
 }
 
 /* ---- The full-screen overlay -------------------------------------------- */
@@ -448,9 +461,11 @@
 .canvas-sgempty { margin: 0; padding: 2px 11px 4px 19px; font-size: 11px; font-style: italic; color: var(--text-tertiary, #666666); }
 .canvas-srows { margin: 0; padding: 0; list-style: none; }
 
-/* `position: relative` + `isolation: isolate` are what let the running sweep's `z-index: -1`
-   sit above the row's background and below its text — the same three properties
-   `.canvas-node-head` carries, and the reason the shared sweep rule works on both. */
+/* `position: relative` + `isolation: isolate` used to be what let the (now deleted, Req 5)
+   sweep's `z-index: -1` band sit above the row's background and below its text — same for the
+   `z-index: 1` on `.canvas-srow-title`/`-dis` below. Nothing on a row still needs a stacking
+   context for that reason; left as-is rather than pulled, since untangling it is outside this
+   requirement and nothing here is currently broken by its staying. */
 .canvas-srow {
   position: relative;
   isolation: isolate;
@@ -466,6 +481,10 @@
 }
 .canvas-srow:hover { background: var(--bg-tertiary, #3e3e42); }
 .canvas-srow.selected { background: var(--bg-tertiary, #3e3e42); box-shadow: inset 2px 0 0 var(--accent-color, #007acc); }
+/* The tab strip's own icon classes carry a `margin-right` meant for a plain flex row with no
+   `gap`; `.canvas-srow` already has one (6px, shared with the disambiguator and the bell), so
+   without this the icon would sit 12px from the title instead of 6px like everything else. */
+.canvas-srow .shell-profile-icon { margin-right: 0; }
 .canvas-srow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
 .canvas-srow-title mark { background: rgba(240,160,32,.28); color: inherit; border-radius: 2px; }
 .canvas-srow-dis {

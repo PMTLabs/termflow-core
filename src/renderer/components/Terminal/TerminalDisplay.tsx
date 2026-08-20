@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { nudgeZoom, resetZoom } from '../../store/slices/zoomSlice';
 import { Terminal } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
@@ -10,6 +10,7 @@ import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
+import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -19,7 +20,8 @@ import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
 import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
-import { store } from '../../store';
+import { store, RootState } from '../../store';
+import { setSurfaceChrome, clearSurfaceChrome } from '../../services/surfaceChrome';
 import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
@@ -174,13 +176,76 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
 
+  /**
+   * `plan/020` §5 — the pane's floating chrome, published so the Canvas overlay can draw it.
+   *
+   * This component's own render tree is UNCHANGED, deliberately: the chrome stays a sibling of
+   * `.terminal-display` here, and `NodeTerminal` renders the same two components from the
+   * published state when the terminal is overlaid. A portal would have been the obvious way and
+   * is closed — see `surfaceChrome.ts` and `terminalDisplayRelocationWiring.test.ts`.
+   *
+   * Stable callbacks: they are compared by identity when deciding whether a publish is a real
+   * change, so a fresh arrow per render would notify on every keystroke.
+   */
+  const scrollToBottomCb = useCallback(() => {
+    engineRef.current?.scrollToBottom();
+    engineRef.current?.focus();
+  }, []);
+  // One token per component instance, so a stale unmount cleanup cannot wipe the registration
+  // a remount has already made under the same terminalId.
+  const chromeOwner = useRef({});
+  useEffect(() => {
+    setSurfaceChrome(terminalId, chromeOwner.current, {
+      atBottom,
+      suggest: {
+        open: suggest.open,
+        items: suggest.items,
+        selectedIndex: suggest.selectedIndex,
+        focused: suggest.focused,
+        anchor: suggest.anchor,
+      },
+      scrollToBottom: scrollToBottomCb,
+      pickSuggestion: suggest.pick,
+    });
+  }, [
+    terminalId, atBottom, scrollToBottomCb, suggest.pick,
+    suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
+  ]);
+  useEffect(() => {
+    const owner = chromeOwner.current;
+    return () => clearSurfaceChrome(terminalId, owner);
+  }, [terminalId]);
+
+  /**
+   * And the gate that decides whether the popup may open at all (design 012 §8.1).
+   *
+   * It is normally set by WHERE the surface went — `relocateTo({ paneChrome })` — because until
+   * now the pane was the only surface that drew chrome. Opening the overlay moves nothing
+   * (`plan/017` decision C: the same host, a bigger world rect), so there is no relocation to
+   * carry the change and the host has to say so directly.
+   *
+   * A relocation overwrites the flag from its own argument, so leaving the canvas re-gates the
+   * engine without this effect having to notice.
+   *
+   * KEYED ON `engineGeneration` as well, and that is not defensive. This effect is declared
+   * ABOVE the engine effect, so on the first run of a component instance `engineRef.current` is
+   * still null; worse, `TerminalDisplay` is rendered without a key and `TerminalPane`'s reuse
+   * path lets `terminalId` change on the same instance (review 098 A1), so on that change this
+   * effect would re-run BEFORE the engine effect replaces the ref — configuring the OUTGOING
+   * engine and leaving the incoming one gated shut. `engineGeneration` bumps right after
+   * `mount()`, which is the only moment the ref is known to hold the current terminal's engine.
+   */
+  const overlaidOnCanvas = useSelector((s: RootState) => s.canvas.overlayId === terminalId);
+  // The effect itself is declared BELOW `useSurfaceRelocation`, which is where
+  // `engineGeneration` comes from.
+
   // Canvas Mode surface relocation (design 012 §4.2). Placed here because its
   // callbacks close over dispatch (:85), setContextMenu (:123), setPathPicker
   // (:126), setSchemaPicker (:133) and suggestRef (:173), all declared above.
   // `engineMounted` is a stable useCallback the engine effect below calls right
   // after mount() — that bump is what makes relocation-at-mount reachable at all
   // (hazard H12, measured by spike 004 Q1).
-  const { engineMounted } = useSurfaceRelocation({
+  const { engineMounted, engineGeneration, host: relocationHost } = useSurfaceRelocation({
     terminalId,
     engineRef,
     paneRef: terminalRef,
@@ -207,6 +272,17 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // registration is left alone, so the canvas node shows an empty box.
       dispatch(addToast({ message: 'Could not move this terminal', type: 'error' }));
     },
+  });
+
+  // The overlay's engine gate. Extracted to its own hook so its DEPENDENCIES can be tested —
+  // they are the whole feature, and this component cannot be mounted under the root Jest config
+  // (see `useOverlayChromeGate.ts` for the round trip that a missing one broke).
+  useOverlayChromeGate({
+    engineRef,
+    overlaid: overlaidOnCanvas,
+    host: relocationHost,
+    engineGeneration,
+    closePopup: () => suggestRef.current.close(),
   });
 
   // Create the engine + mount it once per terminalId. Reattach existing process
@@ -648,13 +724,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         onContextMenu={handleContextMenu}
         data-terminal-id={terminalId}
       />
-      <ScrollToBottomButton
-        visible={!atBottom}
-        onClick={() => {
-          engineRef.current?.scrollToBottom();
-          engineRef.current?.focus();
-        }}
-      />
+      <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
       {searchOpen && (
         <TerminalSearchBar
           onSearchNext={searchNextCb}

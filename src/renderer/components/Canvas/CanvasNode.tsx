@@ -1,5 +1,5 @@
 import React from 'react';
-import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH } from './canvasGeometry';
+import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
@@ -105,7 +105,11 @@ export const CanvasNode: React.FC<{
         dimmed ? 'dimmed' : '',
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
-        node.isRunning ? 'running' : '',
+        // No `running` class. It existed only to carry the header-wide sweep deleted in
+        // `plan/020` §3, and a busy node now says so with the dot below — whose own existence
+        // IS the state. A class with no rule reads as a styling hook that works, and the next
+        // person to reach for it finds out otherwise. The sidebar keeps ITS `.running`, because
+        // there the icon renders either way and only an ancestor selector can blink it.
       ].filter(Boolean).join(' ')}
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}
@@ -132,6 +136,11 @@ export const CanvasNode: React.FC<{
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
         ['--node-surface-scale' as string]: `${w / host.w}`,
+        // The scale above fits by WIDTH, so a portrait pane's replica is taller than the body
+        // and the body clips the overflow off the bottom — where the newest rows are. This
+        // lifts it back (`plan/020` §1). Zero whenever the surface already fits, and provably
+        // zero in the overlay, whose `h` is `hostH * w / hostW + HEAD_H` by construction.
+        ['--node-surface-shift' as string]: `${surfaceShift(host, w, h - HEAD_H)}px`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}
@@ -162,6 +171,12 @@ export const CanvasNode: React.FC<{
                 fontSize: headFontSize(zoom),
               }}
         >
+          {/* Req 7 (`plan/020` §3) — replaces the old header-wide sweep with a small dot, cheap
+              enough to animate on every node at once. Its own EXISTENCE is the running state
+              (unlike the sidebar's icon, which always renders and is blinked by a CSS ancestor
+              selector instead): a busy node mounts it, an idle one never does, so the mutation
+              check for this is "hard-code it to always render", not "hide it with CSS". */}
+          {!isChip && node.isRunning && <span className="canvas-node-dot" />}
           <span className="canvas-node-title">{node.title}</span>
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node

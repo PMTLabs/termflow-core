@@ -1,4 +1,4 @@
-import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, setRunningTabs, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
+import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
 
 const stateWithTwoTabs = () => {
   let state = tabsReducer(undefined, { type: '@@INIT' } as any);
@@ -141,18 +141,51 @@ describe('tabsSlice removeTab clears activity on the newly-activated tab', () =>
   });
 });
 
-describe('tabsSlice setRunningTabs', () => {
+describe('tabsSlice setRunningActivity', () => {
+  // Req 8 (plan/020 §2): ONE action writes BOTH the tab-level `isRunning` and the new
+  // per-pane `runningTerminalIds`, so the two levels can never disagree for a frame.
   it('sets isRunning true for listed tabs and false for the rest', () => {
-    let state = tabsReducer(stateWithTwoTabs(), setRunningTabs(['tb-1']));
+    let state = tabsReducer(stateWithTwoTabs(), setRunningActivity({ tabIds: ['tb-1'], terminalIds: [] }));
     expect(state.tabs.find(t => t.id === 'tb-1')?.isRunning).toBe(true);
     expect(state.tabs.find(t => t.id === 'tb-2')?.isRunning).toBe(false);
-    state = tabsReducer(state, setRunningTabs([]));
+    state = tabsReducer(state, setRunningActivity({ tabIds: [], terminalIds: [] }));
     expect(state.tabs.every(t => !t.isRunning)).toBe(true);
   });
 
   it('sets isRunning on the active tab too (no active-tab guard)', () => {
-    const state = tabsReducer(stateWithTwoTabs(), setRunningTabs(['tb-2'])); // tb-2 is active
+    const state = tabsReducer(stateWithTwoTabs(), setRunningActivity({ tabIds: ['tb-2'], terminalIds: [] })); // tb-2 is active
     expect(state.tabs.find(t => t.id === 'tb-2')?.isRunning).toBe(true);
+  });
+
+  it('sets runningTerminalIds on the slice in the SAME action', () => {
+    const state = tabsReducer(
+      stateWithTwoTabs(),
+      setRunningActivity({ tabIds: ['tb-1'], terminalIds: ['tm-1'] }),
+    );
+    expect(state.runningTerminalIds).toEqual(['tm-1']);
+  });
+
+  /**
+   * The acceptance shape at the slice level: a tab with one busy pane out of two must end up
+   * with `isRunning === true` on the TAB while `runningTerminalIds` names ONLY the busy pane.
+   * Asserting the COUNT (not just membership) so a reducer that marked every terminal busy —
+   * e.g. by accident spreading tabIds into terminalIds — fails this test.
+   */
+  it('a tab with one busy pane of two: tab-level true, runningTerminalIds has exactly one entry', () => {
+    const state = tabsReducer(
+      stateWithTwoTabs(),
+      setRunningActivity({ tabIds: ['tb-1'], terminalIds: ['tm-1'] }),
+    );
+    expect(state.tabs.find(t => t.id === 'tb-1')?.isRunning).toBe(true);
+    expect(state.runningTerminalIds).toHaveLength(1);
+    expect(state.runningTerminalIds).toContain('tm-1');
+    expect(state.runningTerminalIds).not.toContain('tm-2');
+  });
+
+  it('replaces the previous runningTerminalIds wholesale rather than merging', () => {
+    let state = tabsReducer(stateWithTwoTabs(), setRunningActivity({ tabIds: ['tb-1'], terminalIds: ['tm-1', 'tm-2'] }));
+    state = tabsReducer(state, setRunningActivity({ tabIds: [], terminalIds: [] }));
+    expect(state.runningTerminalIds).toEqual([]);
   });
 });
 

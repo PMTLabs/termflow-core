@@ -16,6 +16,9 @@ import { configureStore, EnhancedStore } from '@reduxjs/toolkit';
 import canvasReducer, { SIDEBAR_MIN, SIDEBAR_MAX } from '../../../store/slices/canvasSlice';
 import panesReducer, { PaneNode } from '../../../store/slices/panesSlice';
 import tabsReducer from '../../../store/slices/tabsSlice';
+// `ShellProfileIcon` (Req 6) reads `state.settings.shellProfiles` — real reducer, empty default
+// list, so every row falls through to the emoji fallback rather than resolving a real icon.
+import settingsReducer from '../../../store/slices/settingsSlice';
 import { CanvasSidebar, ROW_FLY_ZOOM } from '../CanvasSidebar';
 import { centreOn, FLY_MS } from '../viewportStyles';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
@@ -87,7 +90,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   store = configureStore({
-    reducer: { canvas: canvasReducer, panes: panesReducer, tabs: tabsReducer },
+    reducer: { canvas: canvasReducer, panes: panesReducer, tabs: tabsReducer, settings: settingsReducer },
     preloadedState: {
       panes: {
         paneTree: null,
@@ -170,8 +173,12 @@ describe('CanvasSidebar — the tree', () => {
     const text = rows().map((r) => r.textContent ?? '');
     expect(text.filter((t) => t.includes('termflow-core'))).toHaveLength(1);
     expect(text.filter((t) => t.includes('termflow-site'))).toHaveLength(1);
-    // `server` is unique, so it must carry nothing extra.
-    expect(text.find((t) => t.startsWith('server'))).toBe('server');
+    // `server` is unique, so its row must carry no disambiguator — checked on the title/dis
+    // structure directly, since the row's full text now also carries its profile icon (Req 6)
+    // ahead of the title and can no longer be compared to the bare title with `toBe`.
+    const serverRow = rows().find((r) => r.querySelector('.canvas-srow-title')?.textContent === 'server');
+    expect(serverRow).toBeDefined();
+    expect(serverRow!.querySelector('.canvas-srow-dis')).toBeNull();
   });
 
   it('filters as you type and highlights the match', () => {
@@ -186,6 +193,35 @@ describe('CanvasSidebar — the tree', () => {
     type('zzzz');
     expect(rows()).toHaveLength(0);
     expect(container.querySelector('.canvas-sempty')?.textContent).toContain('zzzz');
+  });
+});
+
+/**
+ * Req 6 (`plan/020` §3) — a row's profile icon, and the blink that marks it busy.
+ *
+ * The blink itself is CSS (`.canvas-srow.running .shell-profile-icon`, pinned from the
+ * stylesheet in `canvasNodeChrome.test.ts`); what belongs here is the DOM shape that selector
+ * depends on — the icon renders inside every row, and only a BUSY row's `<li>` carries
+ * `running` alongside it.
+ */
+describe('CanvasSidebar — busy icon (Req 6)', () => {
+  it('renders a shell-profile icon on every row, busy or not', () => {
+    render();
+    expect(container.querySelectorAll('.shell-profile-icon').length).toBe(rows().length);
+  });
+
+  it('a busy row carries `running` next to its icon; an idle row in the SAME group does not', () => {
+    const busy: CanvasModel = {
+      ...model,
+      nodes: model.nodes.map((n) => (n.terminalId === 'tm-1' ? { ...n, isRunning: true } : n)),
+    };
+    render(busy);
+    const busyRow = rows()[0]; // tm-1
+    const idleRow = rows()[1]; // tm-2 — same group (`tb-a`), never marked running
+    expect(busyRow.className).toContain('running');
+    expect(busyRow.querySelector('.shell-profile-icon')).not.toBeNull();
+    expect(idleRow.className).not.toContain('running');
+    expect(idleRow.querySelector('.shell-profile-icon')).not.toBeNull();
   });
 });
 

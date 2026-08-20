@@ -381,6 +381,43 @@ describe('agent chip', () => {
 });
 
 /**
+ * The busy dot — Req 7 (`plan/020` §3), what replaced the old header-wide sweep on a canvas
+ * node.
+ *
+ * Its own EXISTENCE is the running state: `CanvasNode` mounts `.canvas-node-dot` only while
+ * `node.isRunning` (per-terminal since Req 8), rather than always rendering it and leaving the
+ * blink to a CSS ancestor selector the way the sidebar's icon does (`canvasSidebar.test.tsx`).
+ * So the regression this pins is specific — a node that renders the dot unconditionally — and
+ * every case here is a positive paired with the negative that catches exactly that.
+ */
+describe('busy dot', () => {
+  const dot = () => container.querySelector('.canvas-node-dot');
+  const renderRunning = (running: boolean, tier: LodTier = 'gpu') => act(() => {
+    root.render(withMetrics(
+      <CanvasNode node={{ ...node0, isRunning: running }} tier={tier} zoom={1}
+        selected={false} focused={false} dimmed={false} hidden={false} />,
+    ));
+  });
+
+  it('is absent on an idle node', () => {
+    renderRunning(false);
+    expect(dot()).toBeNull();
+  });
+
+  it('appears on a running node', () => {
+    renderRunning(true);
+    expect(dot()).not.toBeNull();
+  });
+
+  // Same reason the shell badge and the header buttons go: at the chip tier the header IS the
+  // node, and there is no room for anything but the title.
+  it('is absent at the chip tier even while running', () => {
+    renderRunning(true, 'chip');
+    expect(dot()).toBeNull();
+  });
+});
+
+/**
  * What the NODE still publishes, now that the two counter-scales moved to the root.
  *
  * `--node-k` and `--node-chrome-k` are functions of the zoom alone, so `CanvasMode` sets them
@@ -489,5 +526,29 @@ describe('per-node host box', () => {
     expect(node().style.getPropertyValue('--node-host-w')).toBe(`${DEFAULT_METRICS.hostW}px`);
     expect(Number(node().style.getPropertyValue('--node-surface-scale')))
       .toBeCloseTo(node0.rect.w / DEFAULT_METRICS.hostW, 9);
+  });
+
+  /**
+   * `plan/020` §1. The same trap as the box above, one property along: a `CanvasNode` that never
+   * published `--node-surface-shift` would take the stylesheet's `0px` fallback arm and restore
+   * the clipping in full, behind a green suite. So the portrait case asserts a NON-ZERO value
+   * computed from the box — a `0px` hard-coded by a broken node cannot satisfy it.
+   */
+  it('lifts a portrait pane off the bottom of the body', () => {
+    // Taller than it is wide, so the width-fit scale overflows the body.
+    const PORTRAIT = { w: 400, h: 1200 };
+    renderWith(PORTRAIT);
+    const shift = parseFloat(node().style.getPropertyValue('--node-surface-shift'));
+    const scaledH = PORTRAIT.h * (node0.rect.w / PORTRAIT.w);
+    const bodyH = node0.rect.h - HEAD_H;
+    expect(scaledH).toBeGreaterThan(bodyH); // the precondition — this pane really does overflow
+    expect(shift).toBeLessThan(0);
+    expect(shift).toBeCloseTo(bodyH - scaledH, 6);
+  });
+
+  // Paired with the negative, so the assertion above cannot pass by lifting everything.
+  it('does not lift a surface that already fits', () => {
+    renderWith({ w: 1600, h: 300 });
+    expect(parseFloat(node().style.getPropertyValue('--node-surface-shift'))).toBe(0);
   });
 });

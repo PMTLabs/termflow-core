@@ -20,6 +20,10 @@ const stateWith = (overrides: any = {}) => ({
       { id: 'tb-b', title: 'web', shellType: 'zsh', isActive: false },
     ],
     activeTabId: 'tb-a',
+    // Per-terminal truth (Req 8, plan/020 §2): tb-a's tab-level isRunning above is true, but
+    // only ONE of its two panes ('tm-2') is actually the busy one — the shape the acceptance
+    // test below pins.
+    runningTerminalIds: ['tm-2'],
   },
   panes: {
     treesByTabId: {
@@ -92,10 +96,31 @@ describe('buildCanvasModel', () => {
     expect(overlaps).toBe(false);
   });
 
-  it('marks a group as running when any member tab is running', () => {
+  // Req 8 (plan/020 §2): anyRunning is now "any MEMBER TERMINAL is running", not a copy of
+  // tab.isRunning — strictly more accurate, same field. In this fixture only 'tm-2' (one of
+  // tb-a's two panes) is in runningTerminalIds, and that alone is enough to mark the group.
+  it('marks a group as running when any member terminal is running', () => {
     const m = buildCanvasModel(stateWith());
     expect(m.groups.find((g) => g.tabId === 'tb-a')!.anyRunning).toBe(true);
     expect(m.groups.find((g) => g.tabId === 'tb-b')!.anyRunning).toBe(false);
+  });
+
+  /**
+   * **The acceptance test for Req 8** (plan/020 §2.3). Busy state used to be a tab fact fanned
+   * out onto every pane node — a two-pane tab with only one pane busy showed BOTH nodes busy.
+   * `RunningActivityTracker` already buffers output per-processId (per-pane); this pins that
+   * `runningTerminalIds` reaches `CanvasNodeModel.isRunning` per-terminal while `tab.isRunning`
+   * keeps its own, genuinely independent, tab-wide meaning — both true in the SAME model.
+   */
+  it('a two-pane tab with one busy pane: node A running, node B not, tab still running', () => {
+    const m = buildCanvasModel(stateWith()); // tb-a has panes 'tb-a' (idle) and 'tm-2' (busy)
+    const nodeA = m.nodes.find((n) => n.terminalId === 'tb-a')!; // the idle pane
+    const nodeB = m.nodes.find((n) => n.terminalId === 'tm-2')!; // the busy pane
+    expect(nodeB.isRunning).toBe(true);
+    expect(nodeA.isRunning).toBe(false);
+    // The tab header's own fact is untouched and true at the same time.
+    const s = stateWith();
+    expect(s.tabs.tabs.find((t: any) => t.id === 'tb-a').isRunning).toBe(true);
   });
 
   it('ignores a tab with no pane tree and no stored frame instead of crashing', () => {
