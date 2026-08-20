@@ -16,28 +16,29 @@ export type CloseKind = 'single' | 'right' | 'left' | 'others';
 /**
  * The terminals closing `tabId` must tear down.
  *
- * A RENDERER-originated tab's root pane is created with `terminalId === tab.id`
- * (TerminalContainer), and splits preserve it — so the close path used to *also*
- * tear down `tabId` as a terminal id unconditionally, as a safety net for a tab
- * whose tree we never saw. That only holds while the pane still belongs to the
- * tab: dragging it into another tab (`movePaneToTab`) or another window (detach)
- * carries the terminal away while the source tab keeps its id, so the
- * unconditional teardown killed a pane that is now live somewhere else.
+ * A tab's root pane used to be created with `terminalId === tab.id`, and splits
+ * preserved it — so the close path also tore down `tabId` as a terminal id
+ * unconditionally, as a safety net for a tab whose tree we never saw. That only
+ * held while the pane still belonged to the tab: dragging it into another tab
+ * (`movePaneToTab`) or another window (detach) carries the terminal away while
+ * the source tab keeps its id, so the unconditional teardown killed a pane that
+ * is now live somewhere else.
  *
  * The pane tree is authoritative whenever we have one — it lists exactly the
  * terminals the tab still owns. The `tabId` fallback applies ONLY when there is
  * no tree at all.
  *
- * RESIDUAL RISK (option A / P0-A root-leaf revision): an API-created tab's root
- * pane carries a backend-minted `tm-` leaf, never `tab.id` (see App.tsx Mode 0
- * and TerminalContainer.tsx). If this `[tabId]` fallback ever fired for such a
- * tab, it would try to close a terminal id that was never live (harmless no-op)
- * while leaking the real `tm-` PTY (not harmless). It fires ONLY when
- * `window.tabPanes` was never populated for that tab, and Mode 0 populates it
- * synchronously before the tab is ever visible to a close action, so this is
- * believed unreachable in practice — but it is a real gap in this fallback's
- * coverage, not a proven-impossible one, so it is called out here rather than
- * silently relied upon.
+ * RESIDUAL RISK, now WIDER than when it was written: design 014 gives EVERY root
+ * pane a minted `tm-` leaf, so `tabId` is never a live terminal id for any tab —
+ * not just for the API-created ones this note originally singled out. If this
+ * `[tabId]` fallback ever fired it would close an id that was never live
+ * (harmless no-op) while leaking the real `tm-` PTY (not harmless). It fires ONLY
+ * when `window.tabPanes` was never populated for that tab, and both creation
+ * paths populate it synchronously before the tab is visible to a close action, so
+ * it is believed unreachable in practice — but it is a real gap in this
+ * fallback's coverage, not a proven-impossible one, so it is called out here
+ * rather than silently relied upon. Kept (rather than narrowed to `[]`) because
+ * an empty return would leak just as much and lose the audit trail in the log.
  */
 export function collectTabCloseTerminalIds(
   paneTree: PaneNode | null,

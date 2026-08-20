@@ -1119,13 +1119,12 @@ const App: React.FC = () => {
         const terminalService = (window as any).terminalService;
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
 
-        // For pane terminals, wait longer as they need to be created
-        let isPaneTerminal = false;
-        let maxRetries = 5;
-        if (newestTerminalId) {
-          isPaneTerminal = (newestTerminalId as string).startsWith('tm-') || (newestTerminalId as string).startsWith('pane-terminal-');
-          maxRetries = isPaneTerminal ? 20 : 5; // 2 seconds for pane terminals, 500ms for others
-        }
+        // 2 seconds. This used to be 20 retries for a `tm-`/`pane-terminal-` leaf
+        // and 5 for anything else, on the theory that only a split pane had to be
+        // spawned before its process existed. Design 014 mints a `tm-` leaf for
+        // EVERY pane, so the short budget became unreachable — every terminal is
+        // now spawned by the pane that carries it.
+        const maxRetries = 20;
         const retryDelay = 100;
 
         if (!processId && newestTerminalId) {
@@ -1524,13 +1523,12 @@ const App: React.FC = () => {
         // Try to get process ID (wait longer for pane terminals)
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
 
-        // For pane terminals, wait longer as they need to be created
-        let isPaneTerminal = false;
-        let maxRetries = 5;
-        if (newestTerminalId) {
-          isPaneTerminal = (newestTerminalId as string).startsWith('tm-') || (newestTerminalId as string).startsWith('pane-terminal-');
-          maxRetries = isPaneTerminal ? 20 : 5; // 2 seconds for pane terminals, 500ms for others
-        }
+        // 2 seconds. This used to be 20 retries for a `tm-`/`pane-terminal-` leaf
+        // and 5 for anything else, on the theory that only a split pane had to be
+        // spawned before its process existed. Design 014 mints a `tm-` leaf for
+        // EVERY pane, so the short budget became unreachable — every terminal is
+        // now spawned by the pane that carries it.
+        const maxRetries = 20;
         const retryDelay = 100;
 
         if (!processId && newestTerminalId) {

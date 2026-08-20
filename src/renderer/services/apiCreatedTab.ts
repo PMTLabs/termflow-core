@@ -55,10 +55,9 @@ export interface ApiCreateIds {
   /** Backend PTY id (`pc-*`) to bind the pane to. */
   processId?: string;
   /**
-   * Renderer pane-tree leaf. Two id FORMS, describing who minted the leaf and
-   * NOT the pane's shape: `tb-*` for a renderer-created tab root (leaf ==
-   * owner), `tm-*` for split panes AND for every API-created terminal,
-   * including a solo root. Root/solo/split comes only from the pane tree.
+   * Renderer pane-tree leaf. Always `tm-*` since design 014 — tab root, split
+   * pane and API-created terminal alike; the leaf never carries its tab's id.
+   * Root/solo/split comes only from the pane tree, never from the prefix.
    */
   leafId?: string;
   /** The tab that owns the leaf (`tb-*`). */
@@ -87,13 +86,14 @@ export function resolveApiCreateIds(detail: {
   return {
     processId,
     // Before P0-A no leaf was sent. Every consumer of `leafId` (App.tsx Mode 1
-    // and Mode 2) is minting a NEW sibling pane in a tab that may already have
-    // an occupied root pane whose leaf === owningTabId — so falling back to
-    // owningTabId here would hand that new pane the root's own leaf, which
-    // App.tsx then rebinds in TerminalService and inserts a second pane-tree
-    // node carrying it, corrupting both the root's PTY mapping and the tree's
-    // identity uniqueness (review 099 T2-F3). Fall back to the unique
-    // `processId` instead: this reproduces the exact pre-P0-A behaviour, where
+    // and Mode 2) is minting a NEW sibling pane in a tab that already has an
+    // occupied root pane — and falling back to `owningTabId` would hand that new
+    // pane a TAB id as its leaf. Pre-014 that collided with the root's own leaf
+    // (App.tsx rebinds it in TerminalService and inserts a second pane-tree node
+    // carrying it, corrupting both the root's PTY mapping and the tree's identity
+    // uniqueness — review 099 T2-F3); post-014 it instead plants a `tb-` in the
+    // one id space design 014 cleared of them. Both are wrong. Fall back to the
+    // unique `processId` instead: this reproduces the exact pre-P0-A behaviour, where
     // a process id briefly doubles as a leaf until StateManager.sanitizeLayoutData
     // remaps it to a fresh `tm-*` on the next restore (design 011 §6) — a known,
     // already-handled degradation, not a fresh collision. `owningTabId` remains
@@ -141,8 +141,8 @@ export interface ApiCreateMode0Deps {
 
 export interface ApiCreateMode0Result {
   targetTabId: string;
-  /** The leaf the pane tree's root node ends up carrying — `tm-*` for an
-   *  API-created tab, per option A. */
+  /** The leaf the pane tree's root node ends up carrying — always a `tm-*`,
+   *  never the tab's own id (design 014 §A1). */
   leafId?: string;
   paneTree: { id: string; type: 'terminal'; terminalId?: string; name?: string; shellType?: string };
 }
@@ -158,7 +158,7 @@ export interface ApiCreateMode0Result {
  * Mirrors `App.tsx` exactly: seed the window `tabPanes` map AND dispatch
  * `addTabTree` in the SAME synchronous block as `addTab`, before returning —
  * that ordering is what keeps `TerminalContainer`'s default-seed effect from
- * ever overwriting an API tab's `tm-*` leaf with `tab.id`.
+ * ever replacing this tab's `tm-*` leaf with a seed of its own.
  */
 export function runApiCreateMode0(
   detail: {

@@ -107,12 +107,12 @@ class TerminalServiceClass {
     cols?: number,
     rows?: number,
     /** The `tb-` id of the tab that owns this pane — always a SEPARATE identity
-     *  from `terminalId`, never assumed equal to it. It coincides only for a
-     *  renderer-created tab whose root leaf reuses the tab id; an API-created
-     *  tab's root leaf is a minted `tm-*`, so its owner differs even though the
-     *  pane IS that tab's root. Root-vs-split is tree structure, not an id
-     *  relationship. Design 011 §6: the backend cannot derive this — ownership
-     *  lives only in `panes.treesByTabId`. */
+     *  from `terminalId`, and since design 014 never equal to it: every root leaf
+     *  is a minted `tm-*`, exactly like a split's. Root-vs-split is tree
+     *  structure, not an id relationship. Design 011 §6: the backend cannot
+     *  derive this — ownership lives only in `panes.treesByTabId`. Undefined
+     *  when the tree has not been committed yet; `reassertOwnerAfterSpawn`
+     *  supplies the owner once it lands. */
     owningTabId?: string,
     /** The pty-host session key when it differs from `terminalId` — set only on
      *  a pane migrated from a pre-014 build, whose armed session the host still
@@ -155,16 +155,18 @@ class TerminalServiceClass {
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
 
-      // For pane terminals (created via splits), always create a new process
-      const isPaneTerminal = terminalId.startsWith('tm-') || terminalId.startsWith('pane-terminal-');
-
-      // Check if we already have a process for this terminal
+      // A reaching-this-far create always spawns. The reuse decision belongs to
+      // TerminalPane's mount effect, which checks `getProcessId` before calling
+      // at all; a caller that gets here with a stale binding (restart in place)
+      // wants a NEW process.
+      //
+      // There was a root-vs-split branch here — `tm-`/`pane-terminal-` leaves fell
+      // through to a fresh spawn, anything else returned the existing process.
+      // Design 014 mints a `tm-` leaf for every pane, so the "anything else" arm
+      // could no longer be reached.
       const existingProcess = this.processes.get(terminalId);
-      if (existingProcess && !isPaneTerminal) {
-        console.log(`TerminalService: Terminal ${terminalId} already has process ${existingProcess.id}, returning existing`);
-        return existingProcess.id;
-      } else if (existingProcess && isPaneTerminal) {
-        console.log(`TerminalService: Terminal ${terminalId} is a pane terminal with existing process ${existingProcess.id}, will create new one`);
+      if (existingProcess) {
+        console.log(`TerminalService: Terminal ${terminalId} has existing process ${existingProcess.id}, will create new one`);
       }
 
       // Call IPC to create actual PTY process

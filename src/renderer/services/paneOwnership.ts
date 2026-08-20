@@ -34,12 +34,12 @@ import type { PaneNode } from '../store/slices/panesSlice';
 /**
  * renderer leaf id -> the tab that owns it.
  *
- * The leaf id has two FORMS, naming who minted it and NOT the pane's shape:
- * `tb-*` for a renderer-created tab root, `tm-*` for split panes AND for every
- * API-created terminal, including a solo root. Root/solo/split comes only from
- * the pane tree; ownership comes only from this map, never from the prefix — a
- * leaf keeps its id when moved into another tab, which is what this module
- * detects.
+ * Since design 014 a leaf id has ONE form, `tm-*`, whoever minted it — a tab
+ * root, a split, an API-created terminal. (Trees saved before 014 carried the
+ * tab's own `tb-*` id on its root leaf; StateManager renames those at restore.)
+ * Root/solo/split comes only from the pane tree; ownership comes only from this
+ * map, never from the prefix — a leaf keeps its id when moved into another tab,
+ * which is what this module detects.
  */
 export type LeafOwners = Map<string, string>;
 
