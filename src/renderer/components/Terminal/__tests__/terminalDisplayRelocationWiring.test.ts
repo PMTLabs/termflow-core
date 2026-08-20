@@ -205,8 +205,26 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
 
   it('opens the engine gate only while this terminal is the overlay', () => {
     expect(SOURCE).toContain('s.canvas.overlayId === terminalId');
-    expect(SOURCE).toContain('engineRef.current?.setChromeHostActive(true);');
-    expect(SOURCE).toContain('engineRef.current?.setChromeHostActive(false);');
+    expect(SOURCE).toContain('engine?.setChromeHostActive(true);');
+    expect(SOURCE).toContain('engine?.setChromeHostActive(false);');
+  });
+
+  /**
+   * The same H12 / review-098-A1 hazard the relocation effect is built around, one effect along.
+   *
+   * This effect reaches through `engineRef` to configure the engine, and it is declared ABOVE
+   * the engine effect — so on a fresh instance the ref is still null, and when `TerminalPane`'s
+   * reuse path changes `terminalId` on a mounted `TerminalDisplay` it re-runs BEFORE the ref is
+   * swapped. Both leave the incoming engine gated shut with nothing to indicate it. Keying on
+   * `engineGeneration` is what makes the ref trustworthy; CAPTURING the engine is what stops the
+   * cleanup re-gating a different one.
+   */
+  it('keys the gate on the engine generation and captures the engine', () => {
+    const at = SOURCE.indexOf('engine?.setChromeHostActive(true);');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(SOURCE.slice(0, at)).toContain('const engine = engineRef.current;');
+    expect(SOURCE.slice(at)).toContain('}, [overlaidOnCanvas, engineGeneration]);');
+    expect(SOURCE).toContain('const { engineMounted, engineGeneration } = useSurfaceRelocation({');
   });
 
   /**
@@ -216,7 +234,7 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
    * along.
    */
   it('closes the popup when the overlay closes', () => {
-    const at = SOURCE.indexOf('engineRef.current?.setChromeHostActive(false);');
+    const at = SOURCE.indexOf('engine?.setChromeHostActive(false);');
     expect(at).toBeGreaterThanOrEqual(0);
     expect(SOURCE.slice(at, at + 260)).toContain('suggestRef.current.close();');
   });

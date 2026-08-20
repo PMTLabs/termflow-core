@@ -56,7 +56,7 @@ export interface SurfaceRelocationParams<E extends RelocatableEngine> {
 
 export function useSurfaceRelocation<E extends RelocatableEngine>(
   params: SurfaceRelocationParams<E>,
-): { engineMounted: () => void } {
+): { engineMounted: () => void; engineGeneration: number } {
   const { terminalId, engineRef, paneRef } = params;
   const host = useSurfaceHost(terminalId);
   const [engineGeneration, setEngineGeneration] = useState(0);
@@ -110,5 +110,10 @@ export function useSurfaceRelocation<E extends RelocatableEngine>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host, engineGeneration]);
 
-  return { engineMounted };
+  // `engineGeneration` is exposed as well as consumed (`plan/020` §5). It is the only signal
+  // this component has that `engineRef.current` is populated AND is the engine belonging to the
+  // CURRENT terminalId — the same H12/review-098-A1 hazard this hook already guards for itself.
+  // Any other effect that reaches through `engineRef` to configure the engine has to re-run on
+  // it, or it configures whichever engine happened to be in the ref when it last ran.
+  return { engineMounted, engineGeneration };
 }

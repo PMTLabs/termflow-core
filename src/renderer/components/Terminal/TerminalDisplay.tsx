@@ -223,20 +223,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * (`plan/017` decision C: the same host, a bigger world rect), so there is no relocation to
    * carry the change and the host has to say so directly.
    *
-   * Ordered after the relocation hook on purpose: a relocation overwrites the flag from its own
-   * argument, so leaving the canvas re-gates the engine without this effect having to notice.
+   * A relocation overwrites the flag from its own argument, so leaving the canvas re-gates the
+   * engine without this effect having to notice.
+   *
+   * KEYED ON `engineGeneration` as well, and that is not defensive. This effect is declared
+   * ABOVE the engine effect, so on the first run of a component instance `engineRef.current` is
+   * still null; worse, `TerminalDisplay` is rendered without a key and `TerminalPane`'s reuse
+   * path lets `terminalId` change on the same instance (review 098 A1), so on that change this
+   * effect would re-run BEFORE the engine effect replaces the ref — configuring the OUTGOING
+   * engine and leaving the incoming one gated shut. `engineGeneration` bumps right after
+   * `mount()`, which is the only moment the ref is known to hold the current terminal's engine.
    */
   const overlaidOnCanvas = useSelector((s: RootState) => s.canvas.overlayId === terminalId);
-  useEffect(() => {
-    if (!overlaidOnCanvas) return;
-    engineRef.current?.setChromeHostActive(true);
-    return () => {
-      engineRef.current?.setChromeHostActive(false);
-      // The engine stops emitting, but the popup's REACT state is this hook's, and a popup left
-      // open would keep drawing in a node that has shrunk back to a thumbnail.
-      suggestRef.current.close();
-    };
-  }, [overlaidOnCanvas]);
+  // The effect itself is declared BELOW `useSurfaceRelocation`, which is where
+  // `engineGeneration` comes from.
 
   // Canvas Mode surface relocation (design 012 §4.2). Placed here because its
   // callbacks close over dispatch (:85), setContextMenu (:123), setPathPicker
@@ -244,7 +244,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // `engineMounted` is a stable useCallback the engine effect below calls right
   // after mount() — that bump is what makes relocation-at-mount reachable at all
   // (hazard H12, measured by spike 004 Q1).
-  const { engineMounted } = useSurfaceRelocation({
+  const { engineMounted, engineGeneration } = useSurfaceRelocation({
     terminalId,
     engineRef,
     paneRef: terminalRef,
@@ -272,6 +272,22 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       dispatch(addToast({ message: 'Could not move this terminal', type: 'error' }));
     },
   });
+
+  // The overlay's engine gate — see the block comment above `overlaidOnCanvas`. It lives here
+  // rather than up there because `engineGeneration` is declared by the hook above.
+  useEffect(() => {
+    if (!overlaidOnCanvas) return;
+    // Captured, for the same reason the relocation effect captures its engine: at cleanup time
+    // the ref can already hold a different one, and re-gating that one is not this effect's job.
+    const engine = engineRef.current;
+    engine?.setChromeHostActive(true);
+    return () => {
+      engine?.setChromeHostActive(false);
+      // The engine stops emitting, but the popup's REACT state is this hook's, and a popup left
+      // open would keep drawing in a node that has shrunk back to a thumbnail.
+      suggestRef.current.close();
+    };
+  }, [overlaidOnCanvas, engineGeneration]);
 
   // Create the engine + mount it once per terminalId. Reattach existing process
   // when available. Cleanup → unmount() (NOT dispose — preserve the cache).
