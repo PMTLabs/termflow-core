@@ -651,6 +651,39 @@ describe('overlayGeometry', () => {
     expect(x0 + backdrop.w * vp.z).toBeGreaterThanOrEqual(VW);
     expect(y0 + backdrop.h * vp.z).toBeGreaterThanOrEqual(VH);
   });
+
+  /**
+   * `plan/021` R1 — why the pointer patch exists.
+   *
+   * Every other case in this block feeds `overlayGeometry` a box from `canvasMetrics()`, which
+   * is derived as "the largest host the overlay could show at EXACTLY scale 1 on this display".
+   * With that input the overlay is 1:1 and xterm's pointer maths happens to be correct.
+   *
+   * Since `plan/017` the real input is a replica of the terminal's own PANE
+   * (`canvasHostBoxes.measureHostBox`), and nothing constrains a pane to be smaller than the
+   * canvas viewport — an unsplit tab's pane IS that viewport. The overlay then cannot reach
+   * 1:1, because it must also fit the margins and the header, and every pointer coordinate is
+   * short by that factor.
+   *
+   * Asserted as the geometric relationship rather than a magic 0.918, so it stays true on any
+   * display: a host as large as the viewport cannot fit inside the viewport minus chrome.
+   */
+  it('cannot reach 1:1 for a pane box the size of the viewport', () => {
+    const paneBox = { hostW: VW, hostH: VH, surfaceScale: NODE_W / VW };
+    const { scale } = overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH, paneBox);
+
+    expect(scale).toBeLessThan(1);
+    // And it is the HEIGHT that binds — the header eats more than the side margins do, which
+    // is why shrinking OVERLAY_MARGIN alone would not buy 1:1 back.
+    expect(scale).toBeCloseTo((VH - OVERLAY_MARGIN * 2 - HEAD_H) / VH, 9);
+  });
+
+  it('still reaches 1:1 for a pane box that genuinely fits', () => {
+    // Paired positive, so "always below 1" cannot pass both. A quarter-split's pane has room
+    // to spare, and there the overlay is the terminal at its true size.
+    const small = { hostW: 700, hostH: 400, surfaceScale: NODE_W / 700 };
+    expect(overlayGeometry({ x: 0, y: 0, z: 1 }, VW, VH, small).scale).toBe(1);
+  });
 });
 
 /**

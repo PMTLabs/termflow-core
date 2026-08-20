@@ -42,6 +42,17 @@ export interface SurfaceChromeState {
   scrollToBottom: () => void;
   /** Accept a suggestion — inserts it into the shell and closes the popup. */
   pickSuggestion: (command: string) => void;
+  /**
+   * Open the TERMINAL's context menu — Copy, Paste, Clear, Selection mode — at a point in
+   * VIEWPORT coordinates (`plan/021` R2).
+   *
+   * The menu itself is still rendered by `TerminalDisplay`, and that is not an accident:
+   * `ContextMenu` portals to `document.body` and positions itself `fixed` at the literal
+   * coordinates it is given, so where it is rendered FROM has no bearing on where it appears.
+   * Only the trigger had to travel — the menu's items act on the engine, which is the same
+   * engine either way.
+   */
+  openContextMenu: (x: number, y: number) => void;
 }
 
 interface Entry {
@@ -83,6 +94,7 @@ function same(a: SurfaceChromeState, b: SurfaceChromeState): boolean {
     a.atBottom === b.atBottom
     && a.scrollToBottom === b.scrollToBottom
     && a.pickSuggestion === b.pickSuggestion
+    && a.openContextMenu === b.openContextMenu
     && a.suggest.open === b.suggest.open
     && a.suggest.selectedIndex === b.suggest.selectedIndex
     && a.suggest.focused === b.suggest.focused

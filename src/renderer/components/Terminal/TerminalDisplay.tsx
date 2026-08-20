@@ -191,6 +191,30 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     engineRef.current?.scrollToBottom();
     engineRef.current?.focus();
   }, []);
+  /**
+   * Open the terminal's context menu at a point in VIEWPORT coordinates.
+   *
+   * Declared up here with the other published callbacks rather than beside its DOM handler
+   * (which is ~380 lines down) because the publish effect below reads it, and a `const`
+   * declared after that effect is in its temporal dead zone.
+   *
+   * The reason it is published at all: once the terminal is relocated onto a canvas node, the
+   * right-click happens on that node's host and never reaches `.terminal-display`'s
+   * `onContextMenu` — it lands on `.canvas-node`'s own menu instead, which offers no Copy and
+   * no Paste. Only the TRIGGER has to cross the boundary; `ContextMenu` portals to
+   * `document.body` and positions itself `fixed` at the literal coordinates given, so the menu
+   * draws in the right place and at natural size no matter which surface asked for it, and its
+   * items act on the one engine either way.
+   */
+  const openContextMenuAt = useCallback((x: number, y: number) => {
+    setContextMenu({ x, y });
+    // Detect the pane's agent for the "Color scheme for <agent>" item; refresh
+    // once so a just-started agent is offered without waiting for the next poll.
+    setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId));
+    void agentSchemeTracker.refreshNow().then(() =>
+      setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId)),
+    );
+  }, [terminalId]);
   // One token per component instance, so a stale unmount cleanup cannot wipe the registration
   // a remount has already made under the same terminalId.
   const chromeOwner = useRef({});
@@ -206,9 +230,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       },
       scrollToBottom: scrollToBottomCb,
       pickSuggestion: suggest.pick,
+      openContextMenu: openContextMenuAt,
     });
   }, [
-    terminalId, atBottom, scrollToBottomCb, suggest.pick,
+    terminalId, atBottom, scrollToBottomCb, suggest.pick, openContextMenuAt,
     suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
   ]);
   useEffect(() => {
@@ -569,16 +594,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     }
   }, [fontSize]);
 
-  // Context menu
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY });
-    // Detect the pane's agent for the "Color scheme for <agent>" item; refresh
-    // once so a just-started agent is offered without waiting for the next poll.
-    setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId));
-    void agentSchemeTracker.refreshNow().then(() =>
-      setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId)),
-    );
+    openContextMenuAt(e.clientX, e.clientY);
   };
 
   const getContextMenuItems = () => {

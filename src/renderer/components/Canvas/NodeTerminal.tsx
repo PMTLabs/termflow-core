@@ -60,6 +60,27 @@ const NodeTerminalImpl: React.FC<{
    */
   const chrome = useSurfaceChrome(overlaid ? terminalId : null);
 
+  /**
+   * The pane's TEXT context menu — Copy, Paste, Clear, Selection mode (`plan/021` R2).
+   *
+   * `TerminalDisplay` binds this on its own `.terminal-display`, but that div no longer holds
+   * the terminal once it has been relocated here, so the right-click bubbled to `.canvas-node`
+   * and opened the NODE's menu instead: arrange, close, overlay — nothing that touches text.
+   * `stopPropagation` is what keeps both from firing, and binding it on the HOST rather than
+   * the wrapper is what puts it first: `term.element` lives inside the host, so a right-click
+   * on a glyph passes through here on the way up.
+   *
+   * Present only when `chrome` is — i.e. only on the overlay. An ordinary node renders below
+   * 1:1, and the node menu is the right menu there: you are handling a node, not reading text.
+   */
+  const onTerminalContextMenu = chrome
+    ? (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        chrome.openContextMenu(e.clientX, e.clientY);
+      }
+    : undefined;
+
   return (
     <div className="terminal-display-wrapper canvas-surface">
       <div
@@ -67,6 +88,7 @@ const NodeTerminalImpl: React.FC<{
         data-terminal-id={terminalId}
         ref={hostRef}
         style={{ pointerEvents: focused ? 'auto' : 'none' }}
+        onContextMenu={onTerminalContextMenu}
       />
       {chrome && (
         <ScrollToBottomButton visible={!chrome.atBottom} onClick={chrome.scrollToBottom} />
