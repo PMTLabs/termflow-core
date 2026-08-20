@@ -1028,9 +1028,10 @@ fn show_or_focus_main_window(app: &tauri::AppHandle) {
             .map(|(_, w)| w)
     });
     if let Some(win) = target {
-        let _ = win.unminimize();
-        let _ = win.show();
-        let _ = win.set_focus();
+        // Restores AND makes the webview visible again. A tray click is the most likely way
+        // to reach a window whose webview was hidden on minimize, so this is the path that
+        // would show the blank window if the restore relied on an event arriving.
+        crate::webview_power::restore_and_focus(&win);
     } else if let Err(e) = commands::open_new_window(app, None) {
         log::warn!("Tray show: failed to open a new window: {}", e);
     }
@@ -1568,9 +1569,7 @@ pub fn run() {
         } else if let Some(label) = id.strip_prefix("focus:") {
             // Window menu entry: bring that window to the front.
             if let Some(w) = app.get_webview_window(label) {
-                let _ = w.unminimize();
-                let _ = w.show();
-                let _ = w.set_focus();
+                crate::webview_power::restore_and_focus(&w);
             }
         }
     })

@@ -2438,6 +2438,12 @@ pub fn resolve_tab_drop(
                     serde_json::json!({ "token": token, "target": label }),
                 );
                 let _ = w.set_focus(); // bring the receiving window to the front
+                // Deliberately NOT restore_and_focus: this path only raises the window, and
+                // unminimizing a window the user left minimized would be a behaviour change.
+                // But `set_focus` on Windows CAN restore a minimized window, so the webview's
+                // visibility has to be re-derived from the window's actual state either way —
+                // otherwise a tab dropped into a minimized window reveals a blank one.
+                crate::webview_power::sync(&w);
                 log::info!("resolve_tab_drop: reattaching into {}", label);
                 return Ok(true);
             }

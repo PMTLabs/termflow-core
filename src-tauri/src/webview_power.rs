@@ -58,6 +58,30 @@ pub fn sync(window: &tauri::WebviewWindow) {
     set_visible(window, !minimized);
 }
 
+/// Bring a window back to the user AND make its webview visible again.
+///
+/// **The single entry point for a programmatic restore**, deliberately, because the failure
+/// it prevents is silent and severe. `sync` is otherwise only reached from
+/// `on_window_event`, so every restore depends on Windows emitting a `Focused` / `Resized`
+/// that reaches our handler. That is true today — `WM_SIZE(SIZE_RESTORED)` and
+/// `WM_SETFOCUS` both fire on a normal restore — but it is a property of the platform and
+/// the framework, not of this code, and if it ever fails to hold the symptom is a window
+/// that comes back **blank**: correct size, correct title, nothing painted.
+///
+/// Calling `sync` here makes the restore self-sufficient rather than event-dependent. It is
+/// cheap: `sync` filters repeats, so when the event path also fires (the normal case) the
+/// second call is a no-op that never reaches COM.
+///
+/// A test in this module asserts no other file calls `unminimize()` directly. That is the
+/// point of routing it through here — a gate that lives in the CALLERS is one that every
+/// future caller opts out of by simply not knowing about it.
+pub fn restore_and_focus(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    sync(window);
+}
+
 #[cfg(windows)]
 fn set_visible(window: &tauri::WebviewWindow, visible: bool) {
     let label = window.label().to_string();
@@ -104,6 +128,41 @@ mod tests {
     fn unknown_label_is_treated_as_visible() {
         let c = cache().lock().unwrap();
         assert_eq!(c.get("never-seen").copied().unwrap_or(true), true);
+    }
+
+    /// The class, not the instance.
+    ///
+    /// Two call sites needed the restore-time `sync` when this was written
+    /// (`show_or_focus_main_window` and the Window menu's `focus:<label>` entry), and the
+    /// obvious fix was to add a line to each. That is the shape of bug that comes back: the
+    /// THIRD restore path, written months from now by someone who has never read this file,
+    /// silently omits it and ships a window that restores blank.
+    ///
+    /// So the gate lives in `restore_and_focus` and this test makes bypassing it a build
+    /// failure rather than a code-review question.
+    #[test]
+    fn no_other_file_restores_a_window_directly() {
+        const SOURCES: [(&str, &str); 2] = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("commands.rs", include_str!("commands.rs")),
+        ];
+        for (name, src) in SOURCES {
+            assert!(
+                !src.contains(".unminimize()"),
+                "{name} calls .unminimize() directly. Use webview_power::restore_and_focus \
+                 instead, or the webview stays invisible and the window restores BLANK."
+            );
+        }
+    }
+
+    /// Guards the guard: if `include_str!` ever pointed at the wrong file, or the sources
+    /// were emptied, the assertion above would pass vacuously and prove nothing.
+    #[test]
+    fn the_scanned_sources_are_real() {
+        const LIB: &str = include_str!("lib.rs");
+        const COMMANDS: &str = include_str!("commands.rs");
+        assert!(LIB.contains("on_window_event"), "lib.rs is not the file this test thinks it is");
+        assert!(COMMANDS.contains("pub async fn"), "commands.rs is not the file this test thinks it is");
     }
 
     #[test]
