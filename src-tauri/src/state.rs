@@ -396,6 +396,9 @@ pub struct AppState<R: Runtime = Wry> {
     // `shell_writer_channels`. write/resize/close/repaint route to the client
     // for these; everything else is unchanged.
     pub host_terminals: Arc<DashMap<String, ()>>,
+    /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
+    /// type so it is unit-testable without a Tauri AppHandle.
+    pub identity: crate::identity_index::IdentityIndex,
     // Sessions the sidecar still held when we connected (survived a hot-swap),
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
@@ -487,6 +490,7 @@ impl<R: Runtime> Clone for AppState<R> {
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            identity: self.identity.clone(),
             host_reattach_pending: self.host_reattach_pending.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
@@ -668,6 +672,7 @@ impl<R: Runtime> AppState<R> {
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            identity: crate::identity_index::IdentityIndex::new(),
             host_reattach_pending: Arc::new(DashMap::new()),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),

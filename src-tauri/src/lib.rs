@@ -1,3 +1,4 @@
+pub mod identity_index;
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
