@@ -147,6 +147,14 @@
 .canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: var(--node-divider-w) solid var(--border-color, #3e3e42); border-radius: var(--node-radius) var(--node-radius) 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
 .canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
 .canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
+/* The group chip (`plan/024` Req 5), overlay only. Borrows the agent chip's metrics so the
+   header's three badges read as one family, and differs exactly where the meaning differs: this
+   is a STATIC fact about where the terminal lives, so it is drawn in the muted border/secondary
+   palette rather than the accent one the agent chip uses for what is running right now. Muted
+   also keeps it from competing with the title it sits beside, which is the thing being read.
+   `flex: none` + `max-width` + ellipsis for the same reason as the agent chip: a long tab title
+   must shrink itself, never push the header's buttons out of the node. */
+.canvas-node-group { flex: none; max-width: 34%; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-secondary, #9a9a9a); border: 1px solid var(--border-color, #3e3e42); border-radius: 999px; padding: 1px 6px; position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
 /* The agent/CLI chip (item 6). Shares the shell badge's metrics so the two sit as a pair, and
    differs only where the difference carries meaning: it is ACCENT-coloured and pill-shaped

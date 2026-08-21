@@ -21,6 +21,15 @@ export interface CanvasNodeModel {
   paneId: string;
   /** PaneNode.name — NOT Tab.title. See design 010 §2.1. */
   title: string;
+  /**
+   * The owning GROUP's name, which is `Tab.title` — a group *is* a tab (design 010 §2), so this
+   * is not a second identity, just the other half of the pair `title` deliberately excludes.
+   *
+   * Carried on the node rather than looked up from `groups` by `tabId` because it is already in
+   * scope where the node is built, and because the overlay header needs it for a node whose
+   * group frame may not even be in the model's visible set.
+   */
+  groupTitle: string;
   shellType: string;
   rect: Rect;
   isRunning: boolean;
@@ -210,6 +219,7 @@ function buildModel(
         tabId: tab.id,
         paneId: leaf.id,
         title: leaf.name || tab.title || 'Terminal',
+        groupTitle: tab.title || 'Terminal',
         shellType: leaf.shellType || tab.shellType || '',
         rect: rects[i],
         // Per-terminal (Req 8, plan/020 §2): this node reports its OWN process's activity,

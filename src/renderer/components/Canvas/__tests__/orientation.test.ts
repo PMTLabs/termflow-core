@@ -25,7 +25,7 @@ const node = (
   shellType: 'pwsh',
   rect: { x, y, w: NODE_W, h: NODE_H },
   isRunning,
-  hasUnseenOutput: false,
+  hasUnseenOutput: false, groupTitle: 'Group',
 });
 
 describe('nearestGroupToCentre', () => {

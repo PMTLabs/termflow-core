@@ -58,10 +58,12 @@ const node0: CanvasNodeModel = {
   tabId: 'tb-1',
   paneId: 'pn-1',
   title: 'server',
+  // Deliberately NOT equal to `title`. A fixture whose group and node names matched would let a
+  // chip that rendered `node.title` by mistake pass every case below.
+  groupTitle: 'backend',
   shellType: 'zsh',
   rect: { x: 0, y: 0, w: 340, h: 210 },
   isRunning: false,
-  hasUnseenOutput: false,
 };
 
 interface Handlers {
@@ -379,6 +381,55 @@ describe('agent chip', () => {
     mockAgent = { agent: 'claude', icon: null };
     render('chip', {});
     expect(chip()).toBeNull();
+  });
+});
+
+/**
+ * The group chip — `plan/024` Req 5.
+ *
+ * A group IS a tab (design 010 §2), so this chip carries `Tab.title` while the title beside it
+ * carries `PaneNode.name`. The overlay is a terminal filling the screen with nothing around it to
+ * say which group you are inside; every other canvas surface has the frame or the sidebar to say
+ * it, which is why this is overlay-only rather than everywhere.
+ *
+ * The fixture's `groupTitle` differs from its `title` on purpose — see `node0`.
+ */
+describe('group chip', () => {
+  const chip = () => container.querySelector('.canvas-node-group');
+
+  it('names the group after the terminal title, in the overlay', () => {
+    render('gpu', {}, true);
+    expect(chip()).not.toBeNull();
+    expect(chip()!.textContent).toBe('backend');
+    // Order matters: the request was "after the terminal title". `compareDocumentPosition`
+    // asserts it from the DOM rather than from the order of the JSX.
+    const title = container.querySelector('.canvas-node-title')!;
+    expect(title.compareDocumentPosition(chip()!) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
+
+  // The negative that makes the case above mean something: a chip rendered on every node would
+  // satisfy it just as well, and would crowd a preview header that is already fighting for room.
+  it('is absent on an ordinary canvas node', () => {
+    render('gpu', {});
+    expect(chip()).toBeNull();
+  });
+
+  /**
+   * D7, and the reason it is worth a test: for an unsplit tab `PaneNode.name` and `Tab.title` are
+   * usually the SAME string, so the obvious "hide the duplicate" rule would make the chip vanish
+   * in the commonest case. Tam chose predictability instead — a context chip you cannot rely on
+   * being there is one you stop reading.
+   */
+  it('still shows when it duplicates the terminal title', () => {
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, title: 'backend' }} tier="gpu" zoom={1} selected={false}
+          focused={false} dimmed={false} hidden={false} busyCue="sweep" overlaid />,
+      ));
+    });
+    expect(chip()).not.toBeNull();
+    expect(chip()!.textContent).toBe('backend');
   });
 });
 

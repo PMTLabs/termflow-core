@@ -53,7 +53,7 @@ jest.mock('../../../services/TerminalService', () => ({
 const rect = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
 const node = (terminalId: string, tabId: string, paneId: string, title: string): CanvasNodeModel => ({
   terminalId, tabId, paneId, title, shellType: 'zsh', rect: rect(0, 0),
-  isRunning: false, hasUnseenOutput: false,
+  isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
 });
 const group = (tabId: string, title: string, nodeIds: string[]): CanvasGroupModel =>
   ({ tabId, title, rect: rect(0, 0), nodeIds, anyRunning: false });

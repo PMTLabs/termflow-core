@@ -58,6 +58,24 @@ describe('buildCanvasModel', () => {
     expect(m.nodes.find((n) => n.terminalId === 'tb-a')!.title).toBe('zsh');
   });
 
+  /**
+   * ...and the other half of that pair (`plan/024` Req 5). `groupTitle` is the group's name, a
+   * group is a tab, so it is `Tab.title` — the very value the case above proves `title` is NOT.
+   *
+   * `tm-2` is the one that makes this fail on a hard-coded chip: its pane is named "server"
+   * inside a tab titled "api", so a `groupTitle` wired to the wrong source reads "server" here
+   * and the assertion below catches it. A node whose pane is unnamed falls back to the tab
+   * title, which is why that case cannot carry this test on its own.
+   */
+  it('takes groupTitle from Tab.title — the value the node title deliberately is not', () => {
+    const m = buildCanvasModel(stateWith());
+    const n = m.nodes.find((x) => x.terminalId === 'tm-2')!;
+    expect(n.groupTitle).toBe('api');
+    expect(n.groupTitle).not.toBe(n.title);
+    // A second tab, so the field cannot be one constant that happens to match the first.
+    expect(m.nodes.find((x) => x.tabId === 'tb-b')!.groupTitle).toBe('web');
+  });
+
   it('seeds geometry for a terminal that has never been placed', () => {
     const m = buildCanvasModel(stateWith());
     for (const n of m.nodes) {
@@ -246,7 +264,7 @@ describe('chip fly-to zooms', () => {
 describe('visibleNodeIds', () => {
   const mk = (id: string, x: number, y: number): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', title: id, shellType: 'zsh',
-    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
   });
   const vp: Viewport = { x: 0, y: 0, z: 1 };
 
@@ -334,7 +352,7 @@ describe('labelMaxWidth', () => {
 describe('allCollapsed', () => {
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
   });
   const tiers = (m: Record<string, LodTier>) => m;
 
@@ -424,7 +442,7 @@ describe('chipLabelScreenPx', () => {
 describe('snapshotNodeIds', () => {
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
   });
   const nodes = [n('a'), n('b'), n('c')];
   const all = new Set(['a', 'b', 'c']);

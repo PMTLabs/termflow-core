@@ -199,6 +199,14 @@ export const CanvasNode: React.FC<{
             <span className={node.isRunning ? 'canvas-node-dot running' : 'canvas-node-dot'} />
           )}
           <span className="canvas-node-title">{node.title}</span>
+          {/* The group this terminal belongs to, in the OVERLAY only.
+              A group is a tab (design 010 §2), so this is `Tab.title` while the title beside it
+              is `PaneNode.name` — for an unsplit tab those are usually the same string, and the
+              chip is shown anyway (Tam, `plan/024` D7): a context chip that disappears exactly
+              when the context is simplest is one you cannot learn to rely on.
+              Overlay only because that is the one surface at 1:1 with room for it; a preview
+              node's header is already competing with the title at a fraction of natural size. */}
+          {overlaid && <span className="canvas-node-group">{node.groupTitle}</span>}
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node
               and there is room for a title and nothing else. */}

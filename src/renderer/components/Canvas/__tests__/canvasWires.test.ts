@@ -96,9 +96,9 @@ describe('worldPoint', () => {
 describe('nodeRegistryPayload', () => {
   const model: CanvasModel = {
     nodes: [
-      { terminalId: 'tm-1', tabId: 'tb-a', paneId: 'p1', title: 'build', shellType: 'pwsh', rect: at(0, 0), isRunning: false, hasUnseenOutput: false },
-      { terminalId: 'tm-2', tabId: 'tb-a', paneId: 'p2', title: 'test', shellType: 'pwsh', rect: at(0, 0), isRunning: false, hasUnseenOutput: false },
-      { terminalId: 'tm-3', tabId: 'tb-b', paneId: 'p3', title: 'logs', shellType: 'bash', rect: at(0, 0), isRunning: false, hasUnseenOutput: false },
+      { terminalId: 'tm-1', tabId: 'tb-a', paneId: 'p1', title: 'build', shellType: 'pwsh', rect: at(0, 0), isRunning: false, hasUnseenOutput: false, groupTitle: 'Group' },
+      { terminalId: 'tm-2', tabId: 'tb-a', paneId: 'p2', title: 'test', shellType: 'pwsh', rect: at(0, 0), isRunning: false, hasUnseenOutput: false, groupTitle: 'Group' },
+      { terminalId: 'tm-3', tabId: 'tb-b', paneId: 'p3', title: 'logs', shellType: 'bash', rect: at(0, 0), isRunning: false, hasUnseenOutput: false, groupTitle: 'Group' },
     ],
     groups: [
       { tabId: 'tb-a', title: 'API', rect: at(0, 0), nodeIds: ['tm-1', 'tm-2'], anyRunning: false },
