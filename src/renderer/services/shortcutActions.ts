@@ -110,6 +110,47 @@ export const GLOBAL_SHORTCUT_ACTIONS: ShortcutAction[] = SHORTCUT_ACTIONS.filter
 export const CANVAS_SHORTCUT_ACTIONS: ShortcutAction[] = SHORTCUT_ACTIONS.filter(a => !isGlobalAction(a));
 
 /**
+ * The canvas keys that are FIXED — real shortcuts, listed for the user, not yet rebindable.
+ *
+ * Tam, 2026-08-21: *"There are many shortcuts still are missing... such as the view all,
+ * Shift 1/2. Can you put that into the shortcuts screen? just list out but not allow to change
+ * for now"*. Making them assignable is `docs/backlog/008`.
+ *
+ * **This table is the single source for two jobs that were previously written out twice**: what
+ * Settings displays, and which combos `RESERVED_COMBOS` protects. Kept together deliberately —
+ * a hand-maintained reserve list beside a hand-maintained display list drifts in the direction
+ * that is worst: a key shown to the user as "Next Node" that a customizable action is free to
+ * bind over, silently, and only on the canvas.
+ *
+ * `display` is what the user presses; `reserve` is every canonical spelling that has to be
+ * blocked. The two differ more often than they look:
+ *
+ *  - one row can own several keys (`Delete` and `Backspace` are one command);
+ *  - `+` cannot appear raw in a combo string, so the zoom-in row reserves `Ctrl+Plus`;
+ *  - **Shift+digit has no single spelling.** The recorder builds combos from `event.key`, so
+ *    Shift+1 records as `shift+!` on a US layout and `shift+1` on an AZERTY. Both US spellings
+ *    are reserved and other layouts stay exposed — see `RESERVED_COMBOS`'s own note.
+ */
+export interface CanvasFixedShortcut {
+  label: string;
+  /** What the user presses, for display. Never parsed. */
+  display: string;
+  /** Every canonical spelling to block, so nothing customizable can shadow this. */
+  reserve: string[];
+}
+
+export const CANVAS_FIXED_SHORTCUTS: CanvasFixedShortcut[] = [
+  { label: 'View All', display: 'Shift+1', reserve: ['Shift+1', 'Shift+!'] },
+  { label: 'Fit Current Group', display: 'Shift+2', reserve: ['Shift+2', 'Shift+@'] },
+  { label: 'Next / Previous Node', display: 'Tab  /  Shift+Tab', reserve: ['Tab', 'Shift+Tab'] },
+  { label: 'Pan the Canvas', display: '↑  ↓  ←  →', reserve: ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'] },
+  { label: 'Pan by Dragging', display: 'Hold Space + drag', reserve: ['Space'] },
+  { label: 'Zoom In / Out', display: 'Ctrl+=  /  Ctrl+-', reserve: ['Ctrl+=', 'Ctrl+Plus', 'Ctrl+-'] },
+  { label: 'Reset Zoom', display: 'Ctrl+0', reserve: ['Ctrl+0'] },
+  { label: 'Remove Selected Connection', display: 'Delete  /  Backspace', reserve: ['Delete', 'Backspace'] },
+];
+
+/**
  * Map a KeyboardEvent's `key` to the token a combo string uses for it.
  *
  * Two keys cannot appear raw in a `+`-delimited, whitespace-trimmed combo
@@ -239,14 +280,16 @@ const RESERVED_COMBOS = [
   'Ctrl+Shift+V',
   'Alt+Shift+ArrowLeft', 'Alt+Shift+ArrowRight', 'Alt+Shift+ArrowUp', 'Alt+Shift+ArrowDown',
 
-  /* The canvas's FIXED navigation, which is not in SHORTCUT_ACTIONS and so cannot defend
-   * itself through the per-action conflict loop below.
+  /* The canvas's FIXED navigation, DERIVED from the table Settings displays rather than
+   * repeated here — see `CANVAS_FIXED_SHORTCUTS`.
    *
-   * Without these, Settings would happily accept "Open Node in Its Tab = Tab" — and the canvas
+   * Without these, Settings would happily accept "Open Node in Its Tab = Tab" and the canvas
    * would silently lose Tab-stepping, or an arrow would both pan and leave for a tab. The
    * failure is invisible at bind time and only shows up as a canvas key that stopped working.
+   * Deriving is what stops the displayed list and the protected list drifting apart: a row added
+   * to that table is reserved the same day it becomes visible.
    *
-   * The zoom chords are reserved for the reason InputHandler already documents for not binding
+   * The zoom chords are in there for the reason InputHandler already documents for not binding
    * them ("Ctrl/Cmd +/-/0 zoom is intentionally NOT bound here"): zoom is per-surface, owned by
    * each terminal pane, the canvas and the Settings screen. A customizable action landing on one
    * would shadow all three at once.
@@ -255,16 +298,9 @@ const RESERVED_COMBOS = [
    * reserved reliably. The recorder builds combos from `event.key`, so pressing Shift+1 records
    * as `shift+!` on a US layout and `shift+1` on an AZERTY — there is no single spelling to
    * reserve. Both US spellings are listed; other layouts stay exposed. Fixing it properly means
-   * teaching the recorder `event.code` for digits, which is its own change.
+   * teaching the recorder `event.code` for digits, which is its own change (docs/backlog/008).
    */
-  'Tab', 'Shift+Tab',
-  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
-  'Delete', 'Backspace',
-  // `Ctrl+Plus`, never `'Ctrl++'` — `'+'` IS the delimiter, so that string canonicalizes to a
-  // trailing-empty `control+` and would reserve nothing. This is the word form `comboKeyToken`
-  // produces for a real `+` keypress.
-  'Ctrl+=', 'Ctrl+Plus', 'Ctrl+-', 'Ctrl+0',
-  'Shift+1', 'Shift+2', 'Shift+!', 'Shift+@',
+  ...CANVAS_FIXED_SHORTCUTS.flatMap(s => s.reserve),
 ].map(canonicalizeCombo);
 
 export type ShortcutConflict =

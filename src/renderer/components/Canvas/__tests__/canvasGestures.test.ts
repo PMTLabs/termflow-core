@@ -7,7 +7,7 @@ import {
   wheelPanDelta, WHEEL_LINE_PX, WHEEL_PAGE_PX,
   DRAG_SLOP, SpacePanKey, CanvasKey, CanvasCombos, WheelContext, WheelScroll,
 } from '../canvasGestures';
-import { SHORTCUT_ACTIONS } from '../../../services/shortcutActions';
+import { SHORTCUT_ACTIONS, CANVAS_FIXED_SHORTCUTS } from '../../../services/shortcutActions';
 import { readSource } from '../../../utils/readSource';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
@@ -390,6 +390,89 @@ describe('the four canvas shortcuts are pairwise disjoint', () => {
       .toEqual(['leaveTerminal']);
     expect(firing(canvasKey({ key: 't', code: 'KeyT', ctrlKey: true })))
       .toEqual(['openTabFromOverlay']);
+  });
+});
+
+/**
+ * Everything Settings lists as a fixed canvas key must ACTUALLY be one.
+ *
+ * `shortcutActions.test.ts` proves the table is reserved and rendered; neither says the keys do
+ * anything. A row naming a key the canvas does not handle is the exact failure Tam reported,
+ * inverted — he could not find View All because nothing listed it, and a wrong listing is worse
+ * than none because it looks authoritative.
+ *
+ * Driven off `reserve` rather than `display`: `display` is prose for humans ("↑ ↓ ← →", "Hold
+ * Space + drag") while `reserve` carries the canonical spellings, which parse.
+ */
+describe('the fixed canvas keys Settings lists are real', () => {
+  // Both flags set, so the rows gated on a selection (fit-group, delete-connection) resolve.
+  const ANY_SELECTION = { node: true, edge: true };
+
+  /** A CanvasKey for one canonical combo string. */
+  const pressOf = (combo: string): CanvasKey => {
+    const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
+    const mods = { ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+    let k = '';
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (lower === 'ctrl' || lower === 'control') mods.ctrlKey = true;
+      else if (lower === 'alt') mods.altKey = true;
+      else if (lower === 'shift') mods.shiftKey = true;
+      else k = part;
+    }
+    if (k === 'Plus') k = '+';
+    if (k === 'Space') k = ' ';
+    return canvasKey({ key: k, code: k, ...mods });
+  };
+
+  it('found the table it is checking', () => {
+    expect(CANVAS_FIXED_SHORTCUTS.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * Every listed spelling resolves to something the canvas does — either a `CanvasAction`, or the
+   * hand tool, which is a hold-to-arm gesture rather than a resolved action and so has to be
+   * asked separately.
+   */
+  it('every listed spelling resolves to a real canvas gesture', () => {
+    for (const s of CANVAS_FIXED_SHORTCUTS) {
+      for (const combo of s.reserve) {
+        const press = pressOf(combo);
+        const acts = canvasKeyAction(press, ANY_SELECTION, COMBOS) !== null
+          || shouldArmSpacePan(
+            { key: press.key, code: press.code, repeat: false, target: null },
+            null,
+          );
+        expect({ label: s.label, combo, acts }).toEqual({ label: s.label, combo, acts: true });
+      }
+    }
+  });
+
+  /** And the labels are not lying about WHICH gesture. Spot-checked on the rows whose meaning a
+   *  reader would most reasonably assume — including View All, the one Tam went looking for. */
+  it('routes the named rows to the action their label claims', () => {
+    const at = (label: string) => CANVAS_FIXED_SHORTCUTS.find(s => s.label === label)!;
+    const resolve = (combo: string) => canvasKeyAction(pressOf(combo), ANY_SELECTION, COMBOS);
+
+    expect(resolve(at('View All').reserve[0])).toEqual({ do: 'fit', target: 'all' });
+    expect(resolve(at('Fit Current Group').reserve[0])).toEqual({ do: 'fit', target: 'group' });
+    expect(resolve(at('Reset Zoom').reserve[0])).toEqual({ do: 'zoom', intent: 'reset' });
+    expect(resolve(at('Remove Selected Connection').reserve[0])).toEqual({ do: 'delete-edge' });
+    expect(resolve(at('Next / Previous Node').reserve[0])).toEqual({ do: 'step', dir: 1 });
+    // Both spellings of the Shift+digit row, since neither alone covers every layout.
+    for (const combo of at('View All').reserve) {
+      expect({ combo, action: resolve(combo) })
+        .toEqual({ combo, action: { do: 'fit', target: 'all' } });
+    }
+  });
+
+  /** The zoom row names two directions; a table that reserved only one would leave the other
+   *  bindable while the screen claimed both. */
+  it('covers both zoom directions', () => {
+    const zoom = CANVAS_FIXED_SHORTCUTS.find(s => s.label === 'Zoom In / Out')!;
+    const intents = zoom.reserve.map(c => canvasKeyAction(pressOf(c), ANY_SELECTION, COMBOS));
+    expect(intents).toContainEqual({ do: 'zoom', intent: 'in' });
+    expect(intents).toContainEqual({ do: 'zoom', intent: 'out' });
   });
 });
 

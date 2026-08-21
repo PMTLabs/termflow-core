@@ -7,8 +7,8 @@ import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import {
-    ShortcutAction, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, findConflict, comboKeyToken,
-    allowsModifierlessCombo,
+    ShortcutAction, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, CANVAS_FIXED_SHORTCUTS,
+    findConflict, comboKeyToken, allowsModifierlessCombo,
 } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
@@ -1489,6 +1489,24 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 </span>
                 <div className="shortcut-list">
                     {CANVAS_SHORTCUT_ACTIONS.map(renderShortcutRow)}
+                </div>
+            </div>
+            {/* Listed but not yet assignable (Tam, 2026-08-21). Shown because a shortcut nobody
+                can discover may as well not exist — View All and the fit keys were the ones he
+                could not find. These have no record or reset button rather than a disabled one:
+                a greyed-out control reads as "broken here", while an absent one plus the note
+                below reads as "not yet". Making them assignable is docs/backlog/008. */}
+            <div className="setting-item">
+                <span className="help-text">
+                    Canvas navigation — fixed for now, not yet reassignable.
+                </span>
+                <div className="shortcut-list">
+                    {CANVAS_FIXED_SHORTCUTS.map((s) => (
+                        <div className="shortcut-row" key={s.label}>
+                            <span className="shortcut-label">{s.label}</span>
+                            <kbd className="shortcut-combo shortcut-combo-fixed">{s.display}</kbd>
+                        </div>
+                    ))}
                 </div>
             </div>
         </div>

@@ -78,6 +78,63 @@ describe('every registered shortcut is rendered somewhere', () => {
 });
 
 /**
+ * The FIXED canvas keys — Tam, 2026-08-21: *"just list out but not allow to change for now"*.
+ *
+ * These are the ones he could not find: View All and the fit keys. A shortcut nobody can discover
+ * may as well not exist, so the point of the row is discoverability, and the point of these tests
+ * is that it stays honest — shown, clearly marked unassignable, and genuinely protected.
+ */
+describe('the fixed canvas keys', () => {
+  const FIXED_BLOCK = SETTINGS.slice(SETTINGS.indexOf('CANVAS_FIXED_SHORTCUTS.map('));
+
+  it('renders the whole table', () => {
+    expect(SETTINGS).toContain('CANVAS_FIXED_SHORTCUTS.map(');
+    // Every row, from the table — not a hand-picked subset that could silently fall behind it.
+    expect(FIXED_BLOCK).toContain('{s.label}');
+    expect(FIXED_BLOCK).toContain('{s.display}');
+  });
+
+  /**
+   * Shows `display`, never `reserve`.
+   *
+   * `reserve` carries spellings that exist only to be blocked — `Shift+!`, `Ctrl+Plus`,
+   * `ArrowUp` — and rendering those would tell the user to press keys nobody calls by those
+   * names. The two fields are both strings on the same object, so nothing but this stops the
+   * wrong one being wired.
+   */
+  it('shows the display spelling, not the reserved one', () => {
+    const row = FIXED_BLOCK.slice(0, FIXED_BLOCK.indexOf('</div>'));
+    expect(row).not.toContain('s.reserve');
+  });
+
+  /**
+   * NO record or reset button on these rows.
+   *
+   * Not a disabled one: a greyed-out control reads as "broken here", where an absent control plus
+   * the note reads as "not yet". It is also the only thing that makes these rows distinguishable
+   * from the assignable ones at a glance.
+   */
+  it('gives them no record or reset control', () => {
+    const rows = FIXED_BLOCK.slice(0, FIXED_BLOCK.indexOf('</div>\n            </div>'));
+    expect(rows).not.toContain('shortcut-record-btn');
+    expect(rows).not.toContain('shortcut-reset-btn');
+    expect(rows).not.toContain('setRecordingActionId');
+  });
+
+  it('says they are not reassignable yet', () => {
+    const note = SETTINGS.slice(SETTINGS.lastIndexOf('help-text', SETTINGS.indexOf('CANVAS_FIXED_SHORTCUTS.map(')));
+    expect(note).toContain('not yet reassignable');
+  });
+
+  /** Styled as informational rather than as a disabled control — see the CSS note. */
+  it('marks them with their own class', () => {
+    expect(FIXED_BLOCK).toContain('shortcut-combo-fixed');
+    expect(readSource(path.resolve(__dirname, '..', 'SettingsPage.css')))
+      .toContain('.shortcut-combo-fixed');
+  });
+});
+
+/**
  * The recorder's modifier requirement is scoped, not removed.
  *
  * Two canvas actions ship with a bare letter. Applying the global rule to them leaves a row whose

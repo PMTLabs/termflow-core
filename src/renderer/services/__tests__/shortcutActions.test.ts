@@ -1,5 +1,6 @@
 import {
-  SHORTCUT_ACTIONS, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, isGlobalAction,
+  SHORTCUT_ACTIONS, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, CANVAS_FIXED_SHORTCUTS,
+  isGlobalAction,
   findConflict, canonicalizeCombo, comboKeyToken, eventCombo, matchesCombo,
   allowsModifierlessCombo,
 } from '../shortcutActions';
@@ -61,6 +62,80 @@ describe('shortcut scopes', () => {
     const by = (id: string) => SHORTCUT_ACTIONS.find(a => a.id === id)!;
     expect(canonicalizeCombo(by('canvasOpenNodeTab').defaultCombo)).toBe('t');
     expect(canonicalizeCombo(by('canvasOpenNodeTabFromOverlay').defaultCombo)).toBe('control+t');
+  });
+});
+
+/**
+ * The fixed canvas keys — listed for the user, not yet assignable (`docs/backlog/008`).
+ *
+ * The table exists to serve two jobs at once, and the tests that matter are about them agreeing:
+ * what Settings SHOWS and what `findConflict` PROTECTS. A row visible as "Next Node" that a
+ * customizable action can still bind over is the worst outcome available here — it is silent, it
+ * only breaks on the canvas, and the user has been told the key is spoken for.
+ */
+describe('CANVAS_FIXED_SHORTCUTS', () => {
+  it('is a non-empty table with a label, a display and at least one reserved spelling', () => {
+    expect(CANVAS_FIXED_SHORTCUTS.length).toBeGreaterThan(0);
+    for (const s of CANVAS_FIXED_SHORTCUTS) {
+      expect({ label: s.label, ok: !!s.label && !!s.display && s.reserve.length > 0 })
+        .toEqual({ label: s.label, ok: true });
+    }
+  });
+
+  /**
+   * THE test. Every spelling in the table is actually blocked — derived from the table rather
+   * than a list of the keys we happen to have added, so a row added later is covered the day it
+   * becomes visible.
+   */
+  it('reserves every spelling it lists, against a customizable action', () => {
+    for (const s of CANVAS_FIXED_SHORTCUTS) {
+      for (const combo of s.reserve) {
+        expect({ label: s.label, combo, got: findConflict('canvasOpenNodeTab', combo, {}) })
+          .toEqual({ label: s.label, combo, got: { type: 'reserved' } });
+      }
+    }
+  });
+
+  /** ...and against a GLOBAL action too, since both listeners share one window. */
+  it('reserves them against a global action as well', () => {
+    for (const s of CANVAS_FIXED_SHORTCUTS) {
+      expect({ label: s.label, got: findConflict('newTab', s.reserve[0], {}) })
+        .toEqual({ label: s.label, got: { type: 'reserved' } });
+    }
+  });
+
+  /**
+   * A fixed key and an assignable one must not name the same combo.
+   *
+   * If they did, the screen would show one key twice with two different meanings, and the
+   * assignable row's default would be permanently in conflict with a reserved combo — a row whose
+   * own current value it could never re-record.
+   */
+  it('never collides with a customizable action\'s default', () => {
+    const reserved = new Set(CANVAS_FIXED_SHORTCUTS.flatMap(s => s.reserve).map(canonicalizeCombo));
+    const clashing = SHORTCUT_ACTIONS
+      .filter(a => reserved.has(canonicalizeCombo(a.defaultCombo)))
+      .map(a => a.id);
+    expect(clashing).toEqual([]);
+  });
+
+  /** Two rows claiming the same key would be two answers to "what does this do?". */
+  it('lists each spelling once across the whole table', () => {
+    const all = CANVAS_FIXED_SHORTCUTS.flatMap(s => s.reserve).map(canonicalizeCombo);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  /**
+   * `'+'` IS the combo delimiter, so `'Ctrl++'` canonicalizes to a trailing-empty `control+` and
+   * would reserve nothing at all — silently. The word form is the only spelling that round-trips.
+   */
+  it('uses the word form for keys that cannot survive a combo string', () => {
+    const all = CANVAS_FIXED_SHORTCUTS.flatMap(s => s.reserve);
+    expect(all).toContain('Ctrl+Plus');
+    for (const combo of all) {
+      expect({ combo, empty: canonicalizeCombo(combo).endsWith('+') })
+        .toEqual({ combo, empty: false });
+    }
   });
 });
 
