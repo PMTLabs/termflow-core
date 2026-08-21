@@ -444,6 +444,26 @@ export const CanvasMode: React.FC = () => {
     dispatch(setOverlayNode(terminalId));
   }, [dispatch]);
 
+  /**
+   * The one way to close the overlay — backdrop, header toggle and Ctrl+Shift+E all land here.
+   *
+   * There used to be three closes and only the keyboard one gave the keyboard back, which is
+   * the whole of the bug Tam reported as "E only works once": the pointer paths left
+   * `focusedId` set, the canvas-key listener below opens with `if (focusedId) return`, and the
+   * canvas went deaf to every key it owns until you clicked empty space. `setOverlayNode` now
+   * releases input ownership in the STORE, so this callback exists for the half a reducer
+   * cannot reach — the caret.
+   *
+   * xterm's keyboard sink is a real textarea. Left focused, it keeps every later keystroke
+   * inside a terminal the user has just shrunk back to a node, and `openOverlayShortcut`
+   * refuses an editable target — so the `E` meant to bring the overlay back would be swallowed
+   * by the very terminal it was aimed at.
+   */
+  const closeOverlay = useCallback(() => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    dispatch(setOverlayNode(null));
+  }, [dispatch]);
+
   // A frame after the overlay opens, so the pointer gate has lifted with `focused` and the
   // textarea is reachable. Tracked, because leaving Canvas Mode inside that frame would
   // otherwise pull focus into a terminal that is already back in its pane.
@@ -772,9 +792,14 @@ export const CanvasMode: React.FC = () => {
    * in. So Esc is now handed straight through whenever an overlay is open, and
    * Ctrl/Cmd+Shift+E — a chord no TUI binds — is the way out.
    *
-   * Esc keeps its other job. With no overlay open, a node can still be holding the keyboard
-   * (closing the overlay deliberately does not blur, see `setOverlayNode`), and there Esc is
-   * what hands it back.
+   * Esc's OTHER job — releasing a node that holds the keyboard with no overlay open — is
+   * currently unreachable, and deliberately kept anyway. It relied on closing the overlay
+   * leaving `focusedId` set; that was the "E only works once" bug and `setOverlayNode` no
+   * longer does it, so `focusedId` is now non-null only while `overlayId` is. The arm stays
+   * because `terminalKeyAction` is a tested pure function and deleting the branch would drag
+   * its `overlayOpen` parameter — and with it the load-bearing "Esc reaches the PTY" rule —
+   * along behind it. Whether focus should ever exist without an overlay is a design question,
+   * not something to settle by quietly deleting the only code that would serve it.
    */
   useEffect(() => {
     if (!focusedId) return;
@@ -787,14 +812,16 @@ export const CanvasMode: React.FC = () => {
       // Both exits blur first: xterm's keyboard sink is a real textarea that holds DOM focus,
       // and leaving it focused would keep every later keystroke inside a terminal the user has
       // just stepped out of — including the `E` that is supposed to bring the overlay back.
+      // `closeOverlay` owns that blur for the leave path; the release-focus arm below, which
+      // closes nothing, still does its own.
+      if (action === 'leave') { closeOverlay(); return; }
       (document.activeElement as HTMLElement | null)?.blur();
-      if (action === 'leave') dispatch(setOverlayNode(null));
       dispatch(focusNode(null));
     };
     // Capture phase, matching InputHandler's ownership of global shortcuts.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [focusedId, dispatch]);
+  }, [focusedId, dispatch, closeOverlay]);
 
   // Read through a ref inside the Esc handler above: that effect is keyed on `focusedId`, and
   // adding `overlayId` to its deps would tear down and re-register the capture-phase listener
@@ -907,7 +934,7 @@ export const CanvasMode: React.FC = () => {
               left: overlay.backdrop.x, top: overlay.backdrop.y,
               width: overlay.backdrop.w, height: overlay.backdrop.h,
             }}
-            onPointerDown={(e) => { e.stopPropagation(); dispatch(setOverlayNode(null)); }}
+            onPointerDown={(e) => { e.stopPropagation(); closeOverlay(); }}
           />
         )}
         {model.nodes.map((n) => {
@@ -943,7 +970,7 @@ export const CanvasMode: React.FC = () => {
                 aimedNodeRect(n.rect, NODE_CHIP_ZOOM), size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
               ))}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
-              onOpenOverlay={() => dispatch(setOverlayNode(isOverlaid ? null : n.terminalId))}
+              onOpenOverlay={() => (isOverlaid ? closeOverlay() : dispatch(setOverlayNode(n.terminalId)))}
               onClose={() => closeNode(n)}
               // `n`, never `node`: `node` is the overlay's inflated copy, and the menu needs the
               // terminal's identity, not its current rect.
