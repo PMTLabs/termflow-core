@@ -1201,6 +1201,16 @@ impl<R: Runtime> AppState<R> {
             *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return Err("pty-host connection lost during setup".to_string());
         }
+        // A host reaches here armed for one of two reasons: our OWN prior
+        // launch armed it before an update/offload exit (`updater.rs`), or a
+        // SIBLING's update armed it as a precaution (`hotswap_arm`). Either
+        // way, the reason to stay armed while GUI-less ends the moment a live
+        // GUI is connected and has adopted whatever it holds — nothing else
+        // ever clears `armed_deadline` on the success path, so without this a
+        // later completely normal quit sees the stale arm and Holds instead
+        // of tearing down, and the NEXT launch reattaches a session the user
+        // already asked to end. Idempotent: a no-op against an unarmed host.
+        client.disarm().await;
         Ok(())
     }
 
@@ -2046,6 +2056,62 @@ pub fn plan_reattach(
         }
     }
     (reattach, teardown)
+}
+
+/// The reported bug: `armed_deadline` (pty-host/src/manager.rs) is set once
+/// before an update/offload exit and nothing on the success path ever clears
+/// it, so a completely normal quit LATER — after the user reopened, saw a
+/// correct reattach, and simply chose Exit — still Holds instead of tearing
+/// down, and the next launch reattaches a session the user already ended.
+/// Asserted from source: `ensure_pty_host_inner` needs a live pty-host over a
+/// real pipe/socket to exercise for real, which a unit-test process can't
+/// stand up (the `integration-tests` feature `mock_app` needs breaks the
+/// Windows test binary).
+#[cfg(test)]
+mod arm_lifecycle_wiring_tests {
+    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    fn fn_body(src: &str, signature: &str) -> String {
+        let start = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let rest = &src[start..];
+        let open = rest.find('{').expect("no body");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[open..open + i + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{signature}`");
+    }
+
+    fn source() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
+            .replace("\r\n", "\n")
+    }
+
+    /// Every successful (re)connect must release whatever armed this host —
+    /// our own prior exit, or a sibling's update — because a live GUI just
+    /// adopted its sessions and the GUI-less hold is no longer needed.
+    #[test]
+    fn a_successful_connect_disarms_the_host_it_adopted() {
+        let body = fn_body(&source(), "async fn ensure_pty_host_inner");
+        assert!(
+            body.contains("client.disarm()"),
+            "ensure_pty_host_inner must disarm the host once connected — \
+             otherwise an arm from a past update/offload outlives the update \
+             it was for. Body:\n{body}"
+        );
+    }
 }
 
 #[cfg(test)]

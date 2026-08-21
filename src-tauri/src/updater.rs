@@ -171,7 +171,78 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         ).await;
         return Err(e);
     }
+    // Apply succeeded, so Velopack's kill-and-swap (if it reached a sibling at
+    // all) has already happened — any sibling still standing was never touched
+    // and must not be left holding a 600s window it will never use. A sibling
+    // that WAS killed is unreachable here (best-effort, same as the rollback
+    // paths above) but self-disarms on its own next reconnect (state.rs
+    // `ensure_pty_host_inner`) — the two paths cover each other.
+    let _ = crate::sibling_coord::disarm_siblings(
+        &siblings, &armed_siblings, &crate::sibling_coord::http_call,
+    ).await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     state.app_handle.exit(0);
     Ok(())
+}
+
+/// The success path used to arm siblings and then just exit — nothing ever
+/// disarmed a sibling whose GUI survived the apply untouched, so it stayed
+/// armed (and therefore Held-not-TornDown on its own later normal quit) for
+/// no reason for up to 24h (`pty-host/src/manager.rs` MAX_ARM_SECS). Only the
+/// failure/refusal branches disarmed. Asserted from source: exercising the
+/// real function needs a live Velopack install + a real pty-host + a live
+/// sibling instance, none of which exist in a unit-test process.
+#[cfg(test)]
+mod arm_lifecycle_wiring_tests {
+    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    fn fn_body(src: &str, signature: &str) -> String {
+        let start = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let rest = &src[start..];
+        let open = rest.find('{').expect("no body");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[open..open + i + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{signature}`");
+    }
+
+    fn source() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("updater.rs");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
+            .replace("\r\n", "\n")
+    }
+
+    /// The reported bug's sibling twin: a sibling armed for our update but
+    /// never touched by the apply must be released on the SAME success path
+    /// that armed it, not left to expire a deadline nothing ever checks.
+    #[test]
+    fn a_successful_apply_disarms_the_siblings_it_armed() {
+        let body = fn_body(&source(), "pub async fn update_and_restart");
+        // `return Err(e);` (that exact binding name) closes both the
+        // `arm_detach` failure branch AND the `apply` failure branch, in that
+        // order, and nothing else in this function. Splitting on it and
+        // taking the LAST piece leaves exactly the SUCCESS tail — past both
+        // failure branches' own `disarm_siblings` calls — so a disarm found
+        // only in those earlier branches does not satisfy this.
+        let occurrences = body.matches("return Err(e);").count();
+        assert_eq!(occurrences, 2, "expected exactly the arm_detach and apply failure returns: {body}");
+        let success_tail = body.rsplit("return Err(e);").next().expect("split is never empty");
+        assert!(
+            success_tail.contains("disarm_siblings"),
+            "a successful update must disarm the siblings it armed, on the \
+             success path — not only on failure. Tail after the last failure return:\n{success_tail}"
+        );
+    }
 }
