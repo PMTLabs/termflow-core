@@ -102,8 +102,18 @@ export function removeSourcePane(sourceTabId: string, sourcePaneId: string, term
   if (tabHasNoPanes(store.getState().panes.treesByTabId, sourceTabId)) {
     store.dispatch(removeTab(sourceTabId));
   }
-  // Drop this window's mapping for the handed-off terminals (PTY stays alive).
-  terminalIds.forEach((id) => terminalService.detachTerminal(id));
+  // Drop this window's mapping for the handed-off terminals (PTY stays alive) — and its
+  // session-exit records, by the same rule `removeSourceTab` states: this window no longer has
+  // these terminals, so it keeps nothing about them (`plan/024` Req 4).
+  //
+  // Reachable for an EXITED pane, unlike `detachPaneToNewWindow` which is guarded by
+  // `openWindowWithPayload` bailing on an empty terminal list. `buildPaneDetachPayload` has no
+  // such guard, so `PaneDragController` can begin a cross-window drag of a dead pane and call
+  // this on claim or on an orphan drop.
+  terminalIds.forEach((id) => {
+    store.dispatch(clearSessionClosed({ terminalId: id }));
+    terminalService.detachTerminal(id);
+  });
 }
 
 /** Detach a single pane (leaf) into a brand-new window, then remove it here. */
@@ -149,23 +159,28 @@ export function buildTabDetachPayload(
 
 /** Remove a handed-off tab from this window (its PTYs live on in the backend). */
 export function removeSourceTab(tabId: string, terminalIds: string[]): void {
-  // A tab's panes do not all travel. `collectTerminals` carries only those with a live process,
-  // so a tab holding one running pane and one whose shell has EXITED detaches the first and
-  // leaves the second behind — and this path removes the tab without going through
-  // `TabManager.closeOneTab` or `closePaneNonBlocking`, the two places that drop a terminal's
-  // per-terminal state. Its session-exit record would be stranded in this window for the rest
-  // of the session (`plan/024` Req 4).
+  // Every terminal that LEAVES this window loses its session-exit record here (`plan/024` Req 4).
   //
-  // Only the ones NOT carried. A MOVE keeps its state — that is the same rule
-  // `terminalService.detachTerminal` follows below by preserving the zoom entry, and by
-  // construction a carried terminal is live and has no record to drop anyway.
-  const carried = new Set(terminalIds);
-  const stranded = getAllTerminalIds(store.getState().panes.treesByTabId[tabId] ?? null)
-    .filter((id) => !carried.has(id));
+  // Detach reaches neither `closePaneNonBlocking` nor `TabManager.closeOneTab`, the two paths
+  // that drop a terminal's per-terminal state — and a tab's panes do not all travel:
+  // `collectTerminals` carries only those with a live process, so a tab holding one running pane
+  // and one whose shell has EXITED hands over the first and simply drops the second. Its record
+  // would be stranded in this window with no tab, no pane, and nothing that could ever clear it.
+  //
+  // ALL of them, carried and stranded alike, rather than only the ones left behind. Today the
+  // carried ones are live by construction and so have no record, which makes clearing them a
+  // no-op — but "carried implies live" is an invariant of `collectTerminals`, not of this
+  // function, and if it ever stopped holding the source window would start leaking again. The
+  // rule that needs no invariant is the simpler one: this window no longer has these terminals,
+  // so it keeps nothing about them.
+  const removed = new Set([
+    ...getAllTerminalIds(store.getState().panes.treesByTabId[tabId] ?? null),
+    ...terminalIds,
+  ]);
 
   store.dispatch(removeTabTree(tabId));
   store.dispatch(removeTab(tabId));
-  stranded.forEach((id) => store.dispatch(clearSessionClosed({ terminalId: id })));
+  removed.forEach((id) => store.dispatch(clearSessionClosed({ terminalId: id })));
   terminalIds.forEach((id) => terminalService.detachTerminal(id));
 }
 
