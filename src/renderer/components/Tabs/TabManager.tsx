@@ -666,33 +666,20 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     dispatch(setShowLayoutManager(true));
   }, [dispatch]);
 
-  // Keyboard shortcuts. Reads tabs via tabsRef so the window listener is
-  // registered ONCE — the old [tabsArray] dependency re-added the listener on
-  // every tab-state change (i.e. constantly during terminal output).
-  React.useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        if (e.key === 'w') {
-          e.preventDefault();
-          const activeTab = tabsRef.current.find(tab => tab.isActive);
-          if (activeTab) {
-            // Same confirm-dialog path as the tab close button (was
-            // handleCloseTab, which skipped confirmation).
-            handleCloseRequest(activeTab.id);
-          }
-        } else if (e.key >= '1' && e.key <= '9') {
-          e.preventDefault();
-          const index = parseInt(e.key) - 1;
-          if (index < tabsRef.current.length) {
-            handleSelectTab(tabsRef.current[index].id);
-          }
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleCloseRequest, handleSelectTab]);
+  // There is deliberately NO keydown listener here, and re-adding one would re-open a
+  // shipped bug. This component used to carry its own hard-coded Ctrl+W and Ctrl+1-9 on a
+  // BUBBLE-phase window listener, duplicating two bindings `InputHandler` already owns.
+  //
+  // That made Close Tab impossible to rebind. `InputHandler.handleKeyEvent` returns false
+  // WITHOUT stopPropagation when nothing matches, so the moment a user moved Close Tab off
+  // Ctrl+W in Settings, this copy behind it claimed the key instead — Ctrl+W kept closing
+  // tabs and the customization UI had no idea a second binding existed. It also fired in
+  // places `InputHandler` deliberately declines, like a focused Settings text field.
+  //
+  // Nothing was lost by deleting it: `InputHandler.handleCloseTab` never removed a tab
+  // itself, it dispatches `ui:requestTabClose` — which lands on `handleExternalCloseRequest`
+  // below, the same confirm-and-close flow this listener used to call directly. Shortcuts
+  // belong to `shortcutActions.ts` + `InputHandler`; this component owns the strip, not keys.
 
   // Listen for external close requests (e.g. from main menu) — these prompt for
   // confirmation. Also listen for force-close requests (e.g. a terminal whose
