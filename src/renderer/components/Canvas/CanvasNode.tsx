@@ -4,6 +4,7 @@ import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
 import type { CanvasBusyCue } from './canvasBusyCue';
+import type { CanvasCombos } from './canvasGestures';
 
 /**
  * One terminal on the canvas.
@@ -60,6 +61,13 @@ export const CanvasNode: React.FC<{
   onChipClick?: () => void;
   /** Leave the canvas for this terminal's own tab. */
   onOpenAsTab?: () => void;
+  /**
+   * The canvas's user-assignable combos, for the header tooltips.
+   *
+   * Passed down rather than selected here for the reason `busyCue` is: one subscription in
+   * `CanvasMode` instead of one per node on a canvas that can hold dozens.
+   */
+  combos: CanvasCombos;
   /** Enlarge this node to a near-full-screen overlay, without leaving the canvas. */
   onOpenOverlay?: () => void;
   /** Close this terminal. Routed through the app's existing pane/tab close flows — see
@@ -78,7 +86,7 @@ export const CanvasNode: React.FC<{
 }> = ({
   node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, busyCue,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  onClose, onContextMenu, overlaid, hostBox, children,
+  onClose, onContextMenu, overlaid, hostBox, combos, children,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
@@ -223,10 +231,18 @@ export const CanvasNode: React.FC<{
             <button
               type="button"
               className="canvas-node-open"
-              // Both hotkeys are named here because neither is discoverable: `E` is a bare
-              // letter, and the chord that shrinks it back is pressed from inside a terminal
-              // that is covering the whole screen — with the button itself hidden behind it.
-              title={overlaid ? 'Shrink back to the canvas (Ctrl+Shift+E)' : 'Enlarge on the canvas (E)'}
+              // Both hotkeys are named here because neither is discoverable: the enlarge key is
+              // a bare letter, and the chord that shrinks it back is pressed from inside a
+              // terminal that is covering the whole screen — with the button itself hidden
+              // behind it.
+              //
+              // The combos come from PROPS, never from a literal. They are user-assignable
+              // (Settings > Shortcuts > Canvas Mode), and a hard-coded `(E)` here would go on
+              // naming the default long after the user had rebound it — with a green suite and
+              // a clean typecheck, because nothing else in the app reads this string.
+              title={overlaid
+                ? `Shrink back to the canvas (${combos.leaveTerminal})`
+                : `Enlarge on the canvas (${combos.enlarge})`}
               aria-label={overlaid ? `Shrink ${node.title}` : `Enlarge ${node.title} on the canvas`}
               onPointerDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}
@@ -244,7 +260,12 @@ export const CanvasNode: React.FC<{
             <button
               type="button"
               className="canvas-node-open"
-              title="Open in its tab"
+              // Names BOTH keys for the same reason the enlarge button does, and because which
+              // one applies depends on where the keyboard is: the bare key while the canvas has
+              // it, the chord from inside the enlarged terminal.
+              title={overlaid
+                ? `Open in its tab (${combos.openTabFromOverlay})`
+                : `Open in its tab (${combos.openTab})`}
               aria-label={`Open ${node.title} in its tab`}
               onPointerDown={(e) => e.stopPropagation()}
               onDoubleClick={(e) => e.stopPropagation()}

@@ -40,11 +40,35 @@ const openSettingsTab = jest.fn();
 jest.mock('../openSettings', () => ({ openSettingsTab: () => openSettingsTab() }));
 
 import { inputHandler, InputHandler } from '../InputHandler';
+import { CANVAS_SHORTCUT_ACTIONS } from '../shortcutActions';
 import { pasteToTerminal } from '@termflow/terminal-core';
 import { removeTab, addTab } from '../../store/slices/tabsSlice';
 import { resizeFocusedPane } from '../../store/slices/panesSlice';
 
 afterAll(() => inputHandler.destroy());
+
+/**
+ * A KeyboardEvent for a written combo — the inverse of what `eventCombo` does to a live event.
+ *
+ * Written out here rather than imported so the test does not prove itself: building the event
+ * with the same helper the matcher uses would make a bug in that helper invisible on both sides.
+ */
+function keyEventFor(combo: string): KeyboardEvent {
+  const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
+  const mods = { ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+  let key = '';
+  for (const part of parts) {
+    const lower = part.toLowerCase();
+    if (lower === 'ctrl' || lower === 'control') mods.ctrlKey = true;
+    else if (lower === 'cmd' || lower === 'meta') mods.metaKey = true;
+    else if (lower === 'alt') mods.altKey = true;
+    else if (lower === 'shift') mods.shiftKey = true;
+    else key = part;
+  }
+  if (key === 'Plus') key = '+';
+  if (key === 'Space') key = ' ';
+  return new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...mods });
+}
 
 function pressCtrlW(): void {
   window.dispatchEvent(
@@ -425,5 +449,87 @@ describe('InputHandler terminal-text targets across Canvas Mode', () => {
   it('clears the focused pane in an ordinary tab', () => {
     pressShortcut('X', { ctrlKey: true, shiftKey: true });
     expect(writeToTerminal).toHaveBeenCalledWith('tm-pane', '\x0c');
+  });
+});
+
+/**
+ * Canvas-scoped shortcuts must NEVER reach this window-capture map.
+ *
+ * `CANVAS_SHORTCUT_ACTIONS` includes BARE LETTERS — `T` enlarges nothing outside the canvas, and
+ * a global registration of it would `preventDefault` + `stopPropagation` every `t` typed into
+ * every terminal in the app. That is the failure this scope split exists to make impossible, and
+ * it is not one a user would report as "my shortcut is wrong": they would report that their
+ * shell had stopped accepting a letter.
+ *
+ * Asserted BEHAVIOURALLY, through `handleKeyEvent`'s own return value, rather than by reading the
+ * private `shortcuts` map — the map is an implementation detail, and whether a keypress is
+ * claimed is the actual contract. Both registration paths are covered, because they are separate
+ * loops and the override path is the one that is easy to forget.
+ */
+describe('InputHandler never claims a canvas-scoped shortcut', () => {
+  afterEach(() => inputHandler.applyKeybindingOverrides({}));
+
+  /** Or the assertions below pass because nothing is scoped to the canvas at all. */
+  it('found canvas-scoped actions to check', () => {
+    expect(CANVAS_SHORTCUT_ACTIONS.length).toBeGreaterThan(0);
+    expect(CANVAS_SHORTCUT_ACTIONS.map(a => a.id)).toContain('canvasOpenNodeTab');
+  });
+
+  it('leaves every canvas default combo unclaimed at construction', () => {
+    for (const action of CANVAS_SHORTCUT_ACTIONS) {
+      const claimed = inputHandler.handleKeyEvent(keyEventFor(action.defaultCombo));
+      expect({ id: action.id, combo: action.defaultCombo, claimed })
+        .toEqual({ id: action.id, combo: action.defaultCombo, claimed: false });
+    }
+  });
+
+  /**
+   * The second path, and the one a partial fix would miss: construction could filter correctly
+   * and a user rebinding a canvas key would still hand the new combo to the window the moment
+   * the override was applied.
+   */
+  it('leaves a REBOUND canvas combo unclaimed after applyKeybindingOverrides', () => {
+    inputHandler.applyKeybindingOverrides({ canvasOpenNodeTab: 'Y', canvasEnlargeNode: 'Z' });
+    expect(inputHandler.handleKeyEvent(keyEventFor('Y'))).toBe(false);
+    expect(inputHandler.handleKeyEvent(keyEventFor('Z'))).toBe(false);
+  });
+
+  /** The positive half — without it, a `handleKeyEvent` that had simply stopped working would
+   *  make every assertion above pass. */
+  it('still claims a global shortcut, so the negatives mean something', () => {
+    expect(inputHandler.handleKeyEvent(keyEventFor('Ctrl+W'))).toBe(true);
+  });
+
+  /** Rebinding a canvas action must not disturb the global ones either — phase 1 of the override
+   *  pass unregisters by combo string, and a canvas action left in that loop could clear a combo
+   *  a global action was holding. */
+  it('does not unbind a global shortcut when a canvas action is rebound', () => {
+    inputHandler.applyKeybindingOverrides({ canvasOpenNodeTab: 'Y' });
+    expect(inputHandler.handleKeyEvent(keyEventFor('Ctrl+W'))).toBe(true);
+  });
+
+  /**
+   * THE gate, pinned directly — because the behavioural assertions above do NOT test it.
+   *
+   * Mutation-checked while writing this: reverting `applyKeybindingOverrides` to iterate the
+   * unscoped `SHORTCUT_ACTIONS` leaves every test above green. The scope filter there is real
+   * defence-in-depth, but what actually stops a canvas combo being claimed today is this: phase 2
+   * bails on `if (!handler) continue`, and `actionHandler` has no entry for a canvas action.
+   *
+   * So that absence is the thing worth asserting. It is also exactly the guard a future change
+   * would trip over silently — adding a canvas id to `actionHandler` to "wire it up properly"
+   * would hand a bare letter to the window with no other test noticing.
+   */
+  it('has no global handler for any canvas-scoped action', () => {
+    const actionHandler = (id: string): unknown =>
+      (inputHandler as unknown as { actionHandler(i: string): unknown }).actionHandler(id);
+
+    // The control: a global action DOES have one, or the loop below proves nothing.
+    expect(actionHandler('closeTab')).toBeDefined();
+
+    const wired = CANVAS_SHORTCUT_ACTIONS
+      .filter(a => actionHandler(a.id) !== undefined)
+      .map(a => a.id);
+    expect(wired).toEqual([]);
   });
 });

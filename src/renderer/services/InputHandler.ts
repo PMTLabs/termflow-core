@@ -10,7 +10,7 @@ import { resolveKeyboardTerminalId } from './keyboardTerminal';
 import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
-import { SHORTCUT_ACTIONS, canonicalizeCombo, comboKeyToken } from './shortcutActions';
+import { SHORTCUT_ACTIONS, GLOBAL_SHORTCUT_ACTIONS, canonicalizeCombo, eventCombo } from './shortcutActions';
 import { toggleCanvasTab } from './openCanvas';
 
 export class InputHandler {
@@ -98,8 +98,14 @@ export class InputHandler {
 
     // Snapshot what's now registered per customizable action so
     // applyKeybindingOverrides has a correct baseline before we touch `store`.
+    //
+    // GLOBAL only. A canvas-scoped action seeded here would be handed to
+    // phase 1 of applyKeybindingOverrides as a combo to unregister, and — far
+    // worse — any future `actionHandler` entry for it would let phase 2 claim
+    // a BARE LETTER on the window. CanvasMode owns those keys; see
+    // `ShortcutScope`.
     this.appliedCombos = new Map(
-      SHORTCUT_ACTIONS.map(a => [a.id, a.defaultCombo]),
+      GLOBAL_SHORTCUT_ACTIONS.map(a => [a.id, a.defaultCombo]),
     );
 
     // Defer the initial override-apply + store subscription to a microtask
@@ -174,12 +180,17 @@ export class InputHandler {
    * cleared.
    */
   applyKeybindingOverrides(customKeybindings: Record<string, string> = {}): void {
+    // GLOBAL_SHORTCUT_ACTIONS, not SHORTCUT_ACTIONS, in all three loops below.
+    // This is the SECOND place the scope gate has to hold, and the one that is
+    // easy to miss: registration at construction time could filter correctly
+    // and a user rebinding a canvas key would still hand a bare letter to the
+    // window-capture map the moment the override was applied.
     const desiredByAction = new Map<string, string>(
-      SHORTCUT_ACTIONS.map(a => [a.id, customKeybindings[a.id] ?? a.defaultCombo]),
+      GLOBAL_SHORTCUT_ACTIONS.map(a => [a.id, customKeybindings[a.id] ?? a.defaultCombo]),
     );
 
     // Phase 1: clear every action's current combo that's about to change.
-    for (const action of SHORTCUT_ACTIONS) {
+    for (const action of GLOBAL_SHORTCUT_ACTIONS) {
       const current = this.appliedCombos.get(action.id);
       const desired = desiredByAction.get(action.id)!;
       if (current && current !== desired) {
@@ -188,7 +199,7 @@ export class InputHandler {
     }
 
     // Phase 2: claim every action's desired combo.
-    for (const action of SHORTCUT_ACTIONS) {
+    for (const action of GLOBAL_SHORTCUT_ACTIONS) {
       const current = this.appliedCombos.get(action.id);
       const desired = desiredByAction.get(action.id)!;
       if (current === desired) continue;
@@ -276,21 +287,12 @@ export class InputHandler {
       }
     }
 
-    // Build a raw combo string from the live event, then canonicalize it with
-    // the SAME function normalizeKey uses at registration time — the two can
-    // no longer drift out of sync (that drift previously caused the arrow-key,
-    // Cmd/Meta, and modifier-order matching bugs).
-    const rawParts: string[] = [];
-    if (event.ctrlKey || event.metaKey) rawParts.push('Ctrl');
-    if (event.altKey) rawParts.push('Alt');
-    if (event.shiftKey) rawParts.push('Shift');
-    // Keys that cannot survive a '+'-delimited, whitespace-trimmed combo string
-    // ('+' itself, and Space) become their word form here. This is the SAME
-    // helper the Settings recording UI uses, so registration and live matching
-    // cannot drift — they did twice before it existed.
-    rawParts.push(comboKeyToken(event.key));
-
-    const keyCombo = canonicalizeCombo(rawParts.join('+'));
+    // Build the canonical combo for this live event with the SAME function
+    // normalizeKey uses at registration time — the two can no longer drift out
+    // of sync (that drift previously caused the arrow-key, Cmd/Meta, and
+    // modifier-order matching bugs). `eventCombo` is shared with CanvasMode's
+    // own listener, so there is still exactly one implementation of this.
+    const keyCombo = eventCombo(event);
     const handler = this.shortcuts.get(keyCombo);
 
     if (handler) {

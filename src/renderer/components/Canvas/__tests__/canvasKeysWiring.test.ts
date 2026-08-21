@@ -13,6 +13,7 @@
  */
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
+import { SHORTCUT_ACTIONS } from '../../../services/shortcutActions';
 
 const CANVAS = path.resolve(__dirname, '..');
 
@@ -93,12 +94,123 @@ describe('a passthrough really is left alone', () => {
     expect(TERMINAL_KEYS).toContain('e.stopPropagation();');
   });
 
-  /** The overlay state is read through a REF. The effect is keyed on `focusedId`; adding
-   *  `overlayId` to its deps would tear down and re-register the capture-phase listener every
-   *  time the overlay opened, which is exactly when a keypress is in flight. */
-  it('reads the overlay through the ref, not a dependency', () => {
+  /**
+   * The overlay state and the node list are read through REFS. The effect is keyed on
+   * `focusedId`; adding `overlayId` — or `model.nodes`, which gets a new identity on every frame
+   * of terminal output — to its deps would tear down and re-register the capture-phase listener
+   * exactly when a keypress is in flight.
+   *
+   * `combos` IS a dependency, and correctly so: it is memoised on the overrides object, so its
+   * identity changes only when the user actually rebinds a key — and when they do, the listener
+   * has to be rebuilt or the rebind would not take effect until a reload.
+   */
+  it('reads the overlay and the nodes through refs, not dependencies', () => {
     expect(TERMINAL_KEYS).toContain('overlayIdRef.current');
-    expect(MODE).toMatch(/\}, \[focusedId, dispatch, closeOverlay\]\);/);
+    expect(MODE).toContain('nodesRef.current');
+    expect(MODE).toMatch(/\}, \[focusedId, dispatch, closeOverlay, combos, openTabForTerminal\]\);/);
+    expect(MODE).not.toMatch(/\}, \[[^\]]*model\.nodes[^\]]*closeOverlay/);
+  });
+});
+
+/**
+ * Tam's 2026-08-21 request, wired: the selected node's own tab from the keyboard, by a bare key
+ * on the canvas and a Ctrl chord from inside the enlarged terminal.
+ *
+ * Source-derived like everything else in this file, because mounting `CanvasMode` means mounting
+ * every terminal on the canvas. The DECISIONS are pure and covered in `canvasGestures.test.ts`;
+ * what is left here is which listener acts on them and — the part with the real failure mode —
+ * WHICH ID each one hands to the lookup.
+ */
+/**
+ * The combos the canvas asks the registry for must BE registry actions.
+ *
+ * `effectiveCombo` returns `undefined` for an id it does not know, which this component turns
+ * into `''` — and `matchesCombo('')` matches nothing. So a mistyped id is a canvas key that is
+ * silently dead: no error, no warning, and three of the four still working. Derived from the
+ * source rather than listed here, so an id added later is checked the day it is written.
+ */
+describe('the canvas asks for combos that exist', () => {
+  const REQUESTED = [...MODE.matchAll(/effectiveCombo\('([^']+)'/g)].map((m) => m[1]);
+
+  it('found the lookups it is checking', () => {
+    expect(REQUESTED.length).toBe(4);
+  });
+
+  it('names only registered actions, all of them canvas-scoped', () => {
+    const known = new Map(SHORTCUT_ACTIONS.map((a) => [a.id, a]));
+    const bad = REQUESTED.filter((id) => !known.has(id));
+    expect(bad).toEqual([]);
+    const notCanvas = REQUESTED.filter((id) => known.get(id)!.scope !== 'canvas');
+    expect(notCanvas).toEqual([]);
+  });
+
+  /** Every canvas action in the registry is actually consumed. One that is offered in Settings
+   *  and read by nothing is a row the user can change to no effect. */
+  it('consumes every canvas-scoped action the registry offers', () => {
+    const canvasIds = SHORTCUT_ACTIONS.filter((a) => a.scope === 'canvas').map((a) => a.id);
+    expect(REQUESTED.slice().sort()).toEqual(canvasIds.slice().sort());
+  });
+});
+
+describe('opening a node in its own tab from the keyboard', () => {
+  const OPEN_FOR_TERMINAL = callback(MODE, 'openTabForTerminal');
+
+  /** Or every assertion below matches an empty string and passes saying nothing. */
+  it('found the shared entry point', () => {
+    expect(OPEN_FOR_TERMINAL).toContain('nodesRef.current.find');
+  });
+
+  /**
+   * ONE implementation of "leave the canvas for a node's tab", behind the header button and both
+   * shortcuts.
+   *
+   * The order of the two dispatches is the part that is easy to get wrong and invisible when it
+   * is — `setActiveTab` RESTORES the tab's remembered pane, so a `focusPaneInTab` after it is
+   * overwritten and the cursor lands on whichever pane the tab last had. A second copy of this
+   * would be free to drift on exactly that.
+   */
+  it('routes through openAsTab rather than dispatching the pair itself', () => {
+    expect(OPEN_FOR_TERMINAL).toContain('openAsTab(n.tabId, n.paneId)()');
+    expect(OPEN_FOR_TERMINAL).not.toContain('dispatch(');
+    // And the primitive still orders them correctly.
+    const openAsTab = callback(MODE, 'openAsTab');
+    expect(openAsTab.indexOf('focusPaneInTab')).toBeGreaterThan(-1);
+    expect(openAsTab.indexOf('focusPaneInTab')).toBeLessThan(openAsTab.indexOf('setActiveTab'));
+  });
+
+  /**
+   * **The id space.** `selectedId` and `overlayId` are TERMINAL ids; `tabId` and `paneId` are what
+   * the action needs. All four are bare strings, so a lookup against the wrong field type-checks
+   * and quietly addresses another node — the failure this codebase has already shipped once.
+   */
+  it('looks the node up by terminalId, never by tabId', () => {
+    expect(OPEN_FOR_TERMINAL).toContain('x.terminalId === terminalId');
+    expect(OPEN_FOR_TERMINAL).not.toContain('x.tabId === ');
+  });
+
+  it('acts on the SELECTED node from the canvas listener', () => {
+    expect(CANVAS_KEYS).toContain("case 'open-tab': openTabForTerminal(selectedId); break;");
+  });
+
+  /** The overlay listener has no `selectedId` worth trusting — the enlarged node is the one the
+   *  user is looking at, and `overlayId` is where that lives. */
+  it('acts on the OVERLAID node from the terminal listener', () => {
+    expect(TERMINAL_KEYS).toContain("if (action === 'open-tab') { openTabForTerminal(overlayIdRef.current ?? focusedId); return; }");
+  });
+
+  /**
+   * It must NOT close the overlay on the way out.
+   *
+   * `overlayId` is a view fact belonging to the canvas tab that already survives a tab switch by
+   * design (see "the overlay outlives a tab switch" above). Closing it here would make this the
+   * one departure that also threw away the user's view — and would be a fourth close path, which
+   * the class-not-instance assertion in that section forbids anyway.
+   */
+  it('leaves the overlay open on the way out', () => {
+    const arm = TERMINAL_KEYS.slice(TERMINAL_KEYS.indexOf("action === 'open-tab'"));
+    const upToReturn = arm.slice(0, arm.indexOf('return;'));
+    expect(upToReturn).not.toContain('closeOverlay');
+    expect(upToReturn).not.toContain('setOverlayNode');
   });
 });
 

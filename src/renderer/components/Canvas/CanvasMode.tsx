@@ -43,7 +43,8 @@ import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
 import { beaconLayout, nearestGroupToCentre, stepNodeId } from './orientation';
-import { CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
+import { CanvasCombos, CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
+import { effectiveCombo } from '../../services/shortcutActions';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
@@ -165,6 +166,30 @@ export const CanvasMode: React.FC = () => {
   // copy of it: `s.tabs.tabs` is a stable reference between changes, whereas `.map(...)` in a
   // selector allocates a new array on every dispatch in the app and re-renders the canvas.
   const tabs = useSelector((s: RootState) => s.tabs.tabs);
+  /**
+   * The canvas's four user-assignable combos (Settings > Shortcuts > Canvas Mode).
+   *
+   * Resolved here rather than inside the rules so the pure layer stays pure, and memoised on the
+   * overrides object alone — `effectiveCombo` falls back to each action's default, so the
+   * identity of this object changes only when the user actually rebinds something. That matters:
+   * it is in the dependency list of BOTH capture-phase key listeners below, and a fresh object
+   * every render would tear down and re-register them on every frame of canvas output.
+   * (`customKeybindings` is a stable reference between changes; `InputHandler`'s own store
+   * subscription already depends on that same property.)
+   *
+   * The `?? ''` is NOT a default — the defaults live in the registry and `effectiveCombo` already
+   * returns them. It is only reachable when an action id here does not exist, and `''` is chosen
+   * over a plausible literal deliberately: `matchesCombo('')` matches nothing, so a typo shows up
+   * as a dead key rather than as a shortcut quietly bound to something that looks right. The four
+   * ids are pinned against the registry in `canvasKeysWiring.test.ts`.
+   */
+  const customKeybindings = useSelector((s: RootState) => s.settings.customKeybindings);
+  const combos = useMemo<CanvasCombos>(() => ({
+    enlarge: effectiveCombo('canvasEnlargeNode', customKeybindings) ?? '',
+    openTab: effectiveCombo('canvasOpenNodeTab', customKeybindings) ?? '',
+    leaveTerminal: effectiveCombo('canvasLeaveTerminal', customKeybindings) ?? '',
+    openTabFromOverlay: effectiveCombo('canvasOpenNodeTabFromOverlay', customKeybindings) ?? '',
+  }), [customKeybindings]);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [wireMenu, setWireMenu] = useState<{ edge: CanvasEdge; x: number; y: number } | null>(null);
@@ -597,6 +622,48 @@ export const CanvasMode: React.FC = () => {
   }, [model.nodes, selectedId, dispatch, vp, size, flyTo, metrics]);
 
   /**
+   * Every node, read through a ref by the two key listeners below.
+   *
+   * A ref rather than a dependency for the reason `overlayIdRef` is one: `model.nodes` gets a new
+   * identity on every frame of terminal output, and putting it in either effect's dep list would
+   * tear down and re-register a capture-phase `keydown` listener at that rate — including while a
+   * keypress is in flight.
+   */
+  const nodesRef = useRef(model.nodes);
+  nodesRef.current = model.nodes;
+
+  // Leave the canvas for the tab this node lives in, with the cursor on its own pane.
+  // `focusPaneInTab` before `setActiveTab`, because the activation path RESTORES the
+  // tab's remembered pane — writing `activePaneId` directly would be overwritten.
+  //
+  // Declared ABOVE the key listeners deliberately: a `useEffect` dependency array is evaluated
+  // during render, so an effect listing this while it was still declared further down the
+  // component would throw on the temporal dead zone rather than merely reading a stale value.
+  const openAsTab = useCallback((tabId: string, paneId: string) => () => {
+    dispatch(focusPaneInTab({ tabId, paneId }));
+    dispatch(setActiveTab(tabId));
+  }, [dispatch]);
+
+  /**
+   * The same departure, addressed by TERMINAL id — what both keyboard paths have in hand.
+   *
+   * Routed through `openAsTab` rather than dispatching the pair itself, so there is exactly one
+   * implementation of "leave the canvas for a node's tab" behind the header button and both
+   * shortcuts. Two copies would be free to drift on the part that is easy to get wrong, which is
+   * the ORDER of the two dispatches.
+   *
+   * **The lookup is by `terminalId` and nothing else.** Both callers hold one — `selectedId` and
+   * `overlayId` are terminal ids (`setOverlayNode(n.terminalId)`) — while the value this needs to
+   * ACT on is the node's `tabId`/`paneId`. Those three id spaces are all bare strings, so a
+   * lookup against the wrong field would type-check and quietly address another node.
+   */
+  const openTabForTerminal = useCallback((terminalId: string | null) => {
+    if (!terminalId) return;
+    const n = nodesRef.current.find((x) => x.terminalId === terminalId);
+    if (n) openAsTab(n.tabId, n.paneId)();
+  }, [openAsTab]);
+
+  /**
    * Keys the CANVAS owns — while nothing has handed the keyboard to a terminal.
    *
    * Shift+1 / Shift+2 fit (design 010 §5), `E` enlarges the selected node (Tam's item 2) and the
@@ -616,6 +683,7 @@ export const CanvasMode: React.FC = () => {
       const action = canvasKeyAction(
         e as unknown as CanvasKey,
         { node: !!selectedId, edge: !!selectedEdgeId },
+        combos,
       );
       if (!action) return;
 
@@ -636,6 +704,10 @@ export const CanvasMode: React.FC = () => {
       switch (action.do) {
         case 'fit': (action.target === 'all' ? fitAll : fitGroup)(); break;
         case 'overlay': dispatch(setOverlayNode(selectedId)); break;
+        // Only reachable with a node selected — `canvasKeyAction` resolves this to nothing at
+        // all otherwise, so the key is left alone rather than flying the user to a tab they
+        // never chose.
+        case 'open-tab': openTabForTerminal(selectedId); break;
         case 'step': stepNode(action.dir); break;
         case 'zoom': zoomKey(action.intent); break;
         case 'pan': panScreen(action.dx, action.dy); break;
@@ -656,7 +728,7 @@ export const CanvasMode: React.FC = () => {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [focusedId, fitAll, fitGroup, selectedId, selectedEdgeId, panScreen, stepNode, zoomKey,
-    dropEdge, dispatch]);
+    dropEdge, dispatch, combos, openTabForTerminal]);
 
   /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
    *  render gate below, which covers the minimap in the same breath — a second `overlayId`
@@ -684,14 +756,6 @@ export const CanvasMode: React.FC = () => {
   const flyToWorld = useCallback((w: { x: number; y: number }) => {
     flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));
   }, [flyTo, size, vp.z, metrics]);
-
-  // Leave the canvas for the tab this node lives in, with the cursor on its own pane.
-  // `focusPaneInTab` before `setActiveTab`, because the activation path RESTORES the
-  // tab's remembered pane — writing `activePaneId` directly would be overwritten.
-  const openAsTab = useCallback((tabId: string, paneId: string) => () => {
-    dispatch(focusPaneInTab({ tabId, paneId }));
-    dispatch(setActiveTab(tabId));
-  }, [dispatch]);
 
   /**
    * Close a node's terminal by handing the request to the surface that owns it — see
@@ -810,8 +874,10 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
-      const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current);
+      const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current, combos);
       // Completely untouched — no preventDefault, no stopPropagation — so it reaches the PTY.
+      // This is the arm a bare `T` lands on, which is Tam's requirement from the inside: while a
+      // node is being edited, the letter is the shell's.
       if (action === 'passthrough') return;
       e.preventDefault();
       e.stopPropagation();
@@ -821,13 +887,20 @@ export const CanvasMode: React.FC = () => {
       // `closeOverlay` owns that blur for the leave path; the release-focus arm below, which
       // closes nothing, still does its own.
       if (action === 'leave') { closeOverlay(); return; }
+      // Ctrl+T. `overlayIdRef.current` is a TERMINAL id, and the only id this listener holds —
+      // `focusedId` is the same terminal. The overlay is deliberately left OPEN on the way out:
+      // `overlayId` is a view fact belonging to the canvas tab that already survives a tab
+      // switch by design, and this component's unmount cleanup releases `focusedId` while the
+      // remount path re-grants it. Closing it here would make this the one departure that also
+      // discarded the user's view.
+      if (action === 'open-tab') { openTabForTerminal(overlayIdRef.current ?? focusedId); return; }
       (document.activeElement as HTMLElement | null)?.blur();
       dispatch(focusNode(null));
     };
     // Capture phase, matching InputHandler's ownership of global shortcuts.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [focusedId, dispatch, closeOverlay]);
+  }, [focusedId, dispatch, closeOverlay, combos, openTabForTerminal]);
 
   // Read through a ref inside the Esc handler above: that effect is keyed on `focusedId`, and
   // adding `overlayId` to its deps would tear down and re-register the capture-phase listener
@@ -975,6 +1048,7 @@ export const CanvasMode: React.FC = () => {
               onChipClick={() => flyTo(centreOn(
                 aimedNodeRect(n.rect, NODE_CHIP_ZOOM), size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
               ))}
+              combos={combos}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => (isOverlaid ? closeOverlay() : dispatch(setOverlayNode(n.terminalId)))}
               onClose={() => closeNode(n)}

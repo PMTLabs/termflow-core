@@ -560,6 +560,17 @@
   cursor: default;
 }
 
+/* A fixed canvas key. Dimmer than an assignable one, but NOT styled as disabled: these work
+   perfectly, they just cannot be changed yet. The row also carries no record/reset button, so
+   the difference is already legible from the layout — this only keeps a fixed combo from
+   reading as loudly as one the user can act on. `auto` because these span two keys
+   ("Delete / Backspace") more often than the assignable ones do. */
+.shortcut-combo-fixed {
+  color: #969696;
+  border-style: dashed;
+  min-width: auto;
+}
+
 .shortcut-record-btn,
 .shortcut-reset-btn {
   background: none;
