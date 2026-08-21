@@ -7,11 +7,13 @@ import { RootState, store } from '../../store';
 import { renamePanes, setPaneMuted } from '../../store/slices/panesSlice';
 import { findTabIdByTerminalId, findLeaf, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
+import { markSessionClosed, clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
 import { EndedOverlay, paneClassName } from './EndedOverlay';
 import { PaneContextMenu } from './PaneContextMenu';
 import { SessionClosedBanner } from './SessionClosedBanner';
+import { useRestartHotkey } from './useRestartHotkey';
 import { StateManager } from '../../services/StateManager';
 import { takeInitialCwd } from '../../services/initialCwd';
 import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
@@ -83,7 +85,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   // Set when THIS pane's process exits but the pane is kept open (tab terminals
   // with closeTabOnProcessExit off, and all split panes). Drives the bottom banner.
-  const [closedInfo, setClosedInfo] = useState<{ exitCode: number | null } | null>(null);
+  //
+  // In the STORE rather than in `useState` since `plan/024` Req 4: a canvas node has to draw
+  // itself muted when its session is over, and the canvas overlay has to show this same banner —
+  // neither can read a sibling component's local state. The pane is still the only WRITER; what
+  // changed is that the fact is now legible from outside it. See `sessionExitSlice`.
+  const closedInfo = useSelector(
+    (state: RootState) => (terminalId ? state.sessionExit.byTerminalId[terminalId] : undefined),
+  ) ?? null;
   // UI-level guard so the Restart button/Ctrl+R don't re-enter handleRestart
   // while a restart is already in flight. Belt-and-suspenders on top of
   // TerminalService's leaf-keyed single-flight (review 109 H1) — that is the
@@ -475,7 +484,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // outranks any 30s-tick refresh still in flight, which can only carry a
         // reading from while the shell was alive (i.e. before its last `cd`).
         setCwdSnapshot(terminalId, d.cwd, { final: true, generation });
-        setClosedInfo({ exitCode: typeof d.exitCode === 'number' ? d.exitCode : null });
+        dispatch(markSessionClosed({
+          terminalId,
+          exitCode: typeof d.exitCode === 'number' ? d.exitCode : null,
+        }));
       }
     };
     window.addEventListener('pty:exit', onExit as EventListener);
@@ -529,7 +541,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       );
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
-      setClosedInfo(null);
+      dispatch(clearSessionClosed({ terminalId }));
       // The snapshot has been consumed. Clearing it stops a LATER exit that
       // carries no cwd from silently reusing this directory (spec 045 §3.3).
       clearCwdSnapshot(terminalId);
@@ -543,26 +555,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     }
   }, [terminalId, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch]);
 
-  const handleDismissBanner = useCallback(() => setClosedInfo(null), []);
+  const handleDismissBanner = useCallback(
+    () => { if (terminalId) dispatch(clearSessionClosed({ terminalId })); },
+    [terminalId, dispatch],
+  );
 
-  // While the banner is up, Ctrl+R restarts in place. Capture-phase on the pane so
-  // we intercept before xterm — and preventDefault stops the WebView from
-  // reloading. When no banner is showing this is not bound, so Ctrl+R passes
-  // through to the shell's reverse-search as usual.
-  useEffect(() => {
-    if (!closedInfo) return undefined;
-    const el = paneRef.current;
-    if (!el) return undefined;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && !e.altKey && !e.metaKey && (e.key === 'r' || e.key === 'R')) {
-        e.preventDefault();
-        e.stopPropagation();
-        void handleRestart();
-      }
-    };
-    el.addEventListener('keydown', onKeyDown, true);
-    return () => el.removeEventListener('keydown', onKeyDown, true);
-  }, [closedInfo, handleRestart]);
+  // While the banner is up, Ctrl+R restarts in place. The binding itself now lives in
+  // `useRestartHotkey`, shared with the Canvas overlay so the hint the banner prints means the
+  // same thing on both surfaces (`plan/024` Req 4).
+  const restartHotkeyCb = useCallback(() => { void handleRestart(); }, [handleRestart]);
+  useRestartHotkey(paneRef, !!closedInfo, restartHotkeyCb);
 
   const handleSplitHorizontal = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -753,6 +755,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               // Focus this terminal only when it's the active pane of the active
               // tab — restores the cursor on tab switch / pane select.
               shouldFocus={isActive && isTabActive}
+              // Published into `surfaceChrome` so the Canvas overlay can render THIS pane's
+              // session-closed banner and act on it (`plan/024` Req 4). The pane keeps the only
+              // implementation — a restart needs the profile, the cwd the shell died in and the
+              // migrated session key, none of which the canvas has.
+              onRestartSession={() => { void handleRestart(); }}
+              onDismissSessionClosed={handleDismissBanner}
               onData={(data: string) => {
                 // Send data to PTY through terminal service
                 terminalService.writeToTerminal(terminalId, data).catch(console.error);

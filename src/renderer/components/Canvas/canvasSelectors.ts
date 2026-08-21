@@ -36,6 +36,14 @@ export interface CanvasNodeModel {
   rect: Rect;
   isRunning: boolean;
   hasUnseenOutput: boolean;
+  /**
+   * True once this terminal's shell session has ENDED (`plan/024` Req 4).
+   *
+   * Per-TERMINAL, from `sessionExit`. Deliberately not `Tab.exited`, which only flips once every
+   * pane in the tab has exited — a split tab with one dead pane would report nothing, and a
+   * canvas node IS a pane.
+   */
+  exited: boolean;
 }
 
 export interface CanvasGroupModel {
@@ -150,6 +158,7 @@ function buildModel(
   stored: Record<string, Rect>,
   storedGroups: Record<string, Rect>,
   runningTerminalIds: string[] = [],
+  sessionExit: Record<string, { exitCode: number | null }> = {},
 ): CanvasModel {
   const nodes: CanvasNodeModel[] = [];
   const groups: CanvasGroupModel[] = [];
@@ -266,6 +275,9 @@ function buildModel(
         // Per-terminal (Req 8, plan/020 §2): this node reports its OWN process's activity,
         // not its tab's — a two-pane tab with only one pane busy no longer lights up both.
         isRunning: running.has(id),
+        // Per-TERMINAL, unlike `hasUnseenOutput` below: a two-pane tab whose first shell has
+        // exited mutes that node alone and leaves its live sibling untouched.
+        exited: !!sessionExit[id],
         // hasUnseenOutput stays TAB-level, deliberately (plan/020 §0 D2, §6 "known remaining
         // instance"): per-pane clearing semantics ("viewing which pane clears it?") are
         // undefined, so every node in a tab still shares the tab's unseen flag.
@@ -311,6 +323,7 @@ export const selectCanvasModel = createSelector(
     (s: RootState) => s.canvas.nodes,
     (s: RootState) => s.canvas.groups,
     (s: RootState) => s.tabs.runningTerminalIds,
+    (s: RootState) => s.sessionExit.byTerminalId,
   ],
   buildModel,
 );
@@ -322,6 +335,7 @@ export function buildCanvasModel(state: RootState): CanvasModel {
     state.canvas.nodes,
     state.canvas.groups,
     state.tabs.runningTerminalIds,
+    state.sessionExit?.byTerminalId,
   );
 }
 

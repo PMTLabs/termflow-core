@@ -139,6 +139,34 @@
 .canvas-node.selected { outline-color: var(--accent-color, #007acc); }
 .canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
 .canvas-node.dimmed { opacity: .26; }
+/* A node whose shell session has ENDED (`plan/024` Req 4).
+
+   Deliberately NOT `.dimmed`. That class belongs to the search/"near" highlight set, and
+   overloading it would make a search dim an ended node twice over and make an ended node look
+   like a search miss — two unrelated facts saying the same thing on screen.
+
+   The treatment is the app's existing ended-session language rather than a new token: the same
+   `--ended-wash` the pane overlay uses, plus a muted border and title, so a dead terminal reads
+   as dead in the same way wherever you meet it. Opacity is left alone on purpose — the point of
+   the wash is that prior output stays INSPECTABLE, which is the same reason the pane's alpha is
+   low, and a faded node at canvas scale would be unreadable rather than merely quiet.
+
+   Applies at every tier including chip: zoomed out is exactly where you scan for which
+   terminals are still alive, and the chip tier is the one with no other cue (`plan/023` D2). */
+.canvas-node.ended { outline-color: var(--border-color, #3e3e42); }
+.canvas-node.ended .canvas-node-head { background: var(--bg-secondary, #2d2d30); }
+.canvas-node.ended .canvas-node-title { color: var(--text-tertiary, #666666); font-style: italic; }
+/* Above the surface, like the pane's own overlay: xterm paints its own character grid, so
+   tinting the body's background would colour only the padding slack and leave the content —
+   the thing that has to look different — untouched. */
+.canvas-node.ended .canvas-node-body::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-color: var(--ended-wash, rgba(128, 128, 128, 0.13));
+  pointer-events: none;
+  z-index: 2;
+}
 /* The header is TWO elements on purpose. The outer one is the layout box, and its height is
    set per node from `headScale(zoom)` so the bar stops growing once it has reached its natural
    size. The inner one holds the contents at their natural size and is scaled as a single

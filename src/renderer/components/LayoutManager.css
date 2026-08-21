@@ -333,4 +333,15 @@
   --danger-hover: #c50e1f;
   --danger-background: #2d1b1d;
   --danger-border: #5c2b2e;
+
+  /* The ended-session wash: what a terminal whose shell has exited is tinted with.
+     ONE definition for every scope that shows an ended session — the pane overlay
+     (TerminalPane.css `.pane-ended-overlay`) and the Canvas node (Canvas.css
+     `.canvas-node.ended`) — so the two cannot drift into looking like different features.
+
+     It is the CSS twin of `store/endedTint.ts`, which computes the same blend in JS because
+     xterm's decoration `backgroundColor` takes `#RRGGBB` with no alpha. The numbers below are
+     that module's `NEUTRAL` (0x80) and `WASH_ALPHA` (0.13); `endedTint.test.ts` reads both
+     files and fails if they stop agreeing. */
+  --ended-wash: rgba(128, 128, 128, 0.13);
 }

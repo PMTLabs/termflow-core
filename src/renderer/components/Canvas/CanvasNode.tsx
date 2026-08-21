@@ -123,6 +123,9 @@ export const CanvasNode: React.FC<{
         // own `.running`, because there the icon renders either way and only an ancestor
         // selector can blink it.
         busyCue === 'sweep' && node.isRunning ? 'running' : '',
+        // This terminal's shell has exited (`plan/024` Req 4). Unconditional on tier: zoomed out
+        // is exactly where you scan for what is still alive.
+        node.exited ? 'ended' : '',
       ].filter(Boolean).join(' ')}
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}

@@ -53,6 +53,20 @@ export interface SurfaceChromeState {
    * engine either way.
    */
   openContextMenu: (x: number, y: number) => void;
+  /**
+   * Restart this pane's shell in place, and dismiss the session-closed notice (`plan/024` Req 4).
+   *
+   * Handlers rather than a flag, for the same reason `scrollToBottom` and `openContextMenu` are:
+   * only the PANE can perform them. A restart reuses the profile, the working directory the shell
+   * died in and the migrated session key, all of which live in `TerminalPane` — so the overlay
+   * asks for the action instead of reimplementing it, and there is exactly one restart in the app.
+   *
+   * The FACT that a session ended does not travel this way: it is in `sessionExit`, because a
+   * canvas node must draw itself muted whether or not anything is publishing its chrome, and
+   * every node subscribing here to learn it would wake the whole canvas on every scroll.
+   */
+  restartSession: () => void;
+  dismissSessionClosed: () => void;
 }
 
 interface Entry {
@@ -95,6 +109,8 @@ function same(a: SurfaceChromeState, b: SurfaceChromeState): boolean {
     && a.scrollToBottom === b.scrollToBottom
     && a.pickSuggestion === b.pickSuggestion
     && a.openContextMenu === b.openContextMenu
+    && a.restartSession === b.restartSession
+    && a.dismissSessionClosed === b.dismissSessionClosed
     && a.suggest.open === b.suggest.open
     && a.suggest.selectedIndex === b.suggest.selectedIndex
     && a.suggest.focused === b.suggest.focused

@@ -141,6 +141,36 @@ describe('buildCanvasModel', () => {
     expect(s.tabs.tabs.find((t: any) => t.id === 'tb-a').isRunning).toBe(true);
   });
 
+  /**
+   * `exited` is PER-TERMINAL — `plan/024` Req 4, and the reason a new slice was needed.
+   *
+   * The tab-level fact that already existed (`Tab.exited`) only flips once EVERY pane in the tab
+   * has exited, so the case below — one dead pane beside a live one — is exactly the one it
+   * cannot express, and a canvas node is a pane. This is the same split `isRunning` went through
+   * in `plan/020` Req 8, and deliberately NOT the one `hasUnseenOutput` is still on.
+   */
+  it('marks only the terminal whose session ended, not its live sibling', () => {
+    const s = stateWith();
+    s.sessionExit = { byTerminalId: { 'tm-2': { exitCode: 0 } } };
+    const m = buildCanvasModel(s);
+    expect(m.nodes.find((n) => n.terminalId === 'tm-2')!.exited).toBe(true);
+    // Its sibling in the SAME tab is untouched — the assertion the tab-level flag fails.
+    expect(m.nodes.find((n) => n.terminalId === 'tb-a')!.exited).toBe(false);
+    expect(m.nodes.find((n) => n.terminalId === 'tb-b')!.exited).toBe(false);
+  });
+
+  // Exit code 0 is a real exit. A `!!info.exitCode` anywhere on this path would report a cleanly
+  // finished shell as still running.
+  it('treats a clean exit as exited', () => {
+    const s = stateWith();
+    s.sessionExit = { byTerminalId: { 'tb-b': { exitCode: 0 } } };
+    expect(buildCanvasModel(s).nodes.find((n) => n.terminalId === 'tb-b')!.exited).toBe(true);
+  });
+
+  it('reports every node as live when nothing has exited', () => {
+    expect(buildCanvasModel(stateWith()).nodes.every((n) => n.exited === false)).toBe(true);
+  });
+
   it('ignores a tab with no pane tree and no stored frame instead of crashing', () => {
     const s = stateWith();
     s.tabs.tabs.push({ id: 'tb-ghost', title: 'ghost', shellType: 'zsh' });

@@ -69,6 +69,17 @@ interface TerminalDisplayProps {
   // through to the engine so it can gate the Ctrl+Backspace/Ctrl+Delete word-delete
   // shim (see TerminalEngineOptions.shellType).
   shellType?: string;
+  /**
+   * The pane's session-closed actions, published into `surfaceChrome` so the Canvas overlay can
+   * draw the same `SessionClosedBanner` this pane does (`plan/024` Req 4).
+   *
+   * They arrive as props rather than being rebuilt here because a restart needs the profile, the
+   * cwd the shell died in and the migrated session key — all `TerminalPane`'s. This component is
+   * only the PUBLISHER: `surfaceChrome` allows one owner per terminalId and it is already this
+   * one, so routing them through here keeps that single registration intact.
+   */
+  onRestartSession?: () => void;
+  onDismissSessionClosed?: () => void;
 }
 
 export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
@@ -80,6 +91,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   onResize: _onResize,
   onTitleChange,
   onReady,
+  onRestartSession,
+  onDismissSessionClosed,
   fontSize = 14,
   isActive = true,
   shouldFocus = true,
@@ -215,6 +228,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId)),
     );
   }, [terminalId]);
+  // Stable identities for the two pane-owned actions, so an absent prop does not publish a fresh
+  // no-op closure on every render — `same()` compares these by reference, and a new function each
+  // time would make every write a change and wake every canvas node.
+  const restartSessionCb = useCallback(() => { onRestartSession?.(); }, [onRestartSession]);
+  const dismissSessionClosedCb = useCallback(
+    () => { onDismissSessionClosed?.(); },
+    [onDismissSessionClosed],
+  );
   // One token per component instance, so a stale unmount cleanup cannot wipe the registration
   // a remount has already made under the same terminalId.
   const chromeOwner = useRef({});
@@ -231,10 +252,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       scrollToBottom: scrollToBottomCb,
       pickSuggestion: suggest.pick,
       openContextMenu: openContextMenuAt,
+      restartSession: restartSessionCb,
+      dismissSessionClosed: dismissSessionClosedCb,
     });
   }, [
     terminalId, atBottom, scrollToBottomCb, suggest.pick, openContextMenuAt,
     suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
+    restartSessionCb, dismissSessionClosedCb,
   ]);
   useEffect(() => {
     const owner = chromeOwner.current;

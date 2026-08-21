@@ -142,6 +142,8 @@ describe('NodeTerminal chrome (overlay only)', () => {
     scrollToBottom: jest.fn(),
     pickSuggestion: jest.fn(),
     openContextMenu: jest.fn(),
+    restartSession: jest.fn(),
+    dismissSessionClosed: jest.fn(),
   };
   const owner = {};
 
@@ -272,5 +274,157 @@ describe('NodeTerminal chrome (overlay only)', () => {
       expect(openContextMenu).not.toHaveBeenCalled();
       expect(onNodeMenu).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * The session-closed banner on the overlay — `plan/024` Req 4.
+ *
+ * The requirement was explicit that the pane's footer must be BROUGHT to the overlay rather than
+ * reimplemented there, so the first thing worth asserting is that it is the same component: the
+ * class names below are `SessionClosedBanner`'s own, and a canvas copy would have had to
+ * reproduce them to pass.
+ *
+ * The split between the two sources is the design, and each half is tested against the other's
+ * absence: the FACT comes from the store (via the `exitInfo` prop) because a node must know it
+ * with no publisher, and the ACTIONS come from `surfaceChrome` because only the pane can perform
+ * a restart.
+ */
+describe('NodeTerminal — session-closed banner', () => {
+  const CHROME = {
+    atBottom: true,
+    suggest: { open: false, items: [], selectedIndex: 0, focused: false, anchor: null },
+    scrollToBottom: jest.fn(),
+    pickSuggestion: jest.fn(),
+    openContextMenu: jest.fn(),
+    restartSession: jest.fn(),
+    dismissSessionClosed: jest.fn(),
+  };
+  const owner = {};
+  const EXITED = { exitCode: 130 };
+
+  const renderNode = (
+    overlaid: boolean,
+    exitInfo: { exitCode: number | null } | null,
+  ) => act(() => {
+    root.render(
+      <NodeTerminal terminalId="tm-e" focused overlaid={overlaid} exitInfo={exitInfo} fontSize={14} />,
+    );
+  });
+
+  const banner = () => container.querySelector('.session-closed-banner');
+  const restartButton = () => [...container.querySelectorAll<HTMLButtonElement>(
+    '.session-closed-banner__button',
+  )].find((b) => b.textContent === 'Restart') ?? null;
+  const dismissButton = () =>
+    container.querySelector<HTMLButtonElement>('.session-closed-banner__close');
+
+  beforeEach(() => {
+    CHROME.restartSession.mockClear();
+    CHROME.dismissSessionClosed.mockClear();
+  });
+  afterEach(() => __resetSurfaceChromeForTest());
+
+  it('shows the pane\'s own banner, with the exit code', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, EXITED);
+    expect(banner()).not.toBeNull();
+    expect(banner()!.textContent).toContain('Session closed');
+    expect(banner()!.textContent).toContain('130');
+    // The hint the shared Ctrl+R binding exists to honour.
+    expect(banner()!.textContent).toContain('Ctrl');
+  });
+
+  it('shows nothing while the session is still running', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, null);
+    expect(banner()).toBeNull();
+  });
+
+  // An ordinary node renders well below 1:1 inside a clipping box; a banner there would be a few
+  // illegible pixels over the terminal it is describing.
+  it('shows nothing on an ordinary node, even when the session has ended', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(false, EXITED);
+    expect(banner()).toBeNull();
+  });
+
+  /**
+   * A banner whose Restart did nothing would be worse than no banner. `chrome` is the publisher
+   * of both actions, so without it there is nothing to call and the banner is withheld.
+   */
+  it('shows nothing when no pane is publishing the actions', () => {
+    renderNode(true, EXITED);
+    expect(banner()).toBeNull();
+  });
+
+  it('routes Restart to the pane that owns the shell', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, EXITED);
+    act(() => {
+      restartButton()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(CHROME.restartSession).toHaveBeenCalledTimes(1);
+    expect(CHROME.dismissSessionClosed).not.toHaveBeenCalled();
+  });
+
+  it('routes Dismiss to the pane too, and only Dismiss', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, EXITED);
+    act(() => {
+      dismissButton()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(CHROME.dismissSessionClosed).toHaveBeenCalledTimes(1);
+    expect(CHROME.restartSession).not.toHaveBeenCalled();
+  });
+
+  it('renders inside the surface wrapper, like the rest of the overlay chrome', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, EXITED);
+    expect(banner()!.parentElement).toBe(container.querySelector('.canvas-surface'));
+  });
+
+  // Exit code 0 is a real exit — a `!!exitCode` test anywhere on this path hides a clean finish.
+  it('shows the banner for a clean exit', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, { exitCode: 0 });
+    expect(banner()).not.toBeNull();
+    expect(banner()!.textContent).toContain('0');
+  });
+
+  it('omits the code when the backend could not report one', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, { exitCode: null });
+    expect(banner()).not.toBeNull();
+    expect(banner()!.textContent).toContain('Session closed');
+    expect(banner()!.textContent).not.toContain('exit ');
+  });
+
+  /**
+   * Ctrl+R, via the hook shared with `TerminalPane`. Dispatched on the wrapper the hook binds to,
+   * in capture phase, so this exercises the real listener rather than a simulated one.
+   */
+  it('restarts on Ctrl+R while the banner is up', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, EXITED);
+    act(() => {
+      container.querySelector('.canvas-surface')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    expect(CHROME.restartSession).toHaveBeenCalledTimes(1);
+  });
+
+  // The negative that keeps the case above from breaking reverse-search: with a live shell,
+  // Ctrl+R belongs to the shell and must reach the PTY untouched.
+  it('leaves Ctrl+R alone while the session is running', () => {
+    setSurfaceChrome('tm-e', owner, CHROME);
+    renderNode(true, null);
+    act(() => {
+      container.querySelector('.canvas-surface')!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    expect(CHROME.restartSession).not.toHaveBeenCalled();
   });
 });

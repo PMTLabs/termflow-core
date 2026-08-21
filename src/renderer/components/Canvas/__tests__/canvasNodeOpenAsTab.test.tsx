@@ -64,6 +64,7 @@ const node0: CanvasNodeModel = {
   shellType: 'zsh',
   rect: { x: 0, y: 0, w: 340, h: 210 },
   isRunning: false,
+  exited: false,
 };
 
 interface Handlers {
@@ -430,6 +431,73 @@ describe('group chip', () => {
     });
     expect(chip()).not.toBeNull();
     expect(chip()!.textContent).toBe('backend');
+  });
+});
+
+/**
+ * The muted treatment for a terminal whose shell has ENDED — `plan/024` Req 4.
+ *
+ * Driven by `CanvasNodeModel.exited`, which is PER-TERMINAL: a two-pane tab whose first shell
+ * died mutes that node alone. The tab-level `Tab.exited` could not express that, which is why
+ * this fact needed a home of its own.
+ */
+describe('ended node', () => {
+  const node = () => container.querySelector('.canvas-node')!;
+  const renderEnded = (exited: boolean, tier: LodTier = 'gpu') => act(() => {
+    root.render(withMetrics(
+      <CanvasNode node={{ ...node0, exited }} tier={tier} zoom={1} selected={false}
+        focused={false} dimmed={false} hidden={false} busyCue="sweep" />,
+    ));
+  });
+
+  it('carries the ended class once its session is over', () => {
+    renderEnded(true);
+    expect(node().classList.contains('ended')).toBe(true);
+  });
+
+  it('does not carry it while the session is live', () => {
+    renderEnded(false);
+    expect(node().classList.contains('ended')).toBe(false);
+  });
+
+  /**
+   * Deliberately NOT `.dimmed`. That class belongs to the search/"near" highlight set, so reusing
+   * it would make a search dim an ended node twice over and make an ended node read as a search
+   * miss — two unrelated facts rendered identically. The two must be independently settable.
+   */
+  it('is independent of the search dim', () => {
+    renderEnded(true);
+    expect(node().classList.contains('dimmed')).toBe(false);
+
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, exited: true }} tier="gpu" zoom={1} selected={false}
+          focused={false} dimmed hidden={false} busyCue="sweep" />,
+      ));
+    });
+    // Both at once, and distinguishable.
+    expect(node().classList.contains('ended')).toBe(true);
+    expect(node().classList.contains('dimmed')).toBe(true);
+  });
+
+  // At the chip tier the header IS the node, and zoomed out is exactly where you scan for which
+  // terminals are still alive — so unlike the buttons and badges, this one does NOT drop out.
+  it('still marks an ended node at the chip tier', () => {
+    renderEnded(true, 'chip');
+    expect(node().classList.contains('ended')).toBe(true);
+  });
+
+  // An ended node keeps its busy cue independent: a shell can exit while the tracker still has
+  // it flagged for a tick, and the two classes must not fight over one slot.
+  it('does not disturb the busy cue', () => {
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, exited: true, isRunning: true }} tier="gpu" zoom={1}
+          selected={false} focused={false} dimmed={false} hidden={false} busyCue="sweep" />,
+      ));
+    });
+    expect(node().classList.contains('ended')).toBe(true);
+    expect(node().classList.contains('running')).toBe(true);
   });
 });
 
