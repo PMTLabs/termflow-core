@@ -226,3 +226,41 @@ describe('TerminalService.createTerminal re-asserts pane ownership after the spa
     expect(setTerminalOwningTab).toHaveBeenCalledWith('tm-reassert', 'tb-dst');
   });
 });
+
+/**
+ * A fresh spawn is announced so RunningActivityTracker can hold this shell's startup banner
+ * back from the unseen bell (see SPAWN_GRACE_MS). The tracker cannot work this out for itself:
+ * output is all it sees, and a banner looks exactly like anything else a program prints.
+ */
+describe('TerminalService publishes pty:spawn for a FRESH spawn only', () => {
+  const spawns: Array<{ processId?: string; terminalId?: string }> = [];
+  const onSpawn = (e: Event) => spawns.push((e as CustomEvent).detail);
+
+  beforeEach(() => {
+    spawns.length = 0;
+    window.addEventListener('pty:spawn', onSpawn);
+    (window as any).electronAPI = {
+      createTerminal: jest.fn().mockResolvedValue('pc-spawn-1'),
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  afterEach(() => window.removeEventListener('pty:spawn', onSpawn));
+
+  it('announces the spawn with both ids', async () => {
+    await terminalService.createTerminal('tm-spawn-1');
+    expect(spawns).toEqual([{ processId: 'pc-spawn-1', terminalId: 'tm-spawn-1' }]);
+  });
+
+  /**
+   * The half that decides where the dispatch lives. Binding in `bindProcess` would cover this
+   * path too — and it must not: a cross-window attach and a hot-swap reattach bind a PTY that
+   * has been running for minutes, so its output is activity the user may genuinely have missed,
+   * not a banner they just asked for. Granting it a grace would swallow a real notification.
+   */
+  it('stays silent when an already-running process is merely bound into this window', () => {
+    terminalService.registerExistingTerminal('tm-spawn-2', 'pc-spawn-2');
+    terminalService.attachExistingTerminal('tm-spawn-3', 'pc-spawn-3');
+    expect(spawns).toEqual([]);
+  });
+});

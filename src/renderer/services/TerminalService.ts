@@ -178,6 +178,21 @@ class TerminalServiceClass {
       this.bindProcess(terminalId, processId);
       console.log(`TerminalService: Mapped terminal ${terminalId} to process ${processId}`);
 
+      // A FRESH spawn. Announced so RunningActivityTracker can give this shell's startup
+      // banner the same grace the app-start path already gives a restored one — see
+      // SPAWN_GRACE_MS. Without it a terminal notifies about its own prompt.
+      //
+      // Here rather than in `bindProcess`, which looks like the tidier home and is the wrong
+      // one: that is also where a cross-window attach and a hot-swap reattach bind, and those
+      // processes are already running — their output is genuine activity the user may well
+      // have missed, not a banner they just asked for.
+      //
+      // An event rather than a direct call, for the reason `pty:resize` documents below: the
+      // tracker already imports this module, so calling it would be a cycle.
+      window.dispatchEvent(new CustomEvent('pty:spawn', {
+        detail: { processId, terminalId },
+      }));
+
       // The spawn carried the owner resolved BEFORE the await, and the backend
       // only registers the terminal at the very end of it — so a pane dragged to
       // another tab while this create was in flight had its ownership update

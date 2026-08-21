@@ -6,6 +6,7 @@ import {
   RESIZE_COOLDOWN_MS,
   VIEW_CHANGE_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
+  SPAWN_GRACE_MS,
   UNSEEN_DEBOUNCE_MS,
 } from '../runningActivity';
 
@@ -70,6 +71,13 @@ import { runningActivityTracker } from '../RunningActivityTracker';
 function emitData(processId: string, bytes: number): void {
   window.dispatchEvent(
     new CustomEvent('pty:data', { detail: { processId, data: 'x'.repeat(bytes) } }),
+  );
+}
+
+/** A FRESH PTY spawn, as TerminalService publishes it right after it binds the process. */
+function emitSpawn(processId: string, terminalId?: string): void {
+  window.dispatchEvent(
+    new CustomEvent('pty:spawn', { detail: { processId, terminalId } }),
   );
 }
 
@@ -849,5 +857,131 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
       expect(seenTabs()).toEqual([]);
       mockPaneTree.ready = true;
     });
+  });
+});
+
+/**
+ * A newly spawned shell must not notify about its own prompt.
+ *
+ * Reported from live use on the dev build: open ten shells and type nothing, and seven of them
+ * arrive with a bell and a toast. Every PTY prints a banner and a prompt the instant it is
+ * created, and a new tab is the active one only until the next one is opened — so every shell
+ * whose banner lands after the user moved on flagged itself. In Canvas Mode it is worse and
+ * unconditional: the CANVAS tab stays active, so no terminal tab is ever the active tab and
+ * every single spawn rings.
+ *
+ * The rule was already written down for exactly this output (`STARTUP_COOLDOWN_MS`, "nothing was
+ * missed on a fresh start") — it just only ever ran for the shells that spawn during app start.
+ * `pty:spawn` extends the same grace to one spawned at any other moment.
+ */
+describe('RunningActivityTracker spawn grace (a new shell is not "new activity")', () => {
+  const collect = () => {
+    const bells: Array<{ tabId: string }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    return { bells, done: () => window.removeEventListener('activity:bell', h) };
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    dispatch.mockClear();
+    mockTabsState.activeTabId = null; // the spawned tab is NOT the active one — the whole case
+    mockTabsState.tabs = [];
+    mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
+    mockCanvasState.overlayId = null;
+    runningActivityTracker.start(0); // no app-start grace: this is a spawn mid-session
+  });
+
+  afterEach(() => {
+    runningActivityTracker.stop();
+    jest.useRealTimers();
+  });
+
+  it('does not ring the unseen bell for a freshly spawned shell\'s banner', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400); // the PowerShell banner + prompt
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(unseenTabIds()).not.toContain('tb-1');
+    expect(bells).toHaveLength(0);
+  });
+
+  /**
+   * The positive this needs to stay honest. A grace that never expires — or one applied to the
+   * process forever — passes the case above and silences the terminal for the rest of its life.
+   */
+  it('DOES ring for output produced after the grace has expired', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    jest.advanceTimersByTime(SPAWN_GRACE_MS); // grace over; nothing has been produced yet
+    emitData('p1', 4);                        // now it genuinely does something
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(unseenTabIds()).toContain('tb-1');
+    expect(bells.map((b) => b.tabId)).toContain('tb-1');
+  });
+
+  /**
+   * The grace silences the BELL, not the sweep. This is why it advances the unseen mark rather
+   * than dropping the chunk the way the resize/reconnect cooldown does: a terminal spawned to
+   * run a command (an MCP `create_terminal` carrying one, an agent) has to look busy from its
+   * first byte, and dropping the output would make it look idle for three seconds.
+   */
+  it('still flips the tab RUNNING for spawn-time output', () => {
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 4); emitData('p1', 4); emitData('p1', 4); // >= MIN_CHUNKS
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
+  });
+
+  // Per PROCESS, not global: one terminal starting up must not deafen its neighbours. The
+  // control for every case above — the same output, on a process that was not spawned, rings.
+  it('leaves a different terminal\'s bell alone', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400); // p1 is starting up
+    emitData('p2', 4);   // p2 was already running and genuinely produced something
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-2']);
+  });
+
+  /**
+   * The exit path is a SECOND writer of the same bell (`flagOnExit`), so a grace that only
+   * covered the debounced pass would still notify for a shell that dies while starting — a bad
+   * profile, a missing binary. It compares against the same mark, so it is covered by
+   * construction; this pins that it stays so.
+   */
+  it('stays quiet when the shell dies during its own startup', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400);
+    emitExit('p1', 'tm-1'); // exit settles output immediately, bypassing the debounce
+    done();
+    expect(bells).toHaveLength(0);
+  });
+
+  // An id that outlives its process is a leak AND a wrong answer: the grace would still be
+  // armed for the next terminal to be handed that process id.
+  it('drops the grace when the process exits, so a reused id gets none', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitExit('p1', 'tm-1');   // never produced anything; grace must go with it
+    emitData('p1', 4);        // a NEW process reusing the id, genuinely producing output
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+  });
+
+  // The tracker must not be the thing that decides which binds get a grace: an attach or a
+  // hot-swap reattach binds an already-running process and publishes no `pty:spawn` at all.
+  it('gives no grace to output from a process that never announced a spawn', () => {
+    const { bells, done } = collect();
+    emitData('p1', 400);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
   });
 });

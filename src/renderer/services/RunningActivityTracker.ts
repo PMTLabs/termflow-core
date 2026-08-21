@@ -18,6 +18,7 @@ import {
   VIEW_CHANGE_COOLDOWN_MS,
   RECONNECT_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
+  SPAWN_GRACE_MS,
   UNSEEN_DEBOUNCE_MS,
   BURST_TAB_THRESHOLD,
 } from './runningActivity';
@@ -54,6 +55,13 @@ class RunningActivityTrackerClass {
   // it). Used to echo-cancel typing so the tab sweep doesn't animate while the user
   // types. A bare Enter resets it to -Infinity so the command's output still counts.
   private lastInputAt = new Map<string, number>();
+  // processId → the time its spawn grace expires. A PTY prints a banner and a prompt the moment
+  // it is created; that output is a consequence of the user asking for the terminal, never of
+  // work they missed, so it must not ring that terminal's unseen bell. Seeded by `pty:spawn`,
+  // which TerminalService publishes for a FRESH spawn only — a cross-window attach and a
+  // hot-swap reattach bind an already-running process whose output is genuine. See
+  // SPAWN_GRACE_MS.
+  private spawnGraceUntil = new Map<string, number>();
   private lastActiveTabId: string | null = null; // for focus-change detection
   // The terminal the canvas overlay was last showing at 1:1, so `handleOverlaySeen` fires on the
   // EDGE rather than on every store change. Same shape as `lastActiveTabId`, for the same reason.
@@ -62,6 +70,7 @@ class RunningActivityTrackerClass {
   private readonly opts = { windowMs: WINDOW_MS, minChunks: MIN_CHUNKS, minBytes: MIN_BYTES };
 
   private onData = (e: Event) => this.handleData(e as CustomEvent);
+  private onSpawn = (e: Event) => this.handleSpawn(e as CustomEvent);
   private onInput = (e: Event) => this.handleInput(e as CustomEvent);
   private onExit = (e: Event) => this.handleExit(e as CustomEvent);
   private onResize = () => this.handleResize();
@@ -77,6 +86,7 @@ class RunningActivityTrackerClass {
     // tab "running". Honored by handleData and evaluate via suppressUntil.
     if (startupGraceMs > 0) this.suppressUntil = Date.now() + startupGraceMs;
     window.addEventListener('pty:data', this.onData);
+    window.addEventListener('pty:spawn', this.onSpawn);
     window.addEventListener('pty:input', this.onInput);
     window.addEventListener('pty:exit', this.onExit);
     window.addEventListener('resize', this.onResize);
@@ -93,6 +103,7 @@ class RunningActivityTrackerClass {
 
   stop(): void {
     window.removeEventListener('pty:data', this.onData);
+    window.removeEventListener('pty:spawn', this.onSpawn);
     window.removeEventListener('pty:input', this.onInput);
     window.removeEventListener('pty:exit', this.onExit);
     window.removeEventListener('resize', this.onResize);
@@ -110,6 +121,7 @@ class RunningActivityTrackerClass {
     this.unseenMark.clear();
     this.lastOutputAt.clear();
     this.lastInputAt.clear();
+    this.spawnGraceUntil.clear();
     this.lastActiveTabId = null;
     this.lastOverlaidTerminalId = null;
     this.suppressUntil = 0;
@@ -305,6 +317,29 @@ class RunningActivityTrackerClass {
       this.buffers.set(processId, buf);
     }
     this.lastOutputAt.set(processId, now);
+    // Startup banner/prompt (see SPAWN_GRACE_MS): pre-account for it, so the unseen pass reads
+    // `newest <= mark` and this terminal is never flagged for output the user did not miss.
+    //
+    // Advancing the MARK rather than dropping the chunk — which is what the resize/reconnect
+    // cooldown above does — is load-bearing twice over. It leaves the RUNNING sweep alone, so a
+    // terminal spawned to run a command (an MCP `create_terminal` with a command, an agent) still
+    // shows busy from its first byte; and it is the identical device `computeUnseenUpdate` uses
+    // for a muted or overlaid source, so when the grace ends nothing rings in arrears for output
+    // that has already scrolled past. It also covers `flagOnExit`, which compares against this
+    // same mark — a shell that dies during its own startup stays quiet too.
+    const graceUntil = this.spawnGraceUntil.get(processId);
+    if (graceUntil !== undefined) {
+      if (now < graceUntil) this.unseenMark.set(processId, now);
+      else this.spawnGraceUntil.delete(processId); // expired — stop paying for the lookup
+    }
+  }
+
+  // A terminal's PTY was just created (fresh spawn only — see `spawnGraceUntil`). Arm the
+  // window in which its own banner/prompt must not ring its unseen bell.
+  private handleSpawn(e: CustomEvent): void {
+    const { processId } = (e.detail || {}) as { processId?: string };
+    if (!processId) return;
+    this.spawnGraceUntil.set(processId, Date.now() + SPAWN_GRACE_MS);
   }
 
   // Record the time of a user keystroke/paste to a terminal so handleData can
@@ -345,6 +380,7 @@ class RunningActivityTrackerClass {
       this.unseenMark.delete(processId);
       this.lastOutputAt.delete(processId);
       this.lastInputAt.delete(processId); // avoid a per-process leak across a long session
+      this.spawnGraceUntil.delete(processId); // same, for a process that never outputs at all
     }
     this.evaluate(); // recompute the running sweep without the dead PTY
   }
