@@ -98,7 +98,7 @@ describe('a passthrough really is left alone', () => {
    *  time the overlay opened, which is exactly when a keypress is in flight. */
   it('reads the overlay through the ref, not a dependency', () => {
     expect(TERMINAL_KEYS).toContain('overlayIdRef.current');
-    expect(MODE).toMatch(/\}, \[focusedId, dispatch\]\);/);
+    expect(MODE).toMatch(/\}, \[focusedId, dispatch, closeOverlay\]\);/);
   });
 });
 
@@ -106,8 +106,9 @@ describe('a passthrough really is left alone', () => {
  *  just stepped out of — including for the `E` that is supposed to bring the overlay back. */
 describe('leaving hands the keyboard back', () => {
   it('blurs, closes the overlay and releases the focus', () => {
+    expect(TERMINAL_KEYS).toContain("if (action === 'leave') { closeOverlay(); return; }");
+    // The release-focus arm, which closes nothing and so still owns its own blur.
     expect(TERMINAL_KEYS).toContain('(document.activeElement as HTMLElement | null)?.blur();');
-    expect(TERMINAL_KEYS).toContain("if (action === 'leave') dispatch(setOverlayNode(null));");
     expect(TERMINAL_KEYS).toContain('dispatch(focusNode(null));');
   });
 
@@ -119,7 +120,68 @@ describe('leaving hands the keyboard back', () => {
    * guard is what keeps the two exits distinguishable.
    */
   it('closes the overlay only on the leave path', () => {
-    expect(TERMINAL_KEYS.match(/setOverlayNode\(null\)/g) ?? []).toHaveLength(1);
+    expect(TERMINAL_KEYS.match(/closeOverlay\(\)/g) ?? []).toHaveLength(1);
+    // And never by hand: a bare dispatch here would be a second implementation of "close",
+    // which is exactly the split that let two of the three close paths keep the keyboard.
+    expect(TERMINAL_KEYS).not.toContain('setOverlayNode');
+  });
+});
+
+/**
+ * There are THREE ways to close the overlay, and they must be one mechanism.
+ *
+ * The bug this pins: `E` enlarged a node, and after closing again `E` did nothing -- on that
+ * node or any other. It was never about `E`. Only the keyboard exit released input ownership;
+ * the backdrop and the header toggle dispatched a bare `setOverlayNode(null)` and left
+ * `focusedId` set, and `CanvasMode`'s canvas-key listener opens with `if (focusedId) return`.
+ * So one overlay round trip through the pointer left the canvas deaf to EVERY key it owns --
+ * E, Tab, the arrows, Shift+1, Ctrl+-/+ -- with nothing on screen to say so. The only ways
+ * back were Esc or a click on empty canvas, and nobody guesses either.
+ *
+ * The store half lives in `canvasSlice` ("closes and hands the keyboard back"). This half is
+ * the DOM half plus the thing the store cannot enforce: that no close path skips it. Source-
+ * derived because mounting `CanvasMode` means mounting every terminal on the canvas, and
+ * because the failure mode is silent -- a new caller reaching for `setOverlayNode(null)`
+ * directly re-opens the bug with every other test still green.
+ */
+describe('every close path hands the keyboard back', () => {
+  const CLOSE_OVERLAY = callback(MODE, 'closeOverlay');
+
+  /** Or the three assertions below match an empty string and pass saying nothing. */
+  it('found the shared close callback', () => {
+    expect(CLOSE_OVERLAY).toContain('dispatch(setOverlayNode(null));');
+  });
+
+  /**
+   * The DOM half. The store can clear `focusedId`, but it cannot move the caret: xterm's
+   * keyboard sink is a real textarea, and one left focused keeps every later keystroke inside
+   * a terminal the user has just shrunk -- including the `E` meant to bring the overlay back.
+   */
+  it('blurs whatever the terminal left focused', () => {
+    expect(CLOSE_OVERLAY).toContain('(document.activeElement as HTMLElement | null)?.blur();');
+  });
+
+  it('closes from the backdrop through it', () => {
+    expect(MODE).toContain('onPointerDown={(e) => { e.stopPropagation(); closeOverlay(); }}');
+  });
+
+  /** The toggle's OPEN branch still dispatches directly -- only closing is shared. */
+  it('closes from the header toggle through it', () => {
+    expect(MODE).toContain(
+      'onOpenOverlay={() => (isOverlaid ? closeOverlay() : dispatch(setOverlayNode(n.terminalId)))}',
+    );
+  });
+
+  /**
+   * The class, not the instance.
+   *
+   * Every `setOverlayNode(null)` in the file must be the one inside `closeOverlay`. This is the
+   * assertion that catches the NEXT close path somebody adds -- a menu item, a shortcut, a
+   * gesture -- rather than the two we already found.
+   */
+  it('leaves no other caller closing the overlay by hand', () => {
+    expect(MODE.match(/setOverlayNode\(null\)/g) ?? []).toHaveLength(1);
+    expect(CLOSE_OVERLAY).toContain('dispatch(setOverlayNode(null));');
   });
 });
 

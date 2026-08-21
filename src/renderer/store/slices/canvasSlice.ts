@@ -164,10 +164,26 @@ const canvasSlice = createSlice({
     touchNode: (state, action: PayloadAction<string>) => { touch(state, action.payload); },
     /** Open the full-screen overlay on a node, or close it with `null`.
      *
-     *  Opening also focuses: an overlay you cannot type into is a screenshot. Closing does
-     *  NOT blur — you were working in that terminal a moment ago, and yanking the keyboard
-     *  away as the node shrinks back is not what anyone means by "close". */
+     *  Opening also focuses: an overlay you cannot type into is a screenshot. Closing hands
+     *  the keyboard BACK, and that is a reversal of what this comment used to claim — that
+     *  "you were working in that terminal a moment ago" and so should keep it.
+     *
+     *  It was wrong because the DOM had already decided otherwise. Every close path blurs
+     *  xterm's textarea before this reducer runs: the backdrop and the header toggle because a
+     *  pointerdown elsewhere moves focus off it, `Ctrl+Shift+E` because it blurs by hand. So a
+     *  surviving `focusedId` named a terminal that did not have the keyboard — and
+     *  `CanvasMode` opens its canvas-key listener with `if (focusedId) return`, reading that
+     *  stale id as "a terminal is typing". One overlay round trip and the canvas went deaf to
+     *  every key it owns: E, Tab, the arrows, Shift+1, Ctrl+-/+.
+     *
+     *  Guarded on `focusedId === overlayId` rather than clearing unconditionally, so this only
+     *  ever takes back the focus it granted. Nothing else grants focus today, but an
+     *  unconditional clear would make this the line that silently breaks the first thing that
+     *  does. */
     setOverlayNode: (state, action: PayloadAction<string | null>) => {
+      if (action.payload === null && state.focusedId === state.overlayId) {
+        state.focusedId = null;
+      }
       state.overlayId = action.payload;
       if (action.payload) {
         state.focusedId = action.payload;
