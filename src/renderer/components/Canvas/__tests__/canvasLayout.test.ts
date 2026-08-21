@@ -1,9 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import { NODE_W, NODE_H, Rect, headSlack } from '../canvasGeometry';
 import {
-  fitGroupFrame, groupAt, arrange, seedNodePosition, framePadScale, drawnFrameRect,
-  PAD, PAD_TOP, GAP, GROUP_GAP, PAD_SCREEN_MIN, PAD_SCREEN_MAX, MAX_PAD_OUTSET, GroupBox,
+  NODE_W, NODE_H, Rect, headSlack, paintedNodeH, HEAD_GROWTH_PX, Z_MIN,
+} from '../canvasGeometry';
+import {
+  fitGroupFrame, groupAt, arrange, seedNodePosition, groupBoxFor, framePadScale, drawnFrameRect,
+  PAD, PAD_TOP, GAP_X, GAP_Y, GROUP_GAP, PAD_SCREEN_MIN, PAD_SCREEN_MAX, MAX_PAD_OUTSET, GroupBox,
 } from '../canvasLayout';
 import { readSource } from '../../../utils/readSource';
 
@@ -71,16 +73,16 @@ describe('arrange', () => {
     const r = arrange({ groups: [{ id: 'tb-a', nodeIds: ['n1', 'n2'] }] });
     const f = r.groups['tb-a'];
     expect(r.nodes['n1']).toEqual({ x: f.x + PAD, y: f.y + PAD_TOP });
-    expect(r.nodes['n2']).toEqual({ x: f.x + PAD + NODE_W + GAP, y: f.y + PAD_TOP });
-    expect(f.w).toBe(PAD * 2 + NODE_W * 2 + GAP);
+    expect(r.nodes['n2']).toEqual({ x: f.x + PAD + NODE_W + GAP_X, y: f.y + PAD_TOP });
+    expect(f.w).toBe(PAD * 2 + NODE_W * 2 + GAP_X);
     expect(f.h).toBe(PAD_TOP + PAD + NODE_H);
   });
 
   it('uses a square-ish grid rather than one long row', () => {
     const r = arrange({ groups: [{ id: 'tb-a', nodeIds: ['n1', 'n2', 'n3', 'n4', 'n5'] }] });
     // ceil(sqrt(5)) === 3 columns, 2 rows
-    expect(r.groups['tb-a'].w).toBe(PAD * 2 + NODE_W * 3 + GAP * 2);
-    expect(r.groups['tb-a'].h).toBe(PAD_TOP + PAD + NODE_H * 2 + GAP);
+    expect(r.groups['tb-a'].w).toBe(PAD * 2 + NODE_W * 3 + GAP_X * 2);
+    expect(r.groups['tb-a'].h).toBe(PAD_TOP + PAD + NODE_H * 2 + GAP_Y);
   });
 
   it('lays groups out on a grid with even gutters and no overlap', () => {
@@ -422,9 +424,9 @@ describe('drawnFrameRect', () => {
  */
 describe('the clamp stays out of the layout', () => {
   it('shrink-wraps on PAD alone, whatever the zoom is', () => {
-    const nodes = [at(0, 0), at(NODE_W + GAP, 0)];
+    const nodes = [at(0, 0), at(NODE_W + GAP_X, 0)];
     expect(fitGroupFrame(nodes)).toEqual({
-      x: -PAD, y: -PAD_TOP, w: NODE_W * 2 + GAP + PAD * 2, h: NODE_H + PAD_TOP + PAD,
+      x: -PAD, y: -PAD_TOP, w: NODE_W * 2 + GAP_X + PAD * 2, h: NODE_H + PAD_TOP + PAD,
     });
   });
 
@@ -439,5 +441,99 @@ describe('the clamp stays out of the layout', () => {
       expect({ name, zoomAware: /framePadScale|drawnFrameRect/.test(body(name)) })
         .toEqual({ name, zoomAware: false });
     }
+  });
+});
+
+/**
+ * The no-overlap floor on the VERTICAL gutter — `plan/024` Req 1, and the constraint Tam raised
+ * before a line of it was written.
+ *
+ * `headScale` grows a node's title bar as you zoom OUT and `BODY_H` is pinned, so the growth
+ * comes out of the node's world HEIGHT: a node drawn below zoom 1 is up to `HEAD_GROWTH_PX`
+ * taller than the `rect.h` it was laid out with. Nodes arranged with a comfortable gap at a
+ * working zoom therefore CLOSE that gap as you zoom out to see all of them — which is exactly
+ * when you would notice them touching.
+ *
+ * This is the test that would have caught the tightening this plan nearly shipped: `GAP_Y = 16`
+ * leaves precisely zero clearance, and anything below it overlaps.
+ *
+ * Asserted against the imported `HEAD_GROWTH_PX` rather than the literal 16, because the two
+ * constants live in different files and only one of them is obviously about the other —
+ * `canvasGeometry` already derives `HEAD_GROWTH_PX` from `canvasLayout.PAD` in the other
+ * direction, so this closes the loop.
+ */
+describe('vertical gutters clear the header growth at every zoom', () => {
+  it('GAP_Y exceeds the most a node can grow', () => {
+    expect(GAP_Y).toBeGreaterThan(HEAD_GROWTH_PX);
+    // The guard on the guard: a horizontal gutter under the same floor would be fine, and
+    // asserting it here too would quietly re-impose the constraint this split exists to remove.
+    expect(GAP_X).toBeLessThan(GAP_Y);
+  });
+
+  /**
+   * The behavioural form of the same claim, measured through the real functions rather than the
+   * constants — a `GAP_Y` that satisfied the comparison above while `arrange` used some other
+   * number would pass it and fail this.
+   */
+  it('leaves two gridded rows a positive gap at the bottom of the zoom range', () => {
+    // Four nodes → 2x2, so there is a second row to collide with.
+    const r = arrange({ groups: [{ id: 'tb-a', nodeIds: ['n1', 'n2', 'n3', 'n4'] }] });
+    const top = r.nodes['n1'];
+    const below = r.nodes['n3'];
+    expect(below.y).toBeGreaterThan(top.y); // precondition: they really are stacked
+
+    for (const z of [Z_MIN, 0.2, 0.5, 0.9, 1]) {
+      const drawnBottom = top.y + paintedNodeH(NODE_H, z, false);
+      expect(below.y - drawnBottom).toBeGreaterThan(0);
+    }
+  });
+
+  // ...and the same for the seeding path, which lays nodes out without going through `arrange`.
+  it('leaves seeded rows a positive gap too', () => {
+    const frame = { x: 0, y: 0, ...groupBoxFor(4) };
+    const placed: Rect[] = [];
+    for (let i = 0; i < 4; i++) {
+      const p = seedNodePosition(frame, placed);
+      placed.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
+    }
+    const worstDrawnH = paintedNodeH(NODE_H, Z_MIN, false);
+    for (const a of placed) {
+      for (const b of placed) {
+        if (a === b) continue;
+        const aBox = { ...a, h: worstDrawnH };
+        const bBox = { ...b, h: worstDrawnH };
+        const overlaps = !(aBox.x + aBox.w <= bBox.x || bBox.x + bBox.w <= aBox.x
+          || aBox.y + aBox.h <= bBox.y || bBox.y + bBox.h <= aBox.y);
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
+});
+
+/**
+ * `groupBoxFor` — one answer to "how big is this tab's grid", shared by `arrange` and by the
+ * seeding in `canvasSelectors`.
+ *
+ * They used to disagree: seeding handed `seedNodePosition` a fixed ONE-COLUMN box, so `perRow`
+ * came out 1 and a four-pane tab seeded as a 1x4 column while Arrange laid it out 2x2. Which
+ * layout you got depended on whether you had pressed a button.
+ */
+describe('groupBoxFor', () => {
+  it('matches the box arrange produces for the same node count', () => {
+    for (const n of [1, 2, 3, 4, 5, 9]) {
+      const ids = Array.from({ length: n }, (_, i) => `n${i}`);
+      const r = arrange({ groups: [{ id: 'tb-a', nodeIds: ids }] });
+      expect({ w: r.groups['tb-a'].w, h: r.groups['tb-a'].h }).toEqual(groupBoxFor(n));
+    }
+  });
+
+  it('is square-ish rather than one long row', () => {
+    // 4 nodes → 2 columns, not 4. The seeding regression this fixes was the 1-column case.
+    expect(groupBoxFor(4).w).toBe(PAD * 2 + NODE_W * 2 + GAP_X);
+    expect(groupBoxFor(4).h).toBe(PAD_TOP + PAD + NODE_H * 2 + GAP_Y);
+  });
+
+  it('falls back to a single-node box for an empty group', () => {
+    expect(groupBoxFor(0)).toEqual({ w: PAD * 2 + NODE_W, h: PAD_TOP + PAD + NODE_H });
   });
 });

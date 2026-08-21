@@ -15,10 +15,54 @@ import { NODE_W, NODE_H, Rect, headSlack } from './canvasGeometry';
 const LABEL_OVERHANG = 7;
 export const PAD = 16;
 export const PAD_TOP = PAD + LABEL_OVERHANG;
-/** Gutter between terminals inside a frame. */
-export const GAP = 28;
+
+/**
+ * Gutters between terminals inside a frame — one per axis, and they are NOT the same number.
+ *
+ * They used to be a single `GAP` of 28, which over-constrained the horizontal one to satisfy a
+ * floor only the vertical one has.
+ *
+ * **The vertical floor is `HEAD_GROWTH_PX`, and it is a hard one.** `headScale` grows a node's
+ * title bar as you zoom OUT, and `BODY_H` is pinned, so the growth comes out of the node's world
+ * HEIGHT: a node drawn below zoom 1 is up to `HEAD_GROWTH_PX` taller than its `rect.h` (see
+ * `paintedNodeH`). Two rows laid out `NODE_H + GAP_Y` apart therefore close to `GAP_Y -
+ * HEAD_GROWTH_PX` of clearance at the bottom of the zoom range. At 28 that leaves 12px; at 16 it
+ * would leave zero, and anything under 16 would OVERLAP — nodes arranged with a comfortable gap
+ * at a working zoom would grow into each other as you zoomed out to look at all of them, which
+ * is exactly when you would notice.
+ *
+ * Nothing grows a node's WIDTH, so `GAP_X` has no such floor and is free to be the tighter of
+ * the two. That is most of the density win: horizontal pitch is what decides how many terminals
+ * fit across the screen at a readable zoom.
+ *
+ * `canvasLayout.test.ts` asserts `GAP_Y > HEAD_GROWTH_PX` against the imported constant rather
+ * than restating it, so tightening either one fails loudly.
+ */
+export const GAP_X = 16;
+export const GAP_Y = 28;
 /** Gutter between frames. */
-export const GROUP_GAP = 90;
+export const GROUP_GAP = 48;
+
+/**
+ * How wide a row of group frames may get before it wraps to the next row.
+ *
+ * Frames used to be laid out on a cursor that only ever moved right, always at `y: 60`, so ten
+ * single-terminal tabs made a 4600px strip one frame tall — an aspect ratio no zoom shows
+ * usefully, and the real reason the canvas felt sparse.
+ *
+ * **A width budget, deliberately, and NOT `ceil(sqrt(n))` like `arrange`.** Frame positions are
+ * derived on every model build (a rect is stored only for a frame the user dragged), so a column
+ * count that depends on the total would re-flow every underived frame the moment the tab count
+ * crossed a boundary — 9 tabs to 10 would rearrange the whole canvas. `design/010` §6.4 forbids
+ * exactly that: *"Never automatic. A canvas that rearranges itself while the user is looking away
+ * destroys the spatial memory that is the entire reason for the feature."* A fixed budget is
+ * monotonic in tab order: appending a tab cannot move one already placed.
+ *
+ * Sized as four default frames and their gutters, which is a shape that fits a normal window at
+ * a zoom where the terminals are still readable. Wider frames simply take more of the row and
+ * wrap sooner; the budget is a ceiling on where a row STARTS a new frame, never a clip.
+ */
+export const FRAME_ROW_MAX_W = 4 * (PAD * 2 + NODE_W) + 3 * GROUP_GAP;
 
 /* ---- What the frame DRAWS, as opposed to what it reserves -----------------
  *
@@ -135,6 +179,28 @@ export interface ArrangeResult {
 const cols = (n: number) => Math.max(1, Math.ceil(Math.sqrt(n)));
 
 /**
+ * The box `n` terminals occupy once gridded inside a frame, padding included.
+ *
+ * Shared by `arrange` and by the seeding in `canvasSelectors.buildModel`, which used to
+ * disagree: seeding always handed `seedNodePosition` a ONE-COLUMN default box (`PAD * 2 +
+ * NODE_W`), so `perRow` came out as 1 and a four-pane tab seeded as a 1x4 vertical column ~1000px
+ * tall — while pressing Arrange on the same tab produced a 2x2. Two answers to "where do this
+ * tab's terminals go", and the one you got depended on whether you had touched the button.
+ *
+ * One function now, so a grid seeded on first sight and a grid produced by Arrange are the same
+ * grid, and the density is the same either way.
+ */
+export function groupBoxFor(n: number): { w: number; h: number } {
+  if (n <= 0) return { w: PAD * 2 + NODE_W, h: PAD_TOP + PAD + NODE_H };
+  const c = cols(n);
+  const r = Math.ceil(n / c);
+  return {
+    w: PAD * 2 + c * NODE_W + (c - 1) * GAP_X,
+    h: PAD_TOP + PAD + r * NODE_H + (r - 1) * GAP_Y,
+  };
+}
+
+/**
  * Distribute everything evenly: terminals gridded inside each frame, frames
  * gridded across the canvas, each frame centred in its cell so uneven frame
  * sizes still read as an even arrangement. Deterministic — same input, same output.
@@ -145,17 +211,13 @@ export function arrange(input: ArrangeInput): ArrangeResult {
 
   for (const g of input.groups) {
     const n = g.nodeIds.length;
-    if (!n) { size[g.id] = { w: NODE_W + PAD * 2, h: NODE_H + PAD_TOP + PAD }; continue; }
+    if (!n) { size[g.id] = groupBoxFor(0); continue; }
     const c = cols(n);
-    const r = Math.ceil(n / c);
-    size[g.id] = {
-      w: PAD * 2 + c * NODE_W + (c - 1) * GAP,
-      h: PAD_TOP + PAD + r * NODE_H + (r - 1) * GAP,
-    };
+    size[g.id] = groupBoxFor(n);
     g.nodeIds.forEach((id, i) => {
       offset[id] = {
-        x: PAD + (i % c) * (NODE_W + GAP),
-        y: PAD_TOP + Math.floor(i / c) * (NODE_H + GAP),
+        x: PAD + (i % c) * (NODE_W + GAP_X),
+        y: PAD_TOP + Math.floor(i / c) * (NODE_H + GAP_Y),
       };
     });
   }
@@ -191,12 +253,12 @@ export function arrange(input: ArrangeInput): ArrangeResult {
 
 /** First free grid slot inside a frame — used when a terminal first appears. */
 export function seedNodePosition(frame: Rect, taken: Rect[]): { x: number; y: number } {
-  const perRow = Math.max(1, Math.floor((frame.w - PAD * 2 + GAP) / (NODE_W + GAP)));
+  const perRow = Math.max(1, Math.floor((frame.w - PAD * 2 + GAP_X) / (NODE_W + GAP_X)));
   const overlaps = (x: number, y: number) =>
     taken.some((t) => !(x + NODE_W <= t.x || t.x + t.w <= x || y + NODE_H <= t.y || t.y + t.h <= y));
   for (let i = 0; i < taken.length + perRow + 1; i++) {
-    const x = frame.x + PAD + (i % perRow) * (NODE_W + GAP);
-    const y = frame.y + PAD_TOP + Math.floor(i / perRow) * (NODE_H + GAP);
+    const x = frame.x + PAD + (i % perRow) * (NODE_W + GAP_X);
+    const y = frame.y + PAD_TOP + Math.floor(i / perRow) * (NODE_H + GAP_Y);
     if (!overlaps(x, y)) return { x, y };
   }
   return { x: frame.x + PAD, y: frame.y + PAD_TOP };

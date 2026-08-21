@@ -1,9 +1,23 @@
 import { NODE_W, NODE_H, Rect } from './canvasGeometry';
 
-/** How far from the caller's centre the first ring sits. */
-const RADIUS = NODE_W + 90;
-/** Vertical breathing room between rings and in the fallback column. */
-const GAP = 40;
+/**
+ * How far from the caller's centre the first ring sits.
+ *
+ * Centre-to-centre, so the edge-to-edge gap at 0° is `RADIUS - NODE_W`. Tightened from `+90` to
+ * `+40` (`plan/024` Req 1): the fan is the placement a user sees most, since it is what both a
+ * port drag and an MCP `create_terminal` produce, and at +90 a caller and the terminal it spawned
+ * could not be read side by side at any useful zoom.
+ */
+const RADIUS = NODE_W + 40;
+/**
+ * Breathing room between rings and in the fallback column.
+ *
+ * A ring is `NODE_H + GAP` further out than the last, so this is a VERTICAL clearance for the
+ * angles near ±80° and is floored by the same rule as `canvasLayout.GAP_Y`: a node drawn below
+ * zoom 1 is up to `HEAD_GROWTH_PX` (16) taller than its rect, so 24 leaves 8px rather than the
+ * overlap that 16 or less would produce. Tightened from 40, not to 16.
+ */
+const GAP = 24;
 /** Fan across ±80° so a run of spawns stays readable rather than stacking. */
 const ANGLES = [0, -28, 28, -55, 55, -80, 80];
 const RINGS = 4;

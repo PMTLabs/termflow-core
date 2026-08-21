@@ -9,7 +9,9 @@ import {
   NODE_W, NODE_H, CHIP_H, CULL_MARGIN, T_GPU, T_SNAP, Z_MIN, MIN_TITLE_PX,
   LodTier, Rect, Viewport, isVisible,
 } from './canvasGeometry';
-import { fitGroupFrame, seedNodePosition, PAD, PAD_TOP, GROUP_GAP } from './canvasLayout';
+import {
+  fitGroupFrame, seedNodePosition, groupBoxFor, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W,
+} from './canvasLayout';
 import { isVirtualTab } from '../../services/tabKinds';
 import type { NodeInfoPayload } from '../../services/canvasGraph';
 
@@ -156,10 +158,34 @@ function buildModel(
   // one boolean per tab and fanning that back out onto every node in it.
   const running = new Set(runningTerminalIds);
 
-  let frameCursorX = 60;
-  for (const rect of Object.values(storedGroups)) {
-    frameCursorX = Math.max(frameCursorX, rect.x + rect.w + GROUP_GAP);
-  }
+  /**
+   * The seeding cursor for frames that have no stored rect (`plan/024` Req 1).
+   *
+   * It used to move only right, always at `y: 60`, so a workspace of ten single-terminal tabs
+   * laid out as a 4600px strip one frame tall. It now wraps at `FRAME_ROW_MAX_W`.
+   *
+   * Two properties this has to keep, both of which the obvious `ceil(sqrt(n))` grid loses:
+   *
+   *  - **Appending a tab never moves a frame already placed.** Frame rects are DERIVED on every
+   *    build (only a dragged frame is stored), so a column count computed from the total would
+   *    re-flow the whole canvas each time the count crossed a boundary. `design/010` §6.4:
+   *    a canvas that rearranges itself while you are looking away destroys the spatial memory
+   *    that is the point of the feature. A row cursor depends only on the frames before it.
+   *  - **Rows advance by what a frame DRAWS, not by the box it was seeded from.** The seed box
+   *    is `groupBoxFor(n)`, but the frame that ends up on screen is shrink-wrapped from the
+   *    nodes (see the derivation below) and a stored node rect can put it anywhere. Advancing on
+   *    the seed box would let a tall frame reach straight through the row beneath it.
+   *
+   * `rowStartX` is pushed clear of any STORED frame, exactly as the old cursor was: a dragged
+   * frame is somewhere the user chose, and seeding into it would bury their arrangement.
+   */
+  const rowStartX = Object.values(storedGroups).reduce(
+    (x, rect) => Math.max(x, rect.x + rect.w + GROUP_GAP),
+    60,
+  );
+  let frameCursorX = rowStartX;
+  let frameCursorY = 60;
+  let rowMaxH = 0;
 
   for (const tab of tabs) {
     // Settings and the canvas tab itself are screens, not workspaces. They have no pane
@@ -183,13 +209,28 @@ function buildModel(
       continue;
     }
 
+    // The seed box is sized for the terminals it is about to hold, via the same function
+    // `arrange` uses. It used to be a fixed one-column box, which made `seedNodePosition`
+    // compute `perRow = 1` and stack a four-pane tab as a 1x4 column ~1000px tall — while
+    // Arrange laid the same tab out as a 2x2. Same grid either way now.
+    const seedBox = groupBoxFor(paneLeaves.length);
+    // Wrap BEFORE placing, on the box about to be placed, so the decision uses a width that is
+    // known. Never wrap a row that has not placed anything yet: a frame wider than the whole
+    // budget would otherwise start on an empty row below and leave a hole above it.
+    if (!storedGroups[tab.id]
+      && frameCursorX > rowStartX
+      && frameCursorX + seedBox.w > rowStartX + FRAME_ROW_MAX_W) {
+      frameCursorX = rowStartX;
+      frameCursorY += rowMaxH + GROUP_GAP;
+      rowMaxH = 0;
+    }
+
     const frame: Rect = storedGroups[tab.id] ?? {
       x: frameCursorX,
-      y: 60,
-      w: PAD * 2 + NODE_W,
-      h: PAD_TOP + PAD + NODE_H,
+      y: frameCursorY,
+      w: seedBox.w,
+      h: seedBox.h,
     };
-    if (!storedGroups[tab.id]) frameCursorX = frame.x + frame.w + GROUP_GAP;
 
     // Two passes, deliberately. Every STORED rect is claimed before anything is
     // seeded, so a freshly split pane cannot be seeded into a slot a terminal
@@ -238,15 +279,24 @@ function buildModel(
     // it agrees with `arrange`, whose group rects are exactly this shrink-wrap. The
     // consequence for Task 12: dragging a group must move its NODES; writing only
     // the group rect through `setGroupGeom` would be silently discarded here.
+    const drawnFrame = fitGroupFrame(placed) ?? frame;
     groups.push({
       tabId: tab.id,
       title: tab.title,
-      rect: fitGroupFrame(placed) ?? frame,
+      rect: drawnFrame,
       nodeIds,
       // Any MEMBER terminal running (Req 8) — strictly more accurate than the old
       // tab.isRunning proxy, and still the same field/meaning to a reader.
       anyRunning: nodeIds.some((nid) => running.has(nid)),
     });
+
+    // Advance the seeding cursor on the frame that will actually be DRAWN, not on the box it
+    // was seeded from. The two differ whenever a node carries a stored rect, and the drawn one
+    // is the only one that can collide with the row below.
+    if (!storedGroups[tab.id]) {
+      frameCursorX = drawnFrame.x + drawnFrame.w + GROUP_GAP;
+      rowMaxH = Math.max(rowMaxH, drawnFrame.h);
+    }
   }
 
   return { nodes, groups };

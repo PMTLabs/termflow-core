@@ -23,7 +23,7 @@ import { CanvasSidebar, ROW_FLY_ZOOM } from '../CanvasSidebar';
 import { centreOn, FLY_MS } from '../viewportStyles';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { DEFAULT_METRICS, NODE_W, NODE_H, Rect } from '../canvasGeometry';
-import { fitGroupFrame, GAP } from '../canvasLayout';
+import { fitGroupFrame, GAP_X } from '../canvasLayout';
 import { findPaneIdByTerminalId as findLeaf } from '../canvasMutations';
 import type { CanvasModel, CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
 
@@ -518,7 +518,7 @@ describe('CanvasSidebar — drag and resize', () => {
     expect(placed.every(Boolean)).toBe(true);
     // Side by side on one row, at the frame's own padding — a grid, not two coincidences.
     expect(placed[0].y).toBe(placed[1].y);
-    expect(Math.abs(placed[1].x - placed[0].x)).toBe(NODE_W + GAP);
+    expect(Math.abs(placed[1].x - placed[0].x)).toBe(NODE_W + GAP_X);
     expect(canvas().groups['tb-b']).toEqual(fitGroupFrame(placed));
   });
 
