@@ -3,7 +3,7 @@ import type { CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
 
 const rect = { x: 0, y: 0, w: 340, h: 210 };
 const node = (id: string, tabId: string, title: string, shellType = 'zsh'): CanvasNodeModel =>
-  ({ terminalId: id, tabId, paneId: `pn-${id}`, title, shellType, rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group' });
+  ({ terminalId: id, tabId, paneId: `pn-${id}`, title, shellType, rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false });
 const group = (tabId: string, title: string, nodeIds: string[]): CanvasGroupModel =>
   ({ tabId, title, rect, nodeIds, anyRunning: false });
 

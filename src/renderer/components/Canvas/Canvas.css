@@ -136,9 +136,6 @@
   background: var(--bg-secondary, #2d2d30);
   color: var(--text-primary, #cccccc);
 }
-.canvas-node.selected { outline-color: var(--accent-color, #007acc); }
-.canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
-.canvas-node.dimmed { opacity: .26; }
 /* A node whose shell session has ENDED (`plan/024` Req 4).
 
    Deliberately NOT `.dimmed`. That class belongs to the search/"near" highlight set, and
@@ -152,7 +149,14 @@
    low, and a faded node at canvas scale would be unreadable rather than merely quiet.
 
    Applies at every tier including chip: zoomed out is exactly where you scan for which
-   terminals are still alive, and the chip tier is the one with no other cue (`plan/023` D2). */
+   terminals are still alive, and the chip tier is the one with no other cue (`plan/023` D2).
+
+   DECLARED BEFORE `.selected` / `.focused` / `.overlaid`, and the order is load-bearing: all
+   four are `.canvas-node.x`, so they have identical specificity and the LAST one wins. Declared
+   after them, `ended` repainted the outline of any node you selected or focused, so clicking a
+   dead terminal gave no selection feedback at all — the one cue that says the click landed.
+   A transient interaction state must outrank a durable status; `ended` still shows on every node
+   that is neither selected nor focused, which is all of them but one. */
 .canvas-node.ended { outline-color: var(--border-color, #3e3e42); }
 .canvas-node.ended .canvas-node-head { background: var(--bg-secondary, #2d2d30); }
 .canvas-node.ended .canvas-node-title { color: var(--text-tertiary, #666666); font-style: italic; }
@@ -167,6 +171,9 @@
   pointer-events: none;
   z-index: 2;
 }
+.canvas-node.selected { outline-color: var(--accent-color, #007acc); }
+.canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
+.canvas-node.dimmed { opacity: .26; }
 /* The header is TWO elements on purpose. The outer one is the layout box, and its height is
    set per node from `headScale(zoom)` so the bar stops growing once it has reached its natural
    size. The inner one holds the contents at their natural size and is scaled as a single

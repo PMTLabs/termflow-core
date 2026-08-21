@@ -20,6 +20,7 @@ import { unionKeepSet } from './sessionKeepSet';
 import { sweepOrphanSessions } from './sessionOrphans';
 import { CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, hydrateCanvas } from '../store/slices/canvasSlice';
 import { canvasTabFirst } from './tabKinds';
+import { clearAllSessionClosed } from '../store/slices/sessionExitSlice';
 import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
 
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
@@ -870,6 +871,11 @@ class StateManagerClass {
     // background tab's tree live in Redux with no tab able to render or close
     // it — re-review 111 finding 4.
     dispatch(resetPanes());
+    // ...and every session-closed record with them (`plan/024` Req 4). The per-terminal close
+    // paths (PaneManager, TabManager) clear one entry each, but this path discards the whole
+    // workspace WITHOUT going through either — so without this, loading a layout would strand
+    // an entry for every terminal that had exited under the previous one.
+    dispatch(clearAllSessionClosed());
   }
 
   /**

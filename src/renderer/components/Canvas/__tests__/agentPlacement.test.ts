@@ -90,7 +90,7 @@ describe('arcPlacement', () => {
 
 const node = (terminalId: string, rect: Rect) => ({
   terminalId, tabId: 'tb-a', paneId: `p-${terminalId}`, title: terminalId,
-  shellType: 'pwsh', rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
+  shellType: 'pwsh', rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
 });
 const model = (...nodes: ReturnType<typeof node>[]): CanvasModel => ({
   nodes,

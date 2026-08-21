@@ -35,7 +35,7 @@ jest.mock('../../../services/canvasGraph', () => ({
 
 const node = (terminalId: string, x: number) => ({
   terminalId, tabId: 'tb-1', paneId: `pn-${terminalId}`, title: terminalId, shellType: 'zsh',
-  rect: { x, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
+  rect: { x, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
 });
 
 const MODEL: CanvasModel = {

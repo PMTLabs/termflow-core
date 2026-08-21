@@ -563,8 +563,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // While the banner is up, Ctrl+R restarts in place. The binding itself now lives in
   // `useRestartHotkey`, shared with the Canvas overlay so the hint the banner prints means the
   // same thing on both surfaces (`plan/024` Req 4).
-  const restartHotkeyCb = useCallback(() => { void handleRestart(); }, [handleRestart]);
-  useRestartHotkey(paneRef, !!closedInfo, restartHotkeyCb);
+  const restartSessionCb = useCallback(() => { void handleRestart(); }, [handleRestart]);
+  useRestartHotkey(paneRef, !!closedInfo, restartSessionCb);
 
   const handleSplitHorizontal = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -759,7 +759,14 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               // session-closed banner and act on it (`plan/024` Req 4). The pane keeps the only
               // implementation — a restart needs the profile, the cwd the shell died in and the
               // migrated session key, none of which the canvas has.
-              onRestartSession={() => { void handleRestart(); }}
+              // MEMOISED, never an inline arrow. `TerminalDisplay` wraps this in a
+              // `useCallback` keyed on the prop itself and publishes the result into
+              // `surfaceChrome`, whose `same()` compares callbacks BY REFERENCE — so a fresh
+              // arrow each render makes every publish look like a change, and every canvas node
+              // re-renders on every render of this pane. That is the exact regression
+              // `surfaceChrome`'s "writes are NO-OPS when nothing observable changed" rule
+              // exists to prevent.
+              onRestartSession={restartSessionCb}
               onDismissSessionClosed={handleDismissBanner}
               onData={(data: string) => {
                 // Send data to PTY through terminal service

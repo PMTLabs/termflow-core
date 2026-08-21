@@ -64,6 +64,7 @@ const node0: CanvasNodeModel = {
   shellType: 'zsh',
   rect: { x: 0, y: 0, w: 340, h: 210 },
   isRunning: false,
+  hasUnseenOutput: false,
   exited: false,
 };
 

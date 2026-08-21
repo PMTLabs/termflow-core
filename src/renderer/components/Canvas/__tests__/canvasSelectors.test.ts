@@ -293,8 +293,8 @@ describe('chip fly-to zooms', () => {
 
 describe('visibleNodeIds', () => {
   const mk = (id: string, x: number, y: number): CanvasNodeModel => ({
-    terminalId: id, tabId: 'tb-a', title: id, shellType: 'zsh',
-    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
+    terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: 'zsh',
+    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const vp: Viewport = { x: 0, y: 0, z: 1 };
 
@@ -381,8 +381,8 @@ describe('labelMaxWidth', () => {
 
 describe('allCollapsed', () => {
   const n = (id: string): CanvasNodeModel => ({
-    terminalId: id, tabId: 'tb-a', title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
+    terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const tiers = (m: Record<string, LodTier>) => m;
 
@@ -472,7 +472,7 @@ describe('chipLabelScreenPx', () => {
 describe('snapshotNodeIds', () => {
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group',
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const nodes = [n('a'), n('b'), n('c')];
   const all = new Set(['a', 'b', 'c']);

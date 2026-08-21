@@ -463,3 +463,60 @@ describe('the surface is lifted, not letterboxed', () => {
     expect(surface).not.toMatch(/(?<![\w-])border\s*:/);
   });
 });
+
+/**
+ * DECLARATION ORDER between the node's state classes — and it is a correctness rule, not style.
+ *
+ * `.canvas-node.selected`, `.focused`, `.overlaid` and `.ended` all set `outline-color` and all
+ * have identical specificity (`0,2,0`), so the cascade decides by ORDER ALONE: the last one
+ * declared wins. `plan/024` Req 4 added `.ended` and put it after `.selected`/`.focused`, which
+ * meant selecting or focusing a dead terminal repainted its outline to the muted grey — the node
+ * gave no feedback that the click had landed at all.
+ *
+ * The rule: a TRANSIENT INTERACTION state must outrank a DURABLE STATUS. You are looking at the
+ * selection because you just acted; `ended` is true of the node all day and still shows on every
+ * node that is neither selected nor focused, which is all of them but one.
+ *
+ * Tested against the source order because nothing else can see it. jsdom applies no stylesheet,
+ * so every rendering test passes either way, and the whole 150-suite run did.
+ */
+describe('node state classes are declared in cascade order', () => {
+  /** Index of a rule in declaration order, so "declared before" is expressible. */
+  const indexOf = (selector: string): number => {
+    const i = rules().findIndex((r) => r.selector === selector);
+    if (i === -1) throw new Error(`no rule for ${selector} — its subject moved or was renamed`);
+    return i;
+  };
+
+  // Every pair asserted, not just the one that regressed: the defect is the ORDERING RULE, and a
+  // fix that only moved `ended` above `selected` would leave `focused` broken in exactly the same
+  // way. Both of these set `outline-color`, which is what makes them collide.
+  it.each([
+    ['.canvas-node.selected'],
+    ['.canvas-node.focused'],
+    ['.canvas-node.overlaid'],
+  ])('%s wins over .canvas-node.ended', (interaction) => {
+    expect(indexOf('.canvas-node.ended')).toBeLessThan(indexOf(interaction));
+  });
+
+  /**
+   * The guard on the guard: the ordering above only means anything while all four really do set
+   * the same property. If `ended` stopped setting `outline-color`, every assertion above would
+   * be vacuously true and this suite would keep passing while saying nothing.
+   *
+   * Checked across EVERY rule carrying the selector, not just the first. `.canvas-node.overlaid`
+   * is declared twice — a block of overlay geometry, and a one-liner for the outline — so a
+   * first-match lookup reads the wrong one and reports it as not setting the property at all.
+   */
+  const setsOutlineColor = (selector: string): boolean =>
+    rules().filter((r) => r.selector === selector).some((r) => r.body.includes('outline-color'));
+
+  it.each([
+    ['.canvas-node.ended'],
+    ['.canvas-node.selected'],
+    ['.canvas-node.focused'],
+    ['.canvas-node.overlaid'],
+  ])('%s actually sets outline-color, so the order above is not vacuous', (selector) => {
+    expect(setsOutlineColor(selector)).toBe(true);
+  });
+});
