@@ -7,6 +7,9 @@
 //! - `timeout_secs` is bounded and the deadline uses checked arithmetic, so a
 //!   token-bearing peer cannot overflow-panic the sidecar.
 //! - On a GUI disconnect while NOT armed, all sessions are dropped → TearDown.
+//! - An arm is spent by the first frame received on a connection, so it can
+//!   never outlive the GUI-absence it was set for. Keyed on a frame rather than
+//!   on accept: a peer that connects and never speaks has adopted nothing.
 //! - `Attach` replay/live-enable/exit-reemit is fully delegated to
 //!   `Session::attach`, which does it atomically under the ring lock.
 
@@ -205,7 +208,11 @@ impl SessionManager {
         }
     }
 
-    /// A GUI just connected. Release any arm that predates this connection.
+    /// A GUI has made itself heard on this connection. Release any arm that
+    /// predates it.
+    ///
+    /// Called on the connection's FIRST RECEIVED FRAME, not on accept — opening
+    /// the endpoint proves nothing about who is there (see `run_connection`).
     ///
     /// An arm is always set for a specific absence: an update or offload that
     /// armed and then exited, or a sibling arming us before its own update. A
