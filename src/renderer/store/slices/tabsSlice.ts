@@ -69,7 +69,7 @@ const tabsSlice = createSlice({
   name: 'tabs',
   initialState,
   reducers: {
-    addTab: (state, action: PayloadAction<Omit<Tab, 'isActive'> & { isActive?: boolean; insertAfterId?: string }>) => {
+    addTab: (state, action: PayloadAction<Omit<Tab, 'isActive'> & { isActive?: boolean; insertAfterId?: string; insertAtStart?: boolean }>) => {
       // Check if we're explicitly setting isActive (e.g., during restore)
       const shouldActivate = action.payload.isActive !== false;
 
@@ -78,19 +78,23 @@ const tabsSlice = createSlice({
         state.tabs.forEach(tab => tab.isActive = false);
       }
 
-      // Add new tab (strip the transient insertAfterId — it's not part of Tab state)
-      const { insertAfterId, ...tabFields } = action.payload;
+      // Add new tab (strip the transient placement hints — neither is part of Tab state)
+      const { insertAfterId, insertAtStart, ...tabFields } = action.payload;
       const newTab: Tab = {
         ...tabFields,
         isActive: shouldActivate,
       };
 
-      // Insert immediately after the given tab (its right neighbour) when
-      // requested and found; otherwise append to the end.
+      // Three placements, in precedence order. `insertAtStart` wins over `insertAfterId`
+      // because it is the more specific request: "first" is a position, while "after X" is a
+      // relationship that a caller asking for both has already contradicted.
       const insertIndex = insertAfterId
         ? state.tabs.findIndex(tab => tab.id === insertAfterId)
         : -1;
-      if (insertIndex !== -1) {
+      if (insertAtStart) {
+        state.tabs.unshift(newTab);
+      } else if (insertIndex !== -1) {
+        // Insert immediately after the given tab (its right neighbour).
         state.tabs.splice(insertIndex + 1, 0, newTab);
       } else {
         state.tabs.push(newTab);

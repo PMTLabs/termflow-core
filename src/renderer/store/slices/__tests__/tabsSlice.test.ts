@@ -347,3 +347,57 @@ describe('tabsSlice addTab insertAfterId (context-menu "New Tab" insert-after)',
     expect((next.tabs.find(t => t.id === 'tb-y') as Record<string, unknown>).insertAfterId).toBeUndefined();
   });
 });
+
+/**
+ * `addTab insertAtStart` — the placement Canvas Mode needs (`plan/024` Req 3).
+ *
+ * `insertAfterId` cannot express "first": there is no tab to be after. The reducer therefore
+ * grew a third placement rather than a sentinel, and the case that matters is the one where
+ * both hints arrive at once — a caller that asks for two contradictory positions has to get a
+ * defined one, not whichever branch happens to be written first.
+ */
+describe('tabsSlice addTab insertAtStart (Canvas Mode takes the first position)', () => {
+  const threeTabs = () => {
+    let state = stateWithTwoTabs();
+    state = tabsReducer(state, addTab({ id: 'tb-3', title: 'C', shellType: 'default' }));
+    return state;
+  };
+  const ids = (s: ReturnType<typeof tabsReducer>) => s.tabs.map(t => t.id);
+
+  it('puts the new tab at the front and activates it', () => {
+    const next = tabsReducer(threeTabs(), addTab({ id: 'tb-new', title: 'N', shellType: 'default', insertAtStart: true }));
+    expect(ids(next)).toEqual(['tb-new', 'tb-1', 'tb-2', 'tb-3']);
+    expect(next.activeTabId).toBe('tb-new');
+  });
+
+  it('still appends when insertAtStart is false or omitted', () => {
+    expect(ids(tabsReducer(threeTabs(), addTab({ id: 'tb-a', title: 'A', shellType: 'default', insertAtStart: false }))))
+      .toEqual(['tb-1', 'tb-2', 'tb-3', 'tb-a']);
+    expect(ids(tabsReducer(threeTabs(), addTab({ id: 'tb-b', title: 'B', shellType: 'default' }))))
+      .toEqual(['tb-1', 'tb-2', 'tb-3', 'tb-b']);
+  });
+
+  // Precedence, stated in the reducer and pinned here: "first" is a position, "after X" is a
+  // relationship, and a caller passing both has already contradicted itself.
+  it('wins over insertAfterId when both are supplied', () => {
+    const next = tabsReducer(threeTabs(), addTab({
+      id: 'tb-new', title: 'N', shellType: 'default', insertAtStart: true, insertAfterId: 'tb-2',
+    }));
+    expect(ids(next)).toEqual(['tb-new', 'tb-1', 'tb-2', 'tb-3']);
+  });
+
+  it('does not persist insertAtStart onto the stored Tab object', () => {
+    const next = tabsReducer(threeTabs(), addTab({ id: 'tb-y', title: 'Y', shellType: 'default', insertAtStart: true }));
+    expect((next.tabs.find(t => t.id === 'tb-y') as Record<string, unknown>).insertAtStart).toBeUndefined();
+  });
+
+  // The restore path adds tabs with isActive:false; front-insertion must not smuggle activation in.
+  it('respects isActive:false, as the restore path relies on', () => {
+    const next = tabsReducer(threeTabs(), addTab({
+      id: 'tb-r', title: 'R', shellType: 'default', insertAtStart: true, isActive: false,
+    }));
+    expect(ids(next)[0]).toBe('tb-r');
+    expect(next.tabs.find(t => t.id === 'tb-r')?.isActive).toBe(false);
+    expect(next.activeTabId).toBe('tb-3');
+  });
+});

@@ -19,6 +19,7 @@ import { sessionStateKey, isSlotZero } from './windowScope';
 import { unionKeepSet } from './sessionKeepSet';
 import { sweepOrphanSessions } from './sessionOrphans';
 import { CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, hydrateCanvas } from '../store/slices/canvasSlice';
+import { canvasTabFirst } from './tabKinds';
 import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
 
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
@@ -377,10 +378,18 @@ class StateManagerClass {
           restoreTabPanesInPlace(appState.tabPanes);
         }
 
+        // The canvas tab restores FIRST, wherever it was persisted (`plan/024` Req 3).
+        //
+        // `openCanvasTab` puts it at the front on every open, and a restore that replayed the
+        // saved order would be the one path that quietly disagrees — the position is only worth
+        // having if it survives a restart, which is exactly when a workspace tab is looked for.
+        // The rule itself is in `tabKinds`, with `openCanvasTab`'s.
+        const restoreOrder = canvasTabFirst(appState.tabs);
+
         // Add all tabs first without making them active
-        for (let i = 0; i < appState.tabs.length; i++) {
-          const tab = appState.tabs[i];
-          console.log(`Restoring tab ${i + 1}/${appState.tabs.length}: ${tab.id} - ${tab.title}`);
+        for (let i = 0; i < restoreOrder.length; i++) {
+          const tab = restoreOrder[i];
+          console.log(`Restoring tab ${i + 1}/${restoreOrder.length}: ${tab.id} - ${tab.title}`);
 
           // processId and transient live-status flags are already cleared by
           // sanitizeLayoutData; just ensure the tab isn't marked active here (the

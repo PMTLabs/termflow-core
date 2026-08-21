@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { isVirtualTab, SETTINGS_SHELL_TYPE, CANVAS_SHELL_TYPE } from '../tabKinds';
+import { isVirtualTab, canvasTabFirst, SETTINGS_SHELL_TYPE, CANVAS_SHELL_TYPE } from '../tabKinds';
 import { readSource } from '../../utils/readSource';
 
 describe('isVirtualTab', () => {
@@ -92,5 +92,55 @@ describe('nothing compares shellType to a bare string literal', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * `canvasTabFirst` — the restore half of `plan/024` Req 3.
+ *
+ * Its sibling `moveCanvasTabFirst` (openCanvas) is covered by `openCanvas.test.ts`. What is
+ * unique here is the guarantee the partition buys and a comparator would not: EVERY OTHER TAB
+ * KEEPS ITS RELATIVE ORDER. A restore that reshuffled the strip while moving the canvas would
+ * be a far worse bug than the one this fixes.
+ */
+describe('canvasTabFirst', () => {
+  const t = (id: string, shellType?: string) => ({ id, shellType });
+  const ids = (list: { id: string }[]) => list.map((x) => x.id);
+
+  it('moves the canvas tab to the front from anywhere in the list', () => {
+    const out = canvasTabFirst([t('a', 'bash'), t('b', 'zsh'), t('c', CANVAS_SHELL_TYPE)]);
+    expect(ids(out)).toEqual(['c', 'a', 'b']);
+  });
+
+  it('leaves every other tab in its original relative order', () => {
+    const out = canvasTabFirst([
+      t('a', 'bash'), t('b', 'zsh'), t('c', CANVAS_SHELL_TYPE), t('d', 'bash'), t('e', 'pwsh'),
+    ]);
+    expect(ids(out)).toEqual(['c', 'a', 'b', 'd', 'e']);
+  });
+
+  it('is a no-op when the canvas tab is already first', () => {
+    const out = canvasTabFirst([t('c', CANVAS_SHELL_TYPE), t('a', 'bash')]);
+    expect(ids(out)).toEqual(['c', 'a']);
+  });
+
+  it('leaves a strip with no canvas tab untouched', () => {
+    const out = canvasTabFirst([t('a', 'bash'), t('b', 'zsh')]);
+    expect(ids(out)).toEqual(['a', 'b']);
+  });
+
+  // Settings is the other virtual tab and it is deliberately NOT moved (plan/024 §3.2): the
+  // canvas is a place you return to, Settings is an errand you finish. A `isVirtualTab` check
+  // here instead of a canvas check would pass every case above and fail this one.
+  it('does not move the Settings tab', () => {
+    const out = canvasTabFirst([t('a', 'bash'), t('s', SETTINGS_SHELL_TYPE), t('c', CANVAS_SHELL_TYPE)]);
+    expect(ids(out)).toEqual(['c', 'a', 's']);
+  });
+
+  it('does not mutate the array it was given', () => {
+    const input = [t('a', 'bash'), t('c', CANVAS_SHELL_TYPE)];
+    const before = ids(input);
+    canvasTabFirst(input);
+    expect(ids(input)).toEqual(before);
   });
 });

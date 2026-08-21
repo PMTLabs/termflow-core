@@ -29,3 +29,30 @@ const VIRTUAL_SHELL_TYPES: ReadonlySet<string> = new Set([
 export function isVirtualTab(shellType: string | null | undefined): boolean {
   return !!shellType && VIRTUAL_SHELL_TYPES.has(shellType);
 }
+
+/**
+ * The same list with the canvas tab moved to the front (`plan/024` Req 3).
+ *
+ * `openCanvasTab` puts the canvas first on every open, and session restore has to agree or the
+ * position lasts exactly until the next restart — which is precisely when a workspace overview
+ * is looked for.
+ *
+ * This is the RESTORE half. Its sibling is `moveCanvasTabFirst` in `openCanvas`, which does the
+ * same thing to the live strip through `reorderTabs`; the two cannot share an implementation
+ * (one orders a plain list, the other dispatches a move) so they are cross-referenced instead.
+ * Change one, read the other.
+ *
+ * Lives here rather than in `openCanvas` because this is the module that owns "which tab is the
+ * canvas", and because `StateManager` must be able to ask without importing the live store.
+ *
+ * Partitioned rather than sorted: `filter` preserves relative order within each part by
+ * construction, so no ordinary tab moves relative to any other — a comparator would need that
+ * property argued from `Array.sort`'s stability instead of being obvious. Returns a NEW array;
+ * the caller's is untouched.
+ */
+export function canvasTabFirst<T extends { shellType?: string | null }>(tabs: readonly T[]): T[] {
+  return [
+    ...tabs.filter((t) => t?.shellType === CANVAS_SHELL_TYPE),
+    ...tabs.filter((t) => t?.shellType !== CANVAS_SHELL_TYPE),
+  ];
+}
