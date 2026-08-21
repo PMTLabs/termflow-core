@@ -136,6 +136,41 @@
   background: var(--bg-secondary, #2d2d30);
   color: var(--text-primary, #cccccc);
 }
+/* A node whose shell session has ENDED (`plan/024` Req 4).
+
+   Deliberately NOT `.dimmed`. That class belongs to the search/"near" highlight set, and
+   overloading it would make a search dim an ended node twice over and make an ended node look
+   like a search miss — two unrelated facts saying the same thing on screen.
+
+   The treatment is the app's existing ended-session language rather than a new token: the same
+   `--ended-wash` the pane overlay uses, plus a muted border and title, so a dead terminal reads
+   as dead in the same way wherever you meet it. Opacity is left alone on purpose — the point of
+   the wash is that prior output stays INSPECTABLE, which is the same reason the pane's alpha is
+   low, and a faded node at canvas scale would be unreadable rather than merely quiet.
+
+   Applies at every tier including chip: zoomed out is exactly where you scan for which
+   terminals are still alive, and the chip tier is the one with no other cue (`plan/023` D2).
+
+   DECLARED BEFORE `.selected` / `.focused` / `.overlaid`, and the order is load-bearing: all
+   four are `.canvas-node.x`, so they have identical specificity and the LAST one wins. Declared
+   after them, `ended` repainted the outline of any node you selected or focused, so clicking a
+   dead terminal gave no selection feedback at all — the one cue that says the click landed.
+   A transient interaction state must outrank a durable status; `ended` still shows on every node
+   that is neither selected nor focused, which is all of them but one. */
+.canvas-node.ended { outline-color: var(--border-color, #3e3e42); }
+.canvas-node.ended .canvas-node-head { background: var(--bg-secondary, #2d2d30); }
+.canvas-node.ended .canvas-node-title { color: var(--text-tertiary, #666666); font-style: italic; }
+/* Above the surface, like the pane's own overlay: xterm paints its own character grid, so
+   tinting the body's background would colour only the padding slack and leave the content —
+   the thing that has to look different — untouched. */
+.canvas-node.ended .canvas-node-body::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-color: var(--ended-wash, rgba(128, 128, 128, 0.13));
+  pointer-events: none;
+  z-index: 2;
+}
 .canvas-node.selected { outline-color: var(--accent-color, #007acc); }
 .canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
 .canvas-node.dimmed { opacity: .26; }
@@ -147,6 +182,14 @@
 .canvas-node-head { height: var(--canvas-head-h, 29px); flex: none; border-bottom: var(--node-divider-w) solid var(--border-color, #3e3e42); border-radius: var(--node-radius) var(--node-radius) 0 0; background: var(--bg-primary, #141414); cursor: move; position: relative; isolation: isolate; overflow: hidden; }
 .canvas-node-head-inner { display: flex; align-items: center; gap: 7px; padding: 0 8px; height: 100%; font-size: 12px; transform-origin: 0 0; }
 .canvas-node-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; z-index: 1; }
+/* The group chip (`plan/024` Req 5), overlay only. Borrows the agent chip's metrics so the
+   header's three badges read as one family, and differs exactly where the meaning differs: this
+   is a STATIC fact about where the terminal lives, so it is drawn in the muted border/secondary
+   palette rather than the accent one the agent chip uses for what is running right now. Muted
+   also keeps it from competing with the title it sits beside, which is the thing being read.
+   `flex: none` + `max-width` + ellipsis for the same reason as the agent chip: a long tab title
+   must shrink itself, never push the header's buttons out of the node. */
+.canvas-node-group { flex: none; max-width: 34%; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-secondary, #9a9a9a); border: 1px solid var(--border-color, #3e3e42); border-radius: 999px; padding: 1px 6px; position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
 /* The agent/CLI chip (item 6). Shares the shell badge's metrics so the two sit as a pair, and
    differs only where the difference carries meaning: it is ACCENT-coloured and pill-shaped

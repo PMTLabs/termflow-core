@@ -31,6 +31,26 @@ export const STARTUP_COOLDOWN_MS = 3000; // on app start/restore, ignore output 
                                        // a synchronized burst like a reconnect. Nothing was
                                        // "missed" on a fresh start, so this output must not
                                        // ring the unseen bell on the inactive restored tabs.
+/**
+ * After a terminal's PTY is FIRST spawned, its own output must not ring that terminal's unseen
+ * bell for this long.
+ *
+ * `STARTUP_COOLDOWN_MS` above already states this fact — "every shell prints its prompt/banner
+ * ... Nothing was 'missed' on a fresh start" — but it only ever applied to the shells that spawn
+ * during app start/restore, because that is the one moment the tracker itself starts. A shell
+ * spawned later prints exactly the same banner for exactly the same reason, and rang the bell
+ * for it. Two ways to see it, both reported from live use:
+ *
+ *  - open several tabs in a row: each new tab is active only until the next one is opened, so
+ *    every shell whose banner lands after the user moved on notifies about its own startup;
+ *  - spawn nodes in Canvas Mode, where the CANVAS tab stays active and no terminal tab is ever
+ *    the active one — so every single new shell notifies, with the user watching it appear.
+ *
+ * The SAME number as the startup grace, deliberately, and not a second tunable: both answer the
+ * one question "how long does a shell take to print its prompt", and a copy of a number is a
+ * copy of a rule that can drift from it.
+ */
+export const SPAWN_GRACE_MS = STARTUP_COOLDOWN_MS;
 export const BURST_TAB_THRESHOLD = 3; // if this many inactive tabs would be flagged unseen
                                        // in a SINGLE eval tick, treat it as a synchronized
                                        // repaint burst (resize / RDP↔console reattach /

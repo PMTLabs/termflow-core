@@ -33,6 +33,22 @@ export interface ClosePaneDeps {
    *  all day silently loses GPU rendering for every terminal opened afterwards.
    *  Injected rather than imported so this helper stays free of terminal-core. */
   releaseSurface: (terminalId: string) => void;
+  /** Drops the terminal's session-closed record (`plan/024` Req 4). Same argument as
+   *  `clearCwdSnapshot` one field up: the pane is gone for good, so the map must not grow
+   *  without bound and a recycled id must not inherit a dead shell's exit code and render a
+   *  "Session closed" banner over a live terminal.
+   *
+   *  **Why here and not inside `TerminalService.closeTerminal`, beside `clearZoom`.** That is
+   *  the obvious home — it is the single choke point every genuine close funnels through, and
+   *  it already drops a per-terminal slice entry for exactly this reason. It does not work for
+   *  this one. `closeTerminal` opens with `if (!process) return; // Already closed`, and the
+   *  exit listener deletes the process mapping BEFORE it emits `pty:exit`
+   *  (`TerminalService.ts:70`) — which is the event that creates a session-exit record in the
+   *  first place. So by the time a terminal has an entry here, `closeTerminal` always takes
+   *  that early return, and a clear placed there would be a no-op on 100% of the entries it
+   *  was meant to remove. (The same early return means `clearZoom` already misses an exited
+   *  terminal's entry — pre-existing, and not this plan's to fix.) */
+  clearSessionExit: (terminalId: string) => void;
 }
 
 /**
@@ -46,7 +62,9 @@ export interface ClosePaneDeps {
  * fire-and-forget call remains the one and only PTY kill.
  */
 export function closePaneNonBlocking(deps: ClosePaneDeps): void {
-  const { terminalId, removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface } = deps;
+  const {
+    terminalId, removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface, clearSessionExit,
+  } = deps;
 
   // Remove the pane from the UI immediately — do not wait on the backend.
   removeFromUi();
@@ -56,6 +74,10 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   // Spec 045 §3.3: the pane is gone for good — drop its directory so the map
   // cannot grow without bound and a recycled id can't inherit it.
   clearCwdSnapshot(terminalId);
+
+  // ...and the session-closed record, for the same reason and in the same place. Three
+  // per-terminal maps are now cleared here; a fourth added elsewhere is the one that leaks.
+  clearSessionExit(terminalId);
 
   // ...and dispose the cached xterm engine for the same reason, in the same place.
   // The cache is keyed by terminalId, so this is per TERMINAL, exactly as the

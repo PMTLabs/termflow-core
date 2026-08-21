@@ -2,7 +2,7 @@ import path from 'path';
 import {
   findPaneIdByTerminalId, planRegroup, moveGroupBy, worldDelta, dropTargetTabId, regridGroup,
 } from '../canvasMutations';
-import { fitGroupFrame, PAD, PAD_TOP, GAP } from '../canvasLayout';
+import { fitGroupFrame, PAD, PAD_TOP, GAP_X } from '../canvasLayout';
 import panesReducer, {
   PaneNode, removePaneFromTab, insertPaneIntoTab,
 } from '../../../store/slices/panesSlice';
@@ -351,12 +351,12 @@ describe('regridGroup', () => {
   it('slots nodes into a tidy grid anchored at the frame origin', () => {
     const r = regridGroup({ x: 500, y: 300, w: 0, h: 0 }, ['a', 'b']);
     expect(r.nodes.a).toEqual({ x: 500 + PAD, y: 300 + PAD_TOP });
-    expect(r.nodes.b).toEqual({ x: 500 + PAD + NODE_W + GAP, y: 300 + PAD_TOP });
+    expect(r.nodes.b).toEqual({ x: 500 + PAD + NODE_W + GAP_X, y: 300 + PAD_TOP });
   });
 
   it('resizes the frame to fit exactly', () => {
     const r = regridGroup({ x: 0, y: 0, w: 0, h: 0 }, ['a', 'b']);
-    expect(r.frame.w).toBe(PAD * 2 + NODE_W * 2 + GAP);
+    expect(r.frame.w).toBe(PAD * 2 + NODE_W * 2 + GAP_X);
     expect(r.frame.h).toBe(PAD_TOP + PAD + NODE_H);
   });
 

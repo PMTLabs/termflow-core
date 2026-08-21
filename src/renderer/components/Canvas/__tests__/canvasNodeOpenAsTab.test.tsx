@@ -58,10 +58,14 @@ const node0: CanvasNodeModel = {
   tabId: 'tb-1',
   paneId: 'pn-1',
   title: 'server',
+  // Deliberately NOT equal to `title`. A fixture whose group and node names matched would let a
+  // chip that rendered `node.title` by mistake pass every case below.
+  groupTitle: 'backend',
   shellType: 'zsh',
   rect: { x: 0, y: 0, w: 340, h: 210 },
   isRunning: false,
   hasUnseenOutput: false,
+  exited: false,
 };
 
 interface Handlers {
@@ -379,6 +383,122 @@ describe('agent chip', () => {
     mockAgent = { agent: 'claude', icon: null };
     render('chip', {});
     expect(chip()).toBeNull();
+  });
+});
+
+/**
+ * The group chip — `plan/024` Req 5.
+ *
+ * A group IS a tab (design 010 §2), so this chip carries `Tab.title` while the title beside it
+ * carries `PaneNode.name`. The overlay is a terminal filling the screen with nothing around it to
+ * say which group you are inside; every other canvas surface has the frame or the sidebar to say
+ * it, which is why this is overlay-only rather than everywhere.
+ *
+ * The fixture's `groupTitle` differs from its `title` on purpose — see `node0`.
+ */
+describe('group chip', () => {
+  const chip = () => container.querySelector('.canvas-node-group');
+
+  it('names the group after the terminal title, in the overlay', () => {
+    render('gpu', {}, true);
+    expect(chip()).not.toBeNull();
+    expect(chip()!.textContent).toBe('backend');
+    // Order matters: the request was "after the terminal title". `compareDocumentPosition`
+    // asserts it from the DOM rather than from the order of the JSX.
+    const title = container.querySelector('.canvas-node-title')!;
+    expect(title.compareDocumentPosition(chip()!) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
+
+  // The negative that makes the case above mean something: a chip rendered on every node would
+  // satisfy it just as well, and would crowd a preview header that is already fighting for room.
+  it('is absent on an ordinary canvas node', () => {
+    render('gpu', {});
+    expect(chip()).toBeNull();
+  });
+
+  /**
+   * D7, and the reason it is worth a test: for an unsplit tab `PaneNode.name` and `Tab.title` are
+   * usually the SAME string, so the obvious "hide the duplicate" rule would make the chip vanish
+   * in the commonest case. Tam chose predictability instead — a context chip you cannot rely on
+   * being there is one you stop reading.
+   */
+  it('still shows when it duplicates the terminal title', () => {
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, title: 'backend' }} tier="gpu" zoom={1} selected={false}
+          focused={false} dimmed={false} hidden={false} busyCue="sweep" overlaid />,
+      ));
+    });
+    expect(chip()).not.toBeNull();
+    expect(chip()!.textContent).toBe('backend');
+  });
+});
+
+/**
+ * The muted treatment for a terminal whose shell has ENDED — `plan/024` Req 4.
+ *
+ * Driven by `CanvasNodeModel.exited`, which is PER-TERMINAL: a two-pane tab whose first shell
+ * died mutes that node alone. The tab-level `Tab.exited` could not express that, which is why
+ * this fact needed a home of its own.
+ */
+describe('ended node', () => {
+  const node = () => container.querySelector('.canvas-node')!;
+  const renderEnded = (exited: boolean, tier: LodTier = 'gpu') => act(() => {
+    root.render(withMetrics(
+      <CanvasNode node={{ ...node0, exited }} tier={tier} zoom={1} selected={false}
+        focused={false} dimmed={false} hidden={false} busyCue="sweep" />,
+    ));
+  });
+
+  it('carries the ended class once its session is over', () => {
+    renderEnded(true);
+    expect(node().classList.contains('ended')).toBe(true);
+  });
+
+  it('does not carry it while the session is live', () => {
+    renderEnded(false);
+    expect(node().classList.contains('ended')).toBe(false);
+  });
+
+  /**
+   * Deliberately NOT `.dimmed`. That class belongs to the search/"near" highlight set, so reusing
+   * it would make a search dim an ended node twice over and make an ended node read as a search
+   * miss — two unrelated facts rendered identically. The two must be independently settable.
+   */
+  it('is independent of the search dim', () => {
+    renderEnded(true);
+    expect(node().classList.contains('dimmed')).toBe(false);
+
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, exited: true }} tier="gpu" zoom={1} selected={false}
+          focused={false} dimmed hidden={false} busyCue="sweep" />,
+      ));
+    });
+    // Both at once, and distinguishable.
+    expect(node().classList.contains('ended')).toBe(true);
+    expect(node().classList.contains('dimmed')).toBe(true);
+  });
+
+  // At the chip tier the header IS the node, and zoomed out is exactly where you scan for which
+  // terminals are still alive — so unlike the buttons and badges, this one does NOT drop out.
+  it('still marks an ended node at the chip tier', () => {
+    renderEnded(true, 'chip');
+    expect(node().classList.contains('ended')).toBe(true);
+  });
+
+  // An ended node keeps its busy cue independent: a shell can exit while the tracker still has
+  // it flagged for a tick, and the two classes must not fight over one slot.
+  it('does not disturb the busy cue', () => {
+    act(() => {
+      root.render(withMetrics(
+        <CanvasNode node={{ ...node0, exited: true, isRunning: true }} tier="gpu" zoom={1}
+          selected={false} focused={false} dimmed={false} hidden={false} busyCue="sweep" />,
+      ));
+    });
+    expect(node().classList.contains('ended')).toBe(true);
+    expect(node().classList.contains('running')).toBe(true);
   });
 });
 

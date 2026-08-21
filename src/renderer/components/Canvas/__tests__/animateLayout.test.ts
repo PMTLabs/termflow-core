@@ -131,7 +131,7 @@ describe('interpolateArrange', () => {
 
 const node = (terminalId: string, tabId: string, rect: Rect): CanvasNodeModel => ({
   terminalId, tabId, paneId: `pn-${terminalId}`, title: terminalId, shellType: 'zsh',
-  rect, isRunning: false, hasUnseenOutput: false,
+  rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
 });
 const group = (tabId: string, rect: Rect, nodeIds: string[]): CanvasGroupModel =>
   ({ tabId, title: tabId, rect, nodeIds, anyRunning: false });

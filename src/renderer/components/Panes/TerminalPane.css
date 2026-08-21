@@ -235,7 +235,7 @@
 .terminal-pane.is-ended .pane-ended-overlay {
   position: absolute;
   inset: 0;
-  background-color: rgba(128, 128, 128, 0.13);
+  background-color: var(--ended-wash, rgba(128, 128, 128, 0.13));
   pointer-events: none;
   z-index: 1;
 }

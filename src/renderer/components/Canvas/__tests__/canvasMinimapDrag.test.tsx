@@ -48,7 +48,7 @@ const MODEL: CanvasModel = {
   groups: [group('tb-a', 0, 0), group('tb-b', 3600, 2200)],
   nodes: [{
     terminalId: 'tm-1', tabId: 'tb-a', paneId: 'pn-1', title: 'tm-1', shellType: 'pwsh',
-    rect: { x: 100, y: 100, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    rect: { x: 100, y: 100, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   }],
 };
 

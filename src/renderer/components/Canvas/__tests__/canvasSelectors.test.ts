@@ -8,7 +8,7 @@ import {
   baseTier, clampZoom,
 } from '../canvasGeometry';
 
-import { PAD, PAD_TOP } from '../canvasLayout';
+import { PAD, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W } from '../canvasLayout';
 
 // Per-session now — these are an ordinary 1080p display's metrics.
 const { zMax: Z_MAX } = DEFAULT_METRICS;
@@ -56,6 +56,24 @@ describe('buildCanvasModel', () => {
     const m = buildCanvasModel(stateWith());
     expect(m.nodes.find((n) => n.terminalId === 'tm-2')!.title).toBe('server');
     expect(m.nodes.find((n) => n.terminalId === 'tb-a')!.title).toBe('zsh');
+  });
+
+  /**
+   * ...and the other half of that pair (`plan/024` Req 5). `groupTitle` is the group's name, a
+   * group is a tab, so it is `Tab.title` — the very value the case above proves `title` is NOT.
+   *
+   * `tm-2` is the one that makes this fail on a hard-coded chip: its pane is named "server"
+   * inside a tab titled "api", so a `groupTitle` wired to the wrong source reads "server" here
+   * and the assertion below catches it. A node whose pane is unnamed falls back to the tab
+   * title, which is why that case cannot carry this test on its own.
+   */
+  it('takes groupTitle from Tab.title — the value the node title deliberately is not', () => {
+    const m = buildCanvasModel(stateWith());
+    const n = m.nodes.find((x) => x.terminalId === 'tm-2')!;
+    expect(n.groupTitle).toBe('api');
+    expect(n.groupTitle).not.toBe(n.title);
+    // A second tab, so the field cannot be one constant that happens to match the first.
+    expect(m.nodes.find((x) => x.tabId === 'tb-b')!.groupTitle).toBe('web');
   });
 
   it('seeds geometry for a terminal that has never been placed', () => {
@@ -121,6 +139,36 @@ describe('buildCanvasModel', () => {
     // The tab header's own fact is untouched and true at the same time.
     const s = stateWith();
     expect(s.tabs.tabs.find((t: any) => t.id === 'tb-a').isRunning).toBe(true);
+  });
+
+  /**
+   * `exited` is PER-TERMINAL — `plan/024` Req 4, and the reason a new slice was needed.
+   *
+   * The tab-level fact that already existed (`Tab.exited`) only flips once EVERY pane in the tab
+   * has exited, so the case below — one dead pane beside a live one — is exactly the one it
+   * cannot express, and a canvas node is a pane. This is the same split `isRunning` went through
+   * in `plan/020` Req 8, and deliberately NOT the one `hasUnseenOutput` is still on.
+   */
+  it('marks only the terminal whose session ended, not its live sibling', () => {
+    const s = stateWith();
+    s.sessionExit = { byTerminalId: { 'tm-2': { exitCode: 0 } } };
+    const m = buildCanvasModel(s);
+    expect(m.nodes.find((n) => n.terminalId === 'tm-2')!.exited).toBe(true);
+    // Its sibling in the SAME tab is untouched — the assertion the tab-level flag fails.
+    expect(m.nodes.find((n) => n.terminalId === 'tb-a')!.exited).toBe(false);
+    expect(m.nodes.find((n) => n.terminalId === 'tb-b')!.exited).toBe(false);
+  });
+
+  // Exit code 0 is a real exit. A `!!info.exitCode` anywhere on this path would report a cleanly
+  // finished shell as still running.
+  it('treats a clean exit as exited', () => {
+    const s = stateWith();
+    s.sessionExit = { byTerminalId: { 'tb-b': { exitCode: 0 } } };
+    expect(buildCanvasModel(s).nodes.find((n) => n.terminalId === 'tb-b')!.exited).toBe(true);
+  });
+
+  it('reports every node as live when nothing has exited', () => {
+    expect(buildCanvasModel(stateWith()).nodes.every((n) => n.exited === false)).toBe(true);
   });
 
   it('ignores a tab with no pane tree and no stored frame instead of crashing', () => {
@@ -245,8 +293,8 @@ describe('chip fly-to zooms', () => {
 
 describe('visibleNodeIds', () => {
   const mk = (id: string, x: number, y: number): CanvasNodeModel => ({
-    terminalId: id, tabId: 'tb-a', title: id, shellType: 'zsh',
-    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: 'zsh',
+    rect: { x, y, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const vp: Viewport = { x: 0, y: 0, z: 1 };
 
@@ -333,8 +381,8 @@ describe('labelMaxWidth', () => {
 
 describe('allCollapsed', () => {
   const n = (id: string): CanvasNodeModel => ({
-    terminalId: id, tabId: 'tb-a', title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const tiers = (m: Record<string, LodTier>) => m;
 
@@ -424,7 +472,7 @@ describe('chipLabelScreenPx', () => {
 describe('snapshotNodeIds', () => {
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
-    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false,
+    rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
   });
   const nodes = [n('a'), n('b'), n('c')];
   const all = new Set(['a', 'b', 'c']);
@@ -522,5 +570,155 @@ describe('buildCanvasModel — every node carries its pane', () => {
     // Not the terminalId under another name, and not the tab's id: on the solo-root tab
     // 'tb-b' those two are equal to each other but must both differ from the pane.
     expect(byTerminal['tb-b']).not.toBe('tb-b');
+  });
+});
+
+/**
+ * Frame seeding wraps into rows — `plan/024` Req 1, and the change that actually makes the
+ * canvas denser.
+ *
+ * The cursor used to move only right, always at `y: 60`, so ten single-terminal tabs laid out as
+ * a ~4600px strip one frame tall. Tightening the gutters moves that by a few percent; wrapping
+ * it is what lets you zoom in far enough to read a terminal and still see its neighbours.
+ */
+describe('group frames wrap into rows', () => {
+  /** N single-terminal tabs, nothing stored — the shape that produced the strip. */
+  const manyTabs = (n: number) => {
+    const tabs = Array.from({ length: n }, (_, i) => ({
+      id: `tb-${i}`, title: `t${i}`, shellType: 'zsh', isActive: i === 0,
+    }));
+    const treesByTabId: Record<string, any> = {};
+    for (let i = 0; i < n; i++) {
+      treesByTabId[`tb-${i}`] = {
+        id: `pn-${i}`, type: 'terminal', terminalId: `tb-${i}`, name: 'zsh', shellType: 'zsh',
+      };
+    }
+    return {
+      tabs: { tabs, activeTabId: 'tb-0', runningTerminalIds: [] },
+      panes: { treesByTabId },
+      canvas: { nodes: {}, groups: {} },
+    } as any;
+  };
+  const framesOf = (state: any) => buildCanvasModel(state).groups
+    .map((g) => ({ tabId: g.tabId, ...g.rect }));
+
+  it('starts a second row instead of growing one endless strip', () => {
+    const frames = framesOf(manyTabs(10));
+    const rows = new Set(frames.map((f) => f.y));
+    expect(rows.size).toBeGreaterThan(1);
+
+    // ...and the strip is genuinely gone: the bounding box is no longer wildly wide.
+    const right = Math.max(...frames.map((f) => f.x + f.w));
+    const bottom = Math.max(...frames.map((f) => f.y + f.h));
+    expect(right / bottom).toBeLessThan(4);
+  });
+
+  /**
+   * Asserted as a CONCRETE row length, not against `FRAME_ROW_MAX_W`.
+   *
+   * Comparing `f.x - left <= FRAME_ROW_MAX_W` reads well and proves nothing: the constant is the
+   * very thing under test, so widening it (to `Infinity`, say) moves the code and the assertion
+   * together and the case stays green on a canvas that never wraps at all. The budget is four
+   * default frames wide, so four is what a row of default frames must hold.
+   */
+  it('fits four default frames per row and no more', () => {
+    const frames = framesOf(manyTabs(10));
+    const perRow = new Map<number, number>();
+    for (const f of frames) perRow.set(f.y, (perRow.get(f.y) ?? 0) + 1);
+    for (const [, count] of perRow) expect(count).toBeLessThanOrEqual(4);
+    // Paired positive: a budget so tight that every frame got its own row would satisfy the
+    // ceiling above while being just as unusable as the strip it replaced.
+    expect(Math.max(...perRow.values())).toBe(4);
+    // And the constant really is the four-frame budget it claims to be.
+    expect(FRAME_ROW_MAX_W).toBe(4 * (PAD * 2 + NODE_W) + 3 * GROUP_GAP);
+  });
+
+  /**
+   * The property that ruled out `ceil(sqrt(n))` columns (`plan/024` D2). Frame rects are DERIVED
+   * on every build, so a column count computed from the total would re-flow the whole canvas the
+   * moment the tab count crossed a boundary. `design/010` §6.4 forbids that outright: a canvas
+   * that rearranges itself while you are looking away destroys the spatial memory it exists for.
+   *
+   * Swept across the boundary rather than tested at one N, since a sqrt-grid is stable at most
+   * counts and only jumps at the ones that change the column count.
+   */
+  it('never moves a frame already placed when a tab is appended', () => {
+    for (let n = 1; n < 14; n++) {
+      const before = framesOf(manyTabs(n));
+      const after = framesOf(manyTabs(n + 1));
+      for (const f of before) {
+        const same = after.find((g) => g.tabId === f.tabId)!;
+        expect({ tabId: same.tabId, x: same.x, y: same.y })
+          .toEqual({ tabId: f.tabId, x: f.x, y: f.y });
+      }
+    }
+  });
+
+  /**
+   * The row-height hazard. The cursor advances on the box a frame was SEEDED from, but the frame
+   * that lands on screen is shrink-wrapped from its nodes — and a tab with several panes grids
+   * taller than the single-node default. Advancing on the seed box let a tall frame reach
+   * straight through the row beneath it.
+   */
+  it('does not let a multi-pane frame overlap the row below', () => {
+    const state = manyTabs(12);
+    // Give one tab in the first row four panes, so its frame is 2x2 and much taller.
+    state.panes.treesByTabId['tb-1'] = {
+      id: 'pn-x', type: 'split', direction: 'horizontal',
+      children: Array.from({ length: 4 }, (_, i) => ({
+        id: `pn-x${i}`, type: 'terminal', terminalId: `tm-x${i}`, name: 'p', shellType: 'zsh',
+      })),
+    };
+    const frames = framesOf(state);
+    const tall = frames.find((f) => f.tabId === 'tb-1')!;
+    // Precondition: it really is taller than a default frame, or this proves nothing.
+    expect(tall.h).toBeGreaterThan(frames.find((f) => f.tabId === 'tb-0')!.h);
+
+    for (const a of frames) {
+      for (const b of frames) {
+        if (a.tabId === b.tabId) continue;
+        const overlaps = !(a.x + a.w <= b.x || b.x + b.w <= a.x
+          || a.y + a.h <= b.y || b.y + b.h <= a.y);
+        expect({ pair: `${a.tabId}/${b.tabId}`, overlaps }).toEqual({ pair: `${a.tabId}/${b.tabId}`, overlaps: false });
+      }
+    }
+  });
+
+  // A dragged frame is somewhere the user chose. Seeding must go around it, exactly as the
+  // single-row cursor did.
+  it('honours a stored frame rect and seeds clear of it', () => {
+    const state = manyTabs(3);
+    state.canvas.groups = { 'tb-0': { x: 4000, y: 4000, w: 372, h: 249 } };
+    const frames = framesOf(state);
+    const stored = frames.find((f) => f.tabId === 'tb-0')!;
+    // A single-node group shrink-wraps to its node, which was seeded inside the stored frame —
+    // so the frame stays where the user dragged it rather than being re-seeded into a row.
+    expect(stored.x).toBeGreaterThanOrEqual(4000);
+    expect(stored.y).toBeGreaterThanOrEqual(4000);
+    // What the seeded frames owe it is only that they do not land on top of it. Which SIDE they
+    // end up on is `rowStartX`'s business (it clears stored frames to the right), and asserting
+    // a side here would pin an implementation detail rather than the requirement.
+    for (const f of frames) {
+      if (f.tabId === 'tb-0') continue;
+      const overlaps = !(f.x + f.w <= stored.x || stored.x + stored.w <= f.x
+        || f.y + f.h <= stored.y || stored.y + stored.h <= f.y);
+      expect({ tabId: f.tabId, overlaps }).toEqual({ tabId: f.tabId, overlaps: false });
+    }
+  });
+
+  // A four-pane tab seeds as a grid, not the 1-wide column the fixed default box produced.
+  it('seeds a multi-pane tab as a grid rather than a vertical column', () => {
+    const state = manyTabs(1);
+    state.panes.treesByTabId['tb-0'] = {
+      id: 'pn-x', type: 'split', direction: 'horizontal',
+      children: Array.from({ length: 4 }, (_, i) => ({
+        id: `pn-x${i}`, type: 'terminal', terminalId: `tm-x${i}`, name: 'p', shellType: 'zsh',
+      })),
+    };
+    const m = buildCanvasModel(state);
+    const xs = new Set(m.nodes.map((n) => n.rect.x));
+    const ys = new Set(m.nodes.map((n) => n.rect.y));
+    expect(xs.size).toBe(2);
+    expect(ys.size).toBe(2);
   });
 });

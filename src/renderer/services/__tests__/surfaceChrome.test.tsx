@@ -22,6 +22,8 @@ import {
 const noop = () => {};
 const pick = () => {};
 const openMenu = () => {};
+const restart = () => {};
+const dismiss = () => {};
 
 const state = (over: Partial<SurfaceChromeState> = {}): SurfaceChromeState => ({
   atBottom: true,
@@ -29,6 +31,8 @@ const state = (over: Partial<SurfaceChromeState> = {}): SurfaceChromeState => ({
   scrollToBottom: noop,
   pickSuggestion: pick,
   openContextMenu: openMenu,
+  restartSession: restart,
+  dismissSessionClosed: dismiss,
   ...over,
 });
 
@@ -92,6 +96,11 @@ describe('surfaceChrome registry', () => {
     // own case: one left out of `same()` is a stale closure the overlay keeps calling, and
     // nothing else would notice.
     ['openContextMenu', { openContextMenu: () => {} }],
+    // ...and the session-closed actions (`plan/024` Req 4). Same hazard, one step worse: a stale
+    // `restartSession` would respawn against the profile and cwd of a pane that has since been
+    // closed or re-homed.
+    ['restartSession', { restartSession: () => {} }],
+    ['dismissSessionClosed', { dismissSessionClosed: () => {} }],
   ])('treats a changed %s identity as a change', (_name, over) => {
     const owner = {};
     let notifications = 0;

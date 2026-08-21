@@ -5,6 +5,7 @@ describe('closePaneNonBlocking', () => {
     const removeFromUi = jest.fn();
     const clearCwdSnapshot = jest.fn();
     const releaseSurface = jest.fn();
+    const clearSessionExit = jest.fn();
     // Never resolves — proves the UI removal does not wait on it.
     const closeTerminal = jest.fn(() => new Promise<void>(() => {}));
 
@@ -14,6 +15,7 @@ describe('closePaneNonBlocking', () => {
       closeTerminal,
       clearCwdSnapshot,
       releaseSurface,
+      clearSessionExit,
     });
 
     expect(removeFromUi).toHaveBeenCalledTimes(1);
@@ -36,10 +38,12 @@ describe('closePaneNonBlocking', () => {
     const removeFromUi = jest.fn();
     const clearCwdSnapshot = jest.fn();
     const releaseSurface = jest.fn();
+    const clearSessionExit = jest.fn();
     const closeTerminal = jest.fn(() => Promise.resolve());
 
     closePaneNonBlocking({
       terminalId: 'term-3', removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface,
+      clearSessionExit,
     });
 
     expect(releaseSurface).toHaveBeenCalledTimes(1);
@@ -55,12 +59,14 @@ describe('closePaneNonBlocking', () => {
   // early return covers all three, and this is the negative control for the assert above.
   it('releases nothing when the pane has no terminal', () => {
     const releaseSurface = jest.fn();
+    const clearSessionExit = jest.fn();
     closePaneNonBlocking({
       terminalId: null,
       removeFromUi: jest.fn(),
       closeTerminal: jest.fn(() => Promise.resolve()),
       clearCwdSnapshot: jest.fn(),
       releaseSurface,
+      clearSessionExit,
     });
     expect(releaseSurface).not.toHaveBeenCalled();
   });
@@ -69,6 +75,7 @@ describe('closePaneNonBlocking', () => {
     const removeFromUi = jest.fn();
     const clearCwdSnapshot = jest.fn();
     const releaseSurface = jest.fn();
+    const clearSessionExit = jest.fn();
     const closeTerminal = jest.fn(() => Promise.resolve());
 
     closePaneNonBlocking({
@@ -77,6 +84,7 @@ describe('closePaneNonBlocking', () => {
       closeTerminal,
       clearCwdSnapshot,
       releaseSurface,
+      clearSessionExit,
     });
 
     expect(removeFromUi).toHaveBeenCalledTimes(1);
@@ -88,6 +96,7 @@ describe('closePaneNonBlocking', () => {
     const removeFromUi = jest.fn();
     const clearCwdSnapshot = jest.fn();
     const releaseSurface = jest.fn();
+    const clearSessionExit = jest.fn();
     const closeTerminal = jest.fn(() => Promise.reject(new Error('backend kill failed')));
 
     expect(() =>
@@ -97,6 +106,7 @@ describe('closePaneNonBlocking', () => {
         closeTerminal,
         clearCwdSnapshot,
         releaseSurface,
+        clearSessionExit,
       }),
     ).not.toThrow();
 
@@ -105,5 +115,48 @@ describe('closePaneNonBlocking', () => {
 
     expect(closeTerminal).toHaveBeenCalledTimes(1);
     expect(removeFromUi).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The session-closed record goes with the pane — `plan/024` Req 4.
+ *
+ * Same argument as `clearCwdSnapshot` and `releaseSurface`, and it is the third per-terminal map
+ * this one function is responsible for draining. Two things go wrong without it: the map grows
+ * for the life of the session, and — the reason this is more than tidiness — a recycled terminal
+ * id inherits a dead shell's exit code and paints a "Session closed" banner over a live terminal.
+ */
+describe('closePaneNonBlocking — session-exit record', () => {
+  const deps = (over: Record<string, unknown> = {}) => ({
+    terminalId: 'term-9',
+    removeFromUi: jest.fn(),
+    closeTerminal: jest.fn(() => Promise.resolve()),
+    clearCwdSnapshot: jest.fn(),
+    releaseSurface: jest.fn(),
+    clearSessionExit: jest.fn(),
+    ...over,
+  });
+
+  it('drops the record, keyed by the same id as the rest of the teardown', () => {
+    const d = deps();
+    closePaneNonBlocking(d);
+    expect(d.clearSessionExit).toHaveBeenCalledTimes(1);
+    expect(d.clearSessionExit).toHaveBeenCalledWith('term-9');
+  });
+
+  // Synchronously, with the other two — not after the multi-second backend kill, which is
+  // deliberately never awaited and may never resolve at all.
+  it('drops it without waiting on the backend close', () => {
+    const d = deps({ closeTerminal: jest.fn(() => new Promise<void>(() => {})) });
+    closePaneNonBlocking(d);
+    expect(d.clearSessionExit).toHaveBeenCalledTimes(1);
+  });
+
+  // The negative control, matching the one the cwd snapshot and the surface already have: the
+  // early return covers all three.
+  it('drops nothing when the pane has no terminal', () => {
+    const d = deps({ terminalId: null });
+    closePaneNonBlocking(d);
+    expect(d.clearSessionExit).not.toHaveBeenCalled();
   });
 });

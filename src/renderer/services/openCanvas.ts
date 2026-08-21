@@ -1,5 +1,5 @@
 import { store } from '../store';
-import { addTab, setActiveTab } from '../store/slices/tabsSlice';
+import { addTab, setActiveTab, reorderTabs } from '../store/slices/tabsSlice';
 import { CANVAS_SHELL_TYPE } from './tabKinds';
 
 /**
@@ -31,6 +31,33 @@ function findCanvasTabId(): string | null {
   return tabs.find((t) => t.shellType === CANVAS_SHELL_TYPE)?.id ?? null;
 }
 
+/**
+ * Move the canvas tab to the front of the strip (`plan/024` Req 3).
+ *
+ * The canvas is a workspace OVERVIEW you return to constantly, so it wants one fixed position
+ * you can reach without looking. First is the only position that stays put as tabs open and
+ * close around it — "third from the left" is a different tab every few minutes.
+ *
+ * Enforced on every open rather than only at creation (D5), because the position has to be
+ * reliable to be worth having: a canvas tab restored mid-strip, or nudged along by a
+ * `insertAfterId` neighbour opening beside it, would otherwise stay wherever it landed.
+ *
+ * It is NOT pinned. `TabManager` keeps every tab draggable and nothing here changes that — drag
+ * it wherever you like; the next explicit open brings it back. Enforcing on open and allowing
+ * the drag are only in tension if you expect the drag to be permanent, and a tab you moved
+ * three days ago is not a preference the app can tell from an accident.
+ *
+ * No-op when it is already first, so this cannot dispatch on every store read.
+ *
+ * This is the LIVE-STRIP half of the rule. Its sibling is `canvasTabFirst` in `tabKinds`, which
+ * applies the same policy to the persisted list on session restore. Change one, read the other.
+ */
+function moveCanvasTabFirst(canvasTabId: string): void {
+  const { tabs } = store.getState().tabs;
+  const from = tabs.findIndex((t) => t.id === canvasTabId);
+  if (from > 0) store.dispatch(reorderTabs({ fromIndex: from, toIndex: 0 }));
+}
+
 /** True when the canvas tab exists AND is the one on screen. */
 export function isCanvasTabActive(): boolean {
   const { tabs, activeTabId } = store.getState().tabs;
@@ -56,6 +83,10 @@ export function openCanvasTab(): void {
   if (activeTabId && activeTabId !== existing) returnToTabId = activeTabId;
 
   if (existing) {
+    // Reorder BEFORE activating. Both orders end in the same state, but this one never paints a
+    // frame with the canvas active and still sitting where it was, which reads as the strip
+    // shuffling itself after the switch rather than as the canvas arriving where it belongs.
+    moveCanvasTabFirst(existing);
     store.dispatch(setActiveTab(existing));
     return;
   }
@@ -66,6 +97,7 @@ export function openCanvasTab(): void {
       title: 'Canvas',
       shellType: CANVAS_SHELL_TYPE,
       icon: '🗺️',
+      insertAtStart: true,
     }),
   );
 }

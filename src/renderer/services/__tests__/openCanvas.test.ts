@@ -10,7 +10,7 @@
  * when the tab it came from has been closed underneath it.
  */
 
-import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
+import tabsReducer, { addTab, setActiveTab, reorderTabs } from '../../store/slices/tabsSlice';
 import { CANVAS_SHELL_TYPE } from '../tabKinds';
 
 type TabsState = ReturnType<typeof tabsReducer>;
@@ -171,5 +171,76 @@ describe('toggleCanvasTab', () => {
     toggleCanvasTab();
     toggleCanvasTab();
     expect(activeId()).toBe('tb-2');
+  });
+});
+
+/**
+ * The canvas tab holds the FIRST position in the strip — `plan/024` Req 3.
+ *
+ * The canvas is a workspace overview you return to constantly, so it wants one position you can
+ * reach without looking, and first is the only one that stays put while tabs open and close
+ * around it. Enforced on every open (D5) rather than only at creation, because a position that
+ * survives only until the next restore or the next `insertAfterId` neighbour is not one you can
+ * build a habit on.
+ *
+ * The tension worth pinning: it is enforced but NOT pinned. Nothing here stops the drag, so the
+ * cases below assert both halves — it goes to the front when opened, and the reducer that moves
+ * it elsewhere still works.
+ */
+describe('the canvas tab takes the first position', () => {
+  const ids = () => state.tabs.map((t) => t.id);
+
+  it('is created at the front, not appended', () => {
+    state = tabsReducer(state, shell('tb-1'));
+    state = tabsReducer(state, shell('tb-2'));
+    openCanvasTab();
+
+    expect(ids()[0]).toBe(canvasTabs()[0].id);
+    // The guard on the guard: with an empty strip, "first" and "appended" are the same index and
+    // this case would pass against the old `push`.
+    expect(state.tabs).toHaveLength(3);
+  });
+
+  /**
+   * The half that "only at creation" would have failed. A canvas tab dragged away — or restored
+   * mid-strip by an older layout — must come back to the front on the next explicit open.
+   */
+  it('is moved back to the front when re-opened from elsewhere', () => {
+    state = tabsReducer(state, shell('tb-1'));
+    openCanvasTab();
+    const canvasId = canvasTabs()[0].id;
+
+    // Simulate the user dragging it to the end, which TabManager allows and this must not break.
+    state = tabsReducer(state, reorderTabs({ fromIndex: 0, toIndex: 1 }));
+    expect(ids()[1]).toBe(canvasId);
+
+    state = tabsReducer(state, setActiveTab('tb-1'));
+    openCanvasTab();
+
+    expect(ids()[0]).toBe(canvasId);
+    expect(activeId()).toBe(canvasId);
+  });
+
+  // It is a position, not a pin. A drag that could not move it would be a different feature, and
+  // one Tam explicitly did not ask for.
+  it('can still be moved away by an ordinary reorder', () => {
+    state = tabsReducer(state, shell('tb-1'));
+    openCanvasTab();
+    const canvasId = canvasTabs()[0].id;
+
+    state = tabsReducer(state, reorderTabs({ fromIndex: 0, toIndex: 1 }));
+    expect(ids()[0]).toBe('tb-1');
+    expect(ids()[1]).toBe(canvasId);
+  });
+
+  // Already first: no dispatch, or every store read would churn the strip.
+  it('does not reorder when it is already first', () => {
+    state = tabsReducer(state, shell('tb-1'));
+    openCanvasTab();
+    state = tabsReducer(state, setActiveTab('tb-1'));
+
+    dispatch.mockClear();
+    openCanvasTab();
+    expect(dispatch.mock.calls.filter(([a]) => a.type === reorderTabs.type)).toHaveLength(0);
   });
 });

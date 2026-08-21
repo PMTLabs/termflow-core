@@ -6,6 +6,7 @@ import {
   RESIZE_COOLDOWN_MS,
   VIEW_CHANGE_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
+  SPAWN_GRACE_MS,
   UNSEEN_DEBOUNCE_MS,
 } from '../runningActivity';
 
@@ -36,12 +37,17 @@ jest.mock('../../store/slices/tabsSlice', () => ({
   setRunningActivity: (payload: { tabIds: string[]; terminalIds: string[] }) =>
     ({ type: 'tabs/setRunningActivity', payload }),
   markUnseenOutput: (payload: { tabId: string }) => ({ type: 'tabs/markUnseenOutput', payload }),
+  markTabSeen: (payload: { tabId: string }) => ({ type: 'tabs/markTabSeen', payload }),
 }));
-// terminalId is derived from processId in the mock: p1→tm-1, p2→tm-2, p3→tm-3.
+// terminalId is derived from processId in the mock: p1→tm-1, p2→tm-2, p3→tm-3, and back again.
+// Both directions are needed: the tracker resolves output (processId → terminalId) to find a
+// tab, and resolves the overlaid terminal (terminalId → processId) to advance its unseen mark.
 jest.mock('../TerminalService', () => ({
   terminalService: {
     getTerminalIdForProcess: (pid: string) =>
       pid === 'p1' ? 'tm-1' : pid === 'p2' ? 'tm-2' : pid === 'p3' ? 'tm-3' : undefined,
+    getProcessId: (tid: string) =>
+      tid === 'tm-1' ? 'p1' : tid === 'tm-2' ? 'p2' : tid === 'tm-3' ? 'p3' : undefined,
   },
 }));
 // terminalId → tabId: tm-1→tb-1, tm-2→tb-2, tm-3→tb-3. Gated by mockPaneTree.ready so
@@ -65,6 +71,13 @@ import { runningActivityTracker } from '../RunningActivityTracker';
 function emitData(processId: string, bytes: number): void {
   window.dispatchEvent(
     new CustomEvent('pty:data', { detail: { processId, data: 'x'.repeat(bytes) } }),
+  );
+}
+
+/** A FRESH PTY spawn, as TerminalService publishes it right after it binds the process. */
+function emitSpawn(processId: string, terminalId?: string): void {
+  window.dispatchEvent(
+    new CustomEvent('pty:spawn', { detail: { processId, terminalId } }),
   );
 }
 
@@ -726,5 +739,249 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
       done();
       expect(bells).toHaveLength(0);
     });
+  });
+
+  /**
+   * Opening a terminal in the overlay marks its tab READ — `plan/024` Req 2.
+   *
+   * The mirror image of the suppression above. Suppression stops the overlaid terminal GAINING
+   * a bell; this clears one it already had. Both halves read the same
+   * `overlaySuppressedTerminal`, on purpose: a version of "is the user watching this terminal"
+   * that drifted between them would either bell a terminal being stared at or clear a bell for
+   * one nobody is looking at.
+   */
+  describe('canvas overlay marks the terminal read', () => {
+    const showCanvas = (overlayId: string | null = null) => {
+      mockTabsState.tabs = [
+        { id: 'tb-canvas', shellType: 'canvas' },
+        { id: 'tb-1' },
+        { id: 'tb-2' },
+      ];
+      mockCanvasState.overlayId = overlayId;
+      switchActiveTab('tb-canvas');
+    };
+    const seenTabs = () => dispatch.mock.calls
+      .map(([a]) => a)
+      .filter((a) => a?.type === 'tabs/markTabSeen')
+      .map((a) => a.payload.tabId);
+    const collect = () => {
+      const bells: Array<{ tabId: string }> = [];
+      const h = (e: Event) => bells.push((e as CustomEvent).detail);
+      window.addEventListener('activity:bell', h);
+      return { bells, done: () => window.removeEventListener('activity:bell', h) };
+    };
+
+    it("clears the overlaid terminal's tab, without activating it", () => {
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual(['tb-1']);
+      // The point of the feature: the canvas tab is still the active one. Clearing via
+      // `setActiveTab` would have yanked the user off the canvas to do it.
+      expect(mockTabsState.activeTabId).toBe('tb-canvas');
+    });
+
+    /**
+     * The second condition of `overlaySuppressedTerminal`, and the subtle one: `overlayId` is
+     * deliberately NOT cleared when the user leaves the canvas (`plan/020` §4). Keyed on it
+     * alone, this would mark a terminal read every time the store changed for any reason, from
+     * a tab the user cannot even see.
+     */
+    it('does not clear when the canvas is not on screen, though overlayId survives', () => {
+      showCanvas('tm-1');
+      dispatch.mockClear();
+      switchActiveTab('tb-2');
+      expect(mockCanvasState.overlayId).toBe('tm-1');
+      expect(seenTabs()).toEqual([]);
+    });
+
+    // Edge-triggered. The store subscription fires on EVERY change; re-dispatching on each one
+    // would churn the bell for the whole session the overlay is open.
+    it('fires once per overlay, not once per store change', () => {
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual(['tb-1']);
+      mockStoreSub.cb?.();
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual(['tb-1']);
+    });
+
+    it('clears the new tab when the overlay moves to another terminal', () => {
+      showCanvas('tm-1');
+      mockCanvasState.overlayId = 'tm-2';
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual(['tb-1', 'tb-2']);
+    });
+
+    // Closing the overlay is not an event that means anything was seen.
+    it('does not clear anything when the overlay is dismissed', () => {
+      showCanvas('tm-1');
+      dispatch.mockClear();
+      mockCanvasState.overlayId = null;
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual([]);
+    });
+
+    /**
+     * The sub-tick race, and the reason the mark is advanced at all: output that arrived just
+     * before the overlay opened has NOT cleared the debounce, so an overlay opened and closed
+     * inside one eval interval would ring for output the user just read at 1:1.
+     */
+    it('does not re-ring for output that was already on screen when the overlay opened', () => {
+      emitData('p1', 4);              // arrives first, still settling
+      showCanvas('tm-1');             // ...and is read at full size
+      switchActiveTab('tb-2');        // overlay closed again within the same tick
+      const { bells, done } = collect();
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    /**
+     * The negative that keeps the case above honest. Marking to `now` instead of to the last
+     * RECORDED output passes the case above and fails this one: it declares the future seen, so
+     * a terminal that produced nothing while overlaid falls silent afterwards too.
+     */
+    it('still rings for output that arrived after the overlay was opened', () => {
+      showCanvas('tm-1');             // nothing has been produced yet
+      switchActiveTab('tb-2');        // and the user leaves again
+      const { bells, done } = collect();
+      emitData('p1', 4);              // only NOW does it produce something
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+    });
+
+    // A node whose pane tree has not seeded yet resolves to no tab. Dispatching with a null
+    // tabId would be a no-op in the reducer, but the retry it silently skips would not be.
+    it('does nothing when the terminal resolves to no tab yet', () => {
+      mockPaneTree.ready = false;
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual([]);
+      mockPaneTree.ready = true;
+    });
+  });
+});
+
+/**
+ * A newly spawned shell must not notify about its own prompt.
+ *
+ * Reported from live use on the dev build: open ten shells and type nothing, and seven of them
+ * arrive with a bell and a toast. Every PTY prints a banner and a prompt the instant it is
+ * created, and a new tab is the active one only until the next one is opened — so every shell
+ * whose banner lands after the user moved on flagged itself. In Canvas Mode it is worse and
+ * unconditional: the CANVAS tab stays active, so no terminal tab is ever the active tab and
+ * every single spawn rings.
+ *
+ * The rule was already written down for exactly this output (`STARTUP_COOLDOWN_MS`, "nothing was
+ * missed on a fresh start") — it just only ever ran for the shells that spawn during app start.
+ * `pty:spawn` extends the same grace to one spawned at any other moment.
+ */
+describe('RunningActivityTracker spawn grace (a new shell is not "new activity")', () => {
+  const collect = () => {
+    const bells: Array<{ tabId: string }> = [];
+    const h = (e: Event) => bells.push((e as CustomEvent).detail);
+    window.addEventListener('activity:bell', h);
+    return { bells, done: () => window.removeEventListener('activity:bell', h) };
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    dispatch.mockClear();
+    mockTabsState.activeTabId = null; // the spawned tab is NOT the active one — the whole case
+    mockTabsState.tabs = [];
+    mockPaneTree.ready = true;
+    mockMutedTerminals.clear();
+    mockCanvasState.overlayId = null;
+    runningActivityTracker.start(0); // no app-start grace: this is a spawn mid-session
+  });
+
+  afterEach(() => {
+    runningActivityTracker.stop();
+    jest.useRealTimers();
+  });
+
+  it('does not ring the unseen bell for a freshly spawned shell\'s banner', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400); // the PowerShell banner + prompt
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(unseenTabIds()).not.toContain('tb-1');
+    expect(bells).toHaveLength(0);
+  });
+
+  /**
+   * The positive this needs to stay honest. A grace that never expires — or one applied to the
+   * process forever — passes the case above and silences the terminal for the rest of its life.
+   */
+  it('DOES ring for output produced after the grace has expired', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    jest.advanceTimersByTime(SPAWN_GRACE_MS); // grace over; nothing has been produced yet
+    emitData('p1', 4);                        // now it genuinely does something
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(unseenTabIds()).toContain('tb-1');
+    expect(bells.map((b) => b.tabId)).toContain('tb-1');
+  });
+
+  /**
+   * The grace silences the BELL, not the sweep. This is why it advances the unseen mark rather
+   * than dropping the chunk the way the resize/reconnect cooldown does: a terminal spawned to
+   * run a command (an MCP `create_terminal` carrying one, an agent) has to look busy from its
+   * first byte, and dropping the output would make it look idle for three seconds.
+   */
+  it('still flips the tab RUNNING for spawn-time output', () => {
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 4); emitData('p1', 4); emitData('p1', 4); // >= MIN_CHUNKS
+    jest.advanceTimersByTime(EVAL_INTERVAL_MS);
+    expect(runningPayloads()).toContainEqual(['tb-1']);
+  });
+
+  // Per PROCESS, not global: one terminal starting up must not deafen its neighbours. The
+  // control for every case above — the same output, on a process that was not spawned, rings.
+  it('leaves a different terminal\'s bell alone', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400); // p1 is starting up
+    emitData('p2', 4);   // p2 was already running and genuinely produced something
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-2']);
+  });
+
+  /**
+   * The exit path is a SECOND writer of the same bell (`flagOnExit`), so a grace that only
+   * covered the debounced pass would still notify for a shell that dies while starting — a bad
+   * profile, a missing binary. It compares against the same mark, so it is covered by
+   * construction; this pins that it stays so.
+   */
+  it('stays quiet when the shell dies during its own startup', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitData('p1', 400);
+    emitExit('p1', 'tm-1'); // exit settles output immediately, bypassing the debounce
+    done();
+    expect(bells).toHaveLength(0);
+  });
+
+  // An id that outlives its process is a leak AND a wrong answer: the grace would still be
+  // armed for the next terminal to be handed that process id.
+  it('drops the grace when the process exits, so a reused id gets none', () => {
+    const { bells, done } = collect();
+    emitSpawn('p1', 'tm-1');
+    emitExit('p1', 'tm-1');   // never produced anything; grace must go with it
+    emitData('p1', 4);        // a NEW process reusing the id, genuinely producing output
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+  });
+
+  // The tracker must not be the thing that decides which binds get a grace: an attach or a
+  // hot-swap reattach binds an already-running process and publishes no `pty:spawn` at all.
+  it('gives no grace to output from a process that never announced a spawn', () => {
+    const { bells, done } = collect();
+    emitData('p1', 400);
+    jest.advanceTimersByTime(SETTLE_MS);
+    done();
+    expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
   });
 });

@@ -1,5 +1,5 @@
 import { arcPlacement } from '../agentPlacement';
-import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
+import { NODE_W, NODE_H, Rect, paintedNodeH, Z_MIN } from '../canvasGeometry';
 import { planAgentPlacement } from '../agentSpawnPlacement';
 import type { CanvasModel } from '../canvasSelectors';
 import type { CanvasEdge } from '../../../store/slices/canvasSlice';
@@ -90,7 +90,7 @@ describe('arcPlacement', () => {
 
 const node = (terminalId: string, rect: Rect) => ({
   terminalId, tabId: 'tb-a', paneId: `p-${terminalId}`, title: terminalId,
-  shellType: 'pwsh', rect, isRunning: false, hasUnseenOutput: false,
+  shellType: 'pwsh', rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
 });
 const model = (...nodes: ReturnType<typeof node>[]): CanvasModel => ({
   nodes,
@@ -141,5 +141,47 @@ describe('planAgentPlacement', () => {
     const noise = [wire('tm-other', 'tm-x'), wire('tm-other', 'tm-y'), wire('tm-z', 'tm-caller')];
     expect(planAgentPlacement(m, noise, 'tm-caller', 'tm-new'))
       .toEqual(planAgentPlacement(m, [], 'tm-caller', 'tm-new'));
+  });
+});
+
+/**
+ * The fan is tighter (`plan/024` Req 1) but must still clear at every zoom.
+ *
+ * `arcPlacement` is the placement a user meets most often: it is what BOTH a port drag and an
+ * MCP `create_terminal` produce. At the old `NODE_W + 90` a caller and the terminal it spawned
+ * could not be read side by side at any useful zoom.
+ *
+ * The catch is the same one that floors `canvasLayout.GAP_Y`: a node drawn below zoom 1 is up to
+ * `HEAD_GROWTH_PX` TALLER than its rect, and the fan reaches ±80°, so its outer angles are very
+ * nearly a vertical stack. Tightening the ring step to the horizontal floor would have overlapped
+ * there and nowhere else — the case a test written only against angle 0 would miss.
+ */
+describe('arc placements clear each other at every zoom', () => {
+  const grown = (r: { x: number; y: number }): Rect =>
+    ({ x: r.x, y: r.y, w: NODE_W, h: paintedNodeH(NODE_H, Z_MIN, false) });
+
+  it('leaves a real gap between the caller and its first spawn', () => {
+    const p = arcPlacement(caller, [caller], 0);
+    // A positive gap, not merely "not overlapping" — the point of the change is that they are
+    // close, and the point of the floor is that close is not touching.
+    expect(p.x - (caller.x + NODE_W)).toBeGreaterThan(0);
+    expect(p.x - (caller.x + NODE_W)).toBeLessThan(90); // ...and genuinely tighter than before
+  });
+
+  it('never overlaps once every node is drawn at its zoomed-out height', () => {
+    // Fill the fan, which is what pushes placements onto the outer, near-vertical angles.
+    const taken: Rect[] = [caller];
+    for (let i = 0; i < 12; i++) {
+      const p = arcPlacement(caller, taken, i);
+      taken.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
+    }
+    const drawn = taken.map(grown);
+    for (let i = 0; i < drawn.length; i++) {
+      for (let j = i + 1; j < drawn.length; j++) {
+        const a = drawn[i], b = drawn[j];
+        const hit = !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+        expect({ pair: `${i}/${j}`, hit }).toEqual({ pair: `${i}/${j}`, hit: false });
+      }
+    }
   });
 });

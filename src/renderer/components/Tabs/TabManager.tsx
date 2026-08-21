@@ -21,6 +21,7 @@ import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
+import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows } from '../Panes/dnd/detach';
@@ -512,6 +513,10 @@ export const TabManager: React.FC<TabManagerProps> = () => {
       // must be disposed per terminal — doing it once for the tab id both missed
       // the extra panes of a split tab and hit a moved-away pane.
       cleanupTerminalCache(terminalId);
+      // ...and its session-closed record, for the same reason both of the above are here
+      // (`plan/024` Req 4). Closing a tab used to leak one entry per exited pane for the rest
+      // of the session, and a recycled id would have inherited a dead shell's exit code.
+      dispatch(clearSessionClosed({ terminalId }));
     }
 
     if (paneTree) {

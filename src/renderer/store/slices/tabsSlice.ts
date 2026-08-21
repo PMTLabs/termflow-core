@@ -65,11 +65,28 @@ const initialState: TabsState = {
   runningTerminalIds: [],
 };
 
+/**
+ * "The user has now seen this tab" — the one definition, in one place.
+ *
+ * Three reducers meant this before `plan/024` and each carried its own copy of the two lines:
+ * `setActiveTab`, `removeTab` (for the tab it auto-activates) and now `markTabSeen`. Copies of a
+ * rule drift, and these two flags drive four surfaces between them — the tab-strip bell, the
+ * amber background-activity dot, the canvas sidebar's bell and the OS notification gate — so a
+ * copy that cleared one and not the other would leave a tab that is half-read.
+ *
+ * Both flags go together deliberately (`plan/024` D4). They answer the same question from two
+ * sources (output arrived / an API or MCP caller wrote here) and reading the tab answers both.
+ */
+function markSeen(tab: Tab): void {
+  tab.hasBackgroundActivity = false;
+  tab.hasUnseenOutput = false;
+}
+
 const tabsSlice = createSlice({
   name: 'tabs',
   initialState,
   reducers: {
-    addTab: (state, action: PayloadAction<Omit<Tab, 'isActive'> & { isActive?: boolean; insertAfterId?: string }>) => {
+    addTab: (state, action: PayloadAction<Omit<Tab, 'isActive'> & { isActive?: boolean; insertAfterId?: string; insertAtStart?: boolean }>) => {
       // Check if we're explicitly setting isActive (e.g., during restore)
       const shouldActivate = action.payload.isActive !== false;
 
@@ -78,19 +95,23 @@ const tabsSlice = createSlice({
         state.tabs.forEach(tab => tab.isActive = false);
       }
 
-      // Add new tab (strip the transient insertAfterId — it's not part of Tab state)
-      const { insertAfterId, ...tabFields } = action.payload;
+      // Add new tab (strip the transient placement hints — neither is part of Tab state)
+      const { insertAfterId, insertAtStart, ...tabFields } = action.payload;
       const newTab: Tab = {
         ...tabFields,
         isActive: shouldActivate,
       };
 
-      // Insert immediately after the given tab (its right neighbour) when
-      // requested and found; otherwise append to the end.
+      // Three placements, in precedence order. `insertAtStart` wins over `insertAfterId`
+      // because it is the more specific request: "first" is a position, while "after X" is a
+      // relationship that a caller asking for both has already contradicted.
       const insertIndex = insertAfterId
         ? state.tabs.findIndex(tab => tab.id === insertAfterId)
         : -1;
-      if (insertIndex !== -1) {
+      if (insertAtStart) {
+        state.tabs.unshift(newTab);
+      } else if (insertIndex !== -1) {
+        // Insert immediately after the given tab (its right neighbour).
         state.tabs.splice(insertIndex + 1, 0, newTab);
       } else {
         state.tabs.push(newTab);
@@ -111,11 +132,8 @@ const tabsSlice = createSlice({
           if (state.tabs.length > 0) {
             const newActiveIndex = Math.min(index, state.tabs.length - 1);
             state.tabs[newActiveIndex].isActive = true;
-            // Activating this tab counts as viewing it — clear any pending
-            // background-activity indicator and the unseen-output bell (mirrors
-            // setActiveTab).
-            state.tabs[newActiveIndex].hasBackgroundActivity = false;
-            state.tabs[newActiveIndex].hasUnseenOutput = false;
+            // Activating this tab counts as viewing it (mirrors setActiveTab).
+            markSeen(state.tabs[newActiveIndex]);
             state.activeTabId = state.tabs[newActiveIndex].id;
           } else {
             state.activeTabId = null;
@@ -128,12 +146,8 @@ const tabsSlice = createSlice({
       console.log('tabsSlice: Setting active tab to', action.payload);
       state.tabs.forEach(tab => {
         tab.isActive = tab.id === action.payload;
-        // Viewing a tab clears its pending background-activity indicator and the
-        // unseen-output bell.
-        if (tab.isActive) {
-          tab.hasBackgroundActivity = false;
-          tab.hasUnseenOutput = false;
-        }
+        // Viewing a tab is seeing it.
+        if (tab.isActive) markSeen(tab);
       });
       state.activeTabId = action.payload;
       console.log('tabsSlice: New activeTabId:', state.activeTabId);
@@ -147,6 +161,26 @@ const tabsSlice = createSlice({
       if (!tab) return;
       tab.hasBackgroundActivity = true;
       tab.activityTick = (tab.activityTick ?? 0) + 1;
+    },
+
+    /**
+     * The user has read this tab WITHOUT activating it (`plan/024` Req 2).
+     *
+     * Until now "seen" and "active" were the same event, so clearing lived inside
+     * `setActiveTab`. Canvas Mode's overlay breaks that equivalence: it shows one terminal at
+     * 1:1, in a workspace where the *canvas* tab is the active one, so a terminal can be read
+     * in full while its own tab is in the background and keeps its bell.
+     *
+     * Deliberately NOT guarded on `activeTabId`, unlike `markUnseenOutput`'s mirror-image
+     * guard: the whole point is a tab that is not active, and clearing an already-clear flag on
+     * the active one is a no-op anyway.
+     *
+     * Tab-level, like the flag itself (`plan/020` §0 D2 stands). Reading one pane of a split
+     * clears the whole tab's bell here for exactly the reason activating that tab does.
+     */
+    markTabSeen: (state, action: PayloadAction<{ tabId: string }>) => {
+      const tab = state.tabs.find(t => t.id === action.payload.tabId);
+      if (tab) markSeen(tab);
     },
 
     // Flag a non-active tab as having produced output the user hasn't seen yet.
@@ -264,5 +298,5 @@ const tabsSlice = createSlice({
   },
 });
 
-export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
+export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
 export default tabsSlice.reducer;

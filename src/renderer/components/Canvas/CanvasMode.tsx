@@ -151,6 +151,12 @@ export const CanvasMode: React.FC = () => {
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
   // Read ONCE here and passed down, not subscribed to per node — see `CanvasNode`'s prop doc.
   const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
+  // Session-closed state and the terminal font size, for the overlay's banner (`plan/024` Req 4).
+  // Read once here for the same reason as `busyCue`: a per-node subscription would wake every
+  // node on every change. The MAP is selected, never a per-node object — `NodeTerminal` is
+  // memoised on prop identity, so each node must receive the store's own stable reference.
+  const sessionExitByTerminalId = useSelector((s: RootState) => s.sessionExit.byTerminalId);
+  const terminalFontSize = useSelector((s: RootState) => s.settings.fontSize);
   // For `closeNode` only — the pane COUNT per tab, which decides whether closing a node is a
   // pane close or a tab close. `selectCanvasModel` reads this too, so it is already a
   // subscription this tree pays for.
@@ -985,7 +991,9 @@ export const CanvasMode: React.FC = () => {
                   session. The tier ladder and the cull margin decide what a node
                   PAINTS; they never decide where `term.element` lives. */}
               <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId}
-                overlaid={isOverlaid} />
+                overlaid={isOverlaid}
+                exitInfo={sessionExitByTerminalId[n.terminalId] ?? null}
+                fontSize={terminalFontSize} />
               {/* The exact opposite rule, and for the exact opposite reason: this one is
                   culled hard, because what it owns is a timer rather than a terminal. */}
               {snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}

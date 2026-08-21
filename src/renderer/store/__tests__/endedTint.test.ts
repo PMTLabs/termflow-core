@@ -1,3 +1,5 @@
+import path from 'path';
+import { readSource } from '../../utils/readSource';
 /**
  * xterm's decoration backgroundColor takes no alpha (#RRGGBB only), so the marks
  * for an ended program's scrollback must be pre-blended against the pane's scheme
@@ -64,5 +66,64 @@ describe('endedRailColor', () => {
 
   it('returns undefined for an unparseable background', () => {
     expect(endedRailColor('rgb(0,0,0)')).toBeUndefined();
+  });
+});
+
+/**
+ * The CSS twin of this module's constants — `plan/024` Req 4.
+ *
+ * An ended session is drawn in three places now: xterm decorations (this module, in JS, because
+ * xterm's `backgroundColor` takes `#RRGGBB` with no alpha), the pane overlay, and the Canvas
+ * node. The last two are CSS, and they used to hard-code `rgba(128, 128, 128, 0.13)` — the pane
+ * literally, the canvas about to copy it. Three copies of one colour is how a feature ends up
+ * looking like two different features depending on where you meet it.
+ *
+ * There is now one CSS custom property, `--ended-wash`, and this asserts it still agrees with the
+ * JS constants beside it. Neither file can see the other, and nothing else would notice them
+ * drifting: a canvas node washed at a different alpha from the pane showing the same terminal is
+ * a bug you can only find by looking at both at once.
+ *
+ * Parsed out of the stylesheet rather than read from a live `getComputedStyle`, because the value
+ * has to be right in the SOURCE — a jsdom render would only prove the var resolves.
+ */
+describe('the ended wash is one colour across JS and CSS', () => {
+  const THEME = readSource(
+    path.resolve(__dirname, '../../components/LayoutManager.css'),
+  );
+
+  const declaredWash = (): { r: number; g: number; b: number; a: number } => {
+    const m = /--ended-wash:\s*rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)/.exec(THEME);
+    if (!m) throw new Error('--ended-wash is not declared in LayoutManager.css, or its shape changed');
+    return { r: +m[1], g: +m[2], b: +m[3], a: +m[4] };
+  };
+
+  it('uses the same neutral grey this module blends toward', () => {
+    const { r, g, b } = declaredWash();
+    // NEUTRAL is 0x80 on all three channels — a grey, which is the property that matters.
+    expect([r, g, b]).toEqual([0x80, 0x80, 0x80]);
+  });
+
+  /**
+   * Derived from the module's own output rather than from a repeated literal: blending white
+   * toward NEUTRAL at WASH_ALPHA and comparing against the same blend at the CSS alpha proves the
+   * two numbers agree without either file naming the other's constant.
+   */
+  it('uses the same alpha', () => {
+    const { a } = declaredWash();
+    const white = '#ffffff';
+    expect(blendEndedTint(white, a)).toBe(blendEndedTint(white));
+    // The guard on the guard: the comparison must be able to fail.
+    expect(blendEndedTint(white, a + 0.2)).not.toBe(blendEndedTint(white));
+  });
+
+  // Both stylesheets must actually CONSUME the variable — declaring it and leaving the literals
+  // in place would satisfy every assertion above and change nothing on screen.
+  it.each([
+    ['the pane overlay', '../../components/Panes/TerminalPane.css', '.pane-ended-overlay'],
+    ['the canvas node', '../../components/Canvas/Canvas.css', '.canvas-node.ended'],
+  ])('%s reads the variable rather than repeating the colour', (_name, file, selector) => {
+    const css = readSource(path.resolve(__dirname, file));
+    expect(css).toContain('var(--ended-wash');
+    expect(css).toContain(selector);
   });
 });

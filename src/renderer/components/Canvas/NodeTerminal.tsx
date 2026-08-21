@@ -1,8 +1,13 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { setSurfaceHost, clearSurfaceHost } from '../../services/surfaceHosts';
 import { useSurfaceChrome } from '../../services/surfaceChrome';
 import { ScrollToBottomButton } from '../Terminal/ScrollToBottomButton';
 import { CommandSuggestPopup } from '../Terminal/CommandSuggestPopup';
+import { SessionClosedBanner } from '../Panes/SessionClosedBanner';
+import { useRestartHotkey } from '../Panes/useRestartHotkey';
+
+/** Stable no-op, so the hotkey hook's dependency list does not churn when there is no chrome. */
+const NOOP = (): void => {};
 
 /**
  * Hosts a live terminal inside a canvas node.
@@ -32,7 +37,13 @@ const NodeTerminalImpl: React.FC<{
   /** True while this node IS the overlay — the one canvas surface rendered at 1:1, and so the
    *  only one that can carry the pane's floating chrome (`plan/020` §5). */
   overlaid?: boolean;
-}> = ({ terminalId, focused, overlaid = false }) => {
+  /** This terminal's exit status when its shell has ENDED, else null (`plan/024` Req 4).
+   *  From `sessionExit` via the canvas model, NOT from `surfaceChrome`: a node has to know it
+   *  whether or not anything is publishing chrome for it. */
+  exitInfo?: { exitCode: number | null } | null;
+  /** Terminal font size, so the banner scales with the text as it does in a pane. */
+  fontSize?: number;
+}> = ({ terminalId, focused, overlaid = false, exitInfo = null, fontSize }) => {
   // The ref identity MUST be stable across renders (012 D5). A fresh arrow every render
   // makes React detach and re-attach on every commit — clear + re-register churn, and
   // each churn is a relocation of a live terminal.
@@ -61,6 +72,23 @@ const NodeTerminalImpl: React.FC<{
   const chrome = useSurfaceChrome(overlaid ? terminalId : null);
 
   /**
+   * Ctrl+R restarts, exactly as it does in a pane — the banner prints that hint, and a hint that
+   * only works on one of the two surfaces showing the same banner is worse than none.
+   *
+   * The hook binds to this wrapper, so only the surface actually displaying the banner listens;
+   * the pane's own binding is on an element that is off screen while its terminal is here.
+   * Gated on `chrome` as well as `exitInfo` for the same reason the banner is: without a
+   * publisher there is nothing to call.
+   */
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const restartCb = chrome?.restartSession;
+  useRestartHotkey(
+    wrapperRef,
+    !!(overlaid && exitInfo && restartCb),
+    restartCb ?? NOOP,
+  );
+
+  /**
    * The pane's TEXT context menu — Copy, Paste, Clear, Selection mode (`plan/021` R2).
    *
    * `TerminalDisplay` binds this on its own `.terminal-display`, but that div no longer holds
@@ -82,7 +110,7 @@ const NodeTerminalImpl: React.FC<{
     : undefined;
 
   return (
-    <div className="terminal-display-wrapper canvas-surface">
+    <div className="terminal-display-wrapper canvas-surface" ref={wrapperRef}>
       <div
         className="terminal-display"
         data-terminal-id={terminalId}
@@ -102,6 +130,22 @@ const NodeTerminalImpl: React.FC<{
           onPick={chrome.pickSuggestion}
         />
       )}
+      {/* The session-closed banner, on the overlay only (`plan/024` Req 4).
+          The SAME component the pane renders — it is pure and props-only, so there is one
+          banner in the app rather than a canvas copy that drifts. Its two actions come from
+          `surfaceChrome` because only the pane can perform them, while the FACT that the
+          session ended comes from the store, because an ordinary node must draw itself muted
+          without anything publishing chrome for it.
+          `chrome` is required as well as `exitInfo`: without a publisher the buttons would be
+          dead, and a banner offering a Restart that does nothing is worse than no banner. */}
+      {overlaid && exitInfo && chrome && (
+        <SessionClosedBanner
+          exitCode={exitInfo.exitCode}
+          fontSize={fontSize}
+          onRestart={chrome.restartSession}
+          onDismiss={chrome.dismissSessionClosed}
+        />
+      )}
     </div>
   );
 };
@@ -112,7 +156,12 @@ const NodeTerminalImpl: React.FC<{
  * Canvas Mode re-renders on every frame of a pan or zoom — `setViewport` fires per pointer
  * event — and without this every node's host registration and surface subscription re-ran with it, for the whole workspace
  * including the nodes culled off screen. The props here are primitives, so the equality
- * check is exact and cheap; `CanvasNode` itself is deliberately NOT memoised, because it
+ * check is exact and cheap — with ONE exception, and it is load-bearing: `exitInfo` is an
+ * object, so it must be handed in by REFERENCE from `sessionExit.byTerminalId` rather than
+ * built at the call site. `exitInfo={node.exited ? { exitCode } : null}` would allocate a fresh
+ * object every render, this memo would never bail, and the whole workspace would re-render on
+ * every frame of a pan — the exact regression the memo exists to prevent.
+ * `CanvasNode` itself is deliberately NOT memoised, because it
  * takes `children` and seven per-node closures that are rebuilt each render, and a memo
  * that never bails is only a slower render.
  */

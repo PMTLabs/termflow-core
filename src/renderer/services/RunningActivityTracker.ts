@@ -1,5 +1,5 @@
 import { store } from '../store';
-import { setRunningActivity, markUnseenOutput } from '../store/slices/tabsSlice';
+import { setRunningActivity, markUnseenOutput, markTabSeen } from '../store/slices/tabsSlice';
 import { findTabIdByTerminalId, isTerminalMuted } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
 import {
@@ -18,6 +18,7 @@ import {
   VIEW_CHANGE_COOLDOWN_MS,
   RECONNECT_COOLDOWN_MS,
   STARTUP_COOLDOWN_MS,
+  SPAWN_GRACE_MS,
   UNSEEN_DEBOUNCE_MS,
   BURST_TAB_THRESHOLD,
 } from './runningActivity';
@@ -54,11 +55,22 @@ class RunningActivityTrackerClass {
   // it). Used to echo-cancel typing so the tab sweep doesn't animate while the user
   // types. A bare Enter resets it to -Infinity so the command's output still counts.
   private lastInputAt = new Map<string, number>();
+  // processId → the time its spawn grace expires. A PTY prints a banner and a prompt the moment
+  // it is created; that output is a consequence of the user asking for the terminal, never of
+  // work they missed, so it must not ring that terminal's unseen bell. Seeded by `pty:spawn`,
+  // which TerminalService publishes for a FRESH spawn only — a cross-window attach and a
+  // hot-swap reattach bind an already-running process whose output is genuine. See
+  // SPAWN_GRACE_MS.
+  private spawnGraceUntil = new Map<string, number>();
   private lastActiveTabId: string | null = null; // for focus-change detection
+  // The terminal the canvas overlay was last showing at 1:1, so `handleOverlaySeen` fires on the
+  // EDGE rather than on every store change. Same shape as `lastActiveTabId`, for the same reason.
+  private lastOverlaidTerminalId: string | null = null;
   private unsubscribe: (() => void) | null = null;
   private readonly opts = { windowMs: WINDOW_MS, minChunks: MIN_CHUNKS, minBytes: MIN_BYTES };
 
   private onData = (e: Event) => this.handleData(e as CustomEvent);
+  private onSpawn = (e: Event) => this.handleSpawn(e as CustomEvent);
   private onInput = (e: Event) => this.handleInput(e as CustomEvent);
   private onExit = (e: Event) => this.handleExit(e as CustomEvent);
   private onResize = () => this.handleResize();
@@ -74,18 +86,24 @@ class RunningActivityTrackerClass {
     // tab "running". Honored by handleData and evaluate via suppressUntil.
     if (startupGraceMs > 0) this.suppressUntil = Date.now() + startupGraceMs;
     window.addEventListener('pty:data', this.onData);
+    window.addEventListener('pty:spawn', this.onSpawn);
     window.addEventListener('pty:input', this.onInput);
     window.addEventListener('pty:exit', this.onExit);
     window.addEventListener('resize', this.onResize);
     window.addEventListener('pty:resize', this.onPtyResize);
     document.addEventListener('visibilitychange', this.onVisibility);
     this.lastActiveTabId = store.getState().tabs.activeTabId;
-    this.unsubscribe = store.subscribe(() => this.handleActiveTabChange());
+    this.lastOverlaidTerminalId = this.currentOverlaidTerminalId();
+    this.unsubscribe = store.subscribe(() => {
+      this.handleActiveTabChange();
+      this.handleOverlaySeen();
+    });
     this.timer = setInterval(() => this.evaluate(), EVAL_INTERVAL_MS);
   }
 
   stop(): void {
     window.removeEventListener('pty:data', this.onData);
+    window.removeEventListener('pty:spawn', this.onSpawn);
     window.removeEventListener('pty:input', this.onInput);
     window.removeEventListener('pty:exit', this.onExit);
     window.removeEventListener('resize', this.onResize);
@@ -103,7 +121,9 @@ class RunningActivityTrackerClass {
     this.unseenMark.clear();
     this.lastOutputAt.clear();
     this.lastInputAt.clear();
+    this.spawnGraceUntil.clear();
     this.lastActiveTabId = null;
+    this.lastOverlaidTerminalId = null;
     this.suppressUntil = 0;
   }
 
@@ -127,6 +147,79 @@ class RunningActivityTrackerClass {
     for (const processId of this.lastOutputAt.keys()) {
       if (this.resolveTab(processId) === leftTabId) this.unseenMark.set(processId, now);
     }
+  }
+
+  /**
+   * Which terminal, if any, the canvas overlay is showing at 1:1 right now.
+   *
+   * One expression of the question, consulted by the two suppression sites and by
+   * `handleOverlaySeen` below. That matters more than it looks: suppression ("this terminal
+   * must not GAIN a bell") and clearing ("this terminal's tab has now been read") are the two
+   * halves of one claim, and a version of the claim that drifted apart would either bell a
+   * terminal the user is staring at or clear a bell for one they are not.
+   */
+  private currentOverlaidTerminalId(): string | null {
+    const tabsState = store.getState().tabs;
+    return overlaySuppressedTerminal(
+      tabsState.tabs,
+      tabsState.activeTabId,
+      store.getState().canvas.overlayId,
+    );
+  }
+
+  /**
+   * Opening a terminal in the canvas overlay marks its tab READ (`plan/024` Req 2).
+   *
+   * Until Canvas Mode, "seen" and "active" were the same event, so clearing the bell lived
+   * inside `setActiveTab`. The overlay breaks that: it shows one terminal at natural size while
+   * the CANVAS tab is the active one, so a terminal can be read in full and keep its bell until
+   * the user goes and clicks its real tab — which is exactly the trip the canvas exists to save.
+   *
+   * **Here rather than at the overlay's call sites.** Three gestures open it today (double
+   * click, the ⛶ button, the `E` key) and a fourth is cheap to add; a gate in the callers lets
+   * the fourth opt out silently. Sitting beside the suppression means both halves read the same
+   * `overlaySuppressedTerminal` and cannot disagree — the defect `canvasIsShowing` shipped, and
+   * which stayed invisible for four days because the two call sites had no test between them.
+   *
+   * Edge-triggered on the overlaid terminal, so this is a cheap comparison on the store
+   * subscription's hot path and re-entering the canvas with an overlay remembered re-clears
+   * (the user is looking at it again).
+   */
+  private handleOverlaySeen(): void {
+    const overlaidTerminalId = this.currentOverlaidTerminalId();
+    if (overlaidTerminalId === this.lastOverlaidTerminalId) return;
+    this.lastOverlaidTerminalId = overlaidTerminalId;
+    if (!overlaidTerminalId) return;
+
+    const tabId = findTabIdByTerminalId(
+      store.getState().panes.treesByTabId,
+      overlaidTerminalId,
+    );
+    if (!tabId) return;
+    store.dispatch(markTabSeen({ tabId }));
+
+    // Advance this terminal's mark, for the sub-tick reason `handleActiveTabChange` documents:
+    // output that arrived but has not cleared UNSEEN_DEBOUNCE_MS yet is not accounted for, so an
+    // overlay opened and closed inside one eval interval would ring for output the user just
+    // read at full size.
+    //
+    // To its LAST RECORDED OUTPUT, not to `now`. `now` marks the future as seen: output landing
+    // in the same millisecond — or, once the user has left the canvas again, any time before the
+    // next tick — compares `newest <= mark` and is silently swallowed, so a terminal that
+    // produced nothing while it was overlaid would go quiet afterwards too. Marking what has
+    // actually arrived accounts for exactly the output the overlay put on screen and nothing
+    // else. (A terminal with no output yet has no mark to advance, which is the same thing said
+    // a different way.)
+    //
+    // Only this terminal, NOT the whole tab — and that is the difference from a tab switch.
+    // Activating a tab puts every one of its panes on screen; the overlay puts ONE there and
+    // leaves its siblings as thumbnails that are often not painting at all.
+    // `overlaySuppressedTerminal` already draws that line (it returns one terminal, never a
+    // tab), so a sibling pane that produces output while the overlay is up re-rings the tab,
+    // correctly.
+    const processId = terminalService.getProcessId(overlaidTerminalId);
+    const lastOutput = processId ? this.lastOutputAt.get(processId) : undefined;
+    if (processId && lastOutput !== undefined) this.unseenMark.set(processId, lastOutput);
   }
 
   // An OS session switch (RDP↔console connect / unlock) reattaches the desktop and
@@ -224,6 +317,29 @@ class RunningActivityTrackerClass {
       this.buffers.set(processId, buf);
     }
     this.lastOutputAt.set(processId, now);
+    // Startup banner/prompt (see SPAWN_GRACE_MS): pre-account for it, so the unseen pass reads
+    // `newest <= mark` and this terminal is never flagged for output the user did not miss.
+    //
+    // Advancing the MARK rather than dropping the chunk — which is what the resize/reconnect
+    // cooldown above does — is load-bearing twice over. It leaves the RUNNING sweep alone, so a
+    // terminal spawned to run a command (an MCP `create_terminal` with a command, an agent) still
+    // shows busy from its first byte; and it is the identical device `computeUnseenUpdate` uses
+    // for a muted or overlaid source, so when the grace ends nothing rings in arrears for output
+    // that has already scrolled past. It also covers `flagOnExit`, which compares against this
+    // same mark — a shell that dies during its own startup stays quiet too.
+    const graceUntil = this.spawnGraceUntil.get(processId);
+    if (graceUntil !== undefined) {
+      if (now < graceUntil) this.unseenMark.set(processId, now);
+      else this.spawnGraceUntil.delete(processId); // expired — stop paying for the lookup
+    }
+  }
+
+  // A terminal's PTY was just created (fresh spawn only — see `spawnGraceUntil`). Arm the
+  // window in which its own banner/prompt must not ring its unseen bell.
+  private handleSpawn(e: CustomEvent): void {
+    const { processId } = (e.detail || {}) as { processId?: string };
+    if (!processId) return;
+    this.spawnGraceUntil.set(processId, Date.now() + SPAWN_GRACE_MS);
   }
 
   // Record the time of a user keystroke/paste to a terminal so handleData can
@@ -264,6 +380,7 @@ class RunningActivityTrackerClass {
       this.unseenMark.delete(processId);
       this.lastOutputAt.delete(processId);
       this.lastInputAt.delete(processId); // avoid a per-process leak across a long session
+      this.spawnGraceUntil.delete(processId); // same, for a process that never outputs at all
     }
     this.evaluate(); // recompute the running sweep without the dead PTY
   }
@@ -290,11 +407,7 @@ class RunningActivityTrackerClass {
     // `markUnseen` would leak an exit-settled notification for the very terminal the user is
     // watching. What it must NOT do is go silent merely because the canvas is open — that was
     // R3, and it cost every other terminal its notification.
-    const overlaidTerminalId = overlaySuppressedTerminal(
-      tabsState.tabs,
-      tabsState.activeTabId,
-      store.getState().canvas.overlayId,
-    );
+    const overlaidTerminalId = this.currentOverlaidTerminalId();
     if (overlaidTerminalId !== null && effectiveTerminalId === overlaidTerminalId) return;
     // Mute gate: suppress this exit-settled bell if the tab is muted, or the
     // exiting pane itself is muted (an unmuted sibling in the same tab is
@@ -416,11 +529,7 @@ class RunningActivityTrackerClass {
     //
     // It is a LEAF id, so the comparison needs the process resolved first; the pane-mute check
     // below was already paying for that lookup, so this costs nothing new.
-    const overlaidTerminalId = overlaySuppressedTerminal(
-      tabsState.tabs,
-      tabsState.activeTabId,
-      store.getState().canvas.overlayId,
-    );
+    const overlaidTerminalId = this.currentOverlaidTerminalId();
     const isSuppressed = (processId: string, tabId: string): boolean => {
       if (mutedTabIds.has(tabId)) return true;
       const terminalId = terminalService.getTerminalIdForProcess(processId);

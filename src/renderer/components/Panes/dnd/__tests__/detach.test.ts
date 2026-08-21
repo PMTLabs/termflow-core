@@ -27,7 +27,9 @@ jest.mock('@termflow/terminal-core', () => ({
   terminalCache: { get: () => undefined },
 }));
 
-import { buildTabDetachPayload, applyDetachPayload } from '../detach';
+import {
+  buildTabDetachPayload, applyDetachPayload, removeSourceTab, removeSourcePane,
+} from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
 
 describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => {
@@ -141,5 +143,94 @@ describe('detach carries the cwd snapshot across windows (spec 045 §3.3)', () =
     // Seeding a payload without a cwd must not throw or write a bogus entry.
     expect(() => applyDetachPayload(payload!)).not.toThrow();
     expect(getCwdSnapshot('tm-1')).toBeUndefined();
+  });
+});
+
+/**
+ * Detach must not strand a session-exit record — `plan/024` Req 4.
+ *
+ * The round-1 leak fix put the clear in the two paths that close a terminal:
+ * `closePaneNonBlocking` and `TabManager.closeOneTab`. Detach goes through NEITHER.
+ * `collectTerminals` carries only panes with a live process, so a tab holding one running pane
+ * and one whose shell has exited hands the first to the new window and simply drops the second —
+ * leaving its record in this window's store with no tab, no pane and no way to ever clear it.
+ *
+ * The rule is "this window no longer has these terminals, so it keeps nothing about them", and it
+ * covers carried and left-behind alike. Clearing a carried one is a no-op today (it is live by
+ * construction, so it has no record) — but that is an invariant of `collectTerminals`, not of
+ * these functions, and the rule that depends on no invariant is the one worth having.
+ */
+describe('detach clears the session-exit records of terminals leaving this window', () => {
+  const leafOf = (id: string, terminalId: string): PaneNode => ({ id, type: 'terminal', terminalId });
+  const cleared = () => dispatch.mock.calls
+    .map(([a]) => a)
+    .filter((a: any) => a?.type === 'sessionExit/clearSessionClosed')
+    .map((a: any) => a.payload.terminalId)
+    .sort();
+
+  beforeEach(() => {
+    dispatch.mockClear();
+    mockState.panes.treesByTabId = {
+      'tab-1': {
+        id: 'pn-root', type: 'split', direction: 'horizontal',
+        children: [leafOf('pn-a', 'tm-live'), leafOf('pn-b', 'tm-exited')],
+      } as PaneNode,
+    };
+  });
+
+  describe('removeSourceTab', () => {
+    /**
+     * The leak itself: only `tm-live` travels, so `tm-exited` is removed from this window by a
+     * path that clears nothing. Its record has to go with it.
+     */
+    it('clears the pane that did not travel', () => {
+      removeSourceTab('tab-1', ['tm-live']);
+      expect(cleared()).toContain('tm-exited');
+    });
+
+    it('clears the carried pane too — no invariant required', () => {
+      removeSourceTab('tab-1', ['tm-live']);
+      expect(cleared()).toEqual(['tm-exited', 'tm-live']);
+    });
+
+    // A terminal named in the payload but no longer in the tree still counts as leaving.
+    it('clears a carried terminal that is not in the tree', () => {
+      removeSourceTab('tab-1', ['tm-gone']);
+      expect(cleared()).toContain('tm-gone');
+    });
+
+    // A tab whose tree has already gone must not throw on the way out.
+    it('copes with a tab that has no tree', () => {
+      mockState.panes.treesByTabId = {};
+      expect(() => removeSourceTab('tab-1', ['tm-live'])).not.toThrow();
+      expect(cleared()).toEqual(['tm-live']);
+    });
+  });
+
+  /**
+   * The single-pane path, and it is genuinely reachable for a DEAD pane — unlike
+   * `detachPaneToNewWindow`, which `openWindowWithPayload` guards by bailing on an empty terminal
+   * list. `buildPaneDetachPayload` has no such guard, so `PaneDragController` can start a
+   * cross-window drag of an exited pane and call this on claim or on an orphan drop.
+   */
+  describe('removeSourcePane', () => {
+    it('clears the dragged pane record', () => {
+      removeSourcePane('tab-1', 'pn-b', ['tm-exited']);
+      expect(cleared()).toEqual(['tm-exited']);
+    });
+
+    it('clears nothing when no terminal was handed over', () => {
+      removeSourcePane('tab-1', 'pn-b', []);
+      expect(cleared()).toEqual([]);
+    });
+
+    // Paired with the clear: the handoff itself must still happen, or this would be satisfiable
+    // by a function that only cleaned up and never detached.
+    it('still detaches the terminal it cleared', () => {
+      const { terminalService } = jest.requireMock('../../../../services/TerminalService');
+      terminalService.detachTerminal.mockClear();
+      removeSourcePane('tab-1', 'pn-b', ['tm-exited']);
+      expect(terminalService.detachTerminal).toHaveBeenCalledWith('tm-exited');
+    });
   });
 });
