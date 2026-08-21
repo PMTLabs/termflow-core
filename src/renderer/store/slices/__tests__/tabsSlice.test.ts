@@ -1,4 +1,4 @@
-import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
+import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
 
 const stateWithTwoTabs = () => {
   let state = tabsReducer(undefined, { type: '@@INIT' } as any);
@@ -399,5 +399,99 @@ describe('tabsSlice addTab insertAtStart (Canvas Mode takes the first position)'
     expect(ids(next)[0]).toBe('tb-r');
     expect(next.tabs.find(t => t.id === 'tb-r')?.isActive).toBe(false);
     expect(next.activeTabId).toBe('tb-3');
+  });
+});
+
+/**
+ * `markTabSeen` — reading a tab without activating it (`plan/024` Req 2).
+ *
+ * Until Canvas Mode, "seen" and "active" were the same event, so clearing lived inside
+ * `setActiveTab`. The overlay shows one terminal at 1:1 while the CANVAS tab is active, so a
+ * terminal can be read in full and keep its bell. This is the edge that says so.
+ */
+describe('tabsSlice markTabSeen', () => {
+  const belled = () => {
+    let state = stateWithTwoTabs();                       // tb-2 active
+    state = tabsReducer(state, markUnseenOutput({ tabId: 'tb-1' }));
+    state = tabsReducer(state, flagTabActivity({ tabId: 'tb-1' }));
+    return state;
+  };
+
+  it('clears both seen-flags on the named tab', () => {
+    const before = belled();
+    expect(before.tabs.find(t => t.id === 'tb-1')?.hasUnseenOutput).toBe(true);
+    expect(before.tabs.find(t => t.id === 'tb-1')?.hasBackgroundActivity).toBe(true);
+
+    const next = tabsReducer(before, markTabSeen({ tabId: 'tb-1' }));
+    expect(next.tabs.find(t => t.id === 'tb-1')?.hasUnseenOutput).toBe(false);
+    expect(next.tabs.find(t => t.id === 'tb-1')?.hasBackgroundActivity).toBe(false);
+  });
+
+  // The whole point: it does NOT move the user. Clearing via setActiveTab would have yanked
+  // them off the canvas to mark a background tab read.
+  it('does not change which tab is active', () => {
+    const next = tabsReducer(belled(), markTabSeen({ tabId: 'tb-1' }));
+    expect(next.activeTabId).toBe('tb-2');
+    expect(next.tabs.find(t => t.id === 'tb-1')?.isActive).toBe(false);
+  });
+
+  it('leaves other tabs alone', () => {
+    let state = belled();
+    state = tabsReducer(state, markUnseenOutput({ tabId: 'tb-1' }));
+    const next = tabsReducer(state, markTabSeen({ tabId: 'tb-1' }));
+    // tb-2 is active so it was never belled; assert the negative can't come from tb-1's clear.
+    expect(next.tabs.find(t => t.id === 'tb-2')?.hasUnseenOutput).toBeFalsy();
+  });
+
+  it('is a no-op for an unknown tab', () => {
+    const before = belled();
+    const next = tabsReducer(before, markTabSeen({ tabId: 'tb-missing' }));
+    expect(next.tabs.find(t => t.id === 'tb-1')?.hasUnseenOutput).toBe(true);
+  });
+});
+
+/**
+ * The extracted `markSeen` helper, pinned through its three callers.
+ *
+ * These two lines used to be copy-pasted into `setActiveTab` and `removeTab`; `markTabSeen` was
+ * about to make a third copy. The risk is a copy that clears one flag and not the other, which
+ * leaves a tab half-read — the bell gone but the amber dot still flashing, or the reverse. So
+ * every caller is asserted on BOTH flags rather than on the one it was written for.
+ */
+describe('tabsSlice "seen" clearing is one rule across every caller', () => {
+  const belled = (tabId: string) => {
+    let state = stateWithTwoTabs();
+    state = tabsReducer(state, addTab({ id: 'tb-3', title: 'C', shellType: 'default' }));
+    state = tabsReducer(state, markUnseenOutput({ tabId }));
+    state = tabsReducer(state, flagTabActivity({ tabId }));
+    return state;
+  };
+  const flags = (s: ReturnType<typeof tabsReducer>, id: string) => {
+    const t = s.tabs.find(x => x.id === id);
+    return { unseen: !!t?.hasUnseenOutput, activity: !!t?.hasBackgroundActivity };
+  };
+
+  it('setActiveTab clears both', () => {
+    const next = tabsReducer(belled('tb-1'), setActiveTab('tb-1'));
+    expect(flags(next, 'tb-1')).toEqual({ unseen: false, activity: false });
+  });
+
+  it('markTabSeen clears both', () => {
+    const next = tabsReducer(belled('tb-1'), markTabSeen({ tabId: 'tb-1' }));
+    expect(flags(next, 'tb-1')).toEqual({ unseen: false, activity: false });
+  });
+
+  it('removeTab clears both on the tab it auto-activates', () => {
+    // tb-3 is active (last added); removing it activates its neighbour tb-2. Bell tb-2 first so
+    // the auto-activation has something to clear.
+    let state = belled('tb-2');
+    state = tabsReducer(state, setActiveTab('tb-3'));
+    state = tabsReducer(state, markUnseenOutput({ tabId: 'tb-2' }));
+    state = tabsReducer(state, flagTabActivity({ tabId: 'tb-2' }));
+    expect(flags(state, 'tb-2')).toEqual({ unseen: true, activity: true });
+
+    const next = tabsReducer(state, removeTab('tb-3'));
+    expect(next.activeTabId).toBe('tb-2');
+    expect(flags(next, 'tb-2')).toEqual({ unseen: false, activity: false });
   });
 });

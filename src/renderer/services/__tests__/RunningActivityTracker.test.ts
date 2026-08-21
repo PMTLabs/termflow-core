@@ -36,12 +36,17 @@ jest.mock('../../store/slices/tabsSlice', () => ({
   setRunningActivity: (payload: { tabIds: string[]; terminalIds: string[] }) =>
     ({ type: 'tabs/setRunningActivity', payload }),
   markUnseenOutput: (payload: { tabId: string }) => ({ type: 'tabs/markUnseenOutput', payload }),
+  markTabSeen: (payload: { tabId: string }) => ({ type: 'tabs/markTabSeen', payload }),
 }));
-// terminalId is derived from processId in the mock: p1→tm-1, p2→tm-2, p3→tm-3.
+// terminalId is derived from processId in the mock: p1→tm-1, p2→tm-2, p3→tm-3, and back again.
+// Both directions are needed: the tracker resolves output (processId → terminalId) to find a
+// tab, and resolves the overlaid terminal (terminalId → processId) to advance its unseen mark.
 jest.mock('../TerminalService', () => ({
   terminalService: {
     getTerminalIdForProcess: (pid: string) =>
       pid === 'p1' ? 'tm-1' : pid === 'p2' ? 'tm-2' : pid === 'p3' ? 'tm-3' : undefined,
+    getProcessId: (tid: string) =>
+      tid === 'tm-1' ? 'p1' : tid === 'tm-2' ? 'p2' : tid === 'tm-3' ? 'p3' : undefined,
   },
 }));
 // terminalId → tabId: tm-1→tb-1, tm-2→tb-2, tm-3→tb-3. Gated by mockPaneTree.ready so
@@ -725,6 +730,124 @@ describe('RunningActivityTracker activity:bell emission (notifications)', () => 
       jest.advanceTimersByTime(SETTLE_MS);
       done();
       expect(bells).toHaveLength(0);
+    });
+  });
+
+  /**
+   * Opening a terminal in the overlay marks its tab READ — `plan/024` Req 2.
+   *
+   * The mirror image of the suppression above. Suppression stops the overlaid terminal GAINING
+   * a bell; this clears one it already had. Both halves read the same
+   * `overlaySuppressedTerminal`, on purpose: a version of "is the user watching this terminal"
+   * that drifted between them would either bell a terminal being stared at or clear a bell for
+   * one nobody is looking at.
+   */
+  describe('canvas overlay marks the terminal read', () => {
+    const showCanvas = (overlayId: string | null = null) => {
+      mockTabsState.tabs = [
+        { id: 'tb-canvas', shellType: 'canvas' },
+        { id: 'tb-1' },
+        { id: 'tb-2' },
+      ];
+      mockCanvasState.overlayId = overlayId;
+      switchActiveTab('tb-canvas');
+    };
+    const seenTabs = () => dispatch.mock.calls
+      .map(([a]) => a)
+      .filter((a) => a?.type === 'tabs/markTabSeen')
+      .map((a) => a.payload.tabId);
+    const collect = () => {
+      const bells: Array<{ tabId: string }> = [];
+      const h = (e: Event) => bells.push((e as CustomEvent).detail);
+      window.addEventListener('activity:bell', h);
+      return { bells, done: () => window.removeEventListener('activity:bell', h) };
+    };
+
+    it("clears the overlaid terminal's tab, without activating it", () => {
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual(['tb-1']);
+      // The point of the feature: the canvas tab is still the active one. Clearing via
+      // `setActiveTab` would have yanked the user off the canvas to do it.
+      expect(mockTabsState.activeTabId).toBe('tb-canvas');
+    });
+
+    /**
+     * The second condition of `overlaySuppressedTerminal`, and the subtle one: `overlayId` is
+     * deliberately NOT cleared when the user leaves the canvas (`plan/020` §4). Keyed on it
+     * alone, this would mark a terminal read every time the store changed for any reason, from
+     * a tab the user cannot even see.
+     */
+    it('does not clear when the canvas is not on screen, though overlayId survives', () => {
+      showCanvas('tm-1');
+      dispatch.mockClear();
+      switchActiveTab('tb-2');
+      expect(mockCanvasState.overlayId).toBe('tm-1');
+      expect(seenTabs()).toEqual([]);
+    });
+
+    // Edge-triggered. The store subscription fires on EVERY change; re-dispatching on each one
+    // would churn the bell for the whole session the overlay is open.
+    it('fires once per overlay, not once per store change', () => {
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual(['tb-1']);
+      mockStoreSub.cb?.();
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual(['tb-1']);
+    });
+
+    it('clears the new tab when the overlay moves to another terminal', () => {
+      showCanvas('tm-1');
+      mockCanvasState.overlayId = 'tm-2';
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual(['tb-1', 'tb-2']);
+    });
+
+    // Closing the overlay is not an event that means anything was seen.
+    it('does not clear anything when the overlay is dismissed', () => {
+      showCanvas('tm-1');
+      dispatch.mockClear();
+      mockCanvasState.overlayId = null;
+      mockStoreSub.cb?.();
+      expect(seenTabs()).toEqual([]);
+    });
+
+    /**
+     * The sub-tick race, and the reason the mark is advanced at all: output that arrived just
+     * before the overlay opened has NOT cleared the debounce, so an overlay opened and closed
+     * inside one eval interval would ring for output the user just read at 1:1.
+     */
+    it('does not re-ring for output that was already on screen when the overlay opened', () => {
+      emitData('p1', 4);              // arrives first, still settling
+      showCanvas('tm-1');             // ...and is read at full size
+      switchActiveTab('tb-2');        // overlay closed again within the same tick
+      const { bells, done } = collect();
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells).toHaveLength(0);
+    });
+
+    /**
+     * The negative that keeps the case above honest. Marking to `now` instead of to the last
+     * RECORDED output passes the case above and fails this one: it declares the future seen, so
+     * a terminal that produced nothing while overlaid falls silent afterwards too.
+     */
+    it('still rings for output that arrived after the overlay was opened', () => {
+      showCanvas('tm-1');             // nothing has been produced yet
+      switchActiveTab('tb-2');        // and the user leaves again
+      const { bells, done } = collect();
+      emitData('p1', 4);              // only NOW does it produce something
+      jest.advanceTimersByTime(SETTLE_MS);
+      done();
+      expect(bells.map((b) => b.tabId)).toEqual(['tb-1']);
+    });
+
+    // A node whose pane tree has not seeded yet resolves to no tab. Dispatching with a null
+    // tabId would be a no-op in the reducer, but the retry it silently skips would not be.
+    it('does nothing when the terminal resolves to no tab yet', () => {
+      mockPaneTree.ready = false;
+      showCanvas('tm-1');
+      expect(seenTabs()).toEqual([]);
+      mockPaneTree.ready = true;
     });
   });
 });
