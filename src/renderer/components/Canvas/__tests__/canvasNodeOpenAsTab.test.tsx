@@ -18,6 +18,7 @@ import { CanvasNode } from '../CanvasNode';
 import { LodTier, HEAD_H, DEFAULT_METRICS } from '../canvasGeometry';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { CanvasNodeModel } from '../canvasSelectors';
+import type { CanvasBusyCue } from '../canvasBusyCue';
 
 /**
  * The agent chip's data source, stubbed at the hook.
@@ -91,6 +92,7 @@ function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
         focused={false}
         dimmed={false}
         hidden={false}
+        busyCue="sweep"
         overlaid={overlaid}
         {...handlers}
       />,
@@ -381,39 +383,83 @@ describe('agent chip', () => {
 });
 
 /**
- * The busy dot — Req 7 (`plan/020` §3), what replaced the old header-wide sweep on a canvas
- * node.
+ * The busy cue — Req 7 (`plan/020` §3), made a user setting by `plan/023`.
  *
- * Its own EXISTENCE is the running state: `CanvasNode` mounts `.canvas-node-dot` only while
- * `node.isRunning` (per-terminal since Req 8), rather than always rendering it and leaving the
- * blink to a CSS ancestor selector the way the sidebar's icon does (`canvasSidebar.test.tsx`).
- * So the regression this pins is specific — a node that renders the dot unconditionally — and
- * every case here is a positive paired with the negative that catches exactly that.
+ * A node draws EXACTLY ONE of the two cues, and each one's presence in the DOM is its own
+ * state, so both are mutation-checkable and neither is rendered-then-hidden with CSS:
+ *
+ *  - `sweep` is the `running` CLASS on `.canvas-node`, which the stylesheet turns into a band
+ *    across the header. Conditional on `busyCue` as well as `isRunning`, so a busy node in dot
+ *    mode must NOT carry it — otherwise both cues would run at once.
+ *  - `dot` is the `.canvas-node-dot` SPAN, which (unlike before `plan/023`) renders idle as
+ *    well as busy — muted and static — and carries `.running` only while working. So for this
+ *    cue the class is the running state and the element is the setting.
+ *
+ * Written as a TABLE over (cue × running × tier) rather than as one case per assertion,
+ * because the defect this now pins is "renders the WRONG cue", which no single-cue test can
+ * see. The chip rows are the ones worth reading: that tier is the only place the two cues
+ * disagree about whether any cue exists at all.
  */
-describe('busy dot', () => {
+describe('busy cue', () => {
   const dot = () => container.querySelector('.canvas-node-dot');
-  const renderRunning = (running: boolean, tier: LodTier = 'gpu') => act(() => {
+  const node = () => container.querySelector('.canvas-node')!;
+  const renderCue = (busyCue: CanvasBusyCue, running: boolean, tier: LodTier = 'gpu') => act(() => {
     root.render(withMetrics(
-      <CanvasNode node={{ ...node0, isRunning: running }} tier={tier} zoom={1}
+      <CanvasNode node={{ ...node0, isRunning: running }} tier={tier} zoom={1} busyCue={busyCue}
         selected={false} focused={false} dimmed={false} hidden={false} />,
     ));
   });
 
-  it('is absent on an idle node', () => {
-    renderRunning(false);
-    expect(dot()).toBeNull();
+  type Row = {
+    cue: CanvasBusyCue; running: boolean; tier: LodTier;
+    /** `null` = no dot element at all; otherwise whether it carries `.running`. */
+    dot: null | 'idle' | 'running';
+    /** Whether `.canvas-node` carries the sweep's `running` class. */
+    sweeps: boolean;
+  };
+
+  const TABLE: Row[] = [
+    { cue: 'sweep', running: true,  tier: 'gpu',  dot: null,      sweeps: true  },
+    { cue: 'sweep', running: false, tier: 'gpu',  dot: null,      sweeps: false },
+    // The whole reason `sweep` is the default: at the chip tier the header IS the node, so the
+    // band still shows — and it is the ONLY cue that does.
+    { cue: 'sweep', running: true,  tier: 'chip', dot: null,      sweeps: true  },
+    { cue: 'dot',   running: true,  tier: 'gpu',  dot: 'running', sweeps: false },
+    // `plan/023` D3 — an idle node keeps the dot, muted. Before that it mounted nothing, and
+    // the title shifted sideways every time a command started.
+    { cue: 'dot',   running: false, tier: 'gpu',  dot: 'idle',    sweeps: false },
+    // ...and the gap the setting makes explicit: dot mode shows nothing on a collapsed tile.
+    { cue: 'dot',   running: true,  tier: 'chip', dot: null,      sweeps: false },
+  ];
+
+  it.each(TABLE)('$cue / running=$running / $tier', ({ cue, running, tier, dot: want, sweeps }) => {
+    renderCue(cue, running, tier);
+    // Asserted as one object so a failure names every axis at once, rather than reporting the
+    // first mismatched boolean and hiding whether the OTHER cue also fired.
+    expect({
+      dot: dot() === null ? null : (dot()!.classList.contains('running') ? 'running' : 'idle'),
+      sweeps: node().classList.contains('running'),
+    }).toEqual({ dot: want, sweeps });
   });
 
-  it('appears on a running node', () => {
-    renderRunning(true);
-    expect(dot()).not.toBeNull();
+  // Guard on the guard. Every row above is a conjunction, and a conjunction is satisfiable by a
+  // component that renders NOTHING — `dot: null, sweeps: false` is three of the six rows. These
+  // pin that each cue genuinely appears somewhere in the table, so a `CanvasNode` that dropped
+  // both cues entirely could not pass the block.
+  it('each cue actually fires somewhere in the table', () => {
+    expect(TABLE.some((r) => r.sweeps)).toBe(true);
+    expect(TABLE.some((r) => r.dot === 'running')).toBe(true);
+    expect(TABLE.some((r) => r.dot === 'idle')).toBe(true);
   });
 
-  // Same reason the shell badge and the header buttons go: at the chip tier the header IS the
-  // node, and there is no room for anything but the title.
-  it('is absent at the chip tier even while running', () => {
-    renderRunning(true, 'chip');
-    expect(dot()).toBeNull();
+  // The mutation this replaces the old `describe('busy dot')` for: the two cues must be
+  // mutually exclusive. Hard-coding `running` onto the node (or the dot into the tree) would
+  // leave a node sweeping AND blinking, which no single row above forbids on its own.
+  it('never shows both cues at once', () => {
+    for (const { cue, running, tier } of TABLE) {
+      renderCue(cue, running, tier);
+      expect(node().classList.contains('running') && dot() !== null).toBe(false);
+    }
   });
 });
 
@@ -432,7 +478,7 @@ describe('per-node custom properties', () => {
   const renderAt = (zoom: number) => act(() => {
     root.render(withMetrics(
       <CanvasNode node={node0} tier="gpu" zoom={zoom} selected={false} focused={false}
-        dimmed={false} hidden={false} />,
+        dimmed={false} hidden={false} busyCue="sweep" />,
     ));
   });
 
@@ -485,7 +531,7 @@ describe('per-node host box', () => {
   const renderWith = (hostBox?: { w: number; h: number }) => act(() => {
     root.render(withMetrics(
       <CanvasNode node={node0} tier="gpu" zoom={1} selected={false} focused={false}
-        dimmed={false} hidden={false} hostBox={hostBox} />,
+        dimmed={false} hidden={false} busyCue="sweep" hostBox={hostBox} />,
     ));
   });
 
@@ -513,7 +559,8 @@ describe('per-node host box', () => {
     act(() => {
       root.render(withMetrics(
         <CanvasNode node={{ ...node0, rect: { ...node0.rect, w: BOX.w } }} tier="gpu" zoom={1}
-          selected={false} focused={false} dimmed={false} hidden={false} hostBox={BOX} />,
+          selected={false} focused={false} dimmed={false} hidden={false} busyCue="sweep"
+          hostBox={BOX} />,
       ));
     });
     expect(Number(node().style.getPropertyValue('--node-surface-scale'))).toBeCloseTo(1, 9);

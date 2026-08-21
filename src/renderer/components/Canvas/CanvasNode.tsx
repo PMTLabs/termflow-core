@@ -3,6 +3,7 @@ import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } 
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
+import type { CanvasBusyCue } from './canvasBusyCue';
 
 /**
  * One terminal on the canvas.
@@ -44,6 +45,15 @@ export const CanvasNode: React.FC<{
   linkTarget?: boolean;
   /** Paint-culled, or below the chip tier. Hides the node — never unmounts it. */
   hidden: boolean;
+  /** Which busy cue this node draws while `node.isRunning` — the user's `canvasBusyCue`
+   *  setting (`plan/023`). Read ONCE by `CanvasMode` and threaded down, rather than with a
+   *  `useSelector` here: that would be one store subscription per node, on a surface whose
+   *  whole design is "many nodes at once".
+   *
+   *  REQUIRED on purpose. A default here would keep a future second render site compiling
+   *  while it silently drew no cue at all — the failure would be a node that never says it
+   *  is busy, which looks exactly like a node that isn't. */
+  busyCue: CanvasBusyCue;
   onPointerDown?: (e: React.PointerEvent) => void;
   onHeaderPointerDown?: (e: React.PointerEvent) => void;
   onDoubleClick?: (e: React.MouseEvent) => void;
@@ -66,7 +76,7 @@ export const CanvasNode: React.FC<{
   hostBox?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
-  node, tier, zoom, selected, focused, dimmed, linkTarget, hidden,
+  node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, busyCue,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
   onClose, onContextMenu, overlaid, hostBox, children,
 }) => {
@@ -105,11 +115,14 @@ export const CanvasNode: React.FC<{
         dimmed ? 'dimmed' : '',
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
-        // No `running` class. It existed only to carry the header-wide sweep deleted in
-        // `plan/020` §3, and a busy node now says so with the dot below — whose own existence
-        // IS the state. A class with no rule reads as a styling hook that works, and the next
-        // person to reach for it finds out otherwise. The sidebar keeps ITS `.running`, because
-        // there the icon renders either way and only an ancestor selector can blink it.
+        // `running` is conditional on MORE than `node.isRunning` — it is the sweep cue's own
+        // existence (`plan/023`), so a busy node in `dot` mode deliberately does not carry it.
+        // The dot below is the mirror of this: exactly one of the two is ever in the DOM, and
+        // neither is rendered-then-hidden, so "which cue is this node showing?" stays a
+        // question the DOM can answer. The sidebar is untouched by the setting and keeps its
+        // own `.running`, because there the icon renders either way and only an ancestor
+        // selector can blink it.
+        busyCue === 'sweep' && node.isRunning ? 'running' : '',
       ].filter(Boolean).join(' ')}
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}
@@ -171,12 +184,20 @@ export const CanvasNode: React.FC<{
                 fontSize: headFontSize(zoom),
               }}
         >
-          {/* Req 7 (`plan/020` §3) — replaces the old header-wide sweep with a small dot, cheap
-              enough to animate on every node at once. Its own EXISTENCE is the running state
-              (unlike the sidebar's icon, which always renders and is blinked by a CSS ancestor
-              selector instead): a busy node mounts it, an idle one never does, so the mutation
-              check for this is "hard-code it to always render", not "hide it with CSS". */}
-          {!isChip && node.isRunning && <span className="canvas-node-dot" />}
+          {/* The `dot` cue (`plan/020` §3 Req 7, reshaped by `plan/023`). Cheap enough to
+              animate on every node at once, and — unlike the sweep — a permanent status light:
+              it renders whether or not the terminal is busy, muted and static while idle, and
+              carries `.running` only while it is working. So here the CLASS is the running
+              state and the ELEMENT is the cue setting, which is why both are mutation-checkable
+              (hard-code either one and a test fails).
+
+              Still nothing at the chip tier: there the header IS the node and there is room for
+              a title and nothing else. That leaves a collapsed tile with no cue in `dot` mode —
+              a real gap, and the reason `sweep` is the default. It is stated in the Settings
+              help text rather than left to be discovered. */}
+          {!isChip && busyCue === 'dot' && (
+            <span className={node.isRunning ? 'canvas-node-dot running' : 'canvas-node-dot'} />
+          )}
           <span className="canvas-node-title">{node.title}</span>
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node

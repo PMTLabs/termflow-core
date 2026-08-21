@@ -100,10 +100,9 @@ describe('canvas node layout box', () => {
   });
 
   it('still parses rules nested inside an @media block', () => {
-    // `plan/020` §3: this used to be the running sweep's reduced-motion override, which was
-    // deleted along with the sweep itself (Req 5). `.canvas-node-dot`'s own reduced-motion
-    // override — still real, still nested inside `@media (prefers-reduced-motion: reduce)` —
-    // is the same shape of example.
+    // The reduced-motion block (`@media (prefers-reduced-motion: reduce)`), which holds a rule
+    // for every busy cue — the sweep's override, deleted by `plan/020` §3 Req 5 and restored by
+    // `plan/023`, and the dot's, which was the stand-in example while the sweep was gone.
     const canvas = path.join(RENDERER, 'components/Canvas/Canvas.css');
     const selectors = rulesIn(canvas).map((r) => r.selector);
     expect(selectors).toContain('.canvas-node-dot');

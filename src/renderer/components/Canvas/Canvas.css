@@ -259,27 +259,66 @@
 .canvas-node[data-lod="chip"] .canvas-node-head-inner { justify-content: center; }
 .canvas-node[data-lod="chip"] .canvas-port { display: none; }
 
-/* Busy indicators — `plan/020` §3 (Reqs 5-7).
+/* Busy indicators — `plan/020` §3 (Reqs 5-7), reshaped by `plan/023`.
  *
- * The header-wide sweep that used to live here is GONE from every canvas surface. It was one
- * rule shared by a canvas node header and a sidebar row (see the git history of this file for
- * what it looked like), and it cost a full-width gradient repainting on every frame, forever,
- * for every busy node and row on the canvas at once. The tab strip keeps its own sweep
- * (`TabManager.css` `.tab-item.tab-running::after`) — that is one element, not N — and every
- * canvas surface gets a small, cheap, ANIMATED alternative instead: still a live cue, not a
- * static accent (the tab strip's own reduced-motion note explains why a static accent is the
- * wrong trade — see below).
+ * THREE surfaces, and they do NOT all follow the setting:
  *
- * ONE keyframe for both, so they cannot drift into two different "busy" looks:
- *  - `.canvas-node-dot` (Req 7) — `CanvasNode` mounts this span only while `node.isRunning`
- *    (per-terminal since Req 8), so its own EXISTENCE is the running state; no `.running`
- *    ancestor selector is needed for this one.
- *  - `.shell-profile-icon` inside a running `.canvas-srow` (Req 6) — `ShellProfileIcon` always
- *    renders, busy or not, so the blink has to be scoped by the row's own `.running` class
- *    instead of by the icon's existence.
- */
+ *  - A canvas NODE draws whichever cue the user's `canvasBusyCue` setting names. `CanvasNode`
+ *    renders exactly one of the two — the `running` class for the sweep, the `.canvas-node-dot`
+ *    span for the dot — so neither is ever rendered-then-hidden here, and "which cue is this
+ *    node showing?" stays answerable from the DOM.
+ *  - A SIDEBAR row (Req 6) ignores the setting entirely and always blinks its profile icon.
+ *    A list is already scannable in a way nodes scattered across a canvas are not, and its
+ *    icon renders busy or not, so the blink is scoped by the row's own `.running` class rather
+ *    than by the icon's existence.
+ *  - The TAB STRIP is a different stylesheet and a different rule
+ *    (`TabManager.css` `.tab-item.tab-running::after`); nothing here touches it.
+ *
+ * `plan/020` deleted the node sweep on the grounds that it "repainted a full-width gradient
+ * every frame". That was overstated — the band animates `transform`, which composites, and the
+ * gradient is painted into its layer once — so the real per-node cost is layer memory, bounded
+ * by the number of BUSY nodes. Both cues are affordable; the setting is a legibility choice,
+ * not a fast-vs-pretty one, which is why `sweep` is the default. */
+
+/* ---- The `sweep` cue (default) ------------------------------------------ */
+
+/* NOT the tab strip's rule, though it started as a copy of it. TabManager tiles a 160px
+   gradient with `repeat-x`, which shows exactly one band on a ~160px tab and THREE on a 1440px
+   overlaid node — three sweeps chasing each other, which is what a "one thing is running" cue
+   must never look like.
+
+   So the band is sized as a fraction of the header and translated across it exactly once per
+   period. The gradient peaks at 50%, so its head and tail ramps are the same length and the
+   band reads as symmetrical however wide the node is.
+
+   No chip-tier rule is needed: `.canvas-node[data-lod="chip"] .canvas-node-head` already fills
+   the node, so a collapsed tile sweeps as a whole for free. That is the tier where the dot
+   renders nothing at all, and the reason this cue is the default. */
+.canvas-node.running .canvas-node-head::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 0;
+  width: 55%; z-index: -1; pointer-events: none;
+  opacity: .42;
+  background-image: linear-gradient(90deg, transparent 0%, var(--tab-running-accent, #3aa6ff) 50%, transparent 100%);
+  animation: canvas-node-sweep 1.6s linear infinite;
+}
+@keyframes canvas-node-sweep {
+  /* Percentages here are of the BAND's own width, so -100% is fully off the left edge and
+     182% (= 100 / 0.55) is fully off the right — one crossing, no overlap with the next. */
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(182%); }
+}
+
+/* ---- The `dot` cue, and the sidebar's icon ------------------------------ */
+
+/* ONE keyframe for both, so they cannot drift into two different "busy" looks.
+   The dot is a permanent status light (`plan/023`): it renders idle as well as busy, so the
+   node's title area does not shift sideways the moment a command starts. Idle is muted and
+   static; `.running` is what makes it the accent colour and animates it. */
 .canvas-node-dot {
   width: 7px; height: 7px; border-radius: 50%; flex: none;
+  background: var(--text-tertiary, #666666);
+}
+.canvas-node-dot.running {
   background: var(--tab-running-accent, #3aa6ff);
   animation: canvas-busy-blink 1.1s ease-in-out infinite;
 }
@@ -290,12 +329,14 @@
   0%, 100% { opacity: 1; }
   50%      { opacity: .3; }
 }
-/* Same call the tab strip's sweep already made (`TabManager.css`): keep the cue ANIMATED
-   rather than dropping to a static accent, which reads as a stray dot/border rather than a
-   "running" signal. Slowing it is enough here — unlike the old sweep, this was never a bright
-   moving band, so there is no separate opacity ceiling left to lower. */
+
+/* Reduced motion. The call the tab strip's sweep already made (`TabManager.css`): keep every
+   cue ANIMATED rather than dropping to a static accent, which reads as a stray dot/border
+   rather than a "running" signal. The sweep is a bright moving band, so it gets an opacity
+   ceiling as well as a slower period; the blink never was, so slowing it is enough. */
 @media (prefers-reduced-motion: reduce) {
-  .canvas-node-dot,
+  .canvas-node.running .canvas-node-head::after { animation-duration: 3.2s; opacity: .14; }
+  .canvas-node-dot.running,
   .canvas-srow.running .shell-profile-icon { animation-duration: 2.4s; }
 }
 
