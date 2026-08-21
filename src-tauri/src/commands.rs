@@ -3431,7 +3431,8 @@ mod root_leaf_reservation_tests {
 /// — or a new quit path in `lib.rs` — cannot quietly opt out and strand shells.
 #[cfg(test)]
 mod quit_teardown_wiring_tests {
-    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    /// The body of `fn <name>` (or of a closure passed to `<name>`), found by
+    /// counting braces from the first `{` after the signature.
     fn fn_body(src: &str, signature: &str) -> String {
         let start = src.find(signature).unwrap_or_else(|| {
             panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
@@ -3452,6 +3453,58 @@ mod quit_teardown_wiring_tests {
             }
         }
         panic!("unbalanced braces after `{signature}`");
+    }
+
+    /// Drop `//` line comments. Without this the guards read our own prose: this
+    /// module and the code it guards both *describe* exiting and disarming, and a
+    /// sentence must never stand in for — or trip — an assertion about code.
+    fn strip_line_comments(code: &str) -> String {
+        code.lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether `code` terminates the process by ANY spelling used in this repo.
+    ///
+    /// Matching `.exit(0)` alone was not enough: `std::process::exit(0)` has no
+    /// `.` at all and is an established pattern here (`instance_lock.rs`,
+    /// `lib.rs`), so a future quit fix written that way would sail past a guard
+    /// that only knew the method-call form. `disarm_then_exit` — the sanctioned
+    /// route — is removed first so it is never mistaken for a bare exit.
+    fn has_process_exit(code: &str) -> bool {
+        strip_line_comments(code)
+            .replace("disarm_then_exit", "")
+            .contains("exit(")
+    }
+
+    /// The guard's own detector, pinned. A class guard that misses a spelling is
+    /// worse than no guard: it reports safety it never checked.
+    #[test]
+    fn the_detector_catches_every_spelling_of_a_process_exit() {
+        assert!(has_process_exit("app.exit(0);"), "method call on app");
+        assert!(
+            has_process_exit("std::process::exit(0);"),
+            "std::process::exit has no `.` — the spelling that defeated the first guard"
+        );
+        assert!(has_process_exit("app_handle.exit(0);"), "another receiver");
+        assert!(
+            has_process_exit("window.app_handle().exit(0);"),
+            "chained receiver"
+        );
+        assert!(has_process_exit("std::process::exit(1);"), "nonzero status");
+
+        assert!(
+            !has_process_exit("disarm_then_exit(app);"),
+            "the sanctioned route must not read as a bare exit"
+        );
+        assert!(
+            !has_process_exit("// a bare exit(0) here would strand terminals"),
+            "prose about exiting must not trip the guard"
+        );
     }
 
     fn source(file: &str) -> String {
@@ -3476,9 +3529,9 @@ mod quit_teardown_wiring_tests {
             "flush_then_exit must route its exits through disarm_then_exit. Body:\n{body}"
         );
         assert!(
-            !body.contains(".exit(0)"),
-            "a branch of flush_then_exit still calls exit(0) directly, skipping the \
-             disarm — that branch strands the user's terminals. Body:\n{body}"
+            !has_process_exit(&body),
+            "a branch of flush_then_exit still terminates the process directly, \
+             skipping the disarm — that branch strands the user's terminals. Body:\n{body}"
         );
     }
 
@@ -3487,16 +3540,21 @@ mod quit_teardown_wiring_tests {
     /// window-event handler. It is a user-initiated quit and needs the same
     /// guarantee — missing it was the whole reason to guard the class, not the
     /// single function.
+    ///
+    /// Scoped to the window-event closure, not the whole file: `lib.rs` also has
+    /// a legitimate pre-builder `std::process::exit(2)` that runs before any
+    /// `AppState` or pty-host exists, and a file-wide check would fail on it.
     #[test]
     fn the_last_window_destroyed_path_disarms_before_exiting() {
-        let src = source("lib.rs");
+        let body = fn_body(&source("lib.rs"), ".on_window_event(");
         assert!(
-            src.contains("disarm_then_exit"),
-            "lib.rs's last-window-destroyed exit must disarm the host first"
+            body.contains("disarm_then_exit"),
+            "the last-window-destroyed exit must disarm the host first. Body:\n{body}"
         );
         assert!(
-            !src.contains("app.exit(0)"),
-            "lib.rs still exits directly somewhere, skipping the disarm"
+            !has_process_exit(&body),
+            "the window-event handler still terminates the process directly, \
+             skipping the disarm. Body:\n{body}"
         );
     }
 
@@ -3511,7 +3569,7 @@ mod quit_teardown_wiring_tests {
             "restart_for_update must still arm. Body:\n{body}"
         );
         assert!(
-            !body.contains("disarm"),
+            !strip_line_comments(&body).contains("disarm"),
             "restart_for_update must NOT disarm — it exits deliberately armed so \
              terminals survive the update. Body:\n{body}"
         );

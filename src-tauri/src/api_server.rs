@@ -2642,8 +2642,20 @@ async fn hotswap_disarm(State(state): State<AppState>) -> impl IntoResponse {
     let Some(client) = state.pty_host_clone() else {
         return (StatusCode::OK, "nothing to disarm").into_response();
     };
-    client.disarm().await;
-    (StatusCode::OK, "disarmed").into_response()
+    // Report the sidecar's actual answer. `disarm_siblings` logs a non-2xx as
+    // "its window will expire" — answering 200 unconditionally made that
+    // diagnostic unreachable, so a sibling still holding an armed 600s window
+    // looked exactly like one that had released it.
+    if client.disarm().await {
+        (StatusCode::OK, "disarmed").into_response()
+    } else {
+        log::warn!("[HOTSWAP] sibling disarm request got no DisarmAck; still armed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "pty-host did not acknowledge the disarm",
+        )
+            .into_response()
+    }
 }
 
 async fn get_system_info() -> impl IntoResponse {
