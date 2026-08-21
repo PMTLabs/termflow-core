@@ -149,6 +149,8 @@ export const CanvasMode: React.FC = () => {
   const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
   const edges = useSelector((s: RootState) => s.canvas.edges);
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
+  // Read ONCE here and passed down, not subscribed to per node — see `CanvasNode`'s prop doc.
+  const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
   // For `closeNode` only — the pane COUNT per tab, which decides whether closing a node is a
   // pane close or a tab close. `selectCanvasModel` reads this too, so it is already a
   // subscription this tree pays for.
@@ -920,6 +922,7 @@ export const CanvasMode: React.FC = () => {
               node={node}
               tier={tier}
               zoom={vp.z}
+              busyCue={busyCue}
               selected={selectedId === n.terminalId}
               focused={focusedId === n.terminalId}
               // Hover focus (design §5). The other half of `CanvasWires`'s heat: without it the

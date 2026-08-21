@@ -160,47 +160,49 @@ describe('node chrome is counter-scaled', () => {
 });
 
 /**
- * Req 5 (`plan/020` §3) — the header-wide sweep is gone from every canvas surface; the tab
- * strip's own sweep is untouched.
+ * The busy cue is a SETTING (`plan/023`), so the requirement this block pins has changed shape
+ * rather than gone away.
  *
- * This REPLACES `describe('the running sweep runs once at a time')`, which pinned the deleted
- * rule's shape (band width as a fraction of the header, symmetric gradient stops, the
- * once-per-period travel distance). Deleting that test along with the rule would leave the
- * requirement unpinned — a future PR could bring the sweep back onto `.canvas-node.running` or
- * `.canvas-srow.running` and nothing here would notice. So this asserts the requirement
- * POSITIVELY instead: no canvas surface's stylesheet defines or uses a sweep, and the tab
- * strip's — a different file — still does.
+ * `plan/020` Req 5 deleted the sweep from every canvas surface and wrote a guard here so a
+ * future PR could not quietly re-add it — including a by-MECHANISM check, added after a first
+ * version that only guarded the tab strip's tiling technique and would have let the exact
+ * deleted effect back in under a different keyframe name.
+ *
+ * This is that future PR. The block is REWRITTEN, not deleted: the sweep is back on a node, but
+ * two neighbouring requirements the old blanket rule was protecting incidentally are still live,
+ * and deleting the guard would silently unpin both —
+ *
+ *   1. the SIDEBAR does not sweep. Rows keep the cheap blinking icon under either setting, so
+ *      the mechanism check survives here, re-scoped from `.canvas-node|.canvas-srow` down to
+ *      `.canvas-srow` alone. That narrowing is the entire concession this PR makes.
+ *   2. the node's band is not the TAB STRIP's band. Re-pinned below, in full, from the
+ *      `describe('the running sweep runs once at a time')` that `40da5ab` deleted along with
+ *      the rule — that shape is invisible until a node is wide, so nothing else would catch it.
  */
-describe('no canvas surface carries a sweep animation', () => {
-  // Catches the rule being reintroduced under ITS OLD NAME...
-  it('Canvas.css defines no sweep keyframes', () => {
-    expect(CSS).not.toMatch(/@keyframes\s+[\w-]*sweep/i);
+describe('the node sweeps, and only the node', () => {
+  const SWEEP = '.canvas-node.running .canvas-node-head::after';
+
+  it('the sweep keyframe exists and the node header uses it', () => {
+    expect(CSS).toMatch(/@keyframes\s+canvas-node-sweep\s*\{/);
+    expect(ruleFor(SWEEP)).toMatch(/animation:\s*canvas-node-sweep/);
   });
 
-  // ...and catches it being reintroduced under a NEW name, on a NEW selector, by MECHANISM.
-  //
-  // The first version of this test checked for `background-repeat` / `background-position` —
-  // the tab strip's tiling technique, which the rule actually deleted here never used. It moved
-  // a fixed-width gradient band with `transform: translateX` in its keyframes, so the exact
-  // deleted effect could come back on `.canvas-node-head-inner::after` under a keyframe called
-  // `canvas-node-crawl` and every assertion in this block would still have passed. A guard that
-  // names one technique only guards that technique.
-  //
-  // What the requirement actually says is that a canvas busy cue is CHEAP: an opacity blink on a
-  // small element, not something that moves. So that is what is asserted — any keyframe a canvas
-  // surface animates must not translate anything or scroll a background, whatever it is called.
-  it('no canvas surface animates anything that MOVES', () => {
+  // The re-scoped Req 5 guard: whatever it is called and whichever selector carries it, nothing
+  // on a sidebar ROW may animate something that moves. Resolves the keyframes by name out of
+  // each rule's own `animation` shorthand, so a renamed keyframe on a new pseudo-element is
+  // caught too.
+  it('no sidebar row animates anything that MOVES', () => {
     const frames = keyframes();
     const animated = rules()
-      .filter((r) => /\.canvas-node|\.canvas-srow/.test(r.selector))
+      .filter((r) => /\.canvas-srow/.test(r.selector))
       .flatMap((r) => {
         const decl = /animation:\s*([^;]+)/.exec(r.body)?.[1] ?? '';
         return [...frames.keys()]
           .filter((name) => new RegExp(`(?<![\\w-])${name}(?![\\w-])`).test(decl))
           .map((name) => ({ selector: r.selector, name }));
       });
-    // Guard on the guard: if this resolved nothing the loop below would assert nothing, and a
-    // renamed keyframe or a broken parser would read as "no canvas surface moves".
+    // Guard on the guard: a filter that resolved nothing would assert nothing and read as "the
+    // sidebar moves nothing" — which is also exactly what a broken parser reads as.
     expect(animated.length).toBeGreaterThan(0);
     for (const { selector, name } of animated) {
       const body = frames.get(name)!;
@@ -209,29 +211,85 @@ describe('no canvas surface carries a sweep animation', () => {
     }
   });
 
-  // The tab strip's technique too, kept from the first version — it is still a way back in, just
-  // not the one the deleted rule used.
-  it('no canvas surface tiles or scrolls a background', () => {
-    const surfaceRules = rules().filter((r) => /\.canvas-node|\.canvas-srow/.test(r.selector));
-    expect(surfaceRules.length).toBeGreaterThan(0); // guard on the guard — the filter must hit something
-    for (const r of surfaceRules) {
+  it('no sidebar row tiles or scrolls a background', () => {
+    const rowRules = rules().filter((r) => /\.canvas-srow/.test(r.selector));
+    expect(rowRules.length).toBeGreaterThan(0); // guard on the guard — the filter must hit something
+    for (const r of rowRules) {
       expect(r.body).not.toMatch(/background-repeat:\s*repeat/);
       expect(r.body).not.toMatch(/background-position/);
       expect(r.body).not.toMatch(/tab-running-sweep/);
     }
   });
 
-  // The exact two selectors the old rule was written against no longer resolve to anything —
+  // The row half of the ORIGINAL selector list, which `plan/023` deliberately does not restore.
   // `ruleFor` throws for a selector with no rule, same as it does for a typo.
-  it('the deleted selectors have no rule at all', () => {
-    expect(() => ruleFor('.canvas-node.running .canvas-node-head::after')).toThrow();
+  it('the sidebar half of the old selector list stays deleted', () => {
     expect(() => ruleFor('.canvas-srow.running::after')).toThrow();
   });
 
-  // The other half of the requirement: this was never about removing the cue, only the
-  // expensive, three-surface-wide version of it. The tab strip is a DIFFERENT stylesheet, so
-  // deleting Canvas.css's copy cannot have taken it down too by accident.
-  it('the tab strip still sweeps', () => {
+  /* ---- the band's shape, restored from `40da5ab^` ---------------------------------- */
+
+  it('does not tile a fixed-width gradient across the header', () => {
+    const body = ruleFor(SWEEP);
+    expect(body).not.toMatch(/background-repeat:\s*repeat/);
+    // `background-size` in px is the tiling period that caused this; a band width is a width.
+    expect(body).not.toMatch(/background-size:\s*\d+px/);
+    expect(body).toMatch(/width:\s*\d+(\.\d+)?%/);
+  });
+
+  it('borrows nothing from the tab strip, whose period is a tab wide', () => {
+    expect(ruleFor(SWEEP)).not.toMatch(/tab-running-sweep/);
+  });
+
+  it('travels exactly one band width past each edge', () => {
+    const bandPct = Number(ruleFor(SWEEP).match(/width:\s*(\d+(?:\.\d+)?)%/)![1]);
+    const frames = keyframes().get('canvas-node-sweep')!;
+    const from = Number(frames.match(/from\s*\{[^}]*translateX\((-?\d+(?:\.\d+)?)%/)![1]);
+    const to = Number(frames.match(/to\s*\{[^}]*translateX\((-?\d+(?:\.\d+)?)%/)![1]);
+
+    // Percentages in `translateX` are of the BAND's own width. Starting at -100% puts it fully
+    // off the left edge; ending at 100/fraction puts it fully off the right.
+    expect(from).toBe(-100);
+    expect(to).toBeCloseTo(100 / (bandPct / 100), 0);
+  });
+
+  // Tam's words on the original: "timing of head and tail should be balanced". The band reads
+  // symmetric only if its gradient peaks in the middle — an off-centre peak makes the leading
+  // and trailing ramps different lengths, which looks like a stutter however wide the node is.
+  it('peaks in the middle of the band, so head and tail ramp equally', () => {
+    const body = ruleFor(SWEEP);
+    const stops = [...body.matchAll(/(transparent|var\([^)]*\))\s+(\d+)%/g)].map((m) => ({
+      colour: m[1], at: Number(m[2]),
+    }));
+    expect(stops.map((s) => s.at)).toEqual([0, 50, 100]);
+    expect(stops[0].colour).toBe('transparent');
+    expect(stops[2].colour).toBe('transparent');
+    expect(stops[1].colour).not.toBe('transparent');
+  });
+
+  // `z-index: -1` resolves against the nearest stacking context, so without these three the band
+  // sinks behind the header's own background and vanishes — visible nowhere, while passing every
+  // test above, all of which only read the sweep rule itself.
+  it('the header establishes the stacking context the band needs', () => {
+    const head = ruleFor('.canvas-node-head');
+    expect(head).toMatch(/position:\s*relative/);
+    expect(head).toMatch(/isolation:\s*isolate/);
+    expect(head).toMatch(/overflow:\s*hidden/);
+  });
+
+  // Design 010 §9 / `TabManager.css`: reduced motion SOFTENS the band rather than freezing it,
+  // because a static accent reads as a stray border rather than a running signal. The sweep is
+  // the one cue bright enough to need an opacity ceiling as well as a slower period.
+  it('reduced motion softens the band rather than freezing it', () => {
+    const reduced = rules().filter((r) => r.selector === SWEEP && /animation-duration/.test(r.body));
+    expect(reduced).toHaveLength(1);
+    expect(reduced[0].body).toMatch(/animation-duration:\s*3\.2s/);
+    expect(reduced[0].body).toMatch(/opacity:\s*\.14/);
+  });
+
+  // The other half of the original requirement: the tab strip is a DIFFERENT stylesheet, so
+  // neither deleting the canvas copy (`plan/020`) nor restoring it (`plan/023`) may touch it.
+  it('the tab strip still sweeps, on its own rule', () => {
     const tabCss = readSource(path.resolve(__dirname, '../../Tabs/TabManager.css'));
     expect(tabCss).toMatch(/\.tab-item\.tab-running::after\s*\{[^}]*animation:\s*tab-running-sweep/);
     expect(tabCss).toMatch(/@keyframes\s+tab-running-sweep/);
@@ -239,15 +297,20 @@ describe('no canvas surface carries a sweep animation', () => {
 });
 
 /**
- * Req 6/7 — what replaced the sweep on the canvas: one shared keyframe, two consumers.
+ * The `dot` cue and the sidebar's icon — Req 6/7, reshaped by `plan/023`.
  *
- * Not a copy of the deleted describe above (there is no shape to reverse-engineer — a blink is
- * just an opacity animation), but the same principle: pin that the two rules genuinely SHARE
- * `canvas-busy-blink` rather than each defining their own that happens to look alike today.
+ * Two separate things are pinned here and they are easy to conflate:
+ *
+ *  - The two surfaces genuinely SHARE `canvas-busy-blink`, rather than each defining one that
+ *    happens to look alike today. (There is no shape to reverse-engineer — a blink is just an
+ *    opacity animation — so sharing is the only property worth asserting.)
+ *  - The dot is a permanent STATUS LIGHT, not a busy-only element: idle renders muted and
+ *    STATIC, and only `.running` animates. Without the negative half, a dot that blinked
+ *    whether or not the terminal was working would pass every "they share one blink" check.
  */
 describe('the busy dot and the busy icon share one blink', () => {
   it('both reference the same keyframe', () => {
-    expect(ruleFor('.canvas-node-dot')).toMatch(/animation:\s*canvas-busy-blink/);
+    expect(ruleFor('.canvas-node-dot.running')).toMatch(/animation:\s*canvas-busy-blink/);
     expect(ruleFor('.canvas-srow.running .shell-profile-icon')).toMatch(/animation:\s*canvas-busy-blink/);
   });
 
@@ -255,34 +318,30 @@ describe('the busy dot and the busy icon share one blink', () => {
     expect(CSS).toMatch(/@keyframes\s+canvas-busy-blink\s*\{/);
   });
 
+  // `plan/023` D3. The base rule paints an idle dot and must animate NOTHING — the whole point
+  // of keeping it mounted while idle is that the title area stops shifting when a command
+  // starts, and a dot that blinked while idle would report every node as busy.
+  it('an idle dot is muted and does not animate', () => {
+    const base = ruleFor('.canvas-node-dot');
+    expect(base).not.toMatch(/animation/);
+    expect(base).toMatch(/background:\s*var\(--text-tertiary/);
+    // ...and the running one is the accent colour, or "muted" would be unfalsifiable.
+    expect(ruleFor('.canvas-node-dot.running')).toMatch(/background:\s*var\(--tab-running-accent/);
+  });
+
   // Reduced motion keeps the animation (design 010 §9 / the tab strip's own note in
   // `TabManager.css`: a static accent "read as a stray border, not a running signal") rather
   // than dropping it — just slower. Both selectors, so they cannot fall out of step.
   it('reduced motion slows both rather than freezing either', () => {
     const reduced = rules().filter((r) => /animation-duration/.test(r.body)
-      && (r.selector === '.canvas-node-dot' || r.selector === '.canvas-srow.running .shell-profile-icon'));
+      && (r.selector === '.canvas-node-dot.running' || r.selector === '.canvas-srow.running .shell-profile-icon'));
     expect(reduced.map((r) => r.selector).sort()).toEqual(
-      ['.canvas-node-dot', '.canvas-srow.running .shell-profile-icon'].sort(),
+      ['.canvas-node-dot.running', '.canvas-srow.running .shell-profile-icon'].sort(),
     );
     expect(new Set(reduced.map((r) => r.body))).toEqual(new Set([reduced[0].body]));
   });
 });
 
-/**
- * The frame is one screen pixel at every zoom, and it costs no layout.
- *
- * Two properties, and they are load-bearing together rather than separately:
- *
- *  - **`outline`, never `border`.** `box-sizing: border-box` is global, so a world-space border
- *    eats the body's height — at the overview `1px / 0.05` is twenty world pixels, a tenth of
- *    the body — and the box the surface scales into would move with the zoom. An outline is
- *    free, which is what lets the width be counter-scaled honestly instead of clamped to
- *    something that looks wrong at one end.
- *  - **`--node-chrome-k`, not `--node-k`.** The frame's counter-scale is UNCLAMPED `1/z`. The
- *    title bar's is clamped at 1, because a label on a 96px node has to grow with it. Using
- *    the header's scale for the frame is the bug this pins: it leaves the outline at `1px * z`
- *    below zoom 1, which is a third of a pixel at the overview.
- */
 describe('the node frame is screen-space', () => {
   const declaration = (selector: string, prop: string) => {
     for (const decl of ruleFor(selector).split(';')) {

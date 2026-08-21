@@ -12,6 +12,7 @@ const base: TrackedSettings = {
   commandSuggestions: true,
   activateTabOnApiCreate: false,
   canvasWheelMode: 'zoom',
+  canvasBusyCue: 'sweep',
   defaultEditor: '',
   defaultProfile: 'p1',
   shellProfiles: [{ id: 'p1', cwd: 'C:/a' }, { id: 'p2', cwd: undefined }],
@@ -52,6 +53,21 @@ describe('settingsDirty', () => {
     const snap = snapshotCategory('terminal', base);
     expect(isCategoryDirty('terminal', { ...base, canvasWheelMode: 'scroll' }, snap)).toBe(true);
     expect(isCategoryDirty('terminal', { ...base, canvasWheelMode: 'zoom' }, snap)).toBe(false);
+  });
+
+  it('terminal tracks the canvas busy cue', () => {
+    // Same failure mode as the wheel mode above, and the same reason it is worth its own test:
+    // an untracked field makes "Discard changes" quietly not discard this one.
+    const snap = snapshotCategory('terminal', base);
+    expect(isCategoryDirty('terminal', { ...base, canvasBusyCue: 'dot' }, snap)).toBe(true);
+    expect(isCategoryDirty('terminal', { ...base, canvasBusyCue: 'sweep' }, snap)).toBe(false);
+  });
+
+  it('the canvas busy cue survives a snapshot/revert round trip', () => {
+    // The snapshot is what "Discard changes" replays, so a field that is DIRTY-tracked but not
+    // carried in the snapshot object would flag the change and then fail to undo it.
+    const snap = snapshotCategory('terminal', { ...base, canvasBusyCue: 'dot' });
+    expect(snap).toMatchObject({ kind: 'terminal', canvasBusyCue: 'dot' });
   });
 
   it('profiles tracks cwd and defaultProfile, ignores other fields', () => {

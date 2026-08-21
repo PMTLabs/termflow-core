@@ -4,6 +4,9 @@ import { EULA_ACCEPTED_KEY } from '../../legal';
 // Type-only, and imported rather than restated: the modes are the gesture rule's vocabulary, and
 // a second copy of the union here would let the two drift into a setting the canvas cannot read.
 import type { CanvasWheelMode } from '../../components/Canvas/canvasGestures';
+// Same arrangement, same reason: the cue names are the node renderer's vocabulary, and a
+// second copy here would let the setting drift into a value the canvas cannot render.
+import type { CanvasBusyCue } from '../../components/Canvas/canvasBusyCue';
 
 export interface ShellProfile {
   id: string;
@@ -84,6 +87,13 @@ interface SettingsState {
   //    chord inside the terminal that holds the keyboard, so editing one is unaffected.
   // Canvas Mode only — a wheel in a normal pane is untouched by this setting either way.
   canvasWheelMode: CanvasWheelMode;
+  // How a canvas NODE reports that a process inside it is producing output (plan/023):
+  //  - 'sweep' (default): a gradient band crosses the node header once per period. Readable
+  //    at a glance across a canvas, and the only cue that survives the chip tier.
+  //  - 'dot': a small status light in the title area — muted when idle, accent-coloured and
+  //    blinking when busy. Nothing moves, and nothing renders at the chip tier.
+  // Canvas Mode only, and NODES only — the sidebar's row icon blinks either way.
+  canvasBusyCue: CanvasBusyCue;
   // Sparse map of shortcutActions.ts actionId -> user-chosen combo string.
   // Absent key = use that action's registry default. See
   // docs/041-keyboard-shortcuts-customization-design.md.
@@ -152,6 +162,7 @@ const initialState: SettingsState = {
   agentColorSchemes: {},
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
+  canvasBusyCue: 'sweep',
   customKeybindings: {},
   keepRunningInBackground: false,
   launchAtLogin: false,
@@ -330,6 +341,14 @@ const settingsSlice = createSlice({
       }
     },
 
+    setCanvasBusyCue: (state, action: PayloadAction<CanvasBusyCue>) => {
+      state.canvasBusyCue = action.payload;
+      // Save to config file
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('canvasBusyCue', state.canvasBusyCue);
+      }
+    },
+
     // Bulk-replace the whole agent→schema map. Persists like the other setters
     // (used on config load — re-persisting the loaded value is idempotent, same
     // as setColorSchema/setFontSize — and on Settings "Discard Changes" revert).
@@ -468,6 +487,7 @@ export const {
   setNonFocusedPaneOpacity,
   setCommandSuggestions,
   setCanvasWheelMode,
+  setCanvasBusyCue,
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,

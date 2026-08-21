@@ -29,6 +29,7 @@ import {
   setEnhancedKeyboard,
   setCommandSuggestions,
   setCanvasWheelMode,
+  setCanvasBusyCue,
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
@@ -39,6 +40,7 @@ import {
   setNotifyOsEnabled,
   hydrateEulaAcceptedVersion
 } from './store/slices/settingsSlice';
+import { isCanvasBusyCue } from './components/Canvas/canvasBusyCue';
 import { openSettingsTab } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
@@ -574,6 +576,13 @@ const App: React.FC = () => {
         // dropdown showing no option selected to explain it.
         if (config.canvasWheelMode === 'zoom' || config.canvasWheelMode === 'scroll') {
           dispatch(setCanvasWheelMode(config.canvasWheelMode));
+        }
+        // Validated for the same reason, and by the union's OWN predicate rather than a
+        // restated `=== 'sweep' || === 'dot'` here: a restatement is what silently stops
+        // accepting a third cue on the day one is added. A bad value would otherwise leave
+        // every node with no cue at all and a dropdown showing nothing selected.
+        if (isCanvasBusyCue(config.canvasBusyCue)) {
+          dispatch(setCanvasBusyCue(config.canvasBusyCue));
         }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));

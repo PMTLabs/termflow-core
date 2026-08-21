@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -283,6 +283,46 @@ describe('settingsSlice canvasWheelMode', () => {
     try {
       settingsReducer(undefined, setCanvasWheelMode('scroll'));
       expect(setConfigValue).toHaveBeenCalledWith('canvasWheelMode', 'scroll');
+    } finally {
+      delete (global as any).window.electronAPI;
+    }
+  });
+});
+
+/**
+ * Which busy cue a canvas NODE draws (`plan/023`, Tam 2026-08-20).
+ *
+ * Unlike `canvasWheelMode` above, the default here deliberately CHANGES the behaviour existing
+ * users have: `plan/020` shipped the dot, and this restores the sweep as the out-of-box cue
+ * because the dot does not carry at a glance across a canvas. That makes the default the
+ * assertion that matters for the opposite reason — it is the decision, so it is the thing a
+ * later refactor must not quietly undo.
+ */
+describe('settingsSlice canvasBusyCue', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it("defaults to 'sweep' — the cue that is readable across a whole canvas", () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.canvasBusyCue).toBe('sweep');
+  });
+
+  it("can be switched to 'dot' and back", () => {
+    let state = settingsReducer(undefined, setCanvasBusyCue('dot'));
+    expect(state.canvasBusyCue).toBe('dot');
+    state = settingsReducer(state, setCanvasBusyCue('sweep'));
+    expect(state.canvasBusyCue).toBe('sweep');
+  });
+
+  it('persists the change, so it survives a restart', () => {
+    // Link 4 of the setting chain, and the one that fails SILENTLY: a setter that forgot to
+    // write through works perfectly all session and reverts on the next launch.
+    const setConfigValue = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue };
+    try {
+      settingsReducer(undefined, setCanvasBusyCue('dot'));
+      expect(setConfigValue).toHaveBeenCalledWith('canvasBusyCue', 'dot');
     } finally {
       delete (global as any).window.electronAPI;
     }

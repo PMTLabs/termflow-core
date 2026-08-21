@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
+import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import { SHORTCUT_ACTIONS, findConflict, comboKeyToken } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
@@ -298,6 +299,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setCommandSuggestions(baseline.commandSuggestions));
             dispatch(setActivateTabOnApiCreate(baseline.activateTabOnApiCreate));
             dispatch(setCanvasWheelMode(baseline.canvasWheelMode as CanvasWheelMode));
+            dispatch(setCanvasBusyCue(baseline.canvasBusyCue as CanvasBusyCue));
             dispatch(setDefaultEditor(baseline.defaultEditor));
         } else if (baseline.kind === 'shortcuts') {
             dispatch(setCustomKeybindings(Object.fromEntries(baseline.customKeybindings)));
@@ -1308,6 +1310,29 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 pointer and zooms its font. With “Wheel scrolls”, the wheel pans the workspace
                 (Shift+wheel pans sideways) and Ctrl/Cmd+wheel zooms the canvas instead — font
                 zoom then stays on Ctrl/Cmd+wheel in the terminal you are editing.
+            </span>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="canvas-busy-cue">
+                    Busy indicator in Canvas Mode
+                </label>
+                <select
+                    id="canvas-busy-cue"
+                    className="setting-input"
+                    value={settings.canvasBusyCue}
+                    onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
+                >
+                    <option value="sweep">Sweep across the node (default)</option>
+                    <option value="dot">Blinking dot in the node title</option>
+                </select>
+            </div>
+            <span className="help-text">
+                How a node on the canvas shows that something inside it is producing output.
+                “Sweep” runs a soft band across the node header — easy to pick out across a whole
+                canvas, and the only cue that still shows when you zoom out far enough for nodes
+                to collapse to name tiles. “Blinking dot” is quieter and animates less: a small
+                light in the node title, muted while the terminal is idle and blinking while it
+                is busy, with nothing shown on collapsed tiles. The Canvas sidebar list blinks
+                its shell icon either way.
             </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="default-editor">
