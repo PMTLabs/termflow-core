@@ -423,13 +423,19 @@ pub struct AppState<R: Runtime = Wry> {
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
     // present here, restoring the real pid.
     pub host_reattach_pending: Arc<DashMap<String, u32>>,
-    // Backlog 011: tab_id -> prompt_hook for sessions REATTACHED after a hot-swap
-    // (core restart). Set by create_host_terminal's reattach branch, drained once
-    // by the renderer (take_reattach_prompt_hook) after createTerminal resolves,
-    // so it can re-seed the command-suggest prompt gate that its wiped in-memory
-    // cache lost. Absent for a fresh spawn — a new shell starts armed at a prompt
-    // and must NOT be gated. (Renderer reloads with a live core seed via reconcile
-    // instead; the empty terminal list on a core restart is why this path exists.)
+    // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
+    // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
+    // renderer (take_reattach_prompt_hook) after createTerminal resolves, so it can re-seed
+    // the command-suggest prompt gate that its wiped in-memory cache lost. Absent for a
+    // fresh spawn — a new shell starts armed at a prompt and must NOT be gated. (Renderer
+    // reloads with a live core seed via reconcile instead; the empty terminal list on a core
+    // restart is why this path exists.)
+    //
+    // KEYED BY PROCESS ID, like `state.terminals` beside it — not by the leaf. This comment
+    // said "tab_id ->" until design 014 re-keyed the map and left the text behind, and that
+    // stale line was the visible fingerprint of a real bug: the renderer went on draining by
+    // leaf id, missed every time, and every reattached session lost BOTH the prompt gate and
+    // the Win32-Input-Mode re-seed that rides on the same drained value.
     pub reattach_prompt_hooks: Arc<DashMap<String, bool>>,
     // Monotonic generation bumped on each successful sidecar connect. A client's
     // on_disconnect only clears `pty_host` if its generation is still current,

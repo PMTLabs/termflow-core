@@ -221,13 +221,41 @@ describe('canvasSlice', () => {
       expect(s.recent[0]).toBe('tm-1');
     });
 
-    it('closes without taking the keyboard away', () => {
+    /**
+     * Closing hands the keyboard back to the canvas.
+     *
+     * This REVERSES the rule that used to live here ("closes without taking the keyboard
+     * away"), and the reversal is the bug fix: every close path -- the backdrop, the header
+     * toggle and Ctrl+Shift+E -- has already blurred xterm's textarea in the DOM by the time
+     * this reducer runs. A surviving `focusedId` therefore named a terminal that did not have
+     * the keyboard, and `CanvasMode`'s `if (focusedId) return` read it as "a terminal is
+     * typing" and went deaf to every canvas key: E, Tab, the arrows, Shift+1, Ctrl+-/+.
+     *
+     * The symptom that reached us was `E` working exactly once per canvas visit. It was never
+     * about E -- after one overlay round trip the canvas keyboard was gone entirely, and the
+     * only ways back were Esc or a click on empty canvas, neither of which anybody guesses.
+     */
+    it('closes and hands the keyboard back to the canvas', () => {
       let s = canvasReducer(init(), setOverlayNode('tm-1'));
       s = canvasReducer(s, setOverlayNode(null));
       expect(s.overlayId).toBeNull();
-      // You were working in that terminal a moment ago; shrinking the node is not a reason
-      // to stop. This is also what makes Esc's two-step unwind reachable.
-      expect(s.focusedId).toBe('tm-1');
+      expect(s.focusedId).toBeNull();
+    });
+
+    /**
+     * It only takes back the focus it granted.
+     *
+     * `focusedId === overlayId` rather than an unconditional clear, so a node holding the
+     * keyboard for some other reason keeps it. Nothing grants focus that way today -- the
+     * overlay is the only door -- but an unconditional clear would make this reducer the thing
+     * that silently breaks the first feature that does.
+     */
+    it('leaves a focus it did not grant alone', () => {
+      let s = canvasReducer(init(), setOverlayNode('tm-1'));
+      s = canvasReducer(s, focusNode('tm-other'));
+      s = canvasReducer(s, setOverlayNode(null));
+      expect(s.overlayId).toBeNull();
+      expect(s.focusedId).toBe('tm-other');
     });
 
     it('starts closed', () => {

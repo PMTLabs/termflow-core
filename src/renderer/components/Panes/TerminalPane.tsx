@@ -301,7 +301,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // handoff on mount) — otherwise the popup leaks keystrokes into an agent CLI
         // that survived the update. Best-effort; never block terminal init.
         try {
-          const seed = await window.electronAPI.takeReattachPromptHook?.(terminalId);
+          // `pid`, NOT `terminalId`. Design 014 re-keyed `reattach_prompt_hooks` and
+          // `state.terminals` off the leaf onto the minted `pc-` process id
+          // (commands.rs:424, 573-582), and this reader was left behind: a `tm-` leaf
+          // looked up in a `pc-` map missed every time, so the seed below never ran and
+          // BOTH of the things it unlocks stayed broken on every reattach. The sibling
+          // probe above has always passed `existingProcessId`; the two agree again now.
+          const seed = await window.electronAPI.takeReattachPromptHook?.(pid);
           if (seed) {
             terminalService.stashPromptGate(
               terminalId,
