@@ -6,7 +6,10 @@ import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProces
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
-import { SHORTCUT_ACTIONS, findConflict, comboKeyToken } from '../../services/shortcutActions';
+import {
+    ShortcutAction, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, findConflict, comboKeyToken,
+    allowsModifierlessCombo,
+} from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
 import { ShellProfile } from '../../store/slices/settingsSlice';
@@ -761,7 +764,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const isFunctionKey = /^F([1-9]|1[0-9]|2[0-4])$/.test(e.key);
         const hasModifier = e.ctrlKey || e.metaKey || e.altKey || e.shiftKey;
 
-        if (!hasModifier && !isFunctionKey) {
+        // Canvas-scoped actions are exempt from the modifier requirement, and have to be: two of
+        // them SHIP with a bare letter, so applying the global rule here would leave a row whose
+        // current value is `T` that can never be re-recorded to another bare letter — the same
+        // "visible but unreachable" trap the Space note above records. See
+        // `allowsModifierlessCombo` for why a bare key is safe on that surface and nowhere else.
+        if (!hasModifier && !isFunctionKey && !allowsModifierlessCombo(actionId)) {
             setRecordError({ actionId, message: 'Must include Ctrl/Cmd, Alt, or Shift, or be a function key (F1-F24).' });
             return; // stay in recording state so the user can retry
         }
@@ -1406,6 +1414,55 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         </div>
     );
 
+    // One row, so the two scoped groups below cannot drift into two different rows.
+    const renderShortcutRow = (action: ShortcutAction) => {
+        const combo = settings.customKeybindings[action.id] ?? action.defaultCombo;
+        const isOverridden = action.id in settings.customKeybindings;
+        const isRecording = recordingActionId === action.id;
+        const rowError = recordError?.actionId === action.id ? recordError : null;
+
+        return (
+            <div className="shortcut-row" key={action.id}>
+                <span className="shortcut-label">{action.label}</span>
+                {isRecording ? (
+                    <input
+                        className="shortcut-recording-input"
+                        value="Press keys…"
+                        readOnly
+                        autoFocus
+                        aria-label={`Press keys to record a new shortcut for ${action.label}`}
+                        onKeyDown={(e) => handleRecordKeyDown(action.id, e)}
+                        onBlur={cancelRecording}
+                    />
+                ) : (
+                    <kbd className="shortcut-combo">{combo}</kbd>
+                )}
+                <button
+                    type="button"
+                    className="shortcut-record-btn"
+                    title={`Record a new shortcut for ${action.label}`}
+                    aria-label={`Record a new shortcut for ${action.label}`}
+                    onClick={() => { setRecordError(null); setRecordingActionId(action.id); }}
+                >
+                    ●
+                </button>
+                <button
+                    type="button"
+                    className="shortcut-reset-btn"
+                    title={`Reset ${action.label} to default (${action.defaultCombo})`}
+                    aria-label={`Reset ${action.label} to default`}
+                    disabled={!isOverridden}
+                    onClick={() => dispatch(resetCustomKeybinding(action.id))}
+                >
+                    ↺
+                </button>
+                {rowError && (
+                    <span className="shortcut-conflict-error">{rowError.message}</span>
+                )}
+            </div>
+        );
+    };
+
     const renderShortcuts = () => (
         <div className="settings-section">
             <h2>Shortcuts</h2>
@@ -1415,53 +1472,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     Escape to cancel. Combos already used by another shortcut are rejected.
                 </span>
                 <div className="shortcut-list">
-                    {SHORTCUT_ACTIONS.map((action) => {
-                        const combo = settings.customKeybindings[action.id] ?? action.defaultCombo;
-                        const isOverridden = action.id in settings.customKeybindings;
-                        const isRecording = recordingActionId === action.id;
-                        const rowError = recordError?.actionId === action.id ? recordError : null;
-
-                        return (
-                            <div className="shortcut-row" key={action.id}>
-                                <span className="shortcut-label">{action.label}</span>
-                                {isRecording ? (
-                                    <input
-                                        className="shortcut-recording-input"
-                                        value="Press keys…"
-                                        readOnly
-                                        autoFocus
-                                        aria-label={`Press keys to record a new shortcut for ${action.label}`}
-                                        onKeyDown={(e) => handleRecordKeyDown(action.id, e)}
-                                        onBlur={cancelRecording}
-                                    />
-                                ) : (
-                                    <kbd className="shortcut-combo">{combo}</kbd>
-                                )}
-                                <button
-                                    type="button"
-                                    className="shortcut-record-btn"
-                                    title={`Record a new shortcut for ${action.label}`}
-                                    aria-label={`Record a new shortcut for ${action.label}`}
-                                    onClick={() => { setRecordError(null); setRecordingActionId(action.id); }}
-                                >
-                                    ●
-                                </button>
-                                <button
-                                    type="button"
-                                    className="shortcut-reset-btn"
-                                    title={`Reset ${action.label} to default (${action.defaultCombo})`}
-                                    aria-label={`Reset ${action.label} to default`}
-                                    disabled={!isOverridden}
-                                    onClick={() => dispatch(resetCustomKeybinding(action.id))}
-                                >
-                                    ↺
-                                </button>
-                                {rowError && (
-                                    <span className="shortcut-conflict-error">{rowError.message}</span>
-                                )}
-                            </div>
-                        );
-                    })}
+                    {GLOBAL_SHORTCUT_ACTIONS.map(renderShortcutRow)}
+                </div>
+            </div>
+            {/* Its own group, because these keys do NOT behave like the ones above: they work on
+                one surface, and several of them are bare letters that would be unusable anywhere
+                else. Showing them in a single flat list would read as "E opens a node, app-wide",
+                which is both wrong and alarming. */}
+            <h3>Canvas Mode</h3>
+            <div className="setting-item">
+                <span className="help-text">
+                    These apply only on the canvas tab. The unmodified keys act on the selected
+                    node while the canvas has the keyboard — once you are typing into a node, they
+                    go to the terminal and only the Ctrl combos still act on the canvas. Because
+                    of that, these may be recorded as a plain key with no modifier.
+                </span>
+                <div className="shortcut-list">
+                    {CANVAS_SHORTCUT_ACTIONS.map(renderShortcutRow)}
                 </div>
             </div>
         </div>

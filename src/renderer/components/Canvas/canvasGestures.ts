@@ -5,6 +5,7 @@
  * `.space-pan` class. What it must not also own is the rules, because the rules are where the
  * mistakes are and the wiring is what makes them expensive to reach.
  */
+import { matchesCombo } from '../../services/shortcutActions';
 
 /** The parts of a KeyboardEvent this decision reads. Narrowed so a test does not need a DOM. */
 export interface SpacePanKey {
@@ -199,9 +200,34 @@ export interface CanvasKey {
 const inEditable = (t: CanvasKey['target']): boolean =>
   !!t && (!!t.isContentEditable || EDITABLE.test(t.tagName ?? ''));
 
-/** Does this press name the letter E, however the layout reports it? `code` is
- *  layout-independent; `key` covers CapsLock, jsdom, and stacks that leave `code` empty. */
-const isLetterE = (e: CanvasKey): boolean => e.code === 'KeyE' || e.key.toLowerCase() === 'e';
+/**
+ * The four canvas combos currently in effect, from Settings > Shortcuts.
+ *
+ * Named fields rather than positional arguments, for exactly the reason
+ * `CanvasSelection` is an object: these are four adjacent `string`s, two pairs
+ * of which mean near-opposite things on the same surface. A caller that
+ * transposed `enlarge` and `openTab` would compile, type-check, and fail only
+ * as the wrong key doing the wrong thing.
+ *
+ * **Matched on `event.key`, never `event.code`** — see `matchesCombo`. The old
+ * rules here accepted `code === 'KeyE'` as a layout-independent fallback, and
+ * that fallback becomes actively wrong once the key is user-assignable: the
+ * Settings recorder builds its combo from `event.key`, so a `code` match would
+ * fire for a physical key position the user never recorded. Live matching and
+ * recording now read the same field, which is what makes a rebind mean what
+ * the user saw when they pressed it. CapsLock is still covered — `key` reports
+ * `'E'` and `canonicalizeCombo` lowercases both sides.
+ */
+export interface CanvasCombos {
+  /** Bare, on the canvas: enlarge the selected node into the overlay. */
+  enlarge: string;
+  /** Bare, on the canvas: leave for the selected node's own tab. */
+  openTab: string;
+  /** A chord INSIDE a live terminal: hand the keyboard back to the canvas. */
+  leaveTerminal: string;
+  /** A chord INSIDE a live terminal: leave for this node's own tab. */
+  openTabFromOverlay: string;
+}
 
 /**
  * <kbd>Shift</kbd>+<kbd>1</kbd> frames the whole workspace; <kbd>Shift</kbd>+<kbd>2</kbd> frames
@@ -231,41 +257,73 @@ export function fitShortcut(e: CanvasKey): FitTarget | null {
 }
 
 /**
- * <kbd>E</kbd> — enlarge the selected node into the full-screen overlay (Tam's item 2).
+ * <kbd>E</kbd> by default — enlarge the selected node into the full-screen overlay (Tam's item 2).
  *
  * Bare, with no modifier, which it can only afford to be because the caller gates it on the
  * canvas holding the keyboard: the moment a node is focused, `E` is a letter someone is typing
  * into a shell. That gate is the caller's (it knows `focusedId`), exactly as it is for
  * `fitShortcut`.
+ *
+ * The editable refusal stays, so a rename box and the sidebar search keep their letters — and it
+ * matters more now, not less: a rebound bare key is still a bare key.
  */
-export function openOverlayShortcut(e: CanvasKey): boolean {
-  if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return false;
+export function openOverlayShortcut(e: CanvasKey, combo: string): boolean {
   if (inEditable(e.target)) return false;
-  return isLetterE(e);
+  return matchesCombo(e, combo);
 }
 
 /**
- * <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> — give the keyboard back to the
- * canvas: close the overlay if one is open, and release the terminal (Tam's items 1 and 2).
+ * <kbd>T</kbd> by default — leave the canvas for the selected node's OWN TAB (Tam, 2026-08-21).
  *
- * **This is the one rule that must fire INSIDE a terminal, so it must not test for an editable
- * target.** xterm's keyboard sink is a real `<textarea>`, so while a terminal holds the keyboard
- * `event.target` is one — the guard every other rule here needs would refuse this shortcut in
- * precisely the state it exists for. Adding it "for consistency" is the change that breaks it.
+ * The keyboard half of the `⧉` button already in every node header, and it goes through the same
+ * `openAsTab` callback rather than repeating what that does: the two would otherwise be a pair of
+ * "leave for the tab" implementations that could drift on which of tab/pane they restore.
+ *
+ * Bare and canvas-only for the same reason `openOverlayShortcut` is, with the same editable
+ * refusal and the same caller-owned `focusedId` gate. Its sibling for use INSIDE a terminal is
+ * `openTabFromOverlayShortcut`.
+ */
+export function openTabShortcut(e: CanvasKey, combo: string): boolean {
+  if (inEditable(e.target)) return false;
+  return matchesCombo(e, combo);
+}
+
+/**
+ * <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>E</kbd> by default — give the keyboard
+ * back to the canvas: close the overlay if one is open, and release the terminal (Tam's items 1
+ * and 2).
+ *
+ * **This is one of the two rules that must fire INSIDE a terminal, so it must not test for an
+ * editable target.** xterm's keyboard sink is a real `<textarea>`, so while a terminal holds the
+ * keyboard `event.target` is one — the guard every canvas-side rule here needs would refuse this
+ * shortcut in precisely the state it exists for. Adding it "for consistency" is the change that
+ * breaks it.
  *
  * **It replaces Esc, which is why it exists at all.** Esc used to close the overlay, and that
  * made the key unusable in the terminal the overlay is showing — vim, less, fzf and every menu
  * in codex want it. So Esc now goes to the PTY and the way out is a chord no TUI binds.
  *
- * Ctrl and Cmd are both accepted on every platform rather than branching on `navigator.platform`.
- * Win+Shift+E never reaches the page (the OS takes it) and Ctrl+Shift+E is bound to nothing on
- * macOS, so the union costs nothing and keeps this a pure function with no environment in it.
- * Ctrl+E ALONE stays untouched, which matters: that is readline's end-of-line.
+ * Ctrl and Cmd are both accepted on every platform without branching on `navigator.platform`:
+ * `matchesCombo` folds Meta into Ctrl, exactly as InputHandler does for every other shortcut in
+ * the app. Ctrl+E ALONE stays untouched, which matters: that is readline's end-of-line.
  */
-export function leaveTerminalShortcut(e: CanvasKey): boolean {
-  if (!e.shiftKey || e.altKey) return false;
-  if (!e.ctrlKey && !e.metaKey) return false;
-  return isLetterE(e);
+export function leaveTerminalShortcut(e: CanvasKey, combo: string): boolean {
+  return matchesCombo(e, combo);
+}
+
+/**
+ * <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>T</kbd> by default — leave for this node's own tab from
+ * INSIDE the enlarged terminal (Tam, 2026-08-21).
+ *
+ * The chord exists because the bare key must not: Tam's requirement is that while a node is being
+ * edited, a lone <kbd>T</kbd> is a `t` the shell receives. Only a modified key can mean anything
+ * else there, which is why this is the one canvas action with a different default from its
+ * canvas-side twin rather than the same key reused.
+ *
+ * No editable refusal, for the same reason `leaveTerminalShortcut` has none.
+ */
+export function openTabFromOverlayShortcut(e: CanvasKey, combo: string): boolean {
+  return matchesCombo(e, combo);
 }
 
 /** A unit step, in the direction the VIEW moves — <kbd>→</kbd> shows you what was off the right
@@ -395,6 +453,7 @@ export function zoomShortcut(e: CanvasKey): ZoomIntent | null {
 export type CanvasAction =
   | { do: 'fit'; target: FitTarget }
   | { do: 'overlay' }
+  | { do: 'open-tab' }
   | { do: 'pan'; dx: number; dy: number }
   | { do: 'step'; dir: StepDir }
   | { do: 'zoom'; intent: ZoomIntent }
@@ -413,7 +472,11 @@ export interface CanvasSelection {
   edge: boolean;
 }
 
-export function canvasKeyAction(e: CanvasKey, sel: CanvasSelection): CanvasAction | null {
+export function canvasKeyAction(
+  e: CanvasKey,
+  sel: CanvasSelection,
+  combos: CanvasCombos,
+): CanvasAction | null {
   // Zoom first because it is the only rule here that REQUIRES a modifier; every other one
   // refuses Ctrl/Cmd, so the order below is a readability choice rather than a load-bearing one.
   const intent = zoomShortcut(e);
@@ -426,7 +489,11 @@ export function canvasKeyAction(e: CanvasKey, sel: CanvasSelection): CanvasActio
   // `E` with nothing selected resolves to nothing AT ALL, rather than to an action the caller
   // then declines. That is what leaves the keypress untouched: an overlay opening on a terminal
   // the user never pointed at is worse than a key that did nothing.
-  if (openOverlayShortcut(e)) return sel.node ? { do: 'overlay' } : null;
+  if (openOverlayShortcut(e, combos.enlarge)) return sel.node ? { do: 'overlay' } : null;
+  // `T` takes the same shape, and for the sharper version of the same reason: this one LEAVES
+  // THE CANVAS. A stray press resolving to an action would yank the user to a tab they never
+  // chose, which is the most disorienting thing any key on this surface can do.
+  if (openTabShortcut(e, combos.openTab)) return sel.node ? { do: 'open-tab' } : null;
   // Unlike `E`, stepping with nothing selected is meaningful — it starts at one end.
   const step = stepShortcut(e);
   if (step) return { do: 'step', dir: step };
@@ -442,10 +509,19 @@ export function canvasKeyAction(e: CanvasKey, sel: CanvasSelection): CanvasActio
  * it is what Esc resolves to whenever an overlay is open, and the caller must then leave the
  * event completely alone — no `preventDefault`, no `stopPropagation` — so it reaches the PTY.
  */
-export type TerminalAction = 'leave' | 'release-focus' | 'passthrough';
+export type TerminalAction = 'leave' | 'open-tab' | 'release-focus' | 'passthrough';
 
-export function terminalKeyAction(e: CanvasKey, overlayOpen: boolean): TerminalAction {
-  if (leaveTerminalShortcut(e)) return 'leave';
+export function terminalKeyAction(
+  e: CanvasKey,
+  overlayOpen: boolean,
+  combos: CanvasCombos,
+): TerminalAction {
+  if (leaveTerminalShortcut(e, combos.leaveTerminal)) return 'leave';
+  // Ctrl+T by default. Answered here and NOT in `canvasKeyAction`, which is what makes Tam's
+  // requirement hold from both sides: the bare key means "open the tab" only where the canvas
+  // owns the keyboard, and a lone `t` typed into this terminal falls through to `passthrough`
+  // below like any other letter.
+  if (openTabFromOverlayShortcut(e, combos.openTabFromOverlay)) return 'open-tab';
   if (e.key !== 'Escape') return 'passthrough';
   // Esc keeps its other job. With no overlay open a node can still be holding the keyboard —
   // closing an overlay deliberately does not blur — and there Esc is what hands it back.

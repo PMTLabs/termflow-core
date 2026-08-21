@@ -1,15 +1,39 @@
 import path from 'path';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
-  openOverlayShortcut, leaveTerminalShortcut, panShortcut, PAN_STEP_PX,
+  openOverlayShortcut, leaveTerminalShortcut, openTabShortcut, openTabFromOverlayShortcut,
+  panShortcut, PAN_STEP_PX,
   stepShortcut, zoomShortcut, deleteShortcut, canvasKeyAction, terminalKeyAction,
   wheelPanDelta, WHEEL_LINE_PX, WHEEL_PAGE_PX,
-  DRAG_SLOP, SpacePanKey, CanvasKey, WheelContext, WheelScroll,
+  DRAG_SLOP, SpacePanKey, CanvasKey, CanvasCombos, WheelContext, WheelScroll,
 } from '../canvasGestures';
+import { SHORTCUT_ACTIONS } from '../../../services/shortcutActions';
 import { readSource } from '../../../utils/readSource';
 
 const key = (over: Partial<SpacePanKey> = {}): SpacePanKey =>
   ({ key: ' ', code: 'Space', repeat: false, target: null, ...over });
+
+/**
+ * The combos the resolvers are exercised with — taken from the REGISTRY's own defaults, not
+ * retyped here.
+ *
+ * Retyping them would let this suite go on passing against `E`/`T` after somebody changed the
+ * shipped defaults, which is the one thing these tests are least able to notice: every assertion
+ * below would still be internally consistent and every one of them would be about a key the app
+ * no longer uses.
+ */
+const defaultCombo = (id: string): string => {
+  const action = SHORTCUT_ACTIONS.find(a => a.id === id);
+  if (!action) throw new Error(`canvasGestures.test: no such shortcut action "${id}"`);
+  return action.defaultCombo;
+};
+
+const COMBOS: CanvasCombos = {
+  enlarge: defaultCombo('canvasEnlargeNode'),
+  openTab: defaultCombo('canvasOpenNodeTab'),
+  leaveTerminal: defaultCombo('canvasLeaveTerminal'),
+  openTabFromOverlay: defaultCombo('canvasOpenNodeTabFromOverlay'),
+};
 
 describe('shouldArmSpacePan', () => {
   it('arms on Space over the canvas', () => {
@@ -135,33 +159,135 @@ describe('fitShortcut', () => {
 describe('openOverlayShortcut', () => {
   const e = (over: Partial<CanvasKey> = {}) => canvasKey({ key: 'e', code: 'KeyE', ...over });
 
-  it('fires on a bare E, however the layout reports it', () => {
-    expect(openOverlayShortcut(e())).toBe(true);
-    expect(openOverlayShortcut(e({ key: 'Unidentified' }))).toBe(true);   // `code` alone
-    expect(openOverlayShortcut(e({ code: '' }))).toBe(true);              // `key` alone
+  it('fires on its configured bare key', () => {
+    expect(openOverlayShortcut(e(), 'E')).toBe(true);
     // CapsLock reports the capital with no Shift held. Refusing it would make the shortcut
     // silently stop working for anyone typing in caps.
-    expect(openOverlayShortcut(e({ code: '', key: 'E' }))).toBe(true);
+    expect(openOverlayShortcut(e({ key: 'E' }), 'E')).toBe(true);
+  });
+
+  /**
+   * The rule reads `key`, and `code` is now IGNORED — a deliberate reversal of what this rule
+   * used to do, not an oversight.
+   *
+   * The old rule accepted `code === 'KeyE'` as a layout-independent fallback. That fallback
+   * became wrong the day the key turned into a setting: the Settings recorder builds its combo
+   * from `event.key`, so honouring `code` would fire for a physical key POSITION the user never
+   * recorded — on a Dvorak layout, the key that types `.`.
+   */
+  it('ignores event.code, so a rebind means the key the user actually pressed', () => {
+    expect(openOverlayShortcut(canvasKey({ key: 'Unidentified', code: 'KeyE' }), 'E')).toBe(false);
+    expect(openOverlayShortcut(canvasKey({ key: 'e', code: '' }), 'E')).toBe(true);
+  });
+
+  it('follows a rebind, and stops answering the old key', () => {
+    const q = canvasKey({ key: 'q', code: 'KeyQ' });
+    expect(openOverlayShortcut(q, 'Q')).toBe(true);
+    expect(openOverlayShortcut(e(), 'Q')).toBe(false);
   });
 
   it('refuses every modifier, one at a time', () => {
     for (const mod of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
-      expect({ mod, fires: openOverlayShortcut(e({ [mod]: true })) }).toEqual({ mod, fires: false });
+      expect({ mod, fires: openOverlayShortcut(e({ [mod]: true }), 'E') })
+        .toEqual({ mod, fires: false });
     }
   });
 
   it('refuses in an editable target, so typing "e" into the search box does not enlarge a node', () => {
     for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
-      expect(openOverlayShortcut(e({ target: { tagName } }))).toBe(false);
+      expect(openOverlayShortcut(e({ target: { tagName } }), 'E')).toBe(false);
     }
-    expect(openOverlayShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }))).toBe(false);
+    expect(openOverlayShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }), 'E')).toBe(false);
     // ...but an ordinary element is not editable, or the shortcut would never fire at all.
-    expect(openOverlayShortcut(e({ target: { tagName: 'DIV' } }))).toBe(true);
+    expect(openOverlayShortcut(e({ target: { tagName: 'DIV' } }), 'E')).toBe(true);
   });
 
   it('ignores every other key', () => {
     for (const k of ['a', 'r', 'Enter', 'Escape', '3', '']) {
-      expect(openOverlayShortcut(canvasKey({ key: k, code: k }))).toBe(false);
+      expect(openOverlayShortcut(canvasKey({ key: k, code: k }), 'E')).toBe(false);
+    }
+  });
+});
+
+/**
+ * `T` leaves the canvas for the selected node's own tab — Tam, 2026-08-21.
+ *
+ * The same bargain as `E`: a bare letter, affordable only because the caller gates it on the
+ * canvas holding the keyboard. The editable refusal carries the extra weight here, because this
+ * one navigates AWAY.
+ */
+describe('openTabShortcut', () => {
+  const e = (over: Partial<CanvasKey> = {}) => canvasKey({ key: 't', code: 'KeyT', ...over });
+
+  it('fires on its configured bare key, CapsLock included', () => {
+    expect(openTabShortcut(e(), 'T')).toBe(true);
+    expect(openTabShortcut(e({ key: 'T' }), 'T')).toBe(true);
+  });
+
+  it('refuses every modifier, one at a time', () => {
+    for (const mod of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+      expect({ mod, fires: openTabShortcut(e({ [mod]: true }), 'T') })
+        .toEqual({ mod, fires: false });
+    }
+  });
+
+  /** Typing `t` into the sidebar search must not throw the user into another tab. */
+  it('refuses in an editable target', () => {
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      expect(openTabShortcut(e({ target: { tagName } }), 'T')).toBe(false);
+    }
+    expect(openTabShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }), 'T')).toBe(false);
+    expect(openTabShortcut(e({ target: { tagName: 'DIV' } }), 'T')).toBe(true);
+  });
+
+  it('follows a rebind', () => {
+    expect(openTabShortcut(canvasKey({ key: 'g', code: 'KeyG' }), 'G')).toBe(true);
+    expect(openTabShortcut(e(), 'G')).toBe(false);
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['a', 'e', 'Enter', 'Escape', '']) {
+      expect(openTabShortcut(canvasKey({ key: k, code: k }), 'T')).toBe(false);
+    }
+  });
+});
+
+/**
+ * Ctrl+T leaves for the node's own tab from INSIDE the enlarged terminal — Tam, 2026-08-21.
+ *
+ * Tam's requirement has two halves and this rule is where the second one lives: the chord acts,
+ * and a bare `t` must not. The bare-key half is asserted on `terminalKeyAction` below, which is
+ * what actually decides that a lone letter is a passthrough.
+ */
+describe('openTabFromOverlayShortcut', () => {
+  const e = (over: Partial<CanvasKey> = {}) =>
+    canvasKey({ key: 't', code: 'KeyT', ctrlKey: true, ...over });
+
+  it('fires on Ctrl+T and on Cmd+T', () => {
+    expect(openTabFromOverlayShortcut(e(), 'Ctrl+T')).toBe(true);
+    expect(openTabFromOverlayShortcut(e({ ctrlKey: false, metaKey: true }), 'Ctrl+T')).toBe(true);
+  });
+
+  /** THE test for this rule, and the same one `leaveTerminalShortcut` has: xterm's keyboard sink
+   *  is a real `<textarea>`, so an editable guard here would refuse the chord in exactly the
+   *  state it exists for. */
+  it('fires inside a terminal, where the target is xterm\'s own textarea', () => {
+    expect(openTabFromOverlayShortcut(e({ target: { tagName: 'TEXTAREA' } }), 'Ctrl+T')).toBe(true);
+    expect(openTabFromOverlayShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }), 'Ctrl+T')).toBe(true);
+  });
+
+  it('needs the Ctrl — a bare t is a letter the shell is owed', () => {
+    expect(openTabFromOverlayShortcut(e({ ctrlKey: false }), 'Ctrl+T')).toBe(false);
+  });
+
+  it('refuses extra modifiers that would make it a different chord', () => {
+    expect(openTabFromOverlayShortcut(e({ shiftKey: true }), 'Ctrl+T')).toBe(false);
+    expect(openTabFromOverlayShortcut(e({ altKey: true }), 'Ctrl+T')).toBe(false);
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['a', 'e', 'w', '']) {
+      expect(openTabFromOverlayShortcut(e({ key: k, code: k }), 'Ctrl+T')).toBe(false);
     }
   });
 });
@@ -177,12 +303,12 @@ describe('leaveTerminalShortcut', () => {
     canvasKey({ key: 'E', code: 'KeyE', shiftKey: true, ctrlKey: true, ...over });
 
   it('fires on Ctrl+Shift+E and on Cmd+Shift+E', () => {
-    expect(leaveTerminalShortcut(e())).toBe(true);
-    expect(leaveTerminalShortcut(e({ ctrlKey: false, metaKey: true }))).toBe(true);
+    expect(leaveTerminalShortcut(e(), 'Ctrl+Shift+E')).toBe(true);
+    expect(leaveTerminalShortcut(e({ ctrlKey: false, metaKey: true }), 'Ctrl+Shift+E')).toBe(true);
     // Both accepted on every platform, so no `navigator.platform` sniffing leaks into a rule
     // that is otherwise pure. Win+Shift+E never reaches the page and Ctrl+Shift+E is unbound on
     // macOS, so the union costs nothing.
-    expect(leaveTerminalShortcut(e({ metaKey: true }))).toBe(true);
+    expect(leaveTerminalShortcut(e({ metaKey: true }), 'Ctrl+Shift+E')).toBe(true);
   });
 
   /**
@@ -194,26 +320,26 @@ describe('leaveTerminalShortcut', () => {
    * out at all now that Esc is handed through.
    */
   it('fires inside a terminal, where the target is xterm\'s own textarea', () => {
-    expect(leaveTerminalShortcut(e({ target: { tagName: 'TEXTAREA' } }))).toBe(true);
-    expect(leaveTerminalShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }))).toBe(true);
+    expect(leaveTerminalShortcut(e({ target: { tagName: 'TEXTAREA' } }), 'Ctrl+Shift+E')).toBe(true);
+    expect(leaveTerminalShortcut(e({ target: { tagName: 'DIV', isContentEditable: true } }), 'Ctrl+Shift+E')).toBe(true);
   });
 
   it('leaves Ctrl+E alone, because that is readline\'s end-of-line', () => {
-    expect(leaveTerminalShortcut(e({ shiftKey: false }))).toBe(false);
+    expect(leaveTerminalShortcut(e({ shiftKey: false }), 'Ctrl+Shift+E')).toBe(false);
   });
 
   it('needs a Ctrl or Cmd, so a plain Shift+E still types a capital', () => {
-    expect(leaveTerminalShortcut(e({ ctrlKey: false }))).toBe(false);
-    expect(leaveTerminalShortcut(e({ ctrlKey: false, shiftKey: false }))).toBe(false);
+    expect(leaveTerminalShortcut(e({ ctrlKey: false }), 'Ctrl+Shift+E')).toBe(false);
+    expect(leaveTerminalShortcut(e({ ctrlKey: false, shiftKey: false }), 'Ctrl+Shift+E')).toBe(false);
   });
 
   it('refuses when Alt is also held, so it cannot swallow a different chord', () => {
-    expect(leaveTerminalShortcut(e({ altKey: true }))).toBe(false);
+    expect(leaveTerminalShortcut(e({ altKey: true }), 'Ctrl+Shift+E')).toBe(false);
   });
 
   it('ignores every other key', () => {
     for (const k of ['a', 'w', 'Enter', '']) {
-      expect(leaveTerminalShortcut(e({ key: k, code: k }))).toBe(false);
+      expect(leaveTerminalShortcut(e({ key: k, code: k }), 'Ctrl+Shift+E')).toBe(false);
     }
   });
 });
@@ -225,27 +351,45 @@ describe('leaveTerminalShortcut', () => {
  * modifier being added to one and forgotten in the other — and the symptom would be `E` that
  * opens the overlay and immediately leaves it.
  */
-describe('the two E shortcuts are disjoint', () => {
-  it('never both fire, over every modifier combination', () => {
-    for (const shiftKey of [false, true]) {
-      for (const ctrlKey of [false, true]) {
-        for (const altKey of [false, true]) {
-          for (const metaKey of [false, true]) {
-            const k = canvasKey({ key: 'e', code: 'KeyE', shiftKey, ctrlKey, altKey, metaKey });
-            const both = openOverlayShortcut(k) && leaveTerminalShortcut(k);
-            expect({ shiftKey, ctrlKey, altKey, metaKey, both }).toEqual(
-              { shiftKey, ctrlKey, altKey, metaKey, both: false },
-            );
+describe('the four canvas shortcuts are pairwise disjoint', () => {
+  // The SHIPPED combos, so this is a claim about the defaults users actually get.
+  const DEFAULTS = COMBOS;
+
+  /** Which of the four answer this press, by name. */
+  const firing = (k: CanvasKey): string[] => [
+    openOverlayShortcut(k, DEFAULTS.enlarge) && 'enlarge',
+    openTabShortcut(k, DEFAULTS.openTab) && 'openTab',
+    leaveTerminalShortcut(k, DEFAULTS.leaveTerminal) && 'leaveTerminal',
+    openTabFromOverlayShortcut(k, DEFAULTS.openTabFromOverlay) && 'openTabFromOverlay',
+  ].filter(Boolean) as string[];
+
+  it('never both fire, over every letter and modifier combination', () => {
+    for (const key of ['e', 't']) {
+      for (const shiftKey of [false, true]) {
+        for (const ctrlKey of [false, true]) {
+          for (const altKey of [false, true]) {
+            for (const metaKey of [false, true]) {
+              const k = canvasKey({ key, code: `Key${key.toUpperCase()}`, shiftKey, ctrlKey, altKey, metaKey });
+              // At most ONE rule may answer any single press. Reported with the offending names
+              // attached, so a failure says which two collided rather than just "2 !== 1".
+              const fired = firing(k);
+              expect({ key, shiftKey, ctrlKey, altKey, metaKey, tooMany: fired.length > 1 ? fired : false })
+                .toEqual({ key, shiftKey, ctrlKey, altKey, metaKey, tooMany: false });
+            }
           }
         }
       }
     }
   });
 
-  it('found the combinations it is checking — each fires somewhere in that matrix', () => {
-    // Or the sweep above passes because neither rule ever fires.
-    expect(openOverlayShortcut(canvasKey({ key: 'e', code: 'KeyE' }))).toBe(true);
-    expect(leaveTerminalShortcut(canvasKey({ key: 'e', code: 'KeyE', ctrlKey: true, shiftKey: true }))).toBe(true);
+  it('found the combinations it is checking — each of the four fires somewhere in that matrix', () => {
+    // Or the sweep above passes because no rule ever fires.
+    expect(firing(canvasKey({ key: 'e', code: 'KeyE' }))).toEqual(['enlarge']);
+    expect(firing(canvasKey({ key: 't', code: 'KeyT' }))).toEqual(['openTab']);
+    expect(firing(canvasKey({ key: 'e', code: 'KeyE', ctrlKey: true, shiftKey: true })))
+      .toEqual(['leaveTerminal']);
+    expect(firing(canvasKey({ key: 't', code: 'KeyT', ctrlKey: true })))
+      .toEqual(['openTabFromOverlay']);
   });
 });
 
@@ -471,19 +615,19 @@ describe('canvasKeyAction', () => {
   const EDGE_SELECTED = { node: false, edge: true };
 
   it('routes each key to its own action', () => {
-    expect(canvasKeyAction(canvasKey({ key: '!', code: 'Digit1', shiftKey: true }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: '!', code: 'Digit1', shiftKey: true }), SELECTED, COMBOS))
       .toEqual({ do: 'fit', target: 'all' });
-    expect(canvasKeyAction(canvasKey({ key: '@', code: 'Digit2', shiftKey: true }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: '@', code: 'Digit2', shiftKey: true }), SELECTED, COMBOS))
       .toEqual({ do: 'fit', target: 'group' });
-    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED, COMBOS))
       .toEqual({ do: 'overlay' });
-    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), SELECTED, COMBOS))
       .toEqual({ do: 'step', dir: 1 });
-    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab', shiftKey: true }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab', shiftKey: true }), SELECTED, COMBOS))
       .toEqual({ do: 'step', dir: -1 });
-    expect(canvasKeyAction(canvasKey({ key: '=', code: 'Equal', ctrlKey: true }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: '=', code: 'Equal', ctrlKey: true }), SELECTED, COMBOS))
       .toEqual({ do: 'zoom', intent: 'in' });
-    expect(canvasKeyAction(canvasKey({ key: '-', code: 'Minus', ctrlKey: true }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: '-', code: 'Minus', ctrlKey: true }), SELECTED, COMBOS))
       .toEqual({ do: 'zoom', intent: 'out' });
   });
 
@@ -491,7 +635,7 @@ describe('canvasKeyAction', () => {
    *  Declining it would make Tab do nothing on a canvas you have not clicked yet, which is
    *  exactly when you most want the keyboard. */
   it('steps with nothing selected', () => {
-    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), NOTHING_SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'Tab', code: 'Tab' }), NOTHING_SELECTED, COMBOS))
       .toEqual({ do: 'step', dir: 1 });
   });
 
@@ -501,9 +645,9 @@ describe('canvasKeyAction', () => {
    * canvas that lurches.
    */
   it('returns a pan already measured in screen pixels', () => {
-    expect(canvasKeyAction(canvasKey({ key: 'ArrowRight', code: 'ArrowRight' }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'ArrowRight', code: 'ArrowRight' }), SELECTED, COMBOS))
       .toEqual({ do: 'pan', dx: PAN_STEP_PX, dy: 0 });
-    expect(canvasKeyAction(canvasKey({ key: 'ArrowUp', code: 'ArrowUp' }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'ArrowUp', code: 'ArrowUp' }), SELECTED, COMBOS))
       .toEqual({ do: 'pan', dx: 0, dy: -PAN_STEP_PX });
   });
 
@@ -515,16 +659,16 @@ describe('canvasKeyAction', () => {
    * it. Everything else still resolves in that state, or the empty canvas would go dead.
    */
   it('declines E with nothing selected, and only E', () => {
-    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), NOTHING_SELECTED)).toBeNull();
-    expect(canvasKeyAction(canvasKey({ key: '!', code: 'Digit1', shiftKey: true }), NOTHING_SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), NOTHING_SELECTED, COMBOS)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: '!', code: 'Digit1', shiftKey: true }), NOTHING_SELECTED, COMBOS))
       .toEqual({ do: 'fit', target: 'all' });
-    expect(canvasKeyAction(canvasKey({ key: 'ArrowLeft', code: 'ArrowLeft' }), NOTHING_SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'ArrowLeft', code: 'ArrowLeft' }), NOTHING_SELECTED, COMBOS))
       .toEqual({ do: 'pan', dx: -PAN_STEP_PX, dy: 0 });
   });
 
   it('says nothing about keys it does not own', () => {
     for (const k of ['a', 'Escape', 'Enter', ' ', '']) {
-      expect({ k, action: canvasKeyAction(canvasKey({ key: k, code: k }), SELECTED) })
+      expect({ k, action: canvasKeyAction(canvasKey({ key: k, code: k }), SELECTED, COMBOS) })
         .toEqual({ k, action: null });
     }
   });
@@ -538,15 +682,15 @@ describe('canvasKeyAction', () => {
    */
   it('removes the selected connection on Delete and on Backspace', () => {
     for (const [key, code] of [['Delete', 'Delete'], ['Backspace', 'Backspace']]) {
-      expect({ key, action: canvasKeyAction(canvasKey({ key, code }), EDGE_SELECTED) })
+      expect({ key, action: canvasKeyAction(canvasKey({ key, code }), EDGE_SELECTED, COMBOS) })
         .toEqual({ key, action: { do: 'delete-edge' } });
     }
   });
 
   it('leaves Delete alone when no connection is selected', () => {
     for (const sel of [NOTHING_SELECTED, SELECTED]) {
-      expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), sel)).toBeNull();
-      expect(canvasKeyAction(canvasKey({ key: 'Backspace', code: 'Backspace' }), sel)).toBeNull();
+      expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), sel, COMBOS)).toBeNull();
+      expect(canvasKeyAction(canvasKey({ key: 'Backspace', code: 'Backspace' }), sel, COMBOS)).toBeNull();
     }
   });
 
@@ -556,11 +700,11 @@ describe('canvasKeyAction', () => {
    * failure `CanvasSelection` is an object to prevent, and this is what would catch it.
    */
   it('reads the node flag for E and the edge flag for Delete, not the other way round', () => {
-    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), EDGE_SELECTED)).toBeNull();
-    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), EDGE_SELECTED, COMBOS)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: 'e', code: 'KeyE' }), SELECTED, COMBOS))
       .toEqual({ do: 'overlay' });
-    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), SELECTED)).toBeNull();
-    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), EDGE_SELECTED))
+    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), SELECTED, COMBOS)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: 'Delete', code: 'Delete' }), EDGE_SELECTED, COMBOS))
       .toEqual({ do: 'delete-edge' });
   });
 
@@ -572,7 +716,7 @@ describe('canvasKeyAction', () => {
       canvasKey({ key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true }),
       canvasKey({ key: 'e', code: 'KeyE', ctrlKey: true }),
     ]) {
-      expect(canvasKeyAction(k, SELECTED)).toBeNull();
+      expect(canvasKeyAction(k, SELECTED, COMBOS)).toBeNull();
     }
   });
 
@@ -580,8 +724,42 @@ describe('canvasKeyAction', () => {
    *  chord both open and leave, depending only on which listener happened to see it first. */
   it('leaves the exit chord to the other resolver', () => {
     expect(canvasKeyAction(
-      canvasKey({ key: 'E', code: 'KeyE', ctrlKey: true, shiftKey: true }), SELECTED,
+      canvasKey({ key: 'E', code: 'KeyE', ctrlKey: true, shiftKey: true }), SELECTED, COMBOS,
     )).toBeNull();
+  });
+
+  /* ---- Open the selected node in its own tab (Tam, 2026-08-21) ---- */
+
+  it('resolves the bare open-tab key to its own action', () => {
+    expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT' }), SELECTED, COMBOS))
+      .toEqual({ do: 'open-tab' });
+  });
+
+  /**
+   * With nothing selected it resolves to NOTHING, the same shape `E` has and for the sharper
+   * version of the same reason: the caller `preventDefault`s whatever comes back, so an
+   * `{ do: 'open-tab' }` with no target would swallow the `t` — and if the caller ever stopped
+   * checking, would throw the user into a tab they never chose.
+   */
+  it('declines the open-tab key with nothing selected', () => {
+    expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT' }), NOTHING_SELECTED, COMBOS)).toBeNull();
+    // ...and reads the NODE flag, not the edge flag — the `CanvasSelection` transposition again.
+    expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT' }), EDGE_SELECTED, COMBOS)).toBeNull();
+  });
+
+  /** The overlay chord belongs to the OTHER resolver, exactly as Ctrl+Shift+E does. Answering it
+   *  here too would make one chord mean the same thing twice, from whichever listener won. */
+  it('leaves the overlay open-tab chord to the other resolver', () => {
+    expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT', ctrlKey: true }), SELECTED, COMBOS))
+      .toBeNull();
+  });
+
+  /** A rebind reaches the resolver, not just the rule. */
+  it('follows a rebound open-tab key', () => {
+    const rebound = { ...COMBOS, openTab: 'G' };
+    expect(canvasKeyAction(canvasKey({ key: 'g', code: 'KeyG' }), SELECTED, rebound))
+      .toEqual({ do: 'open-tab' });
+    expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT' }), SELECTED, rebound)).toBeNull();
   });
 });
 
@@ -599,25 +777,25 @@ describe('terminalKeyAction', () => {
 
   /** THE regression this round exists to fix. */
   it('hands Escape to the terminal while an overlay is open', () => {
-    expect(terminalKeyAction(esc(), OVERLAY_OPEN)).toBe('passthrough');
+    expect(terminalKeyAction(esc(), OVERLAY_OPEN, COMBOS)).toBe('passthrough');
   });
 
   /** ...without losing Esc's other job. Closing an overlay deliberately does not blur, so a node
    *  can still be holding the keyboard with nothing enlarged, and there Esc hands it back. */
   it('still releases the keyboard on Escape when nothing is enlarged', () => {
-    expect(terminalKeyAction(esc(), NO_OVERLAY)).toBe('release-focus');
+    expect(terminalKeyAction(esc(), NO_OVERLAY, COMBOS)).toBe('release-focus');
   });
 
   it('leaves on the exit chord, whether or not an overlay is open', () => {
-    expect(terminalKeyAction(chord(), OVERLAY_OPEN)).toBe('leave');
-    expect(terminalKeyAction(chord(), NO_OVERLAY)).toBe('leave');
+    expect(terminalKeyAction(chord(), OVERLAY_OPEN, COMBOS)).toBe('leave');
+    expect(terminalKeyAction(chord(), NO_OVERLAY, COMBOS)).toBe('leave');
   });
 
   /** From inside xterm's own textarea, which is where it will always be pressed. */
   it('leaves from inside the terminal\'s textarea', () => {
     expect(terminalKeyAction(
       canvasKey({ key: 'E', code: 'KeyE', ctrlKey: true, shiftKey: true, target: { tagName: 'TEXTAREA' } }),
-      OVERLAY_OPEN,
+      OVERLAY_OPEN, COMBOS,
     )).toBe('leave');
   });
 
@@ -639,11 +817,54 @@ describe('terminalKeyAction', () => {
       canvasKey({ key: '=', code: 'Equal', ctrlKey: true }),
       canvasKey({ key: '-', code: 'Minus', ctrlKey: true }),
     ]) {
-      expect({ key: k.key, action: terminalKeyAction(k, OVERLAY_OPEN) })
+      expect({ key: k.key, action: terminalKeyAction(k, OVERLAY_OPEN, COMBOS) })
         .toEqual({ key: k.key, action: 'passthrough' });
-      expect({ key: k.key, action: terminalKeyAction(k, NO_OVERLAY) })
+      expect({ key: k.key, action: terminalKeyAction(k, NO_OVERLAY, COMBOS) })
         .toEqual({ key: k.key, action: 'passthrough' });
     }
+  });
+
+  /* ---- Open this node's own tab from inside the overlay (Tam, 2026-08-21) ---- */
+
+  it('opens the tab on the overlay chord, whether or not an overlay is open', () => {
+    const k = canvasKey({ key: 't', code: 'KeyT', ctrlKey: true });
+    expect(terminalKeyAction(k, OVERLAY_OPEN, COMBOS)).toBe('open-tab');
+    expect(terminalKeyAction(k, NO_OVERLAY, COMBOS)).toBe('open-tab');
+  });
+
+  /** Where it will always be pressed: inside xterm's own textarea. */
+  it('opens the tab from inside the terminal\'s textarea', () => {
+    expect(terminalKeyAction(
+      canvasKey({ key: 't', code: 'KeyT', ctrlKey: true, target: { tagName: 'TEXTAREA' } }),
+      OVERLAY_OPEN, COMBOS,
+    )).toBe('open-tab');
+  });
+
+  /**
+   * THE requirement Tam stated, from the inside: *"single key will go to terminal"*.
+   *
+   * The bare key is the canvas's only while the canvas holds the keyboard. Once a node is being
+   * edited it is a letter the shell is owed, and this resolver is what owes it — asserted for
+   * both cases and both letters, since `E` has exactly the same contract.
+   */
+  it('passes the bare open-tab and enlarge keys through to the PTY', () => {
+    for (const key of ['t', 'T', 'e', 'E']) {
+      const k = canvasKey({ key, code: `Key${key.toUpperCase()}` });
+      expect({ key, action: terminalKeyAction(k, OVERLAY_OPEN, COMBOS) })
+        .toEqual({ key, action: 'passthrough' });
+      expect({ key, action: terminalKeyAction(k, NO_OVERLAY, COMBOS) })
+        .toEqual({ key, action: 'passthrough' });
+    }
+  });
+
+  it('follows a rebound overlay chord', () => {
+    const rebound = { ...COMBOS, openTabFromOverlay: 'Ctrl+Shift+G' };
+    expect(terminalKeyAction(
+      canvasKey({ key: 'G', code: 'KeyG', ctrlKey: true, shiftKey: true }), OVERLAY_OPEN, rebound,
+    )).toBe('open-tab');
+    expect(terminalKeyAction(
+      canvasKey({ key: 't', code: 'KeyT', ctrlKey: true }), OVERLAY_OPEN, rebound,
+    )).toBe('passthrough');
   });
 });
 

@@ -1,18 +1,37 @@
 /**
- * Single source of truth for the 14 user-customizable keyboard shortcuts.
- * Consumed by InputHandler (registration/rebinding) and the Settings >
- * Shortcuts UI (rendering + reset-to-default). Kept free of React/Redux so
- * findConflict can be tested in isolation.
+ * Single source of truth for the user-customizable keyboard shortcuts.
+ * Consumed by InputHandler (registration/rebinding), CanvasMode (its own
+ * capture-phase listener) and the Settings > Shortcuts UI (rendering +
+ * reset-to-default). Kept free of React/Redux so findConflict can be tested
+ * in isolation.
  *
  * NOT included here (see docs/041-keyboard-shortcuts-customization-design.md
  * §3): Ctrl+1-9 (systematic tab-jump loop, not one action) and Ctrl+Shift+V
  * (fixed secondary fallback for the same Paste action as Ctrl+V).
  */
 
+/**
+ * WHICH SURFACE owns an action's combo — and therefore who registers it.
+ *
+ *  - `'global'` — InputHandler claims it on `window` in the capture phase, so
+ *    it fires anywhere in the app.
+ *  - `'canvas'` — CanvasMode matches it in ITS own capture-phase listener,
+ *    which exists only while the canvas tab is mounted and (for the bare-key
+ *    ones) only while the canvas rather than a terminal holds the keyboard.
+ *
+ * The distinction is load-bearing, not cosmetic: the canvas actions include
+ * BARE LETTERS. A bare `T` handed to InputHandler would fire on every `t`
+ * typed into any terminal in the app. InputHandler therefore registers
+ * `GLOBAL_SHORTCUT_ACTIONS` only — see `isGlobalAction`.
+ */
+export type ShortcutScope = 'global' | 'canvas';
+
 export interface ShortcutAction {
   id: string;
   label: string;
   defaultCombo: string;
+  /** Absent means `'global'` — the default every pre-canvas action had. */
+  scope?: ShortcutScope;
 }
 
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
@@ -30,7 +49,65 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },
   { id: 'toggleFullScreen', label: 'Toggle Fullscreen', defaultCombo: 'F11' },
   { id: 'toggleCanvasMode', label: 'Toggle Canvas Mode', defaultCombo: 'Ctrl+Shift+Alt+Space' },
+
+  /* ---- Canvas mode ---------------------------------------------------------
+   *
+   * Bare keys are affordable here for the reason the canvas's own listener
+   * documents: it gates every one of them on the canvas — not a terminal —
+   * holding the keyboard. The two `Ctrl+` chords are the mirror, and are the
+   * only canvas actions that fire INSIDE a live terminal.
+   *
+   * `T` / `Ctrl+T`: Tam's request, 2026-08-21. `Ctrl+T` is genuinely free
+   * app-wide — InputHandler deliberately leaves it unregistered (see its
+   * "Ctrl+T (new tab) intentionally NOT registered" note) — and the pair is
+   * reachable one-handed from the left Ctrl.
+   */
+  { id: 'canvasOpenNodeTab', label: 'Open Node in Its Tab', defaultCombo: 'T', scope: 'canvas' },
+  { id: 'canvasOpenNodeTabFromOverlay', label: 'Open Node in Its Tab (while editing)', defaultCombo: 'Ctrl+T', scope: 'canvas' },
+  { id: 'canvasEnlargeNode', label: 'Enlarge Node', defaultCombo: 'E', scope: 'canvas' },
+  { id: 'canvasLeaveTerminal', label: 'Leave Terminal / Shrink Overlay', defaultCombo: 'Ctrl+Shift+E', scope: 'canvas' },
 ];
+
+/** An action fires app-wide (InputHandler's map) rather than on one surface. */
+export function isGlobalAction(action: ShortcutAction): boolean {
+  return (action.scope ?? 'global') === 'global';
+}
+
+/**
+ * May this action be bound to a combo with NO modifier at all?
+ *
+ * The Settings recorder otherwise demands a modifier or a function key, and that rule is right
+ * for everything InputHandler registers: a global bare `T` would `preventDefault` every `t`
+ * typed anywhere in the app.
+ *
+ * It is wrong for a canvas action, and wrong in the way that matters — `canvasOpenNodeTab` and
+ * `canvasEnlargeNode` SHIP with bare defaults. Applying the global rule to them would leave two
+ * rows the user can see, whose current value is a bare letter, and which can never be re-recorded
+ * to another bare letter. That is the same trap the recorder's own Space comment records having
+ * fallen into once already.
+ *
+ * What makes the bare key safe here is not this function but the canvas's gate: its listener runs
+ * only while `CanvasMode` is mounted AND no terminal holds the keyboard. Nothing else in the app
+ * has that property, which is why this is keyed on scope rather than offered as an opt-out flag.
+ */
+export function allowsModifierlessCombo(actionId: string): boolean {
+  const action = SHORTCUT_ACTIONS.find(a => a.id === actionId);
+  return !!action && !isGlobalAction(action);
+}
+
+/**
+ * The actions InputHandler may register. Everything else belongs to a surface
+ * that listens for itself.
+ *
+ * Exported as its own list rather than left as an inline `.filter` at each of
+ * InputHandler's two registration paths: a gate written out at the call site
+ * is one a new call site can forget, and the failure here is silent and
+ * app-wide (a bare letter swallowed from every terminal).
+ */
+export const GLOBAL_SHORTCUT_ACTIONS: ShortcutAction[] = SHORTCUT_ACTIONS.filter(isGlobalAction);
+
+/** The canvas-scoped actions, in registry order — what Settings groups under its own heading. */
+export const CANVAS_SHORTCUT_ACTIONS: ShortcutAction[] = SHORTCUT_ACTIONS.filter(a => !isGlobalAction(a));
 
 /**
  * Map a KeyboardEvent's `key` to the token a combo string uses for it.
@@ -92,6 +169,56 @@ export function canonicalizeCombo(combo: string): string {
   return [...modifiers, mainKey].join('+');
 }
 
+/** The parts of a KeyboardEvent a combo is built from. Narrowed so a caller does not need a DOM. */
+export interface ComboEvent {
+  key: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+}
+
+/**
+ * The canonical combo string for a LIVE keypress.
+ *
+ * Lifted out of `InputHandler.handleKeyEvent`, which built this inline, so the
+ * canvas can ask the same question of the same event without becoming a third
+ * implementation. This file's whole claim is that there is exactly one
+ * normalization path in the app; a second live-matching path would have ended
+ * that quietly, and the three bugs the header note lists were all drift
+ * between two copies of this logic.
+ *
+ * Ctrl and Meta both become `control`, so a `Ctrl+`-defaulted action answers
+ * Cmd on macOS without a second registration — the behaviour every existing
+ * shortcut already has.
+ */
+export function eventCombo(e: ComboEvent): string {
+  const rawParts: string[] = [];
+  if (e.ctrlKey || e.metaKey) rawParts.push('Ctrl');
+  if (e.altKey) rawParts.push('Alt');
+  if (e.shiftKey) rawParts.push('Shift');
+  // Keys that cannot survive a '+'-delimited, whitespace-trimmed combo string
+  // ('+' itself, and Space) become their word form here.
+  rawParts.push(comboKeyToken(e.key));
+  return canonicalizeCombo(rawParts.join('+'));
+}
+
+/**
+ * Does this keypress BE this combo?
+ *
+ * Both sides go through `canonicalizeCombo`, so `'Ctrl+Shift+E'`,
+ * `'shift+control+e'` and a real Cmd+Shift+E keypress are all one value.
+ *
+ * An empty/absent combo matches nothing. That matters: it is what an action
+ * bound to `''` by corrupt settings resolves to, and silently matching every
+ * keypress would be far worse than matching none.
+ */
+export function matchesCombo(e: ComboEvent, combo: string | undefined | null): boolean {
+  if (!combo) return false;
+  if (typeof e.key !== 'string') return false;
+  return eventCombo(e) === canonicalizeCombo(combo);
+}
+
 /** The combo currently in effect for an action: its override if set, else its default. */
 export function effectiveCombo(actionId: string, customKeybindings: Record<string, string> | null | undefined = {}): string | undefined {
   const action = SHORTCUT_ACTIONS.find(a => a.id === actionId);
@@ -111,6 +238,33 @@ const RESERVED_COMBOS = [
   'Ctrl+1', 'Ctrl+2', 'Ctrl+3', 'Ctrl+4', 'Ctrl+5', 'Ctrl+6', 'Ctrl+7', 'Ctrl+8', 'Ctrl+9',
   'Ctrl+Shift+V',
   'Alt+Shift+ArrowLeft', 'Alt+Shift+ArrowRight', 'Alt+Shift+ArrowUp', 'Alt+Shift+ArrowDown',
+
+  /* The canvas's FIXED navigation, which is not in SHORTCUT_ACTIONS and so cannot defend
+   * itself through the per-action conflict loop below.
+   *
+   * Without these, Settings would happily accept "Open Node in Its Tab = Tab" — and the canvas
+   * would silently lose Tab-stepping, or an arrow would both pan and leave for a tab. The
+   * failure is invisible at bind time and only shows up as a canvas key that stopped working.
+   *
+   * The zoom chords are reserved for the reason InputHandler already documents for not binding
+   * them ("Ctrl/Cmd +/-/0 zoom is intentionally NOT bound here"): zoom is per-surface, owned by
+   * each terminal pane, the canvas and the Settings screen. A customizable action landing on one
+   * would shadow all three at once.
+   *
+   * KNOWN GAP, deliberately not half-fixed: Shift+1 / Shift+2 (fit all / fit group) cannot be
+   * reserved reliably. The recorder builds combos from `event.key`, so pressing Shift+1 records
+   * as `shift+!` on a US layout and `shift+1` on an AZERTY — there is no single spelling to
+   * reserve. Both US spellings are listed; other layouts stay exposed. Fixing it properly means
+   * teaching the recorder `event.code` for digits, which is its own change.
+   */
+  'Tab', 'Shift+Tab',
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'Delete', 'Backspace',
+  // `Ctrl+Plus`, never `'Ctrl++'` — `'+'` IS the delimiter, so that string canonicalizes to a
+  // trailing-empty `control+` and would reserve nothing. This is the word form `comboKeyToken`
+  // produces for a real `+` keypress.
+  'Ctrl+=', 'Ctrl+Plus', 'Ctrl+-', 'Ctrl+0',
+  'Shift+1', 'Shift+2', 'Shift+!', 'Shift+@',
 ].map(canonicalizeCombo);
 
 export type ShortcutConflict =

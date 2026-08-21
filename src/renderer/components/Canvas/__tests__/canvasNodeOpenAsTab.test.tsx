@@ -85,6 +85,20 @@ const withMetrics = (node: React.ReactNode) => (
   <CanvasMetricsContext.Provider value={DEFAULT_METRICS}>{node}</CanvasMetricsContext.Provider>
 );
 
+/**
+ * Deliberately NOT the shipped defaults.
+ *
+ * The header tooltips name these keys, and they are user-assignable. A fixture using `E`/`T`
+ * would pass just as happily against a hard-coded `(E)` in the component — which is precisely
+ * the regression the tooltip assertions below exist to catch.
+ */
+const COMBOS = {
+  enlarge: 'Q',
+  openTab: 'G',
+  leaveTerminal: 'Ctrl+Alt+Q',
+  openTabFromOverlay: 'Ctrl+Alt+G',
+};
+
 function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
   act(() => {
     root.render(withMetrics(
@@ -98,6 +112,7 @@ function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
         hidden={false}
         busyCue="sweep"
         overlaid={overlaid}
+        combos={COMBOS}
         {...handlers}
       />,
     ));
@@ -172,6 +187,27 @@ describe('open-in-its-tab button', () => {
 
     expect(onPointerDown).toHaveBeenCalledTimes(1);
     expect(onDoubleClick).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The last link in the chain.
+   *
+   * These keys are user-assignable (Settings > Shortcuts > Canvas Mode), so a tooltip built from
+   * a literal would go on naming the default long after the user had rebound it — with a green
+   * suite and a clean typecheck, because nothing else in the app reads this string. The fixture
+   * combos are deliberately not the shipped ones, so a hard-coded `(E)` fails here.
+   */
+  it('names the CONFIGURED key, not a hard-coded one', () => {
+    render('gpu', { onOpenAsTab: jest.fn(), onOpenOverlay: jest.fn() });
+    expect(button()!.getAttribute('title')).toContain(COMBOS.openTab);
+    expect(overlayButton()!.getAttribute('title')).toContain(COMBOS.enlarge);
+  });
+
+  /** Which key applies depends on where the keyboard is, so an enlarged node names the chords. */
+  it('names the overlay chords once the node is enlarged', () => {
+    render('gpu', { onOpenAsTab: jest.fn(), onOpenOverlay: jest.fn() }, true);
+    expect(button()!.getAttribute('title')).toContain(COMBOS.openTabFromOverlay);
+    expect(overlayButton()!.getAttribute('title')).toContain(COMBOS.leaveTerminal);
   });
 
   it('names the terminal it opens, for screen readers', () => {
