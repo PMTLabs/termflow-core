@@ -205,6 +205,26 @@ impl SessionManager {
         }
     }
 
+    /// A GUI just connected. Release any arm that predates this connection.
+    ///
+    /// An arm is always set for a specific absence: an update or offload that
+    /// armed and then exited, or a sibling arming us before its own update. A
+    /// connected GUI ends that absence — it is here now and owns these sessions.
+    /// Letting the arm outlive it makes a later ordinary quit Hold instead of
+    /// tearing down, stranding the user's shells (and whatever agent CLIs run
+    /// under them) with no window and no tray to reach them.
+    ///
+    /// The GUI also disarms explicitly on connect, but that call is lazy (it
+    /// rides on the first terminal spawn, so a session that restores nothing
+    /// never makes it) and unacknowledged, so it cannot be the only guarantee.
+    pub fn on_gui_connect(&mut self) {
+        if self.armed_deadline.is_some() {
+            eprintln!("termflow-pty-host: GUI connected; releasing a pre-existing detach arm");
+        }
+        self.armed_deadline = None;
+        self.armed_deadline_ms = None;
+    }
+
     pub fn on_gui_disconnect(&mut self) -> Disposition {
         match self.armed_deadline {
             Some(_) => {
@@ -264,6 +284,57 @@ mod tests {
     fn disconnect_without_arm_tears_down() {
         let (mut m, _e, _r) = mgr();
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+    }
+
+    /// An arm belongs to the GUI generation that set it. A NEW GUI connecting
+    /// means whatever the arm was for (an update/offload that armed then exited,
+    /// or a sibling's precautionary arm) is over — that GUI is here now and owns
+    /// these sessions. Without this the arm outlives its reason, and the next
+    /// completely normal quit sees it and Holds instead of tearing down, leaving
+    /// the user's shells and agent CLIs running with no window and no tray.
+    #[test]
+    fn a_new_gui_connection_clears_a_stale_arm() {
+        let (mut m, _e, _r) = mgr();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 600,
+            token: "tok".into(),
+        });
+        assert!(m.is_armed(), "precondition: armed");
+
+        m.on_gui_connect();
+
+        assert!(!m.is_armed(), "a new GUI connection must clear the arm");
+    }
+
+    /// The consequence that actually matters: after a reconnect, a plain quit
+    /// must destroy sessions rather than hold them for a GUI that never comes.
+    #[test]
+    fn quit_after_reconnect_tears_down_despite_earlier_arm() {
+        let (mut m, _e, _r) = mgr();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 600,
+            token: "tok".into(),
+        });
+        m.on_gui_connect();
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+    }
+
+    /// Clearing on connect must not break the flow the arm exists for: a GUI
+    /// that connects and THEN arms (sibling offload, or its own pre-update arm)
+    /// still holds on disconnect. Pins that `on_gui_connect` clears only arms
+    /// that predate the connection, never one set during it.
+    #[test]
+    fn arming_after_connect_still_holds() {
+        let (mut m, _e, _r) = mgr();
+        m.on_gui_connect();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 600,
+            token: "tok".into(),
+        });
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
 
     /// RP-3: `AttachAcked` for an UNKNOWN tab must still ack (alive:false) so a

@@ -1704,18 +1704,50 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 
 /// Ask every window to persist its session, then exit — or exit anyway once
 /// `FLUSH_TIMEOUT` elapses.
+/// The ONLY route from a user-initiated quit to `exit(0)`.
+///
+/// Releases the pty-host's detach arm before exiting. An armed host that loses
+/// its GUI *holds* its sessions instead of tearing them down (see the sidecar's
+/// `on_gui_disconnect`), so exiting while armed leaves the user's shells — and
+/// any agent CLI running under them — alive with no window and no tray to reach
+/// them. Users read "Exit" as "exit everything", so a quit must never leave that
+/// behind.
+///
+/// Deliberately NOT used by `restart_for_update` or the updater: those arm on
+/// purpose and exit so terminals survive the swap.
+pub fn disarm_then_exit(app: &tauri::AppHandle) {
+    use tauri::Manager as _;
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Resolve the client and drop the `State` borrow before awaiting.
+        let client = app.try_state::<AppState>().and_then(|s| s.pty_host_clone());
+        if let Some(client) = client {
+            if !client.disarm().await {
+                log::error!(
+                    "quit: pty-host never acknowledged the disarm; it may keep \
+                     holding sessions after we exit"
+                );
+            }
+        }
+        app.exit(0);
+    });
+}
+
 pub fn flush_then_exit(app: &tauri::AppHandle) {
     use tauri::{Emitter, Manager as _};
 
     let Some(state) = app.try_state::<AppState>() else {
-        app.exit(0);
+        disarm_then_exit(app);
         return;
     };
 
-    // A second Quit while a flush is in flight means "I am done waiting".
+    // A second Quit while a flush is in flight means "I am done waiting" — but
+    // it still goes through the disarm, which is a local round trip and normally
+    // costs milliseconds. Skipping it is what strands terminals.
     if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
         log::info!("flush_then_exit: already flushing; exiting now.");
-        app.exit(0);
+        disarm_then_exit(app);
         return;
     }
 
@@ -1726,7 +1758,7 @@ pub fn flush_then_exit(app: &tauri::AppHandle) {
         .cloned()
         .collect();
     if expected.is_empty() {
-        app.exit(0);
+        disarm_then_exit(app);
         return;
     }
 
@@ -1734,7 +1766,7 @@ pub fn flush_then_exit(app: &tauri::AppHandle) {
     if let Err(e) = app.emit("app:flush-session", ()) {
         // Nothing will ack, so do not make the user wait out the timeout.
         log::warn!("flush_then_exit: could not ask windows to flush ({e}); exiting now.");
-        app.exit(0);
+        disarm_then_exit(app);
         return;
     }
 
@@ -1753,7 +1785,7 @@ pub fn flush_then_exit(app: &tauri::AppHandle) {
                 FLUSH_TIMEOUT.as_millis()
             );
         }
-        app.exit(0);
+        disarm_then_exit(&app);
     });
 }
 
@@ -3385,6 +3417,103 @@ mod root_leaf_reservation_tests {
         assert!(
             claims.try_claim("tb-a1b2c3").is_some(),
             "the owner is free again once the winning spawn has registered",
+        );
+    }
+}
+
+/// The quit path must leave nothing running. Asserted from source because the
+/// real thing needs a live `AppHandle` plus a pty-host over a real pipe, which a
+/// unit-test process cannot stand up (the `integration-tests` feature `mock_app`
+/// needs breaks the Windows test binary).
+///
+/// These are CLASS guards, not instance guards: they pin that *no* exit in the
+/// user-quit paths skips the disarm, so a future branch added to `flush_then_exit`
+/// — or a new quit path in `lib.rs` — cannot quietly opt out and strand shells.
+#[cfg(test)]
+mod quit_teardown_wiring_tests {
+    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    fn fn_body(src: &str, signature: &str) -> String {
+        let start = src.find(signature).unwrap_or_else(|| {
+            panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
+        });
+        let rest = &src[start..];
+        let open = rest.find('{').expect("no body");
+        let mut depth = 0usize;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[open..open + i + 1].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces after `{signature}`");
+    }
+
+    fn source(file: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(file);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
+            .replace("\r\n", "\n")
+    }
+
+    /// `flush_then_exit` has several early-exit branches (no state, nothing to
+    /// flush, emit failed, a second impatient Quit). Every one of them must go
+    /// through `disarm_then_exit`: an armed host that loses its GUI Holds, and a
+    /// held host keeps the user's shells — and whatever agent CLIs run under
+    /// them — alive with no window and no tray to reach them.
+    #[test]
+    fn every_flush_then_exit_branch_disarms_before_exiting() {
+        let body = fn_body(&source("commands.rs"), "pub fn flush_then_exit");
+        assert!(
+            body.contains("disarm_then_exit"),
+            "flush_then_exit must route its exits through disarm_then_exit. Body:\n{body}"
+        );
+        assert!(
+            !body.contains(".exit(0)"),
+            "a branch of flush_then_exit still calls exit(0) directly, skipping the \
+             disarm — that branch strands the user's terminals. Body:\n{body}"
+        );
+    }
+
+    /// The quit path that does NOT go through `flush_then_exit`: destroying the
+    /// last real window (tab tear-off, close_self_window) exits straight from the
+    /// window-event handler. It is a user-initiated quit and needs the same
+    /// guarantee — missing it was the whole reason to guard the class, not the
+    /// single function.
+    #[test]
+    fn the_last_window_destroyed_path_disarms_before_exiting() {
+        let src = source("lib.rs");
+        assert!(
+            src.contains("disarm_then_exit"),
+            "lib.rs's last-window-destroyed exit must disarm the host first"
+        );
+        assert!(
+            !src.contains("app.exit(0)"),
+            "lib.rs still exits directly somewhere, skipping the disarm"
+        );
+    }
+
+    /// The other half of the contract. `restart_for_update` arms ON PURPOSE and
+    /// exits so the shells survive the swap; disarming there would defeat the
+    /// feature. Pins that the new choke point was not applied indiscriminately.
+    #[test]
+    fn the_offload_path_still_exits_while_armed() {
+        let body = fn_body(&source("commands.rs"), "pub async fn restart_for_update");
+        assert!(
+            body.contains("arm_detach"),
+            "restart_for_update must still arm. Body:\n{body}"
+        );
+        assert!(
+            !body.contains("disarm"),
+            "restart_for_update must NOT disarm — it exits deliberately armed so \
+             terminals survive the update. Body:\n{body}"
         );
     }
 }

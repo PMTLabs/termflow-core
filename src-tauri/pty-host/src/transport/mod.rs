@@ -72,6 +72,13 @@ pub async fn serve(
 
     loop {
         heal_record(&record);
+        // An arm is set for a specific ABSENCE of a GUI (an update/offload that
+        // armed then exited, a sibling arming us before its apply). A connected
+        // GUI ends that absence, so the arm is spent here — before this
+        // connection can disconnect and consult it. Otherwise it outlives its
+        // reason and the next ordinary quit Holds instead of tearing down,
+        // leaving shells and agent CLIs alive with no window and no tray.
+        mgr.on_gui_connect();
         let (erx, rrx) = run_connection(&mut mgr, stream, events_rx, resp_rx).await;
         events_rx = erx;
         resp_rx = rrx;
@@ -423,6 +430,89 @@ mod tests {
         .await;
         assert!(replay.contains("persist"), "reattach replayed prior output");
         srv.abort();
+    }
+
+    /// The other half of `sessions_survive_arm_disconnect_reconnect`: once a GUI
+    /// HAS reconnected, the arm that carried the sessions across the gap is spent.
+    /// A subsequent plain quit (no re-arm) must tear the host down and kill the
+    /// shells, exactly as a quit with no arm in the picture would.
+    ///
+    /// Without `on_gui_connect` clearing it, the old arm is still set, the second
+    /// disconnect Holds, and the host lingers indefinitely holding a live child —
+    /// a terminal (and any agent CLI under it) still running with no GUI to reach
+    /// it. `serve` returning is the observable: it returns only on TearDown.
+    #[tokio::test]
+    async fn quit_after_reconnect_tears_the_host_down() {
+        let ep = test_endpoint("stale-arm-teardown");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
+
+        {
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::ArmDetach {
+                    req: 2,
+                    timeout_secs: 600,
+                    token: "tok".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c1 → the armed exit (update/offload) this arm was set for.
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        {
+            // A new GUI adopts the held session. This connection is what spends
+            // the arm — nothing here re-arms.
+            let mut c2 = connect_with_retry(&ep).await;
+            write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+                .await
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c2).await {
+                    if matches!(f, Frame::Resp(Response::SessionList { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c2 → the user hits X and confirms Exit.
+        }
+
+        let ended = tokio::time::timeout(Duration::from_secs(10), srv).await;
+        assert!(
+            ended.is_ok(),
+            "host must tear down on a plain quit after a reconnect; it held \
+             instead, stranding a live shell with no GUI"
+        );
     }
 
     /// C3 (design §10.4): a LIVE session must survive past an EXPIRED (short) arm
