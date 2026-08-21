@@ -36,7 +36,18 @@ export interface ClosePaneDeps {
   /** Drops the terminal's session-closed record (`plan/024` Req 4). Same argument as
    *  `clearCwdSnapshot` one field up: the pane is gone for good, so the map must not grow
    *  without bound and a recycled id must not inherit a dead shell's exit code and render a
-   *  "Session closed" banner over a live terminal. */
+   *  "Session closed" banner over a live terminal.
+   *
+   *  **Why here and not inside `TerminalService.closeTerminal`, beside `clearZoom`.** That is
+   *  the obvious home — it is the single choke point every genuine close funnels through, and
+   *  it already drops a per-terminal slice entry for exactly this reason. It does not work for
+   *  this one. `closeTerminal` opens with `if (!process) return; // Already closed`, and the
+   *  exit listener deletes the process mapping BEFORE it emits `pty:exit`
+   *  (`TerminalService.ts:70`) — which is the event that creates a session-exit record in the
+   *  first place. So by the time a terminal has an entry here, `closeTerminal` always takes
+   *  that early return, and a clear placed there would be a no-op on 100% of the entries it
+   *  was meant to remove. (The same early return means `clearZoom` already misses an exited
+   *  terminal's entry — pre-existing, and not this plan's to fix.) */
   clearSessionExit: (terminalId: string) => void;
 }
 

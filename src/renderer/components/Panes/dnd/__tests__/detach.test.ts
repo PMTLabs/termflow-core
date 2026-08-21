@@ -27,7 +27,7 @@ jest.mock('@termflow/terminal-core', () => ({
   terminalCache: { get: () => undefined },
 }));
 
-import { buildTabDetachPayload, applyDetachPayload } from '../detach';
+import { buildTabDetachPayload, applyDetachPayload, removeSourceTab } from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
 
 describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => {
@@ -141,5 +141,60 @@ describe('detach carries the cwd snapshot across windows (spec 045 §3.3)', () =
     // Seeding a payload without a cwd must not throw or write a bogus entry.
     expect(() => applyDetachPayload(payload!)).not.toThrow();
     expect(getCwdSnapshot('tm-1')).toBeUndefined();
+  });
+});
+
+/**
+ * Detaching a MIXED tab must not strand a session-exit record — `plan/024` Req 4.
+ *
+ * The round-1 leak fix put the clear in the two paths that close a terminal: `closePaneNonBlocking`
+ * and `TabManager.closeOneTab`. Detach goes through NEITHER. `collectTerminals` carries only panes
+ * with a live process, so a tab holding one running pane and one whose shell has exited hands the
+ * first to the new window and simply drops the second — leaving its record in this window's store
+ * with no tab, no pane and no way to ever clear it.
+ *
+ * Only the panes left behind. A move keeps its state, which is the rule `detachTerminal` already
+ * follows by preserving the zoom entry — and a carried terminal is live, so it has no record anyway.
+ */
+describe('removeSourceTab — session-exit records of panes left behind', () => {
+  const leafOf = (id: string, terminalId: string): PaneNode => ({ id, type: 'terminal', terminalId });
+  const cleared = () => dispatch.mock.calls
+    .map(([a]) => a)
+    .filter((a: any) => a?.type === 'sessionExit/clearSessionClosed')
+    .map((a: any) => a.payload.terminalId);
+
+  beforeEach(() => {
+    dispatch.mockClear();
+    mockState.panes.treesByTabId = {
+      'tab-1': {
+        id: 'pn-root', type: 'split', direction: 'horizontal',
+        children: [leafOf('pn-a', 'tm-live'), leafOf('pn-b', 'tm-exited')],
+      } as PaneNode,
+    };
+  });
+
+  it('clears the record of a pane that did not travel', () => {
+    // Only the live terminal is carried, exactly as `collectTerminals` would have decided.
+    removeSourceTab('tab-1', ['tm-live']);
+    expect(cleared()).toEqual(['tm-exited']);
+  });
+
+  // The negative that makes the case above mean something: clearing the carried terminal too
+  // would be a MOVE that silently discards state, which is the opposite of what detach is for.
+  it('leaves the carried terminal alone', () => {
+    removeSourceTab('tab-1', ['tm-live']);
+    expect(cleared()).not.toContain('tm-live');
+  });
+
+  it('clears nothing when every pane travelled', () => {
+    removeSourceTab('tab-1', ['tm-live', 'tm-exited']);
+    expect(cleared()).toEqual([]);
+  });
+
+  // A tab whose tree has already gone must not throw on the way out.
+  it('copes with a tab that has no tree', () => {
+    mockState.panes.treesByTabId = {};
+    expect(() => removeSourceTab('tab-1', ['tm-live'])).not.toThrow();
+    expect(cleared()).toEqual([]);
   });
 });

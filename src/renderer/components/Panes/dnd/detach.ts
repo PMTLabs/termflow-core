@@ -14,7 +14,8 @@ import { setZoom, ZOOM_DEFAULT } from '../../../store/slices/zoomSlice';
 import { getCwdSnapshot, setCwdSnapshot } from '../../../services/cwdSnapshot';
 import { generateId } from '../../../utils/id';
 import { computeZone } from './zone';
-import { tabHasNoPanes } from '../../../store/slices/paneTreeOps';
+import { tabHasNoPanes, getAllTerminalIds } from '../../../store/slices/paneTreeOps';
+import { clearSessionClosed } from '../../../store/slices/sessionExitSlice';
 import { DetachPayload, DetachTerminal } from './types';
 
 const DETACH_PREFIX = 'detach-';
@@ -148,8 +149,23 @@ export function buildTabDetachPayload(
 
 /** Remove a handed-off tab from this window (its PTYs live on in the backend). */
 export function removeSourceTab(tabId: string, terminalIds: string[]): void {
+  // A tab's panes do not all travel. `collectTerminals` carries only those with a live process,
+  // so a tab holding one running pane and one whose shell has EXITED detaches the first and
+  // leaves the second behind — and this path removes the tab without going through
+  // `TabManager.closeOneTab` or `closePaneNonBlocking`, the two places that drop a terminal's
+  // per-terminal state. Its session-exit record would be stranded in this window for the rest
+  // of the session (`plan/024` Req 4).
+  //
+  // Only the ones NOT carried. A MOVE keeps its state — that is the same rule
+  // `terminalService.detachTerminal` follows below by preserving the zoom entry, and by
+  // construction a carried terminal is live and has no record to drop anyway.
+  const carried = new Set(terminalIds);
+  const stranded = getAllTerminalIds(store.getState().panes.treesByTabId[tabId] ?? null)
+    .filter((id) => !carried.has(id));
+
   store.dispatch(removeTabTree(tabId));
   store.dispatch(removeTab(tabId));
+  stranded.forEach((id) => store.dispatch(clearSessionClosed({ terminalId: id })));
   terminalIds.forEach((id) => terminalService.detachTerminal(id));
 }
 
