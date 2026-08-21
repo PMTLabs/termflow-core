@@ -95,6 +95,12 @@ termflow-pty-protocol = { path = "pty-protocol" }
 # process-local mutex cannot help here: two profiles are two processes.
 fs4 = "1.1"
 
+[dev-dependencies]
+# `test-util` is NOT part of tokio's `full`, and it is what lets a test drive a
+# timeout in virtual time (`#[tokio::test(start_paused = true)]`). Without it the
+# quit-path disarm timeouts would have to elapse for real in every test run.
+tokio = { version = "1", features = ["full", "test-util"] }
+
 # Windows-only: trim the WebView2 right-click context menu to Print + Inspect.
 # Versions pinned to what wry/tauri already resolve so the COM types unify.
 [target.'cfg(unix)'.dependencies]

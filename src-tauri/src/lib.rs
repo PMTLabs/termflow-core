@@ -1678,7 +1678,10 @@ pub fn run() {
                         );
                     } else {
                         log::info!("Last window destroyed; exiting app to avoid orphaned processes.");
-                        app.exit(0);
+                        // Via the disarm choke point: an orphaned pty-host holding
+                        // armed sessions is exactly the orphan this branch exists
+                        // to prevent, and this path never touches flush_then_exit.
+                        commands::disarm_then_exit(app);
                     }
                 }
             }

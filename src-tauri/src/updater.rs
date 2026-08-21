@@ -162,7 +162,12 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         .and_then(|r| r)
     {
         log::warn!("[UPDATE] updater failed to launch after arming ({e}); disarming");
-        client.disarm().await;
+        if !client.disarm().await {
+            log::error!(
+                "[UPDATE] rollback disarm was not acknowledged; this host may still \
+                 hold its detach window until a later quit releases it"
+            );
+        }
         // Same obligation for the siblings we armed. Disarming ourselves and
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.

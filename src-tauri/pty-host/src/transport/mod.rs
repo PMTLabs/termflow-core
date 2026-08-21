@@ -202,14 +202,29 @@ where
         (events_rx, resp_rx)
     });
 
-    loop {
-        match read_frame(&mut rd).await {
-            Ok(Some(Frame::Ctrl(c))) => mgr.handle_control(c),
-            Ok(Some(Frame::Data(Data::Stdin { tab_id, bytes }))) => {
-                mgr.handle_stdin(&tab_id, &bytes)
-            }
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => break,
+    // An arm is set for a specific ABSENCE of a GUI (an update/offload that armed
+    // then exited, a sibling arming us before its apply). A GUI that is HERE ends
+    // that absence, so the arm is spent — otherwise it outlives its reason and the
+    // next ordinary quit Holds instead of tearing down, leaving shells and agent
+    // CLIs alive with no window and no tray to reach them.
+    //
+    // Keyed on the first frame RECEIVED, not on accept: neither transport can tell
+    // us who connected (Windows checks same-user+integrity via SDDL, Unix checks
+    // uid), so opening the endpoint proves nothing. A peer that connects and dies
+    // without a word — a launch that crashed before its first write — has adopted
+    // nothing, and spending the arm for it would destroy the very sessions the arm
+    // was set to preserve. Cleared BEFORE the frame is dispatched, so a client
+    // whose first frame is `ArmDetach` still ends up armed.
+    let mut heard_from_peer = false;
+    while let Ok(Some(frame)) = read_frame(&mut rd).await {
+        if !heard_from_peer {
+            heard_from_peer = true;
+            mgr.on_gui_connect();
+        }
+        match frame {
+            Frame::Ctrl(c) => mgr.handle_control(c),
+            Frame::Data(Data::Stdin { tab_id, bytes }) => mgr.handle_stdin(&tab_id, &bytes),
+            _ => {}
         }
     }
 
@@ -423,6 +438,179 @@ mod tests {
         .await;
         assert!(replay.contains("persist"), "reattach replayed prior output");
         srv.abort();
+    }
+
+    /// Opening the endpoint is not adopting. A peer that connects and goes away
+    /// without sending a single frame — a launch that crashed between the OS
+    /// handshake and its first write, some other same-user process poking the
+    /// pipe — never took ownership of anything, so it must not spend the arm.
+    ///
+    /// Getting this wrong is worse than the bug it came from: a broken update
+    /// whose new GUI dies on startup would destroy exactly the sessions the arm
+    /// was set to preserve. Neither transport can tell us WHO connected (Windows
+    /// checks same-user+integrity via SDDL, Unix checks uid via SO_PEERCRED), so
+    /// "sent us a frame" is the honest signal that a real client is here.
+    #[tokio::test]
+    async fn a_connection_that_never_speaks_does_not_spend_the_arm() {
+        let ep = test_endpoint("silent-connect");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
+
+        {
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::ArmDetach {
+                    req: 2,
+                    timeout_secs: 600,
+                    token: "tok".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c1 → the armed exit the arm exists for.
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // A peer connects and vanishes without a word.
+        {
+            let c2 = connect_with_retry(&ep).await;
+            drop(c2);
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The real GUI finally arrives. Its session must still be waiting.
+        let mut c3 = tokio::time::timeout(Duration::from_secs(5), connect_with_retry(&ep))
+            .await
+            .expect("host must still be listening; a silent connection tore it down");
+        write_frame(&mut c3, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+            .await
+            .unwrap();
+        let mut has_t1 = false;
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(f)) = read_frame(&mut c3).await {
+                if let Frame::Resp(Response::SessionList { sessions, .. }) = f {
+                    has_t1 = sessions.iter().any(|s| s.tab_id == "t1");
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            has_t1,
+            "a connection that never sent a frame must not spend the arm"
+        );
+        srv.abort();
+    }
+
+    /// The other half of `sessions_survive_arm_disconnect_reconnect`: once a GUI
+    /// HAS reconnected, the arm that carried the sessions across the gap is spent.
+    /// A subsequent plain quit (no re-arm) must tear the host down and kill the
+    /// shells, exactly as a quit with no arm in the picture would.
+    ///
+    /// Without `on_gui_connect` clearing it, the old arm is still set, the second
+    /// disconnect Holds, and the host lingers indefinitely holding a live child —
+    /// a terminal (and any agent CLI under it) still running with no GUI to reach
+    /// it. `serve` returning is the observable: it returns only on TearDown.
+    #[tokio::test]
+    async fn quit_after_reconnect_tears_the_host_down() {
+        let ep = test_endpoint("stale-arm-teardown");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
+
+        {
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::ArmDetach {
+                    req: 2,
+                    timeout_secs: 600,
+                    token: "tok".into(),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::ArmAck { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c1 → the armed exit (update/offload) this arm was set for.
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        {
+            // A new GUI adopts the held session. This connection is what spends
+            // the arm — nothing here re-arms.
+            let mut c2 = connect_with_retry(&ep).await;
+            write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+                .await
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while let Ok(Some(f)) = read_frame(&mut c2).await {
+                    if matches!(f, Frame::Resp(Response::SessionList { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c2 → the user hits X and confirms Exit.
+        }
+
+        let ended = tokio::time::timeout(Duration::from_secs(10), srv).await;
+        assert!(
+            ended.is_ok(),
+            "host must tear down on a plain quit after a reconnect; it held \
+             instead, stranding a live shell with no GUI"
+        );
     }
 
     /// C3 (design §10.4): a LIVE session must survive past an EXPIRED (short) arm

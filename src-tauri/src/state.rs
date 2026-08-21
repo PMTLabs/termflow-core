@@ -1216,7 +1216,12 @@ impl<R: Runtime> AppState<R> {
         // later completely normal quit sees the stale arm and Holds instead
         // of tearing down, and the NEXT launch reattaches a session the user
         // already asked to end. Idempotent: a no-op against an unarmed host.
-        client.disarm().await;
+        if !client.disarm().await {
+            // Not fatal: the sidecar now also spends the arm on our first frame,
+            // and the quit path disarms again. Worth saying out loud, because a
+            // silent failure here used to be the whole defect.
+            log::warn!("[HOTSWAP] adopted host did not acknowledge the disarm");
+        }
         Ok(())
     }
 

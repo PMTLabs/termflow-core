@@ -253,6 +253,18 @@ impl PtyHostClient {
     // --- request/response (async) ---
 
     async fn request(&self, make: impl FnOnce(u64) -> Control) -> Option<Response> {
+        // Bounded wait so a dead sidecar can't hang a caller forever.
+        self.request_within(std::time::Duration::from_secs(10), make).await
+    }
+
+    /// `request` with an explicit deadline, for callers that cannot afford the
+    /// default 10s — notably the quit path, which runs while the user waits for
+    /// the window to go away.
+    async fn request_within(
+        &self,
+        timeout: std::time::Duration,
+        make: impl FnOnce(u64) -> Control,
+    ) -> Option<Response> {
         let req = self.next_req();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
@@ -260,8 +272,7 @@ impl PtyHostClient {
             self.pending.lock().unwrap().remove(&req);
             return None;
         }
-        // Bounded wait so a dead sidecar can't hang a caller forever.
-        match tokio::time::timeout(std::time::Duration::from_secs(10), rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => Some(resp),
             _ => {
                 self.pending.lock().unwrap().remove(&req);
@@ -320,9 +331,31 @@ impl PtyHostClient {
         }
     }
 
-    pub async fn disarm(&self) {
+    /// Release the detach hold. Returns whether the host actually acknowledged.
+    ///
+    /// The answer matters on the quit path: an unacknowledged disarm is
+    /// indistinguishable from a successful one, and getting it wrong means
+    /// exiting into a host that Holds — the user's shells and agent CLIs left
+    /// running with no window and no tray. Retried once, because a single
+    /// dropped request on a flaky pipe should not decide that.
+    ///
+    /// Each attempt is bounded well under the generic 10s request timeout: this
+    /// runs while the user is waiting for the app to close.
+    pub async fn disarm(&self) -> bool {
+        const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+        const ATTEMPTS: usize = 2;
+
         log::info!("[HOTSWAP] disarming host (update aborted or normal quit)");
-        let _ = self.request(|req| Control::Disarm { req }).await;
+        for attempt in 1..=ATTEMPTS {
+            if let Some(Response::DisarmAck { .. }) = self
+                .request_within(ATTEMPT_TIMEOUT, |req| Control::Disarm { req })
+                .await
+            {
+                return true;
+            }
+            log::warn!("[HOTSWAP] disarm attempt {attempt}/{ATTEMPTS} got no DisarmAck");
+        }
+        false
     }
 }
 
@@ -975,6 +1008,91 @@ fn record_dir_for(
     id: &crate::profile::ProfileIdentity,
 ) -> std::path::PathBuf {
     base.join("app.termflow.desktop").join("host").join(id.key())
+}
+
+/// Tests for the quit-path disarm contract. `disarm` is the last thing that
+/// stands between a user-confirmed Exit and a host that Holds instead of tearing
+/// down, so "did it actually land?" has to be answerable — a fire-and-forget
+/// disarm that silently lost its request looks exactly like a successful one.
+#[cfg(test)]
+mod disarm_tests {
+    use super::*;
+
+    fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
+        let (outbound, out_rx) = unbounded_channel::<Frame>();
+        (
+            PtyHostClient {
+                outbound,
+                pending: Arc::new(Mutex::new(HashMap::new())),
+                req_ctr: Arc::new(AtomicU64::new(0)),
+                survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            },
+            out_rx,
+        )
+    }
+
+    /// Ack every `Disarm` after ignoring the first `ignore_first` of them.
+    fn responder(
+        mut out_rx: tokio::sync::mpsc::UnboundedReceiver<Frame>,
+        pending: PendingMap,
+        mut ignore_first: usize,
+    ) {
+        tokio::spawn(async move {
+            while let Some(f) = out_rx.recv().await {
+                if let Frame::Ctrl(Control::Disarm { req }) = f {
+                    if ignore_first > 0 {
+                        ignore_first -= 1;
+                        continue;
+                    }
+                    if let Some(tx) = pending.lock().unwrap().remove(&req) {
+                        let _ = tx.send(Response::DisarmAck { req });
+                    }
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn disarm_reports_true_when_the_host_acks() {
+        let (c, out_rx) = client();
+        responder(out_rx, c.pending.clone(), 0);
+        assert!(c.disarm().await, "a DisarmAck must be reported as success");
+    }
+
+    /// The case that makes the quit path a lie: the request went out, nothing
+    /// came back. Exiting here strands sessions, so it must NOT read as success.
+    #[tokio::test(start_paused = true)]
+    async fn disarm_reports_false_when_the_host_never_acks() {
+        let (c, _out_rx) = client(); // receiver alive, so the send succeeds; nothing answers
+        assert!(
+            !c.disarm().await,
+            "an unanswered disarm must not report success"
+        );
+    }
+
+    /// A dead pipe is the one honest "nothing to disarm" — it must not stall the
+    /// quit waiting out a timeout for a host that is already gone.
+    #[tokio::test(start_paused = true)]
+    async fn disarm_reports_false_promptly_when_the_pipe_is_gone() {
+        let (c, out_rx) = client();
+        drop(out_rx);
+        assert!(!c.disarm().await);
+    }
+
+    /// One dropped request on a flaky pipe must not decide the question. This is
+    /// the difference between the old `let _ = request(...)` and a disarm the
+    /// exit path can rely on.
+    #[tokio::test(start_paused = true)]
+    async fn disarm_retries_before_giving_up() {
+        let (c, out_rx) = client();
+        responder(out_rx, c.pending.clone(), 1); // swallow the first attempt
+        assert!(
+            c.disarm().await,
+            "a disarm that succeeds on retry must report success"
+        );
+    }
 }
 
 #[cfg(test)]
