@@ -1381,7 +1381,7 @@ pub fn parse_osc_cwd(data: &[u8]) -> Option<String> {
 /// without constructing a full `AppState`, which requires a real `AppHandle<Wry>`
 /// (`tauri::test::mock_app()` yields `AppState<MockRuntime>` instead, and only
 /// under the Linux/macOS-only `integration-tests` feature — see `api_server.rs`).
-fn exit_cwd_for(terminal_cwds: &DashMap<String, String>, id: &str) -> Option<String> {
+pub(crate) fn exit_cwd_for(terminal_cwds: &DashMap<String, String>, id: &str) -> Option<String> {
     terminal_cwds.get(id).map(|cwd| cwd.value().clone())
 }
 
