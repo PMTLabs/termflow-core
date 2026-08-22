@@ -8,6 +8,7 @@ import {
   PAD, PAD_TOP, GAP_X, GAP_Y, GROUP_GAP, PAD_SCREEN_MIN, PAD_SCREEN_MAX, MAX_PAD_OUTSET, GroupBox,
 } from '../canvasLayout';
 import { readSource } from '../../../utils/readSource';
+import { LABEL_TOP } from '../canvasSelectors';
 
 const at = (x: number, y: number): Rect => ({ x, y, w: NODE_W, h: NODE_H });
 
@@ -194,14 +195,18 @@ describe('seedNodePosition', () => {
 /**
  * The frame's top padding only has to clear the part of the label that hangs INSIDE it.
  *
- * `.canvas-glabel` straddles the top border like a fieldset legend — `position: absolute;
- * top: -11px` — so most of it is outside the frame entirely. `PAD_TOP` was 46 against a `PAD`
- * of 30 on the assumption that a whole label-height band had to be reserved, and the extra
- * 16px of empty space read as a group pushed away from its own terminals.
+ * `.canvas-glabel` straddles the top border like a fieldset legend — at `z = 1` it sits at
+ * `LABEL_TOP` (world units, `canvasSelectors.ts`) — so most of it is outside the frame
+ * entirely. `PAD_TOP` was 46 against a `PAD` of 30 on the assumption that a whole label-height
+ * band had to be reserved, and the extra 16px of empty space read as a group pushed away from
+ * its own terminals.
  *
- * The relationship spans a `.ts` file and a `.css` file, so neither can state it alone: the
- * stylesheet does not know what `PAD_TOP` is, and the layout module does not know where the
- * label sits. Restyling the label without revisiting the padding is what this catches.
+ * The relationship spans two `.ts` modules and a `.css` file, so none can state it alone: the
+ * stylesheet does not know what `PAD_TOP` is, `canvasLayout` does not know where the label
+ * sits, and `LABEL_TOP` moved out of the stylesheet entirely once the label's position needed
+ * to counter-scale with `k` alongside its size (`labelScale`) — a fixed CSS `top` only held the
+ * border-hugging appearance at `z = 1`. Restyling the label without revisiting the padding is
+ * what this catches.
  */
 describe('group frame top padding clears the label, and no more', () => {
   const CSS = readSource(path.resolve(__dirname, '../Canvas.css')).replace(/\/\*[\s\S]*?\*\//g, '');
@@ -229,15 +234,14 @@ describe('group frame top padding clears the label, and no more', () => {
   };
 
   it('reads the label rule it depends on', () => {
-    expect(px('top')).not.toBeNull();
     expect(px('font-size')).not.toBeNull();
     // It really is hung on the border, not laid out inside the frame — the whole premise.
-    expect(px('top')!).toBeLessThan(0);
+    expect(LABEL_TOP).toBeLessThan(0);
   });
 
   it('reserves enough for the half that hangs inside', () => {
     // Line box ~1.2x the font size, centred on `top`; what intrudes is everything below y=0.
-    const overhang = px('font-size')! * 1.2 + px('top')!;
+    const overhang = px('font-size')! * 1.2 + LABEL_TOP;
     expect(PAD_TOP - PAD).toBeGreaterThanOrEqual(overhang);
   });
 

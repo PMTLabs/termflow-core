@@ -67,7 +67,13 @@
 /* `overflow`/`text-overflow` are what make the inline `max-width` bite — see `labelMaxWidth`.
    Without them `white-space: nowrap` simply overflows the box and the cap does nothing, which
    looks identical in the DOM and identical in any test that reads the style. */
-.canvas-glabel { position: absolute; top: -11px; left: 14px; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 50%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* `top`/`left` are NOT here — they are `LABEL_TOP`/`LABEL_LEFT` from canvasSelectors.ts, set
+   inline by CanvasGroupFrame counter-scaled by `k` so the label's POSITION holds a constant
+   on-screen offset from the border, the same way `transform: scale(k)` already holds its SIZE
+   constant. `transform-origin: 0 0` is the other half: with the origin at the box's own corner
+   (which now IS the counter-scaled position) there is no leftover fractional term tied to the
+   label's own height to drift with zoom. See the constants' own comment for the full account. */
+.canvas-glabel { position: absolute; padding: 0 8px; background: var(--bg-primary, #141414); font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--text-secondary, #969696); cursor: move; transform-origin: 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* FIXED width, which is what lets `groupChips.groupChipLayout` resolve collisions exactly
    rather than against an estimate — a chip sized by its own title would have to be measured,
    and a layout that guesses widths only ever guesses the overlaps too. It also lines the chips
