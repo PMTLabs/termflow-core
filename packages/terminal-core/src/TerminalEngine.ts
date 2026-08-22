@@ -20,6 +20,7 @@ import type {
   TerminalSearchOptions,
   TerminalSearchResult,
   ContextMenuActions,
+  TerminalLinkHit,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
 import type { TerminalCacheEntry } from './cache';
@@ -400,6 +401,128 @@ function trimPathTrailing(path: string): string {
     break;
   }
   return path.slice(0, end);
+}
+
+/**
+ * What counts as a URL — for the UNDERLINE and for "Copy Link" alike (Tam, 2026-08-21).
+ *
+ * **This is `WebLinksAddon`'s own default pattern, and it is exported so the addon is handed
+ * THIS object rather than falling back to its private copy** (`ILinkProviderOptions.urlRegex`,
+ * see `mount()`). That is the whole point of it living here.
+ *
+ * The alternative was to write a second URL regex for the context menu to hit-test with, and
+ * that second regex is a defect generator: every shape the two disagree about is either a link
+ * xterm underlines with no Copy Link on it, or a Copy Link offered over text that is not drawn
+ * as a link at all. Neither is discoverable — you have to right-click the one exotic URL that
+ * falls in the gap. Passing one regex to both removes the gap by construction instead of
+ * pinning it with a test table that can only ever sample it.
+ *
+ * NOT global, deliberately. A `/g` regex carries `lastIndex` between calls, and this object is
+ * shared with the addon, which would then resume scanning from wherever we left off — a link
+ * that underlines on one hover and not the next. `findUrlLinks` clones it per scan.
+ */
+export const URL_RE = /(https?|HTTPS?):[/]{2}[^\s"'!*(){}|\\\^<>`]*[^\s"':,.!?{}|\\\^~\[\]`()<>]/;
+
+/** Where a URL sits in one stitched logical line. Mirrors `PathLinkMatch`'s shape. */
+export interface UrlLinkMatch {
+  start: number;
+  /** Exclusive, like `PathLinkMatch.end`. */
+  end: number;
+  url: string;
+}
+
+/**
+ * Every URL in one logical line of terminal text.
+ *
+ * Its own global clone of `URL_RE` per call: the shared object must stay non-global (see above),
+ * and a module-level global copy would carry `lastIndex` between calls exactly as badly.
+ */
+export function findUrlLinks(text: string): UrlLinkMatch[] {
+  const re = new RegExp(URL_RE.source, 'g');
+  const out: UrlLinkMatch[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, url: m[0] });
+    // A zero-length match would spin here forever. The pattern cannot produce one — it requires
+    // a scheme — but `lastIndex` advancing is the invariant this loop rests on, so it is made
+    // explicit rather than inferred.
+    if (m[0].length === 0) re.lastIndex += 1;
+  }
+  return out;
+}
+
+/**
+ * Which link, if any, covers character `idx` of a stitched logical line.
+ *
+ * **URLs are tested before paths, and that ordering is load-bearing.**
+ * `https://example.com/a/b.txt` satisfies both matchers — `findPathLinks` claims a fragment of
+ * it — so testing paths first would offer "Copy Path" over a piece of every link in the
+ * terminal, putting a meaningless string on the clipboard. The scheme is what decides which
+ * kind of thing this is.
+ *
+ * Pure, and exported, so the decision is tested against text and an index rather than through a
+ * mounted terminal — see `getLinkAt`, which is the glue that produces the index.
+ */
+export function linkAtIndex(text: string, idx: number): TerminalLinkHit | null {
+  for (const u of findUrlLinks(text)) {
+    if (idx >= u.start && idx < u.end) return { kind: 'url', text: u.url };
+  }
+  for (const p of findPathLinks(text)) {
+    if (idx >= p.start && idx < p.end) return { kind: 'path', text: p.path };
+  }
+  return null;
+}
+
+/** What `pointToCell` needs to know about the rendered terminal element. */
+export interface RenderedTerminalBox {
+  /** `getBoundingClientRect()` — POST-transform, in viewport pixels. */
+  rect: { left: number; top: number; width: number; height: number };
+  /** Layout size — PRE-transform. The ratio of the two is the CSS scale in effect. */
+  offsetWidth: number;
+  offsetHeight: number;
+  /** One cell, in untransformed CSS pixels, from xterm's render service. */
+  cell: { width: number; height: number };
+  cols: number;
+  rows: number;
+}
+
+/**
+ * A viewport point as a terminal cell, or `null` when the point is outside the grid.
+ *
+ * **The scale reconciliation is the whole reason this is not two divisions.**
+ * `getBoundingClientRect()` reports post-transform pixels while `cell` is in untransformed CSS
+ * pixels, so on the canvas overlay — where `.canvas-surface` carries a `scale()` — the two are
+ * in different units and a naive division hit-tests the wrong cell by the scale factor. Dividing
+ * by the MEASURED ratio handles any transform rather than the one case we happen to know about,
+ * and is exactly a no-op at scale 1, which is every ordinary pane.
+ */
+export function pointToCell(
+  clientX: number,
+  clientY: number,
+  box: RenderedTerminalBox,
+): { col: number; row: number } | null {
+  const { rect, cell } = box;
+  if (!(cell.width > 0) || !(cell.height > 0)) return null;
+  /**
+   * An element that occupies no space contains no point, so there is no cell to report.
+   *
+   * Checked explicitly because the scale fallback below hides it: a hidden terminal measures 0
+   * in `offsetWidth` AND in `rect.width`, `offsetWidth > 0` is false, the fallback substitutes a
+   * scale of 1, and the arithmetic then happily divides the click's own coordinates by the cell
+   * size and returns a plausible cell inside a box with no pixels. The grid bounds below cannot
+   * catch it — the fabricated cell is a perfectly legal column and row. Found by its own test.
+   */
+  if (!(rect.width > 0) || !(rect.height > 0)) return null;
+  // `> 0` guards rather than a bare `||`, so a NaN ratio (from a zero-size layout box) is
+  // rejected instead of propagating into `Math.floor`.
+  const scaleX = box.offsetWidth > 0 ? rect.width / box.offsetWidth : 1;
+  const scaleY = box.offsetHeight > 0 ? rect.height / box.offsetHeight : 1;
+  if (!(scaleX > 0) || !(scaleY > 0)) return null;
+
+  const col = Math.floor((clientX - rect.left) / (cell.width * scaleX));
+  const row = Math.floor((clientY - rect.top) / (cell.height * scaleY));
+  if (col < 0 || col >= box.cols || row < 0 || row >= box.rows) return null;
+  return { col, row };
 }
 
 /** Find file-path links (with optional :line:col) in one line of terminal text. */
@@ -1353,9 +1476,13 @@ export class TerminalEngine {
       // Pass a handler so URLs open via the host (Tauri shell), NOT the default
       // window.open() which is a no-op in the Tauri WebView. Gate on the modifier
       // (Ctrl on Win/Linux, Cmd on macOS) so a plain click only selects text.
+      // `urlRegex: URL_RE` hands the addon the SAME pattern `getLinkAt` hit-tests with, so what
+      // the terminal underlines and what "Copy Link" offers cannot drift apart. It is the
+      // addon's own default value, so this changes nothing about which URLs are detected — it
+      // changes WHERE the answer lives. See `URL_RE`.
       const webLinks = new WebLinksAddon((event, uri) => {
         if (this.hasOpenModifier(event)) this.opts.openExternal?.(uri);
-      });
+      }, { urlRegex: URL_RE });
       const unicode11 = new Unicode11Addon();
       const searchAddon = new SearchAddon();
 
@@ -3646,6 +3773,78 @@ export class TerminalEngine {
     Promise.resolve(this.bridge.write(this.attachedProcessId, payload)).catch((e: unknown) => {
       this.opts.onDiag?.(() => `[TERM-DIAG] insertCommand write ignored: ${e}`);
     });
+  }
+
+  /**
+   * The link under a viewport point, for the right-click menu's Copy Link / Copy Path
+   * (Tam, 2026-08-21). `null` when the point is not on one.
+   *
+   * **Why the host cannot answer this itself.** xterm resolves links through registered
+   * `ILinkProvider`s on HOVER and exposes no "what is at this cell" query, so a menu built
+   * outside the engine has nothing to ask. What it does have is the two matchers the providers
+   * already use — `URL_RE` (shared with `WebLinksAddon`, see its note) and `findPathLinks` — so
+   * this re-runs exactly them at the clicked cell. The answer is the same one the underline was
+   * drawn from, not a second opinion about it.
+   *
+   * **URLs win over paths.** `https://host/a/b.txt` satisfies both matchers, and the scheme is
+   * decisive about which it is; testing paths first would offer "Copy Path" for the tail of
+   * every link.
+   *
+   * NOT covered: an OSC 8 hyperlink whose display text differs from its URI. Those bypass
+   * addon providers entirely for xterm's built-in `OscLinkProvider`, and the URI is held in the
+   * cell's extended attributes, which have no public accessor. Right-clicking one offers Copy
+   * Link only when its VISIBLE text is itself a URL. A real gap, recorded rather than papered
+   * over — the alternative is reaching into `_core` for buffer internals, which is a much
+   * bigger promise to keep across xterm upgrades than the render dimensions below.
+   */
+  getLinkAt(clientX: number, clientY: number): TerminalLinkHit | null {
+    const term = this.term;
+    const el = term?.element;
+    if (!term || !el) return null;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cell = (term as any)._core?._renderService?.dimensions?.css?.cell;
+    const cw: unknown = cell?.width;
+    const ch: unknown = cell?.height;
+    if (typeof cw !== 'number' || typeof ch !== 'number') return null;
+
+    const at = pointToCell(clientX, clientY, {
+      rect: el.getBoundingClientRect(),
+      offsetWidth: el.offsetWidth,
+      offsetHeight: el.offsetHeight,
+      cell: { width: cw, height: ch },
+      cols: term.cols,
+      rows: term.rows,
+    });
+    if (!at) return null;
+
+    const buf = term.buffer.active;
+    // The buffer row under the pointer. The viewport is a WINDOW onto the scrollback, so the
+    // scroll offset has to be added — without it every hit-test is wrong the moment you scroll
+    // up, which is exactly when you go looking for a link in old output.
+    const bufferRow = buf.viewportY + at.row;
+    const info = collectWrappedLine(buf, bufferRow);
+    if (!info) return null;
+
+    // Where the pointer's CELL lands in the STITCHED line. The stitch concatenates rows, so the
+    // offset is this row's own start plus the column — the column alone would hit-test the
+    // FIRST row of a wrapped line whichever row you actually clicked.
+    const rowStart = info.rowStarts[bufferRow - info.firstRow];
+    if (rowStart === undefined) return null;
+
+    return linkAtIndex(info.text, rowStart + at.col);
+  }
+
+  /**
+   * Put a link on the clipboard — the Copy Link / Copy Path menu items.
+   *
+   * Goes through the same `writeClipboard` the Copy item uses, so it prefers the host's native
+   * writer (Tauri) over `navigator.clipboard` and does not raise the WebView's permission popup.
+   * A menu item that wrote the clipboard its own way would be the one place in the app that
+   * popped a prompt.
+   */
+  copyLink(text: string): void {
+    if (text) this.writeClipboard(text);
   }
 
   /** Cursor position in px relative to the terminal container, for anchoring the

@@ -174,4 +174,17 @@ export interface ContextMenuActions {
   resetRendering(): void; toggleWebGL(): void;
 }
 
+/**
+ * A link found under the pointer — `TerminalEngine.getLinkAt` (Tam, 2026-08-21).
+ *
+ * `kind` exists so the menu can LABEL it correctly: "Copy Link" for a URL and "Copy Path" for a
+ * detected file path are different promises, and one item covering both would name whichever
+ * the person who wrote it had in mind that day.
+ */
+export interface TerminalLinkHit {
+  kind: 'url' | 'path';
+  /** The link itself — the URL, or the path WITHOUT any `:line:col` suffix. */
+  text: string;
+}
+
 export type { Terminal };
