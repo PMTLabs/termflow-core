@@ -30,7 +30,7 @@ import { useArrange } from './useArrange';
 import { PortClick, useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
 import { CanvasWireMenu } from './CanvasWireMenu';
-import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { CanvasNodeMenu } from './CanvasNodeMenu';
 import { CanvasGroupMenu } from './CanvasGroupMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, decideCanvasClose } from './canvasClose';
@@ -1160,17 +1160,24 @@ export const CanvasMode: React.FC = () => {
         />
       )}
       {nodeMenu && (
-        <CanvasMenu x={nodeMenu.x} y={nodeMenu.y} onClose={() => setNodeMenu(null)}>
-          <div className="context-menu-header">{nodeMenu.node.title}</div>
-          <div className="context-menu-divider" />
-          <CanvasMenuItem
-            icon="✕"
-            danger
-            onClick={() => { setNodeMenu(null); closeNode(nodeMenu.node); }}
-          >
-            Close Terminal
-          </CanvasMenuItem>
-        </CanvasMenu>
+        <CanvasNodeMenu
+          x={nodeMenu.x}
+          y={nodeMenu.y}
+          title={nodeMenu.node.title}
+          // Read from `overlayId` rather than remembered when the menu opened: the overlay can be
+          // dismissed by a backdrop click while the menu is up, and a stale copy would then offer
+          // "Shrink back to the canvas" for a node that is already back on it.
+          overlaid={overlayId === nodeMenu.node.terminalId}
+          // The SAME expressions the header buttons use (see the node's `onOpenOverlay` /
+          // `onOpenAsTab` props below) rather than second implementations of them — one action
+          // reached two ways has to be one action.
+          onToggleOverlay={() => (overlayId === nodeMenu.node.terminalId
+            ? closeOverlay()
+            : dispatch(setOverlayNode(nodeMenu.node.terminalId)))}
+          onOpenAsTab={openAsTab(nodeMenu.node.tabId, nodeMenu.node.paneId)}
+          onCloseTerminal={() => closeNode(nodeMenu.node)}
+          onDismiss={() => setNodeMenu(null)}
+        />
       )}
       {groupMenu && (
         <CanvasGroupMenu
