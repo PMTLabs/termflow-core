@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/xterm';
+import type { FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -1492,8 +1493,8 @@ export class TerminalEngine {
         convertEol: false,
         allowTransparency: false,
         letterSpacing: 0,
-        fontWeight: 'normal',
-        fontWeightBold: 'bold',
+        fontWeight: this.opts.fontWeight ?? 'normal',
+        fontWeightBold: this.opts.fontWeightBold ?? 'bold',
         drawBoldTextInBrightColors: true,
         // Shell/tool prompts routinely paint a background color (e.g. the stock
         // Debian/Ubuntu zsh prompt's `%K{blue}%n@%m%k`) against whatever the active
@@ -3285,6 +3286,14 @@ export class TerminalEngine {
   setTheme(theme: Record<string, string>): void {
     if (!this.term) return;
     this.term.options.theme = theme;
+  }
+
+  // Same shape as setTheme: a plain xterm option write, no re-fit needed since
+  // weight doesn't change monospace glyph advance width.
+  setFontWeight(weight: FontWeight, weightBold: FontWeight): void {
+    if (!this.term) return;
+    this.term.options.fontWeight = weight;
+    this.term.options.fontWeightBold = weightBold;
   }
 
   setFontSize(px: number): void {

@@ -125,6 +125,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // the terminal it stands in for (not a hardcoded stack), so it honours the
   // user's font settings.
   const fontFamily = useSelector((state: RootState) => state.settings.fontFamily);
+  const fontWeight = useSelector((state: RootState) => state.settings.fontWeight);
+  const fontWeightBold = useSelector((state: RootState) => state.settings.fontWeightBold);
   // Per-pane zoom multiplier (keyed by terminalId; defaults to 100%). Multiplied
   // into the font size we hand the engine, so zoom reflows this pane (more zoom =
   // larger text, fewer cols/rows) WITHOUT changing the shared font-size setting.
@@ -750,6 +752,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               processId={processId}
               paneId={paneId}
               fontSize={effectiveFontSize}
+              fontWeight={fontWeight}
+              fontWeightBold={fontWeightBold}
               isActive={isTabActive}
               shellType={finalShellTypeForDisplay}
               // Focus this terminal only when it's the active pane of the active

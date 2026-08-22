@@ -2,6 +2,8 @@ import { snapshotCategory, isCategoryDirty, TrackedSettings } from '../settingsD
 
 const base: TrackedSettings = {
   fontSize: 14,
+  fontWeight: '400',
+  fontWeightBold: '700',
   tabSizingMode: 'shrink',
   fixedTabWidth: 100,
   colorSchemaId: 'default',
@@ -27,6 +29,15 @@ describe('settingsDirty', () => {
     expect(isCategoryDirty('appearance', { ...base, tabSizingMode: 'scroll' }, snap)).toBe(true);
     // changing a non-appearance field does not mark appearance dirty
     expect(isCategoryDirty('appearance', { ...base, smartCtrlC: false }, snap)).toBe(false);
+  });
+
+  it('appearance tracks font weight and bold weight', () => {
+    // Same failure mode noted below for canvasBusyCue: an untracked field makes
+    // "Discard changes" quietly not discard this one.
+    const snap = snapshotCategory('appearance', base);
+    expect(isCategoryDirty('appearance', { ...base, fontWeight: '300' }, snap)).toBe(true);
+    expect(isCategoryDirty('appearance', { ...base, fontWeightBold: '900' }, snap)).toBe(true);
+    expect(isCategoryDirty('appearance', { ...base }, snap)).toBe(false);
   });
 
   it('appearance tracks agentColorSchemes (order-independent)', () => {

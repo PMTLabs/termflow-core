@@ -9,6 +9,8 @@ export type TrackedCategory = 'appearance' | 'terminal' | 'profiles' | 'shortcut
 /** Structural subset of the settings slice that this module reads. */
 export interface TrackedSettings {
   fontSize: number;
+  fontWeight: string;
+  fontWeightBold: string;
   tabSizingMode: string;
   fixedTabWidth: number;
   colorSchemaId: string;
@@ -31,6 +33,8 @@ export type CategorySnapshot =
   | {
       kind: 'appearance';
       fontSize: number;
+      fontWeight: string;
+      fontWeightBold: string;
       tabSizingMode: string;
       fixedTabWidth: number;
       colorSchemaId: string;
@@ -59,6 +63,8 @@ export function snapshotCategory(category: TrackedCategory, s: TrackedSettings):
       return {
         kind: 'appearance',
         fontSize: s.fontSize,
+        fontWeight: s.fontWeight,
+        fontWeightBold: s.fontWeightBold,
         tabSizingMode: s.tabSizingMode,
         fixedTabWidth: s.fixedTabWidth,
         colorSchemaId: s.colorSchemaId,
