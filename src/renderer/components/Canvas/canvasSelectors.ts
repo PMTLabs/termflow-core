@@ -328,6 +328,14 @@ function buildModel(
  * step out of a group and back into it as it crossed a row — and the sidebar, which is sectioned
  * by group, could not show that order at all.
  *
+ * **The visible cost of that, stated so it is not rediscovered as a bug.** When two group frames
+ * OVERLAP horizontally, Tab finishes the first group before starting the second, so focus can
+ * run left → right → back to the middle across nodes that look collinear (raised in review of
+ * PR #56). That is inherent to per-group ordering rather than a defect in it: the alternative
+ * global sort fixes this one case and breaks the guarantee the sidebar depends on, since a
+ * list sectioned by group cannot render an order that interleaves groups. Tam chose per-group
+ * over global with that trade named.
+ *
  * **Exported, and split out of `buildModel` for a reason.** Its orphan branch below is not
  * reachable through `buildModel` — every node there pushes a group in the same iteration — so a
  * test driving the builder cannot exercise it, and the one that tried was measuring

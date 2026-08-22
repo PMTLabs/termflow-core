@@ -25,6 +25,26 @@ import { Rect } from './canvasGeometry';
  * union of the band so far.** Accumulating the band's extent lets a staircase creep: every node
  * overlaps its predecessor by 60%, none overlaps the first by anything, and the whole diagonal
  * collapses into a single row. Anchoring costs nothing and cannot creep.
+ *
+ * ---
+ *
+ * **KNOWN LIMIT, currently unreachable — read this before adding node RESIZE.**
+ *
+ * Anchoring makes the banding depend on which node is topmost, and with nodes of very different
+ * heights that is unstable. A node three rows tall beside a column of three short ones: if the
+ * tall one starts 10px BELOW the first short one, the short one anchors and claims only the tall
+ * one, giving row-major order; if it starts 10px ABOVE, the tall one anchors and claims all
+ * three, giving column-major. A 20px nudge flips the whole traversal (raised in review of
+ * PR #56).
+ *
+ * It cannot happen today: every canvas node is exactly `NODE_H` tall. Seeding
+ * (`canvasSelectors`), Arrange (`canvasArrange`), spawn (`canvasSpawn`) and the sidebar drag all
+ * write `h: NODE_H`, node drags preserve `h`, and there is no resize gesture. So the fix is
+ * deliberately NOT written — it would be machinery for a case no code path can produce, and the
+ * two candidate rules (threshold on the shorter height, which is what `sameRow` does, versus on
+ * BOTH heights) disagree only for heights that do not occur.
+ *
+ * If node resizing is ever added, this is the thing to revisit, and `sameRow` is where.
  */
 
 /**

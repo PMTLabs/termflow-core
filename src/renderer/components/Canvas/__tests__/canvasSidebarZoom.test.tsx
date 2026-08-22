@@ -241,20 +241,25 @@ describe('the stylesheet actually scales from it', () => {
    * that exist today — the failure here is additive, exactly as `canvasNodeChrome` argues for
    * the node's counter-scale: the next rule someone adds will use a bare `px`.
    */
-  it('leaves no bare pixel font-size inside the panel', () => {
+  it('leaves no unscaled font-size inside the panel', () => {
     const offenders: string[] = [];
     for (const m of CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       const head = m[1].trim();
       if (head.startsWith('@')) continue;
       for (const sel of head.split(',').map((s) => s.trim())) {
-        // The panel's own rules, and the tab-strip classes it re-scopes inside a row. The
-        // `.canvas-sidebar` rule itself is the one place a px is REQUIRED — it is the base.
-        if (!/^\.canvas-s(?!idebar\b)/.test(sel) && !/^\.canvas-srow /.test(sel)) continue;
+        // The panel's own rules, and the tab-strip classes it re-scopes inside a row.
+        if (!/^\.canvas-s/.test(sel) && !/^\.canvas-srow /.test(sel)) continue;
         // The drag ghost is `position: fixed` on the BODY and deliberately outside the panel,
         // so it inherits nothing from it and must keep an absolute size.
         if (sel.startsWith('.canvas-sghost')) continue;
         const fs = /font-size:\s*([^;]+)/.exec(m[2])?.[1];
-        if (fs && /\dpx/.test(fs)) offenders.push(`${sel} { font-size: ${fs.trim()} }`);
+        // A `px` routed through `--sidebar-k` IS scaled — that is how the panel's own base is
+        // written, and how `.canvas-sghead .canvas-srename` restates 12px for a nested input
+        // whose parent has a different size. So the rule is "must scale", not "must not say px";
+        // exempting by the VARIABLE rather than by selector name means the base rule is held to
+        // the same standard as everything else instead of being trusted for its name.
+        const scaled = !!fs && /var\(--sidebar-k/.test(fs);
+        if (fs && !scaled && /\dpx/.test(fs)) offenders.push(`${sel} { font-size: ${fs.trim()} }`);
       }
     }
     expect(offenders).toEqual([]);
@@ -343,6 +348,8 @@ describe('at zoom 1 the panel renders exactly as it did before', () => {
     { selector: '.canvas-sgempty', fontEm: 0.92, want: { padding: [2, 11, 4, 19] } },
     { selector: '.canvas-srow', fontEm: 1, want: { padding: [4, 11, 4, 19], gap: [6] } },
     { selector: '.canvas-srow.editing', fontEm: 1, want: { padding: [2, 9, 2, 17] } },
+    // In a ROW. The same element also mounts under the group header, at a different parent
+    // font-size — see the block below, which is where that nearly went wrong.
     { selector: '.canvas-srename', fontEm: 1, want: { padding: [2, 5] } },
   ];
 
@@ -370,6 +377,51 @@ describe('at zoom 1 the panel renders exactly as it did before', () => {
   it('the panel base really is 12px at zoom 1', () => {
     const fs = decl('.canvas-sidebar', 'font-size')!;
     expect(pixels(fs, BASE)[0]).toBe(BASE);
+  });
+
+  /**
+   * ONE element, TWO parents — the blind spot in the table above, and the second finding of the
+   * PR #56 review.
+   *
+   * `.canvas-srename` mounts under a ROW (12px) and under the GROUP HEADER (`.84em` = 10.08px).
+   * A table keyed by selector alone quietly assumes one context per rule, so it checked the row
+   * case, passed, and said nothing about the header case — where `font-size: 1em` means "my
+   * parent's size" and rendered the group rename box 16% smaller than the row one. On `develop`
+   * the declaration was an absolute `12px`, which overrode the header either way; the px→em
+   * conversion is what introduced the split.
+   *
+   * The requirement is what is asserted, not the mechanism: **the rename box is the same size
+   * whichever thing you are renaming.**
+   */
+  it('the rename box is the same size in a row and in a group header', () => {
+    const row = pixels(decl('.canvas-srename', 'font-size')!, BASE)[0];
+    const header = pixels(decl('.canvas-sghead .canvas-srename', 'font-size')!, BASE * 0.84)[0];
+    expect(header).toBeCloseTo(row, 2);
+    expect(header).toBeCloseTo(BASE, 2);
+  });
+
+  /**
+   * ...and its padding lands on the same pixels in both, which only holds because the rule above
+   * restates the font-size the `em` resolves against. Drop that one declaration and this fails
+   * too — the padding shrinks with the inherited size.
+   */
+  it('and its padding lands on the same pixels in both', () => {
+    // The header context's own font-size is what its `em` padding resolves against.
+    const headerFont = pixels(decl('.canvas-sghead .canvas-srename', 'font-size')!, BASE * 0.84)[0];
+    expect(pixels(decl('.canvas-srename', 'padding')!, headerFont)).toEqual(
+      pixels(decl('.canvas-srename', 'padding')!, BASE),
+    );
+  });
+
+  /**
+   * The group header is uppercased and letter-spaced, and both inherit into a nested input — the
+   * reason `.canvas-sghead .canvas-srename` exists at all. Re-pinned here because this PR added a
+   * declaration to that rule, and a rule that grows is a rule someone may later split.
+   */
+  it('the header rename box still resets what the header imposes', () => {
+    const body = bodyOf('.canvas-sghead .canvas-srename');
+    expect(body).toMatch(/text-transform:\s*none/);
+    expect(body).toMatch(/letter-spacing:\s*normal/);
   });
 
   /**

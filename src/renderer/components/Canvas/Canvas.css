@@ -575,11 +575,22 @@
 .canvas-sghead.editing { padding: .3em .9em .2em; overflow: visible; }
 /* The header is uppercased and letter-spaced, and both inherit into an <input> nested in it —
    so the box would render `G A T E W A Y` while committing the `gateway` you actually typed.
-   The row's rename box needs none of this because rows are not uppercased. */
+   The row's rename box needs none of this because rows are not uppercased.
+ *
+ * `font-size` joins that list, and it is the same trap one step further out. `.canvas-srename`
+ * is mounted under TWO different parents — a row (12px) and this header (`.84em` = 10.08px) —
+ * and its own `1em` means "my parent's size", so the one declaration renders at two sizes. On
+ * `develop` it said `font-size: 12px`, an ABSOLUTE that overrode the header either way; the
+ * px→em conversion silently made the group rename box 16% smaller than the row one.
+ *
+ * Restated against the PANEL's base rather than as an `em` of the header, so it does not have to
+ * be re-derived if the header's own size ever changes — and so the `em` padding on
+ * `.canvas-srename` resolves against 12px here exactly as it does in a row. */
 .canvas-sghead .canvas-srename {
   text-transform: none;
   letter-spacing: normal;
   font-weight: 400;
+  font-size: calc(12px * var(--sidebar-k, 1));
   color: var(--text-primary, #cccccc);
 }
 /* NOTE the padding values differ from `.canvas-srow`'s even though both were 11px/19px in px:
