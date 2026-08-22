@@ -582,7 +582,12 @@
   font-weight: 400;
   color: var(--text-primary, #cccccc);
 }
-.canvas-sgempty { margin: 0; padding: .17em .92em .33em 1.58em; font-size: .92em; font-style: italic; color: var(--text-tertiary, #666666); }
+/* NOTE the padding values differ from `.canvas-srow`'s even though both were 11px/19px in px:
+   `em` in a padding resolves against the element's OWN font-size, and this rule sets one
+   (`.92em` = 11.04px) while a row keeps the panel's 12px. Using a row's numbers here would
+   quietly shrink this indent from 19px to 17.4px. `canvasSidebarZoom.test.tsx` computes every
+   sidebar declaration back to pixels and would catch it. */
+.canvas-sgempty { margin: 0; padding: .18em 1em .36em 1.72em; font-size: .92em; font-style: italic; color: var(--text-tertiary, #666666); }
 .canvas-srows { margin: 0; padding: 0; list-style: none; }
 
 /* `position: relative` + `isolation: isolate` used to be what let the (now deleted, Req 5)

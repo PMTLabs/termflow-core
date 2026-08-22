@@ -12,12 +12,28 @@ import { findUrlLinks, findPathLinks, URL_RE } from '../TerminalEngine';
  */
 describe('URL_RE is the single source of truth', () => {
   /**
-   * NOT global. The object is SHARED with the addon, and a `/g` regex carries `lastIndex`
-   * between calls — the addon would resume scanning from wherever our last scan stopped, so a
-   * URL would underline on one hover and not the next. `findUrlLinks` clones it per scan.
+   * NOT global, and this one is load-bearing rather than tidy.
+   *
+   * `LinkComputer` re-derives its scanner as `new RegExp(source, (flags || '') + 'g')`. A global
+   * `URL_RE` therefore yields the flag string `'gg'`, which throws — so URL detection would stop
+   * working ENTIRELY, on every hover, not merely behave oddly.
    */
-  it('is not a global regex', () => {
+  it('is not a global regex, which would make the addon throw', () => {
     expect(URL_RE.global).toBe(false);
+    // The failure it prevents, demonstrated rather than described — this is the exact expression
+    // the addon evaluates.
+    expect(() => new RegExp(URL_RE.source, `${URL_RE.flags}g`)).not.toThrow();
+    expect(() => new RegExp(URL_RE.source, 'gg')).toThrow(SyntaxError);
+  });
+
+  /**
+   * The other half, and the reason sharing one object is safe at all: the addon CLONES rather
+   * than using our instance, so it can never leave `lastIndex` behind on it.
+   */
+  it('is never mutated by being shared', () => {
+    const before = URL_RE.lastIndex;
+    findUrlLinks('a https://one.test b https://two.test');
+    expect(URL_RE.lastIndex).toBe(before);
   });
 
   it('is handed to WebLinksAddon rather than left to its private default', () => {

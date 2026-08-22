@@ -417,9 +417,15 @@ function trimPathTrailing(path: string): string {
  * falls in the gap. Passing one regex to both removes the gap by construction instead of
  * pinning it with a test table that can only ever sample it.
  *
- * NOT global, deliberately. A `/g` regex carries `lastIndex` between calls, and this object is
- * shared with the addon, which would then resume scanning from wherever we left off — a link
- * that underlines on one hover and not the next. `findUrlLinks` clones it per scan.
+ * **MUST NOT be global**, and that is a hard requirement rather than hygiene. `LinkComputer`
+ * re-derives its own scanner as `new RegExp(source, (flags || '') + 'g')` — so a `/g` here
+ * produces the flag string `'gg'`, and `new RegExp(x, 'gg')` throws
+ * `SyntaxError: Invalid flags`. Every link computation on every hover would throw, and URL
+ * detection would stop working entirely. `findUrlLinks` therefore clones it per scan rather
+ * than making this object global.
+ *
+ * The good news from the same line: because the addon CLONES, it never touches our `lastIndex`,
+ * so sharing one object between the addon and `getLinkAt` is safe in the other direction too.
  */
 export const URL_RE = /(https?|HTTPS?):[/]{2}[^\s"'!*(){}|\\\^<>`]*[^\s"':,.!?{}|\\\^~\[\]`()<>]/;
 

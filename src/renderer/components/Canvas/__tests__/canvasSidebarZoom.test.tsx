@@ -285,3 +285,102 @@ describe('the stylesheet actually scales from it', () => {
     },
   );
 });
+
+/**
+ * At zoom 1 the panel must render EXACTLY the pixel sizes it did before the zoom existed.
+ *
+ * The conversion from px to `em` is where this feature can silently change the look of a panel
+ * nobody asked to restyle, and it has one trap that is invisible on inspection:
+ *
+ *   **`em` in a padding resolves against the element's OWN font-size, not its parent's.**
+ *
+ * So a rule that also sets `font-size: .92em` computes its paddings against 11.04px while a
+ * sibling row computes the same numbers against 12px. Copying a row's `1.58em` indent into
+ * `.canvas-sgempty` looks right, reviews as right, and renders 17.4px where 19px was intended.
+ * That is exactly the mistake this block was written after catching.
+ *
+ * So the check is ARITHMETIC over the real stylesheet rather than a spot check of the rules
+ * anyone thought to look at: every length is converted back to pixels using the font-size that
+ * CSS would actually resolve it against, and compared with the pre-change value. The expected
+ * numbers come from `git show develop:src/renderer/components/Canvas/Canvas.css`.
+ */
+describe('at zoom 1 the panel renders exactly as it did before', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+  const CSS: string = require('fs').readFileSync(
+    require('path').resolve(__dirname, '../Canvas.css'), 'utf-8',
+  ).replace(/\/\*[\s\S]*?\*\//g, '');
+
+  const BASE = 12;
+
+  const bodyOf = (selector: string): string => {
+    for (const m of CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const head = m[1].trim();
+      if (head.startsWith('@')) continue;
+      if (head.split(',').some((s) => s.trim() === selector)) return m[2];
+    }
+    throw new Error(`no rule for ${selector} — its subject moved or was renamed`);
+  };
+
+  const decl = (selector: string, prop: string): string | null => {
+    const re = new RegExp(`(?:^|;)\\s*${prop}\\s*:([^;]+)`);
+    return re.exec(bodyOf(selector))?.[1].trim() ?? null;
+  };
+
+  /**
+   * Each row: the selector, the font-size CSS resolves its own `em` lengths against, and the
+   * pixel sizes the panel had on `develop`.
+   *
+   * `fontEm` is stated per row rather than derived, because it is not always the rule's own
+   * declaration — `.canvas-sghead.editing` sets no font-size and inherits `.canvas-sghead`'s
+   * `.84em`, which is precisely the kind of thing a parser would get wrong in the same direction
+   * as the bug.
+   */
+  const TABLE: Array<{ selector: string; fontEm: number; want: Record<string, number[]> }> = [
+    { selector: '.canvas-ssearch', fontEm: 1, want: { margin: [9, 9, 7], padding: [5, 8] } },
+    { selector: '.canvas-sempty', fontEm: 1, want: { padding: [14, 11] } },
+    { selector: '.canvas-sghead', fontEm: 0.84, want: { padding: [5, 11, 3] } },
+    { selector: '.canvas-sghead.editing', fontEm: 0.84, want: { padding: [3, 9, 2] } },
+    { selector: '.canvas-sgempty', fontEm: 0.92, want: { padding: [2, 11, 4, 19] } },
+    { selector: '.canvas-srow', fontEm: 1, want: { padding: [4, 11, 4, 19], gap: [6] } },
+    { selector: '.canvas-srow.editing', fontEm: 1, want: { padding: [2, 9, 2, 17] } },
+    { selector: '.canvas-srename', fontEm: 1, want: { padding: [2, 5] } },
+  ];
+
+  /** Every length in a shorthand, in px, resolved against this element's own font-size. */
+  const pixels = (value: string, fontPx: number): number[] =>
+    [...value.matchAll(/(-?\d*\.?\d+)(em|px)/g)]
+      .map((m) => (m[2] === 'em' ? Number(m[1]) * fontPx : Number(m[1])));
+
+  for (const { selector, fontEm, want } of TABLE) {
+    for (const [prop, expected] of Object.entries(want)) {
+      it(`${selector} { ${prop} } still renders ${expected.join('/')}px`, () => {
+        const raw = decl(selector, prop);
+        expect(raw).not.toBeNull();
+        const got = pixels(raw!, BASE * fontEm);
+        expect(got).toHaveLength(expected.length);
+        // Sub-pixel tolerance: two decimal places of `em` cannot hit every integer exactly, and
+        // a tenth of a pixel is not a visual change. Half a pixel is, which is why it is 0.5 and
+        // not "close enough".
+        got.forEach((px, i) => expect(Math.abs(px - expected[i])).toBeLessThan(0.5));
+      });
+    }
+  }
+
+  /** The rule that set the font-size the rest are relative to. */
+  it('the panel base really is 12px at zoom 1', () => {
+    const fs = decl('.canvas-sidebar', 'font-size')!;
+    expect(pixels(fs, BASE)[0]).toBe(BASE);
+  });
+
+  /**
+   * The `fontEm` column is an input to every case above, so a wrong value there would make the
+   * whole table agree with a wrong stylesheet. These pin it against the CSS itself for the two
+   * rules that actually declare one.
+   */
+  it('the font-size column matches the stylesheet', () => {
+    expect(pixels(decl('.canvas-sghead', 'font-size')!, BASE)[0]).toBeCloseTo(0.84 * BASE, 6);
+    expect(pixels(decl('.canvas-sgempty', 'font-size')!, BASE)[0]).toBeCloseTo(0.92 * BASE, 6);
+    // ...and `.canvas-sghead.editing` genuinely declares none, which is why it inherits .84.
+    expect(decl('.canvas-sghead.editing', 'font-size')).toBeNull();
+  });
+});

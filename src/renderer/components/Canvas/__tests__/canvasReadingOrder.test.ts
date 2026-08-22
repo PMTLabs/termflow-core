@@ -13,7 +13,7 @@
  *     surface would keep passing its own tests while pointing somewhere different.
  */
 import { readingOrder, sameRow, ROW_OVERLAP } from '../readingOrder';
-import { buildCanvasModel, CanvasNodeModel } from '../canvasSelectors';
+import { buildCanvasModel, orderModel, CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
 import { buildSidebarTree } from '../sidebarModel';
 import { stepNodeId } from '../orientation';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
@@ -279,21 +279,73 @@ describe('Tab and the sidebar walk the same sequence', () => {
 });
 
 /**
- * The defensive branch in `buildModel`: a node whose group is missing from `groups` is appended,
- * never dropped. It should be unreachable — every node pushes a group in the same iteration —
- * but the failure if it were reachable is a terminal that disappears from the canvas, which is
- * not a thing to leave resting on "should never".
+ * The defensive branch: a node whose group is missing from `groups` is APPENDED, never dropped.
+ *
+ * These drive `orderModel` directly, and that is the whole point. The first version of this
+ * block called `readingOrder` on a hand-made array and asserted the node came back — which is
+ * true of `readingOrder` whatever `orderModel` does, so deleting the orphan loop entirely left
+ * it green. Caught in review of PR #56, and it is the reason `orderModel` is exported at all:
+ * the branch is unreachable through `buildModel` (every node there pushes a group in the same
+ * iteration), so a test driving the builder could not exercise it either.
  */
 describe('no terminal can fall out of the model', () => {
-  it('keeps a node whose group is absent', () => {
-    const nodes: CanvasNodeModel[] = [
-      { terminalId: 'tm-x', tabId: 'tb-missing', paneId: 'pn-x', title: 'x', groupTitle: 'x',
-        shellType: 'zsh', rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false,
-        hasUnseenOutput: false, exited: false },
-    ];
-    // Exercised at the level the branch lives at: with no group to claim it, the node must still
-    // come back from a reading-order pass rather than vanishing.
-    expect(readingOrder(nodes, (n) => n.rect, (n) => n.terminalId).map((n) => n.terminalId))
-      .toEqual(['tm-x']);
+  const node = (terminalId: string, tabId: string, x: number, y: number): CanvasNodeModel => ({
+    terminalId, tabId, paneId: `pn-${terminalId}`, title: terminalId, groupTitle: tabId,
+    shellType: 'zsh', rect: { x, y, w: NODE_W, h: NODE_H },
+    isRunning: false, hasUnseenOutput: false, exited: false,
+  });
+  const grp = (tabId: string, x: number, y: number): CanvasGroupModel =>
+    ({ tabId, title: tabId, rect: { x, y, w: 900, h: 500 }, nodeIds: [], anyRunning: false });
+
+  it('keeps a node whose group is absent from the model', () => {
+    const out = orderModel([node('tm-x', 'tb-missing', 0, 0)], []);
+    expect(out.nodes.map((n) => n.terminalId)).toEqual(['tm-x']);
+  });
+
+  /**
+   * The orphan is appended AFTER the grouped nodes, not interleaved into them. That is what
+   * keeps the sidebar and Tab in step: the sidebar only renders sections for groups that exist,
+   * so an orphan sorted into the middle would appear to Tab in a position the list cannot show.
+   */
+  it('appends the orphan after every node that has a group', () => {
+    const out = orderModel(
+      [node('tm-orphan', 'tb-gone', 0, 0), node('tm-a', 'tb-a', 500, 500)],
+      [grp('tb-a', 400, 400)],
+    );
+    expect(out.nodes.map((n) => n.terminalId)).toEqual(['tm-a', 'tm-orphan']);
+  });
+
+  it('loses nothing when several groups are missing at once', () => {
+    const out = orderModel(
+      [node('tm-1', 'tb-x', 0, 0), node('tm-2', 'tb-y', 100, 0), node('tm-3', 'tb-a', 0, 900)],
+      [grp('tb-a', 0, 800)],
+    );
+    expect(out.nodes.map((n) => n.terminalId).sort()).toEqual(['tm-1', 'tm-2', 'tm-3']);
+  });
+
+  /**
+   * Guard on the guard, and the one that makes the cases above non-vacuous: with the group
+   * PRESENT the same node is claimed by the grouped pass instead. If `orderModel` simply
+   * returned its input, or appended everything through the orphan loop, both paths would look
+   * identical from outside.
+   */
+  it('does not send a node through the orphan path when its group exists', () => {
+    const nodes = [node('tm-a', 'tb-a', 500, 500), node('tm-b', 'tb-b', 0, 0)];
+    const grouped = orderModel(nodes, [grp('tb-a', 400, 400), grp('tb-b', 0, 0)]);
+    // Both grouped: reading order puts tb-b's node (top-left) first.
+    expect(grouped.nodes.map((n) => n.terminalId)).toEqual(['tm-b', 'tm-a']);
+    // Drop tb-b's group and the SAME two nodes come back in the other order — tm-b is now an
+    // orphan and goes last. The two results differing is the proof that the branch is live.
+    const orphaned = orderModel(nodes, [grp('tb-a', 400, 400)]);
+    expect(orphaned.nodes.map((n) => n.terminalId)).toEqual(['tm-a', 'tm-b']);
+  });
+
+  it('never duplicates a node', () => {
+    const out = orderModel(
+      [node('tm-1', 'tb-a', 0, 0), node('tm-2', 'tb-a', 500, 0)],
+      [grp('tb-a', 0, 0)],
+    );
+    expect(out.nodes).toHaveLength(2);
+    expect(new Set(out.nodes.map((n) => n.terminalId)).size).toBe(2);
   });
 });
