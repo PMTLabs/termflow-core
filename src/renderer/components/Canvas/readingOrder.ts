@@ -37,12 +37,18 @@ import { Rect } from './canvasGeometry';
  * three, giving column-major. A 20px nudge flips the whole traversal (raised in review of
  * PR #56).
  *
- * It cannot happen today: every canvas node is exactly `NODE_H` tall. Seeding
- * (`canvasSelectors`), Arrange (`canvasArrange`), spawn (`canvasSpawn`) and the sidebar drag all
- * write `h: NODE_H`, node drags preserve `h`, and there is no resize gesture. So the fix is
- * deliberately NOT written — it would be machinery for a case no code path can produce, and the
- * two candidate rules (threshold on the shorter height, which is what `sameRow` does, versus on
- * BOTH heights) disagree only for heights that do not occur.
+ * **No PRODUCER exists today** — which is not quite the same as impossible, and the difference is
+ * worth stating precisely because the decision not to fix this rests on it. Every path that
+ * writes a node rect writes `h: NODE_H`: seeding (`canvasSelectors`), Arrange (`canvasArrange`),
+ * spawn (`canvasSpawn`), agent placement (which copies its caller's `h`) and the sidebar drag;
+ * node drags carry `h` through unchanged; and there is no resize gesture at all. What is NOT
+ * enforced is the restore path — `StateManager.isRect` bounds `h` only to `(0, WORLD_LIMIT)`, so
+ * a stored blob that somehow held a different height would be restored faithfully.
+ *
+ * So the fix is deliberately not written: it would be machinery for a case nothing produces, the
+ * worst outcome if one ever appeared is a surprising Tab order rather than anything lost, and the
+ * two candidate rules (threshold on the SHORTER height, which is what `sameRow` does, versus on
+ * BOTH) disagree only for heights that do not occur.
  *
  * If node resizing is ever added, this is the thing to revisit, and `sameRow` is where.
  */
