@@ -1,4 +1,4 @@
-import type { Terminal } from '@xterm/xterm';
+import type { FontWeight, Terminal } from '@xterm/xterm';
 
 export interface TerminalSnapshot { snapshot: string; rows: number; cols: number }
 export interface Disposable { dispose(): void }
@@ -44,6 +44,8 @@ export interface TerminalEngineOptions {
   theme?: Record<string, string>;
   fontFamily?: string;
   fontSize?: number;       // default 14
+  fontWeight?: FontWeight;      // regular-text weight, default 'normal'
+  fontWeightBold?: FontWeight;  // SGR-bold text weight, default 'bold'
   lineHeight?: number;     // default 1.1
   scrollback?: number;     // default 10000
   enableWebGL?: boolean;   // default false

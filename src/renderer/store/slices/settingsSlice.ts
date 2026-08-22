@@ -27,12 +27,33 @@ export interface Theme {
   colors: string[]; // 16 ANSI colors
 }
 
+// Subset of xterm.js's FontWeight union exposed to the user. CSS defines
+// 'normal' === 400 and 'bold' === 700 numerically, so the numeric ladder alone
+// covers every value the engine used to hard-code — no separate 'normal'/'bold'
+// aliases needed, which would otherwise show as confusing duplicate options.
+export type TerminalFontWeight = '300' | '400' | '500' | '600' | '700' | '800' | '900';
+
+export const TERMINAL_FONT_WEIGHTS: ReadonlyArray<{ value: TerminalFontWeight; label: string }> = [
+  { value: '300', label: 'Light (300)' },
+  { value: '400', label: 'Normal (400)' },
+  { value: '500', label: 'Medium (500)' },
+  { value: '600', label: 'Semibold (600)' },
+  { value: '700', label: 'Bold (700)' },
+  { value: '800', label: 'Extra Bold (800)' },
+  { value: '900', label: 'Black (900)' },
+];
+
 interface SettingsState {
   shellProfiles: ShellProfile[];
   defaultProfile: string;
   theme: Theme;
   fontSize: number;
   fontFamily: string;
+  // Weight of regular terminal text. Default '400' (CSS 'normal').
+  fontWeight: TerminalFontWeight;
+  // Weight of SGR-bold terminal text (prompts, `ls`/git highlighting, etc).
+  // Default '700' (CSS 'bold') — the usual source of a terminal reading as "too bold".
+  fontWeightBold: TerminalFontWeight;
   cursorStyle: 'block' | 'underline' | 'bar';
   cursorBlink: boolean;
   scrollback: number;
@@ -147,6 +168,8 @@ const initialState: SettingsState = {
   theme: defaultTheme,
   fontSize: 14,
   fontFamily: 'Consolas, "Courier New", monospace',
+  fontWeight: '400',
+  fontWeightBold: '700',
   cursorStyle: 'block',
   cursorBlink: true,
   scrollback: 1000,
@@ -226,6 +249,20 @@ const settingsSlice = createSlice({
       // Save to config file
       if (window.electronAPI) {
         window.electronAPI.setConfigValue('fontFamily', state.fontFamily);
+      }
+    },
+
+    setFontWeight: (state, action: PayloadAction<TerminalFontWeight>) => {
+      state.fontWeight = action.payload;
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('fontWeight', state.fontWeight);
+      }
+    },
+
+    setFontWeightBold: (state, action: PayloadAction<TerminalFontWeight>) => {
+      state.fontWeightBold = action.payload;
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('fontWeightBold', state.fontWeightBold);
       }
     },
 
@@ -473,6 +510,8 @@ export const {
   updateTheme,
   setFontSize,
   setFontFamily,
+  setFontWeight,
+  setFontWeightBold,
   setCursorStyle,
   setCursorBlink,
   setScrollback,

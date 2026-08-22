@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import type { TerminalFontWeight } from '../../store/slices/settingsSlice';
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
@@ -290,6 +291,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         if (!baseline) return;
         if (baseline.kind === 'appearance') {
             dispatch(setFontSize(baseline.fontSize));
+            dispatch(setFontWeight(baseline.fontWeight as TerminalFontWeight));
+            dispatch(setFontWeightBold(baseline.fontWeightBold as TerminalFontWeight));
             dispatch(setTabSizingMode(baseline.tabSizingMode as 'shrink' | 'scroll' | 'fixed'));
             dispatch(setFixedTabWidth(baseline.fixedTabWidth));
             dispatch(setColorSchema(baseline.colorSchemaId));
@@ -934,6 +937,36 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     min="8"
                     max="72"
                 />
+            </div>
+            <div className="setting-item">
+                <div className="setting-fields-row">
+                    <div className="setting-field">
+                        <label className="setting-label" htmlFor="font-weight">Font Weight</label>
+                        <select
+                            id="font-weight"
+                            className="setting-input"
+                            value={settings.fontWeight}
+                            onChange={(e) => dispatch(setFontWeight(e.target.value as TerminalFontWeight))}
+                        >
+                            {TERMINAL_FONT_WEIGHTS.map((w) => (
+                                <option key={w.value} value={w.value}>{w.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="setting-field">
+                        <label className="setting-label" htmlFor="font-weight-bold">Bold Text Weight</label>
+                        <select
+                            id="font-weight-bold"
+                            className="setting-input"
+                            value={settings.fontWeightBold}
+                            onChange={(e) => dispatch(setFontWeightBold(e.target.value as TerminalFontWeight))}
+                        >
+                            {TERMINAL_FONT_WEIGHTS.map((w) => (
+                                <option key={w.value} value={w.value}>{w.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
             </div>
             <div className="setting-item">
                 <div className="setting-fields-row">

@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { useDispatch, useSelector } from 'react-redux';
 import { nudgeZoom, resetZoom } from '../../store/slices/zoomSlice';
 import { Terminal } from '@xterm/xterm';
+import type { FontWeight } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
 import type { TerminalSearchOptions, TerminalSearchResult, TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
@@ -61,6 +62,8 @@ interface TerminalDisplayProps {
   onTitleChange: (title: string) => void;
   onReady?: (terminal: Terminal) => void;
   fontSize?: number;
+  fontWeight?: FontWeight;
+  fontWeightBold?: FontWeight;
   isActive?: boolean;
   // True when this terminal is the active pane of the active tab. Drives focus:
   // autofocus-on-mount and refocus when the tab/pane is (re)activated.
@@ -94,6 +97,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   onRestartSession,
   onDismissSessionClosed,
   fontSize = 14,
+  fontWeight,
+  fontWeightBold,
   isActive = true,
   shouldFocus = true,
   shellType,
@@ -396,6 +401,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         ),
       ),
       fontSize,
+      fontWeight,
+      fontWeightBold,
       // Only the active pane of the active tab grabs focus on mount; background
       // panes must not steal it from each other. Refocus on activation is handled
       // by the shouldFocus effect below. (Captured at mount; deps stay [terminalId].)
@@ -633,6 +640,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       engineRef.current?.setFontSize(fontSize);
     }
   }, [fontSize]);
+
+  // Propagate font-weight changes (Settings > Appearance).
+  useEffect(() => {
+    engineRef.current?.setFontWeight(fontWeight ?? 'normal', fontWeightBold ?? 'bold');
+  }, [fontWeight, fontWeightBold]);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();

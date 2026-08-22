@@ -17,6 +17,8 @@ import {
   updateTheme,
   setFontSize,
   setFontFamily,
+  setFontWeight,
+  setFontWeightBold,
   setCursorStyle,
   setCursorBlink,
   setScrollback,
@@ -38,8 +40,10 @@ import {
   setNotifySoundEnabled,
   setNotifyToastEnabled,
   setNotifyOsEnabled,
-  hydrateEulaAcceptedVersion
+  hydrateEulaAcceptedVersion,
+  TERMINAL_FONT_WEIGHTS,
 } from './store/slices/settingsSlice';
+import type { TerminalFontWeight } from './store/slices/settingsSlice';
 import { isCanvasBusyCue } from './components/Canvas/canvasBusyCue';
 import { openSettingsTab } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
@@ -64,6 +68,12 @@ import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapsh
 import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
+
+// config.json is hand-editable, so hydration validates against the known
+// weight set rather than trusting the string straight into xterm's option.
+const FONT_WEIGHT_VALUES: ReadonlySet<string> = new Set(TERMINAL_FONT_WEIGHTS.map((w) => w.value));
+const isTerminalFontWeight = (v: unknown): v is TerminalFontWeight =>
+  typeof v === 'string' && FONT_WEIGHT_VALUES.has(v);
 
 const App: React.FC = () => {
   const dispatch = useDispatch();
@@ -490,6 +500,14 @@ const App: React.FC = () => {
         }
         if (config.fontFamily) {
           dispatch(setFontFamily(config.fontFamily));
+        }
+        // config.json is hand-editable, so validate against the known weight set
+        // rather than trusting the string straight into xterm's option.
+        if (isTerminalFontWeight(config.fontWeight)) {
+          dispatch(setFontWeight(config.fontWeight));
+        }
+        if (isTerminalFontWeight(config.fontWeightBold)) {
+          dispatch(setFontWeightBold(config.fontWeightBold));
         }
         if (config.cursorStyle) {
           dispatch(setCursorStyle(config.cursorStyle));
