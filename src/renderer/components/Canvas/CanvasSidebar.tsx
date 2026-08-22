@@ -1,7 +1,7 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { selectNode } from '../../store/slices/canvasSlice';
+import { selectNode, setSidebarZoom } from '../../store/slices/canvasSlice';
 import { renamePanes } from '../../store/slices/panesSlice';
 import { renameTab } from '../../services/renameTab';
 import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
@@ -25,6 +25,19 @@ import type { CanvasModel } from './canvasSelectors';
 /** Zoom floor a row click flies to. Already closer than this? Keep the zoom you chose.
  *  Exported so its test asserts the real destination rather than a copy of the number. */
 export const ROW_FLY_ZOOM = 0.85;
+
+/**
+ * One notch of Ctrl+wheel, as a MULTIPLIER (Tam, 2026-08-21).
+ *
+ * Multiplicative, not additive, so a notch feels the same size at either end of the range — the
+ * same reason `CanvasViewport` zooms the canvas by a ratio. An additive step of 0.1 is a seventh
+ * of the way across the range near the floor and a twentieth near the ceiling, so the control
+ * would speed up as you zoomed out.
+ *
+ * 1.1 gives ~10 notches across the whole 0.7–1.8 range: enough that a notch is a nudge rather
+ * than a jump, few enough that reaching either end is not a chore.
+ */
+export const SIDEBAR_ZOOM_STEP = 1.1;
 
 interface RowProps {
   row: SidebarRow;
@@ -123,6 +136,7 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
   const width = useSelector((s: RootState) => s.canvas.sidebarWidth);
   const selectedId = useSelector((s: RootState) => s.canvas.selectedId);
   const zoom = useSelector((s: RootState) => s.canvas.viewport.z);
+  const sidebarZoom = useSelector((s: RootState) => s.canvas.sidebarZoom);
   const metrics = useCanvasMetrics();
   const flyTo = useFlyTo();
 
@@ -132,6 +146,43 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
 
   // Row drag-to-regroup and the width handle (Task 15).
   const drag = useSidebarDrag(model);
+
+  /**
+   * Ctrl/Cmd+wheel scales the list's own text (Tam, 2026-08-21).
+   *
+   * **Registered natively and non-passively, exactly as `CanvasViewport` does.** React attaches
+   * every wheel listener at the ROOT and passively, so `e.preventDefault()` from an `onWheel`
+   * prop does nothing — the WebView then applies its own page zoom on top of ours, and the whole
+   * app steps sideways while the sidebar scales. Nothing about that failure is visible in the
+   * JSX, which is why the pattern is worth copying rather than re-deriving.
+   *
+   * The sidebar is a SIBLING of `.canvas-viewport`, so this cannot reach the canvas's own wheel
+   * handler and the two gestures never contend: Ctrl+wheel over the canvas still means whatever
+   * `canvasWheelMode` says it means.
+   *
+   * `zoomRef` rather than a dependency: the listener is registered once, and re-registering it
+   * on every notch would drop wheel events mid-gesture — the same reason `CanvasViewport` gives.
+   */
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef(sidebarZoom);
+  zoomRef.current = sidebarZoom;
+
+  useEffect(() => {
+    const el = sidebarRef.current;
+    if (!el) return undefined;
+    const onWheel = (e: WheelEvent) => {
+      // Bare wheel scrolls the list, which is what a list should do. Only the chord zooms.
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      // Sign only, never magnitude: a trackpad reports fractional deltas in the hundreds and a
+      // mouse reports 100 per notch, so scaling BY the delta makes the same gesture behave
+      // completely differently on the two devices.
+      const step = e.deltaY < 0 ? SIDEBAR_ZOOM_STEP : 1 / SIDEBAR_ZOOM_STEP;
+      dispatch(setSidebarZoom(zoomRef.current * step));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [dispatch]);
 
   // Named explicitly rather than passed as `{}`. Every test here still passes with an empty
   // map — and every disambiguator silently degrades to a short id, which is the least useful
@@ -196,7 +247,16 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
 
   return (
     <>
-    <div className="canvas-sidebar" style={{ width }}>
+    {/* `--sidebar-k` is the ONE knob the whole panel scales from — every font size and pad
+        inside it is an `em` of this element's own font-size (see Canvas.css). Twelve `calc()`
+        calls would have been twelve chances to forget one, and the one forgotten is always the
+        one that looks wrong. WIDTH is deliberately untouched: it is the user's own drag, and a
+        zoom that moved it would fight them. */}
+    <div
+      ref={sidebarRef}
+      className="canvas-sidebar"
+      style={{ width, ['--sidebar-k' as string]: sidebarZoom } as React.CSSProperties}
+    >
       <input
         className="canvas-ssearch"
         type="search"

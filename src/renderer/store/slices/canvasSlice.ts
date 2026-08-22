@@ -18,6 +18,7 @@ export interface CanvasPersisted {
   groups: Record<string, Rect>;
   sidebarOpen: boolean;
   sidebarWidth: number;
+  sidebarZoom: number;
 }
 
 /**
@@ -70,6 +71,22 @@ export interface CanvasState extends CanvasPersisted {
 export const SIDEBAR_MIN = 168;
 export const SIDEBAR_MAX = 480;
 
+/**
+ * How far Ctrl+wheel may scale the sidebar's own text (Tam, 2026-08-21).
+ *
+ * Both ends are chosen against what the panel still has to DO rather than against what is
+ * readable in isolation. Below ~0.7 a row's profile icon and its unseen-output bell stop being
+ * distinguishable from each other, and the list stops working as the thing it exists for — a
+ * scannable index of the workspace. Above ~1.8 a row is taller than the group heading it sits
+ * under, and at the default 250px width almost every title ellipsises, so zooming in to read a
+ * name is precisely what stops you reading it.
+ *
+ * Exported so the tests assert the real limits rather than a copy of these numbers, and so a
+ * future settings control cannot invent a second pair.
+ */
+export const SIDEBAR_ZOOM_MIN = 0.7;
+export const SIDEBAR_ZOOM_MAX = 1.8;
+
 const initialState: CanvasState = {
   viewport: { x: 0, y: 0, z: 1 },
   nodes: {},
@@ -77,6 +94,7 @@ const initialState: CanvasState = {
   edges: [],
   sidebarOpen: true,
   sidebarWidth: 250,
+  sidebarZoom: 1,
   selectedId: null,
   selectedEdgeId: null,
   focusedId: null,
@@ -90,6 +108,17 @@ const touch = (state: CanvasState, id: string) => {
 };
 
 const clampWidth = (w: number) => Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, w));
+
+/**
+ * Clamp a sidebar zoom, rejecting NaN/Infinity rather than letting one through.
+ *
+ * `Math.max(min, Math.min(max, NaN))` is NaN — every comparison with NaN is false, so the
+ * clamp that looks like it bounds this value silently does not. A NaN reaching the stylesheet
+ * makes `calc(12px * var(--sidebar-k))` invalid, which drops the declaration and leaves the
+ * panel at its inherited size, looking like the zoom simply stopped responding.
+ */
+const clampZoom = (z: number) =>
+  (Number.isFinite(z) ? Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, z)) : 1);
 
 const canvasSlice = createSlice({
   name: 'canvas',
@@ -228,6 +257,12 @@ const canvasSlice = createSlice({
     setSidebarWidth: (state, action: PayloadAction<number>) => {
       state.sidebarWidth = clampWidth(action.payload);
     },
+    /** Ctrl/Cmd+wheel over the sidebar. An absolute factor, not a delta: the caller already
+     *  holds the current value, and a reducer that accumulated would drift under the two
+     *  wheel events a trackpad sends per notch. */
+    setSidebarZoom: (state, action: PayloadAction<number>) => {
+      state.sidebarZoom = clampZoom(action.payload);
+    },
     pruneCanvasGeometry: (
       state,
       action: PayloadAction<{ terminalIds: string[]; tabIds: string[] }>
@@ -262,6 +297,7 @@ const canvasSlice = createSlice({
       if (p.groups) state.groups = p.groups;
       if (typeof p.sidebarOpen === 'boolean') state.sidebarOpen = p.sidebarOpen;
       if (typeof p.sidebarWidth === 'number') state.sidebarWidth = clampWidth(p.sidebarWidth);
+      if (typeof p.sidebarZoom === 'number') state.sidebarZoom = clampZoom(p.sidebarZoom);
     },
   },
 });
@@ -270,7 +306,7 @@ export const {
   setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
-  setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas,
+  setSidebarOpen, setSidebarWidth, setSidebarZoom, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 
 export default canvasSlice.reducer;

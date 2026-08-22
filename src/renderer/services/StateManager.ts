@@ -18,7 +18,9 @@ import { apiBase } from '../api/apiBase';
 import { sessionStateKey, isSlotZero } from './windowScope';
 import { unionKeepSet } from './sessionKeepSet';
 import { sweepOrphanSessions } from './sessionOrphans';
-import { CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, hydrateCanvas } from '../store/slices/canvasSlice';
+import {
+  CanvasPersisted, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX, hydrateCanvas,
+} from '../store/slices/canvasSlice';
 import { canvasTabFirst } from './tabKinds';
 import { clearAllSessionClosed } from '../store/slices/sessionExitSlice';
 import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
@@ -94,6 +96,9 @@ export function sanitizeCanvasState(
     groups,
     sidebarOpen: typeof c.sidebarOpen === 'boolean' ? c.sidebarOpen : true,
     sidebarWidth: Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, finite(c.sidebarWidth, 250))),
+    // `finite` first, then the clamp — see `clampZoom` in `canvasSlice`: NaN survives a bare
+    // Math.max/Math.min pair, and a NaN here reaches the stylesheet as an invalid calc().
+    sidebarZoom: Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, finite(c.sidebarZoom, 1))),
   };
 }
 
@@ -207,14 +212,15 @@ class StateManagerClass {
         // saveState also runs from `beforeunload`, where an await would mean
         // localStorage.setItem never runs.
         terminalCwds: pruneCwds(getAllCwdSnapshots(), this.collectLiveTerminalIds(state)),
-        // Only the five CanvasPersisted fields — never `edges`, which the backend owns and
-        // the renderer refetches on entering Canvas Mode, and never `enabled`/`focusedId`.
+        // Only the CanvasPersisted fields — never `edges`, which the backend owns and the
+        // renderer refetches on entering Canvas Mode, and never `enabled`/`focusedId`.
         canvas: {
           viewport: state.canvas.viewport,
           nodes: state.canvas.nodes,
           groups: state.canvas.groups,
           sidebarOpen: state.canvas.sidebarOpen,
           sidebarWidth: state.canvas.sidebarWidth,
+          sidebarZoom: state.canvas.sidebarZoom,
         },
       };
 
