@@ -2,8 +2,10 @@ export { TerminalEngine, DEFAULT_THEME } from './TerminalEngine';
 export type { RelocationResult } from './TerminalEngine';
 /** The URL matcher shared by `WebLinksAddon` and `getLinkAt`, and the two line scanners built
  *  on it — exported so their tests assert the real patterns rather than copies. */
-export { URL_RE, findUrlLinks, findPathLinks, linkAtIndex, pointToCell } from './TerminalEngine';
-export type { UrlLinkMatch, RenderedTerminalBox } from './TerminalEngine';
+export {
+  URL_RE, findUrlLinks, findPathLinks, linkAtIndex, pointToCell, cellToStringIndex,
+} from './TerminalEngine';
+export type { UrlLinkMatch, RenderedTerminalBox, CellAddressableLine } from './TerminalEngine';
 export {
   terminalCache,
   pasteToTerminal,

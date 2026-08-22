@@ -1,5 +1,6 @@
 import {
-  linkAtIndex, pointToCell, collectWrappedLine, RenderedTerminalBox,
+  linkAtIndex, pointToCell, cellToStringIndex, collectWrappedLine,
+  RenderedTerminalBox, CellAddressableLine,
 } from '../TerminalEngine';
 
 /**
@@ -134,6 +135,120 @@ describe('pointToCell maps a viewport point onto the grid', () => {
       rect: { left: 0, top: 0, width: 0, height: 0 }, offsetWidth: 0, offsetHeight: 0,
     });
     expect(pointToCell(10, 10, hidden)).toBeNull();
+  });
+});
+
+/**
+ * A CELL column is not a STRING index once the row holds a double-width glyph.
+ *
+ * CJK, most emoji and many box-drawing characters occupy two cells and contribute one index to
+ * `translateToString()`; a surrogate-pair emoji occupies two cells and contributes two. So on any
+ * line containing one, the two spaces drift apart and every hit-test to the right of it is wrong
+ * — in BOTH directions. On `你好 https://a.test` the URL starts at cell 5 and string index 3:
+ * adding the raw column reads three characters into the link when you click its first character,
+ * and reads INSIDE the link when you click 好.
+ */
+describe('cellToStringIndex bridges cells and characters', () => {
+  /**
+   * A line as cells. `w` is the cell width — 2 for the left half of a wide glyph, 0 for its right
+   * half, 1 for everything else — mirroring what xterm reports.
+   */
+  const cells = (spec: Array<[string, number]>): CellAddressableLine => ({
+    getCell: (x) => {
+      const c = spec[x];
+      return c ? { getChars: () => c[0], getWidth: () => c[1] } : undefined;
+    },
+  });
+
+  /** `你好 https://a.test` — the exact line from the note above. */
+  const CJK = cells([
+    ['你', 2], ['', 0], ['好', 2], ['', 0], [' ', 1],
+    ...'https://a.test'.split('').map((ch) => [ch, 1] as [string, number]),
+  ]);
+  const CJK_TEXT = '你好 https://a.test';
+
+  it('maps a plain ASCII row one to one', () => {
+    const ascii = cells('abc'.split('').map((c) => [c, 1] as [string, number]));
+    expect([0, 1, 2].map((c) => cellToStringIndex(ascii, c))).toEqual([0, 1, 2]);
+  });
+
+  it('counts a wide glyph as ONE character across its TWO cells', () => {
+    // 你 occupies cells 0-1, 好 occupies cells 2-3, the space is cell 4.
+    expect(cellToStringIndex(CJK, 0)).toBe(0);       // 你
+    expect(cellToStringIndex(CJK, 2)).toBe(1);       // 好
+    expect(cellToStringIndex(CJK, 4)).toBe(2);       // the space
+    expect(cellToStringIndex(CJK, 5)).toBe(3);       // 'h' — the URL's first character
+  });
+
+  /** Either half of a wide glyph means that glyph, so a click on its right half is not the next
+   *  character along. Without this, clicking 好 lands inside the URL beside it. */
+  it('resolves the right half of a wide glyph to the glyph itself', () => {
+    expect(cellToStringIndex(CJK, 3)).toBe(cellToStringIndex(CJK, 2));
+    expect(cellToStringIndex(CJK, 1)).toBe(cellToStringIndex(CJK, 0));
+  });
+
+  /** The whole point, end to end: the two failure directions the raw column produced. */
+  it('stops a click on CJK from reporting the URL beside it', () => {
+    // The DEFECT, restated so this test cannot pass for the wrong reason: the raw column DID hit.
+    expect(linkAtIndex(CJK_TEXT, 3)).not.toBeNull();
+    // ...and with the mapping, cell 3 is 好, which is not a link.
+    expect(linkAtIndex(CJK_TEXT, cellToStringIndex(CJK, 3))).toBeNull();
+  });
+
+  it('and puts the URL\'s first character genuinely inside the URL', () => {
+    const hit = linkAtIndex(CJK_TEXT, cellToStringIndex(CJK, 5));
+    expect(hit).toEqual({ kind: 'url', text: 'https://a.test' });
+    // The last cell of the line is the URL's last character, and must still hit.
+    expect(linkAtIndex(CJK_TEXT, cellToStringIndex(CJK, 4 + 'https://a.test'.length)))
+      .toEqual({ kind: 'url', text: 'https://a.test' });
+  });
+
+  /**
+   * A surrogate-pair emoji is TWO cells and TWO string indices, unlike CJK's two-and-one — so a
+   * mapping that simply halved wide glyphs would be wrong here in the other direction.
+   */
+  it('counts a surrogate-pair emoji as its real character length', () => {
+    const emoji = cells([['👍', 2], ['', 0], ['x', 1]]);
+    expect('👍'.length).toBe(2);                 // the premise
+    expect(cellToStringIndex(emoji, 0)).toBe(0);
+    expect(cellToStringIndex(emoji, 2)).toBe(2); // 'x' sits after both code units
+  });
+
+  /**
+   * A blank cell reports `''` but `translateToString` writes a space for it, so it must still
+   * advance the string by one. Without the `|| 1`, every link after a run of blanks shifts left
+   * by the number of blanks — which is most of a padded terminal line.
+   */
+  it('advances a blank cell by the space it renders as', () => {
+    const padded = cells([['', 1], ['', 1], ['a', 1]]);
+    expect(cellToStringIndex(padded, 2)).toBe(2);
+  });
+
+  it('is safe past the end of the line', () => {
+    const short = cells([['a', 1]]);
+    expect(cellToStringIndex(short, 99)).toBe(1);
+    expect(cellToStringIndex(short, 0)).toBe(0);
+  });
+
+  /**
+   * `getLinkAt` must actually USE the mapping — every case above holds against a `getLinkAt`
+   * that still adds the raw column, because they exercise `cellToStringIndex` directly.
+   *
+   * Source-derived because composing it for real needs a mounted xterm with a render service,
+   * which this package's jest config deliberately mocks away. Comments stripped first, or the
+   * docblock explaining the rule would satisfy the regex describing it.
+   */
+  it('is the index getLinkAt actually hit-tests with', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+    const src: string = require('fs').readFileSync(
+      require('path').resolve(__dirname, '../TerminalEngine.ts'), 'utf-8',
+    ).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+    const body = /getLinkAt\(clientX: number, clientY: number\)[\s\S]*?\n  \}/.exec(src);
+    expect(body).not.toBeNull();
+    expect(body![0]).toMatch(/linkAtIndex\(\s*info\.text,\s*rowStart \+ cellToStringIndex\(line, at\.col\)\s*\)/);
+    // ...and NOT the raw column, which is the defect this whole block exists for.
+    expect(body![0]).not.toMatch(/rowStart \+ at\.col/);
   });
 });
 

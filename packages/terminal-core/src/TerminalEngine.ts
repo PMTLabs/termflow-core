@@ -479,6 +479,52 @@ export function linkAtIndex(text: string, idx: number): TerminalLinkHit | null {
   return null;
 }
 
+/** The slice of xterm's `IBufferCell` this module needs. */
+interface LinkableCell {
+  getChars(): string;
+  getWidth(): number;
+}
+
+/** The slice of xterm's `IBufferLine` the cell→string mapping needs. */
+export interface CellAddressableLine {
+  getCell(x: number): LinkableCell | undefined;
+}
+
+/**
+ * A CELL column as an index into that row's `translateToString()` output.
+ *
+ * **These are two different coordinate spaces, and conflating them is a real defect rather than
+ * a rounding error.** A double-width character — CJK, most emoji, many box-drawing glyphs —
+ * occupies TWO cells but contributes ONE index to the string; a surrogate-pair emoji occupies two
+ * cells and contributes TWO. So on any line containing one, cell index and string index drift
+ * apart and every hit-test after it is wrong. Concretely, on `你好 https://a.test` the URL starts
+ * at cell 5 and string index 3: right-clicking the URL's first character reads a character three
+ * places into it, and right-clicking 好 — cell 3 — reads index 3, which is inside the URL, so the
+ * menu offers "Copy Link" for a click on a Chinese character.
+ *
+ * xterm has the same problem in reverse and solves it the same way (`LinkComputer._mapStrIdx`
+ * walks cells accumulating `getChars().length`); this is that walk, in the other direction.
+ *
+ * A cell of width 0 is the RIGHT HALF of the wide cell before it, so a click there resolves to
+ * that character's index rather than to the next one — clicking either half of 好 means 好.
+ */
+export function cellToStringIndex(line: CellAddressableLine, col: number): number {
+  // Back up out of a continuation cell first, so both halves of a wide glyph agree.
+  let c = col;
+  while (c > 0 && line.getCell(c)?.getWidth() === 0) c -= 1;
+
+  let idx = 0;
+  for (let i = 0; i < c; i += 1) {
+    const cell = line.getCell(i);
+    if (!cell) break;
+    if (cell.getWidth() === 0) continue;
+    // A blank cell reports `''` but `translateToString` writes a space for it, so it still
+    // advances the string by one. `|| 1` is that space, not a guess.
+    idx += cell.getChars().length || 1;
+  }
+  return idx;
+}
+
 /** What `pointToCell` needs to know about the rendered terminal element. */
 export interface RenderedTerminalBox {
   /** `getBoundingClientRect()` — POST-transform, in viewport pixels. */
@@ -3832,13 +3878,18 @@ export class TerminalEngine {
     const info = collectWrappedLine(buf, bufferRow);
     if (!info) return null;
 
-    // Where the pointer's CELL lands in the STITCHED line. The stitch concatenates rows, so the
-    // offset is this row's own start plus the column — the column alone would hit-test the
-    // FIRST row of a wrapped line whichever row you actually clicked.
+    // Where the pointer's CELL lands in the STITCHED line. Two corrections, and both are needed:
+    //
+    //  - `rowStart`, because the stitch concatenates rows — the column alone would hit-test the
+    //    FIRST row of a wrapped line whichever row you actually clicked.
+    //  - `cellToStringIndex`, because a column is not a string offset once the row holds a
+    //    double-width glyph. See its note: on a line with CJK ahead of a URL, adding the raw
+    //    column offers Copy Link for a click on a Chinese character.
     const rowStart = info.rowStarts[bufferRow - info.firstRow];
-    if (rowStart === undefined) return null;
+    const line = buf.getLine(bufferRow);
+    if (rowStart === undefined || !line) return null;
 
-    return linkAtIndex(info.text, rowStart + at.col);
+    return linkAtIndex(info.text, rowStart + cellToStringIndex(line, at.col));
   }
 
   /**
