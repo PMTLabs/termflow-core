@@ -96,6 +96,26 @@ export function counterScale(z: number, zMax: number): number {
 export const LABEL_LINE_H = 14;
 
 /**
+ * Where the label sits relative to the frame's top-left corner, in world units AT SCALE 1.
+ *
+ * `.canvas-glabel` used to hold these as a literal `top: -11px; left: 14px` with
+ * `transform-origin: 0 50%` — correct only at `z = 1`. `.canvas-world` scales every world
+ * coordinate by the zoom, so a FIXED offset drifts on screen as `z` moves away from 1: the
+ * label's SIZE was already counter-scaled by `labelScale` (a `transform: scale(k)`), but its
+ * POSITION was not, and a transform's origin does not move with it — Tam's report of the title
+ * lifting off the border as you zoom in.
+ *
+ * The fix is to counter-scale the position the same way: multiply both by `k` and set
+ * `transform-origin: 0 0` (the box's own corner, matching this offset exactly, so no fractional
+ * term tied to the label's own rendered height sneaks back in). With `k = 1/z` in the
+ * uncapped range that puts the origin at `(LABEL_LEFT * k, LABEL_TOP * k)` in world units, which
+ * lands at the SAME `(LABEL_LEFT, LABEL_TOP)` screen offset from the border at every zoom —
+ * exactly what a fixed CSS `top`/`left` only achieved at `z = 1`.
+ */
+export const LABEL_TOP = -11;
+export const LABEL_LEFT = 14;
+
+/**
  * How far a group's LABEL may counter-scale.
  *
  * `counterScale` alone reaches 20× at `Z_MIN`, and the label is a world-space element: at 20×

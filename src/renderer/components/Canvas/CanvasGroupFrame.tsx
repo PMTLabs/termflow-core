@@ -1,5 +1,7 @@
 import React from 'react';
-import { CanvasGroupModel, counterScale, labelScale, labelMaxWidth } from './canvasSelectors';
+import {
+  CanvasGroupModel, counterScale, labelScale, labelMaxWidth, LABEL_TOP, LABEL_LEFT,
+} from './canvasSelectors';
 import { drawnFrameRect } from './canvasLayout';
 import { useCanvasMetrics } from './canvasMetricsContext';
 
@@ -90,7 +92,12 @@ export const CanvasGroupFrame: React.FC<{
         return (
           <span
             className="canvas-glabel"
-            style={{ transform: `scale(${k})`, maxWidth: labelMaxWidth(box.w, k) }}
+            style={{
+              top: LABEL_TOP * k,
+              left: LABEL_LEFT * k,
+              transform: `scale(${k})`,
+              maxWidth: labelMaxWidth(box.w, k),
+            }}
             onPointerDown={onLabelPointerDown}
             onContextMenu={onContextMenu}
             // Carries the full title as well as the hint, because the label now ellipsises.
