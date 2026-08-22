@@ -405,6 +405,26 @@
 .canvas-node.overlaid .canvas-node-head { cursor: default; }
 .canvas-node.overlaid .canvas-port { display: none; }
 
+/* The group chip sits BESIDE the title, not out with the badges (Tam, 2026-08-21).
+ *
+ * It was already the title's DOM sibling, so nothing about the markup was wrong — but
+ * `.canvas-node-title` takes `flex: 1` and eats every pixel of the header's slack, which pushed
+ * the chip the whole way across to the agent/shell badges. A chip that says which TAB this
+ * terminal lives in is a caption on the title; read from the far side of the header it looks
+ * like a third badge and the pairing is lost.
+ *
+ * So the free space is moved to the far side of the chip. The title reverts to its natural
+ * width (still shrinkable, still ellipsising — `0 1 auto`, never `none`, or a long pane name
+ * would push the header's buttons out of the node), and `margin-right: auto` on the chip
+ * absorbs what is left.
+ *
+ * Overlay ONLY, and only because that is the one surface that renders the chip at all
+ * (`CanvasNode`): an ordinary node's header is already competing at a fraction of natural size.
+ * Both selectors outrank the base rules on specificity (0,3,0 vs 0,1,0), so neither depends on
+ * where in this file it is declared. */
+.canvas-node.overlaid .canvas-node-title { flex: 0 1 auto; }
+.canvas-node.overlaid .canvas-node-group { margin-right: auto; }
+
 /* ---- Header buttons ----------------------------------------------------- */
 
 /* "Enlarge on the canvas" and "open in its tab" — the two ways out of the overview.
@@ -493,7 +513,26 @@
 /* ---- Sidebar (Task 14) --------------------------------------------------- */
 
 /* A flex sibling of `.canvas-viewport`, before it, so it takes the left edge and the viewport
-   keeps `flex: 1`. Its width is inline from `canvasSlice`, which Task 15 makes draggable. */
+   keeps `flex: 1`. Its width is inline from `canvasSlice`, which Task 15 makes draggable.
+
+   ---- Ctrl+wheel content zoom (Tam, 2026-08-21) ----
+
+   `--sidebar-k` is the panel's zoom factor, set inline by `CanvasSidebar` from
+   `canvas.sidebarZoom`. It is applied HERE, once, to this element's own `font-size` — and every
+   size inside the panel is then an `em` of that, so all of them scale from the one knob.
+
+   Written this way rather than as a `calc(... * var(--sidebar-k))` on each of the dozen sizes
+   below, and the difference is not tidiness: twelve calls are twelve chances to forget one, and
+   the forgotten one is the one that looks wrong. With `em` the default IS scaled — a rule added
+   later inherits the behaviour instead of opting into it.
+
+   The FALLBACK matters. Every `var(--sidebar-k, 1)` here carries one, so the panel renders at
+   its natural size for a `CanvasSidebar` that never set the property (a test render, or a state
+   restored from before the field existed) rather than collapsing to an invalid `calc()`.
+
+   WIDTH is deliberately not scaled: it is the user's own drag (`setSidebarWidth`), and a zoom
+   that moved it would fight them. A larger font inside a fixed width simply ellipsises sooner,
+   which is why `SIDEBAR_ZOOM_MAX` is where it is. */
 .canvas-sidebar {
   flex: none;
   display: flex;
@@ -501,28 +540,29 @@
   min-width: 0;
   border-right: 1px solid var(--border-color, #3e3e42);
   background: var(--bg-secondary, #2d2d30);
+  font-size: calc(12px * var(--sidebar-k, 1));
 }
 .canvas-ssearch {
   flex: none;
-  margin: 9px 9px 7px;
-  padding: 5px 8px;
+  margin: .75em .75em .58em;
+  padding: .42em .67em;
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 4px;
   background: var(--bg-primary, #141414);
   color: var(--text-primary, #cccccc);
-  font-size: 12px;
+  font-size: 1em;
   min-width: 0;
 }
 .canvas-ssearch::placeholder { color: var(--text-tertiary, #666666); }
 .canvas-ssearch:focus-visible { outline: 1px solid var(--accent-color, #007acc); outline-offset: 0; }
 
-.canvas-stree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 0 9px; }
-.canvas-sempty { padding: 14px 11px; color: var(--text-tertiary, #666666); font-size: 12px; }
-.canvas-sgroup { margin-top: 5px; }
+.canvas-stree { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 0 0 .75em; }
+.canvas-sempty { padding: 1.17em .92em; color: var(--text-tertiary, #666666); font-size: 1em; }
+.canvas-sgroup { margin-top: .42em; }
 .canvas-sghead {
   margin: 0;
-  padding: 5px 11px 3px;
-  font-size: 10px;
+  padding: .5em 1.1em .3em;
+  font-size: .84em;
   font-weight: 600;
   letter-spacing: .13em;
   text-transform: uppercase;
@@ -532,17 +572,33 @@
   text-overflow: ellipsis;
 }
 .canvas-sghead:not(.editing) { cursor: default; }
-.canvas-sghead.editing { padding: 3px 9px 2px; overflow: visible; }
+.canvas-sghead.editing { padding: .3em .9em .2em; overflow: visible; }
 /* The header is uppercased and letter-spaced, and both inherit into an <input> nested in it —
    so the box would render `G A T E W A Y` while committing the `gateway` you actually typed.
-   The row's rename box needs none of this because rows are not uppercased. */
+   The row's rename box needs none of this because rows are not uppercased.
+ *
+ * `font-size` joins that list, and it is the same trap one step further out. `.canvas-srename`
+ * is mounted under TWO different parents — a row (12px) and this header (`.84em` = 10.08px) —
+ * and its own `1em` means "my parent's size", so the one declaration renders at two sizes. On
+ * `develop` it said `font-size: 12px`, an ABSOLUTE that overrode the header either way; the
+ * px→em conversion silently made the group rename box 16% smaller than the row one.
+ *
+ * Restated against the PANEL's base rather than as an `em` of the header, so it does not have to
+ * be re-derived if the header's own size ever changes — and so the `em` padding on
+ * `.canvas-srename` resolves against 12px here exactly as it does in a row. */
 .canvas-sghead .canvas-srename {
   text-transform: none;
   letter-spacing: normal;
   font-weight: 400;
+  font-size: calc(12px * var(--sidebar-k, 1));
   color: var(--text-primary, #cccccc);
 }
-.canvas-sgempty { margin: 0; padding: 2px 11px 4px 19px; font-size: 11px; font-style: italic; color: var(--text-tertiary, #666666); }
+/* NOTE the padding values differ from `.canvas-srow`'s even though both were 11px/19px in px:
+   `em` in a padding resolves against the element's OWN font-size, and this rule sets one
+   (`.92em` = 11.04px) while a row keeps the panel's 12px. Using a row's numbers here would
+   quietly shrink this indent from 19px to 17.4px. `canvasSidebarZoom.test.tsx` computes every
+   sidebar declaration back to pixels and would catch it. */
+.canvas-sgempty { margin: 0; padding: .18em 1em .36em 1.72em; font-size: .92em; font-style: italic; color: var(--text-tertiary, #666666); }
 .canvas-srows { margin: 0; padding: 0; list-style: none; }
 
 /* `position: relative` + `isolation: isolate` used to be what let the (now deleted, Req 5)
@@ -556,9 +612,9 @@
   overflow: hidden;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 11px 4px 19px;
-  font-size: 12px;
+  gap: .5em;
+  padding: .33em .92em .33em 1.58em;
+  font-size: 1em;
   color: var(--text-primary, #cccccc);
   cursor: pointer;
   white-space: nowrap;
@@ -569,22 +625,36 @@
    `gap`; `.canvas-srow` already has one (6px, shared with the disambiguator and the bell), so
    without this the icon would sit 12px from the title instead of 6px like everything else. */
 .canvas-srow .shell-profile-icon { margin-right: 0; }
+/* The two borrowed tab-strip glyphs, re-expressed in `em` so they scale with the Ctrl+wheel
+   zoom like everything else in the panel.
+ *
+ * They are sized in fixed px by `TabManager.css`, which is correct THERE — a tab strip has no
+ * zoom. Left alone, a zoomed-in row grew its text around a 16px icon and a 12px bell until the
+ * row read as text with two specks in it, and a zoomed-out row was mostly icon. The values are
+ * the tab strip's own, divided by the sidebar's 12px base, so at k=1 both surfaces still render
+ * pixel-identically — this changes how they RESPOND to the zoom, not how they look without one.
+ *
+ * Overridden here rather than in `TabManager.css`: this stylesheet borrows those classes, it
+ * does not own them, and an `em` there would rescale the tab strip for no reason. */
+.canvas-srow .tab-icon { font-size: 1.17em; }
+.canvas-srow .tab-icon-img { width: 1.34em; height: 1.34em; }
+.canvas-srow .tab-unseen-bell { font-size: 1em; margin-left: .33em; }
 .canvas-srow-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
 .canvas-srow-title mark { background: rgba(240,160,32,.28); color: inherit; border-radius: 2px; }
 .canvas-srow-dis {
   flex: none; position: relative; z-index: 1;
   max-width: 45%; overflow: hidden; text-overflow: ellipsis;
-  font-size: 10px; color: var(--text-tertiary, #666666);
+  font-size: .84em; color: var(--text-tertiary, #666666);
 }
-.canvas-srow.editing { padding: 2px 9px 2px 17px; }
+.canvas-srow.editing { padding: .17em .75em .17em 1.42em; }
 .canvas-srename {
   width: 100%;
-  padding: 2px 5px;
+  padding: .17em .42em;
   border: 1px solid var(--accent-color, #007acc);
   border-radius: 3px;
   background: var(--bg-primary, #141414);
   color: var(--text-primary, #cccccc);
-  font-size: 12px;
+  font-size: 1em;
   min-width: 0;
 }
 

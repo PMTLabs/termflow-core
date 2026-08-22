@@ -190,11 +190,31 @@ describe('buildSidebarTree', () => {
     expect(rows.find((r) => r.terminalId === 'tm-2')!.isRunning).toBe(false);
   });
 
-  // A group's `nodeIds` is a projection of its pane tree and can name a terminal that has just
-  // been removed; skipping is what keeps a mid-dispatch render from throwing.
-  it('skips a nodeId with no matching node', () => {
-    const t = buildSidebarTree(nodes, [group('tb-a', 'api', ['tm-1', 'tm-ghost'])], '', cwds);
-    expect(t[0].rows.map((r) => r.terminalId)).toEqual(['tm-1']);
+  /**
+   * A group's `nodeIds` is a projection of its pane tree and can name a terminal that has just
+   * been removed, so a mid-dispatch render must not produce a row for one — or throw.
+   *
+   * The MECHANISM that guaranteed this changed on 2026-08-21: rows used to be walked out of
+   * `nodeIds` and looked up by id, with a skip for the miss. They are now taken from `nodes`
+   * itself, so that Tab and this list share one order (`canvasReadingOrder.test.ts`) — and a
+   * phantom id can no longer reach a row at all, because nothing is looked up.
+   *
+   * So this asserts the REQUIREMENT rather than the deleted skip. Pinning "the lookup returns
+   * undefined and we `continue`" would guard a line that no longer exists, which is a test that
+   * passes while protecting nothing.
+   */
+  it('never rows a terminal that does not exist', () => {
+    const t = buildSidebarTree(nodes, [group('tb-a', 'api', ['tm-1', 'tm-2', 'tm-ghost'])], '', cwds);
+    const ids = t[0].rows.map((r) => r.terminalId);
+    expect(ids).not.toContain('tm-ghost');
+    // ...and every row it DID emit names a real node, or "no ghost" would be satisfied by a
+    // sidebar that emitted nothing.
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) expect(nodes.some((n) => n.terminalId === id)).toBe(true);
+  });
+
+  it('does not throw when nodeIds names a removed terminal', () => {
+    expect(() => buildSidebarTree(nodes, [group('tb-a', 'api', ['tm-ghost'])], '', cwds)).not.toThrow();
   });
 
   it('does not mutate its inputs', () => {

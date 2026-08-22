@@ -342,6 +342,61 @@ describe('the busy dot and the busy icon share one blink', () => {
   });
 });
 
+/**
+ * The overlay's group chip is a CAPTION on the title, not a third badge (Tam, 2026-08-21).
+ *
+ * Two independent things have to hold, and each one alone renders the chip in the wrong place:
+ *
+ *  - **Markup order.** The chip must sit between the title and the agent badge. `CanvasNode`
+ *    already got this right, which is exactly why the bug was confusing — nothing in the JSX
+ *    looked wrong.
+ *  - **Who absorbs the header's free space.** `.canvas-node-title { flex: 1 }` took all of it,
+ *    so the chip was flung across to the badges. The slack has to be consumed AFTER the chip.
+ *
+ * Derived from source because neither is observable in jsdom: it applies no stylesheet, so a
+ * render test sees the right DOM order and a completely wrong layout, and passes.
+ */
+describe('the overlay group chip sits beside the title', () => {
+  const NODE_TSX = readSource(path.resolve(__dirname, '../CanvasNode.tsx'));
+
+  // The markup half. Positions, not a regex over the whole file: "appears somewhere" would pass
+  // for a chip rendered last, which is the layout being fixed.
+  it('renders the chip between the title and the agent badge', () => {
+    const title = NODE_TSX.indexOf('canvas-node-title');
+    const group = NODE_TSX.indexOf('canvas-node-group');
+    const agent = NODE_TSX.indexOf('<CanvasNodeAgent');
+    expect(title).toBeGreaterThanOrEqual(0);
+    expect(group).toBeGreaterThan(title);
+    expect(agent).toBeGreaterThan(group);
+  });
+
+  // The layout half. An ordinary node keeps `flex: 1` on the title — it renders no chip, and the
+  // title should take the whole bar there.
+  it('leaves an ordinary node\'s title taking the free space', () => {
+    expect(ruleFor('.canvas-node-title')).toMatch(/flex:\s*1\s*;/);
+  });
+
+  it('stops the overlay title taking the free space', () => {
+    const flex = /flex:\s*([^;]+);/.exec(ruleFor('.canvas-node.overlaid .canvas-node-title'))?.[1].trim();
+    // `0 1 auto`, not `none`: the title must still SHRINK, or a long pane name pushes the
+    // header's buttons out of the node. `none` is `0 0 auto` and would do exactly that.
+    expect(flex).toBe('0 1 auto');
+  });
+
+  it('gives the free space to the chip instead, so it hugs the title', () => {
+    expect(ruleFor('.canvas-node.overlaid .canvas-node-group')).toMatch(/margin-right:\s*auto/);
+  });
+
+  // Guard on the guard: the two rules above only matter while the chip is still `flex: none`
+  // and still ellipsises. If it started growing, `margin-right: auto` would have no slack left
+  // to absorb and both assertions above would pass while the chip stretched across the header.
+  it('the chip itself still refuses to grow', () => {
+    const base = ruleFor('.canvas-node-group');
+    expect(base).toMatch(/flex:\s*none/);
+    expect(base).toMatch(/text-overflow:\s*ellipsis/);
+  });
+});
+
 describe('the node frame is screen-space', () => {
   const declaration = (selector: string, prop: string) => {
     for (const decl of ruleFor(selector).split(';')) {

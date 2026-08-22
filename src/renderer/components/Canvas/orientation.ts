@@ -137,11 +137,17 @@ export function minimapRect(t: MinimapTransform, r: Rect): Rect {
 /**
  * The next terminal in reading order — <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd>.
  *
- * `ids` is `model.nodes` in its natural order, which is tab order and then pane order inside
- * each tab. That is not an arbitrary choice made here: it is the SAME order the sidebar lists,
- * because the sidebar is built from the same array. Sorting by position instead — left to right,
- * say — would give the keyboard one order and the list another, and neither would be wrong
- * enough to notice until you tried to follow one with the other.
+ * `ids` is `model.nodes` in the order `buildModel` emits it, which since 2026-08-21 is READING
+ * ORDER — groups left to right and top to bottom, and each group's terminals the same way inside
+ * it (see `readingOrder`). It was previously tab order then pane order, i.e. the order the
+ * terminals were created in; once you have dragged them into an arrangement that is a history
+ * nothing on screen still shows, and Tab looked like it was jumping about at random.
+ *
+ * **The old comment here warned that sorting by position "would give the keyboard one order and
+ * the list another".** That hazard is real and is why the sort lives in `buildModel` rather than
+ * in this function: the sidebar reads its rows out of the same `model.nodes` array, so both
+ * follow from one sort and cannot disagree. Sorting HERE would have re-created exactly the split
+ * the warning described. `canvasReadingOrder.test.ts` pins that they still agree.
  *
  * Wraps, because a list you can fall off the end of makes the last press do nothing and look
  * broken. Starting from no selection enters at the end you are heading towards, so the first

@@ -3,7 +3,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { nudgeZoom, resetZoom } from '../../store/slices/zoomSlice';
 import { Terminal } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
-import type { TerminalSearchOptions, TerminalSearchResult } from '@termflow/terminal-core';
+import type { TerminalSearchOptions, TerminalSearchResult, TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
@@ -136,7 +136,16 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     },
     [],
   );
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * The open menu, and the LINK the right-click landed on (Tam, 2026-08-21).
+   *
+   * `link` is captured when the menu OPENS, not read when an item is clicked: by then the mouse
+   * has moved to the item and the cell it was over is gone. Held here rather than in its own
+   * state so the pair cannot desync — a separate `linkHit` slot would keep the previous
+   * right-click's link alive for a menu opened somewhere with no link at all.
+   */
+  const [contextMenu, setContextMenu] =
+    useState<{ x: number; y: number; link: TerminalLinkHit | null } | null>(null);
   // Backlog 003 follow-up: when a clicked relative path resolves to MULTIPLE files
   // (e.g. a coding agent cd'd into a subfolder), show a picker at the click point.
   const [pathPicker, setPathPicker] = useState<{
@@ -220,7 +229,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * items act on the one engine either way.
    */
   const openContextMenuAt = useCallback((x: number, y: number) => {
-    setContextMenu({ x, y });
+    // Resolved HERE, from the point the right-click happened. By the time an item is clicked the
+    // pointer is on the menu and the cell it came from is unreachable — so the hit is captured
+    // with the menu, in the same setState, and travels with it.
+    //
+    // This is also what gives the canvas OVERLAY the item for free: `NodeTerminal` routes its
+    // right-click through this same callback with the same viewport coordinates, so one
+    // implementation serves the pane and the node.
+    setContextMenu({ x, y, link: engineRef.current?.getLinkAt(x, y) ?? null });
     // Detect the pane's agent for the "Color scheme for <agent>" item; refresh
     // once so a just-started agent is offered without waiting for the next poll.
     setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId));
@@ -696,6 +712,28 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         click: () => setSchemaPicker({ x: contextMenu?.x ?? 0, y: contextMenu?.y ?? 0, agent: agentForMenu }),
       }] : []),
       { type: 'separator' as const },
+      /**
+       * The link under the right-click (Tam, 2026-08-21).
+       *
+       * FIRST in the text block, above Copy, because when there IS a link under the pointer it
+       * is almost always what the right-click was for — Copy needs a selection you made
+       * beforehand, this needs only the thing you are pointing at.
+       *
+       * Present only when a link was actually hit, rather than always-shown-and-disabled: a
+       * greyed "Copy Link" on every right-click teaches people the feature is broken, and the
+       * menu already varies its shape (the pane-tree items, the agent scheme, selection mode).
+       *
+       * Two labels from one hit, because they are different promises. `linkHit.kind` decides —
+       * see `TerminalLinkHit`.
+       */
+      ...(contextMenu?.link ? [{
+        label: contextMenu.link.kind === 'url' ? 'Copy Link' : 'Copy Path',
+        icon: contextMenu.link.kind === 'url' ? '🔗' : '📄',
+        title: contextMenu.link.kind === 'url'
+          ? `Copy ${contextMenu.link.text} to the clipboard.`
+          : `Copy the file path ${contextMenu.link.text} to the clipboard.`,
+        click: () => engine?.copyLink(contextMenu.link!.text),
+      }] : []),
       {
         label: 'Copy',
         icon: '📋',

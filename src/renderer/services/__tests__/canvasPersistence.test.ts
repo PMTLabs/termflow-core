@@ -8,7 +8,9 @@ jest.mock('../../components/TerminalContainer', () => ({ clearTabPanes: jest.fn(
 
 import { sanitizeCanvasState, restoreZMax } from '../StateManager';
 import { Z_MIN, canvasMetrics } from '../../components/Canvas/canvasGeometry';
-import { SIDEBAR_MIN, SIDEBAR_MAX } from '../../store/slices/canvasSlice';
+import {
+  SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX,
+} from '../../store/slices/canvasSlice';
 
 const rect = { x: 1, y: 2, w: 340, h: 210 };
 
@@ -115,6 +117,32 @@ describe('sanitizeCanvasState', () => {
       .toBe(SIDEBAR_MIN);
   });
 
+  /**
+   * The sidebar's Ctrl+wheel zoom (Tam, 2026-08-21) — the READ half of its persistence.
+   *
+   * Worth its own case rather than folding into the width one above: a value that is written on
+   * save and never read back looks exactly like a working feature until the app is restarted,
+   * which is the one thing nobody does while testing the gesture.
+   */
+  it('carries a persisted sidebar zoom back, clamped into range', () => {
+    const base = { viewport: { x: 0, y: 0, z: 1 }, nodes: {}, groups: {} };
+    expect(sanitize({ ...base, sidebarZoom: 1.25 })!.sidebarZoom).toBeCloseTo(1.25, 9);
+    expect(sanitize({ ...base, sidebarZoom: 99 })!.sidebarZoom).toBe(SIDEBAR_ZOOM_MAX);
+    expect(sanitize({ ...base, sidebarZoom: 0.01 })!.sidebarZoom).toBe(SIDEBAR_ZOOM_MIN);
+  });
+
+  /**
+   * NaN survives a bare `Math.max(min, Math.min(max, v))` — every comparison with NaN is false,
+   * so the clamp that looks like it bounds the value does not. A NaN reaching the stylesheet
+   * makes `calc(12px * var(--sidebar-k))` invalid, CSS drops the declaration, and the panel
+   * renders at its inherited size: the zoom simply appears to have stopped working.
+   */
+  it.each([NaN, Infinity, -Infinity, 'big', null])('refuses a non-finite sidebar zoom (%p)', (bad) => {
+    const out = sanitize({ viewport: { x: 0, y: 0, z: 1 }, nodes: {}, groups: {}, sidebarZoom: bad })!;
+    expect(Number.isFinite(out.sidebarZoom)).toBe(true);
+    expect(out.sidebarZoom).toBe(1);
+  });
+
   it('never carries `enabled` through, so the app always boots in tab mode', () => {
     // Canvas Mode is a TAB, so "is the canvas showing" is a fact of `tabs`. A persisted copy
     // would be a second source of truth that desyncs on every path that switches tabs without
@@ -143,6 +171,73 @@ describe('sanitizeCanvasState', () => {
     expect(out.nodes).toEqual({});
     expect(out.groups).toEqual({});
     expect(out.sidebarOpen).toBe(true);
+    // Added after the field existed, so a blob written before it must still restore at natural
+    // size rather than at 0 — which would render the panel as an invisible sliver.
+    expect(out.sidebarZoom).toBe(1);
+  });
+});
+
+/**
+ * The WRITE half, which had no coverage at all — and is the link a new field is most often
+ * dropped from.
+ *
+ * `sanitizeCanvasState` above is the reader. `StateManager.saveState` is the writer, and it
+ * builds its `canvas:` blob as a hand-written object literal naming each field. Add a field to
+ * `CanvasPersisted`, wire the reducer, wire the hydrate, wire the consumer, forget this one
+ * literal, and the feature works perfectly for the whole session and is gone after a restart —
+ * with a green suite, because every other link is genuinely correct.
+ *
+ * So the expected list is DERIVED from the interface rather than restated here. A list typed out
+ * by hand would need updating by exactly the person who just forgot to update the writer.
+ */
+describe('saveState writes every persisted canvas field', () => {
+  const read = (rel: string) =>
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
+    require('fs').readFileSync(require('path').resolve(__dirname, rel), 'utf-8');
+
+  /** The field names declared by `CanvasPersisted`, straight out of the slice. */
+  const persistedFields = (): string[] => {
+    const src = read('../../store/slices/canvasSlice.ts');
+    const body = /export interface CanvasPersisted \{([\s\S]*?)\n\}/.exec(src);
+    expect(body).not.toBeNull();
+    return [...body![1].matchAll(/^\s*(\w+)\s*\??:/gm)].map((m) => m[1]);
+  };
+
+  /** The object literal `saveState` assigns to `canvas:`. */
+  const writerLiteral = (): string => {
+    const src = read('../StateManager.ts')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const m = /\n\s*canvas: \{([\s\S]*?)\n\s*\},/.exec(src);
+    expect(m).not.toBeNull();
+    return m![1];
+  };
+
+  it('names every CanvasPersisted field in the saved blob', () => {
+    const missing = persistedFields().filter((f) => !new RegExp(`\\b${f}:`).test(writerLiteral()));
+    expect(missing).toEqual([]);
+  });
+
+  // Guard on the guard: both parsers must actually find something. An interface rename or a
+  // reshaped literal would otherwise leave this suite comparing two empty lists and passing.
+  it('actually parsed both sides', () => {
+    expect(persistedFields()).toEqual(
+      expect.arrayContaining(['viewport', 'nodes', 'groups', 'sidebarOpen', 'sidebarWidth', 'sidebarZoom']),
+    );
+    expect(writerLiteral()).toContain('state.canvas.');
+  });
+
+  /**
+   * The negative half. `edges` is deliberately NOT persisted — the backend owns the edge table
+   * and the renderer refetches it on entering Canvas Mode — so it must be absent from BOTH the
+   * interface and the writer. Without this, "write every field" could be satisfied by writing
+   * the whole slice.
+   */
+  it('still refuses to persist the backend-owned fields', () => {
+    expect(persistedFields()).not.toContain('edges');
+    for (const f of ['edges', 'focusedId', 'overlayId', 'selectedId']) {
+      expect(writerLiteral()).not.toMatch(new RegExp(`\\b${f}:`));
+    }
   });
 });
 

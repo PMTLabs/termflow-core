@@ -2,7 +2,8 @@ import canvasReducer, {
   setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
-  setSidebarOpen, setSidebarWidth, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
+  setSidebarOpen, setSidebarWidth, setSidebarZoom, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX,
+  pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
 
@@ -132,6 +133,32 @@ describe('canvasSlice', () => {
     expect(canvasReducer(init(), setSidebarWidth(10)).sidebarWidth).toBe(168);
     expect(canvasReducer(init(), setSidebarWidth(9999)).sidebarWidth).toBe(480);
     expect(canvasReducer(init(), setSidebarWidth(300)).sidebarWidth).toBe(300);
+  });
+
+  it('clamps sidebar zoom', () => {
+    expect(canvasReducer(init(), setSidebarZoom(0.1)).sidebarZoom).toBe(SIDEBAR_ZOOM_MIN);
+    expect(canvasReducer(init(), setSidebarZoom(9)).sidebarZoom).toBe(SIDEBAR_ZOOM_MAX);
+    expect(canvasReducer(init(), setSidebarZoom(1.25)).sidebarZoom).toBeCloseTo(1.25, 9);
+  });
+
+  /**
+   * NaN survives `Math.max(min, Math.min(max, v))` — every comparison with NaN is false, so the
+   * clamp that looks like it bounds this value does not. Left in, it reaches the stylesheet as
+   * `calc(12px * NaN)`, CSS drops the whole declaration, and the panel silently stops responding
+   * to the wheel entirely. The wheel handler multiplies the previous value, so ONE bad value
+   * poisons every notch after it.
+   */
+  it.each([NaN, Infinity, -Infinity])('refuses a non-finite sidebar zoom (%p)', (bad) => {
+    const z = canvasReducer(init(), setSidebarZoom(bad)).sidebarZoom;
+    expect(Number.isFinite(z)).toBe(true);
+    expect(z).toBe(1);
+  });
+
+  it('hydrates a persisted sidebar zoom, clamped', () => {
+    expect(canvasReducer(init(), hydrateCanvas({ sidebarZoom: 1.4 })).sidebarZoom).toBeCloseTo(1.4, 9);
+    expect(canvasReducer(init(), hydrateCanvas({ sidebarZoom: 99 })).sidebarZoom).toBe(SIDEBAR_ZOOM_MAX);
+    // Absent from an older blob: the panel stays at natural size rather than collapsing to 0.
+    expect(canvasReducer(init(), hydrateCanvas({})).sidebarZoom).toBe(1);
   });
 
   it('opens and closes the sidebar', () => {

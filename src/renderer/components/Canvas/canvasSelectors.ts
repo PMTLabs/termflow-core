@@ -12,6 +12,7 @@ import {
 import {
   fitGroupFrame, seedNodePosition, groupBoxFor, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W,
 } from './canvasLayout';
+import { readingOrder } from './readingOrder';
 import { isVirtualTab } from '../../services/tabKinds';
 import type { NodeInfoPayload } from '../../services/canvasGraph';
 
@@ -311,7 +312,68 @@ function buildModel(
     }
   }
 
-  return { nodes, groups };
+  return orderModel(nodes, groups);
+}
+
+/**
+ * Both model arrays in reading order — applied ONCE, here (Tam, 2026-08-21).
+ *
+ * `stepNodeId` walks `model.nodes`; `buildSidebarTree` walks `model.groups` and picks each
+ * group's nodes out of that same array. Both therefore follow from this one sort, which is the
+ * whole reason it lives in the builder rather than at either consumer — sorting at the keyboard
+ * handler would have given Tab one order and the list another, exactly as `stepNodeId`'s old
+ * comment warned.
+ *
+ * PER GROUP, not globally: a group frame visually contains its terminals, so a global sort would
+ * step out of a group and back into it as it crossed a row — and the sidebar, which is sectioned
+ * by group, could not show that order at all.
+ *
+ * **The visible cost of that, stated so it is not rediscovered as a bug.** When two group frames
+ * OVERLAP horizontally, Tab finishes the first group before starting the second, so focus can
+ * run left → right → back to the middle across nodes that look collinear (raised in review of
+ * PR #56). That is inherent to per-group ordering rather than a defect in it: the alternative
+ * global sort fixes this one case and breaks the guarantee the sidebar depends on, since a
+ * list sectioned by group cannot render an order that interleaves groups. Tam chose per-group
+ * over global with that trade named.
+ *
+ * **Exported, and split out of `buildModel` for a reason.** Its orphan branch below is not
+ * reachable through `buildModel` — every node there pushes a group in the same iteration — so a
+ * test driving the builder cannot exercise it, and the one that tried was measuring
+ * `readingOrder` instead (found in review of PR #56). A defensive branch nothing can reach is a
+ * branch that silently rots; this is the level it lives at, so this is the level it is tested at.
+ */
+export function orderModel(
+  nodes: readonly CanvasNodeModel[],
+  groups: readonly CanvasGroupModel[],
+): CanvasModel {
+  const orderedGroups = readingOrder(groups, (g) => g.rect, (g) => g.tabId);
+
+  const byTab = new Map<string, CanvasNodeModel[]>();
+  for (const n of nodes) {
+    const list = byTab.get(n.tabId);
+    if (list) list.push(n); else byTab.set(n.tabId, [n]);
+  }
+
+  const orderedNodes: CanvasNodeModel[] = [];
+  for (const g of orderedGroups) {
+    const mine = byTab.get(g.tabId);
+    if (!mine) continue;
+    byTab.delete(g.tabId);
+    orderedNodes.push(...readingOrder(mine, (n) => n.rect, (n) => n.terminalId));
+  }
+  /**
+   * Anything whose group is not in `groups` is APPENDED, never dropped.
+   *
+   * `buildModel` cannot produce one — but the cost of being wrong about that is a terminal that
+   * disappears from the canvas and from the sidebar while its PTY goes on running, which is far
+   * too expensive to leave resting on "should never". Groups are drained with `byTab.delete`
+   * above precisely so that whatever is left here is exactly the orphans.
+   */
+  for (const mine of byTab.values()) {
+    orderedNodes.push(...readingOrder(mine, (n) => n.rect, (n) => n.terminalId));
+  }
+
+  return { nodes: orderedNodes, groups: orderedGroups };
 }
 
 /** Memoised for the component tree: `buildModel` allocates a fresh object every call,

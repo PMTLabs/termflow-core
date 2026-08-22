@@ -231,7 +231,12 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
     expect(SOURCE).toContain('openContextMenu: openContextMenuAt,');
     expect(SOURCE).toContain('const openContextMenuAt = useCallback((x: number, y: number) => {');
     const at = SOURCE.indexOf('const openContextMenuAt = useCallback');
-    expect(SOURCE.slice(at, at + 200)).toContain('setContextMenu({ x, y });');
+    // Opens the menu AT THE GIVEN POINT. Matched on the two coordinates rather than on the whole
+    // literal: `setContextMenu` also carries the right-clicked link since 2026-08-21
+    // (`copyLinkWiring.test.ts`), and pinning the exact object shape here made an addition to it
+    // fail a test about surface chrome — which says nothing about whether the trigger still
+    // works. Widened rather than deleted: "opens the menu where you clicked" is the requirement.
+    expect(SOURCE.slice(at, at + 900)).toMatch(/setContextMenu\(\{\s*x,\s*y[,\s}]/);
     // Declared BEFORE the publish effect reads it — a `const` declared after would be in that
     // effect's temporal dead zone and throw on the first render.
     expect(at).toBeLessThan(SOURCE.indexOf('setSurfaceChrome(terminalId, chromeOwner.current, {'));
