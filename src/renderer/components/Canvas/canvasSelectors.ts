@@ -12,6 +12,7 @@ import {
 import {
   fitGroupFrame, seedNodePosition, groupBoxFor, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W,
 } from './canvasLayout';
+import { readingOrder } from './readingOrder';
 import { isVirtualTab } from '../../services/tabKinds';
 import type { NodeInfoPayload } from '../../services/canvasGraph';
 
@@ -311,7 +312,43 @@ function buildModel(
     }
   }
 
-  return { nodes, groups };
+  /**
+   * Reading order, applied ONCE and here (Tam, 2026-08-21).
+   *
+   * `stepNodeId` walks `model.nodes`; `buildSidebarTree` walks `model.groups` and picks each
+   * group's nodes out of that same array. Both therefore follow from this one sort, which is the
+   * whole reason it lives at the bottom of the builder rather than at either consumer — sorting
+   * at the keyboard handler would have given Tab one order and the list another, which is exactly
+   * what `stepNodeId`'s old comment warned about.
+   *
+   * PER GROUP, not globally: a group frame visually contains its terminals, so a global sort
+   * would step out of a group and back into it as it crossed a row — and the sidebar, which is
+   * sectioned by group, could not show that order at all.
+   */
+  const orderedGroups = readingOrder(groups, (g) => g.rect, (g) => g.tabId);
+
+  const byTab = new Map<string, CanvasNodeModel[]>();
+  for (const n of nodes) {
+    const list = byTab.get(n.tabId);
+    if (list) list.push(n); else byTab.set(n.tabId, [n]);
+  }
+
+  const orderedNodes: CanvasNodeModel[] = [];
+  for (const g of orderedGroups) {
+    const mine = byTab.get(g.tabId);
+    if (!mine) continue;
+    byTab.delete(g.tabId);
+    orderedNodes.push(...readingOrder(mine, (n) => n.rect, (n) => n.terminalId));
+  }
+  // Anything whose group did not make it into `groups` is appended rather than dropped. Every
+  // node built above pushes a group in the same iteration, so this should never fire — but the
+  // failure if it ever did is a terminal that vanishes from the canvas entirely, which is far
+  // too expensive to leave resting on "should never".
+  for (const mine of byTab.values()) {
+    orderedNodes.push(...readingOrder(mine, (n) => n.rect, (n) => n.terminalId));
+  }
+
+  return { nodes: orderedNodes, groups: orderedGroups };
 }
 
 /** Memoised for the component tree: `buildModel` allocates a fresh object every call,

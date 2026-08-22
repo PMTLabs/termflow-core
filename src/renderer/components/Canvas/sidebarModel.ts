@@ -80,17 +80,31 @@ export function buildSidebarTree(
     return n.terminalId.slice(0, 8);
   };
 
-  const byId = new Map(nodes.map((n) => [n.terminalId, n]));
+  /**
+   * The group's terminals, taken from `nodes` rather than walked out of `g.nodeIds`.
+   *
+   * Both hold the same set, so this is purely about ORDER. `buildModel` sorts `nodes` into
+   * reading order — left to right, top to bottom — and `stepNodeId` walks that same array, so
+   * reading rows out of it is what keeps <kbd>Tab</kbd> and this list in step
+   * (`canvasReadingOrder.test.ts` pins that they agree). `nodeIds` is still the PANE tree's
+   * order, which is what `arrange` grids from and what this list must no longer show: after you
+   * have dragged terminals into an arrangement, creation order is a history nothing on screen
+   * still reflects.
+   *
+   * It also retires the old skip for an id naming a terminal that has just been removed —
+   * `nodes` cannot contain one.
+   */
+  const byTabId = new Map<string, CanvasNodeModel[]>();
+  for (const n of nodes) {
+    const list = byTabId.get(n.tabId);
+    if (list) list.push(n); else byTabId.set(n.tabId, [n]);
+  }
+
   const out: SidebarGroup[] = [];
 
   for (const g of groups) {
     const rows: SidebarRow[] = [];
-    for (const id of g.nodeIds) {
-      // `nodeIds` is a projection of the pane tree and can name a terminal that has just been
-      // removed; skipping is what keeps a mid-dispatch render from throwing.
-      const n = byId.get(id);
-      if (!n) continue;
-
+    for (const n of byTabId.get(g.tabId) ?? []) {
       let matchStart = -1;
       if (q) {
         matchStart = n.title.toLowerCase().indexOf(q);
