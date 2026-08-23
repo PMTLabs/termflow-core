@@ -404,6 +404,14 @@ pub struct AppState<R: Runtime = Wry> {
     // is documented as unreliable here). Defaults to the boot window ("main"); the
     // titlebar toggle (set_active_window) and the window-destroy fallback update it.
     pub active_window: Arc<RwLock<String>>,
+    // The window Settings always opens/activates in, regardless of which window the
+    // user triggered "Open Settings" from. Same shape and promotion rule as
+    // `active_window` (default boot window, reassigned by the window-destroy
+    // handler when it closes) but tracked separately: `active_window` is a
+    // user-toggleable API/MCP routing target (titlebar control), and coupling
+    // Settings' location to that toggle would relocate Settings as a surprising
+    // side effect of an unrelated setting.
+    pub main_window: Arc<RwLock<String>>,
     // Stable per-process identity, returned on /health so a second instance can tell
     // "this port is mine" from "another instance owns it" (P0b conflict detection).
     pub instance_id: String,
@@ -512,6 +520,7 @@ impl<R: Runtime> Clone for AppState<R> {
             replay_prefix: self.replay_prefix.clone(),
             history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
+            main_window: self.main_window.clone(),
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
@@ -694,6 +703,7 @@ impl<R: Runtime> AppState<R> {
             replay_prefix: Arc::new(DashMap::new()),
             history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
+            main_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
@@ -718,12 +728,32 @@ impl<R: Runtime> AppState<R> {
     /// from the window-destroyed handler, where the closing window may still appear in
     /// `webview_windows()`). Order: current choice → boot window → first real window.
     pub fn resolve_active_window_label_excluding(&self, exclude: &str) -> String {
+        let chosen = self.active_window.read().clone();
+        self.resolve_window_label_excluding(&chosen, exclude)
+    }
+
+    /// The window Settings should open/activate in — see `main_window`'s doc comment.
+    pub fn resolve_main_window_label(&self) -> String {
+        self.resolve_main_window_label_excluding("")
+    }
+
+    /// Like `resolve_main_window_label`, but treats `exclude` as already gone (used
+    /// from the window-destroyed handler).
+    pub fn resolve_main_window_label_excluding(&self, exclude: &str) -> String {
+        let chosen = self.main_window.read().clone();
+        self.resolve_window_label_excluding(&chosen, exclude)
+    }
+
+    /// Shared normalizer behind both `resolve_active_window_label_excluding` and
+    /// `resolve_main_window_label_excluding`: given a preferred label, fall back to
+    /// the boot window, then to whatever real window is still alive. Order: `chosen`
+    /// → boot window → first real window.
+    fn resolve_window_label_excluding(&self, chosen: &str, exclude: &str) -> String {
         use tauri::Manager;
         let windows = self.app_handle.webview_windows();
         let live = |l: &str| l != exclude && l != "drag-preview" && windows.contains_key(l);
-        let chosen = self.active_window.read().clone();
-        if live(&chosen) {
-            return chosen;
+        if live(chosen) {
+            return chosen.to_string();
         }
         if live(DEFAULT_ACTIVE_WINDOW) {
             return DEFAULT_ACTIVE_WINDOW.to_string();

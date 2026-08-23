@@ -909,6 +909,41 @@ pub fn set_active_window(
     Ok(())
 }
 
+/// Payload for the `settings:open` broadcast — every window listens, but only the
+/// one whose label matches `target` actually opens/activates the Settings tab.
+#[derive(serde::Serialize, Clone)]
+struct SettingsOpenPayload {
+    target: String,
+    category: Option<String>,
+}
+
+/// Open (or activate) the single Settings tab, always in the current main window —
+/// regardless of which window this was invoked from. TermFlow supports multiple
+/// windows, each with its own Redux store, so without routing through one
+/// designated window, Settings opened from window B would only ever exist there.
+/// Broadcasts `settings:open`; the targeted window's `installSettingsRouting`
+/// listener does the actual tab creation/activation, and this also focuses that
+/// window so the user actually sees it land.
+#[tauri::command]
+pub fn open_settings_in_main_window(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    category: Option<String>,
+) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    let target = state.resolve_main_window_label();
+    app_handle
+        .emit("settings:open", SettingsOpenPayload { target: target.clone(), category })
+        .map_err(|e| e.to_string())?;
+    if let Some(w) = app_handle.get_webview_window(&target) {
+        // Unlike the drag-reattach path, the user didn't just interact with the
+        // target window — it may be minimized or on another desktop — so this is
+        // a full restore, not just a focus.
+        crate::webview_power::restore_and_focus(&w);
+    }
+    Ok(())
+}
+
 /// Best-effort current working directory of a terminal (backlog 004). Prefers the
 /// shell-reported cwd parsed from OSC sequences (authoritative for PowerShell, whose
 /// process cwd is not live), then falls back to the OS process cwd (cmd / Unix
@@ -1144,6 +1179,12 @@ pub async fn save_config(app_handle: tauri::AppHandle, config: String) -> Result
 /// Merge top-level settings keys, leaving every other key alone. The renderer
 /// used to read the whole config, merge in JS and save it back — a lost update
 /// whenever the backend (or another instance) wrote in between.
+///
+/// Also broadcasts the merged keys as `config:changed` to every window (including
+/// the one that made the change — reapplying the same value there is a harmless
+/// no-op). TermFlow supports multiple windows, each with its own Redux store, so
+/// without this a setting changed in one window (font, color schema, ...) only
+/// ever took effect in that window's own terminals.
 #[tauri::command]
 pub async fn merge_config(
     app_handle: tauri::AppHandle,
@@ -1154,7 +1195,10 @@ pub async fn merge_config(
         .ok_or_else(|| "merge_config expects a JSON object".to_string())?
         .clone();
     let path = crate::app_config::config_path(&app_handle)?;
-    crate::app_config::merge_many_locked(&path, &updates)
+    crate::app_config::merge_many_locked(&path, &updates)?;
+    use tauri::Emitter;
+    let _ = app_handle.emit("config:changed", serde_json::Value::Object(updates));
+    Ok(())
 }
 
 /// Backlog 011: record one submitted command into the global command history.

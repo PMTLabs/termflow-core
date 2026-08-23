@@ -17,23 +17,21 @@ export function consumePendingSettingsCategory(): string | null {
 }
 
 /**
- * Open the Settings page, enforcing a single instance.
+ * Open (or activate) the Settings tab in THIS window's own store — the actual
+ * tab-creation logic. Called directly when there's no Tauri bridge (tests, plain
+ * browser dev server — only ever one window there), and otherwise only from
+ * `installSettingsRouting` below, in whichever window the backend names as the
+ * current main window.
  *
- * Settings is modelled as a tab with `shellType === 'settings'` (rendered by
- * SettingsPage in TerminalContainer). This is the ONE place that decides whether
- * to reuse the existing Settings tab or create a new one, so every entry point
- * (the Ctrl/Cmd+, hotkey, the New-Tab dropdown) keeps the invariant that at most
- * one Settings tab exists.
- *
- * If a Settings tab is already open it is simply activated (no second tab); if it
- * is already the active tab this is a no-op. No settings-dirty guard is needed
- * here — that guard only fires when *leaving* a dirty Settings tab, and we are
- * navigating *to* Settings.
+ * If a Settings tab is already open (in this window) it is simply activated (no
+ * second tab); if it is already the active tab this is a no-op. No settings-dirty
+ * guard is needed here — that guard only fires when *leaving* a dirty Settings
+ * tab, and we are navigating *to* Settings.
  *
  * Pass `category` to also jump to a specific Settings section (mounted tab: via a
  * DOM event it already listens for; fresh tab: via the pending-category hand-off).
  */
-export function openSettingsTab(category?: string): void {
+function openSettingsLocally(category?: string): void {
   const { tabs } = store.getState().tabs;
   const existing = tabs.find(tab => tab.shellType === SETTINGS_SHELL_TYPE);
 
@@ -59,4 +57,61 @@ export function openSettingsTab(category?: string): void {
       icon: '⚙️',
     }),
   );
+}
+
+/**
+ * Open the Settings page, enforcing a single instance AND a single HOST WINDOW.
+ *
+ * TermFlow supports multiple windows, each with its own independent Redux store —
+ * without routing through one designated window, a Settings tab opened from
+ * window B would only ever exist (and only ever apply its edits) there. Every
+ * call instead asks the backend which window is currently "main" (the boot
+ * window, or whichever window was promoted after it closed — see
+ * `resolve_main_window_label` in state.rs) and broadcasts `settings:open`;
+ * `installSettingsRouting` below is what actually opens/activates the tab, in
+ * whichever window turns out to be the target, and the backend focuses that
+ * window so the user sees it land regardless of where they triggered it from.
+ *
+ * Falls back to opening locally when there's no Tauri bridge (tests, plain
+ * browser dev server) — there's only ever one window in that case anyway.
+ */
+export function openSettingsTab(category?: string): void {
+  // No `window` at all outside a browser/webview (e.g. this module under a
+  // node-environment unit test) — same "only one window anyway" case as no
+  // Tauri bridge.
+  const api = typeof window === 'undefined' ? undefined : window.electronAPI;
+  if (!api?.openSettingsInMainWindow) {
+    openSettingsLocally(category);
+    return;
+  }
+  api.openSettingsInMainWindow(category).catch((err) => {
+    console.error('openSettingsInMainWindow failed; opening locally instead', err);
+    openSettingsLocally(category);
+  });
+}
+
+let routingInstalled = false;
+
+/**
+ * Wire up THIS window to react to `settings:open` broadcasts (see
+ * `openSettingsTab` above) — call once per window boot. Idempotent.
+ */
+export function installSettingsRouting(): void {
+  if (routingInstalled) return;
+  routingInstalled = true;
+  void (async () => {
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const myLabel = getCurrentWindow().label;
+      await listen('settings:open', (event: any) => {
+        const p = event?.payload;
+        if (!p || typeof p !== 'object' || p.target !== myLabel) return;
+        openSettingsLocally(typeof p.category === 'string' ? p.category : undefined);
+      });
+    } catch {
+      // Not under Tauri — nothing to route (openSettingsTab already falls back
+      // to opening locally in that case).
+    }
+  })();
 }

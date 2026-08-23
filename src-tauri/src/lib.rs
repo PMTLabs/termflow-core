@@ -1491,6 +1491,7 @@ pub fn run() {
         commands::update_and_restart,
         commands::get_active_window,
         commands::set_active_window,
+        commands::open_settings_in_main_window,
         commands::get_terminal_cwd,
         commands::get_terminal_cwds,
         commands::resolve_terminal_path,
@@ -1646,6 +1647,13 @@ pub fn run() {
                     *state.active_window.write() = resolved.clone();
                     use tauri::Emitter;
                     let _ = app.emit("active-window:changed", resolved);
+                }
+                // Same reassignment for the Settings host: if the window that just
+                // closed was "main", promote another live window so the next
+                // "Open Settings" (from anywhere) targets a window that still exists.
+                if state.main_window.read().as_str() == window.label() {
+                    let resolved = state.resolve_main_window_label_excluding(window.label());
+                    *state.main_window.write() = resolved;
                 }
             }
             commands::refresh_menu(app);
