@@ -322,9 +322,10 @@ impl Session {
     /// Cloned out because teardown drops the `Session` it belongs to.
     ///
     /// Test-only, like `SessionManager::set_teardown_grace`: production never
-    /// reads the flag, only writes it. Ungated it is `dead_code`, which this
-    /// crate builds with `-D warnings` — caught by CI in 10s, and reproducible
-    /// locally with `RUSTFLAGS="-D warnings" cargo build`.
+    /// reads the flag, only writes it, so ungated this is a `dead_code`
+    /// warning. Gating is hygiene, not a CI requirement — rust-tests.yml sets
+    /// no `RUSTFLAGS` and the crate has no `deny(warnings)`, so warnings do
+    /// not fail the build.
     #[cfg(test)]
     pub fn kill_done_flag(&self) -> Arc<AtomicBool> {
         self.kill_done.clone()
