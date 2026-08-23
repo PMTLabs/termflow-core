@@ -25,6 +25,7 @@ function code(file: string): string {
 const DRAG = code(path.join(CANVAS, 'useCanvasDrag.ts'));
 const MENU = code(path.join(CANVAS, 'CanvasMenu.tsx'));
 const CONTAINER = code(path.join(COMPONENTS, 'TerminalContainer.tsx'));
+const TAB_MANAGER = code(path.join(COMPONENTS, 'Tabs', 'TabManager.tsx'));
 
 describe('a group drag is one transition per pointer event', () => {
   /** The group branch of `onMove` alone — the file also dispatches `setNodeGeom` from the
@@ -87,6 +88,43 @@ describe('canvas geometry is pruned when a terminal goes, not when a tab does', 
   it('is not gated on a tab having been closed', () => {
     expect(pruneEffect).not.toContain('if (closed)');
     expect(CONTAINER).not.toContain('let closed = false;');
+  });
+});
+
+/**
+ * A closed tab's `tabPanes` entry must outlive `closeOneTab` itself.
+ *
+ * The prune effect above reads `treesByTabId` directly and unfiltered, so it only stays
+ * accurate if a closed tab's tree is actually removed from it — and that removal happens in
+ * exactly one place, `TerminalContainer`'s own cleanup effect, which detects a closed tab by
+ * finding its id missing from `tabs` while still present in the `tabPanes` mirror. If
+ * `closeOneTab` deletes that mirror entry itself, it erases the only signal the cleanup effect
+ * has: `removeTabTree` never fires, `treesByTabId` keeps the dead tab's tree (and terminal id)
+ * forever, and an overlay left open on that terminal never clears — `pruneCanvasGeometry` still
+ * finds it "live", so `overlayId` stays set and the toolbar/minimap (`!overlayId` in
+ * `CanvasMode`) stay hidden after the terminal is gone.
+ */
+describe('closeOneTab leaves tabPanes cleanup to TerminalContainer', () => {
+  const start = TAB_MANAGER.indexOf('const closeOneTab = useCallback((id: string) => {');
+  const fn = TAB_MANAGER.slice(start, TAB_MANAGER.indexOf('}, [dispatch]);', start));
+
+  it('has a closeOneTab body to assert against', () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(fn).toContain('dispatch(removeTab(id));');
+  });
+
+  /**
+   * Bounded on what the FIXED body actually does — nothing — rather than on the one literal
+   * spelling (`delete tabPanes[id]`) the original bug used. A regex keyed to that spelling
+   * alone survives a renamed alias (`const tp = window.tabPanes; delete tp[id]`), a direct
+   * `window.__TAB_PANES__[id]`, or `Reflect.deleteProperty(...)` — none of which contain that
+   * literal, all of which would erase the same cleanup signal. `deleteProperty` is checked
+   * separately because `\bdelete\b` has a word boundary on both sides and does not match inside
+   * the identifier `deleteProperty`.
+   */
+  it('does not delete its own tabPanes entry before TerminalContainer can see it go', () => {
+    expect(fn).not.toMatch(/\bdelete\b/);
+    expect(fn).not.toMatch(/deleteProperty/);
   });
 });
 
