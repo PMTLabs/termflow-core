@@ -320,6 +320,12 @@ impl Session {
 
     /// Observe whether this session's kill has finished — see `kill_done`.
     /// Cloned out because teardown drops the `Session` it belongs to.
+    ///
+    /// Test-only, like `SessionManager::set_teardown_grace`: production never
+    /// reads the flag, only writes it. Ungated it is `dead_code`, which this
+    /// crate builds with `-D warnings` — caught by CI in 10s, and reproducible
+    /// locally with `RUSTFLAGS="-D warnings" cargo build`.
+    #[cfg(test)]
     pub fn kill_done_flag(&self) -> Arc<AtomicBool> {
         self.kill_done.clone()
     }
