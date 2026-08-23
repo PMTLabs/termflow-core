@@ -24,7 +24,7 @@ import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
-import { dropTabAcrossWindows } from '../Panes/dnd/detach';
+import { dropTabAcrossWindows, detachTabToNewWindow } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import './TabManager.css';
 
@@ -62,6 +62,21 @@ function pointOutsideViewport(clientX: number, clientY: number): boolean {
 }
 
 const DRAG_THRESHOLD_PX = 5;
+
+/**
+ * Vertical distance the pointer must clear the tab strip by before a release
+ * counts as "pulled the tab out" — matching the Chrome/Firefox convention of
+ * detaching a tab dragged below (or above) the strip, not only one dragged
+ * past the whole OS window's edge. A small tolerance keeps ordinary in-strip
+ * reordering (which wiggles a few px vertically) from accidentally detaching.
+ */
+const STRIP_DETACH_LIFT_PX = 24;
+
+/** True when a client point has been pulled clearly out of the tab strip's rect. */
+function pointOutsideStrip(rect: { top: number; bottom: number } | null, clientY: number): boolean {
+  if (!rect) return false;
+  return clientY < rect.top - STRIP_DETACH_LIFT_PX || clientY > rect.bottom + STRIP_DETACH_LIFT_PX;
+}
 
 interface TabDragHandlers {
   tabId: string;
@@ -106,6 +121,8 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   const startY = e.clientY;
   let dragging = false;
   let ghost: HTMLElement | null = null;
+  // Captured once at press time — the strip's height doesn't change mid-drag.
+  const stripRect = (e.currentTarget as HTMLElement).closest('.tab-manager')?.getBoundingClientRect() ?? null;
 
   const api = window.electronAPI;
   // The native preview is a whole separate transparent/always-on-top Tauri window,
@@ -181,6 +198,17 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
         tabTitle: h.tabTitle,
         clientX: ev.clientX,
         clientY: ev.clientY,
+      });
+    } else if (pointOutsideStrip(stripRect, ev.clientY) && store.getState().tabs.tabs.length > 1) {
+      // Pulled out of the tab strip but released inside this same window (e.g.
+      // dropped over the terminal pane below it). There's no other window under
+      // the cursor to hit-test against, so detach straight to a new one — same
+      // as the pointless-relocate guard in dropTabAcrossWindows, the last
+      // remaining tab is skipped rather than just reopening this window.
+      void detachTabToNewWindow({
+        tabId: h.tabId,
+        tabTitle: h.tabTitle,
+        cursor: { x: ev.clientX, y: ev.clientY },
       });
     }
   };
