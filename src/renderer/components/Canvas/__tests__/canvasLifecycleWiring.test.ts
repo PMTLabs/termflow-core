@@ -113,8 +113,18 @@ describe('closeOneTab leaves tabPanes cleanup to TerminalContainer', () => {
     expect(fn).toContain('dispatch(removeTab(id));');
   });
 
+  /**
+   * Bounded on what the FIXED body actually does — nothing — rather than on the one literal
+   * spelling (`delete tabPanes[id]`) the original bug used. A regex keyed to that spelling
+   * alone survives a renamed alias (`const tp = window.tabPanes; delete tp[id]`), a direct
+   * `window.__TAB_PANES__[id]`, or `Reflect.deleteProperty(...)` — none of which contain that
+   * literal, all of which would erase the same cleanup signal. `deleteProperty` is checked
+   * separately because `\bdelete\b` has a word boundary on both sides and does not match inside
+   * the identifier `deleteProperty`.
+   */
   it('does not delete its own tabPanes entry before TerminalContainer can see it go', () => {
-    expect(fn).not.toMatch(/delete tabPanes\[id\]/);
+    expect(fn).not.toMatch(/\bdelete\b/);
+    expect(fn).not.toMatch(/deleteProperty/);
   });
 });
 
