@@ -240,11 +240,13 @@ impl SessionManager {
     /// `Session::kill` is deliberately backgrounded so an interactive
     /// `Control::Close` cannot stall the frame loop — but that is only safe
     /// while this process keeps running. Here it does not: the caller returns
-    /// `TearDown`, `serve` returns, and the process exits within milliseconds.
-    /// A kill thread that has not yet run dies with it, and on Unix
-    /// `kill_process_tree` signals in-process via `killpg`, so an unstarted
-    /// thread means the signal is NEVER sent — the shell is orphaned with no GUI
-    /// left to reach it. Joining is what makes teardown actually tear down.
+    /// `TearDown`, `serve` returns, and the process exits within milliseconds —
+    /// a race the kill thread may well win, but is not guaranteed to. Losing it
+    /// costs more on Unix than on Windows: `kill_process_tree` signals
+    /// in-process via `killpg`, so a thread that never ran means the signal is
+    /// never sent at all, whereas a `taskkill.exe` that already launched
+    /// completes on its own. Either way the shell is orphaned with no GUI left
+    /// to reach it. Joining is what makes teardown actually tear down.
     ///
     /// Bounded: kills run in parallel and the deadline is absolute, so one
     /// wedged `taskkill` cannot hold the host open indefinitely.
@@ -392,28 +394,39 @@ mod tests {
     /// a backgrounded kill too, so a poll would pass against the very bug this
     /// pins. The claim is specifically that the child is dead by the time the
     /// call RETURNS.
+    ///
+    /// TWO sessions, because one cannot tell "kills every session" from "kills
+    /// the first session it finds" — and the teardown loop is exactly the shape
+    /// that gets that wrong.
     #[test]
-    fn unarmed_disconnect_reaps_children_before_returning() {
+    fn unarmed_disconnect_reaps_every_child_before_returning() {
         let (mut m, _e, _r) = mgr();
-        let sess = Session::spawn(
-            "tab-teardown".into(),
-            &long_lived_spec(),
-            4096,
-            m.events.clone(),
-            true,
-        )
-        .expect("spawn a long-lived child");
-        let pid = sess.pid();
-        assert!(pid > 0, "need a real pid to assert against");
-        assert!(pid_is_alive(pid), "child should be alive before teardown");
-        m.sessions.insert("tab-teardown".into(), sess);
+        let mut pids = Vec::new();
+        for tab in ["tab-teardown-a", "tab-teardown-b"] {
+            let sess =
+                Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
+                    .expect("spawn a long-lived child");
+            let pid = sess.pid();
+            assert!(pid > 0, "need a real pid to assert against");
+            // Presence before absence: a liveness oracle that only ever checks
+            // "gone" passes vacuously if the child never started.
+            assert!(pid_is_alive(pid), "{tab} should be alive before teardown");
+            m.sessions.insert(tab.into(), sess);
+            pids.push((tab, pid));
+        }
 
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
 
+        for (tab, pid) in pids {
+            assert!(
+                !pid_is_alive(pid),
+                "on_gui_disconnect returned while {tab} (pid {pid}) was still alive — \
+                 the kill was left running in a detached thread that dies with the process"
+            );
+        }
         assert!(
-            !pid_is_alive(pid),
-            "on_gui_disconnect returned while pid {pid} was still alive — the kill \
-             was left running in a detached thread that dies with the process"
+            m.sessions.is_empty(),
+            "teardown reaped the children but kept the session records"
         );
     }
 
