@@ -1019,10 +1019,25 @@ pub fn spawn_terminal(
 
 /// Kill a shell process tree (taskkill /T /F on Windows; kill -9 on the
 /// process group on Unix). No-op for pid 0 (unknown).
+///
+/// Backgrounded on its own thread: every caller (`commands::close_terminal`,
+/// `api_server::delete_terminal`, `api_server::fleet_close`) invokes this
+/// inline from an async Tauri command / Axum handler. `taskkill /T /F` can
+/// run 1-3s+ for a shell's whole process tree, and `.output()`/`.status()`
+/// blocks synchronously — which stalls that specific tokio task (and the
+/// worker thread running it) for the duration, same class of bug fixed for
+/// the pty-host sidecar's `Session::kill()` (PR #61). None of the three
+/// callers use the process's death as a signal before proceeding to
+/// `cleanup_terminal_state`, so firing this off and returning immediately is
+/// safe.
 pub fn kill_process_tree(pid: u32) {
     if pid == 0 {
         return;
     }
+    std::thread::spawn(move || kill_process_tree_blocking(pid));
+}
+
+fn kill_process_tree_blocking(pid: u32) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
