@@ -168,6 +168,20 @@ const App: React.FC = () => {
           const updates = event?.payload;
           if (updates && typeof updates === 'object') {
             applyConfigSettings(updates);
+            // Shell profiles + default profile are deliberately NOT part of
+            // applyConfigSettings: at BOOT that function runs concurrently with
+            // initializeShellProfiles (Promise.all above), which re-queries LIVE
+            // system profiles and merges saved cwd overrides in — dispatching the
+            // raw saved snapshot here too would race it and could overwrite the
+            // correctly-merged list with a stale one. Cross-window sync has no such
+            // race (initializeShellProfiles only ever runs once, at boot), so it's
+            // safe to apply here, just not by folding it into the shared function.
+            if (Array.isArray(updates.shellProfiles)) {
+              dispatch(setShellProfiles(updates.shellProfiles));
+            }
+            if (typeof updates.defaultProfile === 'string' && updates.defaultProfile) {
+              dispatch(setDefaultProfile(updates.defaultProfile));
+            }
           }
         });
       } catch {
