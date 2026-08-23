@@ -269,11 +269,21 @@ impl Session {
     /// Kill the child process tree — but NEVER for a session known to have
     /// exited: the OS may have reused its PID, and taskkill'ing a recycled PID
     /// would kill an unrelated process tree.
+    ///
+    /// Backgrounded on its own thread: this runs from `Drop`, reached via
+    /// `Control::Close` on the single connection-reader loop
+    /// (`transport::run_connection`). `kill_process_tree` blocks on
+    /// `taskkill /T /F` (can run 1-3s+ for a shell's whole tree), and that
+    /// loop can't read the NEXT frame — e.g. the `Spawn` for a tab opened
+    /// right after this close — until this call returns. Backgrounding it
+    /// unblocks the loop immediately instead of stalling every subsequent
+    /// frame behind one slow taskkill.
     pub fn kill(&self) {
         if self.exited.load(Ordering::Acquire) {
             return;
         }
-        crate::util::kill_process_tree(self.pid);
+        let pid = self.pid;
+        std::thread::spawn(move || crate::util::kill_process_tree(pid));
     }
 }
 
