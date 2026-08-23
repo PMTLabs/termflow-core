@@ -25,7 +25,24 @@ const MAX_ARM_SECS: u64 = 24 * 60 * 60;
 const RING_CAP: usize = 256 * 1024;
 /// How long teardown waits for child process trees to be reaped before exiting
 /// anyway. Kills run in parallel, so this bounds the TOTAL wait, not each one.
-const TEARDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
+///
+/// **Measured, not guessed.** `taskkill /PID <pid> /T /F` against a `cmd.exe`
+/// with one child took **4.2–4.8s** across three samples on a Windows 11 dev
+/// machine — timed standalone from a shell, with no Rust in the picture. (That
+/// is also the stall this whole line of work started from: it is what the
+/// sidecar's frame loop used to block on for every tab close.)
+///
+/// An earlier revision used 5s, which is **less than one measured kill**.
+/// Because the deadline is shared across handles, the first kill consumed the
+/// entire budget and every remaining session was skipped without being waited
+/// for at all — orphaning precisely what this exists to prevent. The value has
+/// to clear a slow kill with room for contention, not merely a typical one.
+///
+/// The cost of being generous is near zero: the GUI has already exited by the
+/// time this runs, so a sidecar lingering a few extra seconds is invisible. The
+/// bound exists only so a genuinely wedged `taskkill` cannot keep the host
+/// alive forever.
+const TEARDOWN_KILL_GRACE: Duration = Duration::from_secs(30);
 
 pub enum Disposition {
     TearDown,
@@ -45,6 +62,11 @@ pub struct SessionManager {
     survivable: bool,
     events: Sender<Data>,
     responses: Sender<Response>,
+    /// Teardown's kill-wait budget. A field rather than a bare constant so a
+    /// test can assert the *waiting* without also depending on how fast the
+    /// host machine's `taskkill` happens to be — see `TEARDOWN_KILL_GRACE`,
+    /// which is measured in seconds, not milliseconds.
+    teardown_grace: Duration,
 }
 
 impl SessionManager {
@@ -62,7 +84,15 @@ impl SessionManager {
             survivable,
             events,
             responses,
+            teardown_grace: TEARDOWN_KILL_GRACE,
         }
+    }
+
+    /// Override the teardown kill-wait budget. Tests only: production always
+    /// uses the measured `TEARDOWN_KILL_GRACE`.
+    #[cfg(test)]
+    pub fn set_teardown_grace(&mut self, grace: Duration) {
+        self.teardown_grace = grace;
     }
 
     #[cfg(test)]
@@ -250,6 +280,13 @@ impl SessionManager {
     ///
     /// Bounded: kills run in parallel and the deadline is absolute, so one
     /// wedged `taskkill` cannot hold the host open indefinitely.
+    ///
+    /// Note what this does and does not guarantee. It guarantees the kill was
+    /// **issued and completed** before the process exits. It does NOT guarantee
+    /// the child is already reaped when this returns — that is the kernel's
+    /// schedule (a SIGKILL'd Unix child is a zombie until its waiter runs).
+    /// Issuing the kill is the part that dies with the process, so it is the
+    /// part worth waiting for.
     fn tear_down_sessions(&mut self) {
         let kills: Vec<_> = self.sessions.values().filter_map(|s| s.kill()).collect();
         // Dropping the sessions now reaches `Session::drop` → `kill()`, which
@@ -258,7 +295,7 @@ impl SessionManager {
         if kills.is_empty() {
             return;
         }
-        let deadline = Instant::now() + TEARDOWN_KILL_GRACE;
+        let deadline = Instant::now() + self.teardown_grace;
         for k in kills {
             // `JoinHandle` has no timed join, so poll `is_finished` against a
             // shared deadline rather than blocking on `join` per handle.
@@ -297,6 +334,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use tokio::sync::mpsc::channel;
 
     fn mgr() -> (
@@ -390,18 +428,40 @@ mod tests {
     /// sent at all and the shell is orphaned. This is the regression the #61
     /// fix introduced by backgrounding `Session::kill`.
     ///
-    /// Deliberately asserted with NO polling loop: "eventually dead" is true of
-    /// a backgrounded kill too, so a poll would pass against the very bug this
-    /// pins. The claim is specifically that the child is dead by the time the
-    /// call RETURNS.
+    /// The oracle is `kill_done`, NOT pid liveness, and the distinction is the
+    /// whole point of this test.
+    ///
+    /// What this call promises is that it *waited for the kill* — the one thing
+    /// it controls. It cannot promise the child is already reaped: that is the
+    /// kernel's schedule. A SIGKILL'd Unix child stays a zombie (with
+    /// `kill(pid, 0)` still returning 0) until its waiter thread runs, and a
+    /// Windows process can still read `STILL_ACTIVE` for a moment after
+    /// `taskkill.exe` exits. An earlier revision asserted pid-death immediately
+    /// and was therefore testing OS cleanup timing — which is exactly how it
+    /// produced one unreproducible failure in fourteen runs.
+    ///
+    /// The obvious repair — poll pid liveness for a second — is worse than the
+    /// flake: in a TEST the process does not exit, so the pre-fix detached
+    /// threads do run and the child dies within milliseconds. A bounded poll
+    /// passes against the broken implementation too, turning the guard vacuous.
+    /// So the flaky strong oracle is replaced by a deterministic one, not a
+    /// stable weak one. The pid check is kept only as a bounded secondary
+    /// sanity check that the kill did something real.
     ///
     /// TWO sessions, because one cannot tell "kills every session" from "kills
     /// the first session it finds" — and the teardown loop is exactly the shape
     /// that gets that wrong.
     #[test]
-    fn unarmed_disconnect_reaps_every_child_before_returning() {
+    fn unarmed_disconnect_waits_for_every_child_kill_before_returning() {
         let (mut m, _e, _r) = mgr();
-        let mut pids = Vec::new();
+        // Generous budget so this asserts that teardown WAITS, not that this
+        // machine's `taskkill` beats the production deadline. A measured kill is
+        // 4-5s here, so a tight budget would make the test a speed benchmark —
+        // and it did: at 5s the first kill ate the shared deadline and the
+        // second session was skipped, failing this test for the right reason
+        // about the wrong subject.
+        m.set_teardown_grace(Duration::from_secs(120));
+        let mut watched = Vec::new();
         for tab in ["tab-teardown-a", "tab-teardown-b"] {
             let sess =
                 Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
@@ -411,23 +471,56 @@ mod tests {
             // Presence before absence: a liveness oracle that only ever checks
             // "gone" passes vacuously if the child never started.
             assert!(pid_is_alive(pid), "{tab} should be alive before teardown");
+            let done = sess.kill_done_flag();
+            assert!(!done.load(Ordering::Acquire), "{tab} cannot be killed yet");
             m.sessions.insert(tab.into(), sess);
-            pids.push((tab, pid));
+            watched.push((tab, pid, done));
+        }
+
+        // Precondition at the moment that matters. Asserting liveness only at
+        // spawn proves nothing about the instant teardown runs: a child that
+        // died in between sets `exited`, `kill()` correctly declines to touch a
+        // possibly-recycled pid, and the assertions below would then be blaming
+        // teardown for a child that killed itself.
+        for (tab, _pid, _done) in &watched {
+            assert!(
+                m.sessions.get(*tab).expect("session still registered").is_alive(),
+                "{tab} exited on its own before teardown — this run proves nothing"
+            );
         }
 
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
 
-        for (tab, pid) in pids {
+        // PRIMARY, deterministic: every kill ran to completion before the call
+        // returned. `join` gives this a happens-before edge, so it is exact —
+        // and a backgrounded kill fails it, since spawning `taskkill` alone
+        // takes far longer than the microseconds this assertion is away.
+        for (tab, _pid, done) in &watched {
             assert!(
-                !pid_is_alive(pid),
-                "on_gui_disconnect returned while {tab} (pid {pid}) was still alive — \
-                 the kill was left running in a detached thread that dies with the process"
+                done.load(Ordering::Acquire),
+                "on_gui_disconnect returned before {tab}'s kill finished — it was left \
+                 in a detached thread, which at teardown dies with the process"
             );
         }
         assert!(
             m.sessions.is_empty(),
-            "teardown reaped the children but kept the session records"
+            "teardown ran the kills but kept the session records"
         );
+
+        // SECONDARY, bounded: the kill actually reaped the child. Deliberately
+        // NOT the primary assertion (see above) — it is bounded because OS
+        // cleanup is asynchronous, and it is meaningful only because the
+        // deterministic check above already ran.
+        for (tab, pid, _done) in &watched {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while pid_is_alive(*pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !pid_is_alive(*pid),
+                "{tab} (pid {pid}) survived its kill entirely"
+            );
+        }
     }
 
     /// An arm belongs to the GUI generation that set it. A NEW GUI connecting

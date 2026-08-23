@@ -59,6 +59,17 @@ pub struct Session {
     /// `taskkill /T /F` for the same pid is precisely the recycled-pid hazard
     /// `exited` exists to prevent, just arrived at by a different route.
     killing: Arc<AtomicBool>,
+    /// Set by the kill thread once `kill_process_tree` has RETURNED.
+    ///
+    /// Makes teardown's actual contract — "this call waited for the kill" —
+    /// observable. The child's *death* cannot serve that purpose: it is
+    /// asynchronous in the kernel and outside our control. A SIGKILL'd Unix
+    /// process stays a zombie (and `kill(pid, 0)` keeps returning 0) until its
+    /// waiter thread reaps it, and a Windows process can still report
+    /// `STILL_ACTIVE` briefly after `taskkill.exe` exits. Asserting on pid
+    /// liveness therefore tests the OS's cleanup schedule, not our behaviour —
+    /// which is precisely how it flakes.
+    kill_done: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -193,6 +204,7 @@ impl Session {
             attached,
             exited,
             killing: Arc::new(AtomicBool::new(false)),
+            kill_done: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -299,7 +311,17 @@ impl Session {
             return None; // already killing — see the `killing` field doc
         }
         let pid = self.pid;
-        Some(std::thread::spawn(move || crate::util::kill_process_tree(pid)))
+        let done = self.kill_done.clone();
+        Some(std::thread::spawn(move || {
+            crate::util::kill_process_tree(pid);
+            done.store(true, Ordering::Release);
+        }))
+    }
+
+    /// Observe whether this session's kill has finished — see `kill_done`.
+    /// Cloned out because teardown drops the `Session` it belongs to.
+    pub fn kill_done_flag(&self) -> Arc<AtomicBool> {
+        self.kill_done.clone()
     }
 }
 
