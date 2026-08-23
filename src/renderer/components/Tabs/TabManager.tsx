@@ -547,10 +547,14 @@ export const TabManager: React.FC<TabManagerProps> = () => {
       dispatch(clearSessionClosed({ terminalId }));
     }
 
-    if (paneTree) {
-      console.log(`TabManager: Cleaning up tabPanes entry for ${id}`);
-      delete tabPanes[id];
-    }
+    // NOT `delete tabPanes[id]` here. store/index.ts's mirror subscription is upsert-only by
+    // design — "deletions stay in the existing TerminalContainer cleanup path, which also
+    // dispatches removeTabTree" — and that path detects a closed tab by diffing `tabPanes`
+    // against the live tab list. Deleting the entry here first removes the only signal that
+    // effect has, so `removeTabTree` never fires and `panes.treesByTabId` keeps this tab's tree
+    // forever. Canvas geometry prunes straight from `treesByTabId` (`plan/013` Task 22), so an
+    // overlay left open on this tab's terminal then never clears: `overlayId` still names a
+    // "live" node, and the toolbar/minimap — both gated on `!overlayId` — stay hidden.
 
     // Remove tab from Redux state (UI update)
     dispatch(removeTab(id));
