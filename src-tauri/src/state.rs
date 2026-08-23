@@ -1571,11 +1571,17 @@ impl<R: Runtime> AppState<R> {
     /// in `host_close_pending` and delivered on the next successful connect, so
     /// the session can't linger in the host as an adoptable zombie.
     pub fn host_close(&self, id: &str) -> bool {
+        use tauri::Emitter;
         if !self.is_host_owned(id) {
             return false;
         }
         // Resolve BEFORE the removals below drop the record we read it from.
         let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
+        // ...and the cwd for the same reason, one step further out: every caller runs
+        // `cleanup_terminal_state` the moment this returns, and that drops `terminal_cwds`.
+        // It is the directory the shell died in, which is what a restart-in-place resumes in
+        // (spec 045 §3.3) — the pane survives an API close, so this is not dead weight.
+        let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
         match self.pty_host_client().as_ref() {
             Some(c) if c.is_alive() => c.close(&session_key),
             _ => {
@@ -1586,6 +1592,37 @@ impl<R: Runtime> AppState<R> {
         }
         self.host_terminals.remove(id);
         self.host_stream_offsets.remove(&session_key);
+
+        // Announce the end HERE, because nothing downstream will.
+        //
+        // The sidecar does send an `Exit` frame for a session it closes — but it arrives
+        // ~a second later, over the pipe, and by then the caller has already run
+        // `cleanup_terminal_state`, which calls `identity.unindex`. `route_inbound` then
+        // fails to resolve the session key and DROPS the frame
+        // (`pty_host_client.rs`, "dropping Exit for unknown session"). So a host-owned
+        // close emitted nothing at all: the renderer never saw `pty:exit`, and an
+        // API/MCP-closed pane sat there with a dead shell, no session-closed banner, no
+        // ended tint and no `markTabExited`. The in-process twin has always announced —
+        // `kill_process_tree` EOFs the reader thread, which emits from `pty_manager.rs` —
+        // so this makes the two paths indistinguishable to the renderer, which is the
+        // point: it is the same event, and only the plumbing under it differs.
+        //
+        // Regression from `3eb571d` (design 014). Before it the `Exit` frame was passed
+        // straight through with no lookup, so this close DID reach the UI.
+        //
+        // `exitCode: 0` and the payload shape are copied from that in-process emit rather
+        // than invented, for the same reason: a deliberate close produces no status either
+        // way, and a second spelling of "closed" is a second thing to keep in agreement.
+        //
+        // Emitting unconditionally — including on the pipe-down branch above, where the
+        // close is only QUEUED. The terminal is over as far as this GUI is concerned the
+        // moment its state is torn down, and a deferred delivery to the host does not
+        // change that. Harmless if a future caller skips `cleanup_terminal_state` and the
+        // host's own `Exit` therefore does resolve: `markSessionClosed` is idempotent by
+        // construction, so the duplicate lands on the state it already produced.
+        let _ = self
+            .app_handle
+            .emit("terminal:exit", host_exit_payload(id, exit_cwd));
         true
     }
 
@@ -1728,6 +1765,29 @@ impl<R: Runtime> AppState<R> {
         // in the routing set after its state is torn down.
         self.host_terminals.remove(id);
     }
+}
+
+/// The `terminal:exit` payload for a terminal that ENDED — the one shape the renderer's
+/// `onTerminalExit` bridge accepts.
+///
+/// A free function, and taking the resolved cwd rather than `&AppState`, so it can be unit
+/// tested without a real `AppHandle<Wry>` — the same constraint (and the same answer)
+/// `pty_manager::exit_cwd_for` documents.
+///
+/// **`id` is the PROCESS id (`pc-`), never the session key.** That is the whole of design
+/// 014's inbound rule restated on the outbound side: the renderer's `TerminalService` maps
+/// this back to a terminal id by scanning its `terminalId -> process` table, so a session key
+/// here resolves to nothing and the exit silently reaches no pane — which is exactly the
+/// failure this payload exists to end.
+pub(crate) fn host_exit_payload(process_id: &str, exit_cwd: Option<String>) -> serde_json::Value {
+    serde_json::json!({
+        // Matches `pty_manager`'s in-process emit: portable-pty gives no status there, and a
+        // deliberate close has none here, so both report 0 rather than two different
+        // stand-ins for "we don't know".
+        "id": process_id,
+        "exitCode": 0,
+        "cwd": exit_cwd,
+    })
 }
 
 /// Tracks focus-event reporting (DECSET/DECRST 1004) for one terminal by
@@ -2629,5 +2689,112 @@ mod session_key_fallback_tests {
         ] {
             assert!(!session_key_of(&t).is_empty(), "an empty key is silently dropped by the host");
         }
+    }
+}
+
+/* ---- A host-owned close must ANNOUNCE itself ------------------------------
+ *
+ * Reported from live use: a terminal closed over the API/MCP left its pane sitting there
+ * with a dead shell — no "Session closed" banner, no ended tint, no tab-exit mark.
+ *
+ * The sidecar does report the close, but its `Exit` frame lands ~a second later, after the
+ * caller's `cleanup_terminal_state` has run `identity.unindex`; `route_inbound` then cannot
+ * resolve the session key and drops it. So the ONLY announcement is the one `host_close`
+ * makes itself. Nothing else in the chain can be asserted from here — `host_close` takes
+ * `&AppState`, which needs a real `AppHandle<Wry>` under the unit-test binary (see the
+ * `integration-tests` gate) — so the wiring is read from the source text, exactly as
+ * `canvas_endpoints`' liveness-filter guard does, and the payload itself is a free function
+ * precisely so it can be tested for real.
+ */
+#[cfg(test)]
+mod host_close_announces_tests {
+    use super::host_exit_payload;
+
+    #[test]
+    fn payload_is_keyed_by_the_process_id_not_the_session_key() {
+        let p = host_exit_payload("pc-abc123", None);
+        assert_eq!(p["id"], "pc-abc123");
+    }
+
+    /// The renderer's `TerminalService` maps this id back through its
+    /// `terminalId -> process` table. A session key resolves to nothing there, so the exit
+    /// would reach no pane — a silent no-op indistinguishable from the bug being fixed.
+    #[test]
+    fn a_session_key_is_never_substituted_for_the_process_id() {
+        let p = host_exit_payload("pc-abc123", None);
+        assert_ne!(p["id"], "tm-abc123", "a leaf/session key here reaches no pane");
+    }
+
+    /// Spec 045 §3.3: the directory the shell died in is what a restart-in-place resumes in,
+    /// and the pane SURVIVES an API close — so unlike the UI close path this is not
+    /// throwaway. `null` when unknown, which `setCwdSnapshot` ignores rather than erasing.
+    #[test]
+    fn the_cwd_travels_and_is_null_when_unknown() {
+        assert_eq!(host_exit_payload("pc-1", Some("D:\\work".into()))["cwd"], "D:\\work");
+        assert!(host_exit_payload("pc-1", None)["cwd"].is_null());
+    }
+
+    /// Parity with `pty_manager`'s in-process emit is the point of the whole fix: the two
+    /// paths must be the same event to the renderer. `0` also keeps `TabManager`'s
+    /// "already exited cleanly, skip the confirm" check working on an API-closed tab.
+    #[test]
+    fn the_exit_code_matches_the_in_process_emit() {
+        assert_eq!(host_exit_payload("pc-1", None)["exitCode"], 0);
+    }
+
+    /// Normalised: this checkout is CRLF and every slice below is newline delimited.
+    fn source() -> String {
+        include_str!("state.rs").replace("\r\n", "\n")
+    }
+
+    /// One method body, from its signature to the `}` that closes it at impl indent.
+    fn body_of(name: &str) -> String {
+        let src = source();
+        let sig = format!("pub fn {name}(");
+        let at = src
+            .find(&sig)
+            .unwrap_or_else(|| panic!("no fn {name} — it moved or was renamed"));
+        let rest = &src[at..];
+        let end = rest.find("\n    }\n").map(|i| i + 7).unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    /// Or every assertion below is about an empty string.
+    #[test]
+    fn found_the_method_it_is_reading() {
+        assert!(body_of("host_close").contains("host_close_pending"));
+    }
+
+    /// An over-long slice makes "host_close emits" a statement about the rest of the file —
+    /// `teardown_host_terminal` emits `terminal:exit` too, so this would pass with the call
+    /// deleted.
+    #[test]
+    fn the_slice_is_one_method_and_not_the_rest_of_the_file() {
+        let body = body_of("host_close");
+        assert!(!body.contains("pub fn host_repaint"), "slice ran past host_close");
+        assert!(body.len() < 4000, "slice is suspiciously long: {} bytes", body.len());
+    }
+
+    /// THE regression. Without this line an API/MCP close is silent.
+    #[test]
+    fn host_close_emits_terminal_exit() {
+        let body = body_of("host_close");
+        assert!(
+            body.contains("\"terminal:exit\""),
+            "host_close must announce the close — the sidecar's own Exit frame is dropped \
+             by route_inbound once the caller unindexes the session"
+        );
+        assert!(body.contains("host_exit_payload("), "must use the shared payload shape");
+    }
+
+    /// On BOTH branches. A close that could not reach the host is still a close as far as
+    /// this GUI is concerned — its state is torn down either way — so an emit tucked inside
+    /// the live-client arm would leave the pipe-down case silent.
+    #[test]
+    fn the_emit_is_after_the_match_so_a_queued_close_announces_too() {
+        let body = body_of("host_close");
+        let queued = body.find("host_close_pending.insert").expect("pipe-down arm gone");
+        let emit = body.find("\"terminal:exit\"").expect("emit gone");
+        assert!(emit > queued, "the emit sits inside the live-client arm; a queued close would be silent");
     }
 }
