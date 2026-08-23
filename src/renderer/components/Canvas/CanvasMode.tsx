@@ -826,6 +826,12 @@ export const CanvasMode: React.FC = () => {
       flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
     }
 
+    // Open it as the overlay right away — a spawned shell is exactly the terminal the user is
+    // about to type into, so hand it the keyboard instead of leaving it a node they still have
+    // to double-click. `setOverlayNode` also sets `focusedId`, and the `focusRaf` effect above
+    // puts the caret in it a frame later.
+    dispatch(setOverlayNode(plan.leafId));
+
     // Then the wire, if this came from a port. Server-minted id only, exactly as the drag path
     // does — an optimistic client id is never replaced, so a later delete would name a row
     // that does not exist and leave the real edge behind.
