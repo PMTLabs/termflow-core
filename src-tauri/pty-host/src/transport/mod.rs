@@ -140,6 +140,22 @@ async fn wait_for_reconnect(
 /// The write is an atomic create-if-absent — temp file + `hard_link`, which
 /// fails with `AlreadyExists` instead of replacing — so even a racing writer
 /// between our read and publish can never be clobbered (review 007 C-4).
+/// Static name for a control frame, for the frame-loop stall log. Borrowed
+/// rather than `{:?}`-formatted so logging never clones a frame's payload.
+fn control_label(c: &termflow_pty_protocol::Control) -> &'static str {
+    use termflow_pty_protocol::Control::*;
+    match c {
+        Spawn { .. } => "Spawn",
+        Resize { .. } => "Resize",
+        Close { .. } => "Close",
+        ListSessions { .. } => "ListSessions",
+        Attach { .. } => "Attach",
+        AttachAcked { .. } => "AttachAcked",
+        ArmDetach { .. } => "ArmDetach",
+        Disarm { .. } => "Disarm",
+    }
+}
+
 fn heal_record(record: &Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>) {
     let Some((path, rec)) = record else { return };
     if !matches!(termflow_pty_protocol::read_record(path), Ok(None)) {
@@ -221,10 +237,28 @@ where
             heard_from_peer = true;
             mgr.on_gui_connect();
         }
+        // This loop is strictly sequential: the next frame is not even READ
+        // until the current handler returns, so any handler that blocks delays
+        // every subsequent frame (a `Close` stalling the `Spawn` for a tab
+        // opened right after it). Anything slow enough to be user-visible is
+        // worth a line — a handler has no business taking this long.
+        let started = std::time::Instant::now();
+        let label = match &frame {
+            Frame::Ctrl(c) => control_label(c),
+            Frame::Data(Data::Stdin { .. }) => "Stdin",
+            _ => "other",
+        };
         match frame {
             Frame::Ctrl(c) => mgr.handle_control(c),
             Frame::Data(Data::Stdin { tab_id, bytes }) => mgr.handle_stdin(&tab_id, &bytes),
             _ => {}
+        }
+        let took = started.elapsed();
+        if took.as_millis() >= 100 {
+            log::warn!(
+                "[FRAMELOOP] {label} handler blocked the frame loop for {}ms",
+                took.as_millis()
+            );
         }
     }
 
