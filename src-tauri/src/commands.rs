@@ -1180,11 +1180,15 @@ pub async fn save_config(app_handle: tauri::AppHandle, config: String) -> Result
 /// used to read the whole config, merge in JS and save it back — a lost update
 /// whenever the backend (or another instance) wrote in between.
 ///
-/// Also broadcasts the merged keys as `config:changed` to every window (including
-/// the one that made the change — reapplying the same value there is a harmless
-/// no-op). TermFlow supports multiple windows, each with its own Redux store, so
-/// without this a setting changed in one window (font, color schema, ...) only
-/// ever took effect in that window's own terminals.
+/// Also broadcasts the merged keys as `config:changed` to every window — but
+/// ONLY when `merge_many_locked` reports the write actually changed something.
+/// TermFlow supports multiple windows, each with its own Redux store, so without
+/// the broadcast a setting changed in one window (font, color schema, ...) only
+/// ever took effect in that window's own terminals. The "actually changed" gate
+/// is load-bearing, not an optimization: every window that receives
+/// `config:changed` re-applies it through the same settings reducers that
+/// persist on every dispatch, so each window's echo calls back into this exact
+/// command — without the gate, every echo would broadcast again, forever.
 #[tauri::command]
 pub async fn merge_config(
     app_handle: tauri::AppHandle,
@@ -1195,9 +1199,11 @@ pub async fn merge_config(
         .ok_or_else(|| "merge_config expects a JSON object".to_string())?
         .clone();
     let path = crate::app_config::config_path(&app_handle)?;
-    crate::app_config::merge_many_locked(&path, &updates)?;
-    use tauri::Emitter;
-    let _ = app_handle.emit("config:changed", serde_json::Value::Object(updates));
+    let changed = crate::app_config::merge_many_locked(&path, &updates)?;
+    if changed {
+        use tauri::Emitter;
+        let _ = app_handle.emit("config:changed", serde_json::Value::Object(updates));
+    }
     Ok(())
 }
 

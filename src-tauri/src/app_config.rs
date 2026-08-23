@@ -230,25 +230,42 @@ impl Drop for ConfigLock {
 /// both write, lose one set of changes however atomic each write is. The lock
 /// must span the read AND the write, and it must be inter-process — a
 /// `Mutex` only serialises threads within one instance.
+///
+/// Returns whether any key's value actually differs from what was already
+/// stored (skipping the write entirely when nothing did). `merge_config` uses
+/// this to decide whether to broadcast `config:changed` — every window that
+/// receives that broadcast re-applies it through the SAME settings reducers
+/// that persist on every dispatch, so an unconditional broadcast on every call
+/// (including one that changed nothing) would have each window's echo trigger
+/// another merge, which finds the value already stored and would, without this
+/// check, still broadcast again forever.
 pub fn merge_many_locked(
     path: &std::path::Path,
     updates: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let _guard = ConfigLock::acquire(path)?;
     let mut root = read_root_at(path);
     if !root.is_object() {
         root = serde_json::json!({});
     }
+    let mut changed = false;
     for (k, v) in updates {
+        if root.get(k) != Some(v) {
+            changed = true;
+        }
         root[k] = v.clone();
     }
-    write_atomic(
-        path,
-        &serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?,
-    )
+    if changed {
+        write_atomic(
+            path,
+            &serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?,
+        )?;
+    }
+    Ok(changed)
 }
 
-/// Single-key convenience over [`merge_many_locked`].
+/// Single-key convenience over [`merge_many_locked`], for callers that don't
+/// need to know whether the value actually changed.
 pub fn merge_locked(
     path: &std::path::Path,
     key: &str,
@@ -256,7 +273,7 @@ pub fn merge_locked(
 ) -> Result<(), String> {
     let mut m = serde_json::Map::new();
     m.insert(key.to_string(), value);
-    merge_many_locked(path, &m)
+    merge_many_locked(path, &m).map(|_| ())
 }
 
 /// Load the network section, filling defaults for any missing field, and persist
@@ -403,6 +420,43 @@ mod tests {
         assert_eq!(back["theme"], serde_json::json!("dark"));
         assert_eq!(back["shellProfiles"], serde_json::json!([1, 2]));
         assert_eq!(back["network"]["apiPort"], serde_json::json!(42031));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn echoing_the_same_value_back_reports_no_change_and_skips_the_write() {
+        // This return value is load-bearing for cross-window settings sync (see
+        // merge_config's doc comment): a window that receives config:changed
+        // re-persists the same value it was just given, and that echo must be a
+        // true no-op — reporting `changed` for it would re-broadcast forever.
+        let dir = std::env::temp_dir().join("tf-cfg-echo");
+        let _ = std::fs::create_dir_all(&dir);
+        let target = dir.join("config.json");
+        std::fs::write(&target, "{}").unwrap();
+
+        let first = merge_locked(&target, "fontSize", serde_json::json!(16));
+        assert!(first.is_ok());
+        let before = std::fs::metadata(&target).unwrap().modified().unwrap();
+
+        // Re-merge the identical value — the echo this fix exists to catch.
+        let mut m = serde_json::Map::new();
+        m.insert("fontSize".to_string(), serde_json::json!(16));
+        let changed = merge_many_locked(&target, &m).unwrap();
+        assert!(!changed, "re-merging the same value must report no change");
+
+        // Not just the flag — the file must not have been rewritten either.
+        let after = std::fs::metadata(&target).unwrap().modified().unwrap();
+        assert_eq!(before, after, "an unchanged merge must not touch the file");
+
+        // A genuinely different value must still be reported and written.
+        let mut m2 = serde_json::Map::new();
+        m2.insert("fontSize".to_string(), serde_json::json!(18));
+        let changed2 = merge_many_locked(&target, &m2).unwrap();
+        assert!(changed2, "a real value change must still be reported");
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(back["fontSize"], serde_json::json!(18));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
