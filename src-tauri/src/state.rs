@@ -404,6 +404,14 @@ pub struct AppState<R: Runtime = Wry> {
     // is documented as unreliable here). Defaults to the boot window ("main"); the
     // titlebar toggle (set_active_window) and the window-destroy fallback update it.
     pub active_window: Arc<RwLock<String>>,
+    // The window Settings always opens/activates in, regardless of which window the
+    // user triggered "Open Settings" from. Same shape and promotion rule as
+    // `active_window` (default boot window, reassigned by the window-destroy
+    // handler when it closes) but tracked separately: `active_window` is a
+    // user-toggleable API/MCP routing target (titlebar control), and coupling
+    // Settings' location to that toggle would relocate Settings as a surprising
+    // side effect of an unrelated setting.
+    pub main_window: Arc<RwLock<String>>,
     // Stable per-process identity, returned on /health so a second instance can tell
     // "this port is mine" from "another instance owns it" (P0b conflict detection).
     pub instance_id: String,
@@ -512,6 +520,7 @@ impl<R: Runtime> Clone for AppState<R> {
             replay_prefix: self.replay_prefix.clone(),
             history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
+            main_window: self.main_window.clone(),
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
@@ -618,6 +627,35 @@ pub(crate) fn retarget_owning_tab(
     Ok(false)
 }
 
+/// Pure selection behind `active_window`/`main_window` promotion: given a
+/// preferred label, a label to treat as already gone (the window mid-close, which
+/// may still appear in `webview_windows()` when this runs from its own destroy
+/// handler), and the set of currently-live window labels, pick which one to use.
+/// Order: `chosen` → boot window (`DEFAULT_ACTIVE_WINDOW`) → first other live
+/// window → boot window.
+///
+/// Split out from `resolve_window_label_excluding` (a method on `AppState<R>`, which
+/// needs a real `AppHandle` to call `webview_windows()`) specifically so the
+/// decision logic itself is reachable from a plain unit test — `AppState`'s own
+/// Tauri `test` feature crashes the Windows test binary (see
+/// termflow-fabric/docs/agentic/review-rounds-ledger.md, PR #59), so a test that
+/// needed a live/mock `AppHandle` here wasn't a realistic option.
+fn pick_window_label(chosen: &str, exclude: &str, live_labels: &[&str]) -> String {
+    let live = |l: &str| l != exclude && l != "drag-preview" && live_labels.contains(&l);
+    if live(chosen) {
+        return chosen.to_string();
+    }
+    if live(DEFAULT_ACTIVE_WINDOW) {
+        return DEFAULT_ACTIVE_WINDOW.to_string();
+    }
+    for l in live_labels {
+        if *l != exclude && *l != "drag-preview" {
+            return l.to_string();
+        }
+    }
+    DEFAULT_ACTIVE_WINDOW.to_string()
+}
+
 impl<R: Runtime> AppState<R> {
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
     /// to the renderer leaf used by persisted canvas edges. Owning tab ids are not
@@ -694,6 +732,7 @@ impl<R: Runtime> AppState<R> {
             replay_prefix: Arc::new(DashMap::new()),
             history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
+            main_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
@@ -718,22 +757,32 @@ impl<R: Runtime> AppState<R> {
     /// from the window-destroyed handler, where the closing window may still appear in
     /// `webview_windows()`). Order: current choice → boot window → first real window.
     pub fn resolve_active_window_label_excluding(&self, exclude: &str) -> String {
+        let chosen = self.active_window.read().clone();
+        self.resolve_window_label_excluding(&chosen, exclude)
+    }
+
+    /// The window Settings should open/activate in — see `main_window`'s doc comment.
+    pub fn resolve_main_window_label(&self) -> String {
+        self.resolve_main_window_label_excluding("")
+    }
+
+    /// Like `resolve_main_window_label`, but treats `exclude` as already gone (used
+    /// from the window-destroyed handler).
+    pub fn resolve_main_window_label_excluding(&self, exclude: &str) -> String {
+        let chosen = self.main_window.read().clone();
+        self.resolve_window_label_excluding(&chosen, exclude)
+    }
+
+    /// Shared normalizer behind both `resolve_active_window_label_excluding` and
+    /// `resolve_main_window_label_excluding`: fetches the currently-live window
+    /// labels from the real `AppHandle` and hands off to `pick_window_label`, the
+    /// pure selection algorithm (kept separate so it's unit-testable without a
+    /// live/mock `AppHandle` — see that function's doc comment).
+    fn resolve_window_label_excluding(&self, chosen: &str, exclude: &str) -> String {
         use tauri::Manager;
         let windows = self.app_handle.webview_windows();
-        let live = |l: &str| l != exclude && l != "drag-preview" && windows.contains_key(l);
-        let chosen = self.active_window.read().clone();
-        if live(&chosen) {
-            return chosen;
-        }
-        if live(DEFAULT_ACTIVE_WINDOW) {
-            return DEFAULT_ACTIVE_WINDOW.to_string();
-        }
-        for l in windows.keys() {
-            if l.as_str() != exclude && l.as_str() != "drag-preview" {
-                return l.to_string();
-            }
-        }
-        DEFAULT_ACTIVE_WINDOW.to_string()
+        let live_labels: Vec<&str> = windows.keys().map(|k| k.as_str()).collect();
+        pick_window_label(chosen, exclude, &live_labels)
     }
 
     /// Check if tmux is available on the system
@@ -1894,9 +1943,54 @@ mod focus_reporting_tests {
 
 #[cfg(test)]
 mod active_window_tests {
+    use super::pick_window_label;
+
     #[test]
     fn default_active_window_is_main() {
         assert_eq!(super::DEFAULT_ACTIVE_WINDOW, "main");
+    }
+
+    #[test]
+    fn prefers_the_chosen_label_when_it_is_still_live() {
+        let live = ["main", "window-2"];
+        assert_eq!(pick_window_label("window-2", "", &live), "window-2");
+    }
+
+    #[test]
+    fn falls_back_to_the_boot_window_when_chosen_is_excluded() {
+        // The window mid-close is passed as `exclude` because it can still appear
+        // in the live set when this runs from its own destroy handler.
+        let live = ["main", "window-2"];
+        assert_eq!(pick_window_label("window-2", "window-2", &live), "main");
+    }
+
+    #[test]
+    fn promotes_the_first_other_live_window_when_the_boot_window_is_also_gone() {
+        // The exact edge case reported by the user: open a second window, close
+        // the first (the boot window) — the survivor becomes the new choice.
+        let live = ["window-2"];
+        assert_eq!(pick_window_label("main", "main", &live), "window-2");
+    }
+
+    #[test]
+    fn drag_preview_is_never_a_candidate() {
+        let live = ["drag-preview"];
+        assert_eq!(pick_window_label("main", "main", &live), "main");
+    }
+
+    #[test]
+    fn defaults_to_the_boot_window_label_when_nothing_is_live() {
+        let live: [&str; 0] = [];
+        assert_eq!(pick_window_label("window-2", "window-2", &live), "main");
+    }
+
+    #[test]
+    fn a_chosen_label_that_matches_exclude_falls_through_even_when_the_map_still_lists_it() {
+        // Mirrors the real destroy-handler race this function exists for: the
+        // closing window can still be present in `webview_windows()` when this
+        // runs, so `exclude` — not map membership — must be what disqualifies it.
+        let live = ["main", "window-2"];
+        assert_eq!(pick_window_label("main", "main", &live), "window-2");
     }
 }
 

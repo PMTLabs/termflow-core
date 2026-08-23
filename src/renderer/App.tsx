@@ -45,7 +45,7 @@ import {
 } from './store/slices/settingsSlice';
 import type { TerminalFontWeight } from './store/slices/settingsSlice';
 import { isCanvasBusyCue } from './components/Canvas/canvasBusyCue';
-import { openSettingsTab } from './services/openSettings';
+import { openSettingsTab, installSettingsRouting } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
 import { refreshGlyphAtlases } from '@termflow/terminal-core';
@@ -144,6 +144,51 @@ const App: React.FC = () => {
     const handleTrayOpenPeers = () => openSettingsTab('peers');
     window.addEventListener('tray:open-peers', handleTrayOpenPeers);
     return () => window.removeEventListener('tray:open-peers', handleTrayOpenPeers);
+  }, []);
+
+  // Multi-window: Settings only ever opens in the current main window (see
+  // openSettings.ts) — this window needs to be listening for that broadcast in
+  // case IT is the target, whether or not the user ever opens Settings from here.
+  useEffect(() => {
+    installSettingsRouting();
+  }, []);
+
+  // Multi-window settings sync: a value changed on the Settings page (font,
+  // color schema, ...) persists via the same merge_config path regardless of
+  // which window Settings is open in, but each window has its OWN Redux store —
+  // without this, every OTHER window's terminals kept the config they booted
+  // with until closed and reopened. `updates` is exactly the partial object the
+  // originating window sent to merge_config; applyConfigSettings is written to
+  // tolerate a partial config (every field individually guarded).
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        unlisten = await listen('config:changed', (event: any) => {
+          const updates = event?.payload;
+          if (updates && typeof updates === 'object') {
+            applyConfigSettings(updates);
+            // Shell profiles + default profile are deliberately NOT part of
+            // applyConfigSettings: at BOOT that function runs concurrently with
+            // initializeShellProfiles (Promise.all above), which re-queries LIVE
+            // system profiles and merges saved cwd overrides in — dispatching the
+            // raw saved snapshot here too would race it and could overwrite the
+            // correctly-merged list with a stale one. Cross-window sync has no such
+            // race (initializeShellProfiles only ever runs once, at boot), so it's
+            // safe to apply here, just not by folding it into the shared function.
+            if (Array.isArray(updates.shellProfiles)) {
+              dispatch(setShellProfiles(updates.shellProfiles));
+            }
+            if (typeof updates.defaultProfile === 'string' && updates.defaultProfile) {
+              dispatch(setDefaultProfile(updates.defaultProfile));
+            }
+          }
+        });
+      } catch {
+        // Not under Tauri — no cross-window config sync available.
+      }
+    })();
+    return () => unlisten?.();
   }, []);
 
   // A tab dragged from another window onto THIS one: the backend hit-tests the
@@ -486,7 +531,22 @@ const App: React.FC = () => {
     }
   };
 
-  const loadConfigSettings = async (config: any) => {
+  /**
+   * Dispatch every settings field present in `config` into this window's store.
+   * Every field is individually guarded (`if (config.x !== undefined)` or
+   * equivalent), so a PARTIAL object — not just the full boot-time config — is
+   * safe to pass: only the keys present in it are touched. This is what makes it
+   * reusable both at boot (full config) and for the `config:changed` cross-window
+   * broadcast below (just the keys one window's Settings edit changed).
+   *
+   * Deliberately excludes EULA-acceptance hydration, which `loadConfigSettings`
+   * does separately and UNCONDITIONALLY (`null` when the key is absent, on
+   * purpose — that's what triggers the first-run modal at boot). Doing that here
+   * too would reset every OTHER window's EULA state to "not accepted" on every
+   * unrelated settings change (e.g. changing font size) that happens not to
+   * carry `eulaAcceptedVersion` in its partial update.
+   */
+  const applyConfigSettings = (config: any) => {
     try {
       if (config) {
         // Apply theme settings
@@ -615,15 +675,24 @@ const App: React.FC = () => {
         if (config.notifyOsEnabled !== undefined) {
           dispatch(setNotifyOsEnabled(config.notifyOsEnabled));
         }
-        // Hydrate EULA acceptance (null when never accepted → the first-run modal shows).
-        dispatch(hydrateEulaAcceptedVersion(
-          typeof config.eulaAcceptedVersion === 'string' ? config.eulaAcceptedVersion : null,
-        ));
 
         // Note: defaultProfile will be set after shell profiles are loaded
       }
     } catch (error) {
       console.error('Failed to load config settings:', error);
+    }
+  };
+
+  // Boot-only: apply the full config, then hydrate EULA acceptance UNCONDITIONALLY
+  // (null when the key is absent — that's what triggers the first-run modal). Kept
+  // out of applyConfigSettings so a later partial config:changed broadcast can't
+  // reset an already-accepted EULA in every other window (see its doc comment).
+  const loadConfigSettings = async (config: any) => {
+    applyConfigSettings(config);
+    if (config) {
+      dispatch(hydrateEulaAcceptedVersion(
+        typeof config.eulaAcceptedVersion === 'string' ? config.eulaAcceptedVersion : null,
+      ));
     }
   };
 
