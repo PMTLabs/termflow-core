@@ -462,7 +462,19 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         cols,
         rows,
     );
-    match client.spawn_session(&session_key, &spec).await {
+    // Timed because this round trip is the user-visible "how long until my new
+    // tab appears": the sidecar answers `Spawn` from ONE sequential frame loop,
+    // so any slow inline work in another frame's handler (notably a `Close`'s
+    // process-tree kill) shows up here as latency and nowhere else.
+    let spawn_started = std::time::Instant::now();
+    let spawned = client.spawn_session(&session_key, &spec).await;
+    let spawn_ms = spawn_started.elapsed().as_millis();
+    if spawn_ms >= 250 {
+        log::warn!("[SPAWN] host spawn for {session_key} took {spawn_ms}ms");
+    } else {
+        log::info!("[SPAWN] host spawn for {session_key} took {spawn_ms}ms");
+    }
+    match spawned {
         Ok(pid) => {
             if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
@@ -1392,6 +1404,11 @@ pub async fn close_terminal(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    // Timed alongside `[SPAWN]` so a close/open pair can be read as one sequence:
+    // whether the cost sits in this command or in the sidecar's answer to the
+    // NEXT spawn tells you which side to look at.
+    let close_started = std::time::Instant::now();
+
     // Get the terminal info to retrieve the PID + renderer id.
     let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
         (terminal.pid, terminal.renderer_terminal_id.clone())
@@ -1442,7 +1459,12 @@ pub async fn close_terminal(
         }
     }
 
-    log::info!("Closed terminal {} with PID {}", id, pid);
+    log::info!(
+        "Closed terminal {} with PID {} in {}ms",
+        id,
+        pid,
+        close_started.elapsed().as_millis()
+    );
     Ok(())
 }
 
