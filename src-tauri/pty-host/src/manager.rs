@@ -23,6 +23,9 @@ use tokio::sync::mpsc::Sender;
 const MAX_ARM_SECS: u64 = 24 * 60 * 60;
 /// Per-session replay ring cap (see spec §9 / plan Global Constraints).
 const RING_CAP: usize = 256 * 1024;
+/// How long teardown waits for child process trees to be reaped before exiting
+/// anyway. Kills run in parallel, so this bounds the TOTAL wait, not each one.
+const TEARDOWN_KILL_GRACE: Duration = Duration::from_secs(5);
 
 pub enum Disposition {
     TearDown,
@@ -232,6 +235,42 @@ impl SessionManager {
         self.armed_deadline_ms = None;
     }
 
+    /// Kill every session and WAIT for the kills to actually run.
+    ///
+    /// `Session::kill` is deliberately backgrounded so an interactive
+    /// `Control::Close` cannot stall the frame loop — but that is only safe
+    /// while this process keeps running. Here it does not: the caller returns
+    /// `TearDown`, `serve` returns, and the process exits within milliseconds.
+    /// A kill thread that has not yet run dies with it, and on Unix
+    /// `kill_process_tree` signals in-process via `killpg`, so an unstarted
+    /// thread means the signal is NEVER sent — the shell is orphaned with no GUI
+    /// left to reach it. Joining is what makes teardown actually tear down.
+    ///
+    /// Bounded: kills run in parallel and the deadline is absolute, so one
+    /// wedged `taskkill` cannot hold the host open indefinitely.
+    fn tear_down_sessions(&mut self) {
+        let kills: Vec<_> = self.sessions.values().filter_map(|s| s.kill()).collect();
+        // Dropping the sessions now reaches `Session::drop` → `kill()`, which
+        // no-ops: every kill above latched `killing`.
+        self.sessions.clear();
+        if kills.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + TEARDOWN_KILL_GRACE;
+        for k in kills {
+            // `JoinHandle` has no timed join, so poll `is_finished` against a
+            // shared deadline rather than blocking on `join` per handle.
+            while !k.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if k.is_finished() {
+                let _ = k.join();
+            } else {
+                log::warn!("teardown: a child kill did not finish within the grace period");
+            }
+        }
+    }
+
     pub fn on_gui_disconnect(&mut self) -> Disposition {
         match self.armed_deadline {
             Some(_) => {
@@ -239,7 +278,7 @@ impl SessionManager {
                 Disposition::Hold
             }
             None => {
-                self.sessions.clear();
+                self.tear_down_sessions();
                 Disposition::TearDown
             }
         }
@@ -291,6 +330,91 @@ mod tests {
     fn disconnect_without_arm_tears_down() {
         let (mut m, _e, _r) = mgr();
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+    }
+
+    /// A shell that outlives the teardown it was supposed to die in.
+    fn long_lived_spec() -> termflow_pty_protocol::SpawnSpec {
+        let (shell, args) = if cfg!(windows) {
+            ("cmd.exe", vec!["/c".to_string(), "ping -n 60 127.0.0.1 >NUL".to_string()])
+        } else {
+            ("/bin/sh", vec!["-c".to_string(), "sleep 60".to_string()])
+        };
+        termflow_pty_protocol::SpawnSpec {
+            shell: shell.into(),
+            args,
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// Is this pid still a running process, asked of the OS rather than of our
+    /// own `exited` tombstone — the tombstone is set by the reader thread and
+    /// lags the actual death, so trusting it here would test our bookkeeping
+    /// instead of the child.
+    fn pid_is_alive(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            // Signal 0 performs error checking only: 0 ⇒ the pid exists.
+            unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+            use windows_sys::Win32::System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            };
+            // SAFETY: plain Win32 queries; the handle is closed on every path.
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h.is_null() {
+                    return false; // gone (or unreachable, which is gone enough)
+                }
+                let mut code: u32 = 0;
+                let ok = GetExitCodeProcess(h, &mut code) != 0;
+                CloseHandle(h);
+                ok && code == STILL_ACTIVE as u32
+            }
+        }
+    }
+
+    /// Teardown must not merely *start* the kills.
+    ///
+    /// `serve` returns the instant this reports `TearDown` and the process exits
+    /// right after, so a backgrounded kill that has not run yet dies with it —
+    /// on Unix `kill_process_tree` signals in-process, so the signal is never
+    /// sent at all and the shell is orphaned. This is the regression the #61
+    /// fix introduced by backgrounding `Session::kill`.
+    ///
+    /// Deliberately asserted with NO polling loop: "eventually dead" is true of
+    /// a backgrounded kill too, so a poll would pass against the very bug this
+    /// pins. The claim is specifically that the child is dead by the time the
+    /// call RETURNS.
+    #[test]
+    fn unarmed_disconnect_reaps_children_before_returning() {
+        let (mut m, _e, _r) = mgr();
+        let sess = Session::spawn(
+            "tab-teardown".into(),
+            &long_lived_spec(),
+            4096,
+            m.events.clone(),
+            true,
+        )
+        .expect("spawn a long-lived child");
+        let pid = sess.pid();
+        assert!(pid > 0, "need a real pid to assert against");
+        assert!(pid_is_alive(pid), "child should be alive before teardown");
+        m.sessions.insert("tab-teardown".into(), sess);
+
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+
+        assert!(
+            !pid_is_alive(pid),
+            "on_gui_disconnect returned while pid {pid} was still alive — the kill \
+             was left running in a detached thread that dies with the process"
+        );
     }
 
     /// An arm belongs to the GUI generation that set it. A NEW GUI connecting

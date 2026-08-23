@@ -52,6 +52,13 @@ pub struct Session {
     attached: Arc<AtomicBool>,
     /// True once the child has exited (durable tombstone for late reattach).
     exited: Arc<AtomicBool>,
+    /// Latched by the first `kill()`, so a session is never killed twice.
+    ///
+    /// Teardown kills explicitly and then drops the session, which would
+    /// otherwise reach `kill()` a second time through `Drop` — and a second
+    /// `taskkill /T /F` for the same pid is precisely the recycled-pid hazard
+    /// `exited` exists to prevent, just arrived at by a different route.
+    killing: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -185,6 +192,7 @@ impl Session {
             events,
             attached,
             exited,
+            killing: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -266,24 +274,32 @@ impl Session {
         (snap.start_offset, snap.bytes, snap.gap)
     }
 
-    /// Kill the child process tree — but NEVER for a session known to have
-    /// exited: the OS may have reused its PID, and taskkill'ing a recycled PID
-    /// would kill an unrelated process tree.
+    /// Start killing the child process tree, returning the thread doing the
+    /// work. `None` means nothing was started: the child already exited, or a
+    /// kill is already in flight.
     ///
-    /// Backgrounded on its own thread: this runs from `Drop`, reached via
+    /// NEVER kills a session known to have exited: the OS may have reused its
+    /// PID, and taskkill'ing a recycled PID would kill an unrelated tree.
+    ///
+    /// Backgrounded because the usual caller is `Drop`, reached via
     /// `Control::Close` on the single connection-reader loop
     /// (`transport::run_connection`). `kill_process_tree` blocks on
-    /// `taskkill /T /F` (can run 1-3s+ for a shell's whole tree), and that
-    /// loop can't read the NEXT frame — e.g. the `Spawn` for a tab opened
-    /// right after this close — until this call returns. Backgrounding it
-    /// unblocks the loop immediately instead of stalling every subsequent
-    /// frame behind one slow taskkill.
-    pub fn kill(&self) {
+    /// `taskkill /T /F` (1-3s+ for a shell's whole tree), and that loop cannot
+    /// read the NEXT frame — e.g. the `Spawn` for a tab opened right after this
+    /// close — until the handler returns.
+    ///
+    /// The handle is returned rather than dropped because *one* caller must not
+    /// outlive the kill: `SessionManager::tear_down_sessions` exits the process
+    /// moments later, and an unstarted kill thread dies with it (see there).
+    pub fn kill(&self) -> Option<std::thread::JoinHandle<()>> {
         if self.exited.load(Ordering::Acquire) {
-            return;
+            return None;
+        }
+        if self.killing.swap(true, Ordering::AcqRel) {
+            return None; // already killing — see the `killing` field doc
         }
         let pid = self.pid;
-        std::thread::spawn(move || crate::util::kill_process_tree(pid));
+        Some(std::thread::spawn(move || crate::util::kill_process_tree(pid)))
     }
 }
 
@@ -326,9 +342,14 @@ fn stream_live(
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Close/teardown kills the child (unless already exited — PID reuse).
-        // Sessions kept alive across a hot-swap hold are NOT dropped.
-        self.kill();
+        // Close kills the child (unless already exited — PID reuse). Sessions
+        // kept alive across a hot-swap hold are NOT dropped.
+        //
+        // Fire-and-forget is right HERE and only here: this process keeps
+        // running after an interactive close, so the thread finishes. The
+        // teardown path cannot rely on that and kills explicitly first — which
+        // latches `killing`, making this a no-op rather than a second kill.
+        let _ = self.kill();
     }
 }
 
@@ -337,6 +358,47 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::sync::mpsc::channel;
+
+    /// A child that stays alive long enough to be killed deliberately, so a
+    /// test about killing cannot pass because the child had already exited.
+    fn sleep_spec() -> SpawnSpec {
+        let (shell, args) = if cfg!(windows) {
+            ("cmd.exe", vec!["/c".to_string(), "ping -n 60 127.0.0.1 >NUL".to_string()])
+        } else {
+            ("/bin/sh", vec!["-c".to_string(), "sleep 60".to_string()])
+        };
+        SpawnSpec {
+            shell: shell.into(),
+            args,
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// Teardown kills explicitly and THEN drops the session, so `kill` is
+    /// reached twice for one child. The second must do nothing: a repeat
+    /// `taskkill /T /F` on a pid the OS may already have recycled is exactly the
+    /// hazard the `exited` tombstone guards against, arrived at by another
+    /// route. `exited` cannot cover this one — it is still false in the window
+    /// between the first kill starting and the child actually dying.
+    #[test]
+    fn a_second_kill_is_a_no_op() {
+        let (tx, _rx) = channel(1024);
+        let sess =
+            Session::spawn("tab-kill-once".into(), &sleep_spec(), 4096, tx, false).unwrap();
+        let first = sess.kill();
+        assert!(first.is_some(), "the first kill must actually start one");
+        assert!(
+            sess.kill().is_none(),
+            "a second kill started another taskkill for the same pid"
+        );
+        if let Some(h) = first {
+            let _ = h.join();
+        }
+    }
 
     fn echo_spec() -> SpawnSpec {
         if cfg!(windows) {
