@@ -1,5 +1,5 @@
 import { Rect, NODE_W, NODE_H } from './canvasGeometry';
-import { arcPlacement } from './agentPlacement';
+import { fanPlacement } from './agentPlacement';
 import { buildNewTabFields, NewTabFields, ShellProfileLike } from '../../services/newTabActions';
 import type { PaneNode } from '../../store/slices/panesSlice';
 import { generateId } from '../../utils/id';
@@ -47,13 +47,13 @@ export function spawnRectAt(at: { x: number; y: number }): Rect {
 /**
  * A node fanned out from an existing one, for the port-click spawn.
  *
- * The same `arcPlacement` an agent-spawned terminal gets (Task 20), and deliberately so: a wire
+ * The same `fanPlacement` an agent-spawned terminal gets (Task 20), and deliberately so: a wire
  * out of a port and a wire the MCP tool drew are the same relationship, and two placements for
  * one relationship would put hand-made and agent-made children in visibly different places.
  * `index` is how many edges already leave this node, so a run of them fans instead of stacking.
  */
 export function spawnRectNear(source: Rect, taken: readonly Rect[], index: number): Rect {
-  const p = arcPlacement(source, [...taken], index);
+  const p = fanPlacement(source, [...taken], index);
   return { x: p.x, y: p.y, w: source.w, h: source.h };
 }
 

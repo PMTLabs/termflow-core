@@ -40,8 +40,25 @@ export const PAD_TOP = PAD + LABEL_OVERHANG;
  */
 export const GAP_X = 16;
 export const GAP_Y = 28;
-/** Gutter between frames. */
-export const GROUP_GAP = 48;
+/**
+ * Gutter between frames — and the number that decides how dense the canvas actually reads.
+ *
+ * `GAP_X`/`GAP_Y` get all the attention, but they only separate terminals INSIDE one tab. Most
+ * tabs hold one terminal, so most neighbouring pairs on a real canvas are separated by this
+ * instead — and by two frame paddings as well, since each terminal sits `PAD` inside its own
+ * frame. At 48 that was `16 + 48 + 16 = 80` world units between two terminals in different tabs
+ * against 16 between two in the same one: a 5x pitch difference for a distinction the eye
+ * already gets from the frame border. At 28 it is 60, which is what Tam's "I want to view more
+ * content when I zoom in" is really asking for.
+ *
+ * **The floor is `MAX_PAD_OUTSET`, which is derived from this.** `framePadScale` grows a frame's
+ * DRAWN padding as you zoom out so it never reads as touching its terminals, and two neighbours
+ * grow towards each other — so shrinking this shrinks how far that clamp may reach before the
+ * gutter closes. At 28 the clamp still delivers the full `PAD_SCREEN_MIN` down to z≈0.58, which
+ * covers the zoom Tam measured the "terminal touches the edge of the group" complaint at (0.62).
+ * Much below 28 and that complaint comes back at the bottom of the range.
+ */
+export const GROUP_GAP = 28;
 
 /**
  * How wide a row of group frames may get before it wraps to the next row.
@@ -201,9 +218,23 @@ export function groupBoxFor(n: number): { w: number; h: number } {
 }
 
 /**
- * Distribute everything evenly: terminals gridded inside each frame, frames
- * gridded across the canvas, each frame centred in its cell so uneven frame
- * sizes still read as an even arrangement. Deterministic — same input, same output.
+ * Distribute everything evenly: terminals gridded inside each frame, frames laid out in rows
+ * `ceil(sqrt(n))` frames wide. Deterministic — same input, same output.
+ *
+ * **Rows are SHELF-PACKED, not gridded into cells.** Frames used to be placed on a true grid:
+ * every column was as wide as its widest frame, every row as tall as its tallest, and each frame
+ * was centred in its cell "so uneven frame sizes still read as an even arrangement". The even
+ * reading was real and so was its cost — a row holding one four-terminal tab gave three
+ * single-terminal tabs a 728-wide cell for a 372-wide frame, and centring turned the surplus into
+ * dead space on BOTH sides of each of them. On a mixed workspace that is most of the canvas.
+ *
+ * So a frame now starts where the previous one ended, at its own width, and rows advance by the
+ * tallest frame in the row. Nothing overlaps (a row's frames are disjoint in x, and consecutive
+ * rows in y), the layout is still a pure function of the input, and the ragged right edge is the
+ * price of the density — which is what Tam asked Arrange for. The `ceil(sqrt(n))` frames-per-row
+ * cap is kept rather than replaced with `FRAME_ROW_MAX_W`: the seeding cursor needs a fixed
+ * budget because appending a tab must not move a frame already placed, but Arrange moves
+ * everything by definition, and a square-ish canvas is the one that zoom-to-fit shows best.
  */
 export function arrange(input: ArrangeInput): ArrangeResult {
   const size: Record<string, { w: number; h: number }> = {};
@@ -222,32 +253,27 @@ export function arrange(input: ArrangeInput): ArrangeResult {
     });
   }
 
-  const gc = cols(input.groups.length);
-  const colW: number[] = [];
-  const rowH: number[] = [];
-  input.groups.forEach((g, i) => {
-    const c = i % gc, r = Math.floor(i / gc);
-    colW[c] = Math.max(colW[c] ?? 0, size[g.id].w);
-    rowH[r] = Math.max(rowH[r] ?? 0, size[g.id].h);
-  });
-
-  const xs: number[] = [];
-  const ys: number[] = [];
-  let acc = 60;
-  for (let i = 0; i < colW.length; i++) { xs[i] = acc; acc += colW[i] + GROUP_GAP; }
-  acc = 60;
-  for (let i = 0; i < rowH.length; i++) { ys[i] = acc; acc += rowH[i] + GROUP_GAP; }
-
+  const perRow = cols(input.groups.length);
   const out: ArrangeResult = { groups: {}, nodes: {} };
+  let gx = 60;
+  let gy = 60;
+  let rowH = 0;
+
   input.groups.forEach((g, i) => {
-    const c = i % gc, r = Math.floor(i / gc);
-    const gx = Math.round(xs[c] + (colW[c] - size[g.id].w) / 2);
-    const gy = Math.round(ys[r] + (rowH[r] - size[g.id].h) / 2);
-    out.groups[g.id] = { x: gx, y: gy, w: size[g.id].w, h: size[g.id].h };
+    if (i > 0 && i % perRow === 0) {
+      gx = 60;
+      gy += rowH + GROUP_GAP;
+      rowH = 0;
+    }
+    const box = size[g.id];
+    out.groups[g.id] = { x: gx, y: gy, w: box.w, h: box.h };
     for (const id of g.nodeIds) {
       if (offset[id]) out.nodes[id] = { x: gx + offset[id].x, y: gy + offset[id].y };
     }
+    gx += box.w + GROUP_GAP;
+    rowH = Math.max(rowH, box.h);
   });
+
   return out;
 }
 

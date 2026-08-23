@@ -1,5 +1,6 @@
-import { arcPlacement } from '../agentPlacement';
+import { fanPlacement } from '../agentPlacement';
 import { NODE_W, NODE_H, Rect, paintedNodeH, Z_MIN } from '../canvasGeometry';
+import { arrange, GAP_X } from '../canvasLayout';
 import { planAgentPlacement } from '../agentSpawnPlacement';
 import type { CanvasModel } from '../canvasSelectors';
 import type { CanvasEdge } from '../../../store/slices/canvasSlice';
@@ -10,38 +11,38 @@ const caller = at(1000, 1000);
 const overlaps = (a: { x: number; y: number }, b: Rect) =>
   !(a.x + NODE_W <= b.x || b.x + b.w <= a.x || a.y + NODE_H <= b.y || b.y + b.h <= a.y);
 
-describe('arcPlacement', () => {
+describe('fanPlacement', () => {
   it('places the first spawn to the right of its caller', () => {
-    expect(arcPlacement(caller, [caller], 0).x).toBeGreaterThan(caller.x + NODE_W);
+    expect(fanPlacement(caller, [caller], 0).x).toBeGreaterThan(caller.x + NODE_W);
   });
 
   it('never overlaps the caller', () => {
     for (let i = 0; i < 6; i++) {
-      expect(overlaps(arcPlacement(caller, [caller], i), caller)).toBe(false);
+      expect(overlaps(fanPlacement(caller, [caller], i), caller)).toBe(false);
     }
   });
 
   it('never overlaps a previously placed sibling', () => {
     const taken: Rect[] = [caller];
     for (let i = 0; i < 6; i++) {
-      const p = arcPlacement(caller, taken, i);
+      const p = fanPlacement(caller, taken, i);
       for (const t of taken) expect(overlaps(p, t)).toBe(false);
       taken.push({ ...p, w: NODE_W, h: NODE_H });
     }
   });
 
   it('is deterministic for the same inputs', () => {
-    expect(arcPlacement(caller, [caller], 2)).toEqual(arcPlacement(caller, [caller], 2));
+    expect(fanPlacement(caller, [caller], 2)).toEqual(fanPlacement(caller, [caller], 2));
   });
 
   it('fans vertically as the index grows, not just rightward', () => {
-    const a = arcPlacement(caller, [caller], 0);
-    const b = arcPlacement(caller, [caller], 3);
+    const a = fanPlacement(caller, [caller], 0);
+    const b = fanPlacement(caller, [caller], 3);
     expect(a.y).not.toBe(b.y);
   });
 
-  it('keeps the guarantee once every arc slot is taken', () => {
-    // The case the plan's fallback dropped. Blanket the whole arc region so the ring/angle
+  it('keeps the guarantee once every lattice cell is taken', () => {
+    // The case the plan's fallback dropped. Blanket the whole fan region so the cell
     // search cannot succeed, then check the fallback is still collision-free — it is the one
     // branch that never consults `taken`, and it fires exactly when the canvas is crowded
     // enough for that to matter.
@@ -51,7 +52,7 @@ describe('arcPlacement', () => {
         taken.push(at(caller.x + gx, caller.y + gy));
       }
     }
-    const p = arcPlacement(caller, taken, 0);
+    const p = fanPlacement(caller, taken, 0);
     for (const t of taken) expect(overlaps(p, t)).toBe(false);
   });
 
@@ -66,15 +67,15 @@ describe('arcPlacement', () => {
         taken.push(at(caller.x + gx, caller.y + gy));
       }
     }
-    const first = arcPlacement(caller, taken, 0);
+    const first = fanPlacement(caller, taken, 0);
     taken.push({ ...first, w: NODE_W, h: NODE_H });
-    const second = arcPlacement(caller, taken, 0);
+    const second = fanPlacement(caller, taken, 0);
     expect(overlaps(second, { ...first, w: NODE_W, h: NODE_H })).toBe(false);
   });
 
   it('returns integers, so a node never lands on a fractional pixel', () => {
     for (let i = 0; i < 6; i++) {
-      const p = arcPlacement(caller, [caller], i);
+      const p = fanPlacement(caller, [caller], i);
       expect(Number.isInteger(p.x)).toBe(true);
       expect(Number.isInteger(p.y)).toBe(true);
     }
@@ -82,7 +83,7 @@ describe('arcPlacement', () => {
 
   it('works for a caller in negative world space', () => {
     const far = at(-4200, -900);
-    const p = arcPlacement(far, [far], 0);
+    const p = fanPlacement(far, [far], 0);
     expect(overlaps(p, far)).toBe(false);
     expect(p.x).toBeGreaterThan(far.x + NODE_W);
   });
@@ -137,7 +138,7 @@ describe('planAgentPlacement', () => {
 
   it('counts only the edges leaving THIS caller', () => {
     // An unrelated busy terminal elsewhere must not push this caller's first spawn out to a
-    // wide angle — the index is per-caller, not a global spawn counter.
+    // distant row — the index is per-caller, not a global spawn counter.
     const noise = [wire('tm-other', 'tm-x'), wire('tm-other', 'tm-y'), wire('tm-z', 'tm-caller')];
     expect(planAgentPlacement(m, noise, 'tm-caller', 'tm-new'))
       .toEqual(planAgentPlacement(m, [], 'tm-caller', 'tm-new'));
@@ -145,34 +146,56 @@ describe('planAgentPlacement', () => {
 });
 
 /**
- * The fan is tighter (`plan/024` Req 1) but must still clear at every zoom.
+ * The fan is as tight as the grid, and must still clear at every zoom.
  *
- * `arcPlacement` is the placement a user meets most often: it is what BOTH a port drag and an
- * MCP `create_terminal` produce. At the old `NODE_W + 90` a caller and the terminal it spawned
- * could not be read side by side at any useful zoom.
+ * `fanPlacement` is the placement a user meets most often: it is what BOTH a port drag and an
+ * MCP `create_terminal` produce. It has been tightened twice — `NODE_W + 90` centre-to-centre,
+ * then `NODE_W + 40` (`plan/024` Req 1), and Tam reported the second still reads as far away.
+ * The third time the SHAPE changed rather than the radius, because a circle is only as tight as
+ * its widest chord: candidates at ±28° overlapped the caller and were always rejected, so the
+ * second spawn was pushed out to ±55° and the fourth onto a ring 234 further out.
  *
  * The catch is the same one that floors `canvasLayout.GAP_Y`: a node drawn below zoom 1 is up to
- * `HEAD_GROWTH_PX` TALLER than its rect, and the fan reaches ±80°, so its outer angles are very
- * nearly a vertical stack. Tightening the ring step to the horizontal floor would have overlapped
- * there and nowhere else — the case a test written only against angle 0 would miss.
+ * `HEAD_GROWTH_PX` TALLER than its rect, and the fan is a near-vertical stack, so it is exactly
+ * the layout that would close that clearance. Asserted through the real placements at `Z_MIN`
+ * rather than against the pitch constants, which would agree with themselves whatever they held.
  */
-describe('arc placements clear each other at every zoom', () => {
+describe('fan placements are grid-tight and clear each other at every zoom', () => {
   const grown = (r: { x: number; y: number }): Rect =>
     ({ x: r.x, y: r.y, w: NODE_W, h: paintedNodeH(NODE_H, Z_MIN, false) });
 
-  it('leaves a real gap between the caller and its first spawn', () => {
-    const p = arcPlacement(caller, [caller], 0);
+  it('sets the first spawn exactly one grid gutter from its caller', () => {
+    const p = fanPlacement(caller, [caller], 0);
     // A positive gap, not merely "not overlapping" — the point of the change is that they are
     // close, and the point of the floor is that close is not touching.
     expect(p.x - (caller.x + NODE_W)).toBeGreaterThan(0);
-    expect(p.x - (caller.x + NODE_W)).toBeLessThan(90); // ...and genuinely tighter than before
+    // ...and it is the SAME gutter two terminals in one tab get, which is the whole claim: a
+    // spawned terminal is no further from its caller than Arrange would have put it. Compared
+    // against what `arrange` actually produces, so the two cannot drift apart.
+    const r = arrange({ groups: [{ id: 'tb-a', nodeIds: ['n1', 'n2'] }] });
+    const gridGap = r.nodes['n2'].x - (r.nodes['n1'].x + NODE_W);
+    expect(p.x - (caller.x + NODE_W)).toBe(gridGap);
+    // And it really is on the caller's own row — the first spawn reads side by side with it.
+    expect(p.y).toBe(caller.y);
+  });
+
+  it('stays beside its caller for a whole run of spawns, not one ring out', () => {
+    // The failure the shape change fixes: on the circle the fourth spawn landed on ring 1, more
+    // than a node-and-a-half further out than the first. Every spawn in a run must stay within
+    // the column beside the caller until that column is genuinely full (7 rows).
+    const taken: Rect[] = [caller];
+    for (let i = 0; i < 7; i++) {
+      const p = fanPlacement(caller, taken, i);
+      expect({ i, x: p.x }).toEqual({ i, x: caller.x + NODE_W + GAP_X });
+      taken.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
+    }
   });
 
   it('never overlaps once every node is drawn at its zoomed-out height', () => {
-    // Fill the fan, which is what pushes placements onto the outer, near-vertical angles.
+    // Fill the fan, which is what pushes placements onto the outer rows and the next column.
     const taken: Rect[] = [caller];
     for (let i = 0; i < 12; i++) {
-      const p = arcPlacement(caller, taken, i);
+      const p = fanPlacement(caller, taken, i);
       taken.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
     }
     const drawn = taken.map(grown);
