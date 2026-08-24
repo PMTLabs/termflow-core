@@ -161,6 +161,8 @@ releases-osx/*
 
 # Rust build output (CARGO_TARGET_DIR convention, e.g. target/sdd-test)
 /target/
-# Side-by-side `:pro:alt` / `:pro:nightly` build trees
+# Shared Windows Pro cache used by the default, alt, and nightly variants.
+/target-windows/
+# Legacy side-by-side caches left from earlier `:pro:alt` / `:pro:nightly` builds.
 /target-pro-alt/
 /target-pro-nightly/
