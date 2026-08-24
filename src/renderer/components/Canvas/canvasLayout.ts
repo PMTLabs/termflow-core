@@ -33,12 +33,13 @@ export const PAD_TOP = PAD + LABEL_OVERHANG;
  *
  * Nothing grows a node's WIDTH, so `GAP_X` has no such floor and is free to be the tighter of
  * the two. That is most of the density win: horizontal pitch is what decides how many terminals
- * fit across the screen at a readable zoom.
+ * fit across the screen at a readable zoom. Tightened from 16 to 10 (2026-08-24, "reduce the gap
+ * a little bit more") on exactly that reasoning — nothing bounds it below `GAP_Y` but the eye.
  *
  * `canvasLayout.test.ts` asserts `GAP_Y > HEAD_GROWTH_PX` against the imported constant rather
  * than restating it, so tightening either one fails loudly.
  */
-export const GAP_X = 16;
+export const GAP_X = 10;
 export const GAP_Y = 28;
 /**
  * Gutter between frames — and the number that decides how dense the canvas actually reads.
@@ -47,9 +48,9 @@ export const GAP_Y = 28;
  * tabs hold one terminal, so most neighbouring pairs on a real canvas are separated by this
  * instead — and by two frame paddings as well, since each terminal sits `PAD` inside its own
  * frame. At 48 that was `16 + 48 + 16 = 80` world units between two terminals in different tabs
- * against 16 between two in the same one: a 5x pitch difference for a distinction the eye
- * already gets from the frame border. At 28 it is 60, which is what Tam's "I want to view more
- * content when I zoom in" is really asking for.
+ * against 16 (now `GAP_X`'s own 10) between two in the same one: a pitch difference for a
+ * distinction the eye already gets from the frame border. At 28 it is 60, which is what Tam's
+ * "I want to view more content when I zoom in" is really asking for.
  *
  * **The floor is `MAX_PAD_OUTSET`, which is derived from this.** `framePadScale` grows a frame's
  * DRAWN padding as you zoom out so it never reads as touching its terminals, and two neighbours
