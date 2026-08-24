@@ -165,6 +165,8 @@ releases-osx/*
 /target-pro-windows/
 /target-pro-windows-alt/
 /target-pro-windows-nightly/
+# Legacy cache from the initial shared-Windows experiment.
+/target-windows/
 # Legacy side-by-side caches left from earlier `:pro:alt` / `:pro:nightly` builds.
 /target-pro-alt/
 /target-pro-nightly/
