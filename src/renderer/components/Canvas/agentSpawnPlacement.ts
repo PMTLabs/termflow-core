@@ -1,13 +1,13 @@
 import { Rect } from './canvasGeometry';
 import { CanvasEdge } from '../../store/slices/canvasSlice';
 import { CanvasModel } from './canvasSelectors';
-import { arcPlacement } from './agentPlacement';
+import { fanPlacement } from './agentPlacement';
 
 /**
  * Where an agent-spawned terminal's node should land — `plan/013` Task 20 Step 6.
  *
- * Pure, and separate from `arcPlacement`, because the two answer different questions:
- * `arcPlacement` is the geometry, this is everything that has to be true before the geometry
+ * Pure, and separate from `fanPlacement`, because the two answer different questions:
+ * `fanPlacement` is the geometry, this is everything that has to be true before the geometry
  * is worth computing. It lives outside `App.tsx` for the usual reason — nothing in this repo
  * can mount that component, so a decision left inline is a decision no test can reach.
  *
@@ -36,7 +36,7 @@ export function planAgentPlacement(
   const index = edges.filter((e) => e.from === parentTerminalId).length;
 
   const taken = model.nodes.map((n) => n.rect);
-  const p = arcPlacement(caller.rect, taken, index);
+  const p = fanPlacement(caller.rect, taken, index);
   return {
     terminalId: newLeafId,
     rect: { x: p.x, y: p.y, w: caller.rect.w, h: caller.rect.h },

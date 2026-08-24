@@ -157,6 +157,32 @@ describe('arrange', () => {
     expect(arrange({ groups: [] })).toEqual({ groups: {}, nodes: {} });
   });
 
+  /**
+   * Rows are shelf-packed, so a small frame does not pay for a large one beside it.
+   *
+   * Frames used to be gridded into cells sized by the widest frame in the column and CENTRED in
+   * them, which on a mixed workspace turned the difference into dead space on both sides of every
+   * small frame. Measured as the gutter between two ADJACENT frames rather than as a total width:
+   * a width assertion passes if the row merely got narrower for any reason, and this is the one
+   * claim being made — every frame starts exactly `GROUP_GAP` after the one before it, whatever
+   * the sizes are.
+   */
+  it('packs a row tight rather than padding small frames out to the widest', () => {
+    const r = arrange({
+      groups: [
+        { id: 'tb-big', nodeIds: ['a1', 'a2', 'a3', 'a4'] },   // 2x2 — the wide one
+        { id: 'tb-small', nodeIds: ['b1'] },
+        { id: 'tb-mid', nodeIds: ['c1', 'c2'] },
+      ],
+    });
+    // ceil(sqrt(3)) === 2 per row, so `tb-small` is the one that sat in the wide frame's shadow.
+    const big = r.groups['tb-big'], small = r.groups['tb-small'];
+    expect(small.y).toBe(big.y);                               // precondition: same row
+    expect(small.x).toBe(big.x + big.w + GROUP_GAP);
+    // ...and the next row starts under the TALLEST frame in this one, not further.
+    expect(r.groups['tb-mid'].y).toBe(big.y + Math.max(big.h, small.h) + GROUP_GAP);
+  });
+
   it('positions every node it was given, and nothing else', () => {
     const r = arrange({
       groups: [{ id: 'tb-a', nodeIds: ['n1', 'n2'] }, { id: 'tb-b', nodeIds: ['n3'] }],

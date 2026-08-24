@@ -759,9 +759,19 @@ async fn create_terminal(
             // the owning tab already held a live terminal (011 D7's tab-id case is gone).
             // Using `owning_tab_id` would point every split's edge at its tab's root pane,
             // and would then be dropped as a self-edge whenever the caller IS that root pane.
+            //
+            // The resolved leaf is kept for the EVENT below as well, not just for the edge.
+            // The renderer's `planAgentPlacement` looks the parent up in the canvas model,
+            // which is keyed by leaves — so emitting `payload.parent_terminal_id` verbatim
+            // meant a caller that named itself by PROCESS id got its edge (resolved here) and
+            // lost its placement (unresolvable there), which reads as "the new terminal
+            // appeared far away with a wire stretching back to me". One id space at the
+            // boundary, resolved once.
+            let mut parent_leaf: Option<String> = None;
             if let Some(parent_raw) = payload.parent_terminal_id.as_deref() {
                 match state.resolve_renderer_id(parent_raw) {
                     Some(parent_id) if parent_id != identity.renderer_terminal_id => {
+                        parent_leaf = Some(parent_id.clone());
                         let edge = crate::canvas_store::CanvasEdge::new(
                             parent_id,
                             identity.renderer_terminal_id.clone(),
@@ -811,7 +821,11 @@ async fn create_terminal(
                 // PLACEMENT ONLY. The edge is already in the store by this point; the
                 // renderer needs this to fan the new node out from its caller, not to
                 // decide whether a connection exists.
-                "parentTerminalId": payload.parent_terminal_id,
+                //
+                // The RESOLVED leaf, and null whenever the edge was not written — the two
+                // must agree, since a placement without a wire fans a node out from a
+                // terminal it has no visible relationship to.
+                "parentTerminalId": parent_leaf,
                 "targetWindow": target_window
             })) {
                 log::warn!("Failed to emit api:createTerminalTab: {}", e);
