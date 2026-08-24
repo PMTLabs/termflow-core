@@ -236,19 +236,18 @@ class TerminalServiceClass {
 
     try {
       termDiag(() => `[TERM-DIAG] PTY resize -> ${cols}x${rows} (terminalId=${terminalId} processId=${process.id})`);
-      // Announced BEFORE the round-trip, so anything that has to brace for the SIGWINCH is
-      // already armed when the redraw comes back rather than a round-trip late.
+      // The `pty:resize` announcement that arms RunningActivityTracker's view-change burst
+      // suppression is emitted by `electronAPI.resizeTerminal` itself (see `ptyResizeSignal`),
+      // NOT here.
       //
-      // A resize is the one output cause that is never the program doing work: a TUI repaints
-      // its whole screen because the geometry changed, and the geometry changed because the
-      // user did something to the VIEW. RunningActivityTracker listens for this so that
-      // repaint cannot ring an unseen bell or animate the running sweep — see
-      // `notifyViewChangeBurst`. Dispatched as an event rather than calling the tracker
-      // directly because the tracker already imports this module; a direct call would be a
-      // cycle, and this mirrors how `pty:data` and `pty:exit` are published anyway.
-      window.dispatchEvent(new CustomEvent('pty:resize', {
-        detail: { processId: process.id, terminalId, cols, rows },
-      }));
+      // It used to be dispatched on this line, on the strength of this being "the single
+      // choke point every renderer-caused resize goes through". It was not one: input and
+      // resize flow engine -> bridge -> electronAPI (spec §6.1 / §17 R2), so this method's
+      // only remaining caller is the `onResize` prop `TerminalDisplay` discards as vestigial,
+      // and the event was never dispatched in the running app. Moving it one level down onto
+      // the entry point every sender actually shares is what makes it impossible for a sender
+      // to opt out — and leaving a second dispatch here would put two writers on one signal,
+      // where the live one masks the next caller that forgets it.
       await window.electronAPI.resizeTerminal(process.id, cols, rows);
     } catch (error) {
       console.error('Failed to resize terminal:', error);

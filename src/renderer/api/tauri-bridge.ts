@@ -6,6 +6,7 @@ import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
+import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { apiTokenKey } from '../services/profileScope';
 import { apiBase, invalidateApiBase } from './apiBase';
 
@@ -350,6 +351,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   resizeTerminal: async (id, cols, rows) => {
+    emitPtyResize(id, cols, rows); // let the tracker brace for the repaint (see ptyResizeSignal)
     return invoke('resize_terminal', { id, cols, rows });
   },
 
@@ -417,6 +419,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   resizePty: async (id, cols, rows) => {
+    emitPtyResize(id, cols, rows); // keep the burst suppression working via this alias too
     return invoke('resize_terminal', { id, cols, rows });
   },
 

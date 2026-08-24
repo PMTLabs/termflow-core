@@ -244,9 +244,18 @@ class RunningActivityTrackerClass {
    *
    * Armed from TWO places, deliberately:
    *
-   *  - the `pty:resize` event, which `TerminalService` publishes at the single choke point
-   *    every renderer-caused resize goes through. That is the general rule, and it covers
-   *    causes nobody has thought of yet.
+   *  - the `pty:resize` event, which `electronAPI.resizeTerminal` publishes (see
+   *    `ptyResizeSignal`) at the single choke point every renderer-caused resize goes
+   *    through. That is the general rule, and it covers causes nobody has thought of yet.
+   *
+   *    It is emitted from the BRIDGE, not from `TerminalService`, and that is the correction
+   *    rather than a detail: this comment used to name `TerminalService.resizeTerminal` as the
+   *    choke point, and it never was one. Resizes flow engine -> bridge -> electronAPI, so the
+   *    event had no production dispatcher at all and this whole suppression was dead — which
+   *    is why zooming inside Canvas Mode kept ringing the bell on idle terminals while
+   *    ENTERING the canvas (covered by the mount arm below) stayed quiet. The test that
+   *    covered it dispatched the event by hand, so it passed either way; the test that pins it
+   *    now is on the bridge, where the emit actually lives.
    *  - `CanvasMode`'s mount and unmount, which is EARLIER — the relocation's fit is debounced,
    *    so arming at the edge covers the window before any resize has been decided on.
    *

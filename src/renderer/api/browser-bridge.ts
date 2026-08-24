@@ -1,5 +1,6 @@
 import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
+import { emitPtyResize } from '../utils/ptyResizeSignal';
 
 // Configuration for connecting to the Rust backend. Default matches this build's
 // instance (dev backend = 42051, prod = 42031).
@@ -209,6 +210,7 @@ class BrowserBridge implements ElectronAPI {
     }
 
     async resizeTerminal(id: string, cols: number, rows: number): Promise<void> {
+        emitPtyResize(id, cols, rows); // let the tracker brace for the repaint (see ptyResizeSignal)
         try {
             await fetch(`${API_BASE_URL}/terminals/${id}/resize`, {
                 method: 'POST',
