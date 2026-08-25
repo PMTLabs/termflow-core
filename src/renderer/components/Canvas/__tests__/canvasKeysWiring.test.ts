@@ -133,7 +133,7 @@ describe('the canvas asks for combos that exist', () => {
   const REQUESTED = [...MODE.matchAll(/effectiveCombo\('([^']+)'/g)].map((m) => m[1]);
 
   it('found the lookups it is checking', () => {
-    expect(REQUESTED.length).toBe(4);
+    expect(REQUESTED.length).toBe(6);
   });
 
   it('names only registered actions, all of them canvas-scoped', () => {
@@ -579,6 +579,24 @@ describe('the viewport toolbar', () => {
   it('names its keyboard shortcut on both zoom buttons', () => {
     expect(TOOLBAR).toContain('title="Zoom in (Ctrl +)"');
     expect(TOOLBAR).toContain('title="Zoom out (Ctrl -)"');
+  });
+
+  /**
+   * Tam, 2026-08-24: List and Arrange had no way to discover their own shortcut. Read from
+   * `combos`, not a hard-coded letter, so a rebind in Settings changes what the tooltip says —
+   * the same contract the node header's "Open in its tab" tooltip already keeps.
+   */
+  it('names its keyboard shortcut on List and Arrange, and it follows a rebind', () => {
+    expect(TOOLBAR).toContain('(${combos.toggleList})');
+    expect(TOOLBAR).toContain('(${combos.arrange})');
+  });
+
+  /** Tam, 2026-08-24: a one-press way to clear every "ended" node instead of closing each by
+   *  hand. Disabled rather than hidden at zero, the same convention the zoom buttons use. */
+  it('has a Close Ended button that disables at zero', () => {
+    expect(TOOLBAR).toContain('Close Ended');
+    expect(TOOLBAR).toContain('onClick={closeAllEnded}');
+    expect(TOOLBAR).toContain('disabled={endedCount === 0}');
   });
 
   /** `zoomAt` returns the viewport unchanged once `clampZoom` bites, so at the clamps an enabled

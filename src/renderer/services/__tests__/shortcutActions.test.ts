@@ -6,8 +6,8 @@ import {
 } from '../shortcutActions';
 
 describe('SHORTCUT_ACTIONS', () => {
-  it('has 18 unique action ids with unique default combos', () => {
-    expect(SHORTCUT_ACTIONS).toHaveLength(18);
+  it('has 20 unique action ids with unique default combos', () => {
+    expect(SHORTCUT_ACTIONS).toHaveLength(20);
     const ids = SHORTCUT_ACTIONS.map(a => a.id);
     const combos = SHORTCUT_ACTIONS.map(a => a.defaultCombo);
     expect(new Set(ids).size).toBe(ids.length);
@@ -51,7 +51,7 @@ describe('shortcut scopes', () => {
   it('keeps the canvas letters out of the global set', () => {
     const globalIds = GLOBAL_SHORTCUT_ACTIONS.map(a => a.id);
     for (const id of ['canvasOpenNodeTab', 'canvasEnlargeNode', 'canvasOpenNodeTabFromOverlay',
-      'canvasLeaveTerminal']) {
+      'canvasLeaveTerminal', 'canvasArrange', 'canvasToggleList']) {
       expect({ id, global: globalIds.includes(id) }).toEqual({ id, global: false });
     }
   });

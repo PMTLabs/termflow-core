@@ -77,3 +77,48 @@ export function closeEventFor(req: CanvasCloseRequest): { type: string; detail: 
     detail: { [e.idKey]: req.targetId },
   };
 }
+
+/** A node's identity, as far as bulk-closing ended terminals needs it. */
+export interface CanvasEndedNode {
+  terminalId: string;
+  tabId: string;
+  paneId: string;
+}
+
+/**
+ * What "close every ended terminal" resolves to — the toolbar's Close Ended button, Tam's ask
+ * 2026-08-24.
+ *
+ * Grouped by TAB rather than decided node-by-node, and that grouping is what avoids the trap a
+ * naive per-node loop would hit: two ended panes in the same multi-pane tab must not each read
+ * the pane count from a snapshot taken before either closed, or the second one sees a count that
+ * no longer matches reality and can route what is by then the tab's LAST pane down the pane-close
+ * flow — exactly the "tab-shaped hole" this file's own header note warns `decideCanvasClose`
+ * against. Deciding once per tab, from one consistent `panesInTab` snapshot, needs no such
+ * staleness: a tab whose every pane has ended closes as ONE tab-close event; a tab with a live
+ * sibling closes only the ended panes, and the live one — never a member of `endedNodes` — can
+ * never be the one counted toward "every pane has ended".
+ */
+export function closeEndedRequests(
+  endedNodes: readonly CanvasEndedNode[],
+  panesInTab: (tabId: string) => number,
+  isAlive: (terminalId: string) => boolean,
+): CanvasCloseRequest[] {
+  const byTab = new Map<string, CanvasEndedNode[]>();
+  for (const node of endedNodes) {
+    const list = byTab.get(node.tabId);
+    if (list) list.push(node); else byTab.set(node.tabId, [node]);
+  }
+
+  const requests: CanvasCloseRequest[] = [];
+  for (const [tabId, nodes] of byTab) {
+    if (nodes.length >= panesInTab(tabId)) {
+      requests.push({ kind: 'tab', targetId: tabId, confirm: nodes.some((n) => isAlive(n.terminalId)) });
+    } else {
+      for (const node of nodes) {
+        requests.push({ kind: 'pane', targetId: node.paneId, confirm: isAlive(node.terminalId) });
+      }
+    }
+  }
+  return requests;
+}
