@@ -1516,9 +1516,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             <div className="setting-item">
                 <span className="help-text">
                     These apply only on the canvas tab. The unmodified keys act on the selected
-                    node while the canvas has the keyboard — once you are typing into a node, they
-                    go to the terminal and only the Ctrl combos still act on the canvas. Because
-                    of that, these may be recorded as a plain key with no modifier.
+                    node or the workspace itself while the canvas has the keyboard — once you are
+                    typing into a node, they go to the terminal and only the Ctrl combos still act
+                    on the canvas. Because of that, these may be recorded as a plain key with no
+                    modifier.
                 </span>
                 <div className="shortcut-list">
                     {CANVAS_SHORTCUT_ACTIONS.map(renderShortcutRow)}

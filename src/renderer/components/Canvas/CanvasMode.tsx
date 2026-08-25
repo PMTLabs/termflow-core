@@ -33,7 +33,7 @@ import { CanvasWireMenu } from './CanvasWireMenu';
 import { CanvasNodeMenu } from './CanvasNodeMenu';
 import { CanvasGroupMenu } from './CanvasGroupMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
-import { closeEventFor, decideCanvasClose } from './canvasClose';
+import { closeEventFor, closeEndedRequests, decideCanvasClose } from './canvasClose';
 import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
@@ -167,7 +167,7 @@ export const CanvasMode: React.FC = () => {
   // selector allocates a new array on every dispatch in the app and re-renders the canvas.
   const tabs = useSelector((s: RootState) => s.tabs.tabs);
   /**
-   * The canvas's four user-assignable combos (Settings > Shortcuts > Canvas Mode).
+   * The canvas's six user-assignable combos (Settings > Shortcuts > Canvas Mode).
    *
    * Resolved here rather than inside the rules so the pure layer stays pure, and memoised on the
    * overrides object alone — `effectiveCombo` falls back to each action's default, so the
@@ -180,7 +180,7 @@ export const CanvasMode: React.FC = () => {
    * The `?? ''` is NOT a default — the defaults live in the registry and `effectiveCombo` already
    * returns them. It is only reachable when an action id here does not exist, and `''` is chosen
    * over a plausible literal deliberately: `matchesCombo('')` matches nothing, so a typo shows up
-   * as a dead key rather than as a shortcut quietly bound to something that looks right. The four
+   * as a dead key rather than as a shortcut quietly bound to something that looks right. The six
    * ids are pinned against the registry in `canvasKeysWiring.test.ts`.
    */
   const customKeybindings = useSelector((s: RootState) => s.settings.customKeybindings);
@@ -189,6 +189,8 @@ export const CanvasMode: React.FC = () => {
     openTab: effectiveCombo('canvasOpenNodeTab', customKeybindings) ?? '',
     leaveTerminal: effectiveCombo('canvasLeaveTerminal', customKeybindings) ?? '',
     openTabFromOverlay: effectiveCombo('canvasOpenNodeTabFromOverlay', customKeybindings) ?? '',
+    arrange: effectiveCombo('canvasArrange', customKeybindings) ?? '',
+    toggleList: effectiveCombo('canvasToggleList', customKeybindings) ?? '',
   }), [customKeybindings]);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -714,6 +716,9 @@ export const CanvasMode: React.FC = () => {
         // Only reachable with a connection selected — `canvasKeyAction` resolves Delete to
         // nothing at all otherwise, so the `!` is the rule's guarantee rather than a hope.
         case 'delete-edge': dropEdge(selectedEdgeId!); break;
+        // The keyboard halves of the toolbar's Arrange and List buttons — Tam, 2026-08-24.
+        case 'arrange': arrange(); break;
+        case 'toggle-list': dispatch(setSidebarOpen(!sidebarOpen)); break;
         default: {
           // Exhaustiveness, and the reason this is a switch rather than the if-chain it was:
           // the event is ALREADY consumed by the time we get here, so an unhandled action is a
@@ -728,7 +733,7 @@ export const CanvasMode: React.FC = () => {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [focusedId, fitAll, fitGroup, selectedId, selectedEdgeId, panScreen, stepNode, zoomKey,
-    dropEdge, dispatch, combos, openTabForTerminal]);
+    dropEdge, dispatch, combos, openTabForTerminal, arrange, sidebarOpen]);
 
   /** Off-screen running terminals (design §10). Suppression under the overlay belongs to the
    *  render gate below, which covers the minimap in the same breath — a second `overlayId`
@@ -771,6 +776,21 @@ export const CanvasMode: React.FC = () => {
     const { type, detail } = closeEventFor(decideCanvasClose(node, panes, isTerminalAlive));
     window.dispatchEvent(new CustomEvent(type, { detail }));
   }, [treesByTabId]);
+
+  /**
+   * Close every node whose session has already ended — the toolbar's Close Ended button, Tam's
+   * ask 2026-08-24. See `closeEndedRequests` for why this is safe to fire as a batch: grouping by
+   * tab before deciding is what lets a multi-pane tab with several ended siblings close correctly
+   * without re-reading live state between dispatches.
+   */
+  const closeAllEnded = useCallback(() => {
+    const ended = model.nodes.filter((n) => n.exited);
+    const panesInTab = (tabId: string) => getAllLeafIds(treesByTabId[tabId] ?? null).length;
+    closeEndedRequests(ended, panesInTab, isTerminalAlive).forEach((req) => {
+      const { type, detail } = closeEventFor(req);
+      window.dispatchEvent(new CustomEvent(type, { detail }));
+    });
+  }, [model.nodes, treesByTabId]);
 
   /**
    * Create a terminal from the canvas — Tam's items 3 and 4.
@@ -913,6 +933,10 @@ export const CanvasMode: React.FC = () => {
   // every time the overlay opened or closed.
   const overlayIdRef = useRef<string | null>(null);
   overlayIdRef.current = overlayId;
+
+  // For the toolbar's Close Ended button — how many nodes it would close, and whether there is
+  // anything for it to do.
+  const endedCount = model.nodes.filter((n) => n.exited).length;
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
@@ -1098,7 +1122,7 @@ export const CanvasMode: React.FC = () => {
             className="canvas-tbtn"
             aria-pressed={sidebarOpen}
             onClick={() => dispatch(setSidebarOpen(!sidebarOpen))}
-            title={sidebarOpen ? 'Hide the terminal list' : 'Show the terminal list'}
+            title={`${sidebarOpen ? 'Hide' : 'Show'} the terminal list (${combos.toggleList})`}
           >
             List
           </button>
@@ -1106,11 +1130,26 @@ export const CanvasMode: React.FC = () => {
             type="button"
             className="canvas-tbtn"
             onClick={arrange}
-            title="Grid each group's terminals, then the groups themselves"
+            title={`Grid each group's terminals, then the groups themselves (${combos.arrange})`}
           >
             Arrange
           </button>
-          {/* Viewport controls, separated from the two above because they do something to the
+          {/* Tam, 2026-08-24: a way to clear the "ended" tint in one press rather than closing
+              each dead node by hand. Disabled rather than hidden at zero, matching the zoom
+              buttons below — a button that vanishes the moment it would be useful is harder to
+              find than one that is merely greyed out. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            onClick={closeAllEnded}
+            disabled={endedCount === 0}
+            title={endedCount > 0
+              ? `Close ${endedCount} terminal${endedCount === 1 ? '' : 's'} whose session has ended`
+              : 'No ended sessions to close'}
+          >
+            Close Ended
+          </button>
+          {/* Viewport controls, separated from the ones above because they do something to the
               VIEW rather than to the workspace. Tam's item 4. */}
           <span className="canvas-tsep" aria-hidden="true" />
           {/* Disabled at the clamps rather than left to no-op: `zoomAt` returns the same viewport

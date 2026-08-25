@@ -2,6 +2,7 @@ import path from 'path';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, fitShortcut, wheelAction, exceedsDragSlop,
   openOverlayShortcut, leaveTerminalShortcut, openTabShortcut, openTabFromOverlayShortcut,
+  arrangeShortcut, toggleListShortcut,
   panShortcut, PAN_STEP_PX,
   stepShortcut, zoomShortcut, deleteShortcut, canvasKeyAction, terminalKeyAction,
   wheelPanDelta, WHEEL_LINE_PX, WHEEL_PAGE_PX,
@@ -33,6 +34,8 @@ const COMBOS: CanvasCombos = {
   openTab: defaultCombo('canvasOpenNodeTab'),
   leaveTerminal: defaultCombo('canvasLeaveTerminal'),
   openTabFromOverlay: defaultCombo('canvasOpenNodeTabFromOverlay'),
+  arrange: defaultCombo('canvasArrange'),
+  toggleList: defaultCombo('canvasToggleList'),
 };
 
 describe('shouldArmSpacePan', () => {
@@ -253,6 +256,85 @@ describe('openTabShortcut', () => {
 });
 
 /**
+ * `A` grids the workspace — the keyboard half of the toolbar's Arrange button (Tam, 2026-08-24).
+ *
+ * Same bargain as `E`/`T`: a bare letter, affordable only because the caller gates it on the
+ * canvas holding the keyboard.
+ */
+describe('arrangeShortcut', () => {
+  const e = (over: Partial<CanvasKey> = {}) => canvasKey({ key: 'a', code: 'KeyA', ...over });
+
+  it('fires on its configured bare key, CapsLock included', () => {
+    expect(arrangeShortcut(e(), 'A')).toBe(true);
+    expect(arrangeShortcut(e({ key: 'A' }), 'A')).toBe(true);
+  });
+
+  it('refuses every modifier, one at a time', () => {
+    for (const mod of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+      expect({ mod, fires: arrangeShortcut(e({ [mod]: true }), 'A') })
+        .toEqual({ mod, fires: false });
+    }
+  });
+
+  it('refuses in an editable target', () => {
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      expect(arrangeShortcut(e({ target: { tagName } }), 'A')).toBe(false);
+    }
+    expect(arrangeShortcut(e({ target: { tagName: 'DIV' } }), 'A')).toBe(true);
+  });
+
+  it('follows a rebind', () => {
+    expect(arrangeShortcut(canvasKey({ key: 'g', code: 'KeyG' }), 'G')).toBe(true);
+    expect(arrangeShortcut(e(), 'G')).toBe(false);
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['l', 't', 'e', 'Enter', '']) {
+      expect(arrangeShortcut(canvasKey({ key: k, code: k }), 'A')).toBe(false);
+    }
+  });
+});
+
+/**
+ * `L` shows/hides the sidebar — the keyboard half of the toolbar's List button (Tam, 2026-08-24).
+ *
+ * Same shape as `arrangeShortcut`.
+ */
+describe('toggleListShortcut', () => {
+  const e = (over: Partial<CanvasKey> = {}) => canvasKey({ key: 'l', code: 'KeyL', ...over });
+
+  it('fires on its configured bare key, CapsLock included', () => {
+    expect(toggleListShortcut(e(), 'L')).toBe(true);
+    expect(toggleListShortcut(e({ key: 'L' }), 'L')).toBe(true);
+  });
+
+  it('refuses every modifier, one at a time', () => {
+    for (const mod of ['shiftKey', 'ctrlKey', 'altKey', 'metaKey'] as const) {
+      expect({ mod, fires: toggleListShortcut(e({ [mod]: true }), 'L') })
+        .toEqual({ mod, fires: false });
+    }
+  });
+
+  it('refuses in an editable target', () => {
+    for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) {
+      expect(toggleListShortcut(e({ target: { tagName } }), 'L')).toBe(false);
+    }
+    expect(toggleListShortcut(e({ target: { tagName: 'DIV' } }), 'L')).toBe(true);
+  });
+
+  it('follows a rebind', () => {
+    expect(toggleListShortcut(canvasKey({ key: 'g', code: 'KeyG' }), 'G')).toBe(true);
+    expect(toggleListShortcut(e(), 'G')).toBe(false);
+  });
+
+  it('ignores every other key', () => {
+    for (const k of ['a', 't', 'e', 'Enter', '']) {
+      expect(toggleListShortcut(canvasKey({ key: k, code: k }), 'L')).toBe(false);
+    }
+  });
+});
+
+/**
  * Ctrl+T leaves for the node's own tab from INSIDE the enlarged terminal — Tam, 2026-08-21.
  *
  * Tam's requirement has two halves and this rule is where the second one lives: the chord acts,
@@ -351,20 +433,22 @@ describe('leaveTerminalShortcut', () => {
  * modifier being added to one and forgotten in the other — and the symptom would be `E` that
  * opens the overlay and immediately leaves it.
  */
-describe('the four canvas shortcuts are pairwise disjoint', () => {
+describe('the six canvas shortcuts are pairwise disjoint', () => {
   // The SHIPPED combos, so this is a claim about the defaults users actually get.
   const DEFAULTS = COMBOS;
 
-  /** Which of the four answer this press, by name. */
+  /** Which of the six answer this press, by name. */
   const firing = (k: CanvasKey): string[] => [
     openOverlayShortcut(k, DEFAULTS.enlarge) && 'enlarge',
     openTabShortcut(k, DEFAULTS.openTab) && 'openTab',
     leaveTerminalShortcut(k, DEFAULTS.leaveTerminal) && 'leaveTerminal',
     openTabFromOverlayShortcut(k, DEFAULTS.openTabFromOverlay) && 'openTabFromOverlay',
+    arrangeShortcut(k, DEFAULTS.arrange) && 'arrange',
+    toggleListShortcut(k, DEFAULTS.toggleList) && 'toggleList',
   ].filter(Boolean) as string[];
 
   it('never both fire, over every letter and modifier combination', () => {
-    for (const key of ['e', 't']) {
+    for (const key of ['e', 't', 'a', 'l']) {
       for (const shiftKey of [false, true]) {
         for (const ctrlKey of [false, true]) {
           for (const altKey of [false, true]) {
@@ -382,7 +466,7 @@ describe('the four canvas shortcuts are pairwise disjoint', () => {
     }
   });
 
-  it('found the combinations it is checking — each of the four fires somewhere in that matrix', () => {
+  it('found the combinations it is checking — each of the six fires somewhere in that matrix', () => {
     // Or the sweep above passes because no rule ever fires.
     expect(firing(canvasKey({ key: 'e', code: 'KeyE' }))).toEqual(['enlarge']);
     expect(firing(canvasKey({ key: 't', code: 'KeyT' }))).toEqual(['openTab']);
@@ -390,6 +474,8 @@ describe('the four canvas shortcuts are pairwise disjoint', () => {
       .toEqual(['leaveTerminal']);
     expect(firing(canvasKey({ key: 't', code: 'KeyT', ctrlKey: true })))
       .toEqual(['openTabFromOverlay']);
+    expect(firing(canvasKey({ key: 'a', code: 'KeyA' }))).toEqual(['arrange']);
+    expect(firing(canvasKey({ key: 'l', code: 'KeyL' }))).toEqual(['toggleList']);
   });
 });
 
@@ -749,8 +835,10 @@ describe('canvasKeyAction', () => {
       .toEqual({ do: 'pan', dx: -PAN_STEP_PX, dy: 0 });
   });
 
+  // 'a' and 'l' moved out of this sweep 2026-08-24 — `canvasKeyAction` now owns them (Arrange,
+  // Toggle List). 'q' replaces 'a' as the neutral letter; both are covered on their own below.
   it('says nothing about keys it does not own', () => {
-    for (const k of ['a', 'Escape', 'Enter', ' ', '']) {
+    for (const k of ['q', 'Escape', 'Enter', ' ', '']) {
       expect({ k, action: canvasKeyAction(canvasKey({ key: k, code: k }), SELECTED, COMBOS) })
         .toEqual({ k, action: null });
     }
@@ -844,6 +932,32 @@ describe('canvasKeyAction', () => {
       .toEqual({ do: 'open-tab' });
     expect(canvasKeyAction(canvasKey({ key: 't', code: 'KeyT' }), SELECTED, rebound)).toBeNull();
   });
+
+  /* ---- Arrange and Toggle List (Tam, 2026-08-24) ---- */
+
+  /**
+   * Unlike `E`/`T`, neither needs a selection — both act on the whole workspace — so they must
+   * resolve the SAME with nothing selected as with a node selected. `E` and `T`'s decline is a
+   * property of what they do, not of every bare canvas key.
+   */
+  it('resolves Arrange and Toggle List regardless of what is selected', () => {
+    for (const sel of [SELECTED, NOTHING_SELECTED, EDGE_SELECTED]) {
+      expect(canvasKeyAction(canvasKey({ key: 'a', code: 'KeyA' }), sel, COMBOS))
+        .toEqual({ do: 'arrange' });
+      expect(canvasKeyAction(canvasKey({ key: 'l', code: 'KeyL' }), sel, COMBOS))
+        .toEqual({ do: 'toggle-list' });
+    }
+  });
+
+  it('follows a rebind for both', () => {
+    const rebound = { ...COMBOS, arrange: 'G', toggleList: 'H' };
+    expect(canvasKeyAction(canvasKey({ key: 'g', code: 'KeyG' }), SELECTED, rebound))
+      .toEqual({ do: 'arrange' });
+    expect(canvasKeyAction(canvasKey({ key: 'a', code: 'KeyA' }), SELECTED, rebound)).toBeNull();
+    expect(canvasKeyAction(canvasKey({ key: 'h', code: 'KeyH' }), SELECTED, rebound))
+      .toEqual({ do: 'toggle-list' });
+    expect(canvasKeyAction(canvasKey({ key: 'l', code: 'KeyL' }), SELECTED, rebound)).toBeNull();
+  });
 });
 
 /**
@@ -889,6 +1003,9 @@ describe('terminalKeyAction', () => {
   it('passes every other key through, including the ones the canvas owns elsewhere', () => {
     for (const k of [
       canvasKey({ key: 'e', code: 'KeyE' }),
+      // Arrange and Toggle List (2026-08-24) — bare canvas letters, same as `e`.
+      canvasKey({ key: 'a', code: 'KeyA' }),
+      canvasKey({ key: 'l', code: 'KeyL' }),
       canvasKey({ key: 'ArrowLeft', code: 'ArrowLeft' }),
       canvasKey({ key: '!', code: 'Digit1', shiftKey: true }),
       canvasKey({ key: ' ', code: 'Space' }),

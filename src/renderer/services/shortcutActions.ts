@@ -66,6 +66,15 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'canvasOpenNodeTabFromOverlay', label: 'Open Node in Its Tab (while editing)', defaultCombo: 'Ctrl+T', scope: 'canvas' },
   { id: 'canvasEnlargeNode', label: 'Enlarge Node', defaultCombo: 'E', scope: 'canvas' },
   { id: 'canvasLeaveTerminal', label: 'Leave Terminal / Shrink Overlay', defaultCombo: 'Ctrl+Shift+E', scope: 'canvas' },
+
+  /**
+   * `A` / `L`: Tam's request, 2026-08-24 — the toolbar's Arrange and List buttons had no
+   * shortcut to name in their own tooltip. Bare, for the same reason `T`/`E` are: neither needs a
+   * selection, and the canvas's own listener already gates every bare key on the canvas — not a
+   * terminal — holding the keyboard.
+   */
+  { id: 'canvasArrange', label: 'Arrange', defaultCombo: 'A', scope: 'canvas' },
+  { id: 'canvasToggleList', label: 'Toggle Terminal List', defaultCombo: 'L', scope: 'canvas' },
 ];
 
 /** An action fires app-wide (InputHandler's map) rather than on one surface. */

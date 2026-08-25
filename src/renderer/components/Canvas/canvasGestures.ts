@@ -227,6 +227,10 @@ export interface CanvasCombos {
   leaveTerminal: string;
   /** A chord INSIDE a live terminal: leave for this node's own tab. */
   openTabFromOverlay: string;
+  /** Bare, on the canvas: grid the workspace — the toolbar's Arrange button. */
+  arrange: string;
+  /** Bare, on the canvas: show/hide the sidebar — the toolbar's List button. */
+  toggleList: string;
 }
 
 /**
@@ -284,6 +288,30 @@ export function openOverlayShortcut(e: CanvasKey, combo: string): boolean {
  * `openTabFromOverlayShortcut`.
  */
 export function openTabShortcut(e: CanvasKey, combo: string): boolean {
+  if (inEditable(e.target)) return false;
+  return matchesCombo(e, combo);
+}
+
+/**
+ * `A` by default — grid the workspace, the keyboard half of the toolbar's Arrange button (Tam,
+ * 2026-08-24).
+ *
+ * Bare and canvas-only, same bargain as `E`/`T`: the caller gates it on the canvas holding the
+ * keyboard. Unlike them it needs no selection — Arrange acts on the whole workspace, not one node
+ * — so `canvasKeyAction` resolves it unconditionally rather than declining with nothing selected.
+ */
+export function arrangeShortcut(e: CanvasKey, combo: string): boolean {
+  if (inEditable(e.target)) return false;
+  return matchesCombo(e, combo);
+}
+
+/**
+ * `L` by default — show/hide the sidebar, the keyboard half of the toolbar's List button (Tam,
+ * 2026-08-24).
+ *
+ * Same shape as `arrangeShortcut`: bare, canvas-only, and needs no selection.
+ */
+export function toggleListShortcut(e: CanvasKey, combo: string): boolean {
   if (inEditable(e.target)) return false;
   return matchesCombo(e, combo);
 }
@@ -457,7 +485,9 @@ export type CanvasAction =
   | { do: 'pan'; dx: number; dy: number }
   | { do: 'step'; dir: StepDir }
   | { do: 'zoom'; intent: ZoomIntent }
-  | { do: 'delete-edge' };
+  | { do: 'delete-edge' }
+  | { do: 'arrange' }
+  | { do: 'toggle-list' };
 
 /**
  * What the canvas currently has selected.
@@ -494,6 +524,10 @@ export function canvasKeyAction(
   // THE CANVAS. A stray press resolving to an action would yank the user to a tab they never
   // chose, which is the most disorienting thing any key on this surface can do.
   if (openTabShortcut(e, combos.openTab)) return sel.node ? { do: 'open-tab' } : null;
+  // Neither needs a selection — both act on the whole workspace, not one node — so they resolve
+  // unconditionally rather than declining like `E`/`T` do with nothing selected.
+  if (arrangeShortcut(e, combos.arrange)) return { do: 'arrange' };
+  if (toggleListShortcut(e, combos.toggleList)) return { do: 'toggle-list' };
   // Unlike `E`, stepping with nothing selected is meaningful — it starts at one end.
   const step = stepShortcut(e);
   if (step) return { do: 'step', dir: step };

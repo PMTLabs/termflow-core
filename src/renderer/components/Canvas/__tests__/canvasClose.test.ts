@@ -6,7 +6,7 @@
  * Both of the ways this goes wrong are silent at the call site, which is why the decision is a
  * pure function with its own tests rather than three conditions inside a click handler.
  */
-import { decideCanvasClose, closeEventFor, CLOSE_EVENTS } from '../canvasClose';
+import { decideCanvasClose, closeEventFor, closeEndedRequests, CLOSE_EVENTS } from '../canvasClose';
 
 const NODE = { terminalId: 'tm-1', tabId: 'tb-1', paneId: 'pn-1' };
 
@@ -92,5 +92,73 @@ describe('the event a decision becomes', () => {
     expect(CLOSE_EVENTS.tab.idKey).toBe('tabId');
     expect(Object.keys(closeEventFor(decideCanvasClose(NODE, 5, LIVE)).detail)).toEqual(['paneId']);
     expect(Object.keys(closeEventFor(decideCanvasClose(NODE, 1, LIVE)).detail)).toEqual(['tabId']);
+  });
+});
+
+describe('closeEndedRequests — the toolbar\'s Close Ended button', () => {
+  const node = (terminalId: string, tabId: string, paneId: string) => ({ terminalId, tabId, paneId });
+  /** No caller of this function ever passes a live terminal — `endedNodes` is pre-filtered by
+   *  the caller — but the request must still ask, defensively, rather than assume. */
+  const NONE_ALIVE = () => false;
+
+  it('closes a lone ended node as its tab', () => {
+    const out = closeEndedRequests([node('tm-1', 'tb-1', 'pn-1')], () => 1, NONE_ALIVE);
+    expect(out).toEqual([{ kind: 'tab', targetId: 'tb-1', confirm: false }]);
+  });
+
+  /**
+   * THE case a naive per-node loop gets wrong: two ended panes sharing a multi-pane tab. A loop
+   * that re-used a pane count taken before either closed would route the second one down the
+   * pane flow on what is by then the tab's last pane — the exact "tab-shaped hole"
+   * `decideCanvasClose` exists to avoid. Deciding once per tab sidesteps it: both panes accounted
+   * for, both ended, the tab closes as ONE request rather than two pane closes.
+   */
+  it('closes a tab whose every pane has ended as ONE tab request, not one per pane', () => {
+    const out = closeEndedRequests(
+      [node('tm-1', 'tb-1', 'pn-1'), node('tm-2', 'tb-1', 'pn-2')],
+      () => 2,
+      NONE_ALIVE,
+    );
+    expect(out).toEqual([{ kind: 'tab', targetId: 'tb-1', confirm: false }]);
+  });
+
+  /** The live sibling is never a member of `endedNodes`, so the ended count can never reach the
+   *  tab's total pane count — the tab itself must never appear as a request. */
+  it('closes only the ended pane when a tab has a live sibling, and leaves the tab alone', () => {
+    const out = closeEndedRequests([node('tm-1', 'tb-1', 'pn-1')], () => 2, NONE_ALIVE);
+    expect(out).toEqual([{ kind: 'pane', targetId: 'pn-1', confirm: false }]);
+  });
+
+  it('decides each tab independently', () => {
+    const out = closeEndedRequests(
+      [node('tm-1', 'tb-1', 'pn-1'), node('tm-2', 'tb-2', 'pn-2'), node('tm-3', 'tb-2', 'pn-3')],
+      (tabId) => (tabId === 'tb-1' ? 1 : 2),
+      NONE_ALIVE,
+    );
+    expect(out).toEqual([
+      { kind: 'tab', targetId: 'tb-1', confirm: false },
+      { kind: 'tab', targetId: 'tb-2', confirm: false },
+    ]);
+  });
+
+  it('returns nothing for an empty list', () => {
+    expect(closeEndedRequests([], () => 1, NONE_ALIVE)).toEqual([]);
+  });
+
+  /** A tab with no tree at all counts as zero panes, same as `decideCanvasClose` — and a lone
+   *  node against zero panes must still resolve to closing the tab, not get stranded. */
+  it('treats zero panes in the tree the same as one', () => {
+    const out = closeEndedRequests([node('tm-1', 'tb-1', 'pn-1')], () => 0, NONE_ALIVE);
+    expect(out).toEqual([{ kind: 'tab', targetId: 'tb-1', confirm: false }]);
+  });
+
+  /** Defensive, not reachable through the toolbar today: `isAlive` is still consulted per node
+   *  rather than assumed false, so a caller that passes a live terminal still gets asked. */
+  it('still asks isAlive rather than assuming every ended node is dead', () => {
+    const paneOut = closeEndedRequests([node('tm-1', 'tb-1', 'pn-1')], () => 2, () => true);
+    expect(paneOut).toEqual([{ kind: 'pane', targetId: 'pn-1', confirm: true }]);
+
+    const tabOut = closeEndedRequests([node('tm-1', 'tb-1', 'pn-1')], () => 1, () => true);
+    expect(tabOut).toEqual([{ kind: 'tab', targetId: 'tb-1', confirm: true }]);
   });
 });

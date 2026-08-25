@@ -138,6 +138,28 @@ describe('CanvasMode hands the close to the owning surface', () => {
   });
 });
 
+/** The toolbar's Close Ended button, Tam's ask 2026-08-24. The DECISION is pure and tested in
+ *  `canvasClose.test.ts` (`closeEndedRequests`); this is only what has no pure form — which
+ *  nodes feed it and that it dispatches through the same event path as a single node close. */
+describe('CanvasMode routes the Close Ended button through closeEndedRequests', () => {
+  const CLOSE_ALL_ENDED = /const closeAllEnded = useCallback\(\(\) => \{[\s\S]*?\n  \}, \[/.exec(MODE)?.[0] ?? '';
+
+  it('found the callback', () => {
+    expect(CLOSE_ALL_ENDED).not.toBe('');
+  });
+
+  /** Filters on the same `exited` field the "ended" tint reads — a different predicate here
+   *  would close nodes the user cannot see are dead, or leave tinted ones behind. */
+  it('feeds it only the nodes the ended tint marks', () => {
+    expect(CLOSE_ALL_ENDED).toContain('model.nodes.filter((n) => n.exited)');
+  });
+
+  it('dispatches through the same event path a single close uses, not a fourth copy', () => {
+    expect(CLOSE_ALL_ENDED).toContain('closeEventFor(req)');
+    expect(CLOSE_ALL_ENDED).toContain('window.dispatchEvent(new CustomEvent(type, { detail }));');
+  });
+});
+
 /**
  * A rule derived from the real files rather than a list, so the next canvas menu is covered the
  * day it is written.
