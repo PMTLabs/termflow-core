@@ -1,9 +1,13 @@
 // Path helpers for backlog 003 link resolution. The renderer runs in a WebView
 // (no Node `path`), so these are minimal and platform-sniffing by string shape.
 
-/** Windows drive (C:\ or C:/), UNC (\\server), or POSIX (/) absolute path. */
+/** Windows drive (C:\ or C:/), UNC (\\server), POSIX (/) absolute path, or a
+ *  `~`-relative home-directory path (`~` alone, or `~/...` / `~\...`). None of
+ *  these should be joined against the terminal's cwd — a `~` path resolves
+ *  against the user's home directory instead, which the backend expands
+ *  (see Rust `open_commands::expand_tilde`). */
 export function isAbsolutePath(p: string): boolean {
-  return /^([a-zA-Z]:[\\/]|\\\\|\/)/.test(p);
+  return /^([a-zA-Z]:[\\/]|\\\\|\/|~([\\/]|$))/.test(p);
 }
 
 /** Join a relative path under a cwd, picking the separator from the cwd's shape

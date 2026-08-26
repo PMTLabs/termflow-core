@@ -358,23 +358,28 @@ export interface PathLinkMatch {
 }
 
 // Bounded, ReDoS-safe matcher for file paths in terminal output (backlog 003).
-// Four alternatives, each with an optional :line(:col) suffix:
+// Five alternatives, each with an optional :line(:col) suffix:
 //   1. Windows-abs: C:\foo\bar OR C:/foo/bar (tools/agent logs print either
 //      separator). The `(?<![A-Za-z])` guard keeps a URL scheme's single letter
 //      before `://` (the `p` in `http://`) from being read as a `p:` drive.
 //   2. Anchored relative: ./foo, ../foo, .\foo (either separator) — the leading
 //      dot-slash signals user intent, so no file extension is required.
-//   3. POSIX-abs: /foo/bar — but only at a real boundary. The `(?<![\w.:/\\-])`
+//   3. Home-relative: ~/foo or ~\foo — the `~` is the shell's home-dir shorthand.
+//      Without this branch, POSIX-abs below still matches starting at the `/`
+//      (its lookbehind doesn't exclude `~`), silently dropping the `~` and
+//      turning `~/.config/x` into `/.config/x` — a filesystem-root path that
+//      404s instead of resolving under the user's home directory.
+//   4. POSIX-abs: /foo/bar — but only at a real boundary. The `(?<![\w.:/\\-])`
 //      lookbehind stops the `/` *inside* `origin/develop` (or `http://host/p`)
 //      from starting a bogus absolute-path match.
-//   4. Bare relative: seg/seg/…/name.ext. The final segment MUST be a strict
+//   5. Bare relative: seg/seg/…/name.ext. The final segment MUST be a strict
 //      `name.ext` (dot-separated word groups, no consecutive dots) so git refs
 //      (feature/audit-x, origin/develop) AND range expressions (a...b) — none of
 //      which form a real filename — are NOT mistaken for files. Folder-only paths
 //      need the anchored form (./folder) to be detected.
 // Negated/anchored char classes keep every branch free of unbounded backtracking.
 const PATH_RE =
-  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+)(?::(\d+)(?::(\d+))?)?/g;
+  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+)(?::(\d+)(?::(\d+))?)?/g;
 
 // Strip trailing punctuation that terminals / markdown / tool logs place right
 // AFTER a path but that isn't part of it — e.g. the `)` in `Write(C:\a\b.md)` or
