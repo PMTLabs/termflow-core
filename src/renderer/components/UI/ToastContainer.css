@@ -9,6 +9,79 @@
   pointer-events: none;
 }
 
+/* Canvas.css's .canvas-toolbar says `top: 11px`, but that's relative to .canvas-mode —
+   which itself starts BELOW the 40px title bar (TitleBar.css .title-bar), not the
+   viewport. So the toolbar's real viewport span is ~51px to ~77px. This container is
+   position:fixed (viewport-relative), so push it well past that with margin. */
+.toast-container--canvas {
+  top: 96px;
+}
+
+.toast-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.toast-stack--expanded {
+  gap: 12px;
+}
+
+/* A real, always-visible header — not a subtle sliver — so "there's more" and "how to
+   see it" are obvious at a glance instead of discovered by hovering the right pixel. */
+.toast-stack-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 280px;
+  max-width: 400px;
+  padding: 4px 6px;
+  background: rgba(50, 50, 50, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+.toast-stack-expand {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: white;
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-align: left;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+
+.toast-stack-expand:hover {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.toast-stack-chevron {
+  font-size: 0.7rem;
+}
+
+.toast-close-all {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.toast-close-all:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+}
+
 .toast-item {
   pointer-events: auto;
   min-width: 280px;

@@ -72,8 +72,13 @@ const uiSlice = createSlice({
         dismissTabToasts: (state, action: PayloadAction<{ tabId: string }>) => {
             state.toasts = state.toasts.filter(t => t.tabId !== action.payload.tabId);
         },
+        // "Close all" — clears every pending toast, sticky ones included, since it's an
+        // explicit user action.
+        dismissAllToasts: (state) => {
+            state.toasts = [];
+        },
     },
 });
 
-export const { showDialog, hideDialog, addToast, removeToast, dismissTabToasts } = uiSlice.actions;
+export const { showDialog, hideDialog, addToast, removeToast, dismissTabToasts, dismissAllToasts } = uiSlice.actions;
 export default uiSlice.reducer;

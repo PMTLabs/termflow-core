@@ -13,6 +13,7 @@ import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import uiReducer, { addToast, dismissTabToasts } from '../../../store/slices/uiSlice';
+import tabsReducer, { addTab } from '../../../store/slices/tabsSlice';
 
 // Jest has no CSS transform; stub the stylesheet import pulled in by the component.
 jest.mock('../ToastContainer.css', () => ({}));
@@ -22,6 +23,10 @@ import { ToastContainer } from '../ToastContainer';
 
 function makeStore() {
     return configureStore({ reducer: { ui: uiReducer } });
+}
+
+function makeStoreWithTabs() {
+    return configureStore({ reducer: { ui: uiReducer, tabs: tabsReducer } });
 }
 
 /**
@@ -106,5 +111,192 @@ describe('ToastContainer — auto-dismiss vs sticky', () => {
         const remaining = store.getState().ui.toasts;
         expect(remaining).toHaveLength(1);
         expect(remaining[0].tabId).toBe('tb-2');
+    });
+});
+
+describe('ToastContainer — collapsed stack', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeAll(() => {
+        (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    });
+
+    beforeEach(() => {
+        jest.useFakeTimers();
+        container = document.createElement('div');
+        document.body.appendChild(container);
+    });
+
+    afterEach(() => {
+        act(() => root.unmount());
+        container.remove();
+        jest.useRealTimers();
+    });
+
+    function mount(store: ReturnType<typeof makeStore>) {
+        root = createRoot(container);
+        act(() => {
+            root.render(
+                <Provider store={store}>
+                    <ToastContainer />
+                </Provider>,
+            );
+        });
+    }
+
+    function addSticky(store: ReturnType<typeof makeStore>, message: string) {
+        act(() => { store.dispatch(addToast({ message, sticky: true })); });
+    }
+
+    it('does not render stacking chrome for a single toast', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'solo');
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(1);
+        expect(toastRoot().querySelector('.toast-stack-header')).toBeNull();
+        expect(toastRoot().querySelector('.toast-close-all')).toBeNull();
+    });
+
+    it('shows only the most recently added toast when collapsed with multiple toasts', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const items = toastRoot().querySelectorAll('.toast-item');
+        expect(items).toHaveLength(1);
+        expect(items[0].textContent).toContain('second');
+        expect(items[0].textContent).not.toContain('first');
+    });
+
+    it('clicking the visible top toast dismisses only that toast', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const item = toastRoot().querySelector('.toast-item') as HTMLElement;
+        act(() => { item.click(); });
+        const remaining = store.getState().ui.toasts;
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0].message).toBe('first');
+    });
+
+    it('the collapsed stack shows a real, labeled button to expand — not a subtle sliver', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        addSticky(store, 'third');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLButtonElement;
+        expect(expandBtn).toBeTruthy();
+        expect(expandBtn.tagName).toBe('BUTTON');
+        expect(expandBtn.textContent).toContain('3');
+    });
+
+    it('clicking the stack\'s top edge expands to reveal every pending toast', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        addSticky(store, 'third');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        expect(expandBtn).toBeTruthy();
+        act(() => { expandBtn.click(); });
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(3);
+    });
+
+    it('lists expanded toasts newest-first', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        act(() => { expandBtn.click(); });
+        const items = toastRoot().querySelectorAll('.toast-item');
+        expect(items[0].textContent).toContain('second');
+        expect(items[1].textContent).toContain('first');
+    });
+
+    it('selecting close all dismisses every pending toast', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        act(() => { expandBtn.click(); });
+        const closeAll = toastRoot().querySelector('.toast-close-all') as HTMLElement;
+        expect(closeAll).toBeTruthy();
+        act(() => { closeAll.click(); });
+        expect(store.getState().ui.toasts).toHaveLength(0);
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(0);
+    });
+
+    it('clicking Clear all from the collapsed stack dismisses every toast without expanding first', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const closeAll = toastRoot().querySelector('.toast-close-all') as HTMLElement;
+        expect(closeAll).toBeTruthy();
+        act(() => { closeAll.click(); });
+        expect(store.getState().ui.toasts).toHaveLength(0);
+    });
+
+    it('pressing Escape while expanded collapses the stack without dismissing toasts', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        act(() => { expandBtn.click(); });
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(2);
+        act(() => {
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        });
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(1);
+        expect(store.getState().ui.toasts).toHaveLength(2);
+    });
+
+    it('clicking outside the stack while expanded collapses it without dismissing toasts', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        act(() => { expandBtn.click(); });
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(2);
+        act(() => {
+            document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        });
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(1);
+        expect(store.getState().ui.toasts).toHaveLength(2);
+    });
+
+    it('inserts a newly-arriving toast live while the stack is expanded', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'first');
+        addSticky(store, 'second');
+        const expandBtn = toastRoot().querySelector('.toast-stack-expand') as HTMLElement;
+        act(() => { expandBtn.click(); });
+        addSticky(store, 'third');
+        expect(toastRoot().querySelectorAll('.toast-item')).toHaveLength(3);
+    });
+
+    it('exposes an accessible status role on the toast container', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'solo');
+        expect(toastRoot().getAttribute('role')).toBe('status');
+    });
+
+    it('adds a canvas-offset modifier class when the active tab is a canvas tab', () => {
+        const store = makeStoreWithTabs();
+        mount(store);
+        act(() => {
+            store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: 'canvas' }));
+            store.dispatch(addToast({ message: 'hi', sticky: true }));
+        });
+        expect(toastRoot().classList.contains('toast-container--canvas')).toBe(true);
     });
 });

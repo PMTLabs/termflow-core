@@ -1178,6 +1178,30 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 way — the taskbar, Alt-Tab, clicking the window — leaves you on the tab you
                 were already working in.
             </span>
+            {IS_DEV && (
+                <div className="setting-item">
+                    <button
+                        type="button"
+                        className="save-btn apply-btn"
+                        onClick={() => {
+                            const samples: Array<{ message: string; type: 'info' | 'success' | 'warning' | 'error' }> = [
+                                { message: 'Build "core" finished', type: 'success' },
+                                { message: 'New activity in "deploy"', type: 'info' },
+                                { message: 'Disk space is low on /', type: 'warning' },
+                                { message: 'Connection to peer lost', type: 'error' },
+                                { message: 'New activity in "logs"', type: 'info' },
+                            ];
+                            samples.forEach(s => dispatch(addToast({ ...s, sticky: true })));
+                        }}
+                    >
+                        Show a stack of test notifications
+                    </button>
+                    <span className="help-text">
+                        Dev build only: fires several toasts at once so you can verify the
+                        collapse/expand stack, click-to-dismiss, and "Close all".
+                    </span>
+                </div>
+            )}
         </div>
     );
 
