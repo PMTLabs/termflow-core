@@ -894,6 +894,10 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
     // exit and drop the pipe (10-minute safety window).
     client.arm_detach(600, &token).await?;
+    // Let every window persist its state (cwd snapshot included) before we drop
+    // it — an offload that skipped this came back with no persisted cwd for a
+    // just-created/just-`cd`'d tab (see `flush_all_windows`).
+    flush_all_windows(&state.app_handle).await;
     log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
     state.app_handle.exit(0);
     Ok(())
@@ -1808,20 +1812,28 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
     });
 }
 
-pub fn flush_then_exit(app: &tauri::AppHandle) {
+/// Ask every window to persist its state — including the spec 045 §3.3 cwd
+/// snapshot `saveStateWithCwds` refreshes just before saving — and wait up to
+/// `FLUSH_TIMEOUT` for all of them to ack (`app:flush-session` / `flushSessionAck`,
+/// see `App.tsx`). Does NOT disarm or exit the process; the caller decides what
+/// happens next.
+///
+/// Split out of `flush_then_exit` so `restart_for_update` and
+/// `update_and_restart` can run the SAME flush a normal quit runs before THEIR
+/// exit too. Those two arm the pty-host and exit deliberately armed — they must
+/// never route through `disarm_then_exit` — but they used to skip the flush
+/// outright, so a tab offloaded/updated between autosave ticks came back on
+/// relaunch with no persisted cwd and fell through to whatever directory
+/// `CreateProcess` picked with none given (reported: `C:\Windows`).
+pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
     use tauri::{Emitter, Manager as _};
 
-    let Some(state) = app.try_state::<AppState>() else {
-        disarm_then_exit(app);
-        return;
-    };
+    let Some(state) = app.try_state::<AppState>() else { return };
 
-    // A second Quit while a flush is in flight means "I am done waiting" — but
-    // it still goes through the disarm, which is a local round trip and normally
-    // costs milliseconds. Skipping it is what strands terminals.
+    // A second Quit while a flush is in flight means "I am done waiting" — the
+    // caller's own exit still proceeds; there is just nothing further to await.
     if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        log::info!("flush_then_exit: already flushing; exiting now.");
-        disarm_then_exit(app);
+        log::info!("flush_all_windows: already flushing; not waiting again.");
         return;
     }
 
@@ -1832,33 +1844,35 @@ pub fn flush_then_exit(app: &tauri::AppHandle) {
         .cloned()
         .collect();
     if expected.is_empty() {
-        disarm_then_exit(app);
         return;
     }
 
     state.flush_acks.clear();
     if let Err(e) = app.emit("app:flush-session", ()) {
-        // Nothing will ack, so do not make the user wait out the timeout.
-        log::warn!("flush_then_exit: could not ask windows to flush ({e}); exiting now.");
-        disarm_then_exit(app);
+        // Nothing will ack, so do not make the caller wait out the timeout.
+        log::warn!("flush_all_windows: could not ask windows to flush ({e}); continuing.");
         return;
     }
 
     let acks = state.flush_acks.clone();
-    let app = app.clone();
     let want = expected.len();
+    let all_acked = wait_for_acks(&acks, want, FLUSH_TIMEOUT).await;
+    if all_acked {
+        log::info!("flush_all_windows: all {want} window(s) persisted.");
+    } else {
+        log::warn!(
+            "flush_all_windows: {}/{} window(s) persisted before the {}ms deadline; continuing anyway.",
+            acks.len(),
+            want,
+            FLUSH_TIMEOUT.as_millis()
+        );
+    }
+}
+
+pub fn flush_then_exit(app: &tauri::AppHandle) {
+    let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let all_acked = wait_for_acks(&acks, want, FLUSH_TIMEOUT).await;
-        if all_acked {
-            log::info!("flush_then_exit: all {want} window(s) persisted; exiting.");
-        } else {
-            log::warn!(
-                "flush_then_exit: {}/{} window(s) persisted before the {}ms deadline; exiting anyway.",
-                acks.len(),
-                want,
-                FLUSH_TIMEOUT.as_millis()
-            );
-        }
+        flush_all_windows(&app).await;
         disarm_then_exit(&app);
     });
 }
@@ -3646,6 +3660,51 @@ mod quit_teardown_wiring_tests {
             !strip_line_comments(&body).contains("disarm"),
             "restart_for_update must NOT disarm — it exits deliberately armed so \
              terminals survive the update. Body:\n{body}"
+        );
+    }
+
+    /// The reported bug: `restart_for_update` used to arm and exit immediately,
+    /// with no chance for the renderer to persist a just-`cd`'d tab's cwd (spec
+    /// 045 §3.3). Pins that it now runs the same flush a normal quit runs — via
+    /// the shared, non-disarming `flush_all_windows` — BEFORE the exit, not after
+    /// (an ack that arrives after the process has already exited persists nothing).
+    #[test]
+    fn the_offload_path_flushes_cwd_state_before_exiting() {
+        let body = fn_body(&source("commands.rs"), "pub async fn restart_for_update");
+        assert!(
+            body.contains("flush_all_windows"),
+            "restart_for_update must flush every window's state (cwd snapshot \
+             included) before exiting, or a relaunch loses the cwd of any tab \
+             the last periodic autosave missed. Body:\n{body}"
+        );
+        let flush_at = body.find("flush_all_windows").expect("checked above");
+        let exit_at = body.find(".exit(").expect("restart_for_update must still exit");
+        assert!(
+            flush_at < exit_at,
+            "flush_all_windows must be awaited BEFORE exit(0) — after would persist \
+             nothing, the process is already gone. Body:\n{body}"
+        );
+    }
+
+    /// `flush_all_windows` is the shared piece both the normal quit path and the
+    /// offload/update paths build on. It must never itself decide to disarm or
+    /// exit — the three callers disagree on that (quit disarms, offload/update
+    /// must not) — so the decision has to stay with the caller.
+    #[test]
+    fn flush_all_windows_never_disarms_or_exits_itself() {
+        let body = fn_body(&source("commands.rs"), "async fn flush_all_windows");
+        let stripped = strip_line_comments(&body);
+        assert!(
+            !stripped.contains("disarm"),
+            "flush_all_windows must not disarm — that decision belongs to the \
+             caller (disarm_then_exit for a real quit; nothing for offload/update). \
+             Body:\n{body}"
+        );
+        assert!(
+            !has_process_exit(&body),
+            "flush_all_windows must not exit the process itself — callers that \
+             need to stay armed (restart_for_update, update_and_restart) would \
+             inherit an exit they never asked for. Body:\n{body}"
         );
     }
 }
