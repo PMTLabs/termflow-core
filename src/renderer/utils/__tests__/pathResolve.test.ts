@@ -9,6 +9,18 @@ describe('isAbsolutePath', () => {
     expect(isAbsolutePath('./x')).toBe(false);
     expect(isAbsolutePath('../y')).toBe(false);
   });
+
+  it('treats ~-relative home paths as needing no cwd join', () => {
+    // These resolve against the user's home directory, not the terminal's cwd, so
+    // the openPath handler must route them like an absolute path (see
+    // TerminalDisplay's `isAbsolutePath(rawPath) || !pid` check).
+    expect(isAbsolutePath('~/.gemini/brain/state.json')).toBe(true);
+    expect(isAbsolutePath('~\\scoop\\apps')).toBe(true);
+    expect(isAbsolutePath('~')).toBe(true);
+    // A filename that merely starts with `~` (no separator, not bare) is not
+    // home-shorthand — e.g. an Office lock file `~$doc.docx`.
+    expect(isAbsolutePath('~backup.txt')).toBe(false);
+  });
 });
 
 describe('joinCwd', () => {

@@ -96,4 +96,32 @@ describe('findPathLinks', () => {
     // The `/` in `origin/feature` must not start a bogus absolute-path match.
     expect(findPathLinks('compare origin/feature/x with main')).toHaveLength(0);
   });
+
+  it('matches a ~/ home-relative path and keeps the tilde', () => {
+    // Real-world failing case: an agent's config path printed with `~/`. Before the
+    // ~ branch existed, the POSIX-abs alternative matched starting at the `/` right
+    // after the tilde (its lookbehind doesn't exclude `~`), so the match silently
+    // dropped the `~` and produced a bogus filesystem-root path.
+    const text = '~/.gemini/antigravity-cli/brain/b0a98b22-2a03-4265-9adc-9b615e1b9b08/terminal_monitor_state.json';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe(text);
+    expect(text.slice(m.start, m.end)).toBe(text);
+  });
+
+  it('matches a ~\\ home-relative path (Windows separator)', () => {
+    const [m] = findPathLinks('open ~\\scoop\\apps\\config.json now');
+    expect(m.path).toBe('~\\scoop\\apps\\config.json');
+  });
+
+  it('matches a ~/ path with a line:col suffix', () => {
+    const [m] = findPathLinks('at ~/src/main.rs:42:7 today');
+    expect(m.path).toBe('~/src/main.rs');
+    expect(m.line).toBe(42);
+    expect(m.col).toBe(7);
+  });
+
+  it('does not match a bare ~ or a tilde mid-word', () => {
+    expect(findPathLinks('cd ~ now')).toHaveLength(0);
+    expect(findPathLinks('roughly ~5 items changed')).toHaveLength(0);
+  });
 });

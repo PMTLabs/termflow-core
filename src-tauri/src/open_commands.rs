@@ -204,18 +204,47 @@ fn msys_or_wsl_drive(path: &str) -> Option<String> {
     drive_from(rest).map(|(d, after)| to_win(d, after))
 }
 
-/// Turn a terminal-printed path into one the host OS can open. On Windows this first
-/// remaps Git-Bash/WSL drive paths (`/d/…`, `/mnt/d/…`) to `D:\…`, then normalizes
-/// separators; on every other OS it is exactly `normalize_separators` — a `/d/…` path
-/// there is a genuine POSIX path and is left alone.
+/// Expand a leading `~` (home dir) the way a POSIX shell would: `~` alone, or
+/// `~/rest` / `~\rest`. Terminal-printed paths from tools/agents commonly use this
+/// shorthand (e.g. `~/.gemini/antigravity-cli/...`), but `std::fs::canonicalize` has
+/// no notion of it and fails with "File not found" on the literal `~` component.
+/// `home` is injected rather than read from env here so this stays a pure,
+/// directly-testable function — see `home_dir` for the one real lookup. Mirrors the
+/// `~`-expansion already used for a spawned shell's cwd (`pty_manager::build_spawn_spec`).
+fn expand_tilde(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home else { return path.to_string() };
+    let home = home.trim_end_matches(['/', '\\']);
+    if path == "~" {
+        return home.to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        let sep = if cfg!(target_os = "windows") { '\\' } else { '/' };
+        return format!("{home}{sep}{rest}");
+    }
+    path.to_string()
+}
+
+/// The user's home directory, the way a shell would report it — `HOME` first (set in
+/// Git-Bash/WSL sessions too), falling back to Windows' `USERPROFILE`.
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()
+}
+
+/// Turn a terminal-printed path into one the host OS can open. First expands a
+/// leading `~` (home dir) — real on every OS, since `canonicalize` never understands
+/// shell shorthand. Then, Windows only, remaps Git-Bash/WSL drive paths (`/d/…`,
+/// `/mnt/d/…`) to `D:\…` and normalizes separators; on every other OS the tilde
+/// expansion is the whole job — a `/d/…` path there is a genuine POSIX path and is
+/// left alone.
 fn to_native_path(path: &str) -> String {
+    let path = expand_tilde(path, home_dir().as_deref());
     #[cfg(target_os = "windows")]
     {
-        if let Some(win) = msys_or_wsl_drive(path) {
+        if let Some(win) = msys_or_wsl_drive(&path) {
             return win;
         }
     }
-    normalize_separators(path)
+    normalize_separators(&path)
 }
 
 /// True when `program` is a Windows batch launcher (`.cmd`/`.bat`), which std runs
@@ -658,7 +687,7 @@ pub async fn open_in_editor(
 #[cfg(test)]
 mod tests {
     use super::{
-        editor_args, find_descendants, is_batch_shim, is_executable_path,
+        editor_args, expand_tilde, find_descendants, is_batch_shim, is_executable_path,
         is_known_gui_launcher_stub, is_vscode_family, msys_or_wsl_drive, normalize_separators,
         resolve_blocking, resolve_in_path,
     };
@@ -778,6 +807,33 @@ mod tests {
         assert_eq!(msys_or_wsl_drive("/d\\sources").as_deref(), Some("D:\\sources"));
         // A non-ASCII tail is preserved.
         assert_eq!(msys_or_wsl_drive("/mnt/c/Users/中文").as_deref(), Some("C:\\Users\\中文"));
+    }
+
+    #[test]
+    fn expands_leading_tilde_against_a_given_home() {
+        // Bare `~` becomes the home dir itself.
+        assert_eq!(expand_tilde("~", Some("/home/tam")), "/home/tam");
+        // `~/rest` and `~\rest` both join onto home with the OS-native separator —
+        // this is the shape a coding agent actually prints, e.g.
+        // `~/.gemini/antigravity-cli/brain/<uuid>/terminal_monitor_state.json`.
+        let sep = if cfg!(target_os = "windows") { '\\' } else { '/' };
+        assert_eq!(
+            expand_tilde("~/.gemini/brain/state.json", Some("/home/tam")),
+            format!("/home/tam{sep}.gemini/brain/state.json")
+        );
+        assert_eq!(
+            expand_tilde("~\\scoop\\apps", Some("C:\\Users\\tam")),
+            format!("C:\\Users\\tam{sep}scoop\\apps")
+        );
+        // A trailing separator already on `home` doesn't produce a doubled one.
+        assert_eq!(expand_tilde("~/x", Some("/home/tam/")), format!("/home/tam{sep}x"));
+        // No home available: left untouched rather than guessed at.
+        assert_eq!(expand_tilde("~/x", None), "~/x");
+        // Not a tilde-path at all: untouched.
+        assert_eq!(expand_tilde("/usr/lib/foo.so", Some("/home/tam")), "/usr/lib/foo.so");
+        // A filename that merely STARTS with `~` (not `~/`, `~\`, or bare `~`) is a
+        // real file (e.g. an Office lock file `~$doc.docx`), not home-shorthand.
+        assert_eq!(expand_tilde("~backup.txt", Some("/home/tam")), "~backup.txt");
     }
 
     #[test]
