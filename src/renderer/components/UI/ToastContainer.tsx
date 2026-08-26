@@ -33,6 +33,9 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
         <div className={`toast-item ${toast.type}`} onClick={() => dispatch(removeToast(toast.id))}>
             <span className="toast-icon">{getIcon()}</span>
             <span className="toast-message">{toast.message}</span>
+            <span className="toast-time">
+                {new Date(toast.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+            </span>
             <button
                 className="toast-close"
                 aria-label="Dismiss"

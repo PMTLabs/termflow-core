@@ -14,6 +14,8 @@ export interface Toast {
     // once the user opens that tab (e.g. by clicking the OS notification) — the toast
     // is redundant once the activity has been seen. See dismissTabToasts.
     tabId?: string;
+    // When the toast was created, for the local-time display on its card.
+    createdAt: number;
 }
 
 interface DialogState {
@@ -62,6 +64,7 @@ const uiSlice = createSlice({
                 duration: action.payload.duration || 3000,
                 sticky: action.payload.sticky,
                 tabId: action.payload.tabId,
+                createdAt: Date.now(),
             });
         },
         removeToast: (state, action: PayloadAction<string>) => {

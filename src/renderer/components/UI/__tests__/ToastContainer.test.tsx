@@ -299,4 +299,16 @@ describe('ToastContainer — collapsed stack', () => {
         });
         expect(toastRoot().classList.contains('toast-container--canvas')).toBe(true);
     });
+
+    it('shows the local time the toast was created', () => {
+        const store = makeStore();
+        mount(store);
+        const fixedNow = new Date('2024-03-15T14:05:00');
+        jest.setSystemTime(fixedNow);
+        addSticky(store, 'solo');
+        const expected = fixedNow.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const timeEl = toastRoot().querySelector('.toast-time');
+        expect(timeEl).toBeTruthy();
+        expect(timeEl?.textContent).toBe(expected);
+    });
 });
