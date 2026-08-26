@@ -300,15 +300,28 @@ describe('ToastContainer — collapsed stack', () => {
         expect(toastRoot().classList.contains('toast-container--canvas')).toBe(true);
     });
 
-    it('shows the local time the toast was created', () => {
+    it('shows a relative "time ago" label that updates as time passes', () => {
         const store = makeStore();
         mount(store);
         const fixedNow = new Date('2024-03-15T14:05:00');
         jest.setSystemTime(fixedNow);
         addSticky(store, 'solo');
-        const expected = fixedNow.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-        const timeEl = toastRoot().querySelector('.toast-time');
-        expect(timeEl).toBeTruthy();
-        expect(timeEl?.textContent).toBe(expected);
+        expect(toastRoot().querySelector('.toast-time')?.textContent).toBe('Just now');
+
+        act(() => {
+            jest.setSystemTime(new Date(fixedNow.getTime() + 2 * 60 * 1000));
+            jest.advanceTimersByTime(30_000);
+        });
+        expect(toastRoot().querySelector('.toast-time')?.textContent).toBe('2m ago');
+    });
+
+    it('exposes the full local date and time as a hover tooltip on the timestamp', () => {
+        const store = makeStore();
+        mount(store);
+        const fixedNow = new Date('2024-03-15T14:05:00');
+        jest.setSystemTime(fixedNow);
+        addSticky(store, 'solo');
+        const expected = fixedNow.toLocaleString();
+        expect(toastRoot().querySelector('.toast-time')?.getAttribute('title')).toBe(expected);
     });
 });

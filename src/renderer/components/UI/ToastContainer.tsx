@@ -6,8 +6,26 @@ import { removeToast, dismissAllToasts, Toast as ToastType } from '../../store/s
 import { CANVAS_SHELL_TYPE } from '../../services/tabKinds';
 import './ToastContainer.css';
 
+// Mirrors SearchResults.tsx's formatTimestamp — same thresholds, kept local since toasts
+// and search results have no shared timestamp-formatting module.
+function formatRelativeTime(createdAt: number, now: number): string {
+    const diffMs = now - createdAt;
+    const diffMins = Math.floor(diffMs / (1000 * 60));
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffMins < 1) return 'Just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return new Date(createdAt).toLocaleDateString();
+}
+
 const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
     const dispatch = useDispatch();
+    // A sticky toast can sit visible for a long time; this forces a periodic re-render
+    // so its "time ago" label keeps pace instead of freezing at whatever it said on mount.
+    const [, tick] = useState(0);
 
     useEffect(() => {
         // Sticky toasts (e.g. activity notifications) never auto-dismiss — they stay
@@ -19,6 +37,11 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
 
         return () => clearTimeout(timer);
     }, [dispatch, toast.id, toast.duration, toast.sticky]);
+
+    useEffect(() => {
+        const interval = setInterval(() => tick(t => t + 1), 30_000);
+        return () => clearInterval(interval);
+    }, []);
 
     const getIcon = () => {
         switch (toast.type) {
@@ -33,8 +56,8 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
         <div className={`toast-item ${toast.type}`} onClick={() => dispatch(removeToast(toast.id))}>
             <span className="toast-icon">{getIcon()}</span>
             <span className="toast-message">{toast.message}</span>
-            <span className="toast-time">
-                {new Date(toast.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+            <span className="toast-time" title={new Date(toast.createdAt).toLocaleString()}>
+                {formatRelativeTime(toast.createdAt, Date.now())}
             </span>
             <button
                 className="toast-close"
