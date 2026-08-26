@@ -1196,7 +1196,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     >
                         Show a stack of test notifications
                     </button>
-                    <span className="help-text" style={{ display: 'block', marginTop: 6 }}>
+                    <span className="help-text help-text--block">
                         Dev build only: fires several toasts at once so you can verify the
                         collapse/expand stack, click-to-dismiss, and "Close all".
                     </span>

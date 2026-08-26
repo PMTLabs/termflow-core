@@ -387,6 +387,15 @@
   margin-bottom: 0;
 }
 
+/* Same fix as `.setting-item-row + .help-text` above, but as a class instead of a
+   sibling selector — for a bare <span class="help-text"> that needs block treatment
+   regardless of what precedes it (e.g. directly after a standalone action button,
+   where there is no .setting-item-row to key off). */
+.help-text--block {
+  display: block;
+  margin-top: 6px;
+}
+
 .default-badge {
   background-color: #007acc;
   color: white;
