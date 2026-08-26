@@ -1499,6 +1499,7 @@ pub fn run() {
         open_commands::open_external,
         open_commands::open_path,
         open_commands::open_in_editor,
+        open_commands::open_legal_document,
         commands::write_terminal,
         commands::resize_terminal,
         commands::get_terminal_size,

@@ -40,6 +40,13 @@ export interface BundledDoc {
     title: string;
     /** Only present in Pro builds (bundles the peering fabric); read may fail otherwise. */
     proOnly?: boolean;
+    /**
+     * Too large to read into a JS string and render inline (THIRD-PARTY-NOTICES.txt is
+     * ~7MB of reproduced license text for ~970 components — doing so crashed the panel).
+     * The UI shows a short summary instead and opens the real file via `openLegalDocument`
+     * in the OS-native text editor rather than fetching its text with `readLegalDocument`.
+     */
+    external?: boolean;
 }
 
 /** The documents bundled into the app, shown in Settings → About & Legal. */
@@ -48,5 +55,5 @@ export const BUNDLED_DOCS: BundledDoc[] = [
     { file: 'PRIVACY.txt', title: 'Privacy Notice' },
     { file: 'LICENSE-apache-2.0.txt', title: 'Open-Source Core License (Apache-2.0)' },
     { file: 'LICENSE-fabric-fsl.txt', title: 'Peering Fabric License (FSL-1.1-Apache-2.0)', proOnly: true },
-    { file: 'THIRD-PARTY-NOTICES.txt', title: 'Third-Party Notices' },
+    { file: 'THIRD-PARTY-NOTICES.txt', title: 'Third-Party Notices', external: true },
 ];

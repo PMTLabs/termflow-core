@@ -330,6 +330,10 @@ class BrowserBridge implements ElectronAPI {
         throw new Error('legal documents are not bundled in the browser host');
     }
 
+    async openLegalDocument(_name: string): Promise<void> {
+        throw new Error('legal documents are not bundled in the browser host');
+    }
+
     // Backlog 011: command history — browser build has no SQLite; degrade to
     // the localStorage-backed config store via the existing config API.
     async addCommandHistory(command: string): Promise<void> {

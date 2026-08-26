@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { BUNDLED_DOCS, LEGAL_LINKS, isLive, BundledDoc } from '../../legal';
+import { BUNDLED_DOCS, LEGAL_LINKS, isLive, BundledDoc, SITE_ORIGIN } from '../../legal';
 
 /**
  * Settings → About & Legal. Lists the agreements/notices bundled with this build (read via
@@ -19,8 +19,13 @@ export const AboutLegalPanel: React.FC = () => {
 
     const view = useCallback(async (doc: BundledDoc) => {
         setSelected(doc);
-        setText('Loading…');
         setError(null);
+        if (doc.external) {
+            // Too large to fetch into a JS string and render inline (see BundledDoc.external).
+            setText('');
+            return;
+        }
+        setText('Loading…');
         try {
             const t = await window.electronAPI?.readLegalDocument?.(doc.file);
             setText(t ?? '');
@@ -39,6 +44,16 @@ export const AboutLegalPanel: React.FC = () => {
         e.preventDefault();
         void window.electronAPI?.openExternal?.(url);
     };
+
+    const openExternalDoc = useCallback(async (doc: BundledDoc) => {
+        setError(null);
+        try {
+            await window.electronAPI?.openLegalDocument?.(doc.file);
+        } catch (err) {
+            console.error('openLegalDocument failed:', err);
+            setError('This document could not be opened from the current build.');
+        }
+    }, []);
 
     const online = LEGAL_LINKS.filter(isLive);
 
@@ -80,6 +95,27 @@ export const AboutLegalPanel: React.FC = () => {
                     </div>
                     {error ? (
                         <p className="help-text">{error}</p>
+                    ) : selected.external ? (
+                        <>
+                            <p className="help-text">
+                                TermFlow bundles the open-source components it depends on, each under
+                                its own license. The full list — component names, versions, and
+                                reproduced license text — is too large to display here, so it opens in
+                                your default text editor instead. A short human-readable summary is
+                                also published at{' '}
+                                <a
+                                    href={`${SITE_ORIGIN}/licenses`}
+                                    onClick={openLink(`${SITE_ORIGIN}/licenses`)}
+                                    style={{ color: '#4ea1ff' }}
+                                >
+                                    termflow.app/licenses
+                                </a>
+                                .
+                            </p>
+                            <button className="link-btn" onClick={() => { void openExternalDoc(selected); }}>
+                                Open full notices file
+                            </button>
+                        </>
                     ) : (
                         <div
                             style={{

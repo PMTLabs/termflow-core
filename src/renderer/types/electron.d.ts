@@ -220,6 +220,10 @@ export interface ElectronAPI {
   setConfigValue: (key: string, value: any) => Promise<boolean>;
   // Read a bundled legal document (EULA/privacy/licenses/notices) by filename.
   readLegalDocument?: (name: string) => Promise<string>;
+  // Open a bundled legal document directly in the OS-native text editor, bypassing
+  // IPC + DOM entirely — used for THIRD-PARTY-NOTICES.txt, which is too large (~7MB)
+  // to read into a JS string and render inline without crashing the panel.
+  openLegalDocument?: (name: string) => Promise<void>;
   // Backlog 011: global command history for the suggestion popup.
   addCommandHistory: (command: string) => Promise<void>;
   loadCommandHistory: (limit?: number) => Promise<string[]>;

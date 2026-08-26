@@ -560,6 +560,27 @@ pub async fn open_path(path: String) -> Result<(), String> {
     open_in_text_editor(&resolved)
 }
 
+/// Open a bundled legal/agreement document (see [`crate::commands::LEGAL_DOCUMENTS`])
+/// directly in the OS-native text editor, without ever bringing its bytes into the
+/// renderer. Exists because `THIRD-PARTY-NOTICES.txt` is ~7MB — reading it into a JS
+/// string and rendering it in the DOM (the `read_legal_document` path) crashed the
+/// About & Legal panel; this bypasses both the IPC payload and the DOM entirely.
+#[tauri::command]
+pub async fn open_legal_document(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    use tauri::Manager;
+    if !crate::commands::LEGAL_DOCUMENTS.contains(&name.as_str()) {
+        return Err(format!("unknown legal document: {name}"));
+    }
+    let path = app
+        .path()
+        .resolve(format!("legal/{name}"), tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("resolve {name}: {e}"))?;
+    if !path.exists() {
+        return Err(format!("{name} is not available in this build"));
+    }
+    open_in_text_editor(&path_to_string(path))
+}
+
 #[tauri::command]
 pub async fn open_in_editor(
     editor: String,

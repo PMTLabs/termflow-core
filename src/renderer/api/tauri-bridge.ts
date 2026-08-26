@@ -97,6 +97,8 @@ interface ElectronAPI {
   setConfigValue: (key: string, value: any) => Promise<void>;
   // Read a bundled legal document (EULA/privacy/licenses/notices) by filename.
   readLegalDocument: (name: string) => Promise<string>;
+  // Open a bundled legal document in the OS-native text editor (bypasses IPC/DOM).
+  openLegalDocument: (name: string) => Promise<void>;
   // Backlog 011: global command history for the suggestion popup.
   addCommandHistory: (command: string) => Promise<void>;
   loadCommandHistory: (limit?: number) => Promise<string[]>;
@@ -488,6 +490,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   readLegalDocument: async (name) => invoke<string>('read_legal_document', { name }),
+  openLegalDocument: async (name) => invoke<void>('open_legal_document', { name }),
 
   // Backlog 011: command history (errors are non-fatal — suggestions degrade
   // to session-only, the terminal itself is never affected).
