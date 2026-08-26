@@ -1867,25 +1867,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     <li>Rebuild the app.</li>
                     <li>Launch the new build — it reattaches every terminal.</li>
                 </ol>
-                {!offloadArmed ? (
-                    <button
-                        className="save-btn apply-btn"
-                        onClick={() => setOffloadArmed(true)}
-                        disabled={offloading || !!hotswapBlockedReason}
-                    >
-                        Offload &amp; Close…
-                    </button>
-                ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                        <span className="help-text" style={{ margin: 0 }}>This closes TermFlow now. Continue?</span>
-                        <button className="save-btn apply-btn" onClick={doOffloadRebuild} disabled={offloading}>
-                            {offloading ? 'Offloading…' : 'Offload & Close'}
-                        </button>
-                        <button className="link-btn" onClick={() => setOffloadArmed(false)} disabled={offloading}>
-                            Cancel
-                        </button>
-                    </div>
-                )}
+                <button
+                    className="save-btn apply-btn"
+                    onClick={() => setOffloadArmed(true)}
+                    disabled={offloading || !!hotswapBlockedReason}
+                >
+                    Offload &amp; Close…
+                </button>
+                <ConfirmDialog
+                    isOpen={offloadArmed}
+                    title="Offload & Close TermFlow?"
+                    message="This closes TermFlow now — your terminals keep running in the background. Continue?"
+                    onConfirm={doOffloadRebuild}
+                    onCancel={() => setOffloadArmed(false)}
+                    confirmText={offloading ? 'Offloading…' : 'Offload & Close'}
+                    cancelText="Cancel"
+                />
                 {hotswapBlockedReason && (
                     <p className="help-text" data-testid="offload-blocked" style={{ marginTop: 12, color: 'var(--warning, #d08770)' }}>
                         ⚠ Offload isn’t available right now: {hotswapBlockedReason}. The action is
