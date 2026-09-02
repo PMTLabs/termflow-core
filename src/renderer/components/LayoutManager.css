@@ -18,7 +18,10 @@
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 8px;
   width: 90%;
-  max-width: 800px;
+  /* Widened from 800px: the header now carries six controls and each saved-layout
+     row carries four, so the row's name/description had been losing width to the
+     action cluster. */
+  max-width: 1000px;
   max-height: 80%;
   display: flex;
   flex-direction: column;
@@ -26,13 +29,28 @@
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
+/* Two ROWS, not one: the title (with the close button) above, the actions below.
+ *
+ * The header used to be a single `space-between` row holding the title and all
+ * five buttons. That layout has no slack — `.layout-manager-actions` sets no
+ * `flex-wrap`, so each new action steals width from the others until the labels
+ * are squeezed, and the panel is only 90vw on a small window. Giving the actions
+ * their own full-width row means the button count no longer competes with the
+ * title for space, which is what makes room for the sixth. */
 .layout-manager-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--border-color, #3e3e42);
   background: var(--bg-primary, #141414);
+}
+
+.layout-manager-titlerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .layout-manager-header h2 {
@@ -42,8 +60,13 @@
   font-weight: 600;
 }
 
+/* `wrap` is the backstop the single-row version never had: once the actions no
+ * longer have to share with the title they fit comfortably, but a narrow window
+ * or a future seventh button now wraps whole buttons onto a second line instead
+ * of compressing every label. */
 .layout-manager-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
 }
@@ -66,8 +89,23 @@
   transition: background-color 0.2s;
 }
 
+/* The row lifts on hover, but it must never arrive at a colour one of its own
+ * buttons is already wearing. It used to use `--bg-hover` (#37373d) — which is
+ * exactly `.btn-secondary`'s RESTING background — so hovering the row repainted
+ * it in the buttons' own colour and Update/Rename dissolved into it. Nothing was
+ * dimming them; the row simply became them.
+ *
+ * `--bg-active` (#4a4a4a) is not available either: that is `.btn-secondary`'s
+ * HOVER colour, so it would trade a resting-state collision for a hover-state
+ * one. The row therefore darkens-upward from its own resting `--bg-primary`
+ * instead of climbing into the button palette at all.
+ *
+ * The invariant, for whoever touches this next: a container's hover background
+ * must differ from every resting AND hover background of the controls inside it.
+ */
 .layout-item:hover {
-  background: var(--bg-hover, #37373d);
+  background: var(--bg-row-hover, #1f1f23);
+  border-color: var(--bg-active, #4a4a4a);
 }
 
 .layout-info {
@@ -161,7 +199,23 @@
   margin-bottom: 16px;
 }
 
-.form-group label {
+/* The form group's OWN field label ("Layout Name:", "Save:"), which is always a
+ * direct child. Scoped with `>` because as a descendant selector it also
+ * captured `.scope-option` — the `<label>` wrapping each radio, nested one level
+ * down inside `.scope-options`.
+ *
+ * That was the real cause of the radio misalignment, and the first fix only
+ * removed half of it. `.form-group label` (0,1,1) outranks `.scope-option`
+ * (0,1,0), so `display: block` won and the option label was never a flex row at
+ * all: its `gap: 8px` did nothing, and JSX strips the whitespace between the
+ * `<input>` and the `<span>`, so the radio ended up touching its text. Removing
+ * `width: 100%` from the input rule fixed the STACKING — a second, independent
+ * contributor — while leaving the gap defeated.
+ *
+ * `>` also stops `margin-bottom` and `font-weight: 500` leaking onto the option
+ * labels, which were rendering slightly bold and over-spaced for the same reason.
+ */
+.form-group > label {
   display: block;
   margin-bottom: 6px;
   color: var(--text-primary, #cccccc);
@@ -169,7 +223,22 @@
   font-weight: 500;
 }
 
-.form-group input,
+/* TEXT-ENTRY fields only.
+ *
+ * `.form-group input` matches EVERY input nested anywhere under a form group,
+ * so when the scope radios arrived (plan/025 §2.6 step 4) they inherited
+ * `width: 100%` plus text-field padding, border and background. Chromium honours
+ * width on a native radio and stretches the control to fill it, which left no
+ * room on the row for the label `<span>` and pushed the text onto the next line
+ * — the radio-above-its-own-label rendering in the GUI pass.
+ *
+ * Excluded by TYPE rather than patched at `.scope-option`, because the defect is
+ * the selector, not the radios: the next checkbox, range or colour input added
+ * under any form group would inherit the same text-field chrome. Both halves of
+ * the rule carry the exclusion — a focus ring shaped for a text box is wrong on
+ * a radio for the same reason.
+ */
+.form-group input:not([type='radio']):not([type='checkbox']),
 .form-group textarea {
   width: 100%;
   padding: 8px 12px;
@@ -181,7 +250,7 @@
   resize: none;
 }
 
-.form-group input:focus,
+.form-group input:not([type='radio']):not([type='checkbox']):focus,
 .form-group textarea:focus {
   outline: none;
   border-color: var(--accent-color, #007acc);
@@ -244,6 +313,37 @@
 
 .btn-danger:hover:not(:disabled) {
   background: var(--danger-hover, #c50e1f);
+}
+
+/* Revert. Its own class rather than a restyle of `.btn-secondary`, which is
+ * shared by Import/Export, Reset Layout, Update, Rename and Cancel — recolouring
+ * that would repaint five buttons to change one.
+ *
+ * Amber rather than red: Revert is not destructive (the workspace it replaces is
+ * still running, and the snapshot it restores was captured before the switch),
+ * but it IS the one header action that replaces the whole workspace, so it
+ * should not read as just another neutral button either. Dark text, because
+ * #ff9800 is too light to carry white legibly. */
+.btn-warning {
+  background: var(--attention-color, #ff9800);
+  color: #1a1a1a;
+  border: 1px solid transparent;
+  font-weight: 600;
+}
+
+.btn-warning:hover:not(:disabled) {
+  background: var(--attention-hover, #e08600);
+}
+
+/* Disabled is the button's RESTING state most of the time — there is nothing to
+ * revert to until the user switches layouts — so it must not sit there glowing
+ * amber at 60% opacity. It falls back to the neutral treatment and only takes
+ * the accent colour once it can actually do something. */
+.btn-warning:disabled {
+  background: var(--bg-hover, #37373d);
+  color: var(--text-primary, #cccccc);
+  border-color: var(--border-color, #3e3e42);
+  font-weight: 500;
 }
 
 .btn-close {
@@ -322,6 +422,19 @@
   --bg-secondary: #2d2d30;
   --bg-hover: #37373d;
   --bg-active: #4a4a4a;
+  /* Row hover. Deliberately NOT --bg-hover: that value is `.btn-secondary`'s
+     resting background, and a row that hovers into its own buttons' colour
+     erases them (see `.layout-item:hover`). */
+  --bg-row-hover: #1f1f23;
+  /* Attention/orange. The codebase's one consistent warning colour is the
+     literal #ff9800, used by `.toast-item.warning` and
+     `.global-dialog-content.warning`; this gives it a name.
+     NOT called `--warning-color` or `--warning`: SettingsPage.tsx references
+     both of those names inline with their own fallbacks (#d98a00 / #d08770) and
+     neither is declared anywhere, so declaring them here would silently restyle
+     four unrelated Settings strings. */
+  --attention-color: #ff9800;
+  --attention-hover: #e08600;
   --bg-accent-subtle: rgba(0, 122, 204, 0.1);
   --border-color: #3e3e42;
   --text-primary: #cccccc;
@@ -344,4 +457,83 @@
      that module's `NEUTRAL` (0x80) and `WASH_ALPHA` (0.13); `endedTint.test.ts` reads both
      files and fails if they stop agreeing. */
   --ended-wash: rgba(128, 128, 128, 0.13);
+}
+
+/* plan/025 §2.6 Task B3 — the process-continuity banner. Mirrors `.error-message`'s
+   flex-row shape (padding/border/layout) above, but in an INFO tone: the accent
+   colors already declared on `:root` above, reused rather than duplicated so this
+   reads as "the app's accent", not a bespoke third color. Permanent (unlike
+   `.error-message`, which is conditional), so it carries no dismiss button. */
+.continuity-banner {
+  background: var(--bg-accent-subtle, rgba(0, 122, 204, 0.1));
+  color: var(--text-primary, #cccccc);
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border-color, #3e3e42);
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.continuity-banner strong {
+  color: var(--accent-color, #007acc);
+}
+
+/* plan/025 §2.6 Task B5 — the scope badge on each saved-layout row. */
+.layout-scope-badge {
+  color: var(--text-secondary, #969696);
+}
+
+/* plan/025 §2.6 Task B5 — the save dialog's scope radios, ShellSelector.tsx's
+   `<label>`-wrapped pattern. */
+.scope-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scope-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary, #cccccc);
+  font-size: 14px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+/* The same radios reused inside ConfirmDialog's body (the Update dialog). In the
+   save dialog the block gets its spacing from `.form-group`; there is no form
+   group in a confirm dialog, so it needs its own. */
+.confirm-dialog-body .scope-options {
+  margin-top: 10px;
+}
+
+/* Shown only when confirming would actually re-point a tab-scoped layout at a
+   different tab. Amber rather than red: it is a consequence worth reading, not
+   an error — the user may well mean to do it. */
+.scope-retarget-note {
+  margin: 12px 0 0;
+  color: var(--attention-color, #ff9800);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* The gap alone is not enough to make the spacing predictable: a native radio
+ * carries a UA default margin (Chromium: 3px 3px 0 5px), which ADDS to the flex
+ * gap on the left and pushes the control off the text's optical centre on the
+ * top. Zeroed so `gap` is the only thing between the control and its label, and
+ * sized explicitly so the row does not change height with the UA's default.
+ * `flex: 0 0 auto` keeps a long label from compressing the control itself. */
+.scope-option input[type='radio'] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent-color, #007acc);
+  cursor: pointer;
+}
+
+.scope-option input[disabled] + span {
+  color: var(--text-tertiary, #666666);
 }

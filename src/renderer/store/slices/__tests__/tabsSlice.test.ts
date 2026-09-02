@@ -1,4 +1,4 @@
-import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle } from '../tabsSlice';
+import tabsReducer, { addTab, removeTab, markTabExited, clearTabExited, setActiveTab, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabTitle, setAutoTabTitle, updateTabMeta } from '../tabsSlice';
 
 const stateWithTwoTabs = () => {
   let state = tabsReducer(undefined, { type: '@@INIT' } as any);
@@ -493,5 +493,57 @@ describe('tabsSlice "seen" clearing is one rule across every caller', () => {
     const next = tabsReducer(state, removeTab('tb-3'));
     expect(next.activeTabId).toBe('tb-2');
     expect(flags(next, 'tb-2')).toEqual({ unseen: false, activity: false });
+  });
+});
+
+/**
+ * `updateTabMeta` — plan/025 §2.4, the tab-scoped layout load's ONLY way to
+ * update an EXISTING tab's saved metadata. `removeTab` + `addTab` is not an
+ * option for that caller: `TerminalContainer`'s cleanup effect reacts to a
+ * tab's disappearance by dropping its tree, which would destroy the very tree
+ * the tab-scoped load is about to install a moment later. So this patches the
+ * durable fields on the SAME tab object in place.
+ */
+describe('tabsSlice updateTabMeta', () => {
+  it('patches the listed durable fields on the matching tab only', () => {
+    const next = tabsReducer(stateWithTwoTabs(), updateTabMeta({
+      id: 'tb-1',
+      patch: { title: 'Renamed', shellType: 'ssh', icon: '🚀', colorSchemaId: 'dracula', titleColor: '#ff5555', titleIsCustom: true, notifyMuted: true },
+    }));
+    const tab = next.tabs.find(t => t.id === 'tb-1');
+    expect(tab?.title).toBe('Renamed');
+    expect(tab?.shellType).toBe('ssh');
+    expect(tab?.icon).toBe('🚀');
+    expect(tab?.colorSchemaId).toBe('dracula');
+    expect(tab?.titleColor).toBe('#ff5555');
+    expect(tab?.titleIsCustom).toBe(true);
+    expect(tab?.notifyMuted).toBe(true);
+    // The other tab is untouched.
+    expect(next.tabs.find(t => t.id === 'tb-2')?.title).toBe('B');
+  });
+
+  it('accepts a partial patch, leaving fields it does not mention alone', () => {
+    let state = tabsReducer(stateWithTwoTabs(), setTabColorSchema({ id: 'tb-1', colorSchemaId: 'dracula' }));
+    const next = tabsReducer(state, updateTabMeta({ id: 'tb-1', patch: { title: 'Only title changes' } }));
+    const tab = next.tabs.find(t => t.id === 'tb-1');
+    expect(tab?.title).toBe('Only title changes');
+    // colorSchemaId was not in this patch, so it survives untouched.
+    expect(tab?.colorSchemaId).toBe('dracula');
+  });
+
+  it('does not touch transient/identity fields (id, isActive, processId, isRunning) — only the durable ones it lists', () => {
+    let state = tabsReducer(stateWithTwoTabs(), setRunningActivity({ tabIds: ['tb-2'], terminalIds: [] })); // tb-2 active+running
+    const before = state.tabs.find(t => t.id === 'tb-2');
+    const next = tabsReducer(state, updateTabMeta({ id: 'tb-2', patch: { title: 'New title' } }));
+    const after = next.tabs.find(t => t.id === 'tb-2');
+    expect(after?.title).toBe('New title');
+    expect(after?.id).toBe(before?.id);
+    expect(after?.isActive).toBe(before?.isActive);
+    expect(after?.isRunning).toBe(before?.isRunning);
+  });
+
+  it('is a no-op for an unknown tab id, like every sibling reducer in this slice', () => {
+    const next = tabsReducer(stateWithTwoTabs(), updateTabMeta({ id: 'tb-missing', patch: { title: 'Ghost' } }));
+    expect(next.tabs.map(t => t.title)).toEqual(['A', 'B']);
   });
 });

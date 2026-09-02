@@ -139,6 +139,25 @@
   color: white;
 }
 
+/* plan/025 §2.6 — the optional inline action (e.g. "Undo"). Styled like
+   `.toast-close-all`'s pill so it reads as an action, not a link, on the dark card. */
+.toast-action {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.toast-action:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+}
+
 /* Toast Variants */
 .toast-item.success {
   border-left: 4px solid #4caf50;

@@ -11,15 +11,20 @@
  * The backend owns the identity (`src-tauri/src/window_registry.rs`); this
  * module caches it and derives the session key from it.
  *
- * Scope boundary — only the AUTO-SAVED SESSION is per-window:
+ * Scope boundary — only the AUTO-SAVED SESSION (and, for the same reason, the
+ * layout-undo snapshot below) is per-window:
  *   * session state (`auto-terminal-state`)  → per window
+ *   * layout-undo snapshot (`auto-terminal-layout-undo`) → per window; a
+ *     workspace snapshot (plan/025 §2.1) describes ONE window's tabs/panes,
+ *     exactly like the session blob above, and unlike the per-instance layout
+ *     library below
  *   * saved layouts (`auto-terminal-layouts`) → per instance; a named layout is
  *     a user library, and fragmenting it per window would hide layouts from the
  *     window that did not save them
  *   * API token (`api_token`)                 → per instance
  */
 
-import { stateKeyFor, currentProfile } from './profileScope';
+import { stateKeyFor, scopedKey, currentProfile } from './profileScope';
 
 /**
  * The window that owns the pre-existing, unsuffixed key.
@@ -68,6 +73,17 @@ export function windowScopeResolved(): boolean {
  */
 export function sessionStateKey(): string {
   const base = stateKeyFor(currentProfile().scope);
+  return isSlotZero() ? base : `${base}${WINDOW_SEPARATOR}${current}`;
+}
+
+/**
+ * The localStorage key holding THIS window's one-deep layout-undo snapshot
+ * (plan/025 §2.2). Per-window for the same reason as `sessionStateKey()` above:
+ * a workspace snapshot describes one window's tabs/panes, and window A
+ * reverting must never be satisfiable from window B's undo slot.
+ */
+export function layoutUndoKey(): string {
+  const base = scopedKey('auto-terminal-layout-undo', currentProfile().scope);
   return isSlotZero() ? base : `${base}${WINDOW_SEPARATOR}${current}`;
 }
 

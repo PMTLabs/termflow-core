@@ -307,6 +307,26 @@ const panesSlice = createSlice({
     },
 
     /**
+     * SET (not toggle) a tab's maximized pane — `paneId: null` clears it.
+     *
+     * A restore must never use `toggleMaximizePane`: it is idempotent only from
+     * a known-empty starting state. Restoring `maximizedPaneByTabId[t] = p`
+     * onto a tab whose pane `p` is ALREADY maximized makes the toggle delete
+     * the entry, i.e. the restore un-maximizes exactly the pane it was asked to
+     * maximize (plan/025 §2.4 — the tab-scoped load never runs `resetPanes`, so
+     * it has no empty starting state to rely on).
+     *
+     * The safety of a toggle here can only ever be argued from what the CALLER
+     * did first, which is precisely the kind of guarantee the next caller opts
+     * out of without noticing. This reducer needs no such argument.
+     */
+    setMaximizedPane: (state, action: PayloadAction<{ tabId: string; paneId: string | null }>) => {
+      const { tabId, paneId } = action.payload;
+      if (paneId === null) delete state.maximizedPaneByTabId[tabId];
+      else state.maximizedPaneByTabId[tabId] = paneId;
+    },
+
+    /**
      * Toggle (set/clear) a single pane's notification mute. Finds the leaf by
      * `paneId` across all tabs' trees and sets/deletes its `notifyMuted` flag.
      * Mutating the node in `treesByTabId` also updates the active tab's
@@ -799,6 +819,7 @@ export const {
   splitPane,
   splitPaneInTab,
   toggleMaximizePane,
+  setMaximizedPane,
   setPaneMuted,
   closePane,
   resizePane,
