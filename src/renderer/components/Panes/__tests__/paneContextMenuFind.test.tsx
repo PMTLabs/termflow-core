@@ -187,10 +187,11 @@ describe('PaneContextMenu — Find…', () => {
     render(undefined);
     expect(findItem().title).toBe('This pane has no terminal to search');
 
+    // The EXACT string, not two negatives. "not empty and not the other message" is satisfied by
+    // `title: 'Disabled'`, by `' '`, and by the other reason's text with a typo — none of which
+    // tells the user why the item is grey, which is the entire point of the tooltip.
     render('tm-unpublished');
-    const starting = findItem().title;
-    expect(starting).not.toBe('');
-    expect(starting).not.toBe('This pane has no terminal to search');
+    expect(findItem().title).toBe('This terminal is not ready to search yet');
 
     setSurfaceChrome('tm-mine', {}, chromeFor(jest.fn()));
     render('tm-mine');

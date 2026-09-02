@@ -133,13 +133,27 @@ describe('calling back for every change', () => {
     expect(input().value).toBe('');
   });
 
-  it('routes each toggle to its own callback and no other', () => {
+  /**
+   * EVERY toggle, not one of them. The earlier version clicked only Match Case, and the wrong
+   * implementation it could not see is the likeliest one there is: `onClick={toggleCaseSensitive}`
+   * copy-pasted onto all three buttons. That leaves `toggleWholeWord` and `toggleRegex` dead and
+   * unreachable while the assertions — one positive, two negatives — all still hold, because the
+   * two negatives are about callbacks nothing has clicked yet.
+   *
+   * A table over the three, so a fourth toggle added later has one obvious place to go.
+   */
+  it.each([
+    ['Match Case', 'toggleCaseSensitive'],
+    ['Match Whole Word', 'toggleWholeWord'],
+    ['Use Regular Expression', 'toggleRegex'],
+  ] as const)('routes the %s toggle to its own callback and no other', (title, own) => {
     const search = view();
     render(search);
-    click(toggle('Match Case'));
-    expect(search.toggleCaseSensitive).toHaveBeenCalledTimes(1);
-    expect(search.toggleWholeWord).not.toHaveBeenCalled();
-    expect(search.toggleRegex).not.toHaveBeenCalled();
+    click(toggle(title));
+    const others = (['toggleCaseSensitive', 'toggleWholeWord', 'toggleRegex'] as const)
+      .filter((k) => k !== own);
+    expect(search[own]).toHaveBeenCalledTimes(1);
+    for (const other of others) expect(search[other]).not.toHaveBeenCalled();
   });
 
   it('routes the nav buttons and the close button', () => {

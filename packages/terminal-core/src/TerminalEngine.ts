@@ -691,12 +691,33 @@ interface LinkableBufferLine {
 const ROOTED_HEAD_RE = /^(?:[\\/]|\.{1,2}[\\/]|~[\\/]|[A-Za-z]:)/;
 
 /**
- * Does a path segment end in a file extension (`.ts`, `.md`, `.js`)? Used only by guard G7.
+ * Does a path segment read as a FINISHED filename? Used only by guard G7.
  *
  * Applied to the LAST segment of row N's trailing token, never to the whole token: `webpack` in
  * `webpack/config.js` is not an extension, and `config.js` is.
+ *
+ * The trailing `[^A-Za-z0-9]*` is the whole subtlety, and it was found by review. Anchoring the
+ * extension at `$` asks "does this token END in `.ext`", when the question is "is this token
+ * FINISHED" — and a printer routinely puts one more character after the extension. `config.js.`
+ * at a sentence end and `config.js-` both slipped past a `$`-anchored test, and both FUSE when
+ * joined: `webpack/config.js.` + `v5.91.0` stitches to `webpack/config.js.v5.91.0`, one wrong
+ * link where a correct one used to be. Trailing punctuation that TERMINATES a match on both
+ * sides — `"`, `)`, `,` — is not in this class and was measured not to be: the join adds text
+ * the matcher cannot reach, so the original link survives byte-identical.
  */
-const FILENAME_TAIL_RE = /\.[A-Za-z0-9_]{1,8}$/;
+const FINISHED_SEGMENT_RE = /\.[A-Za-z0-9_]{1,8}[^A-Za-z0-9]*$/;
+
+/**
+ * Does row N's trailing token end in a `:line` / `:line:col` reference? Also guard G7.
+ *
+ * A diagnostic reference is finished the same way a filename is, and it fuses in its own way:
+ * `Button.tsx:42` followed by an indented head that starts with a digit stitches to
+ * `Button.tsx:425`, silently moving the line number. Nothing legitimate is lost by refusing —
+ * a real wrap landing right after `:42` leaves the head starting `:`, which G2 already rejects.
+ * A wrap landing INSIDE the digits is refused too; that is a genuine miss, and it is listed with
+ * the others below rather than left to be rediscovered.
+ */
+const LINE_REFERENCE_TAIL_RE = /:\d+$/;
 
 /**
  * Does buffer row `prev` HARD-wrap into row `next`, and if so how many leading blanks of `next`
@@ -742,8 +763,17 @@ const FILENAME_TAIL_RE = /\.[A-Za-z0-9_]{1,8}$/;
  * but carries NO extension, followed by an indented path, still joins: `/var/log/app` +
  * `    src/index.ts` becomes `/var/log/appsrc/index.ts`. When that token was already a working
  * link, the join REPLACES it — the underline covers a path that does not exist, and Copy Path
- * yields the wrong string. G7 removes the common half of this class (a printed filename almost
- * always ends in an extension); the extension-less half needs the excluded G3 and stays.
+ * yields the wrong string. G7 rejects the members whose trailing token reads as FINISHED — it
+ * carries an extension, with or without one trailing punctuation character, or a `:line`
+ * reference. The members it cannot reject are the ones whose token is genuinely
+ * indistinguishable from a wrapped fragment: `/var/log/app` is a complete path AND a plausible
+ * prefix of a longer one, and telling them apart needs the excluded G3.
+ *
+ * That sentence used to read "G7 removes the common half of this class (a printed filename
+ * almost always ends in an extension)". Review showed the parenthesis was doing the work and was
+ * wrong: `$`-anchored, G7 did not see `config.js.` or `config.js-`, both of which fuse. The
+ * lesson is kept here because the wording is the kind that reads as verified — a claim about how
+ * often a shape occurs, standing in for a claim about what the code tests.
  *
  * **Break positions this guard set still misses** on a genuinely wrapped path (all pinned, by
  * index, in the `sweeps every wrap position` test — 22 of 103 for the plan's headline path):
@@ -751,7 +781,12 @@ const FILENAME_TAIL_RE = /\.[A-Za-z0-9_]{1,8}$/;
  *  - exactly AFTER a separator, so row `prev` ends at one (G6 — indistinguishable from `ls -R`);
  *  - inside a dot-led segment such as `.claude`, so row `prev` looks like a finished filename
  *    (G7), or after the final `.` so the head holds no `.`/`/`/`\` at all (G4);
- *  - immediately after a drive letter, where the head starts `:` (G2).
+ *  - immediately after a drive letter, where the head starts `:` (G2);
+ *  - inside the digits of a `:line` reference, so row `prev` ends `…:4` and reads as a finished
+ *    diagnostic (G7). Landing just AFTER the digits is not a miss — G2 refuses the `:`-led head
+ *    first — so this costs only the positions strictly inside the number.
+ * The count above is for the headline path, which carries no `:line`; a path that does has that
+ * many more. The LIST is the durable part, not the number.
  * Each is a guard doing its job on a shape it cannot tell apart from a false positive. They are
  * recorded so the next reader recognises them instead of re-discovering them as bugs.
  */
@@ -774,7 +809,15 @@ function hardWrapIndent(
   // does and means the opposite. Reading it as blank made a row that ends in a wide glyph exactly
   // at the right edge — every CJK path, at the widths where it wraps there — judged "not full",
   // so it never joined.
-  if (!lastCell || (lastCell.getWidth() !== 0 && lastCell.getChars() === '')) return null;
+  // A WRITTEN SPACE at the right edge is not full either, and it has to be tested separately
+  // because it is a different value: an unwritten cell reports `''`, a painted one reports `' '`.
+  // A path contains no whitespace, so a wrap can never break across a space — a row ending in one
+  // finished on its own and the next row continues nothing. Two things followed from missing this.
+  // The pair `G6`/`G7` below both read `tail`, which is computed by slicing after the last space:
+  // on such a row that slice is EMPTY, so both guards tested `''` and passed vacuously. And the
+  // alt-screen argument above only holds now — a TUI that paints its padding (ratatui does) fills
+  // the edge with a real `' '`, which the `=== ''` test read as full.
+  if (!lastCell || (lastCell.getWidth() !== 0 && lastCell.getChars().trim() === '')) return null;
 
   const nextText = next.translateToString(false);
 
@@ -807,14 +850,20 @@ function hardWrapIndent(
   const tail = prevText.slice(prevText.lastIndexOf(' ') + 1);
   if (tail.endsWith('/') || tail.endsWith('\\')) return null;
 
-  // G7 — row `prev` does not already end in a filename. A token whose last segment carries an
-  // extension is complete as written, exactly like G6's separator case, so the row filled the
-  // grid by coincidence rather than by running out of room. Appending to it does not just add a
-  // spurious link, it DESTROYS a correct one: `built with webpack/config.js` (a full row) +
-  // `  v5.91.0 warn` stitches to `webpack/config.jsv5.91.0`, so the link that opened the right
-  // file now opens nothing and Copy Path returns a path that does not exist.
+  // G7 — row `prev` does not already end in a FINISHED reference. A token that carries an
+  // extension, or a `:line`/`:line:col`, is complete as written, exactly like G6's separator
+  // case, so the row filled the grid by coincidence rather than by running out of room.
+  // Appending to it does not just add a spurious link, it DESTROYS a correct one:
+  // `built with webpack/config.js` (a full row) + `  v5.91.0 warn` stitches to
+  // `webpack/config.jsv5.91.0`, so the link that opened the right file now opens nothing and
+  // Copy Path returns a path that does not exist.
+  //
+  // "Finished" is asked of the token, not of its last character — see the two patterns' notes.
+  // A `$`-anchored extension test answers a narrower question and let `config.js.` and
+  // `config.js-` through, which fuse.
+  if (LINE_REFERENCE_TAIL_RE.test(tail)) return null;
   const seg = tail.slice(Math.max(tail.lastIndexOf('/'), tail.lastIndexOf('\\')) + 1);
-  if (FILENAME_TAIL_RE.test(seg)) return null;
+  if (FINISHED_SEGMENT_RE.test(seg)) return null;
 
   return indent;
 }
@@ -1327,10 +1376,16 @@ export class TerminalEngine {
     // before it opens, and only while THIS pane is focused (the listener is on the
     // pane container). Shift/Alt excluded so Ctrl+Shift+F etc. pass through.
     //
-    // Pane hosts only (design 012 §8): on a chromeless host this would call
-    // onOpenSearch -> setSearchOpen(true) -> the bar renders in the OFF-SCREEN pane
-    // and autofocuses its input (TerminalSearchBar.tsx:39-41), pulling focus out of
-    // the canvas. Unwired, xterm forwards ^F to the PTY as a normal terminal key.
+    // Pane hosts only (design 012 §8 / D16), and `plan/027` narrowed what that now means.
+    // The original reason — a chromeless host would open a bar that renders in the OFF-SCREEN
+    // pane and steals focus there — no longer applies to the Canvas OVERLAY, which draws the
+    // real bar itself from `surfaceChrome`. It still applies to every other chromeless host,
+    // including an ordinary (non-overlay) canvas node, which draws no chrome at all.
+    //
+    // The gate stays here rather than moving, because this listener cannot tell those two apart:
+    // `paneChrome` is fixed at wire time and the overlay is chosen later. The overlay's own
+    // Ctrl+F is bound on its wrapper by the renderer's `useSearchHotkey`, which knows. Both call
+    // the same `isFindShortcut` below. Unwired, xterm forwards ^F to the PTY as a normal key.
     if (o.paneChrome) {
       const searchKeyHandler = (event: KeyboardEvent) => {
         // The predicate is shared with the canvas overlay's hotkey (`isFindShortcut`), so the

@@ -327,6 +327,63 @@ describe('collectWrappedLine joins a HARD-wrapped path', () => {
     expect(collectWrappedLine(buf, 0, a.length)!.text).toBe(a);
   });
 
+  /**
+   * G7 asks whether row 0's token is FINISHED, not whether its last CHARACTER is an extension —
+   * and the difference is the whole point, because a printer routinely puts one more character
+   * after the extension. Each row below fuses when the guard is `$`-anchored, and each produces
+   * ONE WRONG link where row 0 already had a correct one, which is strictly worse than the
+   * spurious-underline residue the docblock accepts elsewhere.
+   *
+   * A table, deliberately: the first version of this guard was validated on a single sample and
+   * the shape it missed was found by review, not by the suite.
+   */
+  it.each([
+    ['a sentence period after the extension', 'see webpack/config.js.', '  v5.91.0 warn', 'webpack/config.js'],
+    ['a dash after the extension', 'edited webpack/config.js-', '  v5.91.0.old', 'webpack/config.js-'],
+  ])('G7 — refuses %s', (_label, a, b, keptLink) => {
+    const buf = fakeBuffer([{ text: a }, { text: b }], a.length);
+    const info = collectWrappedLine(buf, 0, a.length)!;
+    expect(info.text).toBe(a);
+    expect(findPathLinks(info.text)[0].path).toBe(keptLink);
+  });
+
+  it('G7 — refuses a row ending in a `:line` reference, which fuses into the line NUMBER', () => {
+    /**
+     * The distinctive damage: `Button.tsx:42` + a head starting with a digit stitches to
+     * `Button.tsx:425`, so the link still resolves — to the wrong LINE. A link that opens the
+     * right file at the wrong place is harder to notice than one that opens nothing.
+     *
+     * Nothing legitimate is refused. A real wrap landing just after `:42` leaves the head
+     * starting `:`, which G2 rejects first; only a wrap INSIDE the digits is lost, and that is
+     * listed with the other known misses in `hardWrapIndent`'s docblock.
+     */
+    const a = 'at src/components/Button.tsx:42';
+    const buf = fakeBuffer([{ text: a }, { text: '  5.2/lib/x.ts' }], a.length);
+    const info = collectWrappedLine(buf, 0, a.length)!;
+    expect(info.text).toBe(a);
+    const hit = findPathLinks(info.text)[0];
+    expect(hit.path).toBe('src/components/Button.tsx');
+    expect(hit.line).toBe(42);
+  });
+
+  it('G1 — refuses a row whose last cell is a PAINTED space', () => {
+    /**
+     * An unwritten cell reports `''` and a painted one reports `' '`, so a `=== ''` test read a
+     * space-padded row as full. Two consequences, and the second is the reason this is a defect
+     * rather than a tidy-up: a path contains no whitespace, so a wrap can never break across a
+     * space; AND `tail` is computed by slicing after the last space, so on such a row it is
+     * EMPTY and both G6 and G7 tested `''` and passed vacuously. This is also what makes the
+     * docblock's alt-screen argument true — a TUI that paints its padding fills the edge with a
+     * real `' '`.
+     */
+    const a = 'modified:   src/main.ts ';
+    const cols = a.length;
+    const last = fakeBuffer([{ text: a }], cols).getLine(0)!.getCell(cols - 1)!;
+    expect(last.getChars()).toBe(' '); // the premise: painted, not unwritten
+    const buf = fakeBuffer([{ text: a }, { text: '  src/other.ts' }], cols);
+    expect(collectWrappedLine(buf, 0, cols)!.text).toBe(a.trimEnd());
+  });
+
   it('applies the row cap to hard-wrapped rows too', () => {
     // Every row is full, indented and path-shaped, so the join never terminates on its own —
     // only the cap stops it, and it must stop it by returning null rather than by truncating.
