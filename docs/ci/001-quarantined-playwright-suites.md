@@ -27,8 +27,8 @@ lands:
 - **On a runner with a Rust toolchain:** the backend **cold-compiles past the
   `webServer` timeout**, so the suite never gets a usable server — no signal, just a
   slow timeout.
-- **On a runner without Rust** (e.g. a self-hosted Linux runner that isn't a Rust dev
-  box): the build dies immediately with
+- **On a runner without Rust** (any runner that hasn't installed the toolchain for
+  this job): the build dies immediately with
 
   ```
   failed to run 'cargo metadata' command to get workspace directory:
@@ -63,10 +63,9 @@ of the flag:
 
 1. Rewrite the Playwright `webServer`/specs to drive the **Tauri** app instead of the
    Electron launcher (no port-3000 Electron server).
-2. Ensure whichever runner the job lands on has the Tauri build prerequisites
-   (Rust toolchain + platform WebView deps). Note `runs-on: [self-hosted]` is **not**
-   OS-pinned, so the job can land on any self-hosted runner — pin a label if the suite
-   needs a specific host.
+2. Add the Rust toolchain / platform WebView deps this job currently lacks
+   (`e2e-tests` runs on GitHub-hosted `ubuntu-latest` and installs neither today,
+   since the quarantined steps are the only thing that needs them).
 3. Set `RUN_QUARANTINED_E2E: 'true'`.
 4. Restore the `performance-tests` job trigger from the comment
    (`github.event_name == 'push' && github.ref == 'refs/heads/main'`) in place of
@@ -75,7 +74,7 @@ of the flag:
 
 ## Related
 
-- `rust-tests.yml` is correctly OS-pinned: Linux runs on GitHub-hosted `ubuntu-latest`
-  (Rust via `dtolnay/rust-toolchain`); Windows runs on the self-hosted box and only
-  **verifies** an already-installed toolchain (`rustup show`). If that verify step
-  fails, it's the self-hosted host's Rust install, not this workflow.
+- `rust-tests.yml` runs Linux, Windows and macOS all on GitHub-hosted runners
+  (`ubuntu-latest` / `windows-latest` / `macos-latest`), each installing its own
+  Rust toolchain via `dtolnay/rust-toolchain`. That workflow is unaffected by
+  this one's quarantine — it never touches the Playwright suites.
