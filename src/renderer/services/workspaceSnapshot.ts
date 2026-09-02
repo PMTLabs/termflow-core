@@ -136,3 +136,75 @@ export function workspaceIdentity(s: WorkspaceSnapshot): string {
 export function isWorkspaceEmpty(s: WorkspaceSnapshot): boolean {
   return s.tabs.length === 0;
 }
+
+/** The five fields a workspace-scope `SavedLayout` and a live `WorkspaceSnapshot`
+ *  both carry. Structural, so either shape satisfies it without a cast. */
+export interface LayoutShaped {
+  tabs: Tab[];
+  activeTabId: string | null;
+  paneTree: PaneNode | null;
+  activePaneId: string | null;
+  treesByTabId?: Record<string, PaneNode | null>;
+}
+
+/**
+ * A stable identity over ONLY what a workspace-scope saved layout can hold.
+ *
+ * `workspaceIdentity` above cannot be used to compare a workspace against a
+ * SAVED layout, and not merely because it would give a wrong answer: it would
+ * THROW. `StateManager.buildLayoutBody` writes exactly
+ * `{ tabs, activeTabId, paneTree, activePaneId, treesByTabId }` for a
+ * workspace-scope save, so `tabPanes` and `canvas` are absent from every saved
+ * layout that has ever existed, and `activePaneByTabId` / `maximizedPaneByTabId`
+ * / `terminalCwds` are present only on TAB-scoped saves. `sortedEntries` calls
+ * `Object.entries(undefined)` on any of those and raises a TypeError.
+ *
+ * So this is a deliberately WEAKER comparison, and the weakness is the point.
+ * The fields it drops are exactly the ones a workspace layout does not persist:
+ * per-tab focus, per-tab maximize, working directories and canvas geometry.
+ * A workspace that differs from a saved layout ONLY in those is a workspace
+ * whose difference that layout could not have stored — so offering to "save"
+ * it before switching would not preserve the difference either. Gating on it
+ * offers the user a remedy that does not work.
+ *
+ * What it does NOT license is comparing against a tab-scoped layout: a one-tab
+ * layout is not a claim about the whole workspace, and the caller must exclude
+ * those. See `matchesAnySavedWorkspace`.
+ */
+export function layoutShapeIdentity(s: LayoutShaped): string {
+  return JSON.stringify({
+    tabs: (s.tabs ?? []).map(durableTab),
+    activeTabId: s.activeTabId ?? null,
+    paneTree: s.paneTree ?? null,
+    activePaneId: s.activePaneId ?? null,
+    // `?? {}` rather than a required field: `treesByTabId` is optional on
+    // `SavedLayout` for backward compatibility with layouts saved before it
+    // existed, and those must compare as "no keyed trees" rather than throw.
+    treesByTabId: sortedEntries(s.treesByTabId ?? {}),
+  });
+}
+
+/**
+ * Does the live workspace already match some saved layout, whatever the user
+ * last loaded?
+ *
+ * The dirty gate's original question was "has the workspace drifted from the
+ * layout it came FROM", which answers yes for a workspace the user has since
+ * saved under another name — offering to protect work that is already on disk.
+ * This is the second question: is this exact arrangement stored ANYWHERE?
+ *
+ * Tab-scoped layouts are excluded. Their `tabs` array holds the one saved tab,
+ * so a single-tab workspace could match one by coincidence — and "you have this
+ * tab saved" is not "you have this workspace saved". Matching one would wave the
+ * gate through on the strength of a layout that never claimed to describe the
+ * whole workspace.
+ */
+export function matchesAnySavedWorkspace(
+  current: LayoutShaped,
+  savedLayouts: ReadonlyArray<LayoutShaped & { scope?: 'workspace' | 'tab' }>,
+): boolean {
+  const identity = layoutShapeIdentity(current);
+  return savedLayouts.some(
+    layout => layout.scope !== 'tab' && layoutShapeIdentity(layout) === identity,
+  );
+}

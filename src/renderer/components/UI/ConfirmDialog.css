@@ -18,7 +18,13 @@
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 12px;
   width: 90%;
-  max-width: 400px;
+  /* 400px fitted the two-button ConfirmDialog it was written for. The dirty gate
+     (plan/025 §2.6) puts THREE buttons in this same footer — Cancel /
+     "Switch anyway" / "Save current layout…" — which did not fit, and the
+     footer's default `flex-shrink: 1` squeezed the middle one until its label
+     broke across two lines. Widened so the row fits; `.confirm-btn` below stops
+     the squeeze from being the failure mode ever again. */
+  max-width: 460px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
@@ -51,6 +57,11 @@
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+  /* When the labels genuinely cannot fit — a long translation, a narrow window,
+     a future fourth button — whole BUTTONS drop to a second line. Without this
+     the row is `nowrap` and the only way it can yield is by crushing a button
+     narrower than its own text. */
+  flex-wrap: wrap;
   background-color: rgba(255, 255, 255, 0.03);
 }
 
@@ -62,6 +73,13 @@
   cursor: pointer;
   transition: all 0.2s ease;
   border: 1px solid transparent;
+  /* A button is as wide as its label. These two are what actually fixed the
+     two-line "Switch anyway": `flex-shrink: 0` stops the footer from taking
+     width off the button, and `nowrap` stops the label from breaking if
+     something else ever does. A wider dialog alone would not have held — it
+     only moves the threshold. */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .confirm-btn.cancel {

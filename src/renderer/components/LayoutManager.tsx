@@ -485,8 +485,19 @@ export const LayoutManager: React.FC = () => {
         aria-labelledby={titleId}
         tabIndex={-1}
       >
+        {/* Two rows: the title (with close) above, the actions below. The single
+            `space-between` row this replaces gave the buttons no slack — every
+            action added competed with the title for width. */}
         <div className="layout-manager-header">
-          <h2 id={titleId}>Layout Manager</h2>
+          <div className="layout-manager-titlerow">
+            <h2 id={titleId}>Layout Manager</h2>
+            <button
+              className="btn btn-close"
+              onClick={() => dispatch(setShowLayoutManager(false))}
+            >
+              ×
+            </button>
+          </div>
           <div className="layout-manager-actions">
             <button
               className="btn btn-primary"
@@ -503,9 +514,12 @@ export const LayoutManager: React.FC = () => {
             </button>
             {/* Task B4 — enabled only while there is something to revert to; the
                 snapshot's own label (set when it was captured, e.g. "Workspace
-                before loading X") doubles as the hover tooltip. */}
+                before loading X") doubles as the hover tooltip.
+                `btn-warning` (amber), not `btn-secondary`: this is the one header
+                action that replaces the whole workspace, and it was previously
+                indistinguishable from Import/Export and Reset Layout. */}
             <button
-              className="btn btn-secondary"
+              className="btn btn-warning"
               onClick={handleRevert}
               disabled={!undoSnapshot || isLoading}
               title={undoSnapshot?.label}
@@ -518,12 +532,6 @@ export const LayoutManager: React.FC = () => {
               disabled={isLoading}
             >
               Reset Layout
-            </button>
-            <button
-              className="btn btn-close"
-              onClick={() => dispatch(setShowLayoutManager(false))}
-            >
-              ×
             </button>
           </div>
         </div>

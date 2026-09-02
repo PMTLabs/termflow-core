@@ -1,6 +1,10 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { StateManager, SavedLayout } from '../../services/StateManager';
-import { captureWorkspaceSnapshot, workspaceIdentity } from '../../services/workspaceSnapshot';
+import {
+  captureWorkspaceSnapshot,
+  workspaceIdentity,
+  matchesAnySavedWorkspace,
+} from '../../services/workspaceSnapshot';
 import { isWorkspaceDirty, clearLayoutBaseline } from '../../services/layoutBaseline';
 
 interface LayoutsState {
@@ -146,8 +150,27 @@ export const recomputeDirty = createAsyncThunk(
   'layouts/recomputeDirty',
   async (_: void, { getState }) => {
     const state = getState() as { layouts: LayoutsState; [key: string]: any };
-    const identity = workspaceIdentity(captureWorkspaceSnapshot(state as any, 'dirty-check'));
-    return isWorkspaceDirty(identity, state.layouts.activeLayoutId);
+    const snapshot = captureWorkspaceSnapshot(state as any, 'dirty-check');
+
+    // Question one, unchanged: has the workspace drifted from the layout it
+    // came FROM? A "no" here is the cheap, exact answer and short-circuits.
+    if (!isWorkspaceDirty(workspaceIdentity(snapshot), state.layouts.activeLayoutId)) {
+      return false;
+    }
+
+    // Question two. Drifting from the layout you loaded is not the same as
+    // being unsaved: the user may have since saved this exact arrangement under
+    // another name, or never loaded anything at all this session (in which case
+    // `activeLayoutId` is null and question one says "dirty" unconditionally,
+    // however faithfully the workspace matches something on disk). Warning
+    // about unsaved work that is demonstrably saved trains the user to click
+    // through the gate, which is how the gate stops protecting anything.
+    //
+    // Read through `getSavedLayouts()` rather than `state.layouts.savedLayouts`
+    // — the same source every `.fulfilled` case in this file refreshes from, so
+    // the two can never disagree, and a layout saved by a sibling window is
+    // seen without waiting for this window's list to be refreshed.
+    return !matchesAnySavedWorkspace(snapshot, StateManager.getSavedLayouts());
   }
 );
 

@@ -61,6 +61,37 @@ describe('the continuity banner (Task B3 / P1a)', () => {
   });
 });
 
+describe('the header layout (GUI pass)', () => {
+  it('puts the title and close button in their own row, above the actions', () => {
+    // The header was one `space-between` row holding the title and all five
+    // buttons, so every action added competed with the title for width. Two
+    // rows is what makes room for the sixth.
+    const header = SOURCE.slice(
+      SOURCE.indexOf('<div className="layout-manager-header">'),
+      SOURCE.indexOf('<div className="continuity-banner">'),
+    );
+    expect(header).toContain('<div className="layout-manager-titlerow">');
+    // The close button moved INTO the title row — it is not an action.
+    const titlerowAt = header.indexOf('layout-manager-titlerow');
+    const actionsAt = header.indexOf('layout-manager-actions');
+    expect(titlerowAt).toBeGreaterThan(-1);
+    expect(actionsAt).toBeGreaterThan(titlerowAt);
+    expect(header.indexOf('btn btn-close')).toBeGreaterThan(titlerowAt);
+    expect(header.indexOf('btn btn-close')).toBeLessThan(actionsAt);
+  });
+
+  it('gives Revert its own accent class rather than the shared secondary one', () => {
+    // `.btn-secondary` is worn by Import/Export, Reset Layout, Update, Rename
+    // and Cancel — Revert was indistinguishable from all of them despite being
+    // the one header action that replaces the whole workspace.
+    const revertAt = SOURCE.indexOf('onClick={handleRevert}');
+    expect(revertAt).toBeGreaterThan(-1);
+    const button = SOURCE.slice(SOURCE.lastIndexOf('<button', revertAt), revertAt);
+    expect(button).toContain('btn btn-warning');
+    expect(button).not.toContain('btn-secondary');
+  });
+});
+
 describe('the save dialog scope radio (Task B5)', () => {
   const dialog = SOURCE.slice(
     SOURCE.indexOf('Save Current Layout</h3>'),
