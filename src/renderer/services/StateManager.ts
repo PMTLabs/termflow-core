@@ -139,6 +139,20 @@ export interface AppState {
   canvas?: CanvasPersisted;
 }
 
+/**
+ * What an Update should re-capture. Both fields optional so every pre-existing
+ * caller keeps its exact behaviour: omitting `scope` re-captures in the layout's
+ * own scope, which is what `updateLayout(id)` has always done.
+ *
+ * `tabId` is only meaningful for `scope: 'tab'`, and supplying it is a
+ * deliberate RE-TARGET — the Update dialog names the tab in its option label, so
+ * the user has seen which one they are pointing the layout at.
+ */
+export interface UpdateLayoutOptions {
+  scope?: 'workspace' | 'tab';
+  tabId?: string;
+}
+
 export interface SavedLayout {
   id: string;
   name: string;
@@ -668,7 +682,7 @@ class StateManagerClass {
   /**
    * Update existing layout with current state
    */
-  async updateLayout(layoutId: string): Promise<boolean> {
+  async updateLayout(layoutId: string, opts?: UpdateLayoutOptions): Promise<boolean> {
     try {
       const store = (window as any).__REDUX_STORE__;
       if (!store) throw new Error('Store not available');
@@ -676,12 +690,13 @@ class StateManagerClass {
       const state: RootState = store.getState();
       const layouts = this.getSavedLayouts();
       const layoutIndex = layouts.findIndex(l => l.id === layoutId);
-      
+
       if (layoutIndex === -1) {
         throw new Error('Layout not found');
       }
-      
-      // An update re-captures the CURRENT state in the layout's OWN scope.
+
+      // An update re-captures the CURRENT state in a scope the CALLER chooses,
+      // defaulting to the layout's own.
       //
       // Re-capturing as a workspace regardless (which is what this did before
       // scopes existed) would leave a layout whose `scope: 'tab'` survives the
@@ -690,21 +705,50 @@ class StateManagerClass {
       // builder is what keeps this branch and `saveLayout` from drifting; see
       // `buildLayoutBody` for the drift that already happened once here.
       const existing = layouts[layoutIndex];
-      const scope = existing.scope ?? 'workspace';
-      // A tab-scoped layout re-captures the tab it has always described, NOT
-      // whatever tab happens to be active now — "Update" means "re-capture what
-      // this layout is", not "re-point it at something else". If that tab is
-      // gone, there is nothing to re-capture and the caller is told so rather
-      // than being handed a silent re-target to an unrelated tab.
-      const scopedTabId = existing.scopedTabId ?? existing.tabs?.[0]?.id;
+      const scope = opts?.scope ?? existing.scope ?? 'workspace';
+
+      // Which tab a tab-scope update captures depends on WHO asked.
+      //
+      // With no explicit `tabId` this keeps the original rule: re-capture the
+      // tab this layout has always described, never whatever tab happens to be
+      // active — "Update" means "re-capture what this layout is", not "re-point
+      // it at something else", and a silent re-target is the failure mode that
+      // rule exists to prevent. If that tab is gone there is nothing to
+      // re-capture and the caller is told so.
+      //
+      // An explicit `tabId` is the user having chosen a target on the record —
+      // the Update dialog names the tab in the option label — so it is honoured
+      // as given. That is a re-target the user asked for, not a silent one.
+      const scopedTabId = scope === 'tab'
+        ? (opts?.tabId ?? existing.scopedTabId ?? existing.tabs?.[0]?.id)
+        : undefined;
       if (scope === 'tab' && !state.tabs.tabs.some(t => t.id === scopedTabId)) {
         throw new Error(
-          `Cannot update "${existing.name}": the tab it saved is no longer open.`,
+          opts?.tabId
+            ? `Cannot update "${existing.name}": that tab is no longer open.`
+            : `Cannot update "${existing.name}": the tab it saved is no longer open.`,
         );
       }
 
+      // Every scope-DEPENDENT field is dropped before the rebuild rather than
+      // spread through it. `buildLayoutBody`'s workspace branch returns only the
+      // five workspace fields, so a plain `{ ...existing, ...body }` would carry
+      // `scope: 'tab'`, `scopedTabId` and the per-tab maps straight out of the
+      // old record — producing, for a tab→workspace update, exactly the "claims
+      // to be one tab, carries every tab" layout this method's own comment warns
+      // about. That was unreachable while the scope could not change; allowing
+      // the caller to change it is what makes this necessary.
+      const {
+        scope: _replacedByTheChosenScope,
+        scopedTabId: _staleTarget,
+        activePaneByTabId: _tabScopeOnly,
+        maximizedPaneByTabId: _alsoTabScopeOnly,
+        terminalCwds: _andThisOne,
+        ...identity
+      } = existing;
+
       layouts[layoutIndex] = {
-        ...existing,
+        ...identity,
         ...this.buildLayoutBody(state, scope, scopedTabId),
         updatedAt: Date.now(),
       };

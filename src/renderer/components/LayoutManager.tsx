@@ -54,6 +54,10 @@ export const LayoutManager: React.FC = () => {
   // boolean) the pending confirmation applies to; null/false means no dialog showing.
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pendingUpdateId, setPendingUpdateId] = useState<string | null>(null);
+  // The scope the pending Update will re-capture in. Seeded from the layout's
+  // OWN scope when the dialog opens, so accepting the default is always the
+  // same operation Update performed before it could be chosen.
+  const [updateScope, setUpdateScope] = useState<'workspace' | 'tab'>('workspace');
   const [pendingReset, setPendingReset] = useState(false);
   // Task B4 — mirrors `layoutUndo.ts`'s module-scope slot so the header Revert
   // button re-renders on every push/take/clear, not just when THIS component causes one.
@@ -409,12 +413,38 @@ export const LayoutManager: React.FC = () => {
     event.target.value = '';
   };
 
+  // Opening the Update dialog seeds its scope from the layout being updated.
+  // A tab-scoped layout defaults to tab, a workspace one to workspace — so the
+  // default answer is always "re-capture what this layout already is".
+  // True only when confirming would actually move the layout to a different tab
+  // from the one it describes today — a workspace-scope update, or a tab update
+  // whose target is unchanged, re-points nothing.
+  const pendingUpdateLayout = savedLayouts.find(l => l.id === pendingUpdateId);
+  const updateRetargets =
+    updateScope === 'tab' &&
+    pendingUpdateLayout?.scope === 'tab' &&
+    (pendingUpdateLayout.scopedTabId ?? pendingUpdateLayout.tabs?.[0]?.id) !== activeTabId;
+
+  const startUpdate = (layoutId: string) => {
+    const layout = savedLayouts.find(l => l.id === layoutId);
+    setUpdateScope(layout?.scope === 'tab' ? 'tab' : 'workspace');
+    setPendingUpdateId(layoutId);
+  };
+
   const confirmUpdate = async () => {
     const id = pendingUpdateId;
     setPendingUpdateId(null);
     if (!id) return;
     try {
-      await dispatch(updateLayout(id)).unwrap();
+      await dispatch(updateLayout({
+        layoutId: id,
+        scope: updateScope,
+        // The tab option means the tab the user is looking at, which is what
+        // its label names. Sent explicitly so `StateManager.updateLayout`
+        // treats it as a deliberate re-target rather than re-capturing
+        // whatever tab the layout originally described.
+        tabId: updateScope === 'tab' ? (activeTabId ?? undefined) : undefined,
+      })).unwrap();
     } catch (error) {
       console.error('Failed to update layout:', error);
     }
@@ -609,7 +639,7 @@ export const LayoutManager: React.FC = () => {
                   </button>
                   <button
                     className="btn btn-secondary btn-sm"
-                    onClick={() => setPendingUpdateId(layout.id)}
+                    onClick={() => startUpdate(layout.id)}
                     disabled={isLoading}
                   >
                     Update
@@ -810,10 +840,54 @@ export const LayoutManager: React.FC = () => {
         onConfirm={confirmDelete}
         onCancel={() => setPendingDeleteId(null)}
       />
+      {/* Update asks for a SCOPE, not just a yes/no. Before this it silently
+          re-captured in whatever scope the layout already had, so a
+          workspace layout could never be narrowed to one tab and a tab layout
+          could never be widened — and neither the question nor the answer was
+          ever on screen. Same radio pattern as the save dialog, and
+          `useDialogA11y.isTypingTarget` returns false for radios, so the
+          dialog's Esc and mnemonics stay live with one focused. */}
       <ConfirmDialog
         isOpen={pendingUpdateId !== null}
         title="Update Layout"
-        message="Are you sure you want to update this layout with the current state?"
+        message={
+          <>
+            <p>Re-capture the current state into this layout. What should it save?</p>
+            <div className="scope-options">
+              <label className="scope-option">
+                <input
+                  type="radio"
+                  name="update-scope"
+                  value="workspace"
+                  checked={updateScope === 'workspace'}
+                  onChange={() => setUpdateScope('workspace')}
+                />
+                <span>Whole workspace ({tabs.length} tab{tabs.length !== 1 ? 's' : ''})</span>
+              </label>
+              <label className="scope-option">
+                <input
+                  type="radio"
+                  name="update-scope"
+                  value="tab"
+                  checked={updateScope === 'tab'}
+                  onChange={() => setUpdateScope('tab')}
+                  disabled={!activeTab}
+                />
+                <span>Only this tab ("{activeTab?.title ?? ''}")</span>
+              </label>
+            </div>
+            {updateRetargets && (
+              /* Naming the tab in the option label is what keeps a re-target
+                 from being silent, but a user who saved "build" and is now
+                 sitting on "editor" is one blind Enter away from re-pointing
+                 the layout. Say so outright when it would actually happen. */
+              <p className="scope-retarget-note">
+                This layout currently saves a different tab. Updating will re-point it at
+                "{activeTab?.title ?? ''}".
+              </p>
+            )}
+          </>
+        }
         confirmText="Update"
         confirmMnemonic="U"
         cancelText="Cancel"

@@ -199,7 +199,23 @@
   margin-bottom: 16px;
 }
 
-.form-group label {
+/* The form group's OWN field label ("Layout Name:", "Save:"), which is always a
+ * direct child. Scoped with `>` because as a descendant selector it also
+ * captured `.scope-option` — the `<label>` wrapping each radio, nested one level
+ * down inside `.scope-options`.
+ *
+ * That was the real cause of the radio misalignment, and the first fix only
+ * removed half of it. `.form-group label` (0,1,1) outranks `.scope-option`
+ * (0,1,0), so `display: block` won and the option label was never a flex row at
+ * all: its `gap: 8px` did nothing, and JSX strips the whitespace between the
+ * `<input>` and the `<span>`, so the radio ended up touching its text. Removing
+ * `width: 100%` from the input rule fixed the STACKING — a second, independent
+ * contributor — while leaving the gap defeated.
+ *
+ * `>` also stops `margin-bottom` and `font-weight: 500` leaking onto the option
+ * labels, which were rendering slightly bold and over-spaced for the same reason.
+ */
+.form-group > label {
   display: block;
   margin-bottom: 6px;
   color: var(--text-primary, #cccccc);
@@ -479,9 +495,42 @@
 .scope-option {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   color: var(--text-primary, #cccccc);
   font-size: 14px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+/* The same radios reused inside ConfirmDialog's body (the Update dialog). In the
+   save dialog the block gets its spacing from `.form-group`; there is no form
+   group in a confirm dialog, so it needs its own. */
+.confirm-dialog-body .scope-options {
+  margin-top: 10px;
+}
+
+/* Shown only when confirming would actually re-point a tab-scoped layout at a
+   different tab. Amber rather than red: it is a consequence worth reading, not
+   an error — the user may well mean to do it. */
+.scope-retarget-note {
+  margin: 12px 0 0;
+  color: var(--attention-color, #ff9800);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* The gap alone is not enough to make the spacing predictable: a native radio
+ * carries a UA default margin (Chromium: 3px 3px 0 5px), which ADDS to the flex
+ * gap on the left and pushes the control off the text's optical centre on the
+ * top. Zeroed so `gap` is the only thing between the control and its label, and
+ * sized explicitly so the row does not change height with the UA's default.
+ * `flex: 0 0 auto` keeps a long label from compressing the control itself. */
+.scope-option input[type='radio'] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent-color, #007acc);
   cursor: pointer;
 }
 
