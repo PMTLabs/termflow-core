@@ -249,7 +249,21 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
       payload: { tabId: 'tb-owner', tree: { id: 'pn-owner', type: 'terminal', terminalId: 'tm-shared' } },
     });
 
-    const savedTree = { id: 'pn-saved', type: 'terminal' as const, terminalId: 'tm-shared' };
+    // Both ownership claims are SEEDED, which is what gives the assertions
+    // below any force. Round-2 review flagged that `seededForTabId` was never
+    // pinned; reading the fixture showed the same was true of `sessionKey` —
+    // the saved tree carried neither, so `expect('sessionKey' in installed)`
+    // was satisfied by a field that had never existed. An implementation that
+    // preserved both passed this test. The values are the colliding
+    // terminal's, because that is what a layout saved from a live workspace
+    // actually contains.
+    const savedTree = {
+      id: 'pn-saved',
+      type: 'terminal' as const,
+      terminalId: 'tm-shared',
+      sessionKey: 'tm-shared',
+      seededForTabId: 'tb-owner',
+    };
     seedLayouts([{
       id: 'layout-collide',
       name: 'Collide',
@@ -271,9 +285,14 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
     // Re-minted away from the collision...
     expect(installed.terminalId).not.toBe('tm-shared');
     expect(installed.terminalId.startsWith('tm-')).toBe(true);
-    // ...and claiming nothing. `sessionKey` must be absent, not just falsy:
-    // the spawn path forwards any value it finds.
+    // ...and claiming nothing. Both must be ABSENT, not just falsy: the spawn
+    // path forwards any value it finds. Both are asserted because they are two
+    // independent claims on the live terminal — `sessionKey` routes backend
+    // output to it, `seededForTabId` asserts which tab already seeded it — and
+    // an implementation stripping one while carrying the other over is exactly
+    // the wrong implementation the single-field version of this test allowed.
     expect('sessionKey' in installed).toBe(false);
+    expect('seededForTabId' in installed).toBe(false);
     // The live owner is untouched and keeps the id the host knows it by.
     expect(state.panes.treesByTabId['tb-owner'].terminalId).toBe('tm-shared');
   });
@@ -480,6 +499,82 @@ describe('StateManager.loadTabScopedLayout refuses during a replacement (pre-rev
     const tabResult = await StateManager.loadTabScopedLayout('layout-tab', store.dispatch);
     expect(tabResult).toBe(true);
     expect((store.getState() as any).tabs.tabs.map((t: any) => t.id)).toEqual(['tb-tab']);
+  });
+
+  /**
+   * Round-2 external review, both reviewers independently (report 179/180).
+   *
+   * The two tests above pin ZERO-versus-ONE replacement, and a boolean flag
+   * satisfies that completely. What they cannot see is ONE-versus-MANY:
+   * replacements are explicitly allowed to overlap — arbitrating between them
+   * is what `loadGeneration` is for — and a boolean is cleared by the FIRST to
+   * leave, not the last. So the wrong implementation
+   *
+   *     private replacementInFlight = false;                  // set true / false
+   *
+   * passes both tests above and still hands the workspace away mid-swap: A and
+   * B both take it, A wakes to a stale generation and abandons, and A's
+   * `finally` clears the flag while B is still yielded and still owns the
+   * cleared store. That is the original layering blocker, reopened by its own
+   * fix.
+   *
+   * Anchored on `await a` rather than on a sleep: `loadLayoutInner` returns
+   * immediately after its post-yield generation check with no further awaits,
+   * so the moment A's promise resolves is exactly the moment after A has
+   * released. B was started 50ms later and is still inside its own yield, so
+   * the assertion also carries ~50ms of slack on a loaded machine.
+   */
+  it('still refuses when an EARLIER overlapping replacement has already released and a later one is still in flight', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    seedLayouts([
+      {
+        id: 'layout-x', name: 'Workspace X',
+        tabs: [{ id: 'tb-x', title: 'X' }], activeTabId: 'tb-x',
+        paneTree: null, activePaneId: null, treesByTabId: { 'tb-x': null },
+        createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'layout-y', name: 'Workspace Y',
+        tabs: [{ id: 'tb-y', title: 'Y' }], activeTabId: 'tb-y',
+        paneTree: null, activePaneId: null, treesByTabId: { 'tb-y': null },
+        createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'layout-tab', name: 'Tab layout',
+        tabs: [{ id: 'tb-tab', title: 'Tab' }], activeTabId: 'tb-tab',
+        paneTree: null, activePaneId: null, treesByTabId: { 'tb-tab': null },
+        scope: 'tab', scopedTabId: 'tb-tab',
+        createdAt: 1, updatedAt: 1,
+      },
+    ] as SavedLayout[]);
+
+    // A takes the workspace and yields (~100ms).
+    const a = StateManager.loadLayout('layout-x', store.dispatch);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    // B takes it too, 50ms later, and supersedes A's generation.
+    const b = StateManager.loadLayout('layout-y', store.dispatch);
+
+    // A wakes, finds its generation stale, abandons — and RELEASES.
+    expect(await a).toBe(false);
+
+    // B is still yielded and still owns the cleared workspace. Under a boolean
+    // this is `false` and the tab load walks straight in.
+    const tabResult = await StateManager.loadTabScopedLayout('layout-tab', store.dispatch);
+    expect(tabResult).toBe(false);
+
+    // A synchronous reset is the second non-replacement mutation and must
+    // refuse in the same window, for the same reason.
+    expect(StateManager.resetToDefaultLayout(store.dispatch)).toBe(false);
+
+    expect(await b).toBe(true);
+
+    // Exactly B's workspace — not B's plus a layered tab, and not the single
+    // default tab a leaked-through reset would have installed.
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-y']);
+    expect(state.panes.treesByTabId['tb-tab']).toBeUndefined();
   });
 });
 

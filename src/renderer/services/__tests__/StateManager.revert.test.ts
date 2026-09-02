@@ -24,7 +24,7 @@ import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager } from '../StateManager';
 import { peekUndo, __resetLayoutUndoForTests } from '../layoutUndo';
-import { layoutUndoKey } from '../windowScope';
+import { layoutUndoKey, sessionStateKey } from '../windowScope';
 import { getLayoutBaseline, clearLayoutBaseline } from '../layoutBaseline';
 import { captureWorkspaceSnapshot, workspaceIdentity } from '../workspaceSnapshot';
 
@@ -315,7 +315,12 @@ describe('StateManager.resetToDefaultLayout invalidates recovery bookkeeping (pr
 
     // Started, NOT awaited — still inside the clear-then-100ms-yield window.
     const loadPromise = StateManager.loadLayout('layout-x', store.dispatch);
-    StateManager.resetToDefaultLayout(store.dispatch);
+    // The refusal is REPORTED, not just performed. `resetToDefaultLayout`
+    // returned `void` until round-2 review, so its caller could not tell a
+    // declined reset from a completed one and dispatched the Redux half of the
+    // reset either way — tearing up the layout tracking for a workspace that
+    // had not been reset.
+    expect(StateManager.resetToDefaultLayout(store.dispatch)).toBe(false);
 
     const committed = await loadPromise;
     expect(committed).toBe(true);
@@ -325,5 +330,90 @@ describe('StateManager.resetToDefaultLayout invalidates recovery bookkeeping (pr
     // tab a successful reset would have installed.
     expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-x']);
     expect(state.tabs.tabs.some((t: any) => t.title === 'Terminal')).toBe(false);
+  });
+
+  it('returns true when it actually resets, so the caller can tell the two apart', async () => {
+    // The paired positive. Without it, a `resetToDefaultLayout` that returned
+    // `false` unconditionally would satisfy the refusal test above vacuously
+    // and permanently disable the caller's Redux half.
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-old', title: 'Old' } });
+
+    expect(StateManager.resetToDefaultLayout(store.dispatch)).toBe(true);
+    expect((store.getState() as any).tabs.tabs.map((t: any) => t.title)).toEqual(['Terminal']);
+  });
+});
+
+/**
+ * Round-2 external review (report 179). A replacement clears the workspace,
+ * yields ~100ms, and only then repopulates. `saveState` is called from a 30s
+ * autosave tick, a pane teardown, a visibility change and `beforeunload` —
+ * none of which know a swap is underway — so one landing inside that window
+ * serialised `tabs: []` over the user's real session and the next launch
+ * restored nothing.
+ *
+ * The window PREDATES this branch (`loadLayout` has cleared-then-yielded since
+ * long before it), so this is not a defect the branch introduced; it is one
+ * the branch's own guard finally makes expressible, and `revertWorkspace` adds
+ * a third path through it.
+ */
+describe('StateManager.saveState does not persist a mid-replacement workspace (round-2 review)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __resetLayoutUndoForTests();
+    clearLayoutBaseline();
+    jest.useRealTimers();
+  });
+
+  it('skips the write while a replacement owns the workspace, leaving the last real session intact', async () => {
+    // `saveState` reads `settings.shellProfiles`/`defaultProfile`, which
+    // `makeStore` above does not carry — without them the write throws into
+    // StateManager's own try/catch and this test would pass against a
+    // saveState that never wrote anything at all.
+    const store = configureStore({
+      reducer: {
+        tabs: tabsReducer,
+        panes: panesReducer,
+        canvas: canvasReducer,
+        settings: () => ({ shellProfiles: [], defaultProfile: 'default' }),
+      },
+    });
+    (window as any).__REDUX_STORE__ = store;
+    (window as any).__TAB_PANES__ = {};
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-x', name: 'X',
+      tabs: [{ id: 'tb-x', title: 'X' }],
+      activeTabId: 'tb-x',
+      paneTree: null,
+      activePaneId: null,
+      treesByTabId: { 'tb-x': null },
+      createdAt: 1, updatedAt: 1,
+    }]));
+
+    // A real session on disk, written the ordinary way.
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-real', title: 'Real work' } });
+    await StateManager.saveState();
+    const beforeSwap = localStorage.getItem(sessionStateKey());
+    expect(JSON.parse(beforeSwap!).tabs.map((t: any) => t.id)).toEqual(['tb-real']);
+
+    // Mid-replacement: cleared, yielded, not yet repopulated.
+    const loadPromise = StateManager.loadLayout('layout-x', store.dispatch);
+    expect((store.getState() as any).tabs.tabs).toEqual([]);
+    // This is the autosave tick firing at the worst possible moment.
+    await StateManager.saveState();
+
+    // Byte-identical to the pre-swap write: not an empty `tabs: []`, and not a
+    // rewrite with a fresher timestamp either.
+    expect(localStorage.getItem(sessionStateKey())).toBe(beforeSwap);
+
+    expect(await loadPromise).toBe(true);
+
+    // ...and saving is not permanently disabled: once the replacement releases,
+    // the next tick writes the real post-swap workspace.
+    await StateManager.saveState();
+    const afterSwap = JSON.parse(localStorage.getItem(sessionStateKey())!);
+    expect(afterSwap.tabs.map((t: any) => t.id)).toEqual(['tb-x']);
   });
 });

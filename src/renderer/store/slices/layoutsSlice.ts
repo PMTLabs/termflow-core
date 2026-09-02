@@ -1,7 +1,7 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { StateManager, SavedLayout } from '../../services/StateManager';
 import { captureWorkspaceSnapshot, workspaceIdentity } from '../../services/workspaceSnapshot';
-import { isWorkspaceDirty } from '../../services/layoutBaseline';
+import { isWorkspaceDirty, clearLayoutBaseline } from '../../services/layoutBaseline';
 
 interface LayoutsState {
   savedLayouts: SavedLayout[];
@@ -83,10 +83,25 @@ export const revertWorkspace = createAsyncThunk(
 
 export const deleteLayout = createAsyncThunk(
   'layouts/deleteLayout',
-  async (layoutId: string) => {
+  async (layoutId: string, { getState }) => {
+    // Read BEFORE the delete: the reducer clears `activeLayoutId` when the
+    // deleted layout was the active one, so afterwards there is nothing left
+    // to compare against.
+    const wasActive =
+      (getState() as { layouts: LayoutsState }).layouts.activeLayoutId === layoutId;
     const success = StateManager.deleteLayout(layoutId);
     if (!success) {
       throw new Error('Failed to delete layout');
+    }
+    // The Redux half of dissolving the association lives in the reducer
+    // (`activeLayoutId: null`, `isDirty: true`); this is the MODULE half. The
+    // baseline is the fingerprint the workspace is measured clean against, and
+    // it outlives the layout it was captured from — left installed, a workspace
+    // whose only saved copy was just deleted keeps comparing clean against a
+    // layout that no longer exists. Every other site that dissolves the
+    // association clears both halves; this one cleared only Redux.
+    if (wasActive) {
+      clearLayoutBaseline();
     }
     return layoutId;
   }
@@ -258,6 +273,13 @@ const layoutsSlice = createSlice({
           // offered as "the" layout to compare against, so the dirty gate
           // stays armed until the user explicitly saves.
           state.activeLayoutId = null;
+          // Both halves, or neither. `activeLayoutId: null` is what
+          // `isWorkspaceDirty` READS, but `isDirty` is what the gate in
+          // `LayoutManager` renders from, and nothing recomputes it on store
+          // changes — so clearing only the first left a reverted workspace
+          // sitting at `{ activeLayoutId: null, isDirty: false }`, i.e. the
+          // comment above describing a state the store did not actually hold.
+          state.isDirty = true;
         }
       })
       .addCase(revertWorkspace.rejected, (state, action) => {

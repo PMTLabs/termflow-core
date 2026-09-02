@@ -207,23 +207,41 @@ class StateManagerClass {
    * would strand the single tab-scoped fragment as the entire workspace.
    *
    * So the rule is refusal, not arbitration: while a replacement owns the
-   * workspace, a non-replacement mutation of it does not run. Every path that
-   * calls `clearCurrentState` sets this — `restoreState`, `loadLayout`,
-   * `revertWorkspace` and `resetToDefaultLayout` — so the guard cannot be
-   * opted out of by adding a fifth. This is NOT backlog 006's arbiter (which
-   * would serialise the replacements against each OTHER); it is the narrower
-   * interaction rule the tab-scoped path needs to exist safely.
+   * workspace, a non-replacement mutation of it does not run. The three ASYNC
+   * clearing paths — `restoreState`, `loadLayout`, `revertWorkspace` — take
+   * ownership through `asReplacement`. `resetToDefaultLayout` clears too, but
+   * synchronously: it has no yield for anything to land in, so it only READS
+   * the guard. (An earlier version of this comment said reset took the guard
+   * "via an `asReplacement` wrapper"; it does not, and never did.) This is NOT
+   * backlog 006's arbiter (which would serialise the replacements against each
+   * OTHER); it is the narrower interaction rule the tab-scoped path needs.
+   *
+   * A DEPTH, not a boolean. Replacements are explicitly allowed to overlap —
+   * arbitrating between them is exactly what `loadGeneration` is for — so the
+   * workspace can be owned by an unknown NUMBER of them at once. A boolean
+   * records only that at least one arrived, and is cleared by the first to
+   * LEAVE: `loadLayout(A)`, then `loadLayout(B)`; A wakes to a stale
+   * generation, abandons, and its `finally` hands the workspace away while B
+   * is still yielded and still owns it. A tab-scoped load landing in that gap
+   * layers into the empty store exactly as it did before this guard existed.
+   * The property being tracked is "how many", not "whether", and only a count
+   * survives an overlap.
    */
-  private replacementInFlight = false;
+  private replacementDepth = 0;
+
+  /** True while ANY replacement transaction owns the workspace. */
+  private get replacementInFlight(): boolean {
+    return this.replacementDepth > 0;
+  }
 
   /** Run `body` as a replacement transaction. `finally`, so an abandoned or
    *  throwing replacement can never leave the workspace permanently barred. */
   private async asReplacement<T>(body: () => Promise<T>): Promise<T> {
-    this.replacementInFlight = true;
+    this.replacementDepth++;
     try {
       return await body();
     } finally {
-      this.replacementInFlight = false;
+      this.replacementDepth--;
     }
   }
 
@@ -255,6 +273,20 @@ class StateManagerClass {
     try {
       const store = (window as any).__REDUX_STORE__;
       if (!store) return;
+
+      // A replacement (load / revert / restore) clears the workspace, yields,
+      // and only then repopulates. For the length of that yield `state.tabs` is
+      // EMPTY — and this method is called from a 30s autosave tick, a pane
+      // teardown, a visibility change and `beforeunload`, none of which know a
+      // swap is underway. Persisting from inside the window writes `tabs: []`
+      // over the user's real session, so the next launch restores nothing.
+      //
+      // Skipping is always the safe direction: the previous write still
+      // describes a real workspace, and the next autosave tick (or the next
+      // teardown/unload) writes the post-replacement one. This window predates
+      // the branch that added the guard — `loadLayout` has cleared-then-yielded
+      // since long before — but `revertWorkspace` adds a third path through it.
+      if (this.replacementInFlight) return;
 
       const state: RootState = store.getState();
       
@@ -1515,15 +1547,23 @@ class StateManagerClass {
   }
 
   /**
-   * Reset to default layout (single tab with default shell)
+   * Reset to default layout (single tab with default shell).
+   *
+   * Returns whether the reset actually happened. It can decline (a replacement
+   * owns the workspace) or fail, and the caller has its OWN half of the reset
+   * to perform — `layoutsSlice.resetLayoutTracking` clears `activeLayoutId` and
+   * `isDirty` while this clears the undo slot and the identity baseline. A
+   * `void` return let the caller dispatch its half unconditionally, so a
+   * declined reset still tore up the Redux tracking for a workspace that had
+   * not been reset: the two halves this method exists to keep in step, split.
    */
-  resetToDefaultLayout(dispatch: Dispatch): void {
+  resetToDefaultLayout(dispatch: Dispatch): boolean {
     // Synchronous, so it cannot be interrupted mid-flight — but dispatched
     // INTO another replacement's yield it layers exactly the same way a
     // tab-scoped load would. See `replacementInFlight`.
     if (this.replacementInFlight) {
       console.warn('StateManager: reset ignored — a workspace replacement is already in flight');
-      return;
+      return false;
     }
     try {
       // Clear current state
@@ -1550,8 +1590,10 @@ class StateManagerClass {
       clearUndo();
       clearLayoutBaseline();
       console.log('Reset to default layout');
+      return true;
     } catch (error) {
       console.error('Failed to reset layout:', error);
+      return false;
     }
   }
 

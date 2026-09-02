@@ -189,6 +189,57 @@ describe('the Undo toast (Task B4 step 3)', () => {
     expect(body).toContain('fireUndoToast(');
   });
 
+  /**
+   * Round-2 external review, both reviewers (report 179/180). The test above
+   * identifies "a successful switch" by the mere PRESENCE of `fireUndoToast(`
+   * in `performLoad`, which cannot distinguish firing it on commit from firing
+   * it unconditionally. Both load thunks RESOLVE on a load that deliberately
+   * did nothing — a tab-scoped load refused because a replacement owns the
+   * workspace, a workspace load superseded by a newer one — so `unwrap()` not
+   * throwing is not success. The wrong implementation this pins out:
+   *
+   *     await dispatch(loadLayout(layoutId)).unwrap();
+   *     dispatch(setShowLayoutManager(false));
+   *     fireUndoToast(layout?.name ?? 'layout');   // fires for a no-op switch
+   *
+   * which posted 'Switched to "X" · Undo' for a switch that never happened and
+   * armed the Undo against whichever snapshot was in the one-deep slot.
+   */
+  it('performLoad gates the close and the toast on `committed`, not merely on not-throwing', () => {
+    const at = SOURCE.indexOf('const performLoad = async (layoutId: string) => {');
+    const body = SOURCE.slice(at, SOURCE.indexOf('};', SOURCE.indexOf('};', at) + 1));
+    // The result is destructured, and it short-circuits before the two
+    // success-only effects.
+    expect(body).toMatch(/const\s*\{\s*committed\s*\}\s*=/);
+    expect(body).toMatch(/if\s*\(!committed\)/);
+    const guardAt = body.indexOf('if (!committed)');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(body.indexOf('setShowLayoutManager(false)')).toBeGreaterThan(guardAt);
+    expect(body.indexOf('fireUndoToast(')).toBeGreaterThan(guardAt);
+    // ...and the refusal is reported rather than swallowed.
+    expect(body.slice(guardAt)).toContain('addToast(');
+  });
+
+  /**
+   * Same class, the other refusing operation. `resetToDefaultLayout` declines
+   * while a replacement owns the workspace, and it owns HALF the reset — the
+   * undo slot and the identity baseline — while `resetLayoutTracking` owns the
+   * Redux half. Dispatching the Redux half regardless is how the two come
+   * apart: tracking torn up for a workspace that was never reset. The wrong
+   * implementation is the one this branch shipped in `f422700`:
+   *
+   *     StateManager.resetToDefaultLayout(dispatch);   // return value dropped
+   *     dispatch(resetLayoutTracking());
+   */
+  it('confirmReset gates its Redux half on the reset actually happening', () => {
+    const at = SOURCE.indexOf('const confirmReset = () => {');
+    expect(at).toBeGreaterThan(-1);
+    const body = SOURCE.slice(at, SOURCE.indexOf('};', SOURCE.indexOf('};', at) + 1));
+    expect(body).toMatch(/if\s*\(!StateManager\.resetToDefaultLayout\(dispatch\)\)/);
+    const guardAt = body.indexOf('if (!StateManager.resetToDefaultLayout(dispatch))');
+    expect(body.indexOf('resetLayoutTracking()')).toBeGreaterThan(guardAt);
+  });
+
   it('the header Revert button is enabled only while an undo snapshot exists', () => {
     const at = SOURCE.indexOf('onClick={handleRevert}');
     expect(at).toBeGreaterThan(-1);

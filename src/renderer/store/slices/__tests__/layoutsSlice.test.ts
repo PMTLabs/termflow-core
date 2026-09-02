@@ -15,6 +15,7 @@
 jest.mock('../../../services/StateManager', () => ({
   StateManager: {
     getSavedLayouts: jest.fn(() => []),
+    deleteLayout: jest.fn(() => true),
   },
 }));
 
@@ -32,10 +33,17 @@ import layoutsReducer, {
   recomputeDirty,
   resetLayoutTracking,
 } from '../layoutsSlice';
+import { configureStore } from '@reduxjs/toolkit';
 import { StateManager } from '../../../services/StateManager';
+import {
+  setLayoutBaseline,
+  getLayoutBaseline,
+  clearLayoutBaseline,
+} from '../../../services/layoutBaseline';
 import type { SavedLayout } from '../../../services/StateManager';
 
 const getSavedLayoutsMock = StateManager.getSavedLayouts as jest.Mock;
+const deleteLayoutMock = StateManager.deleteLayout as jest.Mock;
 
 const makeLayout = (overrides: Partial<SavedLayout> = {}): SavedLayout => ({
   id: 'layout-1',
@@ -54,6 +62,56 @@ const initial = () => layoutsReducer(undefined, { type: '@@INIT' } as any);
 beforeEach(() => {
   getSavedLayoutsMock.mockReset();
   getSavedLayoutsMock.mockReturnValue([]);
+  deleteLayoutMock.mockReset();
+  deleteLayoutMock.mockReturnValue(true);
+  clearLayoutBaseline();
+});
+
+/**
+ * Round-2 external review (report 179). Dissolving the association between the
+ * workspace and a saved layout has TWO halves: the Redux half (`activeLayoutId`
+ * / `isDirty`, in the reducer) and the module half (the identity baseline the
+ * workspace is measured clean AGAINST). `resetToDefaultLayout` cleared both;
+ * deleting the active layout cleared only Redux, leaving a fingerprint for a
+ * layout that no longer exists.
+ *
+ * The thunk is exercised through a real store rather than by feeding the
+ * reducer a `fulfilled` action, because the module half lives in the thunk —
+ * a reducer-only test cannot observe it at all.
+ */
+describe('layoutsSlice deleteLayout invalidates BOTH halves for the active layout', () => {
+  const storeWith = (activeLayoutId: string | null) =>
+    configureStore({
+      reducer: { layouts: layoutsReducer },
+      preloadedState: { layouts: { ...initial(), activeLayoutId, isDirty: false } },
+    });
+
+  it('clears the identity baseline when the deleted layout was the active one', async () => {
+    setLayoutBaseline('fingerprint-of-layout-1');
+    const store = storeWith('layout-1');
+
+    await store.dispatch(deleteLayout('layout-1') as any);
+
+    expect(getLayoutBaseline()).toBeNull();
+    // Both halves, asserted together: the Redux half alone was already true
+    // before this fix, so asserting only it cannot see the defect.
+    expect(store.getState().layouts.activeLayoutId).toBeNull();
+    expect(store.getState().layouts.isDirty).toBe(true);
+  });
+
+  it('leaves the baseline alone when a DIFFERENT layout is deleted', async () => {
+    setLayoutBaseline('fingerprint-of-layout-1');
+    const store = storeWith('layout-1');
+
+    await store.dispatch(deleteLayout('layout-2') as any);
+
+    // The paired negative: an unconditional `clearLayoutBaseline()` would
+    // satisfy the test above while making every unrelated delete dirty the
+    // workspace.
+    expect(getLayoutBaseline()).toBe('fingerprint-of-layout-1');
+    expect(store.getState().layouts.activeLayoutId).toBe('layout-1');
+    expect(store.getState().layouts.isDirty).toBe(false);
+  });
 });
 
 describe('layoutsSlice initial state', () => {
@@ -255,18 +313,27 @@ describe('layoutsSlice revertWorkspace', () => {
     expect(next.error).toBeNull();
   });
 
-  it('fulfilled(true) clears activeLayoutId — the reverted workspace is ad-hoc, not any saved layout', () => {
-    const before = { ...initial(), activeLayoutId: 'layout-x' };
+  it('fulfilled(true) clears activeLayoutId AND marks dirty — the reverted workspace is ad-hoc, not any saved layout', () => {
+    // `isDirty: false` in the BEFORE state is what gives this test its teeth:
+    // round-2 review found the reducer clearing only `activeLayoutId`, so a
+    // workspace that had been clean stayed `isDirty: false` after a revert —
+    // and `isDirty` is what the gate renders from. Asserting one field could
+    // not tell the two implementations apart.
+    const before = { ...initial(), activeLayoutId: 'layout-x', isDirty: false };
     const next = layoutsReducer(before, revertWorkspace.fulfilled(true, 'req-2', undefined));
     expect(next.isLoading).toBe(false);
     expect(next.activeLayoutId).toBeNull();
+    expect(next.isDirty).toBe(true);
   });
 
-  it('fulfilled(false) — nothing to revert — leaves activeLayoutId untouched', () => {
-    const before = { ...initial(), activeLayoutId: 'layout-x' };
+  it('fulfilled(false) — nothing to revert — leaves activeLayoutId AND isDirty untouched', () => {
+    const before = { ...initial(), activeLayoutId: 'layout-x', isDirty: false };
     const next = layoutsReducer(before, revertWorkspace.fulfilled(false, 'req-3', undefined));
     expect(next.isLoading).toBe(false);
     expect(next.activeLayoutId).toBe('layout-x');
+    // The paired negative: without it, an unconditional `isDirty = true` would
+    // satisfy the test above while dirtying a workspace nothing happened to.
+    expect(next.isDirty).toBe(false);
   });
 
   it('rejected sets isLoading false and records the error message', () => {

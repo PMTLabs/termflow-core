@@ -139,8 +139,24 @@ export const LayoutManager: React.FC = () => {
     }
   };
 
-  // plan/025 §2.6 step 3: fired on every successful switch (workspace- or tab-scoped
+  // One helper, both revert entry points (the header button and the toast's
+  // Undo action). A revert declines rather than throwing when the undo slot is
+  // empty or its snapshot went stale, and each caller was swallowing that
+  // differently — the button by doing nothing visible, the toast by not
+  // looking at all.
+  const fireRevertFailedToast = () => {
+    dispatch(addToast({
+      message: 'Could not restore the previous workspace — it is no longer available.',
+      type: 'warning',
+    }));
+  };
+
+  // plan/025 §2.6 step 3: fired on every COMMITTED switch (workspace- or tab-scoped
   // alike — both push an undo snapshot, see StateManager.loadLayout/loadTabScopedLayout).
+  // "Committed", not merely "resolved": both thunks report `{ committed }` and a
+  // resolved-but-uncommitted load did nothing, so `performLoad` gates on it. The
+  // earlier wording here said "every successful switch" while the call site fired
+  // unconditionally — the sentence described the intent, not the code.
   // Sticky and with an inline Undo action, because the Layout Manager closes on load
   // (below) and the header Revert button is therefore not reachable feedback for a
   // switch the user just made from a now-closed panel.
@@ -166,7 +182,14 @@ export const LayoutManager: React.FC = () => {
     const toastId = makeToastActionId('layout-undo-toast');
     registerToastAction(actionId, () => {
       retireUndoToast();
-      dispatch(revertWorkspace());
+      // Reads the result, like `handleRevert` — `revertWorkspace` resolves
+      // `false` when the snapshot is gone or its generation went stale, and a
+      // revert that silently does nothing leaves the user believing their
+      // previous workspace came back. Same class as `performLoad` above: an
+      // operation allowed to decline has to be HEARD declining.
+      void dispatch(revertWorkspace()).unwrap()
+        .then(restored => { if (!restored) fireRevertFailedToast(); })
+        .catch(error => console.error('Failed to revert workspace:', error));
     });
     undoToastRef.current = { toastId, actionId };
     dispatch(addToast({
@@ -185,10 +208,25 @@ export const LayoutManager: React.FC = () => {
   const performLoad = async (layoutId: string) => {
     const layout = savedLayouts.find(l => l.id === layoutId);
     try {
-      if (layout?.scope === 'tab') {
-        await dispatch(loadTabScopedLayout(layoutId)).unwrap();
-      } else {
-        await dispatch(loadLayout(layoutId)).unwrap();
+      // `committed`, not "did not throw". Both thunks RESOLVE on a load that
+      // deliberately did nothing — a tab-scoped load refused because a
+      // replacement owns the workspace, or a workspace load superseded by a
+      // newer one — so `unwrap()` succeeding says only that no error was
+      // raised. Acting on that closed the panel and posted 'Switched to "X" ·
+      // Undo' for a switch that never happened, and the Undo was armed against
+      // whatever snapshot was in the one-deep slot: usually the IN-FLIGHT
+      // replacement's, so pressing it reverted a workspace the toast had never
+      // named. `undoToastRef`'s own comment already spells out why: "a stale
+      // affordance that lies is worse than none."
+      const { committed } = layout?.scope === 'tab'
+        ? await dispatch(loadTabScopedLayout(layoutId)).unwrap()
+        : await dispatch(loadLayout(layoutId)).unwrap();
+      if (!committed) {
+        dispatch(addToast({
+          message: 'That layout was not loaded — the workspace is mid-switch. Try again.',
+          type: 'warning',
+        }));
+        return;
       }
       dispatch(setShowLayoutManager(false));
       fireUndoToast(layout?.name ?? 'layout');
@@ -254,7 +292,11 @@ export const LayoutManager: React.FC = () => {
   const handleRevert = async () => {
     try {
       const restored = await dispatch(revertWorkspace()).unwrap();
-      if (restored) dispatch(setShowLayoutManager(false));
+      if (restored) {
+        dispatch(setShowLayoutManager(false));
+      } else {
+        fireRevertFailedToast();
+      }
     } catch (error) {
       console.error('Failed to revert workspace:', error);
     }
@@ -372,7 +414,18 @@ export const LayoutManager: React.FC = () => {
 
   const confirmReset = () => {
     setPendingReset(false);
-    StateManager.resetToDefaultLayout(dispatch);
+    // Gated on the RESULT: a reset declines while a replacement owns the
+    // workspace. Dispatching the Redux half regardless is how the two halves
+    // come apart — the module half (undo slot, identity baseline) untouched
+    // because StateManager returned early, the Redux half torn up anyway, for
+    // a workspace that was never reset.
+    if (!StateManager.resetToDefaultLayout(dispatch)) {
+      dispatch(addToast({
+        message: 'Reset skipped — the workspace is mid-switch. Try again.',
+        type: 'warning',
+      }));
+      return;
+    }
     // A reset throws the workspace away rather than replacing it with something
     // named, so the workspace no longer corresponds to any saved layout.
     // `resetToDefaultLayout` clears the module half (the undo slot and the
