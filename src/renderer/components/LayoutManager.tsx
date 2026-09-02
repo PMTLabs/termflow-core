@@ -470,10 +470,10 @@ export const LayoutManager: React.FC = () => {
   const handleRestoreRunning = () => {
     if (hiddenAgents.length === 0) return;
     const { restored, skipped } = restoreHiddenAgentTerminals(hiddenAgents, dispatch);
-    // Reported rather than silent. `skipped` is not an error — the set is
-    // polled, so between the last poll and this click a layout load may have
-    // brought some of these back on its own — but a button that says it will
-    // restore five and restores three has to say so.
+    // Reported rather than silent. `skipped` is not an error — `hiddenAgents`
+    // is captured when this component renders, so something can put one of them
+    // back on screen before the click is processed — but a button that says it
+    // will restore five and restores three has to say so.
     if (restored.length > 0) {
       dispatch(setShowLayoutManager(false));
       dispatch(addToast({

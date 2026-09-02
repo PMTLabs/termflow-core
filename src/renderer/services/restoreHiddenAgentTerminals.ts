@@ -40,7 +40,13 @@ const AGENT_ICONS: Record<string, string> = {
 export interface RestoreResult {
   restored: HiddenAgentTerminal[];
   /** Asked for but skipped because a pane already showed them by the time the
-   *  click was processed — the set is polled, so it can be up to 10s stale. */
+   *  click was processed. `candidates` is captured when the caller renders, so
+   *  anything that puts one of them back on screen between that render and the
+   *  click lands here. (This comment used to give the reason as "the set is
+   *  polled, so it can be up to 10s stale"; that stopped being the reason when
+   *  the tracker began recomputing on every workspace change — the poll now
+   *  only governs the BACKEND half, which is not what makes a candidate
+   *  visible.) */
   skipped: HiddenAgentTerminal[];
 }
 
@@ -48,12 +54,16 @@ export interface RestoreResult {
  * Give every terminal in `candidates` its own tab, bound to the terminal that is
  * already running.
  *
- * Re-checks visibility against the LIVE store rather than trusting the polled
- * set: the badge's data is up to a poll interval old, and in that window the
- * user may have loaded a layout that brought some of these back. Building a
- * second pane for an already-visible terminal is precisely the duplicate-leaf
- * state the codebase cannot represent — `findTabIdByTerminalId` returns the
- * first match, so the two panes would then fight over routing and muting.
+ * Re-checks visibility against the LIVE store rather than trusting the list it
+ * was handed. `candidates` is a render-time snapshot, and a pane can appear
+ * between that render and this call. Building a second pane for an
+ * already-visible terminal is precisely the duplicate-leaf state the codebase
+ * cannot represent — `findTabIdByTerminalId` returns the first match, so the
+ * two panes would then fight over routing and muting.
+ *
+ * The re-check is cheap and unconditional on purpose: it does not depend on how
+ * fresh the caller's list happens to be, so it keeps holding if the tracker's
+ * update strategy changes again.
  */
 export function restoreHiddenAgentTerminals(
   candidates: ReadonlyArray<HiddenAgentTerminal>,
