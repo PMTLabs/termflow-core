@@ -415,7 +415,7 @@ pub struct AppState<R: Runtime = Wry> {
     // Stable per-process identity, returned on /health so a second instance can tell
     // "this port is mine" from "another instance owns it" (P0b conflict detection).
     pub instance_id: String,
-    // --- PTY-host sidecar (opt-in, Windows) ---
+    // --- PTY-host sidecar (default-on, all OSes; `TERMFLOW_PTY_HOST=0` opts out) ---
     // The connected sidecar client, when the pty-host flag is enabled and a
     // connection has been established. None otherwise (in-process spawn path).
     pub pty_host: Arc<Mutex<Option<crate::pty_host_client::PtyHostClient>>>,
