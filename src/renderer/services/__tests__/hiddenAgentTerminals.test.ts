@@ -10,10 +10,13 @@
  * stub: session keys are built by the same code that parses them, so a test
  * cannot pass against a key shape production would never produce.
  */
+jest.mock('../../api/apiBase', () => ({ apiBase: async () => 'http://127.0.0.1:65535/api' }));
+
 import {
   findHiddenAgentTerminals,
   visibleTerminalIds,
   sameHiddenSet,
+  hiddenAgentTerminals,
   ProcessRow,
   IdentityRow,
 } from '../hiddenAgentTerminals';
@@ -189,5 +192,123 @@ describe('sameHiddenSet', () => {
   it('sees a membership change', () => {
     expect(sameHiddenSet([row('tm-1', 'x')] as any, [row('tm-2', 'x')] as any)).toBe(false);
     expect(sameHiddenSet([row('tm-1', 'x')] as any, [] as any)).toBe(false);
+  });
+});
+
+/**
+ * The badge must appear AS the workspace changes, not up to a poll interval
+ * later. The reported symptom was exactly that delay: loading a saved layout
+ * hid a running CLI, and the indicator turned up "after a few seconds".
+ *
+ * The cause was that nothing observed the workspace — the only on-demand
+ * refreshes were the Layout Manager opening and a restore finishing, so a
+ * layout LOAD waited out the interval. The fix caches the backend half and
+ * recomputes the moment `panes.treesByTabId` changes, which is free.
+ */
+describe('hiddenAgentTerminals tracker reacts to the workspace, not just the clock', () => {
+  const makeStore = () => {
+    let state: any = { panes: { treesByTabId: {} } };
+    const subs = new Set<() => void>();
+    return {
+      getState: () => state,
+      subscribe: (fn: () => void) => { subs.add(fn); return () => subs.delete(fn); },
+      setTrees: (treesByTabId: any) => {
+        // A NEW object, as Redux Toolkit hands back when the slice changes —
+        // the tracker's change detection is reference equality.
+        state = { panes: { treesByTabId } };
+        subs.forEach(fn => fn());
+      },
+    };
+  };
+
+  beforeEach(() => {
+    hiddenAgentTerminals.__resetForTests();
+    __setWindowForTests(ME);
+  });
+
+  afterEach(() => {
+    hiddenAgentTerminals.__resetForTests();
+    delete (window as any).__REDUX_STORE__;
+    delete (window as any).electronAPI;
+  });
+
+  /** One backend round returning a single agent terminal on leaf tm-1. */
+  const stubBackend = () => {
+    (window as any).electronAPI = {
+      getActiveProcesses: async () => [{ id: 'pc-1', agent: 'claude', name: 'Agent' }],
+    };
+    (globalThis as any).fetch = async () => ({
+      ok: true,
+      json: async () => ({ instance: undefined, terminals: [{ id: 'pc-1', terminalId: 'tm-1' }] }),
+    });
+  };
+
+  it('publishes a newly hidden terminal on the workspace change itself, with no second fetch', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    // tm-1 starts VISIBLE, so the first poll finds nothing hidden.
+    store.setTrees({ 'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-1' } });
+    stubBackend();
+
+    let fetches = 0;
+    const realFetch = (globalThis as any).fetch;
+    (globalThis as any).fetch = async (...args: any[]) => { fetches++; return realFetch(...args); };
+
+    const seen: number[] = [];
+    const unsubscribe = hiddenAgentTerminals.subscribe(h => seen.push(h.length));
+    await hiddenAgentTerminals.refresh();
+    expect(hiddenAgentTerminals.current).toEqual([]);
+    const fetchesAfterPoll = fetches;
+    // The backend round really happened. Without this the `toEqual([])` above
+    // passes just as well when the fetch threw and the cache stayed empty —
+    // which is exactly how the first version of this test fooled itself.
+    expect(fetchesAfterPoll).toBeGreaterThan(0);
+
+    // The layout switch: tm-1 is no longer in any pane.
+    store.setTrees({ 'tb-b': { id: 'pn-b', type: 'terminal', terminalId: 'tm-other' } });
+
+    // SYNCHRONOUS — no await, no timer. This is the whole point: the answer was
+    // already known, only the workspace half had changed.
+    expect(hiddenAgentTerminals.current.map(h => h.terminalId)).toEqual(['tm-1']);
+    expect(seen).toContain(1);
+    // ...and it cost no extra process-table scan.
+    expect(fetches).toBe(fetchesAfterPoll);
+
+    unsubscribe();
+  });
+
+  it('publishes again when the terminal becomes visible once more', async () => {
+    // The paired positive: a recompute that only ever ADDS would satisfy the
+    // test above while leaving a stale badge after a restore.
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    store.setTrees({});
+    stubBackend();
+
+    const unsubscribe = hiddenAgentTerminals.subscribe(() => {});
+    await hiddenAgentTerminals.refresh();
+    expect(hiddenAgentTerminals.current.map(h => h.terminalId)).toEqual(['tm-1']);
+
+    store.setTrees({ 'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-1' } });
+    expect(hiddenAgentTerminals.current).toEqual([]);
+
+    unsubscribe();
+  });
+
+  it('stops watching the store once the last subscriber unmounts', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    store.setTrees({ 'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-1' } });
+    stubBackend();
+
+    const unsubscribe = hiddenAgentTerminals.subscribe(() => {});
+    await hiddenAgentTerminals.refresh();
+    unsubscribe();
+
+    let notified = 0;
+    hiddenAgentTerminals.subscribe(() => { notified++; })();
+    // A change after everything unmounted must not reach a torn-down tracker.
+    store.setTrees({});
+    expect(notified).toBe(0);
   });
 });

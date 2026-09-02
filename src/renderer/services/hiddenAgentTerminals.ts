@@ -145,9 +145,16 @@ export function findHiddenAgentTerminals(
  * consumer is mounted and the window is visible.
  *
  * `/api/processes` enumerates the whole OS process table on the backend
- * (50-200ms), so this interval is a real cost and is set accordingly. The
- * signal is also refreshed ON DEMAND at the moments that actually create hidden
- * terminals — see `refreshHiddenAgentTerminals`.
+ * (50-200ms), so this interval is a real cost and is set accordingly.
+ *
+ * The interval is NOT how the badge keeps up with the user, and an earlier
+ * version of this comment claimed it was ("refreshed on demand at the moments
+ * that actually create hidden terminals"). It was not: the only on-demand
+ * refreshes were the Layout Manager opening and a restore completing, so a
+ * layout LOAD — the very thing that strands a terminal — waited out the full
+ * interval before the badge appeared. The tracker now watches the workspace and
+ * recomputes from cache the moment it changes (`watchWorkspace`); this poll only
+ * keeps the backend half honest.
  */
 const POLL_MS = 10_000;
 
@@ -158,6 +165,12 @@ class HiddenAgentTerminalsTracker {
   private listeners = new Set<Listener>();
   private hidden: HiddenAgentTerminal[] = [];
   private inFlight: Promise<void> | null = null;
+  // The last BACKEND answer, kept so the set can be recomputed without another
+  // process-table scan. See `watchWorkspace`.
+  private lastProcesses: ProcessRow[] = [];
+  private lastIdentities: IdentityRow[] = [];
+  private lastTrees: unknown = undefined;
+  private storeUnsub: (() => void) | null = null;
 
   /** The last computed set. Never null — an un-polled tracker reports nothing
    *  hidden, which is the safe default for a badge (it under-claims rather than
@@ -177,12 +190,71 @@ class HiddenAgentTerminalsTracker {
 
   private start(): void {
     this.timer = setInterval(() => { void this.tick(); }, POLL_MS);
+    this.watchWorkspace();
     void this.tick();
   }
 
   private stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.storeUnsub?.();
+    this.storeUnsub = null;
+  }
+
+  /**
+   * Recompute the instant the WORKSPACE changes, without re-fetching.
+   *
+   * This is what makes the badge appear as a layout switch strands a terminal
+   * rather than up to `POLL_MS` later. The question has two halves and only one
+   * of them is expensive: which terminals are alive and running a CLI needs the
+   * backend, but which of them this workspace is SHOWING is local Redux state.
+   * A layout load changes only the second half, so the cached first half still
+   * answers it — no scan, no wait.
+   *
+   * Done by OBSERVING the store rather than by calling `refresh()` from
+   * `loadLayout`/`revertWorkspace`/`resetToDefaultLayout`. Those are not the only
+   * paths that strand a terminal — closing a tab, dragging a pane to another
+   * window and an API-created tab all move the same needle — and a refresh
+   * placed in each caller is one the NEXT such path silently opts out of.
+   * Subscribing cannot be opted out of.
+   *
+   * Liveness stays on the poll: a terminal that exits is noticed within
+   * `POLL_MS`, exactly as before.
+   */
+  private watchWorkspace(): void {
+    const store = (window as any).__REDUX_STORE__;
+    if (!store || this.storeUnsub) return;
+    this.lastTrees = store.getState()?.panes?.treesByTabId;
+    this.storeUnsub = store.subscribe(() => {
+      const trees = store.getState()?.panes?.treesByTabId;
+      // Reference equality is the whole point: Redux Toolkit hands back a new
+      // object only when that slice actually changed, so this stays cheap on
+      // the many dispatches that touch nothing here.
+      if (trees === this.lastTrees) return;
+      this.lastTrees = trees;
+      this.publish(this.computeFromCache());
+    });
+  }
+
+  /** The hidden set implied by the last backend answer and the CURRENT workspace. */
+  private computeFromCache(): HiddenAgentTerminal[] {
+    return findHiddenAgentTerminals(
+      this.lastProcesses,
+      this.lastIdentities,
+      visibleTerminalIds((window as any).__REDUX_STORE__?.getState()?.panes?.treesByTabId ?? {}),
+      currentWindowId(),
+    );
+  }
+
+  /** Store `next` and notify, but only when membership actually moved. */
+  private publish(next: HiddenAgentTerminal[]): void {
+    if (sameHiddenSet(this.hidden, next)) return;
+    this.hidden = next;
+    for (const listener of this.listeners) {
+      try { listener(next); } catch (e) {
+        console.warn('hiddenAgentTerminals: listener failed', e);
+      }
+    }
   }
 
   private async tick(): Promise<void> {
@@ -201,22 +273,31 @@ class HiddenAgentTerminalsTracker {
   }
 
   private async doRefresh(): Promise<void> {
-    let next: HiddenAgentTerminal[];
+    let rows: LiveTerminalRows;
     try {
-      next = await fetchHiddenAgentTerminals();
+      rows = await fetchLiveTerminalRows();
     } catch (e) {
       // A failed poll must not clear a set the user is looking at, and must not
       // invent one either — keep the last known answer and try again next tick.
       console.warn('hiddenAgentTerminals: refresh failed, keeping the last known set', e);
       return;
     }
-    if (sameHiddenSet(this.hidden, next)) return;
-    this.hidden = next;
-    for (const listener of this.listeners) {
-      try { listener(next); } catch (e) {
-        console.warn('hiddenAgentTerminals: listener failed', e);
-      }
-    }
+    // Cached so a later workspace change is answered without another scan.
+    this.lastProcesses = rows.processes;
+    this.lastIdentities = rows.identities;
+    this.publish(this.computeFromCache());
+  }
+
+  /** Test seam: drop the cached backend answer and the observed workspace, so
+   *  one test does not inherit the previous one's tracker state. */
+  __resetForTests(): void {
+    this.stop();
+    this.listeners.clear();
+    this.hidden = [];
+    this.lastProcesses = [];
+    this.lastIdentities = [];
+    this.lastTrees = undefined;
+    this.inFlight = null;
   }
 }
 
@@ -232,14 +313,31 @@ export function sameHiddenSet(
 
 export const hiddenAgentTerminals = new HiddenAgentTerminalsTracker();
 
-/** Re-poll now. Call after anything that can strand a terminal — a layout load,
- *  a revert, a reset — rather than waiting out the interval. */
+/**
+ * Force a fresh BACKEND read now, rather than waiting out the interval.
+ *
+ * Note what this is NOT for: reacting to a workspace change. The tracker
+ * observes the store for that and recomputes instantly from its cache (see
+ * `watchWorkspace`), so a layout load needs no call here. Use it when the
+ * backend's own answer may have moved — a terminal exiting, a CLI starting —
+ * and the user is about to look, as the Layout Manager does when it opens.
+ */
 export function refreshHiddenAgentTerminals(): Promise<void> {
   return hiddenAgentTerminals.refresh();
 }
 
+/** The raw backend answer, before it is joined against the workspace. */
+export interface LiveTerminalRows {
+  processes: ProcessRow[];
+  identities: IdentityRow[];
+}
+
 /**
- * One round of the join. Exported for tests; the tracker is the normal caller.
+ * One backend round: both endpoints, and the instance owner check.
+ *
+ * Split from the join so the tracker can CACHE this half. The workspace half is
+ * free to recompute and changes far more often; keeping the two together forced
+ * a full process-table scan every time a tab moved.
  *
  * The instance owner check is not optional. The configured API port can be
  * bound by a SIBLING profile that started first, in which case `/api/terminals`
@@ -247,7 +345,7 @@ export function refreshHiddenAgentTerminals(): Promise<void> {
  * put panes on another app's PTYs. `StateManager.reconcileExistingTerminals`
  * makes the same check for the same reason.
  */
-export async function fetchHiddenAgentTerminals(): Promise<HiddenAgentTerminal[]> {
+export async function fetchLiveTerminalRows(): Promise<LiveTerminalRows> {
   const base = await apiBase();
   const token = localStorage.getItem(apiTokenKey());
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
@@ -266,14 +364,25 @@ export async function fetchHiddenAgentTerminals(): Promise<HiddenAgentTerminal[]
       `hiddenAgentTerminals: /api/terminals answered by instance '${owner}', not '${mine}' — ` +
         'reporting nothing hidden rather than offering another instance\'s terminals',
     );
-    return [];
+    // Empty rather than a throw: a sibling instance answering is a definite
+    // "nothing of ours here", not a failed read, so it should REPLACE the cached
+    // set rather than leave the last one standing.
+    return { processes: [], identities: [] };
   }
 
-  const store = (window as any).__REDUX_STORE__;
-  const trees = store?.getState()?.panes?.treesByTabId ?? {};
+  return {
+    processes: (processes as ProcessRow[]) ?? [],
+    identities: (data?.terminals as IdentityRow[]) ?? [],
+  };
+}
+
+/** The whole question in one call: fetch, then join against this workspace. */
+export async function fetchHiddenAgentTerminals(): Promise<HiddenAgentTerminal[]> {
+  const rows = await fetchLiveTerminalRows();
+  const trees = (window as any).__REDUX_STORE__?.getState()?.panes?.treesByTabId ?? {};
   return findHiddenAgentTerminals(
-    (processes as ProcessRow[]) ?? [],
-    (data?.terminals as IdentityRow[]) ?? [],
+    rows.processes,
+    rows.identities,
     visibleTerminalIds(trees),
     currentWindowId(),
   );
