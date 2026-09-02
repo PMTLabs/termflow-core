@@ -124,15 +124,24 @@ export const renameLayout = createAsyncThunk(
 
 export const updateLayout = createAsyncThunk(
   'layouts/updateLayout',
-  async (layoutId: string) => {
-    const success = await StateManager.updateLayout(layoutId);
+  async (arg: string | { layoutId: string; scope?: 'workspace' | 'tab'; tabId?: string }) => {
+    // Accepts the bare id it has always accepted, so nothing that only wants
+    // "re-capture in whatever scope this layout already is" has to change.
+    const { layoutId, ...opts } = typeof arg === 'string' ? { layoutId: arg } : arg;
+    const success = await StateManager.updateLayout(layoutId, opts);
     if (!success) {
       throw new Error('Failed to update layout');
     }
-    // The layout's own scope decides whether this re-capture makes the WORKSPACE
-    // clean. A tab-scope update re-captured one tab, so the rest of the
-    // workspace is exactly as dirty as it was — the same rule `saveLayout` and
-    // `StateManager.updateLayout`'s baseline block already apply.
+    // The scope the update actually PERSISTED decides whether this re-capture
+    // makes the WORKSPACE clean. A tab-scope update re-captured one tab, so the
+    // rest of the workspace is exactly as dirty as it was — the same rule
+    // `saveLayout` and `StateManager.updateLayout`'s baseline block apply.
+    //
+    // Read back from storage rather than taken from `opts.scope`: the scope can
+    // now be CHANGED by the caller, so the stored record is the only thing that
+    // knows what the layout ended up being. (This comment used to say "the
+    // layout's own scope", which stopped being true the moment an update could
+    // change it.)
     const scope = StateManager.getSavedLayouts().find(l => l.id === layoutId)?.scope ?? 'workspace';
     return { layoutId, scope };
   }

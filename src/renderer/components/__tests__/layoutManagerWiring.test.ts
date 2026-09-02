@@ -358,10 +358,41 @@ describe('window.confirm is fully replaced by ConfirmDialog (Task B6)', () => {
   });
 
   it('preserves the original confirmation copy verbatim', () => {
+    // EXPECTATION CHANGED for Update only. Task B6's promise was that swapping
+    // `window.confirm` for `ConfirmDialog` changed the mechanism and not the
+    // wording, and that still holds for delete and reset. Update is no longer
+    // the same QUESTION: it asks which scope to re-capture in rather than
+    // yes/no, so preserving "Are you sure you want to update this layout with
+    // the current state?" would mean preserving a prompt the dialog no longer
+    // asks. Its new copy is pinned in the scope test below instead.
     expect(SOURCE).toContain('Are you sure you want to delete this layout?');
-    expect(SOURCE).toContain('Are you sure you want to update this layout with the current state?');
     expect(SOURCE).toContain(
       'Are you sure you want to reset to default layout? This will close all current tabs and create a single terminal.',
     );
+  });
+
+  it('the Update dialog asks for a scope rather than a yes/no', () => {
+    expect(SOURCE).toContain('Re-capture the current state into this layout. What should it save?');
+    expect(SOURCE.match(/name="update-scope"/g)).toHaveLength(2);
+    // Seeded from the layout being updated, so accepting the default is the
+    // operation Update performed before the scope could be chosen at all.
+    const starter = declBody('startUpdate');
+    expect(starter).toMatch(/setUpdateScope\(layout\?\.scope === 'tab' \? 'tab' : 'workspace'\)/);
+  });
+
+  it('the Update confirm sends the chosen scope, and a tabId only for tab scope', () => {
+    const handler = declBody('confirmUpdate');
+    expect(handler).toMatch(/scope:\s*updateScope,/);
+    expect(handler).toMatch(/tabId:\s*updateScope === 'tab'/);
+  });
+
+  it('warns before re-pointing a tab-scoped layout at a different tab', () => {
+    // Naming the tab in the option label keeps the re-target from being silent,
+    // but a user who saved "build" and is sitting on "editor" is one blind
+    // Enter from moving it. The condition must be narrow enough that it does
+    // not cry wolf on a workspace update or on a same-tab re-capture.
+    expect(SOURCE).toContain('will re-point it at');
+    expect(SOURCE).toMatch(/updateScope === 'tab'\s*&&[\s\S]{0,200}?scope === 'tab'/);
+    expect(SOURCE).toMatch(/scopedTabId \?\?[\s\S]{0,80}?\) !== activeTabId/);
   });
 });

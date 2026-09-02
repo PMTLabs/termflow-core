@@ -127,6 +127,40 @@ describe('LayoutManager.css — text-field chrome must not reach the radios', ()
     expect(focusRule![1]).toContain(":not([type='checkbox'])");
   });
 
+  /**
+   * The other half of the same defect, and the half the first fix missed.
+   *
+   * `.form-group label` (0,1,1) outranks `.scope-option` (0,1,0), so as a
+   * DESCENDANT selector it won the `display` fight and the option label was
+   * never a flex row: its `gap` did nothing and — because JSX strips the
+   * whitespace between the `<input>` and the `<span>` — the radio ended up
+   * touching its own text. Removing `width: 100%` from the input rule fixed the
+   * stacking without touching this.
+   */
+  it('the field-label rule is scoped to direct children, so it cannot reach the option labels', () => {
+    expect(LAYOUT_CSS).toContain('.form-group > label {');
+    const bare = [...LAYOUT_CSS.matchAll(/(?:^|[},])\s*\.form-group label\b/g)];
+    expect(bare).toEqual([]);
+  });
+
+  it('the option label is therefore a real flex row with a real gap', () => {
+    // Asserted rather than assumed: this rule was present and inert for the
+    // whole of the previous fix, which is exactly why it needs an oracle.
+    expect(decl(LAYOUT_CSS, '.scope-option', 'display')).toBe('flex');
+    expect(decl(LAYOUT_CSS, '.scope-option', 'gap')).toMatch(/^\d+px$/);
+    // Vertical centring is the same casualty. While `display: block` won, the
+    // radio was an INLINE box sitting on the text baseline — which renders it
+    // high against the text's optical middle. `align-items: center` was present
+    // the whole time and inert; making the row a real flex row is what applies
+    // it. Deliberately no manual `top`/`margin` nudge: an offset stacked on top
+    // of working cross-axis centring would push it back off by that amount.
+    expect(decl(LAYOUT_CSS, '.scope-option', 'align-items')).toBe('center');
+  });
+
+  it('the radio carries no UA margin to add unevenly to that gap', () => {
+    expect(decl(LAYOUT_CSS, ".scope-option input[type='radio']", 'margin')).toBe('0');
+  });
+
   it('leaves no OTHER bare `.form-group input` rule for the chrome to leak through', () => {
     // The census, not just the two known sites. Any `.form-group input` that is
     // not immediately followed by a `:not(` exclusion is a fresh leak.

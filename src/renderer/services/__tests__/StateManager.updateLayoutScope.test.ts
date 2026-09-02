@@ -201,6 +201,137 @@ describe('StateManager.updateLayout scope (bug fix regression)', () => {
   });
 });
 
+/**
+ * GUI-pass follow-up: Update now takes an explicit scope, so a layout can be
+ * WIDENED (tab -> workspace) or NARROWED (workspace -> tab) rather than being
+ * stuck in whatever scope it was first saved with.
+ *
+ * That reopens the exact bug this file was written for. `buildLayoutBody`'s
+ * workspace branch returns only the five workspace fields, so the old
+ * `{ ...existing, ...body }` would have carried `scope: 'tab'`, `scopedTabId`
+ * and the per-tab maps straight out of the previous record — a layout claiming
+ * to be one tab while carrying every tab. It was unreachable while the scope
+ * could not change; letting the caller change it is what makes it reachable.
+ */
+describe('StateManager.updateLayout with an explicit scope (GUI pass)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __resetCwdSnapshots();
+  });
+
+  const seedTwoTabs = () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    const treeA = { id: 'pn-a', type: 'terminal' as const, terminalId: 'tm-a' };
+    const treeB = { id: 'pn-b', type: 'terminal' as const, terminalId: 'tm-b' };
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-a', title: 'A' } });
+    store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-a', tree: treeA } });
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-b', title: 'B' } });
+    store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-b', tree: treeB } });
+    return store;
+  };
+
+  const tabScopedLayout = (): SavedLayout => ({
+    id: 'layout-x',
+    name: 'X',
+    tabs: [{ id: 'tb-a', title: 'A' }],
+    activeTabId: 'tb-a',
+    paneTree: { id: 'pn-a', type: 'terminal', terminalId: 'tm-a' },
+    activePaneId: 'pn-a',
+    treesByTabId: { 'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-a' } },
+    scope: 'tab',
+    scopedTabId: 'tb-a',
+    // The tab-scope-only fields. These are what must NOT survive a widening.
+    activePaneByTabId: { 'tb-a': 'pn-a' },
+    maximizedPaneByTabId: { 'tb-a': 'pn-a' },
+    terminalCwds: { 'tm-a': '/only/this/tab' },
+    createdAt: 1,
+    updatedAt: 1,
+  } as SavedLayout);
+
+  const stored = () => JSON.parse(localStorage.getItem('auto-terminal-layouts')!)[0];
+
+  it('WIDENS a tab layout to the workspace, dropping every tab-scope-only field with it', async () => {
+    seedTwoTabs();
+    seedLayouts([tabScopedLayout()]);
+
+    expect(await StateManager.updateLayout('layout-x', { scope: 'workspace' })).toBe(true);
+
+    const after = stored();
+    // It carries the whole workspace...
+    expect(after.tabs.map((t: any) => t.id).sort()).toEqual(['tb-a', 'tb-b']);
+    expect(Object.keys(after.treesByTabId).sort()).toEqual(['tb-a', 'tb-b']);
+    // ...and it no longer CLAIMS to be one tab. This pair is the whole point:
+    // asserting the tabs alone passes for the defect, because the defect is a
+    // record that carries every tab while still saying `scope: 'tab'`.
+    expect(after.scope ?? 'workspace').toBe('workspace');
+    expect(after.scopedTabId).toBeUndefined();
+    // The per-tab maps described ONE tab. Left behind, they would describe a
+    // tab the layout no longer claims, and `loadLayout` would apply them.
+    expect(after.activePaneByTabId).toBeUndefined();
+    expect(after.maximizedPaneByTabId).toBeUndefined();
+    expect(after.terminalCwds).toBeUndefined();
+  });
+
+  it('NARROWS a workspace layout to one tab, naming the tab it was given', async () => {
+    seedTwoTabs();
+    seedLayouts([{
+      id: 'layout-x', name: 'X',
+      tabs: [{ id: 'tb-a', title: 'A' }, { id: 'tb-b', title: 'B' }],
+      activeTabId: 'tb-a', paneTree: null, activePaneId: null,
+      treesByTabId: { 'tb-a': null, 'tb-b': null },
+      createdAt: 1, updatedAt: 1,
+    } as SavedLayout]);
+
+    expect(await StateManager.updateLayout('layout-x', { scope: 'tab', tabId: 'tb-b' })).toBe(true);
+
+    const after = stored();
+    expect(after.scope).toBe('tab');
+    expect(after.scopedTabId).toBe('tb-b');
+    expect(after.tabs.map((t: any) => t.id)).toEqual(['tb-b']);
+    expect(Object.keys(after.treesByTabId)).toEqual(['tb-b']);
+  });
+
+  it('RE-TARGETS a tab layout at a different tab when given one explicitly', async () => {
+    // The old rule — re-capture the tab this layout has always described — is
+    // what stops a SILENT re-point. An explicit tabId is the user having chosen
+    // on the record (the dialog names the tab, and warns when it differs), so
+    // it is honoured.
+    seedTwoTabs();
+    seedLayouts([tabScopedLayout()]);
+
+    expect(await StateManager.updateLayout('layout-x', { scope: 'tab', tabId: 'tb-b' })).toBe(true);
+
+    const after = stored();
+    expect(after.scopedTabId).toBe('tb-b');
+    expect(after.tabs.map((t: any) => t.id)).toEqual(['tb-b']);
+  });
+
+  it('still re-captures the layout OWN scope when no options are passed', async () => {
+    // Backward compatibility, asserted rather than assumed: every existing
+    // caller and every test above calls `updateLayout(id)` with no options.
+    seedTwoTabs();
+    seedLayouts([tabScopedLayout()]);
+
+    expect(await StateManager.updateLayout('layout-x')).toBe(true);
+
+    const after = stored();
+    expect(after.scope).toBe('tab');
+    expect(after.scopedTabId).toBe('tb-a');
+    expect(after.tabs.map((t: any) => t.id)).toEqual(['tb-a']);
+  });
+
+  it('rejects an explicit tab target that is not open, rather than re-pointing at something else', async () => {
+    seedTwoTabs();
+    seedLayouts([tabScopedLayout()]);
+    await expect(
+      StateManager.updateLayout('layout-x', { scope: 'tab', tabId: 'tb-gone' }),
+    ).rejects.toThrow(/no longer open/);
+    // ...and the stored layout is untouched by the failed attempt.
+    expect(stored().scopedTabId).toBe('tb-a');
+  });
+});
+
 describe('StateManager.loadTabScopedLayout cwd re-keying on collision (bug fix regression)', () => {
   beforeEach(() => {
     localStorage.clear();
