@@ -19,6 +19,7 @@ import { terminalService } from '../../services/TerminalService';
 import { termDiag, isTermDiagEnabled, setTermDiag } from '../../utils/diag';
 import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
+import { usePaneMuteState } from '../Panes/usePaneMuteState';
 import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
 import { store, RootState } from '../../store';
@@ -104,6 +105,12 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   shellType,
 }) => {
   const dispatch = useDispatch();
+  // plan/025 §2.7: the pane/tab mute pair shared with TerminalPane's header bell
+  // and PaneContextMenu — see usePaneMuteState for why it is one hook, not a
+  // third copy. Reaches this surface on the Canvas overlay too: the overlay
+  // never renders its own TerminalDisplay (there is exactly one instantiation
+  // site, TerminalPane.tsx), it only borrows this engine's context menu.
+  const { paneMuted, tabMuted, effectiveMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
   const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -772,6 +779,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
             ? 'The app\'s mouse is paused: drag to select text, then Copy. Click to give mouse control back to the app.'
             : 'A CLI is using the mouse, so dragging won\'t select. Click to pause its mouse so you can drag-select text and copy, then click again to restore it.',
           click: () => engine?.setSelectionMode(!selectionMode),
+        },
+      ] : []),
+      // plan/025 §2.7. Ungated — `paneId` is set on both surfaces (the canvas
+      // overlay never renders its own TerminalDisplay; see the header comment
+      // on usePaneMuteState above) — unlike the pane-tree items further up,
+      // which act on a tab that can be off screen. Mute is per-pane DATA, so
+      // it is correct wherever the surface happens to be drawn. Label reused
+      // verbatim from PaneContextMenu so the two menus cannot drift apart.
+      ...(paneId ? [
+        {
+          label: paneMuted ? 'Unmute Pane Notifications' : 'Mute Pane Notifications',
+          icon: effectiveMuted ? '🔕' : '🔔',
+          title: tabMuted ? 'This pane is also muted by its tab' : undefined,
+          click: () => toggleMute(),
         },
       ] : []),
       { type: 'separator' as const },

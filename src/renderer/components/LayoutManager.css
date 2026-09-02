@@ -345,3 +345,49 @@
      files and fails if they stop agreeing. */
   --ended-wash: rgba(128, 128, 128, 0.13);
 }
+
+/* plan/025 §2.6 Task B3 — the process-continuity banner. Mirrors `.error-message`'s
+   flex-row shape (padding/border/layout) above, but in an INFO tone: the accent
+   colors already declared on `:root` above, reused rather than duplicated so this
+   reads as "the app's accent", not a bespoke third color. Permanent (unlike
+   `.error-message`, which is conditional), so it carries no dismiss button. */
+.continuity-banner {
+  background: var(--bg-accent-subtle, rgba(0, 122, 204, 0.1));
+  color: var(--text-primary, #cccccc);
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border-color, #3e3e42);
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.continuity-banner strong {
+  color: var(--accent-color, #007acc);
+}
+
+/* plan/025 §2.6 Task B5 — the scope badge on each saved-layout row. */
+.layout-scope-badge {
+  color: var(--text-secondary, #969696);
+}
+
+/* plan/025 §2.6 Task B5 — the save dialog's scope radios, ShellSelector.tsx's
+   `<label>`-wrapped pattern. */
+.scope-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scope-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary, #cccccc);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.scope-option input[disabled] + span {
+  color: var(--text-tertiary, #666666);
+}

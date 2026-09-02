@@ -282,6 +282,42 @@ const tabsSlice = createSlice({
       else delete tab.titleColor;
     },
 
+    /**
+     * Patch an existing tab's DURABLE fields in place (plan/025 §2.4, tab-scoped
+     * layout load). `removeTab` + `addTab` is not an option for that caller:
+     * `TerminalContainer`'s cleanup effect (`TerminalContainer.tsx:78-103`)
+     * reacts to a tab's disappearance by dropping its tree and dispatching
+     * `removeTabTree` — destroying the very tree the tab-scoped load is about
+     * to install a moment later.
+     *
+     * Only the fields a saved layout actually describes are touched; every
+     * transient field (`processId`, `exited`, `isRunning`, ...) is left alone,
+     * same as every other reducer in this slice. Unknown id is a silent no-op,
+     * like the siblings above.
+     */
+    updateTabMeta: (
+      state,
+      action: PayloadAction<{
+        id: string;
+        patch: Partial<Pick<Tab, 'title' | 'shellType' | 'icon' | 'colorSchemaId' | 'titleColor' | 'titleIsCustom' | 'notifyMuted'>>;
+      }>,
+    ) => {
+      const tab = state.tabs.find(t => t.id === action.payload.id);
+      if (!tab) return;
+      // A patch key holding `undefined` means the saved layout describes NO
+      // value for that field, so the field is DELETED rather than assigned —
+      // `Object.assign` would leave the key present holding `undefined`, and
+      // every optional flag in this slice (`notifyMuted`, `titleColor`,
+      // `colorSchemaId`) is read as presence-or-absence by its siblings above.
+      // A key present-but-undefined also survives an Immer draft and only
+      // disappears at the next `JSON.stringify`, so the in-memory state and
+      // the persisted state would disagree until a save happened to run.
+      for (const [key, value] of Object.entries(action.payload.patch)) {
+        if (value === undefined) delete (tab as any)[key];
+        else (tab as any)[key] = value;
+      }
+    },
+
     // Toggle (set/clear) tab-level notification mute. Muting also clears any
     // pending unseen-output bell so a muted tab never keeps showing a
     // notification indicator that it can no longer earn.
@@ -298,5 +334,5 @@ const tabsSlice = createSlice({
   },
 });
 
-export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted } = tabsSlice.actions;
+export const { addTab, removeTab, setActiveTab, markTabExited, clearTabExited, updateTabTitle, setAutoTabTitle, reorderTabs, clearAllTabs, flagTabActivity, markUnseenOutput, markTabSeen, setRunningActivity, setTabColorSchema, setTabTitleColor, setTabMuted, updateTabMeta } = tabsSlice.actions;
 export default tabsSlice.reducer;

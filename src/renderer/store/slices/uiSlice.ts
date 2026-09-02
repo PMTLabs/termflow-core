@@ -16,6 +16,11 @@ export interface Toast {
     tabId?: string;
     // When the toast was created, for the local-time display on its card.
     createdAt: number;
+    // plan/025 §2.6 — an optional inline action button (e.g. "Undo"). The handler
+    // itself cannot live here: Redux state must stay serialisable (RTK's
+    // serializableCheck), so only `label` + an `actionId` travel with the toast, and
+    // the real callback is looked up by that id in `services/toastActions.ts`.
+    action?: { label: string; actionId: string };
 }
 
 interface DialogState {
@@ -55,8 +60,13 @@ const uiSlice = createSlice({
         hideDialog: (state) => {
             state.dialog.isOpen = false;
         },
-        addToast: (state, action: PayloadAction<{ message: string; type?: ToastType; duration?: number; sticky?: boolean; tabId?: string }>) => {
-            const id = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+        addToast: (state, action: PayloadAction<{ id?: string; message: string; type?: ToastType; duration?: number; sticky?: boolean; tabId?: string; action?: { label: string; actionId: string } }>) => {
+            // `id` is optional and generated when omitted, which is every existing
+            // caller. A caller supplies one only when it must be able to REMOVE the
+            // toast later without racing the reducer for the generated value — the
+            // layout Undo toast, which has to be retired the moment its single undo
+            // slot is consumed (see LayoutManager's `undoToastRef`).
+            const id = action.payload.id ?? (Date.now().toString() + Math.random().toString(36).substr(2, 9));
             state.toasts.push({
                 id,
                 message: action.payload.message,
@@ -64,6 +74,7 @@ const uiSlice = createSlice({
                 duration: action.payload.duration || 3000,
                 sticky: action.payload.sticky,
                 tabId: action.payload.tabId,
+                action: action.payload.action,
                 createdAt: Date.now(),
             });
         },

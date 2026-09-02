@@ -2,15 +2,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { store, RootState } from '../../store';
-import { findLeaf, findTabIdByTerminalId } from '../../store/slices/paneTreeOps';
+import { findLeaf } from '../../store/slices/paneTreeOps';
 import { setAgentColorScheme, removeAgentColorScheme } from '../../store/slices/settingsSlice';
-import { toggleMaximizePane, setPaneMuted } from '../../store/slices/panesSlice';
+import { toggleMaximizePane } from '../../store/slices/panesSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { detachPaneToNewWindow } from './dnd/detach';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
 import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
+import { usePaneMuteState } from './usePaneMuteState';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -46,23 +47,11 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // Pane ids are unique across tabs, so a value match tells us this pane is the
   // maximized one for its tab (drives the Maximize/Restore label).
   const isMaximized = Object.values(maximizedPaneByTabId).includes(paneId);
-  // Mute state: this pane's own flag, plus its owning tab's flag (which
-  // overrides). The item toggles the pane flag; the icon shows the effective
-  // (tab-or-pane) muted state so it matches the header bell. Each selector is
-  // self-contained (resolves the pane/tab itself) so it can't read a stale
-  // owningTabId during an intermediate store-notification pass.
-  const paneMuted = useSelector((s: RootState) => {
-    for (const tid of Object.keys(s.panes.treesByTabId)) {
-      const leaf = findLeaf(s.panes.treesByTabId[tid], paneId);
-      if (leaf) return !!leaf.notifyMuted;
-    }
-    return false;
-  });
-  const tabMuted = useSelector((s: RootState) => {
-    if (!terminalId) return false;
-    const tid = findTabIdByTerminalId(s.panes.treesByTabId, terminalId);
-    return !!(tid && s.tabs.tabs.find(t => t.id === tid)?.notifyMuted);
-  });
+  // Mute state — see usePaneMuteState for why this pane/tab selector pair is
+  // a shared hook rather than a local copy. The item toggles the pane's own
+  // flag; the icon shows the effective (tab-or-pane) muted state so it
+  // matches the header bell.
+  const { paneMuted, tabMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
   const [schemaExpanded, setSchemaExpanded] = useState(false);
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
@@ -241,7 +230,7 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       <div className="context-menu-divider" />
       <button
         className="context-menu-item"
-        onClick={() => runAndClose(() => dispatch(setPaneMuted({ paneId, muted: !paneMuted })))}
+        onClick={() => runAndClose(toggleMute)}
         title={tabMuted ? 'This pane is also muted by its tab' : undefined}
       >
         <span className="menu-icon"><BellIcon muted={tabMuted || paneMuted} /></span>

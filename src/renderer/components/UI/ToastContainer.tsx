@@ -4,6 +4,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
 import { removeToast, dismissAllToasts, Toast as ToastType } from '../../store/slices/uiSlice';
 import { CANVAS_SHELL_TYPE } from '../../services/tabKinds';
+import { runToastAction } from '../../services/toastActions';
 import './ToastContainer.css';
 
 // Mirrors SearchResults.tsx's formatTimestamp — same thresholds, kept local since toasts
@@ -56,6 +57,17 @@ const ToastItem: React.FC<{ toast: ToastType }> = ({ toast }) => {
         <div className={`toast-item ${toast.type}`} onClick={() => dispatch(removeToast(toast.id))}>
             <span className="toast-icon">{getIcon()}</span>
             <span className="toast-message">{toast.message}</span>
+            {toast.action && (
+                // Same guard as `.toast-close` just below: the whole card's own onClick
+                // (above) dismisses the toast, so without stopPropagation this button
+                // would fire its action AND immediately have the card dismiss under it.
+                <button
+                    className="toast-action"
+                    onClick={(e) => { e.stopPropagation(); runToastAction(toast.action!.actionId); }}
+                >
+                    {toast.action.label}
+                </button>
+            )}
             <span className="toast-time" title={new Date(toast.createdAt).toLocaleString()}>
                 {formatRelativeTime(toast.createdAt, Date.now())}
             </span>
