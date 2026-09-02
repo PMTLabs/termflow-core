@@ -114,6 +114,58 @@
   background: rgba(63, 185, 80, 0.14);
 }
 
+/* Hidden running agents: CLIs still running that no pane in this layout shows.
+ *
+ * Shaped like `.active-window-indicator` on purpose — same height, radius, dot +
+ * text pair — because it lives beside it and a second pill of a different shape
+ * would read as a different KIND of thing. It is amber rather than green because
+ * it reports something needing attention rather than a healthy state, and amber
+ * is already this strip's "needs attention" colour (`.server-status-icon.partial`).
+ *
+ * Unlike its neighbour it renders only when the count is non-zero, so it is
+ * always in its "active" state and needs no dimmed variant. */
+.hidden-agents-indicator {
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  margin: 0 8px 0 0;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  border: 1px solid rgba(210, 153, 34, 0.55);
+  border-radius: 11px;
+  background: rgba(210, 153, 34, 0.14);
+  color: #d29922;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+.hidden-agents-indicator .hai-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d29922;
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.6);
+}
+.hidden-agents-indicator:hover {
+  color: #f0b429;
+  border-color: rgba(240, 180, 41, 0.85);
+  background: rgba(210, 153, 34, 0.22);
+}
+.hidden-agents-indicator:focus-visible {
+  outline: 2px solid #0078d4;
+  outline-offset: 1px;
+}
+.light-theme .hidden-agents-indicator {
+  color: #8a5a00;
+  border-color: rgba(138, 90, 0, 0.5);
+  background: rgba(210, 153, 34, 0.18);
+}
+
 .title-bar-tabs {
   display: flex;
   align-items: center;

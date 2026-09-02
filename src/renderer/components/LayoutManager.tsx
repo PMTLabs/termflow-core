@@ -20,6 +20,9 @@ import {
 } from '../store/slices/layoutsSlice';
 import { addToast, removeToast } from '../store/slices/uiSlice';
 import { registerToastAction, unregisterToastAction, makeToastActionId } from '../services/toastActions';
+import { useHiddenAgentTerminals } from '../hooks/useHiddenAgentTerminals';
+import { refreshHiddenAgentTerminals } from '../services/hiddenAgentTerminals';
+import { restoreHiddenAgentTerminals } from '../services/restoreHiddenAgentTerminals';
 import { peekUndo, subscribeUndo } from '../services/layoutUndo';
 import { WorkspaceSnapshot } from '../services/workspaceSnapshot';
 import { StateManager } from '../services/StateManager';
@@ -59,6 +62,9 @@ export const LayoutManager: React.FC = () => {
   // same operation Update performed before it could be chosen.
   const [updateScope, setUpdateScope] = useState<'workspace' | 'tab'>('workspace');
   const [pendingReset, setPendingReset] = useState(false);
+  // Subscribing here is also what keeps the poll alive while this panel is
+  // open — the tracker runs only while something is listening.
+  const hiddenAgents = useHiddenAgentTerminals();
   // Task B4 — mirrors `layoutUndo.ts`'s module-scope slot so the header Revert
   // button re-renders on every push/take/clear, not just when THIS component causes one.
   const [undoSnapshot, setUndoSnapshot] = useState<WorkspaceSnapshot | null>(() => peekUndo());
@@ -80,6 +86,9 @@ export const LayoutManager: React.FC = () => {
   useEffect(() => {
     if (showLayoutManager) {
       dispatch(refreshLayouts());
+      // The hidden set is polled on a 10s interval, and opening this panel is
+      // exactly when a stale count would be seen. Re-poll rather than show it.
+      void refreshHiddenAgentTerminals();
       // plan/025 §2.5: recomputed "when the Layout Manager opens" — not on every
       // store tick — so the dirty gate below always judges the LATEST workspace.
       dispatch(recomputeDirty());
@@ -450,6 +459,49 @@ export const LayoutManager: React.FC = () => {
     }
   };
 
+  // No confirmation step. The button that calls this already carries the count
+  // in its own label and lists the terminals in its tooltip, so a dialog would
+  // only re-read what the user just clicked. The title-bar badge keeps its
+  // confirm: that is a glanceable icon, and the dialog is where its list of
+  // terminals is shown for the first time.
+  //
+  // Safe to act immediately regardless: this only ADDS tabs, every terminal it
+  // attaches to is already running, and nothing is restarted or closed.
+  const handleRestoreRunning = async () => {
+    if (hiddenAgents.length === 0) return;
+    const { restored, skipped, stale } = await restoreHiddenAgentTerminals(hiddenAgents, dispatch);
+    // Reported rather than silent. `skipped` is not an error — `hiddenAgents`
+    // is captured when this component renders, so something can put one of them
+    // back on screen before the click is processed — but a button that says it
+    // will restore five and restores three has to say so.
+    if (restored.length > 0) {
+      dispatch(setShowLayoutManager(false));
+      const notes: string[] = [];
+      if (skipped.length > 0) notes.push(`${skipped.length} already open`);
+      // Named separately from `skipped`: "already open" is a non-event, "no
+      // longer running" is the user's agent having exited, which they want to know.
+      if (stale.length > 0) notes.push(`${stale.length} no longer running`);
+      dispatch(addToast({
+        message: notes.length === 0
+          ? `Restored ${restored.length} running ${restored.length === 1 ? 'CLI' : 'CLIs'}.`
+          : `Restored ${restored.length}; ${notes.join(', ')}.`,
+        type: 'info',
+      }));
+    } else if (stale.length > 0) {
+      dispatch(addToast({
+        message: stale.length === 1
+          ? 'That terminal is no longer running — nothing to bring back.'
+          : `Those ${stale.length} terminals are no longer running — nothing to bring back.`,
+        type: 'warning',
+      }));
+    } else {
+      dispatch(addToast({
+        message: 'Nothing to restore — those terminals are already open in this layout.',
+        type: 'warning',
+      }));
+    }
+  };
+
   const confirmReset = () => {
     setPendingReset(false);
     // Gated on the RESULT: a reset declines while a replacement owns the
@@ -562,6 +614,25 @@ export const LayoutManager: React.FC = () => {
               disabled={isLoading}
             >
               Reset Layout
+            </button>
+            {/* Agent CLIs still running that no pane here is showing — usually
+                stranded by a layout switch. Rendered ALWAYS, unlike the title-bar
+                badge which appears only when there is something to report: this
+                panel is where a user comes looking for the capability, and a
+                control that exists only once it is already needed cannot be
+                discovered before then. Disabled, with the reason in the tooltip,
+                is the honest resting state. */}
+            <button
+              className="btn btn-warning"
+              onClick={handleRestoreRunning}
+              disabled={hiddenAgents.length === 0 || isLoading}
+              title={hiddenAgents.length === 0
+                ? 'Every running agent CLI is already open in this layout.'
+                : hiddenAgents.map(h => `${h.name} (${h.agent})`).join(', ')}
+            >
+              {hiddenAgents.length === 0
+                ? 'Restore Running CLIs'
+                : `Restore Running CLIs (${hiddenAgents.length})`}
             </button>
           </div>
         </div>
@@ -907,6 +978,7 @@ export const LayoutManager: React.FC = () => {
         onConfirm={confirmReset}
         onCancel={() => setPendingReset(false)}
       />
+
     </div>
   );
 };

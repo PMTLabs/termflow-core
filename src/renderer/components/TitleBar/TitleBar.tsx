@@ -5,6 +5,10 @@ import { TabManager } from '../Tabs/TabManager';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { GearIcon } from './GearIcon';
 import { openSettingsTab } from '../../services/openSettings';
+import { useHiddenAgentTerminals } from '../../hooks/useHiddenAgentTerminals';
+import { restoreHiddenAgentTerminals } from '../../services/restoreHiddenAgentTerminals';
+import { addToast } from '../../store/slices/uiSlice';
+import { useDispatch } from 'react-redux';
 import './TitleBar.css';
 
 type ServerStatus = 'checking' | 'online' | 'partial' | 'offline';
@@ -20,6 +24,12 @@ export const TitleBar: React.FC = () => {
     const [activeLabel, setActiveLabel] = useState('');
     // Gate the active-window toggle behind a confirmation popup.
     const [showActivateConfirm, setShowActivateConfirm] = useState(false);
+    // Agent CLIs still running with no pane in this workspace showing them —
+    // usually stranded by a layout switch, which replaces what is on screen
+    // without stopping anything (plan/025 §0.1).
+    const hiddenAgents = useHiddenAgentTerminals();
+    const [showRestoreConfirm, setShowRestoreConfirm] = useState(false);
+    const dispatch = useDispatch();
 
     // Reflect the API + MCP server health as a small dot in the title area.
     // green=both online, amber=one down, red=both down. Polls periodically and
@@ -202,6 +212,29 @@ export const TitleBar: React.FC = () => {
                 <span className="awi-text">API</span>
             </button>
 
+            {/* Hidden running agents. Rendered only when there ARE any: an
+                always-present "0" would be noise in a strip the user looks at
+                constantly, and the whole point of this control is that its
+                appearance is the signal.
+
+                It sits in the title bar rather than the OS window title because
+                on Windows and Linux `decorations: false` means there IS no OS
+                title bar — `setTitle()` would write a string nothing displays.
+                This strip is what "the window title" means in this app. */}
+            {hiddenAgents.length > 0 && (
+                <button
+                    type="button"
+                    className="hidden-agents-indicator"
+                    title={`${hiddenAgents.length} running ${hiddenAgents.length === 1 ? 'agent is' : 'agents are'} not shown in this layout: ${
+                        hiddenAgents.map(h => h.name).join(', ')
+                    }. Click to bring ${hiddenAgents.length === 1 ? 'it' : 'them'} back.`}
+                    onClick={() => setShowRestoreConfirm(true)}
+                >
+                    <span className="hai-dot" aria-hidden="true" />
+                    <span className="hai-text">{hiddenAgents.length}</span>
+                </button>
+            )}
+
             <div className="title-bar-tabs">
                 <TabManager />
             </div>
@@ -282,6 +315,38 @@ export const TitleBar: React.FC = () => {
                 </div>
             )}
         </div>
+        <ConfirmDialog
+            isOpen={showRestoreConfirm && hiddenAgents.length > 0}
+            title={hiddenAgents.length === 1 ? 'Bring back 1 running agent?' : `Bring back ${hiddenAgents.length} running agents?`}
+            message={
+                `These are still running with nothing on screen showing them: ${hiddenAgents.map(h => h.name).join(', ')}. ` +
+                'Each gets a new tab attached to the terminal that is already running — nothing is restarted, and no output is lost.'
+            }
+            confirmText="Bring back"
+            cancelText="Cancel"
+            confirmMnemonic="B"
+            cancelMnemonic="C"
+            onConfirm={() => {
+                setShowRestoreConfirm(false);
+                // Reported here as well as in the Layout Manager: both surfaces
+                // consume ONE hidden set, so they must not disagree about what
+                // happened either. A terminal that exited between the badge
+                // appearing and the click is silent otherwise — its tab simply
+                // never arrives.
+                void restoreHiddenAgentTerminals(hiddenAgents, dispatch).then(({ restored, stale }) => {
+                    if (stale.length === 0) return;
+                    dispatch(addToast({
+                        message: restored.length === 0
+                            ? (stale.length === 1
+                                ? 'That terminal is no longer running — nothing to bring back.'
+                                : `Those ${stale.length} terminals are no longer running — nothing to bring back.`)
+                            : `Brought back ${restored.length}; ${stale.length} no longer running.`,
+                        type: restored.length === 0 ? 'warning' : 'info',
+                    }));
+                });
+            }}
+            onCancel={() => setShowRestoreConfirm(false)}
+        />
         <ConfirmDialog
             isOpen={showActivateConfirm}
             title="Receive API/MCP terminals here?"

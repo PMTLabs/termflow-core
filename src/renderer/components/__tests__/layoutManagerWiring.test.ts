@@ -336,7 +336,22 @@ describe('window.confirm is fully replaced by ConfirmDialog (Task B6)', () => {
   });
 
   it('delete, update and reset each render their own ConfirmDialog', () => {
-    expect(SOURCE.match(/<ConfirmDialog/g)).toHaveLength(3);
+    // EXPECTATION CHANGED. This asserted `toHaveLength(3)` — an exact census of
+    // every ConfirmDialog in the file — and broke the moment an unrelated
+    // feature added a fourth (the Restore Running CLIs confirmation). The count
+    // was never the property: Task B6 requires that each of these three actions
+    // has its OWN dialog rather than sharing one, which the three distinct
+    // `isOpen` bindings below say exactly, without forbidding a fourth dialog
+    // for something else. A total is a claim about the whole file, and it goes
+    // stale every time the file grows.
+    expect((SOURCE.match(/<ConfirmDialog/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    // Distinct bindings is what "its own" means, and is the part a
+    // shared-dialog refactor would actually break.
+    expect(new Set([
+      SOURCE.indexOf('isOpen={pendingDeleteId !== null}'),
+      SOURCE.indexOf('isOpen={pendingUpdateId !== null}'),
+      SOURCE.indexOf('isOpen={pendingReset}'),
+    ]).size).toBe(3);
     expect(SOURCE).toMatch(/isOpen=\{pendingDeleteId !== null\}/);
     expect(SOURCE).toMatch(/isOpen=\{pendingUpdateId !== null\}/);
     expect(SOURCE).toMatch(/isOpen=\{pendingReset\}/);

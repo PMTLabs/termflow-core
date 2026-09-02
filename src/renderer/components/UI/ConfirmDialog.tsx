@@ -13,7 +13,15 @@ interface ConfirmDialogProps {
   onCancel: () => void;
   confirmText?: string;
   cancelText?: string;
-  /** Destructive confirms default focus to Cancel so a stray Enter never fires. */
+  /**
+   * Is the primary action itself destructive?
+   *
+   * Two effects, and it used to have only the first: focus defaults to Cancel
+   * so a stray Enter never fires it, AND the confirm button is red rather than
+   * accent. The colour used to be unconditional, which made it say nothing —
+   * `Restore`, `Bring back`, `Activate` and `Update` were as red as `Delete`,
+   * so a genuinely dangerous confirm looked exactly like a safe one.
+   */
   destructive?: boolean;
   /** Bare-letter shortcut + underlined mnemonic for the confirm button, e.g. "C". */
   confirmMnemonic?: string;
@@ -82,7 +90,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
-          <button className="confirm-btn confirm" data-dialog-confirm onClick={onConfirm}>
+          <button
+            className={`confirm-btn ${destructive ? 'danger' : 'primary'}`}
+            data-dialog-confirm
+            onClick={onConfirm}
+          >
             {confirmMnemonic ? (
               <Mnemonic label={confirmText} char={confirmMnemonic} />
             ) : (

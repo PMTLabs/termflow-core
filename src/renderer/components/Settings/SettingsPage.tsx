@@ -1874,8 +1874,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 >
                     Offload &amp; Close…
                 </button>
+                {/* `destructive`: this CLOSES the running app. It was the only
+                    app-closing confirm without the flag — its sibling in App.tsx
+                    ("Quit"/"Close Window") has always carried it — so it alone
+                    focused its confirm button by default and a stray Enter shut
+                    TermFlow. Now that the flag also drives the colour, leaving it
+                    off would additionally have dropped the red it has today. */}
                 <ConfirmDialog
                     isOpen={offloadArmed}
+                    destructive
                     title="Offload & Close TermFlow?"
                     message="This closes TermFlow now — your terminals keep running in the background. Continue?"
                     onConfirm={doOffloadRebuild}

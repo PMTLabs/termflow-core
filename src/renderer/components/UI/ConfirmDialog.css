@@ -93,12 +93,20 @@
   color: var(--tab-active-foreground, #ffffff);
 }
 
-.confirm-btn.confirm {
-  background: #e51400; /* Professional red for close/destructive actions */
+/* The SOLID red, for a dialog whose primary action is itself destructive:
+   Delete, Reset, Quit, Close Pane, Revoke.
+   Renamed from `.confirm-btn.confirm`, which read as "the confirm button" and
+   so was applied to every confirm button regardless of what it did — making red
+   unconditional, and therefore meaningless. `Restore`, `Bring back`, `Activate`
+   and `Update` all arrived in the same alarming red as `Delete`.
+   Distinct from `.confirm-btn.destructive` below, which is the GHOST variant
+   for a destructive SECONDARY option standing beside a primary one. */
+.confirm-btn.danger {
+  background: #e51400;
   color: white;
 }
 
-.confirm-btn.confirm:hover {
+.confirm-btn.danger:hover {
   background: #ff1a00;
   box-shadow: 0 0 10px rgba(229, 20, 0, 0.3);
 }
@@ -114,7 +122,12 @@
   box-shadow: 0 0 10px rgba(0, 120, 212, 0.3);
 }
 
-/* Destructive action, e.g. "Discard" — red, but distinct from the primary. */
+/* Destructive action, e.g. "Discard" — red, but distinct from the primary.
+   GHOST, not solid: this is for a destructive option offered ALONGSIDE a primary
+   one (UnsavedChangesDialog's "Switch anyway" next to "Save current layout…"),
+   so it must read as the lesser-weight choice. A dialog whose PRIMARY action is
+   destructive wants `.confirm-btn.danger` above instead — swapping the two turns
+   Delete into an outline button. */
 .confirm-btn.destructive {
   background: transparent;
   color: #ff6b6b;
