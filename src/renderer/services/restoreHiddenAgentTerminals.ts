@@ -24,7 +24,13 @@ import { addTabTree, setActiveTabId, focusPane } from '../store/slices/panesSlic
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { HiddenAgentTerminal, refreshHiddenAgentTerminals, visibleTerminalIds } from './hiddenAgentTerminals';
+import {
+  HiddenAgentTerminal,
+  refreshHiddenAgentTerminals,
+  visibleTerminalIds,
+  fetchLiveTerminalRows,
+  liveAgentProcessIds,
+} from './hiddenAgentTerminals';
 
 /** An emoji per known CLI so a restored tab is recognisable at a glance, with a
  *  neutral fallback — the detector labels ANY non-shell foreground program, so
@@ -39,6 +45,17 @@ const AGENT_ICONS: Record<string, string> = {
 
 export interface RestoreResult {
   restored: HiddenAgentTerminal[];
+  /**
+   * Asked for but NOT restored because the backend no longer reports them as a
+   * live agent terminal at click time — they exited while the badge still
+   * advertised them, or the liveness read itself failed.
+   *
+   * Separate from `skipped`, and the distinction matters: `skipped` means "you
+   * already have it", `stale` means "it is gone". Attaching one of these would
+   * register a mapping to a process the backend does not own, and the pane
+   * mounted on it would look alive while being connected to nothing.
+   */
+  stale: HiddenAgentTerminal[];
   /** Asked for but skipped because a pane already showed them by the time the
    *  click was processed. `candidates` is captured when the caller renders, so
    *  anything that puts one of them back on screen between that render and the
@@ -65,15 +82,34 @@ export interface RestoreResult {
  * fresh the caller's list happens to be, so it keeps holding if the tracker's
  * update strategy changes again.
  */
-export function restoreHiddenAgentTerminals(
+export async function restoreHiddenAgentTerminals(
   candidates: ReadonlyArray<HiddenAgentTerminal>,
   dispatch: Dispatch,
-): RestoreResult {
+): Promise<RestoreResult> {
+  // Prove liveness BEFORE binding anything. The candidate list carries a
+  // `processId` from a poll up to POLL_MS old, and that is the value we would
+  // hand to `attachExistingTerminal` — so a terminal that exited in the meantime
+  // would be bound to a dead process and reported as a successful restore.
+  // This read also supplies the CURRENT processId, which is what makes the
+  // restore correct across a respawn that reused the leaf id.
+  let live: Map<string, string>;
+  try {
+    live = liveAgentProcessIds(await fetchLiveTerminalRows());
+  } catch (e) {
+    // Cannot prove anything is alive => attach nothing. Reporting the whole list
+    // as stale is honest: "not proven live" is exactly what we know.
+    console.warn('restoreHiddenAgentTerminals: liveness read failed; restoring nothing', e);
+    return { restored: [], skipped: [], stale: [...candidates] };
+  }
+
+  // Read the workspace AFTER the await, never before: the whole point of this
+  // check is to see panes that appeared while we were waiting.
   const store = (window as any).__REDUX_STORE__;
   const visible = visibleTerminalIds(store?.getState()?.panes?.treesByTabId ?? {});
 
   const restored: HiddenAgentTerminal[] = [];
   const skipped: HiddenAgentTerminal[] = [];
+  const stale: HiddenAgentTerminal[] = [];
   let firstTabId: string | null = null;
   let firstPaneId: string | null = null;
 
@@ -83,14 +119,22 @@ export function restoreHiddenAgentTerminals(
       continue;
     }
 
+    const liveProcessId = live.get(candidate.terminalId);
+    if (!liveProcessId) {
+      stale.push(candidate);
+      continue;
+    }
+
     // Bind BEFORE the pane exists. `attachExistingTerminal` seeds the init
-    // guards that `TerminalDisplay`'s mount effect reads to decide whether to
+    // guards that `TerminalPane`'s mount effect reads to decide whether to
     // reuse a live PTY or create one; dispatching the tab first would let that
     // effect run against an unseeded id and spawn a duplicate — orphaning the
     // very terminal being recovered.
     terminalService.attachExistingTerminal(
       candidate.terminalId,
-      candidate.processId,
+      // The freshly-read id, NOT `candidate.processId`, which is as old as the
+      // last poll.
+      liveProcessId,
       reattachPromptGate(candidate.promptHook, false),
     );
     if (candidate.promptHook === true) markArmProbePending(candidate.terminalId);
@@ -136,5 +180,5 @@ export function restoreHiddenAgentTerminals(
   // advertising terminals that are now on screen until the next interval.
   void refreshHiddenAgentTerminals();
 
-  return { restored, skipped };
+  return { restored, skipped, stale };
 }

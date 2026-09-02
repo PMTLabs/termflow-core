@@ -7,6 +7,7 @@ import { GearIcon } from './GearIcon';
 import { openSettingsTab } from '../../services/openSettings';
 import { useHiddenAgentTerminals } from '../../hooks/useHiddenAgentTerminals';
 import { restoreHiddenAgentTerminals } from '../../services/restoreHiddenAgentTerminals';
+import { addToast } from '../../store/slices/uiSlice';
 import { useDispatch } from 'react-redux';
 import './TitleBar.css';
 
@@ -327,7 +328,22 @@ export const TitleBar: React.FC = () => {
             cancelMnemonic="C"
             onConfirm={() => {
                 setShowRestoreConfirm(false);
-                restoreHiddenAgentTerminals(hiddenAgents, dispatch);
+                // Reported here as well as in the Layout Manager: both surfaces
+                // consume ONE hidden set, so they must not disagree about what
+                // happened either. A terminal that exited between the badge
+                // appearing and the click is silent otherwise — its tab simply
+                // never arrives.
+                void restoreHiddenAgentTerminals(hiddenAgents, dispatch).then(({ restored, stale }) => {
+                    if (stale.length === 0) return;
+                    dispatch(addToast({
+                        message: restored.length === 0
+                            ? (stale.length === 1
+                                ? 'That terminal is no longer running — nothing to bring back.'
+                                : `Those ${stale.length} terminals are no longer running — nothing to bring back.`)
+                            : `Brought back ${restored.length}; ${stale.length} no longer running.`,
+                        type: restored.length === 0 ? 'warning' : 'info',
+                    }));
+                });
             }}
             onCancel={() => setShowRestoreConfirm(false)}
         />

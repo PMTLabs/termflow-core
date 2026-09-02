@@ -467,20 +467,32 @@ export const LayoutManager: React.FC = () => {
   //
   // Safe to act immediately regardless: this only ADDS tabs, every terminal it
   // attaches to is already running, and nothing is restarted or closed.
-  const handleRestoreRunning = () => {
+  const handleRestoreRunning = async () => {
     if (hiddenAgents.length === 0) return;
-    const { restored, skipped } = restoreHiddenAgentTerminals(hiddenAgents, dispatch);
+    const { restored, skipped, stale } = await restoreHiddenAgentTerminals(hiddenAgents, dispatch);
     // Reported rather than silent. `skipped` is not an error — `hiddenAgents`
     // is captured when this component renders, so something can put one of them
     // back on screen before the click is processed — but a button that says it
     // will restore five and restores three has to say so.
     if (restored.length > 0) {
       dispatch(setShowLayoutManager(false));
+      const notes: string[] = [];
+      if (skipped.length > 0) notes.push(`${skipped.length} already open`);
+      // Named separately from `skipped`: "already open" is a non-event, "no
+      // longer running" is the user's agent having exited, which they want to know.
+      if (stale.length > 0) notes.push(`${stale.length} no longer running`);
       dispatch(addToast({
-        message: skipped.length === 0
+        message: notes.length === 0
           ? `Restored ${restored.length} running ${restored.length === 1 ? 'CLI' : 'CLIs'}.`
-          : `Restored ${restored.length}; ${skipped.length} ${skipped.length === 1 ? 'was' : 'were'} already open.`,
+          : `Restored ${restored.length}; ${notes.join(', ')}.`,
         type: 'info',
+      }));
+    } else if (stale.length > 0) {
+      dispatch(addToast({
+        message: stale.length === 1
+          ? 'That terminal is no longer running — nothing to bring back.'
+          : `Those ${stale.length} terminals are no longer running — nothing to bring back.`,
+        type: 'warning',
       }));
     } else {
       dispatch(addToast({

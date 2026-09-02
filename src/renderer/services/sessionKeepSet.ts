@@ -98,3 +98,59 @@ export function unionKeepSet(storage: KeyValueStore): KeepSet {
 
   return { ids, complete, windows };
 }
+
+/**
+ * Every terminal id that a window OTHER than `myWindowId` has in its saved
+ * session, for this profile.
+ *
+ * Exists because there is no live cross-window view of what is on screen. Each
+ * window is its own WebView2 with its own store; what they share is one
+ * localStorage, and each window's session blob under `auto-terminal-state#<id>`
+ * is the only durable record of what that window is showing. So this is the
+ * union machinery above, minus my own window.
+ *
+ * `complete` is false when some other window's blob could not be read. A caller
+ * deciding whether a terminal is unowned must treat that as "I cannot tell" and
+ * under-claim, exactly as `unionKeepSet`'s caller skips its prune — the ids of a
+ * window you cannot read are precisely the ones you would wrongly call orphaned.
+ *
+ * KNOWN LAG, and it is not closeable from here: a session blob is written on
+ * autosave/visibility-change/unload, so a terminal another window opened moments
+ * ago may not be in its blob yet. This narrows the window in which one window can
+ * mistake another's terminal for an orphan; it does not eliminate it. Closing it
+ * needs a live cross-window channel (a `storage` event ping, or backend-held
+ * window ownership), which does not exist today.
+ */
+export function terminalIdsInOtherWindows(
+  storage: KeyValueStore,
+  myWindowId: string,
+): KeepSet {
+  const ids = new Set<string>();
+  let complete = true;
+  let windows = 0;
+
+  const keys: string[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const k = storage.key(i);
+    if (k !== null) keys.push(k);
+  }
+
+  for (const key of keys) {
+    const owner = windowIdFromSessionKey(key);
+    if (owner === null || owner === myWindowId) continue;
+    windows++;
+    const raw = storage.getItem(key);
+    if (raw === null) {
+      complete = false;
+      continue;
+    }
+    try {
+      collectTerminalIds(JSON.parse(raw), ids);
+    } catch {
+      console.warn(`sessionKeepSet: could not parse the session at "${key}"; treating its terminals as unknown`);
+      complete = false;
+    }
+  }
+
+  return { ids, complete, windows };
+}

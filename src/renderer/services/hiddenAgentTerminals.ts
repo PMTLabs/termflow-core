@@ -12,11 +12,21 @@
  *
  * The join, and why it takes two endpoints:
  *   GET /api/processes   → `agent` / `agentExe`, but NO renderer identity
- *   GET /api/terminals   → `terminalId` / `sessionKey`, but NO agent
+ *   GET /api/terminals   → `terminalId`, but NO agent
  * They share `id` (== processId), and neither alone can answer the question.
+ *
+ * Neither endpoint says which WINDOW is showing a terminal, and an earlier
+ * version of this module believed `/api/terminals.sessionKey` did. It does not:
+ * that field is the PTY-HOST's key, equal to `terminalId` for anything created
+ * on this build, and `api_server.rs` labels it "Diagnostic only — nothing
+ * addresses a terminal by this". Passing it to `windowIdFromSessionKey` (which
+ * parses `auto-terminal-state#<windowId>` localStorage keys) returned `null`
+ * every time, so the ownership filter never once excluded anything. The real
+ * signal is each window's saved session blob — see `terminalIdsInOtherWindows`.
  */
 import { getAllTerminalIds } from '../store/slices/paneTreeOps';
-import { currentWindowId, windowIdFromSessionKey } from './windowScope';
+import { currentWindowId } from './windowScope';
+import { terminalIdsInOtherWindows } from './sessionKeepSet';
 import { apiBase } from '../api/apiBase';
 import { apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
 
@@ -34,9 +44,10 @@ export interface IdentityRow {
   id?: string;
   processId?: string;
   terminalId?: string | null;
-  sessionKey?: string | null;
   name?: string | null;
   promptHook?: boolean;
+  /* `sessionKey` is deliberately NOT read here. It is the pty-host's own key,
+     not a window identity — see the module doc. */
 }
 
 export interface HiddenAgentTerminal {
@@ -73,17 +84,21 @@ export function visibleTerminalIds(treesByTabId: Record<string, unknown>): Set<s
  * duplicate-leaf state `findTabIdByTerminalId` cannot represent (it returns the
  * FIRST match, so the two panes would fight over routing and muting).
  *
- * `sessionKey` is the discriminator: it is window-scoped, so
- * `windowIdFromSessionKey` says which window owns the session. A terminal whose
- * key names a DIFFERENT window of this profile is that window's business.
- * A terminal with no session key at all has never been bound to a window's
- * session and is fair game.
+ * `ownedElsewhere` is that discriminator, and it has to be supplied by the
+ * caller because it comes from localStorage rather than either endpoint: it is
+ * the union of the terminal ids in every OTHER window's saved session
+ * (`terminalIdsInOtherWindows`). A terminal in it is that window's business.
+ *
+ * Its lag is documented at the source and is the honest limit of this filter: a
+ * terminal another window opened since its last session write is not in the set
+ * yet, so it can still be offered here. That is narrower than the previous
+ * behaviour, which excluded nothing at all, but it is not zero.
  */
 export function findHiddenAgentTerminals(
   processes: ReadonlyArray<ProcessRow>,
   identities: ReadonlyArray<IdentityRow>,
   visible: ReadonlySet<string>,
-  myWindowId: string,
+  ownedElsewhere: ReadonlySet<string>,
 ): HiddenAgentTerminal[] {
   const identityByProcess = new Map<string, IdentityRow>();
   for (const row of identities) {
@@ -107,11 +122,8 @@ export function findHiddenAgentTerminals(
     // 2. Something on screen here is already showing it.
     if (visible.has(terminalId)) continue;
 
-    // 3. Another window of this profile owns the session (see the doc comment).
-    if (identity?.sessionKey) {
-      const owner = windowIdFromSessionKey(identity.sessionKey);
-      if (owner !== null && owner !== myWindowId) continue;
-    }
+    // 3. Another window of this profile has it on screen (see the doc comment).
+    if (ownedElsewhere.has(terminalId)) continue;
 
     // The backend can briefly hold two rows for one leaf (a respawn racing a
     // close); offering it twice would build two tabs for one terminal.
@@ -171,10 +183,21 @@ class HiddenAgentTerminalsTracker {
   private lastIdentities: IdentityRow[] = [];
   private lastTrees: unknown = undefined;
   private storeUnsub: (() => void) | null = null;
+  /** Invalidates an in-flight refresh across a reset. See `__resetForTests`. */
+  private generation = 0;
 
-  /** The last computed set. Never null — an un-polled tracker reports nothing
-   *  hidden, which is the safe default for a badge (it under-claims rather than
-   *  inventing terminals that may not exist). */
+  /**
+   * The last computed set. Never null — a tracker that has never polled reports
+   * nothing hidden, which is the safe default for a badge (it under-claims
+   * rather than inventing terminals that may not exist).
+   *
+   * Note the scoping: NEVER POLLED, not "not currently polling". `stop()`
+   * deliberately retains `hidden` and the cached backend rows, so a stopped
+   * tracker keeps reporting its last answer — which is what lets the hook seed
+   * from `current` on remount instead of flashing an empty badge. The cost is
+   * that a set which stopped being true while nothing was subscribed is served
+   * until the restart's first tick lands.
+   */
   get current(): HiddenAgentTerminal[] {
     return this.hidden;
   }
@@ -188,9 +211,23 @@ class HiddenAgentTerminalsTracker {
     };
   }
 
+  /**
+   * `tick()` skips every interval while the window is hidden, so without this
+   * the badge would stay as stale as the moment the window was hidden for up to
+   * a further POLL_MS after it is shown again — and being shown again is exactly
+   * when the user looks at it. Refreshes through `refresh()`, so it shares the
+   * single-flight guard with an interval that fires at the same moment.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState === 'visible') void this.refresh();
+  };
+
   private start(): void {
     this.timer = setInterval(() => { void this.tick(); }, POLL_MS);
     this.watchWorkspace();
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.onVisibility);
+    }
     void this.tick();
   }
 
@@ -199,6 +236,9 @@ class HiddenAgentTerminalsTracker {
     this.timer = null;
     this.storeUnsub?.();
     this.storeUnsub = null;
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.onVisibility);
+    }
   }
 
   /**
@@ -238,11 +278,16 @@ class HiddenAgentTerminalsTracker {
 
   /** The hidden set implied by the last backend answer and the CURRENT workspace. */
   private computeFromCache(): HiddenAgentTerminal[] {
+    const elsewhere = otherWindowTerminals();
+    // Cannot read some other window's session => cannot tell whose its terminals
+    // are. Report nothing rather than offer a terminal that window may be showing;
+    // the badge's contract is to under-claim, never to invent.
+    if (!elsewhere.complete) return [];
     return findHiddenAgentTerminals(
       this.lastProcesses,
       this.lastIdentities,
       visibleTerminalIds((window as any).__REDUX_STORE__?.getState()?.panes?.treesByTabId ?? {}),
-      currentWindowId(),
+      elsewhere.ids,
     );
   }
 
@@ -273,6 +318,11 @@ class HiddenAgentTerminalsTracker {
   }
 
   private async doRefresh(): Promise<void> {
+    // Captured before the await so a reset that happens WHILE this is in flight
+    // can invalidate the result. Without it, `__resetForTests` could not honour
+    // its own contract: clearing the caches does not cancel a request already
+    // running, and that request would repopulate them after the reset.
+    const generation = this.generation;
     let rows: LiveTerminalRows;
     try {
       rows = await fetchLiveTerminalRows();
@@ -282,16 +332,25 @@ class HiddenAgentTerminalsTracker {
       console.warn('hiddenAgentTerminals: refresh failed, keeping the last known set', e);
       return;
     }
+    if (generation !== this.generation) return;
     // Cached so a later workspace change is answered without another scan.
     this.lastProcesses = rows.processes;
     this.lastIdentities = rows.identities;
     this.publish(this.computeFromCache());
   }
 
-  /** Test seam: drop the cached backend answer and the observed workspace, so
-   *  one test does not inherit the previous one's tracker state. */
+  /**
+   * Test seam: drop the cached backend answer and the observed workspace, so one
+   * test does not inherit the previous one's tracker state.
+   *
+   * Bumping the generation is what makes that true rather than merely intended.
+   * Clearing `inFlight` does not cancel a request already awaiting the network;
+   * before the generation check in `doRefresh`, such a request would resolve
+   * after the reset and quietly repopulate everything cleared here.
+   */
   __resetForTests(): void {
     this.stop();
+    this.generation++;
     this.listeners.clear();
     this.hidden = [];
     this.lastProcesses = [];
@@ -301,14 +360,25 @@ class HiddenAgentTerminalsTracker {
   }
 }
 
-/** Compared by id, not by deep equality: `name` can flap as a shell retitles
- *  itself, and re-rendering the badge for that is noise. */
+/**
+ * Compared by BOTH ids, not by deep equality.
+ *
+ * `name` is deliberately ignored: it flaps as a shell retitles itself, and
+ * re-rendering the badge for that is noise. `processId` is deliberately NOT
+ * ignored, and an earlier version of this function did ignore it. That was a
+ * silent data-corruption bug rather than a cosmetic one: `publish()` returns
+ * early when this says "same", so a poll that correctly replaced `tm-1 -> pc-old`
+ * with `tm-1 -> pc-new` (the respawn-racing-a-close case the join dedupes just
+ * above) left the OLD row in `this.hidden` forever. Restore binds `processId`,
+ * so every later restore would attach to a process that no longer exists, and no
+ * amount of polling would repair it.
+ */
 export function sameHiddenSet(
   a: ReadonlyArray<HiddenAgentTerminal>,
   b: ReadonlyArray<HiddenAgentTerminal>,
 ): boolean {
   if (a.length !== b.length) return false;
-  return a.every((row, i) => row.terminalId === b[i].terminalId);
+  return a.every((row, i) => row.terminalId === b[i].terminalId && row.processId === b[i].processId);
 }
 
 export const hiddenAgentTerminals = new HiddenAgentTerminalsTracker();
@@ -376,14 +446,60 @@ export async function fetchLiveTerminalRows(): Promise<LiveTerminalRows> {
   };
 }
 
+/**
+ * Which terminals other windows of this profile are showing.
+ *
+ * Wrapped so both the tracker and the one-shot query ask the same question of
+ * the same storage, and so a test can point it at a stub.
+ */
+export function otherWindowTerminals(): { ids: ReadonlySet<string>; complete: boolean } {
+  try {
+    const { ids, complete } = terminalIdsInOtherWindows(localStorage, currentWindowId());
+    return { ids, complete };
+  } catch (e) {
+    // localStorage can throw outright (private mode, blocked site data). Unknown
+    // ownership, so say so and let the caller under-claim.
+    console.warn('hiddenAgentTerminals: could not read other windows\' sessions', e);
+    return { ids: new Set(), complete: false };
+  }
+}
+
+/**
+ * `terminalId -> processId` for every terminal that is alive AND still running
+ * an agent, straight from a backend answer.
+ *
+ * Same join as `findHiddenAgentTerminals`, minus the workspace filters. Restore
+ * needs it because the tracker's rows are up to POLL_MS old and `processId` is
+ * the value it binds: attaching to a process that has since exited registers a
+ * mapping the backend does not own, and a pane mounted on it looks alive.
+ */
+export function liveAgentProcessIds(rows: LiveTerminalRows): Map<string, string> {
+  const identityByProcess = new Map<string, IdentityRow>();
+  for (const row of rows.identities) {
+    const processId = row.id ?? row.processId;
+    if (processId) identityByProcess.set(processId, row);
+  }
+  const out = new Map<string, string>();
+  for (const proc of rows.processes) {
+    if (!proc.agent?.trim()) continue;
+    const terminalId = identityByProcess.get(proc.id)?.terminalId?.trim();
+    // First row wins, matching the detector's dedupe: the backend can briefly
+    // hold two rows for one leaf while a respawn races a close.
+    if (terminalId && !out.has(terminalId)) out.set(terminalId, proc.id);
+  }
+  return out;
+}
+
 /** The whole question in one call: fetch, then join against this workspace. */
 export async function fetchHiddenAgentTerminals(): Promise<HiddenAgentTerminal[]> {
   const rows = await fetchLiveTerminalRows();
   const trees = (window as any).__REDUX_STORE__?.getState()?.panes?.treesByTabId ?? {};
+  const elsewhere = otherWindowTerminals();
+  if (!elsewhere.complete) return [];
   return findHiddenAgentTerminals(
     rows.processes,
     rows.identities,
     visibleTerminalIds(trees),
-    currentWindowId(),
+    elsewhere.ids,
   );
 }

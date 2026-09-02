@@ -1,4 +1,4 @@
-import { collectTerminalIds, unionKeepSet, KeyValueStore } from '../sessionKeepSet';
+import { collectTerminalIds, unionKeepSet, terminalIdsInOtherWindows, KeyValueStore } from '../sessionKeepSet';
 import { __setWindowForTests, SLOT_ZERO_ID } from '../windowScope';
 import { __setProfileForTests, DEFAULT_SCOPE } from '../profileScope';
 
@@ -124,5 +124,70 @@ describe('unionKeepSet', () => {
     expect(keep.complete).toBe(true);
     expect(keep.windows).toBe(0);
     expect(keep.ids.size).toBe(0);
+  });
+});
+
+/**
+ * `terminalIdsInOtherWindows` answers a different question from `unionKeepSet`:
+ * not "which terminals must survive a prune" but "which terminals is some OTHER
+ * window showing". The difference is my own window, and it matters in the
+ * opposite direction — including myself here would make every terminal I have
+ * ever had on screen look owned, and the hidden-CLI badge would go permanently
+ * silent.
+ */
+describe('terminalIdsInOtherWindows', () => {
+  afterEach(() => {
+    __setWindowForTests(SLOT_ZERO_ID);
+  });
+
+  it('excludes MY window and includes every other one', () => {
+    __setWindowForTests('w1');
+    const out = terminalIdsInOtherWindows(
+      store({
+        'auto-terminal-state#w1': session(['tb-mine'], { 'tb-mine': leaf('tm-mine') }),
+        'auto-terminal-state#w2': session(['tb-theirs'], { 'tb-theirs': leaf('tm-theirs') }),
+      }),
+      'w1',
+    );
+    // Presence and absence together: asserting only that mine is missing passes
+    // against a function that returns nothing at all.
+    expect(out.ids.has('tm-theirs')).toBe(true);
+    expect(out.ids.has('tm-mine')).toBe(false);
+    expect(out.windows).toBe(1);
+    expect(out.complete).toBe(true);
+  });
+
+  it('excludes slot zero when slot zero is ME, and includes it when it is not', () => {
+    // The unsuffixed key IS a window (`w0`), not a global — a filter keyed on the
+    // `#` suffix would silently treat the commonest window as nobody's.
+    const s = store({
+      'auto-terminal-state': session(['tb-zero'], { 'tb-zero': leaf('tm-zero') }),
+      'auto-terminal-state#w1': session(['tb-one'], { 'tb-one': leaf('tm-one') }),
+    });
+
+    expect(terminalIdsInOtherWindows(s, SLOT_ZERO_ID).ids.has('tm-zero')).toBe(false);
+    expect(terminalIdsInOtherWindows(s, 'w1').ids.has('tm-zero')).toBe(true);
+  });
+
+  it('ignores another PROFILE\'s sessions', () => {
+    const out = terminalIdsInOtherWindows(
+      store({ 'auto-terminal-state:work#w2': session(['tb-x'], { 'tb-x': leaf('tm-work') }) }),
+      'w1',
+    );
+    expect(out.ids.size).toBe(0);
+    expect(out.windows).toBe(0);
+  });
+
+  it('reports incomplete when another window\'s session cannot be parsed', () => {
+    // The caller under-claims on this, so it must be distinguishable from "that
+    // window has no terminals" — which is what a silent skip would look like.
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const out = terminalIdsInOtherWindows(
+      store({ 'auto-terminal-state#w2': '{ truncated' }),
+      'w1',
+    );
+    expect(out.complete).toBe(false);
+    expect(out.windows).toBe(1);
+    warn.mockRestore();
   });
 });
