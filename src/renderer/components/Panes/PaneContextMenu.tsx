@@ -12,6 +12,7 @@ import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../.
 import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { usePaneMuteState } from './usePaneMuteState';
+import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -52,6 +53,9 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // flag; the icon shows the effective (tab-or-pane) muted state so it
   // matches the header bell.
   const { paneMuted, tabMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
+  // Whether this pane's terminal can be searched RIGHT NOW — see the Find item below for why
+  // this is a live subscription and why it is a boolean.
+  const searchable = useSurfaceChromeAvailable(terminalId ?? null);
   const [schemaExpanded, setSchemaExpanded] = useState(false);
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
@@ -228,6 +232,47 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         Open New Pane Down
       </button>
       <div className="context-menu-divider" />
+      {/* Find… — `plan/027` R2, the pane-title half.
+          This menu reaches nothing per-terminal on its own: every other action here is Redux, a
+          store+tree walk, a service function or a poller singleton. It gets ONE new mechanism,
+          the registry that already carries `openContextMenu` across the same boundary.
+
+          Availability comes from `useSurfaceChromeAvailable`, which SUBSCRIBES. Reading
+          `getSurfaceChrome` at render, as this first did, froze the answer for as long as the
+          menu stayed open: still greyed out after the pane's terminal finished starting, still
+          enabled after an MCP client closed it — and then silently doing nothing on click.
+          Subscribing is affordable only because that hook's snapshot is a BOOLEAN: the chrome
+          is republished on nearly every keystroke, and `useSyncExternalStore` re-renders only
+          when the value actually flips. `getSurfaceChrome` still does the click, because the
+          click needs the state OBJECT and the `?.` covers the gap between render and click.
+
+          Rendered DISABLED rather than hidden when there is no terminal or nothing publishing
+          chrome — `terminalId` is genuinely absent for a pane with no terminal — matching the
+          “Color scheme for agent” fallback above. An item that looks live and calls nothing is
+          worse than one that is visibly unavailable. Each reason gets its OWN title: the
+          unpublished-chrome case is a pane still starting, or one whose shell failed
+          (`TerminalPane` renders `TerminalDisplay` only when `terminalId && processId`), and it
+          is the case that most needs explaining — a greyed item with no tooltip beside a
+          disabled sibling that always carries one reads as a bug.
+
+          Grouped with Mute rather than given a divider of its own: both are actions on THIS
+          pane's terminal, unlike the tab/window/split items above them. No accelerator, because
+          this menu shows none on any item. */}
+      <button
+        className="context-menu-item"
+        disabled={!terminalId || !searchable}
+        title={
+          !terminalId
+            ? 'This pane has no terminal to search'
+            : (!searchable ? 'This terminal is not ready to search yet' : undefined)
+        }
+        onClick={() => runAndClose(() => {
+          if (terminalId) getSurfaceChrome(terminalId)?.openSearch();
+        })}
+      >
+        <span className="menu-icon">🔍</span>
+        Find…
+      </button>
       <button
         className="context-menu-item"
         onClick={() => runAndClose(toggleMute)}

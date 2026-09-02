@@ -3,8 +3,10 @@ import { setSurfaceHost, clearSurfaceHost } from '../../services/surfaceHosts';
 import { useSurfaceChrome } from '../../services/surfaceChrome';
 import { ScrollToBottomButton } from '../Terminal/ScrollToBottomButton';
 import { CommandSuggestPopup } from '../Terminal/CommandSuggestPopup';
+import { TerminalSearchBar } from '../Terminal/TerminalSearchBar';
 import { SessionClosedBanner } from '../Panes/SessionClosedBanner';
 import { useRestartHotkey } from '../Panes/useRestartHotkey';
+import { useSearchHotkey } from '../Panes/useSearchHotkey';
 
 /** Stable no-op, so the hotkey hook's dependency list does not churn when there is no chrome. */
 const NOOP = (): void => {};
@@ -89,6 +91,24 @@ const NodeTerminalImpl: React.FC<{
   );
 
   /**
+   * Ctrl+F / Cmd+F opens the find bar, exactly as it does in a pane (`plan/027` R1).
+   *
+   * The engine's own Ctrl+F listener is not wired here: it exists only while `paneChrome` is
+   * true, and this host was relocated with `paneChrome: false` (design/012 D16), so without this
+   * binding `^F` is forwarded to the shell. The hook is bound to the same wrapper as the restart
+   * key for the same reason — only the surface actually showing the terminal listens.
+   *
+   * Gated on `chrome` as well as `overlaid`: the bar is drawn from the published state, so with
+   * no publisher there is nothing to open.
+   */
+  const openSearchCb = chrome?.openSearch;
+  useSearchHotkey(
+    wrapperRef,
+    !!(overlaid && openSearchCb),
+    openSearchCb ?? NOOP,
+  );
+
+  /**
    * The pane's TEXT context menu — Copy, Paste, Clear, Selection mode (`plan/021` R2).
    *
    * `TerminalDisplay` binds this on its own `.terminal-display`, but that div no longer holds
@@ -121,6 +141,14 @@ const NodeTerminalImpl: React.FC<{
       {chrome && (
         <ScrollToBottomButton visible={!chrome.atBottom} onClick={chrome.scrollToBottom} />
       )}
+      {/* The find bar (`plan/027` §1.5). Rendered INSIDE this wrapper and never portalled:
+          the overlay's backdrop closes the overlay on any `pointerdown` outside the node
+          (`CanvasMode.tsx`), so a bar portalled to `document.body` would dismiss the very
+          terminal it is searching the moment it was clicked. `createPortal` is closed here
+          anyway — design/012 D1 and `terminalDisplayRelocationWiring.test.ts`.
+          The component is presentational since `plan/027` §1.3, so this copy and the pane's
+          can coexist; the state they both draw has exactly one owner. */}
+      {chrome?.search.open && <TerminalSearchBar search={chrome.search} />}
       {chrome?.suggest.open && (
         <CommandSuggestPopup
           suggestions={chrome.suggest.items}

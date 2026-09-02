@@ -4,12 +4,13 @@ import { nudgeZoom, resetZoom } from '../../store/slices/zoomSlice';
 import { Terminal } from '@xterm/xterm';
 import type { FontWeight } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
-import type { TerminalSearchOptions, TerminalSearchResult, TerminalLinkHit } from '@termflow/terminal-core';
+import type { TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { useCommandSuggest } from './useCommandSuggest';
+import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { commandHistoryService } from '../../services/commandHistoryService';
@@ -115,39 +116,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
   const terminalRef = useRef<HTMLDivElement>(null);
   const engineRef = useRef<TerminalEngine | null>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
   // Scroll-to-bottom button: true while the viewport is pinned to the live tail.
   // Seeded from the engine right after mount (a cached reattach may already be
   // scrolled up), then kept live via onScrollPosition.
   const [atBottom, setAtBottom] = useState(true);
-  // Bumped on every Ctrl+F so the bar refocuses its input each press — even when
-  // it's already open and focus has moved back into the terminal (setSearchOpen
-  // alone is a no-op then, so it would never refocus). See onOpenSearch below.
-  const [searchFocusToken, setSearchFocusToken] = useState(0);
-  // Stable callbacks for the search overlay. engineRef is a ref (stable), so these
-  // never change identity — important for subscribeResults, which the bar passes to
-  // a useEffect dependency; an inline arrow would resubscribe on every render.
-  const searchNextCb = useCallback(
-    (q: string, o: TerminalSearchOptions, inc: boolean) => engineRef.current?.searchNext(q, o, inc),
-    [],
-  );
-  const searchPreviousCb = useCallback(
-    (q: string, o: TerminalSearchOptions) => engineRef.current?.searchPrevious(q, o),
-    [],
-  );
-  const searchClearCb = useCallback(() => engineRef.current?.clearSearch(), []);
-  const searchCloseCb = useCallback(() => {
-    engineRef.current?.clearSearch();
-    setSearchOpen(false);
-    engineRef.current?.focus();
-  }, []);
-  const subscribeResultsCb = useCallback(
-    (cb: (r: TerminalSearchResult) => void) => {
-      const sub = engineRef.current?.onSearchResults(cb);
-      return () => sub?.dispose();
-    },
-    [],
-  );
+  /**
+   * The find bar's state, LIFTED into its own hook (`plan/027` §1.3).
+   *
+   * It used to live inside `TerminalSearchBar`, which made the bar unrenderable on a second
+   * surface: its as-you-type effect runs on mount with an empty query and calls `clearSearch()`,
+   * so an overlay instance mounting wiped the pane instance's live search. The bar is now
+   * presentational and this is its one owner — the same move `useCommandSuggest` already made,
+   * and the reason the state can be published for the Canvas overlay to draw.
+   */
+  const search = useTerminalSearch(engineRef, terminalId);
   /**
    * The open menu, and the LINK the right-click landed on (Tam, 2026-08-21).
    *
@@ -277,16 +259,32 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         focused: suggest.focused,
         anchor: suggest.anchor,
       },
+      // `plan/027` §1.4. The whole view state travels, not a flag: the overlay draws the real
+      // bar from it. Published as the hook's own object — `same()` compares it FIELD BY FIELD,
+      // exactly like `suggest`, because this wrapper is fresh on every render. It carries
+      // `openSearch` along for the ride, which is harmless: the field the callers use is the
+      // top-level one below, and `SearchViewState` — what a surface needs in order to DRAW —
+      // deliberately does not name it.
+      search,
       scrollToBottom: scrollToBottomCb,
       pickSuggestion: suggest.pick,
       openContextMenu: openContextMenuAt,
       restartSession: restartSessionCb,
       dismissSessionClosed: dismissSessionClosedCb,
+      openSearch: search.openSearch,
     });
   }, [
     terminalId, atBottom, scrollToBottomCb, suggest.pick, openContextMenuAt,
     suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
     restartSessionCb, dismissSessionClosedCb,
+    // Every published `search` sub-field, one at a time. The object itself is a fresh wrapper
+    // each render, so listing it alone would either re-publish constantly (harmless only because
+    // `same()` filters it) or, if `same()` ever forgot a field, publish a STALE closure the
+    // overlay keeps calling. The two lists are the same contract read from two ends.
+    search.open, search.query, search.caseSensitive, search.wholeWord, search.regex,
+    search.result, search.focusToken, search.setQuery, search.toggleCaseSensitive,
+    search.toggleWholeWord, search.toggleRegex, search.next, search.previous, search.close,
+    search.openSearch,
   ]);
   useEffect(() => {
     const owner = chromeOwner.current;
@@ -338,10 +336,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       setPathPicker(null);
       setSchemaPicker(null);
       // The SEARCH BAR is deliberately left open with its state intact (§8): it
-      // holds user-typed query/caseSensitive/wholeWord/regex
-      // (TerminalSearchBar.tsx:27-30) and the SearchAddon's highlights live on the
-      // buffer and travel with term.element. Closing it would call clearSearch()
-      // and discard their query.
+      // holds user-typed query/caseSensitive/wholeWord/regex (now in
+      // useTerminalSearch, `plan/027` §1.3) and the SearchAddon's highlights live on
+      // the buffer and travel with term.element. Closing it would call
+      // search.close(), which clears the highlights AND resets their query.
     },
     onAborted: () => {
       // design 012 §5.1's recovery contract. The engine is fully restored and the
@@ -503,13 +501,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       },
       onTitleChange: (t) => onTitleChangeRef.current(t),
       // Backlog 006: Ctrl/Cmd+F opens the in-terminal search overlay. The engine
-      // has already preventDefault'd the browser's native find dialog. Bump the
-      // focus token too so a repeat Ctrl+F (bar already open, focus back in the
-      // terminal) pulls focus back to the search input.
-      onOpenSearch: () => {
-        setSearchOpen(true);
-        setSearchFocusToken((t) => t + 1);
-      },
+      // has already preventDefault'd the browser's native find dialog.
+      // `openSearch` bumps the focus token as well as opening, so a repeat Ctrl+F
+      // (bar already open, focus back in the terminal) pulls focus back to the input.
+      // Safe to call on the captured `search` wrapper even though the wrapper itself is
+      // rebuilt each render: every callback on it has a stable identity by construction,
+      // which is the same property `surfaceChrome`'s no-op rule depends on.
+      onOpenSearch: () => search.openSearch(),
       // termDiag gates on isTermDiagEnabled() internally — restores the exact
       // old [TERM-OUT]/[TERM-DIAG] behavior (spec §11 gate item g).
       onDiag: (build) => termDiag(build),
@@ -810,6 +808,21 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         title: 'Select all text in this terminal, including scrollback.',
         click: () => actions?.selectAll(),
       },
+      // `plan/027` R2. UNGATED, the same class as Copy/Paste/Clear and Mute above: search acts
+      // on the ENGINE, which is the same engine wherever its surface happens to be drawn. It
+      // must not join the `!relocationHost` block further up — that exists for pane-tree actions
+      // which would silently re-lay-out an off-screen tab, and gating Find that way would remove
+      // it from the canvas overlay, the one surface this requirement is about.
+      //
+      // The first accelerator in this menu with a macOS branch: plain Ctrl+F is not search on
+      // macOS. The four existing literals are left as they are (out of scope).
+      {
+        label: 'Find…',
+        icon: '🔍',
+        accelerator: isMac ? 'Cmd+F' : 'Ctrl+F',
+        title: 'Search this terminal, including its scrollback.',
+        click: () => search.openSearch(),
+      },
       { type: 'separator' as const },
       {
         label: 'Reset Rendering',
@@ -849,16 +862,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         data-terminal-id={terminalId}
       />
       <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
-      {searchOpen && (
-        <TerminalSearchBar
-          onSearchNext={searchNextCb}
-          onSearchPrevious={searchPreviousCb}
-          onClear={searchClearCb}
-          onClose={searchCloseCb}
-          subscribeResults={subscribeResultsCb}
-          focusToken={searchFocusToken}
-        />
-      )}
+      {search.open && <TerminalSearchBar search={search} />}
       {suggest.open && (
         <CommandSuggestPopup
           suggestions={suggest.items}

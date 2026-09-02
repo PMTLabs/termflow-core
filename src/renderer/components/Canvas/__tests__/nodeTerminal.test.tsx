@@ -16,6 +16,31 @@ import {
   setSurfaceChrome, __resetSurfaceChromeForTest,
 } from '../../../services/surfaceChrome';
 
+/**
+ * The search view state a publisher hands over (`plan/027` §1.4).
+ *
+ * A factory rather than a constant so a case can flip one field without leaking the change into
+ * the next test; the callbacks are `jest.fn()` so “the overlay's bar calls back into the ONE
+ * owner” is assertable rather than merely renderable.
+ */
+const searchState = (over: Record<string, unknown> = {}) => ({
+  open: false,
+  query: '',
+  caseSensitive: false,
+  wholeWord: false,
+  regex: false,
+  result: { resultIndex: -1, resultCount: 0 },
+  focusToken: 0,
+  setQuery: jest.fn(),
+  toggleCaseSensitive: jest.fn(),
+  toggleWholeWord: jest.fn(),
+  toggleRegex: jest.fn(),
+  next: jest.fn(),
+  previous: jest.fn(),
+  close: jest.fn(),
+  ...over,
+});
+
 let container: HTMLDivElement;
 let root: Root;
 
@@ -144,6 +169,8 @@ describe('NodeTerminal chrome (overlay only)', () => {
     openContextMenu: jest.fn(),
     restartSession: jest.fn(),
     dismissSessionClosed: jest.fn(),
+    search: searchState(),
+    openSearch: jest.fn(),
   };
   const owner = {};
 
@@ -299,6 +326,8 @@ describe('NodeTerminal — session-closed banner', () => {
     openContextMenu: jest.fn(),
     restartSession: jest.fn(),
     dismissSessionClosed: jest.fn(),
+    search: searchState(),
+    openSearch: jest.fn(),
   };
   const owner = {};
   const EXITED = { exitCode: 130 };
@@ -426,5 +455,197 @@ describe('NodeTerminal — session-closed banner', () => {
       );
     });
     expect(CHROME.restartSession).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The find bar on the overlay — `plan/027` R1.
+ *
+ * The bar is presentational since §1.3, so the overlay renders the SAME component the pane
+ * does, from the published state. Two things can go wrong and neither is visible anywhere else:
+ * the bar being drawn where the overlay's backdrop or the host contract cannot tolerate it, and
+ * the Ctrl+F that opens it never being bound — the engine's own listener is wired only while
+ * `paneChrome` is true, which is false on every canvas host (design/012 D16), so without the
+ * binding here `^F` goes to the shell.
+ */
+describe('NodeTerminal — find bar and Ctrl+F', () => {
+  const chromeWith = (over: Record<string, unknown> = {}) => ({
+    atBottom: true,
+    suggest: { open: false, items: [], selectedIndex: 0, focused: false, anchor: null },
+    scrollToBottom: jest.fn(),
+    pickSuggestion: jest.fn(),
+    openContextMenu: jest.fn(),
+    restartSession: jest.fn(),
+    dismissSessionClosed: jest.fn(),
+    search: searchState(),
+    openSearch: jest.fn(),
+    ...over,
+  });
+  const owner = {};
+
+  const renderNode = (overlaid: boolean) =>
+    act(() => {
+      root.render(<NodeTerminal terminalId="tm-s" focused overlaid={overlaid} />);
+    });
+
+  const bar = () => container.querySelector('.terminal-search-bar');
+  const wrapper = () => container.querySelector('.canvas-surface')!;
+  const pressFind = (init: KeyboardEventInit) => {
+    const e = new KeyboardEvent('keydown', {
+      key: 'f', bubbles: true, cancelable: true, ...init,
+    });
+    act(() => { wrapper().dispatchEvent(e); });
+    return e;
+  };
+
+  /** jsdom reports an empty `navigator.platform`; the hook reads it when it binds. */
+  const setPlatform = (platform: string) => {
+    Object.defineProperty(window.navigator, 'platform', { value: platform, configurable: true });
+  };
+
+  beforeEach(() => setPlatform('Win32'));
+  afterEach(() => {
+    __resetSurfaceChromeForTest();
+    setPlatform('Win32');
+  });
+
+  it('draws the bar when the overlay published search is open', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith({ search: searchState({ open: true }) }));
+    renderNode(true);
+    expect(bar()).not.toBeNull();
+  });
+
+  it('draws none while the search is closed', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith());
+    renderNode(true);
+    expect(bar()).toBeNull();
+  });
+
+  // An ordinary node renders below 1:1 inside a clipping box, so a bar there would be a few
+  // illegible pixels; it never subscribes to chrome at all.
+  it('draws none on an ordinary node, even with the search open', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith({ search: searchState({ open: true }) }));
+    renderNode(false);
+    expect(bar()).toBeNull();
+  });
+
+  it('draws none when nothing is publishing chrome', () => {
+    renderNode(true);
+    expect(bar()).toBeNull();
+  });
+
+  /**
+   * INSIDE the wrapper and NOT portalled. The overlay's backdrop closes the overlay on any
+   * `pointerdown` outside the node, so a bar portalled to `document.body` would dismiss the very
+   * terminal it is searching the first time it was clicked.
+   *
+   * And a SIBLING of the host, never a child: `FitAddon` measures the host, so an extra box in
+   * there moves with the terminal's own geometry — the same contract the rest of the chrome keeps.
+   */
+  it('renders inside the surface wrapper, as a sibling of the host', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith({ search: searchState({ open: true }) }));
+    renderNode(true);
+    const host = container.querySelector<HTMLElement>('.terminal-display')!;
+    expect(bar()!.parentElement).toBe(wrapper());
+    expect(host.children).toHaveLength(0);
+  });
+
+  // It draws from the published state, so the pane and the overlay cannot show different queries.
+  it('draws the published query and count', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith({
+      search: searchState({ open: true, query: 'needle', result: { resultIndex: 1, resultCount: 4 } }),
+    }));
+    renderNode(true);
+    expect(container.querySelector<HTMLInputElement>('.tsb-input')!.value).toBe('needle');
+    expect(container.querySelector('.tsb-count')!.textContent).toBe('2 of 4');
+  });
+
+  it('opens search on Ctrl+F, and swallows the key', () => {
+    const chrome = chromeWith();
+    setSurfaceChrome('tm-s', owner, chrome);
+    renderNode(true);
+    const e = pressFind({ ctrlKey: true });
+    expect(chrome.openSearch).toHaveBeenCalledTimes(1);
+    // preventDefault stops the WebView's own find dialog; stopPropagation is what keeps ^F
+    // (0x06) out of the PTY, and is proven by the descendant case below.
+    expect(e.defaultPrevented).toBe(true);
+  });
+
+  /**
+   * CAPTURE phase. Dispatching from a DESCENDANT is what tells capture from bubble: the hook
+   * stops propagation, and stopping it while descending means the terminal's own element — where
+   * xterm's key handler lives — never sees the event at all.
+   */
+  it('intercepts before the key can reach the terminal element', () => {
+    const chrome = chromeWith();
+    setSurfaceChrome('tm-s', owner, chrome);
+    renderNode(true);
+    const seenByHost: string[] = [];
+    const host = container.querySelector<HTMLElement>('.terminal-display')!;
+    host.addEventListener('keydown', (e) => seenByHost.push((e as KeyboardEvent).key));
+    act(() => {
+      host.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'f', ctrlKey: true, bubbles: true, cancelable: true,
+      }));
+    });
+    expect(chrome.openSearch).toHaveBeenCalledTimes(1);
+    expect(seenByHost).toHaveLength(0);
+  });
+
+  // The paired positive: every other key still reaches the terminal, or the case above would be
+  // satisfied by a binding that swallowed the keyboard wholesale.
+  it('lets every other key through to the terminal element', () => {
+    setSurfaceChrome('tm-s', owner, chromeWith());
+    renderNode(true);
+    const seenByHost: string[] = [];
+    const host = container.querySelector<HTMLElement>('.terminal-display')!;
+    host.addEventListener('keydown', (e) => seenByHost.push((e as KeyboardEvent).key));
+    act(() => {
+      host.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true }));
+      host.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true }));
+    });
+    expect(seenByHost).toEqual(['f', 'c']);
+  });
+
+  it('is not bound on an ordinary node', () => {
+    const chrome = chromeWith();
+    setSurfaceChrome('tm-s', owner, chrome);
+    renderNode(false);
+    const e = pressFind({ ctrlKey: true });
+    expect(chrome.openSearch).not.toHaveBeenCalled();
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  it('is not bound when nothing is publishing chrome', () => {
+    renderNode(true);
+    const e = pressFind({ ctrlKey: true });
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  describe('on macOS', () => {
+    beforeEach(() => setPlatform('MacIntel'));
+
+    it('opens on Cmd+F', () => {
+      const chrome = chromeWith();
+      setSurfaceChrome('tm-s', owner, chrome);
+      renderNode(true);
+      const e = pressFind({ metaKey: true });
+      expect(chrome.openSearch).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented).toBe(true);
+    });
+
+    /**
+     * ...and plain Ctrl+F does NOT. On macOS Ctrl+F is the emacs "forward char" every shell and
+     * readline binds, so intercepting it would break a key people use constantly — the same
+     * distinction the engine's own listener has always made.
+     */
+    it('leaves plain Ctrl+F to the shell', () => {
+      const chrome = chromeWith();
+      setSurfaceChrome('tm-s', owner, chrome);
+      renderNode(true);
+      const e = pressFind({ ctrlKey: true });
+      expect(chrome.openSearch).not.toHaveBeenCalled();
+      expect(e.defaultPrevented).toBe(false);
+    });
   });
 });

@@ -531,6 +531,42 @@ export function cellToStringIndex(line: CellAddressableLine, col: number): numbe
   return idx;
 }
 
+/**
+ * A row-local STRING index as a CELL column — the inverse walk of `cellToStringIndex`.
+ *
+ * Needed because `wrappedBufferRange` produces xterm buffer coordinates, and xterm draws a link
+ * range in CELLS. It used to hand the stitched string offset straight through as `x`, which is
+ * the same conflation `cellToStringIndex` exists to prevent, only in the other direction: on a
+ * row with a wide glyph ahead of the match, the underline and its click hitbox were drawn one
+ * cell to the LEFT per preceding wide glyph.
+ *
+ * Mirrors `translateToString`'s own walk so the two agree by construction — a cell of width 0
+ * contributes nothing to the string, and every other cell advances it by
+ * `getChars().length || 1` (the `|| 1` is the space a blank cell renders as, not a guess).
+ * After each glyph the width-0 continuation cells are swallowed, so the NEXT string index maps
+ * to the next real glyph's LEFT cell rather than to the right half of the one before it — the
+ * exact pairing that makes `stringIndexToCell(cellToStringIndex(line, c)) === c` for every cell
+ * that starts a character.
+ *
+ * Two edges, both deliberate and both pinned by tests:
+ *  - An index that lands INSIDE a surrogate pair has no cell of its own; the cell after the pair
+ *    is returned, because there is no smaller answer that is a real cell boundary.
+ *  - Past the end of the line the walk runs out of cells and falls back to one cell per
+ *    remaining character, which is what `translateToString` would have produced for the blanks.
+ */
+export function stringIndexToCell(line: CellAddressableLine, idx: number): number {
+  let col = 0;
+  let at = 0;
+  while (at < idx) {
+    const cell = line.getCell(col);
+    if (!cell) break;
+    at += cell.getChars().length || 1;
+    col += 1;
+    while (line.getCell(col)?.getWidth() === 0) col += 1;
+  }
+  return at < idx ? col + (idx - at) : col;
+}
+
 /** What `pointToCell` needs to know about the rendered terminal element. */
 export interface RenderedTerminalBox {
   /** `getBoundingClientRect()` — POST-transform, in viewport pixels. */
@@ -619,11 +655,168 @@ export interface WrappedLineInfo {
   text: string;
   /** rowStarts[i] = index in `text` where buffer row (firstRow + i) begins. */
   rowStarts: number[];
+  /** rowIndents[i] = leading blank cells of buffer row (firstRow + i) dropped before
+   *  concatenation. 0 for row 0 and for every soft-wrapped row. Because only literal
+   *  ' ' cells (width 1, one char each) are ever dropped, this count is identical in
+   *  cell space and in row-local string space — which is what lets one number serve
+   *  both mapping directions. */
+  rowIndents: number[];
 }
 
 interface LinkableBufferLine {
   isWrapped: boolean;
   translateToString(trimRight?: boolean): string;
+  /** Cell-level access. Row fullness (G1 below) is a question about CELLS: characters and
+   *  cells stop agreeing the moment the row holds a wide glyph, so `translateToString()[cols-1]`
+   *  answers a different question. `line.length - 1` is no substitute either — xterm's own
+   *  typings warn `length` may exceed `cols` after a resize. */
+  getCell(x: number): LinkableCell | undefined;
+}
+
+/**
+ * A continuation head that is ROOTED — it starts a path from a filesystem anchor rather than
+ * continuing one. Used only by guard G5.
+ *
+ * `/`, `\`, `./`, `../`, `~/` and `C:` are the five shapes that can only ever BEGIN a path, which
+ * is what an indented listing's rows do. The tail of a wrapped path never begins with one: the
+ * break falls inside a segment, so the continuation starts with segment characters.
+ *
+ * Deliberately NOT "the head parses as a complete `PATH_RE` match" (what G5 asked until review
+ * round 1). That test is width-dependent to the point of uselessness: `PATH_RE`'s bare-relative
+ * branch matches any `seg/…/name.ext`, so for the plan's own headline path the head parses whole
+ * at every break outside the final segment's stem, and the join fired at only ~38% of the
+ * possible break positions — the SAME path linked or not depending on the terminal's width.
+ * Rooted-only takes that to ~79% (see the sweep test, which pins every position).
+ */
+const ROOTED_HEAD_RE = /^(?:[\\/]|\.{1,2}[\\/]|~[\\/]|[A-Za-z]:)/;
+
+/**
+ * Does a path segment end in a file extension (`.ts`, `.md`, `.js`)? Used only by guard G7.
+ *
+ * Applied to the LAST segment of row N's trailing token, never to the whole token: `webpack` in
+ * `webpack/config.js` is not an extension, and `config.js` is.
+ */
+const FILENAME_TAIL_RE = /\.[A-Za-z0-9_]{1,8}$/;
+
+/**
+ * Does buffer row `prev` HARD-wrap into row `next`, and if so how many leading blanks of `next`
+ * are the app's hanging indent? Returns the indent length, or `null` for "these are two
+ * independent lines".
+ *
+ * A hard wrap is not xterm's soft wrap: the application emitted a newline and indented the
+ * continuation itself, so `next.isWrapped` is FALSE and real whitespace was inserted. Nothing
+ * marks it, so it has to be inferred, and inferring wrongly fabricates a link out of two
+ * unrelated rows. The guards are the inference, each one rejecting a shape that measurably
+ * occurs in real tool output (`git status`, cargo diagnostics, pytest asserts, `ls -R`,
+ * wrapped URLs). Each is pinned by a test that fails if that single guard is deleted.
+ *
+ * **G3 — "row `prev` alone already holds a PATH_RE match ending exactly at the row end" — is
+ * deliberately NOT one of them, and that exclusion is the single most important decision here.**
+ * G3 is FALSE for the bare-relative form of the real failing case (`docs/plan/027-canvas-sea` +
+ * `    rch.md`), which is the commonest shape in agent and tool output, because the fragment on
+ * row `prev` has no trailing `name.ext` for `PATH_RE`'s last branch to anchor on. Requiring G3
+ * would fix four path shapes and leave the fifth — the frequent one — broken. Reviewers ask
+ * about it every time; the answer is the truth table below, not a re-argument.
+ *
+ * Truth table, re-derived against the guards as they now stand (`R*` must join, `F*` must not):
+ *
+ * | case                                                  | G1 | G2 | G4 | G5 | G6 | G7 | join |
+ * |-------------------------------------------------------|----|----|----|----|----|----|------|
+ * | R1 win-abs `…\D--sources-work-rephlo\mem` + `ory\…`    | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | R2 bare-relative `docs/plan/027-canvas-sea` + `rch.md` | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | R3 posix-abs `/srv/app/util` + `s.ts`                  | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | R4 hard-wrapped URL `…/a/very/lo` + `ng/path/f.html`   | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | F3 `git status` two `modified:` rows                   | T  | T  | F  | —  | —  | —  |  ✘   |
+ * | F4 cargo `--> src/main.rs:12:5`                        | T  | T  | F  | —  | —  | —  |  ✘   |
+ * | F9 pytest `assert 1 == 2`                              | T  | T  | F  | —  | —  | —  |  ✘   |
+ * | F10 indented listing `/etc/app` + `/etc/app/main.conf` | T  | T  | T  | F  | —  | —  |  ✘   |
+ * | F2 `ls -R` heading ending in `/`                       | T  | T  | T  | T  | F  | —  |  ✘   |
+ * | F11 `built with webpack/config.js` + `v5.91.0 warn`    | T  | T  | T  | T  | T  | F  |  ✘   |
+ *
+ * R4 moved from ✘ to ✔ when G5 narrowed to "rooted", and that is a fix rather than residue: a
+ * URL really was hard-wrapped, so reconstructing it is what the user asked for. It is offered by
+ * right-click but not underlined on hover, because `WebLinksAddon` does its own soft-wrap-only
+ * walk (plan 027 §3.6).
+ *
+ * **Known residue, accepted rather than hidden.** A full row whose trailing token is path-shaped
+ * but carries NO extension, followed by an indented path, still joins: `/var/log/app` +
+ * `    src/index.ts` becomes `/var/log/appsrc/index.ts`. When that token was already a working
+ * link, the join REPLACES it — the underline covers a path that does not exist, and Copy Path
+ * yields the wrong string. G7 removes the common half of this class (a printed filename almost
+ * always ends in an extension); the extension-less half needs the excluded G3 and stays.
+ *
+ * **Break positions this guard set still misses** on a genuinely wrapped path (all pinned, by
+ * index, in the `sweeps every wrap position` test — 22 of 103 for the plan's headline path):
+ *  - the wrap lands exactly BEFORE a separator, so the head is rooted (G5);
+ *  - exactly AFTER a separator, so row `prev` ends at one (G6 — indistinguishable from `ls -R`);
+ *  - inside a dot-led segment such as `.claude`, so row `prev` looks like a finished filename
+ *    (G7), or after the final `.` so the head holds no `.`/`/`/`\` at all (G4);
+ *  - immediately after a drive letter, where the head starts `:` (G2).
+ * Each is a guard doing its job on a shape it cannot tell apart from a false positive. They are
+ * recorded so the next reader recognises them instead of re-discovering them as bugs.
+ */
+function hardWrapIndent(
+  prev: LinkableBufferLine,
+  next: LinkableBufferLine,
+  cols: number,
+): number | null {
+  // G1 — row `prev` is FULL. A hard wrap happens because the text ran out of columns, so a row
+  // with room left in it ended for some other reason and continues nothing. This is also what
+  // keeps a painted TUI screen out: an alt-screen row is padded with blanks to the right edge,
+  // so almost every one of them fails here — which is why no `buffer.type === 'alternate'`
+  // bail-out is needed, and why adding one would delete the fix for ratatui/codex output.
+  const lastCell = prev.getCell(cols - 1);
+  // An absent cell is a row SHORTER than the grid, i.e. not full. `?.getChars() !== ''` would
+  // read `undefined !== ''` as "full" and join off the end of a stub row.
+  //
+  // A width-0 cell IS full: it is the RIGHT HALF of a double-width glyph (CJK, emoji) whose
+  // characters are stored on the left half, so it reports `''` for the same reason a blank cell
+  // does and means the opposite. Reading it as blank made a row that ends in a wide glyph exactly
+  // at the right edge — every CJK path, at the widths where it wraps there — judged "not full",
+  // so it never joined.
+  if (!lastCell || (lastCell.getWidth() !== 0 && lastCell.getChars() === '')) return null;
+
+  const nextText = next.translateToString(false);
+
+  // G2 — row `next` opens with a hanging indent, and what follows it could start a path. Only
+  // literal ' ' is counted (never \t or any other blank), because this one number is also used
+  // as a CELL count when mapping coordinates back, and only a space is guaranteed to be one
+  // cell wide and one character long.
+  let indent = 0;
+  while (nextText[indent] === ' ') indent += 1;
+  if (indent === 0) return null;
+  const head = nextText.slice(indent).split(' ')[0];
+  if (!/^[A-Za-z0-9_.~/\\-]/.test(head)) return null;
+
+  // G4 — the continuation head looks like part of a path rather than prose. Without it, any two
+  // rows where the second is indented join: `git status`'s consecutive `modified:` lines, a
+  // cargo `--> src/main.rs:12:5` under its error, a pytest `assert 1 == 2`.
+  if (!/[./\\]/.test(head)) return null;
+
+  // G5 — the head is not ROOTED. A head anchored at `/`, `\`, `./`, `../`, `~/` or a drive letter
+  // STARTS a path, which is what the rows of an indented listing do; the tail of a wrapped path
+  // breaks inside a segment and can never begin that way. A bare-relative head is deliberately
+  // allowed through — see ROOTED_HEAD_RE for why the stricter "parses as a whole path" form of
+  // this guard made the join depend on the terminal's width.
+  if (ROOTED_HEAD_RE.test(head)) return null;
+
+  // G6 — row `prev` does not end at a separator. A path that ends in `/` or `\` is complete as
+  // written (an `ls -R` directory heading); joining the next row's filename onto it invents a
+  // path nobody printed.
+  const prevText = prev.translateToString(false);
+  const tail = prevText.slice(prevText.lastIndexOf(' ') + 1);
+  if (tail.endsWith('/') || tail.endsWith('\\')) return null;
+
+  // G7 — row `prev` does not already end in a filename. A token whose last segment carries an
+  // extension is complete as written, exactly like G6's separator case, so the row filled the
+  // grid by coincidence rather than by running out of room. Appending to it does not just add a
+  // spurious link, it DESTROYS a correct one: `built with webpack/config.js` (a full row) +
+  // `  v5.91.0 warn` stitches to `webpack/config.jsv5.91.0`, so the link that opened the right
+  // file now opens nothing and Copy Path returns a path that does not exist.
+  const seg = tail.slice(Math.max(tail.lastIndexOf('/'), tail.lastIndexOf('\\')) + 1);
+  if (FILENAME_TAIL_RE.test(seg)) return null;
+
+  return indent;
 }
 
 /**
@@ -632,31 +825,64 @@ interface LinkableBufferLine {
  * the line start, then join forward across continuations. Interior rows keep
  * trailing spaces (they are real characters of the logical line); only the final
  * row is right-trimmed. Returns null for a missing row or a line over the cap.
+ *
+ * Also joins a HARD-wrapped continuation — a row the application itself indented after a
+ * newline, where `isWrapped` is false — when `hardWrapIndent` accepts the pair. The indent is
+ * DROPPED rather than kept: every `PATH_RE` branch stops at the first space, so a join that
+ * preserved it would still hand the matcher a truncated path and change nothing.
+ *
+ * `cols` is REQUIRED and deliberately not defaulted (`default-parameter-hides-a-dropped-
+ * argument`): row fullness cannot be asked without it, and a call site that forgot it would go
+ * on compiling while silently keeping the old soft-wrap-only behaviour on that one surface.
  */
 export function collectWrappedLine(
   buffer: { getLine(n: number): LinkableBufferLine | undefined },
   row: number,
+  cols: number,
   maxRows = MAX_WRAPPED_LINK_ROWS,
 ): WrappedLineInfo | null {
   if (!buffer.getLine(row)) return null;
   let first = row;
   let guard = maxRows;
-  while (first > 0 && buffer.getLine(first)?.isWrapped) {
+  // The backward walk applies the SAME guards as the forward one, symmetrically — otherwise
+  // hovering the continuation row of a hard-wrapped path would find only its tail, and the same
+  // path would be a link from one row and not from the other.
+  for (;;) {
+    if (first <= 0) break;
+    const cur = buffer.getLine(first);
+    if (!cur) break;
+    const prev = buffer.getLine(first - 1);
+    const continues = cur.isWrapped
+      || (!!prev && hardWrapIndent(prev, cur, cols) !== null);
+    if (!continues) break;
     if (--guard <= 0) return null;
     first--;
   }
   const rowStarts: number[] = [];
+  const rowIndents: number[] = [];
   let text = '';
+  // Leading blanks to drop from the row about to be appended. Decided by the PREVIOUS
+  // iteration, because "is this a hard-wrapped continuation" is a question about the pair.
+  let indent = 0;
   for (let r = first; r - first < maxRows; r++) {
     const line = buffer.getLine(r);
     if (!line) break; // a line shouldn't vanish mid-walk, but stop cleanly
     rowStarts.push(text.length);
-    if (buffer.getLine(r + 1)?.isWrapped) {
-      text += line.translateToString(false);
-    } else {
-      text += line.translateToString(true);
-      return { firstRow: first, text, rowStarts };
+    rowIndents.push(indent);
+    const next = buffer.getLine(r + 1);
+    if (next?.isWrapped) {
+      text += line.translateToString(false).slice(indent);
+      indent = 0;
+      continue;
     }
+    const hard = next ? hardWrapIndent(line, next, cols) : null;
+    if (hard !== null) {
+      text += line.translateToString(false).slice(indent);
+      indent = hard;
+      continue;
+    }
+    text += line.translateToString(true).slice(indent);
+    return { firstRow: first, text, rowStarts, rowIndents };
   }
   return null; // hit the cap (or a hole) before the logical line ended
 }
@@ -665,19 +891,84 @@ export function collectWrappedLine(
  * Map a [start, endExclusive) character range in a stitched logical line back to
  * xterm 1-based buffer coordinates (range end is inclusive of the last cell).
  * Equals the old single-row mapping (`{x: start+1}` / `{x: end}`) when the line
- * occupies one row.
+ * occupies one row and holds no wide glyph.
+ *
+ * Two corrections live in `rowLocal`/`cellOf`, and both are needed:
+ *
+ *  - `+ rowIndents[r]`, because a hard-wrapped row's leading blanks were dropped from `text`
+ *    but are still drawn on screen, so a stitched offset is that many characters short of where
+ *    the glyph actually sits. NOT folded into `rowStarts`: the `while (r > 0 && …)` scan below
+ *    depends on `rowStarts` staying a monotonic map of stitched indices.
+ *  - `stringIndexToCell`, because `x` is a CELL column and the sum so far is a string index.
+ *    Without it the range is drawn one cell left per preceding wide glyph — the defect class in
+ *    `cell-column-is-not-a-string-index`, which was sitting inside this function.
+ *
+ * **`start` and `end` apply their `+1` in different places, and that asymmetry is the point.**
+ * `start` maps the first character's index and adds one to make the column 1-based. `end` must
+ * report the LAST cell the final character occupies, so it maps the index AFTER the match — the
+ * 0-based cell where the next character begins is exactly the 1-based cell where this one ends —
+ * and adds nothing afterwards. Mapping `endExclusive - 1` and adding one outside is what it did
+ * before, and it over-extends by a cell whenever the match ends in a surrogate pair:
+ * `stringIndexToCell` documents that an index inside a pair resolves to the cell AFTER the pair,
+ * and `endExclusive - 1` is the LOW surrogate. On `see /tmp/a/😀` the range then covered one cell
+ * of unrelated text, which xterm underlines and accepts a Ctrl+click on.
+ *
+ * The ROW is still chosen from `endExclusive - 1`, deliberately: `endExclusive` belongs to the
+ * next row whenever a match ends exactly at a row boundary, and the range would run off onto it.
+ *
+ * The `buffer` is a PARAMETER rather than a field on `WrappedLineInfo` on purpose: xterm
+ * recycles buffer lines as output scrolls, so an `info` that held line objects would be a
+ * snapshot that silently starts mapping through rows that have since been overwritten. Taking
+ * the buffer here means the cells are read at the moment the range is asked for. A row whose
+ * line has gone falls back to treating the string index as the column, which is exactly the
+ * pre-existing behaviour and is correct for every row without a wide glyph.
  */
 export function wrappedBufferRange(
   info: WrappedLineInfo,
+  buffer: { getLine(n: number): CellAddressableLine | undefined },
   start: number,
   endExclusive: number,
 ): { start: { x: number; y: number }; end: { x: number; y: number } } {
-  const locate = (idx: number): { x: number; y: number } => {
+  const rowOf = (idx: number): number => {
     let r = info.rowStarts.length - 1;
     while (r > 0 && info.rowStarts[r] > idx) r--;
-    return { x: idx - info.rowStarts[r] + 1, y: info.firstRow + r + 1 };
+    return r;
   };
-  return { start: locate(start), end: locate(endExclusive - 1) };
+  const rowLocal = (idx: number, r: number): number =>
+    idx - info.rowStarts[r] + (info.rowIndents[r] ?? 0);
+  const cellOf = (r: number, inRow: number): number => {
+    const line = buffer.getLine(info.firstRow + r);
+    return line ? stringIndexToCell(line, inRow) : inRow;
+  };
+  const sr = rowOf(start);
+  const er = rowOf(endExclusive - 1);
+  const last = rowLocal(endExclusive - 1, er);
+  return {
+    start: { x: cellOf(sr, rowLocal(start, sr)) + 1, y: info.firstRow + sr + 1 },
+    end: { x: cellOf(er, last + 1), y: info.firstRow + er + 1 },
+  };
+}
+
+/**
+ * Ctrl+F on Windows/Linux, Cmd+F on macOS. Plain Ctrl+F is NOT search on macOS.
+ *
+ * ONE implementation, exported, because there are two homes for this shortcut: the engine's own
+ * pane-container listener below, and the canvas overlay's element-bound hotkey (the overlay is
+ * chromeless, so the engine wires no listener there at all). A second copy in the renderer is
+ * precisely the `two-implementations-one-fix` shape — the two would be fixed apart, and the
+ * macOS branch is the half that would rot, because nobody developing on Windows can see it.
+ *
+ * Shift/Alt are excluded so `Ctrl+Shift+F` and friends pass through to the PTY untouched.
+ * `code` is checked alongside `key` so a non-Latin keyboard layout, where `key` is not `'f'`,
+ * still opens search on the physical F key.
+ */
+export function isFindShortcut(
+  e: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>,
+  isMac: boolean,
+): boolean {
+  const modifier = isMac ? e.metaKey : e.ctrlKey;
+  if (!modifier || e.shiftKey || e.altKey) return false;
+  return e.key === 'f' || e.key === 'F' || e.code === 'KeyF';
 }
 
 /**
@@ -1042,13 +1333,12 @@ export class TerminalEngine {
     // the canvas. Unwired, xterm forwards ^F to the PTY as a normal terminal key.
     if (o.paneChrome) {
       const searchKeyHandler = (event: KeyboardEvent) => {
-        const modifier = isMac ? event.metaKey : event.ctrlKey;
-        if (!modifier || event.shiftKey || event.altKey) return;
-        if (event.key === 'f' || event.key === 'F' || event.code === 'KeyF') {
-          event.preventDefault();
-          event.stopPropagation();
-          this.opts.onOpenSearch?.();
-        }
+        // The predicate is shared with the canvas overlay's hotkey (`isFindShortcut`), so the
+        // two surfaces cannot disagree about what "the find shortcut" is.
+        if (!isFindShortcut(event, isMac)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.opts.onOpenSearch?.();
       };
       container.addEventListener('keydown', searchKeyHandler, true);
       this.containerDisposables.push(() => {
@@ -2469,14 +2759,18 @@ export class TerminalEngine {
         // Wrapped-line aware: a long path that soft-wraps continues on further
         // buffer rows (isWrapped), so stitch the full logical line before
         // matching — a single row would only ever see the path's first fragment.
-        const info = collectWrappedLine(boundTerm.buffer.active, bufferLineNumber - 1);
+        // `cols` is what lets the stitch also join a HARD wrap (the app's own newline plus a
+        // hanging indent), which needs to know whether the row it is leaving was full.
+        const info = collectWrappedLine(
+          boundTerm.buffer.active, bufferLineNumber - 1, boundTerm.cols,
+        );
         if (!info) { callback(undefined); return; }
         const matches = findPathLinks(info.text);
         if (matches.length === 0) { callback(undefined); return; }
         callback(matches.map((mt) => ({
           // Map string offsets back to 1-based buffer coords; the range may span
           // several rows (end is inclusive of the last cell).
-          range: wrappedBufferRange(info, mt.start, mt.end),
+          range: wrappedBufferRange(info, boundTerm.buffer.active, mt.start, mt.end),
           text: mt.path,
           activate: (event) => {
             // Require the modifier (Ctrl on Win/Linux, Cmd on macOS); a plain click
@@ -3889,21 +4183,33 @@ export class TerminalEngine {
     // scroll offset has to be added — without it every hit-test is wrong the moment you scroll
     // up, which is exactly when you go looking for a link in old output.
     const bufferRow = buf.viewportY + at.row;
-    const info = collectWrappedLine(buf, bufferRow);
+    const info = collectWrappedLine(buf, bufferRow, term.cols);
     if (!info) return null;
 
-    // Where the pointer's CELL lands in the STITCHED line. Two corrections, and both are needed:
+    // Where the pointer's CELL lands in the STITCHED line. Three corrections, and all are
+    // needed:
     //
     //  - `rowStart`, because the stitch concatenates rows — the column alone would hit-test the
     //    FIRST row of a wrapped line whichever row you actually clicked.
     //  - `cellToStringIndex`, because a column is not a string offset once the row holds a
     //    double-width glyph. See its note: on a line with CJK ahead of a URL, adding the raw
     //    column offers Copy Link for a click on a Chinese character.
-    const rowStart = info.rowStarts[bufferRow - info.firstRow];
+    //  - `- rowIndent`, because a hard-wrapped row's hanging indent was dropped from the
+    //    stitched text but is still on screen, so every column on that row is that many
+    //    characters ahead of its stitched offset.
+    const r = bufferRow - info.firstRow;
+    const rowStart = info.rowStarts[r];
+    const rowIndent = info.rowIndents[r];
     const line = buf.getLine(bufferRow);
-    if (rowStart === undefined || !line) return null;
+    if (rowStart === undefined || rowIndent === undefined || !line) return null;
 
-    return linkAtIndex(info.text, rowStart + cellToStringIndex(line, at.col));
+    const inRow = cellToStringIndex(line, at.col);
+    // Inside the dropped indent there is nothing to hit: those cells are blank, xterm draws no
+    // glyph on them, and clamping to the first real character would offer "Copy Path" for a
+    // right-click on whitespace.
+    if (inRow < rowIndent) return null;
+
+    return linkAtIndex(info.text, rowStart + (inRow - rowIndent));
   }
 
   /**

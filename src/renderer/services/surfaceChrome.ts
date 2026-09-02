@@ -31,6 +31,7 @@
  */
 import { useCallback, useSyncExternalStore } from 'react';
 import type { SuggestViewState } from '../components/Terminal/useCommandSuggest';
+import type { SearchViewState } from '../components/Terminal/useTerminalSearch';
 
 /** What a surface needs in order to draw a terminal's chrome and act on it. */
 export interface SurfaceChromeState {
@@ -38,6 +39,15 @@ export interface SurfaceChromeState {
   atBottom: boolean;
   /** The command-history popup's view state, straight from `useCommandSuggest`. */
   suggest: SuggestViewState;
+  /**
+   * The search bar's view state — one owner, drawn by whichever surface is showing
+   * (`plan/027` §1.4).
+   *
+   * Same shape and same reason as `suggest`: the bar is presentational, so the pane and the
+   * overlay can both render one, but only `TerminalDisplay` may own the state — two owners means
+   * two as-you-type effects clearing each other's search.
+   */
+  search: SearchViewState;
   /** Jump to the live tail and take the keyboard back. */
   scrollToBottom: () => void;
   /** Accept a suggestion — inserts it into the shell and closes the popup. */
@@ -67,6 +77,17 @@ export interface SurfaceChromeState {
    */
   restartSession: () => void;
   dismissSessionClosed: () => void;
+  /**
+   * Open + focus search for this terminal (`plan/027` §1.4). The TRIGGER only; the bar itself is
+   * drawn by whichever surface is showing, from `search` above.
+   *
+   * Published separately from `search` because its callers render nothing: the canvas overlay's
+   * Ctrl+F binding, the terminal content menu's Find item and `PaneContextMenu`'s. The engine's
+   * own Ctrl+F listener does not come through here — it is wired only when `paneChrome` is true,
+   * which is false on every canvas host (design/012 D16), and that gap is exactly what the
+   * overlay's element-bound hotkey fills.
+   */
+  openSearch: () => void;
 }
 
 interface Entry {
@@ -102,6 +123,11 @@ function sameItems(a: string[], b: string[]): boolean {
  * out would not, and the failure is silent and global — every canvas node re-rendering on every
  * scroll event, with nothing to point at. A few string compares on a list that never exceeds the
  * popup's own page size is the cheaper side of that trade.
+ *
+ * `search` is compared THE SAME WAY, field by field including its callbacks, for the same
+ * reason: `useTerminalSearch` returns a fresh wrapper on every render of the pane. A field left
+ * out here is not a missed re-render — it is a STALE CLOSURE the overlay goes on calling, with
+ * nothing else in the app to notice (`plan/027` §1.4).
  */
 function same(a: SurfaceChromeState, b: SurfaceChromeState): boolean {
   return (
@@ -111,11 +137,27 @@ function same(a: SurfaceChromeState, b: SurfaceChromeState): boolean {
     && a.openContextMenu === b.openContextMenu
     && a.restartSession === b.restartSession
     && a.dismissSessionClosed === b.dismissSessionClosed
+    && a.openSearch === b.openSearch
     && a.suggest.open === b.suggest.open
     && a.suggest.selectedIndex === b.suggest.selectedIndex
     && a.suggest.focused === b.suggest.focused
     && a.suggest.anchor === b.suggest.anchor
     && sameItems(a.suggest.items, b.suggest.items)
+    && a.search.open === b.search.open
+    && a.search.query === b.search.query
+    && a.search.caseSensitive === b.search.caseSensitive
+    && a.search.wholeWord === b.search.wholeWord
+    && a.search.regex === b.search.regex
+    && a.search.focusToken === b.search.focusToken
+    && a.search.result.resultIndex === b.search.result.resultIndex
+    && a.search.result.resultCount === b.search.result.resultCount
+    && a.search.setQuery === b.search.setQuery
+    && a.search.toggleCaseSensitive === b.search.toggleCaseSensitive
+    && a.search.toggleWholeWord === b.search.toggleWholeWord
+    && a.search.toggleRegex === b.search.toggleRegex
+    && a.search.next === b.search.next
+    && a.search.previous === b.search.previous
+    && a.search.close === b.search.close
   );
 }
 
@@ -168,9 +210,53 @@ export function useSurfaceChrome(terminalId: string | null): SurfaceChromeState 
   return useSyncExternalStore(subscribeSurfaceChrome, getSnapshot, getSnapshot);
 }
 
-/** Test-only: read a registration without a React render. */
-export function __getSurfaceChromeForTest(terminalId: string): SurfaceChromeState | null {
+/**
+ * Whether ANYTHING is currently publishing chrome for `terminalId` — PRESENCE ONLY.
+ *
+ * `PaneContextMenu`'s Find item is the caller this exists for (`plan/027` R2). Reading
+ * `getSurfaceChrome` at render, as it first did, freezes the answer for as long as the menu is
+ * open: the item stays greyed out after the pane's terminal finishes starting and becomes
+ * searchable, and stays enabled after an MCP client closes that terminal — then silently does
+ * nothing when clicked, because the click re-reads the registry and finds nothing.
+ *
+ * A BOOLEAN snapshot is what makes subscribing affordable, and that is the whole design here:
+ * `useSyncExternalStore` compares snapshots with `Object.is`, so a publish that merely changed
+ * the query or `atBottom` returns the same `true` and re-renders nothing. Only availability
+ * actually flipping wakes the consumer. Subscribing with `useSurfaceChrome` instead would
+ * deliver every write in the registry — the chrome is republished on nearly every keystroke —
+ * which is exactly the per-keystroke re-render the menu avoided by not subscribing at all.
+ *
+ * `null` opts out and always reads `false`, exactly as `useSurfaceChrome`'s `null` does: a pane
+ * with no terminal has no id to ask about, and a hook cannot be called conditionally.
+ */
+export function useSurfaceChromeAvailable(terminalId: string | null): boolean {
+  const getSnapshot = useCallback(
+    () => (terminalId !== null && chrome.has(terminalId)),
+    [terminalId],
+  );
+  return useSyncExternalStore(subscribeSurfaceChrome, getSnapshot, getSnapshot);
+}
+
+/**
+ * This terminal's chrome WITHOUT subscribing — for a click handler that reads once.
+ *
+ * `PaneContextMenu` is the caller this exists for (`plan/027` §2.2). It only needs the value at
+ * the moment a menu item is clicked, and `useSurfaceChrome` would sign it up for every write in
+ * the registry: the chrome is republished on nearly every keystroke, so the hook would re-render
+ * an open menu constantly for a value it reads once.
+ *
+ * What it must NOT be used for is deciding what the menu DRAWS. An item that looks live but
+ * calls nothing is worse than a disabled one, and a value read at render never changes again
+ * while the menu is open — `useSurfaceChromeAvailable` above is the render-time half, and this
+ * is the click-time one. The `?.` at a call site is what covers the gap between them.
+ */
+export function getSurfaceChrome(terminalId: string): SurfaceChromeState | null {
   return chrome.get(terminalId)?.state ?? null;
+}
+
+/** Test-only alias of `getSurfaceChrome`, kept because the existing suites read by this name. */
+export function __getSurfaceChromeForTest(terminalId: string): SurfaceChromeState | null {
+  return getSurfaceChrome(terminalId);
 }
 
 /** Test-only: drop all registrations and subscribers between cases. */

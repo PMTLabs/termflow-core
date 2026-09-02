@@ -6,6 +6,11 @@ export {
   URL_RE, findUrlLinks, findPathLinks, linkAtIndex, pointToCell, cellToStringIndex,
 } from './TerminalEngine';
 export type { UrlLinkMatch, RenderedTerminalBox, CellAddressableLine } from './TerminalEngine';
+/** The find-shortcut predicate, exported for the CANVAS OVERLAY — where the engine wires no
+ *  listener at all (chromeless host), so the overlay binds its own and must ask the same
+ *  question the engine asks. A second copy in the renderer is the whole defect this export
+ *  exists to prevent. */
+export { isFindShortcut } from './TerminalEngine';
 export {
   terminalCache,
   pasteToTerminal,

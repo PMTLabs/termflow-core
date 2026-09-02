@@ -1,6 +1,6 @@
 import {
-  linkAtIndex, pointToCell, cellToStringIndex, collectWrappedLine,
-  RenderedTerminalBox, CellAddressableLine,
+  linkAtIndex, pointToCell, cellToStringIndex, stringIndexToCell, collectWrappedLine,
+  findPathLinks, RenderedTerminalBox, CellAddressableLine,
 } from '../TerminalEngine';
 
 /**
@@ -246,9 +246,85 @@ describe('cellToStringIndex bridges cells and characters', () => {
 
     const body = /getLinkAt\(clientX: number, clientY: number\)[\s\S]*?\n  \}/.exec(src);
     expect(body).not.toBeNull();
-    expect(body![0]).toMatch(/linkAtIndex\(\s*info\.text,\s*rowStart \+ cellToStringIndex\(line, at\.col\)\s*\)/);
+    // The column reaches the stitched line through `cellToStringIndex` and nothing else.
+    expect(body![0]).toMatch(/const inRow = cellToStringIndex\(line, at\.col\);/);
+    expect(body![0])
+      .toMatch(/linkAtIndex\(\s*info\.text,\s*rowStart \+ \(inRow - rowIndent\)\s*\)/);
     // ...and NOT the raw column, which is the defect this whole block exists for.
     expect(body![0]).not.toMatch(/rowStart \+ at\.col/);
+    /**
+     * Updated for plan 027 §3.4 direction B, deliberately and not to make a red test green: the
+     * hit-test now also SUBTRACTS the hard-wrapped row's dropped indent, and refuses outright
+     * when the pointer is inside it. Both halves are pinned, because dropping either one is
+     * silent — the first shifts every hit on a joined row by the indent width, the second offers
+     * "Copy Path" over blank cells.
+     */
+    expect(body![0]).toMatch(/const rowIndent = info\.rowIndents\[r\];/);
+    expect(body![0]).toMatch(/if \(inRow < rowIndent\) return null;/);
+    // And the stitch is asked for the grid width, or it can only ever see a soft wrap.
+    expect(body![0]).toMatch(/collectWrappedLine\(buf, bufferRow, term\.cols\)/);
+  });
+});
+
+/**
+ * The inverse walk, `stringIndexToCell` — used by `wrappedBufferRange` to turn a stitched string
+ * offset back into the CELL column xterm draws a link range in.
+ *
+ * Round-tripping is the property that matters and the one a hand-written table would miss: for
+ * every cell that STARTS a character, `stringIndexToCell(cellToStringIndex(c)) === c`. Asserting
+ * it over ASCII, CJK, a surrogate-pair emoji and a blank in ONE loop is what makes it a property
+ * rather than four samples.
+ */
+describe('stringIndexToCell inverts cellToStringIndex', () => {
+  const cells = (spec: Array<[string, number]>): CellAddressableLine => ({
+    getCell: (x) => {
+      const c = spec[x];
+      return c ? { getChars: () => c[0], getWidth: () => c[1] } : undefined;
+    },
+  });
+
+  /** `a你 👍b` — one of each: ASCII, CJK (2 cells / 1 char), a blank-width space, and a
+   *  surrogate-pair emoji (2 cells / 2 chars). Every one of those ratios is different, which is
+   *  the whole point of the fixture. */
+  const MIXED: Array<[string, number]> = [
+    ['a', 1], ['你', 2], ['', 0], [' ', 1], ['👍', 2], ['', 0], ['b', 1],
+  ];
+  const line = cells(MIXED);
+  /** The columns that START a character — the right half of a wide glyph is not one. */
+  const STARTS = [0, 1, 3, 4, 6];
+
+  it('round-trips every cell that starts a character', () => {
+    for (const col of STARTS) {
+      expect(stringIndexToCell(line, cellToStringIndex(line, col))).toBe(col);
+    }
+  });
+
+  it('maps the string indices of that line to the columns they are drawn at', () => {
+    // 'a' idx 0 → cell 0; 你 idx 1 → cell 1; ' ' idx 2 → cell 3; 👍 idx 3 → cell 4;
+    // 'b' idx 5 → cell 6 (the emoji contributed TWO indices across its two cells).
+    expect([0, 1, 2, 3, 5].map((i) => stringIndexToCell(line, i))).toEqual([0, 1, 3, 4, 6]);
+  });
+
+  /** An index INSIDE a surrogate pair is at no cell boundary at all. The cell after the pair is
+   *  the only answer that is a real boundary, and it must not be the pair's own right half. */
+  it('resolves an index inside a surrogate pair to the cell after it', () => {
+    expect(stringIndexToCell(line, 4)).toBe(6);
+  });
+
+  /** A blank cell renders as a space and so advances the string by one — the `|| 1` on both
+   *  sides of the walk. Without it every column after a run of blanks drifts left. */
+  it('counts blank cells as the space they render as', () => {
+    const padded = cells([['', 1], ['', 1], ['a', 1]]);
+    expect(stringIndexToCell(padded, 2)).toBe(2);
+    expect(stringIndexToCell(padded, cellToStringIndex(padded, 2))).toBe(2);
+  });
+
+  /** Past the end there are no cells left to walk; falling back to one cell per remaining
+   *  character is what `translateToString` would have produced for the trailing blanks. */
+  it('is safe past the end of the line', () => {
+    const short = cells([['a', 1]]);
+    expect(stringIndexToCell(short, 0)).toBe(0);
+    expect(stringIndexToCell(short, 5)).toBe(5);
   });
 });
 
@@ -261,29 +337,57 @@ describe('cellToStringIndex bridges cells and characters', () => {
  * the column alone hit-tests the first row for every row, so a right-click on the tail of a long
  * URL finds whatever happens to sit at that column of the line's beginning.
  */
-describe('a wrapped link is hit on every row it occupies', () => {
-  const fakeBuffer = (rows: Array<{ text: string; isWrapped?: boolean }>) => ({
-    getLine(n: number) {
-      const entry = rows[n];
-      if (!entry) return undefined;
-      return {
-        isWrapped: entry.isWrapped ?? false,
-        translateToString: (trim?: boolean) => (trim ? entry.text.replace(/\s+$/, '') : entry.text),
-      };
-    },
-  });
+/**
+ * A buffer row as CELLS. Wide glyphs occupy two cells and the row is padded to `cols` with
+ * blanks, exactly as a real xterm line is — `collectWrappedLine` asks `getCell(cols - 1)` whether
+ * the row is full, and a fixture that stopped at the end of its text would answer `undefined`.
+ */
+const rowCells = (text: string, cols: number) => {
+  const out: Array<{ getChars(): string; getWidth(): number }> = [];
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const wide = (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0x1f300 && cp <= 0x1faff);
+    out.push({ getChars: () => ch, getWidth: () => (wide ? 2 : 1) });
+    if (wide) out.push({ getChars: () => '', getWidth: () => 0 });
+  }
+  while (out.length < cols) out.push({ getChars: () => '', getWidth: () => 1 });
+  return out;
+};
 
+const wrapBuffer = (rows: Array<{ text: string; isWrapped?: boolean }>, cols: number) => ({
+  getLine(n: number) {
+    const entry = rows[n];
+    if (!entry) return undefined;
+    const cells = rowCells(entry.text, cols);
+    return {
+      isWrapped: entry.isWrapped ?? false,
+      translateToString: (trim?: boolean) => (trim ? entry.text.replace(/\s+$/, '') : entry.text),
+      getCell: (x: number) => cells[x],
+    };
+  },
+});
+
+/** `getLinkAt`'s composition, exactly — see the source-derived test above that pins it. */
+const hitLink = (
+  buf: ReturnType<typeof wrapBuffer>, row: number, col: number, cols: number,
+) => {
+  const info = collectWrappedLine(buf, row, cols)!;
+  const r = row - info.firstRow;
+  const rowStart = info.rowStarts[r];
+  const rowIndent = info.rowIndents[r];
+  const inRow = cellToStringIndex(buf.getLine(row)!, col);
+  if (inRow < rowIndent) return null;
+  return linkAtIndex(info.text, rowStart + (inRow - rowIndent));
+};
+
+describe('a wrapped link is hit on every row it occupies', () => {
   // A 20-column terminal; the URL breaks across two rows.
-  const buf = fakeBuffer([
+  const buf = wrapBuffer([
     { text: 'see https://ex.test/' },
     { text: 'a/very/long/path.txt', isWrapped: true },
-  ]);
+  ], 20);
 
-  const hitAt = (row: number, col: number) => {
-    const info = collectWrappedLine(buf, row)!;
-    const rowStart = info.rowStarts[row - info.firstRow];
-    return linkAtIndex(info.text, rowStart + col);
-  };
+  const hitAt = (row: number, col: number) => hitLink(buf, row, col, 20);
 
   const WHOLE = 'https://ex.test/a/very/long/path.txt';
 
@@ -305,5 +409,58 @@ describe('a wrapped link is hit on every row it occupies', () => {
     // Column 1 of row 0 is in the word "see" — genuinely not a link — so the stitched index
     // really is being used rather than the whole line being treated as one match.
     expect(hitAt(0, 1)).toBeNull();
+  });
+});
+
+/**
+ * The same composition over a HARD wrap (plan 027 §3) — the app's own newline plus a hanging
+ * indent, where `isWrapped` is FALSE and real whitespace was inserted.
+ *
+ * The fixture carries CJK on the first row on purpose. Cell space and string space agree on an
+ * all-ASCII row, so an ASCII fixture would pass against a `getLinkAt` that still added the raw
+ * column AND against one that forgot to subtract the indent — it can only fail for the right
+ * reason if the two spaces actually differ (`suspect-the-shared-fixture-first`).
+ */
+describe('a HARD-wrapped path is hit from both of its rows', () => {
+  const COLS = 21; // 你(2) + 好(2) + ' '(1) + 16 = 21 cells, from 19 characters
+  const buf = wrapBuffer([
+    { text: '你好 /srv/app/compone' },
+    { text: ' nts.tsx:42:7 ok' },
+  ], COLS);
+  const hitAt = (row: number, col: number) => hitLink(buf, row, col, COLS);
+  const PATH = '/srv/app/components.tsx';
+
+  it('hits the joined path from the FIRST row, at the column it is drawn at', () => {
+    // The `/` is string index 3 but CELL 5, because 你好 is two characters over four cells.
+    expect(hitAt(0, 5)).toEqual({ kind: 'path', text: PATH });
+  });
+
+  it('hits the SAME path from the continuation row', () => {
+    expect(hitAt(1, 1)).toEqual({ kind: 'path', text: PATH });
+    expect(hitAt(1, 1)).toEqual(hitAt(0, 5));
+  });
+
+  /**
+   * Inside the dropped indent there is nothing to hit. Those cells are blank, xterm draws no
+   * glyph on them, and clamping to the first real character would offer "Copy Path" for a
+   * right-click on whitespace.
+   */
+  it('returns null for a pointer inside the dropped indent', () => {
+    expect(hitAt(1, 0)).toBeNull();
+  });
+
+  /** And the wide glyph itself is not a link — the guard that says the cell→string mapping is
+   *  really being applied rather than the raw column happening to land inside the path. */
+  it('does not report the path for a click on the CJK ahead of it', () => {
+    expect(hitAt(0, 0)).toBeNull();
+    expect(hitAt(0, 2)).toBeNull();
+  });
+
+  it('parses the :line:col suffix written on the continuation row', () => {
+    const info = collectWrappedLine(buf, 0, COLS)!;
+    const [m] = findPathLinks(info.text);
+    expect(m.path).toBe(PATH);
+    expect(m.line).toBe(42);
+    expect(m.col).toBe(7);
   });
 });
