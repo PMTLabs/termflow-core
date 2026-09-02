@@ -1,17 +1,18 @@
 name: Rust Tests
 
-# Runs the Rust suite on Linux, Windows, and macOS.
+# Runs the Rust suite on Linux, Windows, and macOS — all three GitHub-hosted.
 #
-# - Linux (GitHub-hosted ubuntu-latest): runs the full suite WITH the
-#   `integration-tests` feature. That feature turns on tauri's `test` feature so
-#   the concurrency regression test can build an AppState<MockRuntime> via
+# - Linux (ubuntu-latest): runs the full suite WITH the `integration-tests`
+#   feature. That feature turns on tauri's `test` feature so the concurrency
+#   regression test can build an AppState<MockRuntime> via
 #   `tauri::test::mock_app()` and drive the real `send_prompt_to_terminal` handler.
 #
-# - Windows (self-hosted): runs ONLY the default unit suite (NO `integration-tests`).
-#   Enabling tauri's `test` feature on Windows makes the compiled test binary fail
-#   at loader time (STATUS_ENTRYPOINT_NOT_FOUND, 0xC0000139) before any test runs,
-#   so the mock_app integration test is Linux-only by design. Windows still covers
-#   compilation + all 79 unit tests on the production (Wry) runtime.
+# - Windows (windows-latest): runs ONLY the default unit suite (NO
+#   `integration-tests`). Enabling tauri's `test` feature on Windows makes the
+#   compiled test binary fail at loader time (STATUS_ENTRYPOINT_NOT_FOUND,
+#   0xC0000139) before any test runs, so the mock_app integration test is
+#   Linux-only by design. Windows still covers compilation + all 79 unit tests
+#   on the production (Wry) runtime.
 
 on:
   push:
@@ -32,9 +33,7 @@ jobs:
             # Linux can run the mock_app integration test.
             test-args: "--features integration-tests"
           - name: Windows
-            # Self-hosted Windows runner. Adjust the labels to match your runner
-            # if it doesn't carry the default `windows` OS label.
-            runs-on: [ self-hosted, windows ]
+            runs-on: windows-latest
             # No integration-tests on Windows (tauri/test crashes the test binary
             # at loader time); default unit suite only.
             test-args: ""
@@ -50,8 +49,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # Linux-only: Tauri 2 links webkit2gtk/gtk to compile on this target.
-      # ubuntu-latest (24.04) ships the 4.1 line. Windows already has the WebView2
-      # SDK / MSVC toolchain on the self-hosted box.
+      # ubuntu-latest (24.04) ships the 4.1 line. windows-latest and macos-latest
+      # already carry the MSVC toolchain / Xcode CLT Tauri needs.
       - name: Install Tauri system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -65,31 +64,13 @@ jobs:
             build-essential \
             pkg-config
 
-      # dtolnay/rust-toolchain is a bash composite action; on a self-hosted Windows
-      # runner it mangles the temp script path (backslashes stripped) and fails. Use
-      # it only on the GitHub-hosted Linux runner; the self-hosted Windows box is the
-      # dev machine and already has rustup/cargo installed — just verify it.
-      - name: Setup Rust toolchain (GitHub-hosted)
-        if: runner.os != 'Windows'
+      - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify Rust toolchain (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          rustup show
-          rustc --version
-          cargo --version
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          # NEVER cache ~/.cargo/bin: rust-cache's post step prunes that dir back
-          # to its cached snapshot. On the PERSISTENT self-hosted Windows runner
-          # that is the real user profile — every job ended by deleting the dev
-          # box's restored rustup.exe, which then failed the NEXT run's
-          # "Verify Rust toolchain" step (recurring since ~Jul 2).
-          cache-bin: "false"
 
       # The PTY-host sidecar crates (pty-host / pty-protocol) are separate
       # manifests, NOT workspace members, so `cargo test` in src-tauri does not
@@ -105,17 +86,9 @@ jobs:
           cargo test --manifest-path pty-host/Cargo.toml
 
       # src-tauri/build.rs shells out to `bun scripts/build-mcp-sidecar.mjs`, so bun
-      # must be present before cargo compiles the crate. On the self-hosted Windows
-      # box bun is already installed; oven-sh/setup-bun fails there trying to
-      # overwrite the in-use bun.exe (EBUSY), so only run it on Linux and verify on
-      # Windows.
-      - name: Setup Bun (GitHub-hosted)
-        if: runner.os != 'Windows'
+      # must be present before cargo compiles the crate.
+      - name: Setup Bun
         uses: oven-sh/setup-bun@v2
-
-      - name: Verify Bun (Windows)
-        if: runner.os == 'Windows'
-        run: bun --version
 
       - name: Install workspace dependencies
         run: bun install --frozen-lockfile
@@ -130,7 +103,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Linux: unit + integration (--features integration-tests).
-      # Windows: unit suite only (test-args empty).
+      # Windows/macOS: unit suite only (test-args empty).
       - name: Run Rust tests
         working-directory: src-tauri
         run: cargo test ${{ matrix.test-args }}

@@ -18,7 +18,7 @@ env:
 jobs:
   e2e-tests:
     timeout-minutes: 60
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
@@ -28,35 +28,8 @@ jobs:
       with:
         node-version: '18'
 
-    # oven-sh/setup-bun DOWNLOADS bun and overwrites the shared install. On any
-    # self-hosted runner that binary is already there and may be in use, so the
-    # copy fails and the job dies before any of our code runs — a random red X on
-    # an otherwise green PR:
-    #
-    #   Windows, overwriting the in-use exe:
-    #     EBUSY: resource busy or locked, copyfile '...bun.exe' -> 'C:\...\bun.exe'
-    #   Linux, two jobs sharing /home/ubuntu/.bun:
-    #     ETXTBSY: text file is busy, copyfile '.../bun' -> '/home/ubuntu/.bun/bin/bun'
-    #
-    # This used to be guarded with `runner.os != 'Windows'`, copied from
-    # rust-tests.yml — where it is correct, because that job pins
-    # `runs-on: [self-hosted, windows]`. THIS job is bare `[self-hosted]` and can
-    # land on the Linux boxes, where that guard lets setup-bun run and hit the
-    # ETXTBSY form instead. Gate on the runner ENVIRONMENT so both are covered and
-    # a GitHub-hosted runner still installs bun. (ci.yml, PR #37, same change.)
-    - name: Setup Bun (GitHub-hosted)
-      if: runner.environment == 'github-hosted'
+    - name: Setup Bun
       uses: oven-sh/setup-bun@v2
-
-    - name: Verify Bun (self-hosted)
-      if: runner.environment != 'github-hosted'
-      shell: bash
-      run: |
-        # Where the preinstalled bun lives; a no-op when the runner's profile
-        # already has it on PATH.
-        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.bun/bin:$PATH"
-        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -106,7 +79,7 @@ jobs:
 
   performance-tests:
     timeout-minutes: 30
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     # QUARANTINED job — same obsolete Electron Playwright harness, no signal on Tauri.
     # Disabled until rewritten. Original trigger was:
     #   github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -122,18 +95,8 @@ jobs:
       with:
         node-version: '18'
 
-    # Same shared-install race as the e2e job above — see the comment there.
-    - name: Setup Bun (GitHub-hosted)
-      if: runner.environment == 'github-hosted'
+    - name: Setup Bun
       uses: oven-sh/setup-bun@v2
-
-    - name: Verify Bun (self-hosted)
-      if: runner.environment != 'github-hosted'
-      shell: bash
-      run: |
-        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.bun/bin:$PATH"
-        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -141,8 +104,8 @@ jobs:
     - name: Build application
       run: npm run build
 
-    # Non-blocking install (see the e2e job): avoids the self-hosted apt-lock
-    # failure mode; the perf suite below is quarantined anyway.
+    # Non-blocking install (see the e2e job): the perf suite below is
+    # quarantined anyway.
     - name: Install Playwright Browsers
       run: npx playwright install
       continue-on-error: true

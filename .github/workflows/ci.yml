@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Test
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         node-version: [18.x, 20.x]
@@ -22,35 +22,8 @@ jobs:
       with:
         node-version: ${{ matrix.node-version }}
 
-    # oven-sh/setup-bun DOWNLOADS bun and overwrites the shared install. On a
-    # self-hosted runner that binary is already present and may be in use, so the
-    # copy fails and the job dies before any of our code has run:
-    #
-    #   Linux, two matrix jobs racing over /home/ubuntu/.bun:
-    #     ETXTBSY: text file is busy, copyfile '.../bun' -> '/home/ubuntu/.bun/bin/bun'
-    #   Windows, overwriting the in-use exe:
-    #     EBUSY: resource busy or locked, copyfile '...bun.exe' -> 'C:\...\bun.exe'
-    #
-    # It passes whenever the binary happens to be free, so it reads as a random
-    # red X on unrelated changes — it took 4 of the last 5 pushes to develop, and
-    # a re-run simply moved the failure from the 18.x job to the 20.x one.
-    # rust-tests.yml already documents and works around this, but its guard is
-    # `runner.os != 'Windows'`, which does not cover the Linux self-hosted runners
-    # this workflow uses. Gate on the runner ENVIRONMENT instead: that covers both,
-    # and a GitHub-hosted runner still installs bun normally.
-    - name: Setup Bun (GitHub-hosted)
-      if: runner.environment == 'github-hosted'
+    - name: Setup Bun
       uses: oven-sh/setup-bun@v2
-
-    - name: Verify Bun (self-hosted)
-      if: runner.environment != 'github-hosted'
-      shell: bash
-      run: |
-        # Where the preinstalled bun lives; a no-op when the runner's profile
-        # already has it on PATH.
-        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.bun/bin:$PATH"
-        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -60,15 +33,6 @@ jobs:
     - name: Build terminal-core
       run: bun run build:terminal-core
 
-    # `npx tsc` does NOT resolve the local TypeScript compiler here. On the
-    # self-hosted Windows runner it picks up the unrelated `tsc` package and
-    # prints "This is not the tsc command you are looking for", exit 1. A
-    # package script puts node_modules/.bin at the front of PATH, so `tsc`
-    # resolves correctly on every platform.
-    #
-    # This was invisible until now because the Setup Bun race (see above) killed
-    # the job before it ever reached this step whenever it landed on Windows.
-    # Fixing one failure exposed the next.
     - name: Type check
       run: bun run typecheck
 
@@ -81,7 +45,7 @@ jobs:
   build:
     name: Build
     needs: test
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
@@ -91,18 +55,8 @@ jobs:
       with:
         node-version: 20.x
 
-    # Same reason as the test job above — see the comment there.
-    - name: Setup Bun (GitHub-hosted)
-      if: runner.environment == 'github-hosted'
+    - name: Setup Bun
       uses: oven-sh/setup-bun@v2
-
-    - name: Verify Bun (self-hosted)
-      if: runner.environment != 'github-hosted'
-      shell: bash
-      run: |
-        echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.bun/bin:$PATH"
-        bun --version
 
     - name: Install dependencies
       run: bun install --frozen-lockfile
@@ -112,7 +66,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: [self-hosted]
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
 
