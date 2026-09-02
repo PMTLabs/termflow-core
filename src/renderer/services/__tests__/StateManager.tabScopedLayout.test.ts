@@ -167,12 +167,75 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
     // tb-owner's terminal is completely untouched — still the same id, no sessionKey added.
     expect(state.panes.treesByTabId['tb-owner']).toEqual(ownerBefore);
 
-    // tb-new's leaf was re-minted: a FRESH id, not tm-shared, with the old id
-    // preserved as sessionKey (the pty-host protocol has no rename verb).
+    // tb-new's leaf was re-minted: a FRESH id, not tm-shared.
+    //
+    // EXPECTATION CHANGED (pre-review HIGH). This originally asserted
+    // `sessionKey === 'tm-shared'`, reasoning by analogy with the pre-014
+    // migration, where preserving the old key is right because the pty-host
+    // has no rename verb and the session is OURS to keep. That analogy does not
+    // hold here: the id is colliding precisely because ANOTHER TAB'S LIVE
+    // TERMINAL is the session the host knows by it. Carrying it made the fresh
+    // spawn overwrite `session_to_process[tm-shared]` in the backend index, so
+    // the original terminal's output would be routed to this new process. The
+    // assertion was pinning the defect, so it is inverted here rather than
+    // deleted — see the sibling test above for the full mechanism.
     const newLeaf = state.panes.treesByTabId['tb-new'];
     expect(newLeaf.terminalId).not.toBe('tm-shared');
     expect(newLeaf.terminalId).toMatch(/^tm-/);
-    expect(newLeaf.sessionKey).toBe('tm-shared');
+    expect('sessionKey' in newLeaf).toBe(false);
+  });
+
+  /**
+   * Regression (pre-review HIGH). A re-minted leaf must NOT carry the colliding
+   * id in `sessionKey`.
+   *
+   * `sessionKey` means "the pty-host already knows this session by this id" —
+   * and the reason we are re-minting is that another tab's STILL-RUNNING
+   * terminal is the one the host knows by it. The spawn path forwards
+   * `sessionKey` into `create_terminal`, and the backend's
+   * `register_host_terminal` indexes `session_to_process` with an unconditional
+   * insert, so carrying it here made the fresh spawn take over the live
+   * terminal's routing key: every inbound frame for the original, still-visible
+   * terminal would then be delivered to this new process instead.
+   */
+  it('a re-minted leaf carries NO sessionKey, so it cannot hijack the live terminal it collided with', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    // tm-shared is LIVE in another tab.
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-owner', title: 'Owner' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-owner', tree: { id: 'pn-owner', type: 'terminal', terminalId: 'tm-shared' } },
+    });
+
+    const savedTree = { id: 'pn-saved', type: 'terminal' as const, terminalId: 'tm-shared' };
+    seedLayouts([{
+      id: 'layout-collide',
+      name: 'Collide',
+      tabs: [{ id: 'tb-new', title: 'New' }],
+      activeTabId: 'tb-new',
+      paneTree: savedTree,
+      activePaneId: 'pn-saved',
+      treesByTabId: { 'tb-new': savedTree },
+      scope: 'tab',
+      scopedTabId: 'tb-new',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } as SavedLayout]);
+
+    expect(await StateManager.loadTabScopedLayout('layout-collide', store.dispatch)).toBe(true);
+
+    const state = store.getState() as any;
+    const installed = state.panes.treesByTabId['tb-new'];
+    // Re-minted away from the collision...
+    expect(installed.terminalId).not.toBe('tm-shared');
+    expect(installed.terminalId.startsWith('tm-')).toBe(true);
+    // ...and claiming nothing. `sessionKey` must be absent, not just falsy:
+    // the spawn path forwards any value it finds.
+    expect('sessionKey' in installed).toBe(false);
+    // The live owner is untouched and keeps the id the host knows it by.
+    expect(state.panes.treesByTabId['tb-owner'].terminalId).toBe('tm-shared');
   });
 
   it('does not re-mint when the terminal id is already owned by the TARGET tab itself', async () => {

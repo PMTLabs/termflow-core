@@ -31,7 +31,7 @@ import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
 // snapshot it holds — see workspaceSnapshot.ts / layoutUndo.ts for why a
 // SavedLayout (below) is not enough to revert into.
 import { captureWorkspaceSnapshot, workspaceIdentity, isWorkspaceEmpty } from './workspaceSnapshot';
-import { pushUndo, takeUndo } from './layoutUndo';
+import { pushUndo, peekUndo, takeUndo, clearUndo } from './layoutUndo';
 import { setLayoutBaseline } from './layoutBaseline';
 
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
@@ -701,7 +701,15 @@ class StateManagerClass {
     const tab = state.tabs.tabs.find(t => t.id === tabId);
     if (!tab) throw new Error(`buildLayoutBody: tab not found: ${tabId}`);
 
-    const tree = state.panes.treesByTabId[tabId] ?? null;
+    // `in`, not `?? null`: the three states of a `treesByTabId` entry are
+    // load-bearing (absent = never initialised, so TerminalContainer seeds one;
+    // null = open and empty; a PaneNode = the tab's layout). Collapsing absent
+    // into null here would round-trip a never-initialised tab back as an
+    // explicitly-empty one — the exact distinction the workspace-scope branch
+    // above preserves by spreading the map verbatim, and that
+    // `populateWorkspace`'s `!== undefined` guard exists to honour.
+    const hasTree = tabId in state.panes.treesByTabId;
+    const tree = hasTree ? state.panes.treesByTabId[tabId] : null;
     // Only this tab's own directories, via the same keep-set filter
     // `saveState`'s autosave uses — a workspace-wide cwd map would leak
     // every OTHER tab's directory into a layout that claims to be one tab.
@@ -712,7 +720,8 @@ class StateManagerClass {
       activeTabId: tabId,
       paneTree: tree,
       activePaneId: state.panes.activePaneByTabId[tabId] ?? state.panes.activePaneId,
-      treesByTabId: { [tabId]: tree },
+      // An absent entry stays ABSENT in the saved map (see `hasTree`).
+      treesByTabId: hasTree ? { [tabId]: tree } : {},
       scope: 'tab',
       scopedTabId: tabId,
       terminalCwds,
@@ -1080,15 +1089,34 @@ class StateManagerClass {
    * reconciled against the backend (plan/025 §2.2 "Risks").
    */
   async revertWorkspace(dispatch: Dispatch): Promise<boolean> {
-    const snapshot = takeUndo();
-    if (!snapshot) return false;
+    // PEEK, do not take. The slot is consumed only once this call has actually
+    // committed (below), because every early exit from the transaction — the
+    // supersede return, or a throw — would otherwise have already destroyed the
+    // one copy of the workspace the user asked to get back, with nothing
+    // restored in its place and no error they could act on. "Consume on
+    // success" is the only ordering under which a failed revert is a no-op
+    // rather than a silent total loss.
+    const snapshot = peekUndo();
+    // A structurally invalid snapshot is NOT a revert target. `layoutUndo`
+    // hydrates from localStorage, where a truncated or foreign write parses
+    // fine as an object while carrying no `tabs` — and `{}` is truthy, so a
+    // bare null-check would let it through: `clearCurrentState` would wipe the
+    // live workspace and `populateWorkspace` would then no-op on it (its body
+    // is entirely inside `if (data.tabs?.length > 0)`), reporting success
+    // while leaving the window empty.
+    if (!snapshot || !Array.isArray(snapshot.tabs) || snapshot.tabs.length === 0) {
+      if (snapshot) {
+        console.warn('StateManager: undo snapshot is unusable, discarding rather than reverting into it');
+        clearUndo();
+      }
+      return false;
+    }
 
     try {
       // Same invariant as `loadLayout`: only a call that can actually enter the
-      // replacement transaction may hold the token. `takeUndo()` above cannot
-      // throw, so acquiring it here (rather than at method entry) buys nothing
-      // extra for THIS method — keeping the shape identical to `loadLayout` is
-      // the point.
+      // replacement transaction may hold the token. Everything above is a
+      // read plus validation, so reaching here means this call intends to
+      // clear and populate.
       const generation = ++this.loadGeneration;
 
       this.clearCurrentState(dispatch);
@@ -1110,7 +1138,23 @@ class StateManagerClass {
       // after one.
       await this.reconcileExistingTerminals({ tabs: snapshot.tabs, tabPanes: snapshot.tabPanes });
 
+      // The token must be re-checked after EVERY await, not just the yield.
+      // This one is not a formality: `reconcileExistingTerminals` awaits
+      // `apiBase()`, a `fetch` and a `json()` on every ordinary revert, so it
+      // is a real window in which a newer load or revert can take the token,
+      // clear, and populate. Committing after that would layer this snapshot
+      // on top of the winner's freshly populated state — the exact duplicate
+      // -tabs failure `loadLayout`'s own guard exists to prevent.
+      if (generation !== this.loadGeneration) {
+        console.log('Workspace revert superseded during reattach, abandoning');
+        return false;
+      }
+
       this.populateWorkspace(snapshot, dispatch);
+
+      // Committed — only NOW is the slot spent. Reverting is not itself
+      // undoable, which is why this consumes rather than leaves it.
+      takeUndo();
 
       // plan/025 §2.5: the reverted-to workspace becomes the new "clean"
       // reference. Best-effort — `workspaceIdentity` is a pure stringify and
@@ -1194,8 +1238,28 @@ class StateManagerClass {
           const owner = findTabIdByTerminalId(state.panes.treesByTabId, node.terminalId);
           if (owner !== null && owner !== targetTabId) {
             const fresh = generateId('tm');
-            remintedIds.set(node.terminalId, fresh);
-            return { ...node, terminalId: fresh, sessionKey: node.sessionKey ?? node.terminalId };
+            // FIRST mapping wins. A well-formed saved tree cannot carry the
+            // same terminal id twice, but an imported or hand-edited one can,
+            // and letting the second leaf overwrite the first's entry would
+            // silently hand the one saved cwd to whichever leaf happened to be
+            // visited last.
+            if (!remintedIds.has(node.terminalId)) remintedIds.set(node.terminalId, fresh);
+            // The colliding id is DROPPED, not carried into `sessionKey`.
+            //
+            // `sessionKey` means "the pty-host already knows this session by
+            // this id", and the whole reason we are re-minting is that some
+            // OTHER tab's still-running terminal is the one the host knows by
+            // it. Claiming it here is not a harmless label: the spawn path
+            // forwards `sessionKey` to `create_terminal`, and the backend's
+            // `register_host_terminal` indexes `session_to_process` with an
+            // unconditional insert — so the fresh spawn would take over the
+            // live terminal's routing key and every inbound frame for the
+            // ORIGINAL, still-visible terminal would be delivered to this new
+            // process instead. A re-minted leaf is by definition a terminal
+            // whose identity is already taken, so it must start a genuinely
+            // new session.
+            const { sessionKey: _claimedByALiveTerminal, ...rest } = node;
+            return { ...rest, terminalId: fresh };
           }
         }
         if (node.type === 'split' && Array.isArray(node.children)) {
@@ -1203,9 +1267,17 @@ class StateManagerClass {
         }
         return node;
       };
-      const tree = remintCollisions(
-        sanitizedLayout.treesByTabId?.[targetTabId] ?? sanitizedLayout.paneTree ?? null,
-      );
+      // The saved entry may legitimately be ABSENT (a tab that was never given
+      // a tree) — distinct from present-and-null (open and empty). Only an
+      // entry that actually exists is dispatched, mirroring `populateWorkspace`'s
+      // `!== undefined` guard; an absent one leaves TerminalContainer's seed
+      // effect to do what it does for any uninitialised tab. A legacy
+      // single-`paneTree` layout still supplies its tree through the fallback.
+      const savedTree =
+        sanitizedLayout.treesByTabId && targetTabId in sanitizedLayout.treesByTabId
+          ? sanitizedLayout.treesByTabId[targetTabId]
+          : sanitizedLayout.paneTree ?? undefined;
+      const tree = savedTree === undefined ? undefined : remintCollisions(savedTree);
 
       // 3. Install the tab: patch durable fields in place if it already
       // exists — `removeTab` + `addTab` would destroy the tree the very next
@@ -1230,7 +1302,7 @@ class StateManagerClass {
       } else {
         dispatch(addTab({ ...savedTab, id: targetTabId, isActive: false }));
       }
-      dispatch(addTabTree({ tabId: targetTabId, tree }));
+      if (tree !== undefined) dispatch(addTabTree({ tabId: targetTabId, tree }));
 
       // 4. Activate, then the per-tab maps this ONE tab carries (§0.2 lossiness
       // does not apply to a tab-scoped save — see `SavedLayout.activePaneByTabId`).

@@ -25,6 +25,18 @@ const code = (file: string): string =>
 
 const SOURCE = code(path.join(__dirname, '..', 'LayoutManager.tsx'));
 
+/** The body of a top-level `const <name> = ...` in the component, up to the next
+ *  one. Deliberately NOT delimited on `};` — these bodies contain object literals
+ *  that end that way, and slicing on the first match silently truncates the region
+ *  under test into one that trivially passes. */
+const declBody = (name: string): string => {
+  const lines = SOURCE.split(/\r?\n/);
+  const start = lines.findIndex((l) => l.startsWith(`  const ${name} =`));
+  if (start === -1) throw new Error(`declBody: no top-level declaration for ${name}`);
+  const rest = lines.slice(start + 1).findIndex((l) => /^ {2}const \w+ =/.test(l));
+  return lines.slice(start, rest === -1 ? lines.length : start + 1 + rest).join('\n');
+};
+
 describe('the continuity banner (Task B3 / P1a)', () => {
   it('renders permanently (not gated behind any conditional) with the exact plan copy', () => {
     expect(SOURCE).toContain('<div className="continuity-banner">');
@@ -75,24 +87,37 @@ describe('the save dialog scope radio (Task B5)', () => {
 });
 
 describe('Load is guarded by the dirty check (Task B4)', () => {
-  const handler = (() => {
-    const at = SOURCE.indexOf('const handleLoadLayout = (layoutId: string) => {');
-    expect(at).toBeGreaterThan(-1);
-    return SOURCE.slice(at, SOURCE.indexOf('};', at));
-  })();
+  const handler = declBody('handleLoadLayout');
 
-  it('checks the workspace-level isDirty flag before switching', () => {
-    expect(handler).toMatch(/scope\s*!==\s*'tab'\s*&&\s*isDirty/);
+  /**
+   * EXPECTATION CHANGED (pre-review MEDIUM). This originally required the
+   * literal `scope !== 'tab' && isDirty` — i.e. that the handler read the
+   * Redux `isDirty` value directly. That value is only ever recomputed when the
+   * panel OPENS (`recomputeDirty` has exactly one other dispatch site and
+   * nothing recomputes it on store changes), so it goes stale the moment the
+   * workspace changes while the panel stays open — an API/MCP tab creation, a
+   * pane-split shortcut, a terminal exiting — and the gate waved those exact
+   * cases through. The handler now re-checks at click time, so what is pinned
+   * here is the re-check, not the stale read.
+   */
+  it('re-checks dirtiness at click time rather than trusting the panel-open value', () => {
+    expect(handler).toContain('dispatch(recomputeDirty())');
     expect(handler).toContain('setDirtyGateLayoutId(layoutId)');
     // The gate returns early — `performLoad` (the actual switch) must NOT run in
     // the same branch as opening the gate.
     expect(handler).toMatch(/setDirtyGateLayoutId\(layoutId\);\s*return;/);
+    // The branch is taken on the FRESH value, never on the Redux field.
+    expect(handler).toMatch(/if \(dirtyNow\)/);
+  });
+
+  it('falls back to the last known value if the re-check throws, never to "clean"', () => {
+    // A capture failure must not silently downgrade the gate into a switch.
+    expect(handler).toMatch(/let dirtyNow = isDirty;/);
   });
 
   it('a tab-scoped layout bypasses the gate entirely (plan/025 §2.4)', () => {
-    // The condition is `scope !== 'tab' && isDirty` — for `scope === 'tab'` the
-    // left side is false and the gate can never open, regardless of isDirty.
-    expect(handler).toMatch(/layout\?\.scope\s*!==\s*'tab'/);
+    // Returns before the dirty check is even reached.
+    expect(handler).toMatch(/layout\?\.scope === 'tab'[\s\S]*?return;/);
   });
 
   it('a clean workspace switches immediately, with no dialog in the way', () => {
@@ -100,9 +125,7 @@ describe('Load is guarded by the dirty check (Task B4)', () => {
   });
 
   it('routes a tab-scoped load through loadTabScopedLayout, not the whole-workspace loadLayout', () => {
-    const at = SOURCE.indexOf('const performLoad = async (layoutId: string) => {');
-    expect(at).toBeGreaterThan(-1);
-    const performLoad = SOURCE.slice(at, SOURCE.indexOf('};', SOURCE.indexOf('};', at) + 1));
+    const performLoad = declBody('performLoad');
     expect(performLoad).toMatch(/scope === 'tab'[\s\S]*?loadTabScopedLayout\(layoutId\)/);
     expect(performLoad).toContain('dispatch(loadLayout(layoutId))');
   });
@@ -183,18 +206,6 @@ describe('at most ONE live Undo toast, mirroring the one-deep undo slot', () => 
    * is what keeps the affordance honest, and it is also the only thing that
    * unregisters a handler for a toast dismissed WITHOUT clicking Undo.
    */
-  /** The body of a top-level `const <name> = ...` in the component, up to the
-   *  next one. Deliberately NOT delimited on `};` — the bodies here contain
-   *  object literals that end that way, and slicing on the first match silently
-   *  truncates the region under test into one that trivially passes. */
-  const declBody = (name: string): string => {
-    const lines = SOURCE.split(/\r?\n/);
-    const start = lines.findIndex((l) => l.startsWith(`  const ${name} =`));
-    expect(start).toBeGreaterThan(-1);
-    const rest = lines.slice(start + 1).findIndex((l) => /^ {2}const \w+ =/.test(l));
-    return lines.slice(start, rest === -1 ? lines.length : start + 1 + rest).join('\n');
-  };
-
   it('retires the previous Undo toast before firing a new one', () => {
     const body = declBody('fireUndoToast');
     // The retire must come FIRST — after the new toast is recorded in the ref it

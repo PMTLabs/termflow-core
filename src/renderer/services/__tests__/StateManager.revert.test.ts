@@ -24,6 +24,7 @@ import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager } from '../StateManager';
 import { peekUndo, __resetLayoutUndoForTests } from '../layoutUndo';
+import { layoutUndoKey } from '../windowScope';
 import { getLayoutBaseline, clearLayoutBaseline } from '../layoutBaseline';
 import { captureWorkspaceSnapshot, workspaceIdentity } from '../workspaceSnapshot';
 
@@ -153,5 +154,102 @@ describe('StateManager.revertWorkspace (plan/025 Task A4)', () => {
 
     expect(result).toBe(false);
     expect(store.getState().tabs.tabs.map((t: any) => t.id)).toEqual(['tb-only']);
+  });
+
+  /**
+   * Regression (pre-review HIGH). The undo slot must be spent only once the
+   * revert has actually COMMITTED.
+   *
+   * `takeUndo()` at method entry consumed it before the transaction, so a
+   * revert that was superseded during its 100ms yield returned false having
+   * already destroyed the only copy of the workspace the user asked to get
+   * back — nothing restored, nothing left to retry with, and no error they
+   * could act on. Uses the same overlap technique the loadLayout suite next to
+   * this one uses for its own generation-token tests.
+   */
+  it('does NOT consume the undo slot when the revert is superseded mid-transaction', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-w0', title: 'W0' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-w0', tree: { id: 'pn-w0', type: 'terminal', terminalId: 'tm-w0' } },
+    });
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([
+      {
+        id: 'layout-a', name: 'A',
+        tabs: [{ id: 'tb-a', title: 'A' }],
+        activeTabId: 'tb-a',
+        paneTree: { id: 'pn-a', type: 'terminal', terminalId: 'tm-a' },
+        activePaneId: 'pn-a',
+        treesByTabId: { 'tb-a': { id: 'pn-a', type: 'terminal', terminalId: 'tm-a' } },
+        createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'layout-b', name: 'B',
+        tabs: [{ id: 'tb-b', title: 'B' }],
+        activeTabId: 'tb-b',
+        paneTree: { id: 'pn-b', type: 'terminal', terminalId: 'tm-b' },
+        activePaneId: 'pn-b',
+        treesByTabId: { 'tb-b': { id: 'pn-b', type: 'terminal', terminalId: 'tm-b' } },
+        createdAt: 1, updatedAt: 1,
+      },
+    ]));
+
+    // Load A, so W0 is in the undo slot.
+    await StateManager.loadLayout('layout-a', store.dispatch);
+    expect(peekUndo()?.tabs.map((t: any) => t.id)).toEqual(['tb-w0']);
+
+    // Start a revert, then let a load of B take the generation while the
+    // revert is still inside its yield.
+    const revert = StateManager.revertWorkspace(store.dispatch);
+    await new Promise(r => setTimeout(r, 30));
+    const load = StateManager.loadLayout('layout-b', store.dispatch);
+
+    const [reverted] = await Promise.all([revert, load]);
+
+    expect(reverted).toBe(false);
+    // The whole point: W0 is still recoverable. Before the fix this was null.
+    expect(peekUndo()).not.toBeNull();
+    expect(peekUndo()!.tabs.map((t: any) => t.id)).toEqual(['tb-w0']);
+  });
+
+  /**
+   * Regression (pre-review MEDIUM). A structurally invalid snapshot must never
+   * enter the replacement transaction.
+   *
+   * `layoutUndo` hydrates from localStorage, where a truncated or foreign write
+   * parses fine as an object while carrying no `tabs`. `{}` is truthy, so a
+   * bare null-check let it through: `clearCurrentState` wiped the live
+   * workspace and `populateWorkspace` then no-opped on it (its body is entirely
+   * inside `if (data.tabs?.length > 0)`), reporting success and leaving the
+   * window empty.
+   */
+  it('refuses a malformed persisted snapshot instead of clearing the workspace into it', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-live', title: 'Live' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-live', tree: { id: 'pn-live', type: 'terminal', terminalId: 'tm-live' } },
+    });
+
+    // A parseable but structurally empty blob, as a partial write would leave.
+    localStorage.setItem(layoutUndoKey(), '{}');
+    __resetLayoutUndoForTests(); // force a re-hydrate from storage
+
+    const result = await StateManager.revertWorkspace(store.dispatch);
+
+    expect(result).toBe(false);
+    // The live workspace is untouched — this is the assertion that was false
+    // before the fix (both of these were empty).
+    expect(store.getState().tabs.tabs.map((t: any) => t.id)).toEqual(['tb-live']);
+    expect(store.getState().panes.treesByTabId['tb-live']).toEqual({
+      id: 'pn-live', type: 'terminal', terminalId: 'tm-live',
+    });
+    // ...and the unusable blob is discarded rather than left to be re-offered.
+    expect(peekUndo()).toBeNull();
   });
 });

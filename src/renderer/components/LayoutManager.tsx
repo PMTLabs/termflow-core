@@ -116,10 +116,22 @@ export const LayoutManager: React.FC = () => {
       // plan/025 §2.6 step 2: the dirty gate's "Save current layout..." choice opens
       // THIS dialog rather than saving immediately (see `handleDirtyGateSave` below);
       // once the save has landed, resume the load the user originally asked for.
+      //
+      // Only a WORKSPACE-scope save satisfies the gate. The gate's promise is
+      // "your unsaved workspace is preserved before I replace it", and a
+      // tab-scope save preserves exactly one tab — resuming on it would replace
+      // every other tab having saved none of them, which is the loss the gate
+      // was standing in front of. The scope radio stays available (a user may
+      // genuinely decide to save just this tab), so the pending load is simply
+      // NOT resumed and the gate is re-shown for the decision it still needs.
       if (pendingLoadAfterSave) {
         const id = pendingLoadAfterSave;
         setPendingLoadAfterSave(null);
-        await performLoad(id);
+        if (saveScope === 'workspace') {
+          await performLoad(id);
+        } else {
+          setDirtyGateLayoutId(id);
+        }
       }
     } catch (error) {
       console.error('Failed to save layout:', error);
@@ -187,13 +199,36 @@ export const LayoutManager: React.FC = () => {
   // plan/025 §2.6 step 2 — the dirty gate. `isDirty` is a WORKSPACE-level flag
   // (§2.5), so it only ever gates a workspace-scope load: a tab-scoped load never
   // touches the rest of the workspace (§2.4) and has nothing for the gate to protect.
-  const handleLoadLayout = (layoutId: string) => {
+  const handleLoadLayout = async (layoutId: string) => {
     const layout = savedLayouts.find(l => l.id === layoutId);
-    if (layout?.scope !== 'tab' && isDirty) {
+    if (layout?.scope === 'tab') {
+      // A tab load never touches the rest of the workspace (§2.4), so the
+      // workspace-level gate has nothing to protect here. Its own tab is
+      // covered by the undo snapshot `loadTabScopedLayout` pushes.
+      await performLoad(layoutId);
+      return;
+    }
+    // Recomputed HERE, not read from the panel-open snapshot. `recomputeDirty`
+    // has exactly one other dispatch site (the open effect above) and nothing
+    // recomputes on store changes, so the Redux `isDirty` goes stale the moment
+    // the workspace changes while the panel stays open — which an API/MCP tab
+    // creation, a pane-split shortcut, or a terminal exiting all do without
+    // going anywhere near this component. Judging a switch on that stale value
+    // is precisely the case the gate exists for, waved through.
+    let dirtyNow = isDirty;
+    try {
+      dirtyNow = await dispatch(recomputeDirty()).unwrap();
+    } catch (e) {
+      // Capturing a snapshot failed. Fall back to the last known value — and
+      // note the fallback errs toward SHOWING the gate when that value is
+      // dirty, never toward silently switching.
+      console.warn('LayoutManager: dirty re-check failed, using last known value', e);
+    }
+    if (dirtyNow) {
       setDirtyGateLayoutId(layoutId);
       return;
     }
-    performLoad(layoutId);
+    await performLoad(layoutId);
   };
 
   const handleDirtyGateSave = () => {

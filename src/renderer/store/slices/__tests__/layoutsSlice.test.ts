@@ -148,6 +148,10 @@ describe('layoutsSlice saveCurrentLayout scope', () => {
     expect(next.activeLayoutId).toBe('layout-new');
     expect(next.savedLayouts).toEqual(layouts);
     expect(next.isLoading).toBe(false);
+    // The workspace now matches what was just saved, so it is clean. Leaving
+    // isDirty set made the very next Load in the same session re-open the dirty
+    // gate over a workspace with nothing unsaved in it.
+    expect(next.isDirty).toBe(false);
   });
 
   /**
@@ -157,8 +161,8 @@ describe('layoutsSlice saveCurrentLayout scope', () => {
    * Starting from a state that already has a DIFFERENT active layout so a
    * reducer that always overwrites it (ignoring scope) is caught.
    */
-  it('tab scope does NOT claim activeLayoutId', () => {
-    const before = { ...initial(), activeLayoutId: 'layout-workspace' };
+  it('tab scope does NOT claim activeLayoutId, and does not declare the workspace clean', () => {
+    const before = { ...initial(), activeLayoutId: 'layout-workspace', isDirty: true };
     const layouts = [makeLayout({ id: 'layout-tab' })];
     getSavedLayoutsMock.mockReturnValue(layouts);
 
@@ -173,6 +177,9 @@ describe('layoutsSlice saveCurrentLayout scope', () => {
 
     expect(next.activeLayoutId).toBe('layout-workspace');
     expect(next.savedLayouts).toEqual(layouts);
+    // ...and for the same reason it must not declare the workspace clean:
+    // every other tab's unsaved state was never written anywhere.
+    expect(next.isDirty).toBe(true);
   });
 
   it('pending sets isLoading and clears error; rejected records the error message', () => {
@@ -273,18 +280,41 @@ describe('layoutsSlice updateLayout', () => {
     expect(next.error).toBeNull();
   });
 
-  it('fulfilled refreshes savedLayouts and claims activeLayoutId as the updated layout', () => {
+  it('fulfilled refreshes savedLayouts, claims activeLayoutId, and marks the workspace clean', () => {
     const layouts = [makeLayout({ id: 'layout-x', name: 'Updated' })];
     getSavedLayoutsMock.mockReturnValue(layouts);
 
     const next = layoutsReducer(
-      { ...initial(), activeLayoutId: null },
-      updateLayout.fulfilled('layout-x', 'req-2', 'layout-x'),
+      { ...initial(), activeLayoutId: null, isDirty: true },
+      updateLayout.fulfilled({ layoutId: 'layout-x', scope: 'workspace' }, 'req-2', 'layout-x'),
     );
 
     expect(next.isLoading).toBe(false);
     expect(next.activeLayoutId).toBe('layout-x');
     expect(next.savedLayouts).toEqual(layouts);
+    // The workspace now matches what was just written. Leaving isDirty set made
+    // the very next Load re-open the dirty gate over a clean workspace.
+    expect(next.isDirty).toBe(false);
+  });
+
+  /**
+   * The payload gained a `scope` (it was a bare layout id) so this branch can
+   * exist: updating a TAB-scoped layout re-captures one tab and says nothing
+   * about the workspace, so it must claim neither the active-layout slot nor
+   * "clean" — otherwise every other tab's genuinely unsaved state is silently
+   * declared saved, and the gate that exists to protect it stops opening.
+   */
+  it('a TAB-scoped update claims neither activeLayoutId nor clean', () => {
+    getSavedLayoutsMock.mockReturnValue([makeLayout({ id: 'layout-tab' })]);
+
+    const next = layoutsReducer(
+      { ...initial(), activeLayoutId: null, isDirty: true },
+      updateLayout.fulfilled({ layoutId: 'layout-tab', scope: 'tab' }, 'req-2b', 'layout-tab'),
+    );
+
+    expect(next.isLoading).toBe(false);
+    expect(next.activeLayoutId).toBeNull();
+    expect(next.isDirty).toBe(true);
   });
 
   it('rejected sets isLoading false and records the error message', () => {

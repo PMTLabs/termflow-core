@@ -110,7 +110,12 @@ export const updateLayout = createAsyncThunk(
     if (!success) {
       throw new Error('Failed to update layout');
     }
-    return layoutId;
+    // The layout's own scope decides whether this re-capture makes the WORKSPACE
+    // clean. A tab-scope update re-captured one tab, so the rest of the
+    // workspace is exactly as dirty as it was — the same rule `saveLayout` and
+    // `StateManager.updateLayout`'s baseline block already apply.
+    const scope = StateManager.getSavedLayouts().find(l => l.id === layoutId)?.scope ?? 'workspace';
+    return { layoutId, scope };
   }
 );
 
@@ -165,6 +170,12 @@ const layoutsSlice = createSlice({
         // keeps `activeLayoutId` consistent with that same rule.
         if (action.payload.scope !== 'tab') {
           state.activeLayoutId = action.payload.layoutId;
+          // The workspace now MATCHES what was just written, so it is clean.
+          // Without this the panel keeps the pre-save `isDirty` and the very
+          // next Load in the same session re-opens the dirty gate over a
+          // workspace that has nothing unsaved in it — the gate crying wolf is
+          // how a user learns to click through it.
+          state.isDirty = false;
         }
       })
       .addCase(saveCurrentLayout.rejected, (state, action) => {
@@ -279,11 +290,15 @@ const layoutsSlice = createSlice({
         state.isLoading = false;
         // Refresh layouts list to get updated timestamps
         state.savedLayouts = StateManager.getSavedLayouts();
-        // plan/025 §2.5: updating a layout re-captures the CURRENT workspace
-        // under it, so it becomes the active/clean reference exactly like a
-        // fresh save (`StateManager.updateLayout` already recorded the
-        // baseline itself).
-        state.activeLayoutId = action.payload;
+        // plan/025 §2.5: updating a WORKSPACE-scope layout re-captures the
+        // current workspace under it, so it becomes the active/clean reference
+        // exactly like a fresh save (`StateManager.updateLayout` already
+        // recorded the baseline itself). A TAB-scope update captured one tab
+        // and says nothing about the workspace, so it claims neither.
+        if (action.payload.scope !== 'tab') {
+          state.activeLayoutId = action.payload.layoutId;
+          state.isDirty = false;
+        }
       })
       .addCase(updateLayout.rejected, (state, action) => {
         state.isLoading = false;
