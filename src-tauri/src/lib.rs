@@ -1725,17 +1725,32 @@ pub fn run() {
         // the tracker — only the in-memory record updates here.
         if matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
             if let Some(state) = window.app_handle().try_state::<AppState>() {
-                if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
-                    state.windows.note_geometry(
-                        window.label(),
-                        pos.x,
-                        pos.y,
-                        size.width,
-                        size.height,
-                        window.is_maximized().unwrap_or(false),
-                    );
+                // A window the registry never registered is skipped BEFORE any geometry
+                // is read. `note_geometry` already drops it (it resolves the label to an
+                // id first and returns on a miss), but merely REACHING that guard costs
+                // an `is_maximized()` — and on macOS that is a MUTATING query: to ask
+                // AppKit whether a borderless window is zoomed, tao swaps its style mask
+                // to Titled|Resizable and back, and each swap rebuilds the whole
+                // NSThemeFrame (title bar, traffic lights, their SwiftUI layout).
+                //
+                // The `drag-preview` window is borderless and is moved once per frame for
+                // the entire length of a tab drag, so paying that here pegged the main
+                // thread at 100% and froze the app until it was force-quit — for a value
+                // `note_geometry` then threw away. Cheap for a registered window, ruinous
+                // for this one, so the label check comes first.
+                if state.windows.id_for_label(window.label()).is_some() {
+                    if let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) {
+                        state.windows.note_geometry(
+                            window.label(),
+                            pos.x,
+                            pos.y,
+                            size.width,
+                            size.height,
+                            window.is_maximized().unwrap_or(false),
+                        );
+                    }
+                    state.windows.persist_if_due();
                 }
-                state.windows.persist_if_due();
             }
         }
     })
@@ -1850,5 +1865,47 @@ mod respawn_tests {
         let mut new = base();
         new.expose_on_network = true;
         assert!(mcp_respawn_needed(&old, &new));
+    }
+
+    /// The geometry handler must decide a window is TRACKED before it asks whether it is
+    /// maximized. A tripwire over source, because the thing being guarded is a cost, not a
+    /// result: both orderings record exactly the same geometry, and the wrong one is only
+    /// visible as an app that freezes on macOS while a borderless window is dragged.
+    ///
+    /// `is_maximized()` is not a read on macOS. tao cannot ask AppKit whether a borderless
+    /// window is zoomed without temporarily swapping its style mask to Titled|Resizable and
+    /// back, and each swap rebuilds the window's entire NSThemeFrame. Evaluated as an
+    /// argument to `note_geometry` — which then discards it for an unregistered label — that
+    /// ran twice per frame for every move of the `drag-preview` window and pegged the main
+    /// thread for the whole drag.
+    ///
+    /// Comments are stripped first: the fix is explained in a comment that names
+    /// `is_maximized`, and an explanation must not be able to satisfy the test that polices it.
+    #[test]
+    fn geometry_tracking_checks_the_label_before_asking_is_maximized() {
+        const SRC: &str = include_str!("lib.rs");
+        let anchor = SRC
+            .find("state.windows.note_geometry(")
+            .expect("the geometry handler moved; this tripwire needs re-anchoring");
+        let start = SRC[..anchor]
+            .rfind("WindowEvent::Moved")
+            .expect("the Moved/Resized guard moved; this tripwire needs re-anchoring");
+        let code: String = SRC[start..]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let gate = code
+            .find("id_for_label")
+            .expect("geometry tracking must gate on a registered label, or drag-preview reaches is_maximized()");
+        let query = code
+            .find("is_maximized")
+            .expect("the handler no longer reads is_maximized; re-check what this test is for");
+        assert!(
+            gate < query,
+            "the label gate must come BEFORE is_maximized(): reaching that call for an \
+             untracked window is what froze the app during a tab drag on macOS"
+        );
     }
 }
