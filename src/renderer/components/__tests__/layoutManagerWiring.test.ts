@@ -214,10 +214,18 @@ describe('the Undo toast (Task B4 step 3)', () => {
     expect(body).toMatch(/if\s*\(!committed\)/);
     const guardAt = body.indexOf('if (!committed)');
     expect(guardAt).toBeGreaterThan(-1);
-    expect(body.indexOf('setShowLayoutManager(false)')).toBeGreaterThan(guardAt);
+    const closeAt = body.indexOf('setShowLayoutManager(false)');
+    expect(closeAt).toBeGreaterThan(guardAt);
     expect(body.indexOf('fireUndoToast(')).toBeGreaterThan(guardAt);
     // ...and the refusal is reported rather than swallowed.
     expect(body.slice(guardAt)).toContain('addToast(');
+    // The `return` is what makes the condition a GATE rather than a comment.
+    // Round-3 review: asserting only that the effects come AFTER the `if` is
+    // satisfied by a branch that toasts and then falls straight through into
+    // them. Asserted as "a return occurs between the guard and the first
+    // success-only effect", which is exactly the property a fall-through
+    // breaks.
+    expect(body.slice(guardAt, closeAt)).toContain('return;');
   });
 
   /**
@@ -237,7 +245,10 @@ describe('the Undo toast (Task B4 step 3)', () => {
     const body = SOURCE.slice(at, SOURCE.indexOf('};', SOURCE.indexOf('};', at) + 1));
     expect(body).toMatch(/if\s*\(!StateManager\.resetToDefaultLayout\(dispatch\)\)/);
     const guardAt = body.indexOf('if (!StateManager.resetToDefaultLayout(dispatch))');
-    expect(body.indexOf('resetLayoutTracking()')).toBeGreaterThan(guardAt);
+    const trackingAt = body.indexOf('resetLayoutTracking()');
+    expect(trackingAt).toBeGreaterThan(guardAt);
+    // Same gate/fall-through distinction as `performLoad` above.
+    expect(body.slice(guardAt, trackingAt)).toContain('return;');
   });
 
   it('the header Revert button is enabled only while an undo snapshot exists', () => {

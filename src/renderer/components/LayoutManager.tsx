@@ -144,9 +144,17 @@ export const LayoutManager: React.FC = () => {
   // empty or its snapshot went stale, and each caller was swallowing that
   // differently — the button by doing nothing visible, the toast by not
   // looking at all.
+  // Deliberately says nothing about WHY, because `false` covers two cases that
+  // differ in exactly that respect: the undo slot was empty or its snapshot was
+  // structurally invalid (gone), or the revert was superseded by a newer
+  // replacement at a generation check — which uses `peekUndo` and never spends
+  // the slot, so the snapshot is still there to retry. An earlier version of
+  // this message said the workspace "is no longer available", which is false on
+  // the second path. The retryability is already on screen without being
+  // claimed here: `Revert` is enabled exactly while `peekUndo()` is non-null.
   const fireRevertFailedToast = () => {
     dispatch(addToast({
-      message: 'Could not restore the previous workspace — it is no longer available.',
+      message: 'Could not restore the previous workspace.',
       type: 'warning',
     }));
   };
