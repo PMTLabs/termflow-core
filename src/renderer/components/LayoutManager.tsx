@@ -62,7 +62,6 @@ export const LayoutManager: React.FC = () => {
   // same operation Update performed before it could be chosen.
   const [updateScope, setUpdateScope] = useState<'workspace' | 'tab'>('workspace');
   const [pendingReset, setPendingReset] = useState(false);
-  const [pendingRestore, setPendingRestore] = useState(false);
   // Subscribing here is also what keeps the poll alive while this panel is
   // open — the tracker runs only while something is listening.
   const hiddenAgents = useHiddenAgentTerminals();
@@ -460,8 +459,16 @@ export const LayoutManager: React.FC = () => {
     }
   };
 
-  const confirmRestore = () => {
-    setPendingRestore(false);
+  // No confirmation step. The button that calls this already carries the count
+  // in its own label and lists the terminals in its tooltip, so a dialog would
+  // only re-read what the user just clicked. The title-bar badge keeps its
+  // confirm: that is a glanceable icon, and the dialog is where its list of
+  // terminals is shown for the first time.
+  //
+  // Safe to act immediately regardless: this only ADDS tabs, every terminal it
+  // attaches to is already running, and nothing is restarted or closed.
+  const handleRestoreRunning = () => {
+    if (hiddenAgents.length === 0) return;
     const { restored, skipped } = restoreHiddenAgentTerminals(hiddenAgents, dispatch);
     // Reported rather than silent. `skipped` is not an error — the set is
     // polled, so between the last poll and this click a layout load may have
@@ -605,7 +612,7 @@ export const LayoutManager: React.FC = () => {
                 is the honest resting state. */}
             <button
               className="btn btn-warning"
-              onClick={() => setPendingRestore(true)}
+              onClick={handleRestoreRunning}
               disabled={hiddenAgents.length === 0 || isLoading}
               title={hiddenAgents.length === 0
                 ? 'Every running agent CLI is already open in this layout.'
@@ -960,24 +967,6 @@ export const LayoutManager: React.FC = () => {
         onCancel={() => setPendingReset(false)}
       />
 
-      {/* Not `destructive`: this only ADDS tabs, and every terminal it attaches
-          to is already running. Confirmed rather than immediate because it can
-          add several tabs at once, which is a big enough change to the workspace
-          that the user should see the list first. */}
-      <ConfirmDialog
-        isOpen={pendingRestore && hiddenAgents.length > 0}
-        title={hiddenAgents.length === 1 ? 'Restore 1 running CLI' : `Restore ${hiddenAgents.length} running CLIs`}
-        message={
-          `These are still running with no pane in this layout showing them: ${hiddenAgents.map(h => h.name).join(', ')}. ` +
-          'Each gets a new tab attached to the terminal that is already running — nothing is restarted, and no scrollback is lost.'
-        }
-        confirmText="Restore"
-        confirmMnemonic="R"
-        cancelText="Cancel"
-        cancelMnemonic="A"
-        onConfirm={confirmRestore}
-        onCancel={() => setPendingRestore(false)}
-      />
     </div>
   );
 };
