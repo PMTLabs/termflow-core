@@ -17,6 +17,78 @@ import { readSource } from '../../../utils/readSource';
 
 const SOURCE = readSource(path.join(__dirname, '..', 'TerminalDisplay.tsx'));
 
+/**
+ * `SOURCE` with its comments removed, for every assertion below that is STRUCTURAL.
+ *
+ * Raw `toContain` on source counts text inside comments, so a negative is only ever one
+ * explanatory sentence away from being satisfied by the very comment that explains it — the
+ * round-8 defect, found on a correction written to fix the previous instance of it. Stripping
+ * once, here, is what stops each new case having to remember.
+ *
+ * `[^\n]*` and NO `$` anchor, deliberately. This file is CRLF, and in JavaScript `.` does not
+ * match `\r` — it is a line terminator — so `.*$` never reaches end-of-string on a CRLF line and
+ * the strip silently does nothing. `(^|[^:])` is what keeps a `https://` inside a string literal
+ * from eating the rest of its line.
+ */
+const CODE = SOURCE
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n')
+  .map((l) => l.replace(/(^|[^:])\/\/[^\n]*/, '$1'))
+  .join('\n');
+
+/**
+ * The body of the `{ … }` block that opens at or after `from`, found by BRACE MATCHING.
+ *
+ * A fixed-size `slice` cannot do this job. `onRelocated:`'s callback outgrew the 900 characters
+ * once measured for it, so `not.toContain('search.close()')` stopped covering the end of the
+ * very callback it names — and the LAST statement is the natural place to add a closer. A window
+ * that has to be re-measured every time the code inside it changes is not a tripwire.
+ */
+function blockBodyAt(from: number): string {
+  const open = CODE.indexOf('{', from);
+  expect(open).toBeGreaterThan(-1);
+  let depth = 0;
+  for (let i = open; i < CODE.length; i += 1) {
+    if (CODE[i] === '{') depth += 1;
+    else if (CODE[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return CODE.slice(open + 1, i);
+    }
+  }
+  throw new Error(`unbalanced braces from ${from}`);
+}
+
+/**
+ * The whole context-menu ELEMENT whose `label:` sits at `labelAt` — from the end of the previous
+ * sibling through this item's own closing brace.
+ *
+ * Anchoring a negative on the LABEL cannot see a gate, and that is the point of this helper.
+ * A conditional spread's condition is written BEFORE the label it wraps, so
+ * `...(!relocationHost ? [ { label: 'Find…', … } ] : []),` leaves every forward-looking
+ * assertion green while removing the item from the canvas overlay's menu — the one surface the
+ * requirement is about. Reaching back past the previous `,` is what puts such a wrapper inside
+ * the region being asserted on.
+ */
+function menuItemRegion(labelAt: number): string {
+  // Back to the `{` that opens this item, counting braces so a nested object cannot be
+  // mistaken for it.
+  let depth = 0;
+  let open = -1;
+  for (let i = labelAt; i >= 0; i -= 1) {
+    if (CODE[i] === '}') depth += 1;
+    else if (CODE[i] === '{') {
+      if (depth === 0) { open = i; break; }
+      depth -= 1;
+    }
+  }
+  expect(open).toBeGreaterThan(-1);
+  // ...and back again to the previous sibling's comma, which is where anything wrapping this
+  // item has to have been written.
+  const prev = CODE.lastIndexOf(',', open);
+  expect(prev).toBeGreaterThan(-1);
+  return CODE.slice(prev + 1, open) + blockBodyAt(open);
+}
+
 describe('TerminalDisplay relocation wiring', () => {
   // §13 T14's last clause / §4.2: the render output is LITERALLY unchanged, and
   // there is no portal anywhere. D1 killed the portal in rev 4 and reviews 089/090
@@ -54,44 +126,17 @@ describe('TerminalDisplay relocation wiring', () => {
   // that can pin this file's own refusal behaviour. That is a reason to make it assert the
   // body, not a reason to accept a tripwire that a regression walks straight through.
   it('handles a refused mount in the block BODY, not just at the guard line', () => {
-    const open = SOURCE.indexOf('if (!engine.mount(pane)) {');
-    expect(open).toBeGreaterThan(-1);
-
-    // Walk to the matching brace, so these assertions cannot silently drift into
-    // code that follows the block.
-    const from = SOURCE.indexOf('{', open);
-    let depth = 0;
-    let end = -1;
-    for (let i = from; i < SOURCE.length; i += 1) {
-      if (SOURCE[i] === '{') depth += 1;
-      else if (SOURCE[i] === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
-    }
-    expect(end).toBeGreaterThan(from);
-
-    // STRIP COMMENTS BEFORE MATCHING (round 8 LOW). Raw `toContain` on source counts text
-    // inside comments, so prefixing the real statements with `//` left every required
-    // substring present and the test green while the refusal branch did nothing at
-    // runtime. That is the same "asserts presence, not behaviour" defect one level down —
-    // found on the correction written to fix the previous instance of it.
+    // Brace-matched and comment-stripped, both by the shared helpers at the top of this file.
+    // The strip is not optional (round 8 LOW): prefixing the real statements with `//` left
+    // every required substring present and this test green while the refusal branch did
+    // nothing at runtime.
     //
     // This still cannot prove EXECUTION (a body wrapped in `if (false)` would pass), which
     // is stated plainly rather than papered over: the real fix is an executable refusal
     // helper, recorded in `153` as the follow-up.
-    // `[^\n]*` and NO `$` anchor, deliberately. This file is CRLF, and in JavaScript `.`
-    // does not match `\r` — it is a line terminator — so `.*$` never reaches end-of-string
-    // on a CRLF line and the strip silently does nothing. The first version of this fix
-    // had exactly that bug and passed the mutation test it was written to fail.
-    const body = SOURCE.slice(from + 1, end)
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .split('\n')
-      .map((l) => l.replace(/(^|[^:])\/\/[^\n]*/, '$1'))
-      .join('\n');
+    const open = CODE.indexOf('if (!engine.mount(pane)) {');
+    expect(open).toBeGreaterThan(-1);
+    const body = blockBodyAt(open);
 
     // Drops the never-wired engine. Without this the next reader of
     // `engineRef.current!.terminal` hits a getter that throws.
@@ -145,19 +190,26 @@ describe('TerminalDisplay relocation wiring', () => {
   // and the SEARCH BAR is deliberately left open with its state intact, because it
   // holds user-typed state and its highlights travel with the buffer.
   it('closes the coordinate-anchored overlays on relocation and leaves search alone', () => {
-    const start = SOURCE.indexOf('onRelocated:');
+    const start = CODE.indexOf('onRelocated:');
     expect(start).toBeGreaterThan(-1);
-    // PLAN CORRECTION (015 Task 13): the plan sliced 400 chars, which cannot reach
-    // the calls its own Step 4 snippet places — the prescribed comment blocks put
-    // `setContextMenu(null)` at +536 and `setSchemaPicker(null)` at +591. 900 still
-    // ends strictly INSIDE the onRelocated callback (`onAborted:` begins at +968),
-    // so the locality this tripwire exists to assert is preserved.
-    const body = SOURCE.slice(start, start + 900);
+    // The WHOLE callback, brace-matched. It used to be `slice(start, start + 900)`, a window
+    // measured against the code of the day: the callback has since grown past it, so
+    // `not.toContain('search.close()')` no longer covered its last statement — the natural
+    // place to add a closer — and this tripwire would have stayed green while every relocation
+    // silently discarded the user's search.
+    const body = blockBodyAt(start);
     expect(body).toContain('setContextMenu(null)');
     expect(body).toContain('setPathPicker(null)');
     expect(body).toContain('setSchemaPicker(null)');
     expect(body).toContain('suggestRef.current.close()');
-    expect(body).not.toContain('setSearchOpen(false)');
+    // The search bar is still left alone. UPDATED DELIBERATELY for `plan/027` §1.3: the
+    // state moved out of `TerminalSearchBar` into `useTerminalSearch`, so `setSearchOpen`
+    // no longer exists and the old assertion could only ever pass. The closer is now
+    // `search.close()` — which clears the SearchAddon's highlights AND resets the user's
+    // query — so that is what must not appear here. The requirement is unchanged: a
+    // relocation must not discard a search the user typed, and the highlights live on the
+    // buffer and travel with `term.element`.
+    expect(body).not.toContain('search.close()');
   });
 
   // §5.1's recovery contract: an 'aborted' return must TELL THE USER. That, not a
@@ -221,10 +273,13 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
     expect(SOURCE).toContain('...(paneId && !relocationHost ? [');
     // The text actions are NOT gated: they act on the engine, so they are correct on every
     // surface. Pairing the negative with a positive is what stops an over-broad gate passing.
-    const copyAt = SOURCE.indexOf("label: 'Copy',");
-    expect(copyAt).toBeGreaterThan(SOURCE.indexOf('...(paneId && !relocationHost ? ['));
-    expect(SOURCE.slice(copyAt, copyAt + 400)).toContain("label: 'Paste',");
-    expect(SOURCE.slice(copyAt, copyAt + 400)).not.toContain('relocationHost');
+    const copyAt = CODE.indexOf("label: 'Copy',");
+    expect(copyAt).toBeGreaterThan(CODE.indexOf('...(paneId && !relocationHost ? ['));
+    expect(CODE.slice(copyAt, copyAt + 400)).toContain("label: 'Paste',");
+    // The negative is anchored on the ITEM, not on its label: a conditional spread's condition
+    // is written BEFORE the label, so a 400-character forward window cannot see one.
+    expect(menuItemRegion(copyAt)).not.toContain('relocationHost');
+    expect(menuItemRegion(copyAt)).not.toContain('...(');
   });
 
   it('publishes the context-menu trigger, as a stable callback that opens the menu', () => {
@@ -291,5 +346,128 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
     expect(SOURCE).toContain('<ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />');
     expect(SOURCE).toContain('{suggest.open && (');
     expect(SOURCE).not.toContain('createPortal');
+  });
+});
+
+/**
+ * `plan/027` — the find bar's state is published, and the Find item is not gated.
+ *
+ * Both halves are invisible to every other suite. `surfaceChrome.test.tsx` proves the registry
+ * carries the two new fields and `nodeTerminal.test.tsx` proves the overlay draws and triggers
+ * from them, but neither can see whether THIS component still feeds them — and the failure is
+ * silent: Ctrl+F on the overlay would simply do nothing while every other test stayed green.
+ */
+describe('plan/027 — publishing the search state', () => {
+  it('lifts the state into useTerminalSearch instead of keeping it in the bar', () => {
+    // The TERMINAL ID is passed too, and it is load-bearing rather than housekeeping: it is
+    // what resets the bar when `TerminalPane`'s reuse path swaps the terminal under this same
+    // component instance (review 098 A1). Without it the bar stays open over terminal B showing
+    // A's query, still counting A's matches.
+    expect(SOURCE).toContain('const search = useTerminalSearch(engineRef, terminalId);');
+    // The old local state is gone. Two `TerminalSearchBar`s each owning their own copy is the
+    // shape §1.3 rules out: the bar's as-you-type effect runs on mount with an empty query and
+    // calls `clearSearch()`, so a second one mounting wipes the first one's live search.
+    expect(SOURCE).not.toContain('const [searchOpen, setSearchOpen]');
+    expect(SOURCE).not.toContain('const [searchFocusToken, setSearchFocusToken]');
+  });
+
+  /**
+   * Both new fields reach the registry. `search` is the view state the overlay DRAWS; `openSearch`
+   * is the trigger its Ctrl+F and both context menus CALL, and it is separate because none of
+   * those callers render anything.
+   */
+  it('publishes the search view state and the open trigger', () => {
+    const at = SOURCE.indexOf('setSurfaceChrome(terminalId, chromeOwner.current, {');
+    expect(at).toBeGreaterThan(-1);
+    const publish = SOURCE.slice(at, SOURCE.indexOf('});', at));
+    expect(publish).toMatch(/^\s*search,\s*$/m);
+    expect(publish).toContain('openSearch: search.openSearch,');
+  });
+
+  /**
+   * ...and every one of them is in the effect's DEPENDENCY ARRAY.
+   *
+   * This is the half of the four-part contract that has no other guard. `same()` deciding a
+   * field matters is worth nothing if the effect never re-runs to publish the new value: the
+   * overlay would keep drawing a query the user has since changed, and — worse for the
+   * callbacks — keep calling a closure from a render that is gone.
+   */
+  it('re-publishes when any search sub-field changes', () => {
+    const at = SOURCE.indexOf('setSurfaceChrome(terminalId, chromeOwner.current, {');
+    const deps = SOURCE.slice(SOURCE.indexOf('}, [', at), SOURCE.indexOf(']);', at));
+    for (const field of [
+      'search.open', 'search.query', 'search.caseSensitive', 'search.wholeWord', 'search.regex',
+      'search.result', 'search.focusToken', 'search.setQuery', 'search.toggleCaseSensitive',
+      'search.toggleWholeWord', 'search.toggleRegex', 'search.next', 'search.previous',
+      'search.close', 'search.openSearch',
+    ]) {
+      // Matched with a trailing-identifier guard, not `toContain`. A bare substring makes
+      // `search.open` satisfied by `search.openSearch` — so dropping `search.open` (the field
+      // that decides whether the overlay draws a bar at all) would pass. That is the weak-oracle
+      // failure this whole file exists to avoid one level down.
+      expect(deps).toMatch(new RegExp(`${field.replace('.', '\\.')}(?![A-Za-z0-9_])`));
+    }
+  });
+
+  // The pane still renders its own bar, unchanged and UNGATED. Gating it on `!relocationHost`
+  // was considered and rejected (§1.3): the pane copy is inert in a non-painting subtree, and
+  // the branch would have nothing behind it.
+  it('still renders the bar for the pane, from the published state', () => {
+    expect(SOURCE).toContain('{search.open && <TerminalSearchBar search={search} />}');
+    expect(SOURCE).not.toContain('createPortal');
+  });
+
+  // The engine's own Ctrl+F goes through the same one trigger, so the shortcut and the two menu
+  // items cannot drift into opening search two different ways.
+  it('routes the engine Ctrl+F through the same trigger', () => {
+    expect(SOURCE).toContain('onOpenSearch: () => search.openSearch(),');
+  });
+});
+
+/**
+ * `plan/027` R2 — Find… in the terminal content menu.
+ *
+ * The gating is the whole point of this case. Search acts on the ENGINE, which is the same
+ * engine wherever its surface is drawn, so Find belongs with Copy/Paste/Clear and Mute — not
+ * with the `!relocationHost` pane-tree block, whose items would silently re-lay-out an
+ * off-screen tab. Joining that block would remove Find from the canvas overlay, which is the
+ * one surface R1 and R2 are about.
+ */
+describe('plan/027 R2 — the content menu Find item', () => {
+  const findAt = () => {
+    const at = CODE.indexOf("label: 'Find…',");
+    expect(at).toBeGreaterThan(-1);
+    return at;
+  };
+
+  it('sits AFTER the pane-tree block, outside its gate', () => {
+    const gateAt = CODE.indexOf('...(paneId && !relocationHost ? [');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(findAt()).toBeGreaterThan(gateAt);
+    // Ungated, like the text actions it sits with — asserted over the ITEM, not over a window
+    // that starts at its label. A conditional spread's condition is written BEFORE the label,
+    // so `...(!relocationHost ? [ … ] : []),` around this item satisfied all four of this
+    // describe's assertions while removing Find from the canvas overlay's menu — the one
+    // surface R1 and R2 are about. `...(` is banned as well as the identifier, so a gate on
+    // some OTHER flag cannot slip in either.
+    //
+    // The paired positive is the placement check below: an item deleted outright would also
+    // contain no `relocationHost`.
+    const item = menuItemRegion(findAt());
+    expect(item).not.toContain('relocationHost');
+    expect(item).not.toContain('...(');
+  });
+
+  it('is placed beside Select All, and opens the one search', () => {
+    const selectAllAt = CODE.indexOf("label: 'Select All',");
+    expect(selectAllAt).toBeGreaterThan(-1);
+    expect(findAt()).toBeGreaterThan(selectAllAt);
+    expect(menuItemRegion(findAt())).toContain('click: () => search.openSearch(),');
+  });
+
+  // The first accelerator in this menu with a macOS branch: plain Ctrl+F is not search on macOS,
+  // so a hard-coded 'Ctrl+F' would print a shortcut that does nothing there.
+  it('shows the platform accelerator', () => {
+    expect(menuItemRegion(findAt())).toContain("accelerator: isMac ? 'Cmd+F' : 'Ctrl+F',");
   });
 });
