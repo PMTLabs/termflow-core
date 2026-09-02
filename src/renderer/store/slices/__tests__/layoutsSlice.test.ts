@@ -30,6 +30,7 @@ import layoutsReducer, {
   renameLayout,
   updateLayout,
   recomputeDirty,
+  resetLayoutTracking,
 } from '../layoutsSlice';
 import { StateManager } from '../../../services/StateManager';
 import type { SavedLayout } from '../../../services/StateManager';
@@ -87,6 +88,9 @@ describe('layoutsSlice loadLayout', () => {
     expect(next.isLoading).toBe(false);
     expect(next.activeLayoutId).toBe('layout-x');
     expect(next.savedLayouts).toEqual(layouts);
+    // The workspace IS the layout that was just loaded, so it is clean
+    // (pre-review fix — this branch now also clears isDirty).
+    expect(next.isDirty).toBe(false);
   });
 
   /**
@@ -98,7 +102,7 @@ describe('layoutsSlice loadLayout', () => {
    * `activeLayoutId` (ignoring `committed`) is caught, not just one that
    * defaults it to something falsy.
    */
-  it('fulfilled with committed:false still refreshes the layout list but leaves activeLayoutId untouched', () => {
+  it('fulfilled with committed:false still refreshes the layout list but leaves activeLayoutId AND isDirty untouched', () => {
     const layouts = [makeLayout({ id: 'layout-y' })];
     getSavedLayoutsMock.mockReturnValue(layouts);
     const before = { ...initial(), activeLayoutId: 'layout-already-active' };
@@ -111,6 +115,10 @@ describe('layoutsSlice loadLayout', () => {
     expect(next.isLoading).toBe(false);
     expect(next.activeLayoutId).toBe('layout-already-active');
     expect(next.savedLayouts).toEqual(layouts);
+    // Pre-review fix: an abandoned load populated nothing, so it must claim
+    // neither the active layout nor cleanliness — `before.isDirty` (from
+    // `initial()`) is `true` and must stay that way.
+    expect(next.isDirty).toBe(before.isDirty);
   });
 
   it('rejected sets isLoading false and records the error message', () => {
@@ -384,6 +392,39 @@ describe('layoutsSlice pre-existing reducers', () => {
     expect(next.savedLayouts.map(l => l.id)).toEqual(['layout-b']);
   });
 
+  /**
+   * Deleting the layout the workspace came FROM dissolves the association —
+   * left in place, `activeLayoutId` would name a layout that no longer
+   * exists while the workspace kept comparing CLEAN against its baseline.
+   */
+  it('deleteLayout.fulfilled clears activeLayoutId and marks dirty when the deleted layout IS the active one', () => {
+    const before = {
+      ...initial(),
+      savedLayouts: [makeLayout({ id: 'layout-a' }), makeLayout({ id: 'layout-b' })],
+      activeLayoutId: 'layout-a',
+      isDirty: false,
+    };
+    const next = layoutsReducer(before, deleteLayout.fulfilled('layout-a', 'req-2', 'layout-a'));
+    expect(next.activeLayoutId).toBeNull();
+    expect(next.isDirty).toBe(true);
+  });
+
+  /**
+   * The paired negative: deleting a DIFFERENT (non-active) layout must leave
+   * both `activeLayoutId` and `isDirty` alone.
+   */
+  it('deleteLayout.fulfilled leaves activeLayoutId and isDirty untouched when deleting a DIFFERENT layout', () => {
+    const before = {
+      ...initial(),
+      savedLayouts: [makeLayout({ id: 'layout-a' }), makeLayout({ id: 'layout-b' })],
+      activeLayoutId: 'layout-b',
+      isDirty: false,
+    };
+    const next = layoutsReducer(before, deleteLayout.fulfilled('layout-a', 'req-3', 'layout-a'));
+    expect(next.activeLayoutId).toBe('layout-b');
+    expect(next.isDirty).toBe(false);
+  });
+
   it('renameLayout.fulfilled patches name/description/updatedAt on the matching layout only', () => {
     const before = {
       ...initial(),
@@ -406,5 +447,19 @@ describe('layoutsSlice pre-existing reducers', () => {
     expect(renamed.updatedAt).toBeGreaterThan(1);
     const other = next.savedLayouts.find(l => l.id === 'layout-b')!;
     expect(other.name).toBe('Untouched');
+  });
+
+  /**
+   * The Redux half of `StateManager.resetToDefaultLayout` (which clears the
+   * module half: the undo slot and the identity baseline). A reset throws the
+   * workspace away rather than replacing it with something named, so it must
+   * dissolve the active-layout association the same way deleting the active
+   * layout does.
+   */
+  it('resetLayoutTracking clears activeLayoutId and marks the workspace dirty', () => {
+    const before = { ...initial(), activeLayoutId: 'layout-x', isDirty: false };
+    const next = layoutsReducer(before, resetLayoutTracking());
+    expect(next.activeLayoutId).toBeNull();
+    expect(next.isDirty).toBe(true);
   });
 });

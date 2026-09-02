@@ -253,3 +253,77 @@ describe('StateManager.revertWorkspace (plan/025 Task A4)', () => {
     expect(peekUndo()).toBeNull();
   });
 });
+
+describe('StateManager.resetToDefaultLayout invalidates recovery bookkeeping (pre-review fix)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __resetLayoutUndoForTests();
+    clearLayoutBaseline();
+    jest.useRealTimers();
+  });
+
+  /**
+   * Rationale: after Switch then Reset, Revert would otherwise skip OVER the
+   * reset and restore a workspace the user has since deliberately thrown
+   * away. `resetToDefaultLayout` now calls `clearUndo()`/`clearLayoutBaseline()`
+   * so neither piece of recovery bookkeeping still points at the discarded
+   * pre-reset workspace.
+   */
+  it('clears the undo slot and the layout baseline', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-orig', title: 'Orig' } });
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-x', name: 'X',
+      tabs: [{ id: 'tb-x', title: 'X' }],
+      activeTabId: 'tb-x',
+      paneTree: null,
+      activePaneId: null,
+      treesByTabId: { 'tb-x': null },
+      createdAt: 1, updatedAt: 1,
+    }]));
+
+    await StateManager.loadLayout('layout-x', store.dispatch);
+    expect(peekUndo()).not.toBeNull();
+
+    StateManager.resetToDefaultLayout(store.dispatch);
+
+    expect(peekUndo()).toBeNull();
+    expect(getLayoutBaseline()).toBeNull();
+  });
+
+  /**
+   * `resetToDefaultLayout` is synchronous but checks `replacementInFlight`
+   * the same way `loadTabScopedLayout` does — dispatched into another
+   * replacement's clear-then-yield window it would layer exactly the same
+   * way. Same non-awaited-load technique as the guard test above.
+   */
+  it('refuses while a replacement is in flight, leaving the in-flight load to finish and win', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{
+      id: 'layout-x', name: 'X',
+      tabs: [{ id: 'tb-x', title: 'X' }],
+      activeTabId: 'tb-x',
+      paneTree: null,
+      activePaneId: null,
+      treesByTabId: { 'tb-x': null },
+      createdAt: 1, updatedAt: 1,
+    }]));
+
+    // Started, NOT awaited — still inside the clear-then-100ms-yield window.
+    const loadPromise = StateManager.loadLayout('layout-x', store.dispatch);
+    StateManager.resetToDefaultLayout(store.dispatch);
+
+    const committed = await loadPromise;
+    expect(committed).toBe(true);
+
+    const state = store.getState() as any;
+    // The workspace is the LOADED layout, not the single default 'Terminal'
+    // tab a successful reset would have installed.
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-x']);
+    expect(state.tabs.tabs.some((t: any) => t.title === 'Terminal')).toBe(false);
+  });
+});

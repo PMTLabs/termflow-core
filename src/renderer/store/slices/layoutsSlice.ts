@@ -151,6 +151,25 @@ const layoutsSlice = createSlice({
     clearError: (state) => {
       state.error = null;
     },
+
+    /**
+     * The Redux half of "this workspace no longer corresponds to any saved
+     * layout" — dispatched after `StateManager.resetToDefaultLayout`, which
+     * clears the module half (the undo slot and the identity baseline).
+     *
+     * A reset is not a load: it throws the workspace away rather than replacing
+     * it with something named. Leaving `activeLayoutId` pointing at whatever was
+     * loaded before would let a single default terminal compare clean against a
+     * layout it has nothing in common with.
+     *
+     * It is a plain reducer rather than a thunk because `resetToDefaultLayout`
+     * is synchronous and is called directly from the component; there is no
+     * async boundary here for a thunk to hang off.
+     */
+    resetLayoutTracking: (state) => {
+      state.activeLayoutId = null;
+      state.isDirty = true;
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -194,6 +213,13 @@ const layoutsSlice = createSlice({
         state.savedLayouts = StateManager.getSavedLayouts();
         if (action.payload.committed) {
           state.activeLayoutId = action.payload.layoutId;
+          // The workspace IS the layout that was just loaded, so it is clean.
+          // The third site of this rule, alongside saveCurrentLayout.fulfilled
+          // and updateLayout.fulfilled — a load establishes a clean reference
+          // exactly as a save does. Only on `committed`: an abandoned load
+          // (superseded by a newer one) populated nothing, so it must claim
+          // neither the active layout nor cleanliness.
+          state.isDirty = false;
         }
       })
       .addCase(loadLayout.rejected, (state, action) => {
@@ -253,6 +279,16 @@ const layoutsSlice = createSlice({
       .addCase(deleteLayout.fulfilled, (state, action) => {
         state.isLoading = false;
         state.savedLayouts = state.savedLayouts.filter(l => l.id !== action.payload);
+        // Deleting the layout the workspace came FROM dissolves the association.
+        // Left in place, `activeLayoutId` names a layout that no longer exists
+        // and the workspace keeps comparing CLEAN against its baseline — so a
+        // workspace whose only saved copy the user just deleted would sail
+        // through the Save/Switch/Cancel gate that exists to protect exactly
+        // that state. Unsaved-and-unsaveable is the dirtiest a workspace gets.
+        if (state.activeLayoutId === action.payload) {
+          state.activeLayoutId = null;
+          state.isDirty = true;
+        }
       })
       .addCase(deleteLayout.rejected, (state, action) => {
         state.isLoading = false;
@@ -308,6 +344,7 @@ const layoutsSlice = createSlice({
 });
 
 export const {
+  resetLayoutTracking,
   refreshLayouts,
   setShowLayoutManager,
   clearError

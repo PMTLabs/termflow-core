@@ -4,7 +4,7 @@ import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slic
 import {
   addTabTree, focusPane, focusPaneInTab, setActiveTabId, resetPanes, setMaximizedPane,
 } from '../store/slices/panesSlice';
-import { findTabIdByTerminalId, getAllTerminalIds } from '../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/slices/paneTreeOps';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
@@ -32,7 +32,7 @@ import { clampZoom, canvasMetrics } from '../components/Canvas/canvasGeometry';
 // SavedLayout (below) is not enough to revert into.
 import { captureWorkspaceSnapshot, workspaceIdentity, isWorkspaceEmpty } from './workspaceSnapshot';
 import { pushUndo, peekUndo, takeUndo, clearUndo } from './layoutUndo';
-import { setLayoutBaseline } from './layoutBaseline';
+import { setLayoutBaseline, clearLayoutBaseline } from './layoutBaseline';
 
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
 const WORLD_LIMIT = 1e6;
@@ -189,6 +189,45 @@ class StateManagerClass {
   private get LAYOUTS_KEY(): string { return layoutsKey(); }
 
   /**
+   * True from the moment a REPLACEMENT transaction clears the workspace until it
+   * has finished populating (or abandoned).
+   *
+   * The `loadGeneration` token below settles which of two overlapping
+   * REPLACEMENTS wins — it is a last-writer-wins rule between peers that both
+   * clear and both populate. It says nothing about a non-replacement mutation
+   * landing in the window where the workspace is legitimately EMPTY. A
+   * tab-scoped load is exactly that: it never clears, so it never takes the
+   * token, and dispatched during a replacement's yield its tab would be
+   * installed into the empty store and then have the replacement's own tabs
+   * appended on top — a workspace that is neither of the two things the user
+   * asked for.
+   *
+   * Bumping the token from the tab load instead would be worse, not better: the
+   * workspace has already been cleared by then, so invalidating the replacement
+   * would strand the single tab-scoped fragment as the entire workspace.
+   *
+   * So the rule is refusal, not arbitration: while a replacement owns the
+   * workspace, a non-replacement mutation of it does not run. Every path that
+   * calls `clearCurrentState` sets this — `restoreState`, `loadLayout`,
+   * `revertWorkspace` and `resetToDefaultLayout` — so the guard cannot be
+   * opted out of by adding a fifth. This is NOT backlog 006's arbiter (which
+   * would serialise the replacements against each OTHER); it is the narrower
+   * interaction rule the tab-scoped path needs to exist safely.
+   */
+  private replacementInFlight = false;
+
+  /** Run `body` as a replacement transaction. `finally`, so an abandoned or
+   *  throwing replacement can never leave the workspace permanently barred. */
+  private async asReplacement<T>(body: () => Promise<T>): Promise<T> {
+    this.replacementInFlight = true;
+    try {
+      return await body();
+    } finally {
+      this.replacementInFlight = false;
+    }
+  }
+
+  /**
    * Monotonic token identifying the newest `loadLayout` call. `loadLayout`
    * clears the current state and then yields before populating; anything that
    * resumes after that yield with a stale token must not commit. See
@@ -268,6 +307,10 @@ class StateManagerClass {
    * Restore application state from localStorage
    */
   async restoreState(dispatch: Dispatch): Promise<boolean> {
+    return this.asReplacement(() => this.restoreStateInner(dispatch));
+  }
+
+  private async restoreStateInner(dispatch: Dispatch): Promise<boolean> {
     try {
       const savedState = localStorage.getItem(this.STATE_KEY);
       if (!savedState) {
@@ -814,6 +857,10 @@ class StateManagerClass {
    * owns the state", never "nothing was touched".
    */
   async loadLayout(layoutId: string, dispatch: Dispatch): Promise<boolean> {
+    return this.asReplacement(() => this.loadLayoutInner(layoutId, dispatch));
+  }
+
+  private async loadLayoutInner(layoutId: string, dispatch: Dispatch): Promise<boolean> {
     try {
       console.log(`Loading layout with ID: ${layoutId}`);
       const layouts = this.getSavedLayouts();
@@ -1089,6 +1136,10 @@ class StateManagerClass {
    * reconciled against the backend (plan/025 §2.2 "Risks").
    */
   async revertWorkspace(dispatch: Dispatch): Promise<boolean> {
+    return this.asReplacement(() => this.revertWorkspaceInner(dispatch));
+  }
+
+  private async revertWorkspaceInner(dispatch: Dispatch): Promise<boolean> {
     // PEEK, do not take. The slot is consumed only once this call has actually
     // committed (below), because every early exit from the transaction — the
     // supersede return, or a throw — would otherwise have already destroyed the
@@ -1185,6 +1236,14 @@ class StateManagerClass {
       const store = (window as any).__REDUX_STORE__;
       if (!store) throw new Error('Store not available');
 
+      // A tab-scoped load is not a replacement and takes no generation token,
+      // so it must not run while one owns the workspace — see
+      // `replacementInFlight` for what layering looks like.
+      if (this.replacementInFlight) {
+        console.warn('StateManager: tab-scoped load ignored — a workspace replacement is already in flight');
+        return false;
+      }
+
       const layouts = this.getSavedLayouts();
       const layout = layouts.find(l => l.id === layoutId);
       if (!layout) throw new Error('Layout not found');
@@ -1220,10 +1279,15 @@ class StateManagerClass {
       // 2. Collision guard (§2.4 step 2). `findTabIdByTerminalId` returns the
       // FIRST match, so a terminal id already live in a DIFFERENT tab would be
       // silently claimed by both this tab and its original owner. Re-mint it
-      // via `generateId('tm')`, carrying the OLD id into `sessionKey` — the
-      // same rule `sanitizeLayoutData` uses for a pre-014 leaf — because the
-      // pty-host protocol has no rename verb and dropping the old key orphans
-      // an armed session.
+      // via `generateId('tm')` and DROP the old id rather than carrying it into
+      // `sessionKey`.
+      //
+      // That is the opposite of what `sanitizeLayoutData` does for a pre-014
+      // leaf, deliberately. There, preserving the old key is required: the
+      // pty-host has no rename verb and the session being renamed is OURS.
+      // Here the id collides precisely because the session belongs to another
+      // tab's LIVE terminal — carrying the key would make this fresh spawn
+      // overwrite `session_to_process` and steal that terminal's output.
       //
       // Every re-mint is recorded in `remintedIds` because a terminal id is a
       // KEY, not just a value: `terminalCwds` is keyed by it, and seeding the
@@ -1232,8 +1296,35 @@ class StateManagerClass {
       // default directory while their uncollided siblings came back in place.
       // Re-keying a map means auditing its READERS, not only its writers.
       const remintedIds = new Map<string, string>();
+      // Pane ids are re-minted on the same rule as terminal ids, and for the same
+      // reason: an id that is ALREADY LIVE somewhere else must not be installed a
+      // second time.
+      //
+      // Pane-id uniqueness across tabs is not a nicety, it is an assumption the
+      // codebase acts on. `setPaneMuted` walks every tab's tree and returns at the
+      // FIRST leaf carrying the id; so does `paneActions.findLeafInAnyTree`; and
+      // `PaneContextMenu` derives "am I the maximized pane?" from a bare
+      // `Object.values(maximizedPaneByTabId).includes(paneId)` under a comment that
+      // says outright "Pane ids are unique across tabs". Duplicate one and those
+      // operations silently act on the OTHER tab's pane — muting, splitting or
+      // maximizing something the user is not looking at.
+      //
+      // Reachable without anything exotic: save tab A, drag pane `pn-x` from A into
+      // tab B (the node keeps its id), then load A's saved tab layout.
+      const remintedPaneIds = new Map<string, string>();
+      const paneIdIsLiveElsewhere = (paneId: string): boolean =>
+        Object.keys(state.panes.treesByTabId).some(
+          tid => tid !== targetTabId && !!findLeaf(state.panes.treesByTabId[tid], paneId),
+        );
       const remintCollisions = (node: any): any => {
         if (!node) return node;
+        let next = node;
+        if (next.id && paneIdIsLiveElsewhere(next.id)) {
+          const freshPane = remintedPaneIds.get(next.id) ?? generateId('pn');
+          remintedPaneIds.set(next.id, freshPane);
+          next = { ...next, id: freshPane };
+        }
+        node = next;
         if (node.type === 'terminal' && node.terminalId) {
           const owner = findTabIdByTerminalId(state.panes.treesByTabId, node.terminalId);
           if (owner !== null && owner !== targetTabId) {
@@ -1258,7 +1349,16 @@ class StateManagerClass {
             // process instead. A re-minted leaf is by definition a terminal
             // whose identity is already taken, so it must start a genuinely
             // new session.
-            const { sessionKey: _claimedByALiveTerminal, ...rest } = node;
+            //
+            // `seededForTabId` goes with it. It records which tab a leaf was
+            // seeded FOR, and this leaf is being installed into `targetTabId`
+            // under a brand-new identity — keeping a claim on some other tab
+            // hands `tabTreeSeed`'s ownership tiebreak a false owner.
+            const {
+              sessionKey: _claimedByALiveTerminal,
+              seededForTabId: _staleOwnershipClaim,
+              ...rest
+            } = node;
             return { ...rest, terminalId: fresh };
           }
         }
@@ -1308,7 +1408,16 @@ class StateManagerClass {
       // does not apply to a tab-scoped save — see `SavedLayout.activePaneByTabId`).
       dispatch(setActiveTab(targetTabId));
       dispatch(setActiveTabId(targetTabId));
-      const activePaneId = sanitizedLayout.activePaneByTabId?.[targetTabId] ?? sanitizedLayout.activePaneId;
+      // Through `remintedPaneIds`, because these three fields REFERENCE pane ids
+      // rather than containing them — remapping the tree but not its referrers
+      // would leave the restored tab focusing and maximizing panes that no longer
+      // exist in it (and, worse, that DO still exist in the tab we re-minted away
+      // from). Re-keying a map means auditing its readers.
+      const remap = (id: string | null | undefined): string | undefined =>
+        id === undefined || id === null ? undefined : remintedPaneIds.get(id) ?? id;
+      const activePaneId = remap(
+        sanitizedLayout.activePaneByTabId?.[targetTabId] ?? sanitizedLayout.activePaneId,
+      );
       // `focusPaneInTab`, not `focusPane`: this also records the pane in
       // `activePaneByTabId[targetTabId]` (not just the top-level
       // `activePaneId` mirror), so the tab's remembered focus survives a later
@@ -1325,7 +1434,7 @@ class StateManagerClass {
       // `null` clears, which is what "this layout has no maximized pane" means.
       dispatch(setMaximizedPane({
         tabId: targetTabId,
-        paneId: sanitizedLayout.maximizedPaneByTabId?.[targetTabId] ?? null,
+        paneId: remap(sanitizedLayout.maximizedPaneByTabId?.[targetTabId]) ?? null,
       }));
       if (sanitizedLayout.terminalCwds) {
         // Re-key onto the ids the tree actually carries (see `remintedIds`).
@@ -1409,6 +1518,13 @@ class StateManagerClass {
    * Reset to default layout (single tab with default shell)
    */
   resetToDefaultLayout(dispatch: Dispatch): void {
+    // Synchronous, so it cannot be interrupted mid-flight — but dispatched
+    // INTO another replacement's yield it layers exactly the same way a
+    // tab-scoped load would. See `replacementInFlight`.
+    if (this.replacementInFlight) {
+      console.warn('StateManager: reset ignored — a workspace replacement is already in flight');
+      return;
+    }
     try {
       // Clear current state
       this.clearCurrentState(dispatch);
@@ -1422,6 +1538,17 @@ class StateManagerClass {
         icon: '🖥️'
       }));
       
+      // A reset discards the workspace the undo slot describes, so the slot's
+      // target is no longer the thing the user would be taken back to:
+      // after Switch then Reset, Revert would skip OVER the reset and restore
+      // a pre-switch workspace the user has since deliberately thrown away.
+      // Same reasoning for the baseline — the default layout is not the
+      // layout the baseline was captured from, and leaving it installed lets
+      // a freshly-reset workspace compare CLEAN against a named layout it no
+      // longer resembles. `layoutsSlice.resetLayoutTracking` clears the Redux
+      // half (`activeLayoutId`/`isDirty`); these two clear the module half.
+      clearUndo();
+      clearLayoutBaseline();
       console.log('Reset to default layout');
     } catch (error) {
       console.error('Failed to reset layout:', error);

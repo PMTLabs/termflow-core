@@ -45,12 +45,27 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
     (window as any).__REDUX_STORE__ = store;
 
     // An unrelated live tab, present before and expected to be untouched after.
+    // Weak-oracle fix (pre-review): a distinctive title plus its own
+    // activePaneByTabId/maximizedPaneByTabId entries, so an implementation that
+    // corrupts the unrelated tab's TITLE or clobbers either per-tab map entry —
+    // while still leaving its TREE alone — is caught too.
     const unrelatedTree = { id: 'pn-unrelated', type: 'terminal' as const, terminalId: 'tm-unrelated' };
-    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-unrelated', title: 'Unrelated' } });
+    // isActive: false so this tab's OWN activation state is not perturbed by
+    // the load below activating a different tab (setActiveTab flips isActive
+    // on every tab, so starting active here would give a false-positive
+    // "corrupted" diff that has nothing to do with the code under test).
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-unrelated', title: 'Distinctive Unrelated Title', isActive: false } });
     store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-unrelated', tree: unrelatedTree } });
+    store.dispatch({ type: 'panes/focusPaneInTab', payload: { tabId: 'tb-unrelated', paneId: 'pn-unrelated' } });
+    store.dispatch({ type: 'panes/setMaximizedPane', payload: { tabId: 'tb-unrelated', paneId: 'pn-unrelated' } });
     const unrelatedBefore = JSON.parse(JSON.stringify(
       (store.getState() as any).panes.treesByTabId['tb-unrelated'],
     ));
+    const unrelatedTabBefore = JSON.parse(JSON.stringify(
+      (store.getState() as any).tabs.tabs.find((t: any) => t.id === 'tb-unrelated'),
+    ));
+    const unrelatedActivePaneBefore = (store.getState() as any).panes.activePaneByTabId['tb-unrelated'];
+    const unrelatedMaximizedPaneBefore = (store.getState() as any).panes.maximizedPaneByTabId['tb-unrelated'];
 
     const newTree = { id: 'pn-new', type: 'terminal' as const, terminalId: 'tm-new' };
     seedLayouts([{
@@ -81,6 +96,12 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
 
     // The STRONG assertion: the unrelated tab's tree is deep-equal before and after.
     expect(state.panes.treesByTabId['tb-unrelated']).toEqual(unrelatedBefore);
+    // The FULL unrelated-tab projection, deep-equal before and after
+    // (pre-review weak-oracle finding): Tab object, tree (above), and both
+    // per-tab map entries.
+    expect(state.tabs.tabs.find((t: any) => t.id === 'tb-unrelated')).toEqual(unrelatedTabBefore);
+    expect(state.panes.activePaneByTabId['tb-unrelated']).toBe(unrelatedActivePaneBefore);
+    expect(state.panes.maximizedPaneByTabId['tb-unrelated']).toBe(unrelatedMaximizedPaneBefore);
 
     // §2.4 step 5: "reverting a tab load is the same gesture" — an undo
     // snapshot was pushed.
@@ -96,11 +117,25 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
     store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-target', title: 'Old title', shellType: 'default' } });
     store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-target', tree: liveTree } });
 
-    // A second, unrelated tab that must stay untouched.
+    // A second, unrelated tab that must stay untouched. Weak-oracle fix
+    // (pre-review): a distinctive title plus its own activePaneByTabId/
+    // maximizedPaneByTabId entries, so an implementation that corrupts the
+    // title or clobbers either per-tab map entry — while leaving the TREE
+    // alone — is still caught.
     const otherTree = { id: 'pn-other', type: 'terminal' as const, terminalId: 'tm-other' };
-    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-other', title: 'Other' } });
+    // isActive: false for the same reason as the sibling test above — this
+    // tab's own activation state must not be perturbed by the load below
+    // activating tb-target.
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-other', title: 'Distinctive Other Title', isActive: false } });
     store.dispatch({ type: 'panes/addTabTree', payload: { tabId: 'tb-other', tree: otherTree } });
+    store.dispatch({ type: 'panes/focusPaneInTab', payload: { tabId: 'tb-other', paneId: 'pn-other' } });
+    store.dispatch({ type: 'panes/setMaximizedPane', payload: { tabId: 'tb-other', paneId: 'pn-other' } });
     const otherBefore = JSON.parse(JSON.stringify((store.getState() as any).panes.treesByTabId['tb-other']));
+    const otherTabBefore = JSON.parse(JSON.stringify(
+      (store.getState() as any).tabs.tabs.find((t: any) => t.id === 'tb-other'),
+    ));
+    const otherActivePaneBefore = (store.getState() as any).panes.activePaneByTabId['tb-other'];
+    const otherMaximizedPaneBefore = (store.getState() as any).panes.maximizedPaneByTabId['tb-other'];
 
     const savedTree = { id: 'pn-saved', type: 'terminal' as const, terminalId: 'tm-saved' };
     seedLayouts([{
@@ -131,9 +166,14 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
     expect(state.panes.treesByTabId['tb-target'].terminalId).toBe('tm-saved');
     // The unrelated tab is untouched.
     expect(state.panes.treesByTabId['tb-other']).toEqual(otherBefore);
+    // The FULL unrelated-tab projection, deep-equal before and after
+    // (pre-review weak-oracle finding).
+    expect(state.tabs.tabs.find((t: any) => t.id === 'tb-other')).toEqual(otherTabBefore);
+    expect(state.panes.activePaneByTabId['tb-other']).toBe(otherActivePaneBefore);
+    expect(state.panes.maximizedPaneByTabId['tb-other']).toBe(otherMaximizedPaneBefore);
   });
 
-  it('re-mints a terminal id that is currently live in a DIFFERENT tab, carrying the old id into sessionKey', async () => {
+  it('re-mints a terminal id that is currently live in a DIFFERENT tab, and drops the old id rather than claiming it', async () => {
     const store = makeStore();
     (window as any).__REDUX_STORE__ = store;
 
@@ -340,6 +380,245 @@ describe('StateManager.loadTabScopedLayout (plan/025 Task A5)', () => {
 
     expect(await StateManager.loadTabScopedLayout('layout-flat', store.dispatch)).toBe(true);
     expect((store.getState() as any).panes.maximizedPaneByTabId['tb-target']).toBeUndefined();
+  });
+});
+
+describe('StateManager.loadTabScopedLayout refuses during a replacement (pre-review fix)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __resetLayoutUndoForTests();
+  });
+
+  /**
+   * Blocker (pre-review). `loadLayout`/`revertWorkspace` are wrapped by
+   * `asReplacement`, which sets `replacementInFlight` from before
+   * `clearCurrentState` until the transaction finishes. A tab-scoped load is
+   * NOT a replacement (no generation token, no clear, no yield) — dispatched
+   * into a replacement's clear-then-100ms-yield window, it used to install its
+   * tab into the emptied store, which the replacement's own populate then
+   * layered on top of: a workspace that is neither of the two things the user
+   * asked for. `loadTabScopedLayout` now returns `false` immediately instead.
+   *
+   * Pinned end-to-end (NOT by poking the private flag): `loadLayout` is
+   * started but not awaited, landing this test inside its clear-then-yield
+   * window; the tab load is issued during that window; then the original load
+   * is awaited to completion.
+   */
+  it('returns false while a loadLayout replacement owns the workspace, and its tab is never layered into the replacement\'s result', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    seedLayouts([
+      {
+        id: 'layout-x',
+        name: 'Workspace X',
+        tabs: [{ id: 'tb-x', title: 'X' }],
+        activeTabId: 'tb-x',
+        paneTree: null,
+        activePaneId: null,
+        treesByTabId: { 'tb-x': null },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'layout-tab',
+        name: 'Tab layout',
+        tabs: [{ id: 'tb-tab', title: 'Tab' }],
+        activeTabId: 'tb-tab',
+        paneTree: null,
+        activePaneId: null,
+        treesByTabId: { 'tb-tab': null },
+        scope: 'tab',
+        scopedTabId: 'tb-tab',
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ] as SavedLayout[]);
+
+    // Started, NOT awaited — synchronously clears and then yields ~100ms
+    // before populating. `replacementInFlight` is true by the time this
+    // statement returns.
+    const loadPromise = StateManager.loadLayout('layout-x', store.dispatch);
+
+    // Dispatched DURING that window.
+    const tabResult = await StateManager.loadTabScopedLayout('layout-tab', store.dispatch);
+    expect(tabResult).toBe(false);
+
+    const committed = await loadPromise;
+    expect(committed).toBe(true);
+
+    // The final workspace is EXACTLY layout-x's tabs — the refused tab load's
+    // tab must NOT be present, layered on top or otherwise.
+    const state = store.getState() as any;
+    expect(state.tabs.tabs.map((t: any) => t.id)).toEqual(['tb-x']);
+    expect(state.panes.treesByTabId['tb-tab']).toBeUndefined();
+  });
+
+  /**
+   * The paired positive. Without it, a `loadTabScopedLayout` that
+   * unconditionally `return false`d at the top of the method would pass the
+   * negative test above vacuously.
+   */
+  it('returns true and installs its tab when no replacement is in flight', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    seedLayouts([{
+      id: 'layout-tab',
+      name: 'Tab layout',
+      tabs: [{ id: 'tb-tab', title: 'Tab' }],
+      activeTabId: 'tb-tab',
+      paneTree: null,
+      activePaneId: null,
+      treesByTabId: { 'tb-tab': null },
+      scope: 'tab',
+      scopedTabId: 'tb-tab',
+      createdAt: 1,
+      updatedAt: 1,
+    } as SavedLayout]);
+
+    const tabResult = await StateManager.loadTabScopedLayout('layout-tab', store.dispatch);
+    expect(tabResult).toBe(true);
+    expect((store.getState() as any).tabs.tabs.map((t: any) => t.id)).toEqual(['tb-tab']);
+  });
+});
+
+describe('StateManager.loadTabScopedLayout re-mints colliding PANE ids (pre-review fix)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    __resetLayoutUndoForTests();
+  });
+
+  /**
+   * Blocker (pre-review). Pane ids are assumed unique across tabs —
+   * `setPaneMuted` and `paneActions.findLeafInAnyTree` both return at the
+   * FIRST tab whose tree contains the id. Reachable: a saved tab layout's pane
+   * id collides with a pane id currently LIVE in a DIFFERENT tab (e.g. the
+   * pane was dragged between tabs after the layout was saved). `tb-other`
+   * gets a DIFFERENT terminalId than the incoming layout's leaf, so this
+   * isolates the PANE-id collision from the terminal-id collision the earlier
+   * describe block in this file already covers.
+   */
+  it('re-mints a pane id that collides with a DIFFERENT tab\'s live pane, and remaps the activePaneByTabId/maximizedPaneByTabId references to it', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-other', title: 'Other' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-other', tree: { id: 'pn-x', type: 'terminal', terminalId: 'tm-other' } },
+    });
+
+    const collidingTree = { id: 'pn-x', type: 'terminal' as const, terminalId: 'tm-new' };
+    seedLayouts([{
+      id: 'layout-pane-collide',
+      name: 'Pane collide',
+      tabs: [{ id: 'tb-new', title: 'New' }],
+      activeTabId: 'tb-new',
+      paneTree: collidingTree,
+      activePaneId: 'pn-x',
+      treesByTabId: { 'tb-new': collidingTree },
+      activePaneByTabId: { 'tb-new': 'pn-x' },
+      maximizedPaneByTabId: { 'tb-new': 'pn-x' },
+      scope: 'tab',
+      scopedTabId: 'tb-new',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } as SavedLayout]);
+
+    const ok = await StateManager.loadTabScopedLayout('layout-pane-collide', store.dispatch);
+    expect(ok).toBe(true);
+
+    const state = store.getState() as any;
+    const installed = state.panes.treesByTabId['tb-new'];
+    expect(installed.id).not.toBe('pn-x');
+    expect(installed.id).toMatch(/^pn-/);
+    // tb-other's leaf is untouched — still 'pn-x'.
+    expect(state.panes.treesByTabId['tb-other'].id).toBe('pn-x');
+
+    // These fields REFERENCE pane ids rather than containing them, so they
+    // must be remapped along with the tree, not left pointing at the stale
+    // 'pn-x' — which, after the load, names a DIFFERENT tab's pane.
+    expect(state.panes.activePaneByTabId['tb-new']).toBe(installed.id);
+    expect(state.panes.maximizedPaneByTabId['tb-new']).toBe(installed.id);
+  });
+
+  /**
+   * The consequence that actually matters (pre-review HIGH). Before the fix,
+   * both tabs held the pane id 'pn-x', and `setPaneMuted` — which walks
+   * `treesByTabId` and acts on the FIRST tab whose tree contains the id — put
+   * the mute on whichever tree happened to be walked first, not the one the
+   * user actually targeted.
+   */
+  it('setPaneMuted after a pane-id collision mutes only the installed pane, not the tab it collided with', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-other', title: 'Other' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-other', tree: { id: 'pn-x', type: 'terminal', terminalId: 'tm-other' } },
+    });
+
+    const collidingTree = { id: 'pn-x', type: 'terminal' as const, terminalId: 'tm-new' };
+    seedLayouts([{
+      id: 'layout-pane-collide-mute',
+      name: 'Pane collide mute',
+      tabs: [{ id: 'tb-new', title: 'New' }],
+      activeTabId: 'tb-new',
+      paneTree: collidingTree,
+      activePaneId: 'pn-x',
+      treesByTabId: { 'tb-new': collidingTree },
+      scope: 'tab',
+      scopedTabId: 'tb-new',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } as SavedLayout]);
+
+    expect(await StateManager.loadTabScopedLayout('layout-pane-collide-mute', store.dispatch)).toBe(true);
+    const installedId = (store.getState() as any).panes.treesByTabId['tb-new'].id;
+
+    store.dispatch({ type: 'panes/setPaneMuted', payload: { paneId: installedId, muted: true } });
+
+    const state = store.getState() as any;
+    expect(state.panes.treesByTabId['tb-other'].notifyMuted).toBeUndefined();
+    expect(state.panes.treesByTabId['tb-new'].notifyMuted).toBe(true);
+  });
+
+  /**
+   * The negative: a saved pane id that is NOT live in any other tab must be
+   * preserved unchanged, so a reload of a tab layout onto the same tab still
+   * reattaches to the pane it already has rather than being needlessly
+   * re-minted every time.
+   */
+  it('does not re-mint a pane id that is NOT live in any other tab — a reload onto the same tab still reattaches', async () => {
+    const store = makeStore();
+    (window as any).__REDUX_STORE__ = store;
+
+    store.dispatch({ type: 'tabs/addTab', payload: { id: 'tb-target', title: 'Target' } });
+    store.dispatch({
+      type: 'panes/addTabTree',
+      payload: { tabId: 'tb-target', tree: { id: 'pn-x', type: 'terminal', terminalId: 'tm-target' } },
+    });
+
+    const savedTree = { id: 'pn-x', type: 'terminal' as const, terminalId: 'tm-target' };
+    seedLayouts([{
+      id: 'layout-pane-self',
+      name: 'Pane self',
+      tabs: [{ id: 'tb-target', title: 'Target' }],
+      activeTabId: 'tb-target',
+      paneTree: savedTree,
+      activePaneId: 'pn-x',
+      treesByTabId: { 'tb-target': savedTree },
+      scope: 'tab',
+      scopedTabId: 'tb-target',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    } as SavedLayout]);
+
+    const ok = await StateManager.loadTabScopedLayout('layout-pane-self', store.dispatch);
+    expect(ok).toBe(true);
+    expect((store.getState() as any).panes.treesByTabId['tb-target'].id).toBe('pn-x');
   });
 });
 

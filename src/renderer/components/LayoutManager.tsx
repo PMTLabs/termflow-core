@@ -15,7 +15,8 @@ import {
   updateLayout,
   refreshLayouts,
   setShowLayoutManager,
-  clearError
+  clearError,
+  resetLayoutTracking
 } from '../store/slices/layoutsSlice';
 import { addToast, removeToast } from '../store/slices/uiSlice';
 import { registerToastAction, unregisterToastAction, makeToastActionId } from '../services/toastActions';
@@ -372,6 +373,13 @@ export const LayoutManager: React.FC = () => {
   const confirmReset = () => {
     setPendingReset(false);
     StateManager.resetToDefaultLayout(dispatch);
+    // A reset throws the workspace away rather than replacing it with something
+    // named, so the workspace no longer corresponds to any saved layout.
+    // `resetToDefaultLayout` clears the module half (the undo slot and the
+    // identity baseline); this clears the Redux half, so the dirty gate stops
+    // measuring a single default terminal against a layout it has nothing in
+    // common with.
+    dispatch(resetLayoutTracking());
     dispatch(setShowLayoutManager(false));
   };
 
