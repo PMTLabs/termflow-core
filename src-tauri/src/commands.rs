@@ -378,8 +378,9 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         name,
     } = req;
 
-    // Deliberately off (Unix default, or the `TERMFLOW_PTY_HOST=0` kill-switch):
-    // in-process is the intended behaviour here, not a degraded one.
+    // Deliberately off (the `TERMFLOW_PTY_HOST=0` kill-switch — the only way to
+    // land here now that every supported OS is default-on): in-process is the
+    // intended behaviour, not a degraded one.
     if !crate::pty_host_client::enabled() {
         return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
     }
@@ -656,8 +657,9 @@ fn host_fallback(
     name: Option<&str>,
     reason: &str,
 ) -> Result<String, String> {
-    // A sidecar that is switched OFF is not a failure — on Unix that is still the
-    // default, so warning here would fire on every single spawn.
+    // A sidecar that is switched OFF is not a failure but an explicit
+    // `TERMFLOW_PTY_HOST=0`, so warning here would fire on every single spawn
+    // for someone who asked for exactly this.
     if crate::pty_host_client::enabled() {
         log::warn!("pty-host unavailable ({reason}); falling back to in-process");
     } else {
