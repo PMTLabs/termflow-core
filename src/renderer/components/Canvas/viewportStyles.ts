@@ -1,16 +1,51 @@
 import type React from 'react';
-import { Rect, Viewport, clampZoom } from './canvasGeometry';
+import { Rect, Viewport, clampZoom, worldRaster } from './canvasGeometry';
 
 /** World-space distance between dots at zoom 1. */
 export const DOT_SPACING = 26;
 /** Breathing room left around the content when fitting. */
 export const FIT_MARGIN = 140;
 
-export function worldStyle(vp: Viewport): React.CSSProperties {
+/**
+ * The pan-and-zoom transform, on `.canvas-world`.
+ *
+ * `scale(z / R)` rather than `scale(z)`, and the missing factor of R is put back by
+ * `rasterStyle` on the element inside — see `worldRaster` for why the world is laid out large
+ * and scaled down instead of laid out small and scaled up. The PRODUCT is `z`, so every other
+ * number in the canvas is untouched: `worldPoint`'s inverse, `worldToScreen`, the counter-scales
+ * and every `getBoundingClientRect` inside the world all still see `screen = world * z + pan`.
+ *
+ * The two halves must be read from the same `dpr` — split them and the world paints at a
+ * different zoom from the one the pointer maths uses. That is what `viewportStyles.test.ts`
+ * pins as a product, rather than asserting either half alone.
+ */
+export function worldStyle(vp: Viewport, dpr: number): React.CSSProperties {
   return {
-    transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.z})`,
+    transform: `translate(${vp.x}px, ${vp.y}px) scale(${vp.z / worldRaster(vp.z, dpr)})`,
     transformOrigin: '0 0',
   };
+}
+
+/**
+ * The supersample, on `.canvas-raster` — the element between `.canvas-world` and the nodes.
+ *
+ * `zoom` rather than a second `transform`, because a transform would only nest one raster
+ * magnification inside another; `zoom` multiplies the USED VALUE of every length in the subtree,
+ * so the content is laid out — and therefore rasterised — R times larger.
+ *
+ * It is deliberately on a child rather than on `.canvas-world` itself: `zoom` scales the
+ * element's own transform lengths too, which would multiply the pan by R.
+ *
+ * **Why this is safe for a live terminal.** `plan/017`'s whole guarantee is that
+ * `FitAddon.proposeDimensions()` reads the same host box on the canvas as it did in the pane, so
+ * the fit finds nothing to do and no SIGWINCH reaches the PTY. `zoom` does not disturb it:
+ * measured in this WebKit, an 800px box under `zoom: 3` reports `getComputedStyle().width` of
+ * 800px (and `offsetWidth`/`clientWidth` of 800) while `getBoundingClientRect()` reports the
+ * magnified 2400 — so the four things `proposeDimensions` reads are unchanged, and the screen
+ * geometry every gesture measures is unchanged too.
+ */
+export function rasterStyle(vp: Viewport, dpr: number): React.CSSProperties {
+  return { zoom: worldRaster(vp.z, dpr) };
 }
 
 /**

@@ -4,7 +4,7 @@ import { RootState } from '../../store';
 import { setViewport, panViewport } from '../../store/slices/canvasSlice';
 import { Viewport, zoomAt } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
-import { gridStyle, worldStyle, lerpViewport, FLY_MS } from './viewportStyles';
+import { gridStyle, worldStyle, rasterStyle, lerpViewport, FLY_MS } from './viewportStyles';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, wheelAction, wheelPanDelta, CanvasWheelMode,
 } from './canvasGestures';
@@ -82,6 +82,13 @@ export const CanvasViewport: React.FC<{
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const ref = useRef<HTMLDivElement>(null);
   const pan = useRef<{ x: number; y: number } | null>(null);
+
+  // The display's device scale, which decides how much the world has to supersample
+  // (`worldRaster`). Read during render rather than held in state: it is only ever used to pick
+  // a raster factor, so a stale value costs sharpness or a little layer memory and nothing else,
+  // and every pan, zoom and selection re-renders this component anyway. Defaulted for jsdom,
+  // where the property is absent in some environments.
+  const dpr = typeof window === 'undefined' ? 1 : (window.devicePixelRatio || 1);
 
   // Keep a ref of the viewport so the native wheel listener below always reads the
   // current value without re-subscribing on every pan. Declared BEFORE the effect
@@ -283,7 +290,12 @@ export const CanvasViewport: React.FC<{
       onContextMenu={onContextMenu}
     >
       <div className="canvas-grid" style={gridStyle(vp)} />
-      <div className="canvas-world" style={worldStyle(vp)}>{children}</div>
+      {/* TWO elements, not one: `.canvas-world` pans and zooms, `.canvas-raster` supersamples.
+          See `worldRaster` for why the pair exists and `rasterStyle` for why the `zoom` cannot
+          sit on the world itself. Read from the same `dpr` — the two are halves of one scale. */}
+      <div className="canvas-world" style={worldStyle(vp, dpr)}>
+        <div className="canvas-raster" style={rasterStyle(vp, dpr)}>{children}</div>
+      </div>
       {overlay}
     </div>
   );

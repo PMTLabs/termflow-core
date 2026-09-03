@@ -1,12 +1,16 @@
-import { gridStyle, worldStyle, fitViewport, boundsOf, centreOn, FLY_MS, DOT_SPACING, easeOutCubic, lerpViewport } from '../viewportStyles';
-import { Viewport, Rect, Z_MIN, NODE_W, NODE_H, DEFAULT_METRICS } from '../canvasGeometry';
+import { gridStyle, worldStyle, rasterStyle, fitViewport, boundsOf, centreOn, FLY_MS, DOT_SPACING, easeOutCubic, lerpViewport } from '../viewportStyles';
+import { Viewport, Rect, Z_MIN, NODE_W, NODE_H, DEFAULT_METRICS, MAX_WORLD_R, worldRaster } from '../canvasGeometry';
 
 // Per-session now — an ordinary 1080p display's ceiling.
 const { zMax: Z_MAX } = DEFAULT_METRICS;
 
+/** The scale factor out of a `translate(...) scale(k)` transform. */
+const scaleOf = (transform: string | undefined): number =>
+  Number(/scale\(([-\d.e]+)\)/.exec(transform ?? '')?.[1]);
+
 describe('worldStyle', () => {
   it('emits a translate-then-scale transform anchored at the origin', () => {
-    const s = worldStyle({ x: 12, y: -8, z: 0.5 });
+    const s = worldStyle({ x: 12, y: -8, z: 0.5 }, 1);
     expect(s.transform).toBe('translate(12px, -8px) scale(0.5)');
     expect(s.transformOrigin).toBe('0 0');
   });
@@ -16,9 +20,72 @@ describe('worldStyle', () => {
   // origin 0 0 means screen = world * z + pan, which is what worldToScreen does.
   it('agrees with the transform canvasGeometry uses for hit-testing', () => {
     const vp: Viewport = { x: 37, y: -14, z: 0.65 };
-    const s = worldStyle(vp);
+    const s = worldStyle(vp, 1);
     expect(s.transform).toBe(`translate(${vp.x}px, ${vp.y}px) scale(${vp.z})`);
     expect(s.transformOrigin).toBe('0 0');
+  });
+
+  // Below zoom 1 there is nothing to supersample: the world is already being drawn smaller
+  // than it is laid out, so R stays 1 and this is the transform it has always emitted.
+  it('leaves the transform alone while the world is being shrunk', () => {
+    expect(scaleOf(worldStyle({ x: 0, y: 0, z: Z_MIN }, 1).transform)).toBe(Z_MIN);
+    expect(rasterStyle({ x: 0, y: 0, z: Z_MIN }, 1).zoom).toBe(1);
+  });
+
+  // The pan is NOT divided by R. It is applied outside the `zoom`ed element, in screen pixels,
+  // which is the whole reason the zoom sits on a child — dividing it here would be the same bug
+  // in the other direction, and it is exact at pan (0, 0), where it is easiest to test.
+  it('keeps the pan in screen pixels when the world is supersampled', () => {
+    const s = worldStyle({ x: 40, y: -25, z: 2.5 }, 1);
+    expect(s.transform).toContain('translate(40px, -25px)');
+  });
+});
+
+// THE invariant of the split: whatever R is, the world must still paint at exactly `z`.
+// Asserted as the PRODUCT, never as either half, because either half alone passes while the
+// two disagree — and a world painting at a different zoom from the one `worldPoint` inverts
+// puts every node under the cursor somewhere it is not.
+describe('worldStyle x rasterStyle', () => {
+  it('multiplies back to the zoom at every zoom and device scale', () => {
+    for (const dpr of [1, 1.5, 2, 3]) {
+      for (const z of [Z_MIN, 0.3, 0.99, 1, 1.01, 1.35, 2, 2.5, 3, Z_MAX, MAX_WORLD_R + 1]) {
+        const vp: Viewport = { x: 7, y: 9, z };
+        const net = scaleOf(worldStyle(vp, dpr).transform) * (rasterStyle(vp, dpr).zoom as number);
+        expect(net).toBeCloseTo(z, 10);
+      }
+    }
+  });
+
+  // The criterion the whole change exists to satisfy: `R * dpr >= z` — never fewer device
+  // pixels in the backing store than the CSS pixels being painted from it. Asserted as that
+  // inequality rather than as `scale <= 1`, which is the DPR-1 special case and passes a
+  // Retina panel that is quietly two device pixels short.
+  it('keeps at least one backing device pixel per painted CSS pixel', () => {
+    for (const dpr of [1, 1.5, 2, 3]) {
+      for (const z of [Z_MIN, 0.99, 1, 1.01, 1.35, 2, 2.5, 3, Z_MAX]) {
+        expect(worldRaster(z, dpr) * dpr).toBeGreaterThanOrEqual(z);
+      }
+    }
+  });
+
+  // At DPR 1 that criterion means the raster is never stretched AT ALL — a magnified raster is
+  // what macOS WebKit gives back blurred, and DPR 1 is the display the bug was reported on.
+  it('never stretches the raster on a non-Retina display', () => {
+    for (const z of [1, 1.01, 1.35, 2, 2.5, 3, Z_MAX]) {
+      expect(scaleOf(worldStyle({ x: 0, y: 0, z }, 1).transform)).toBeLessThanOrEqual(1);
+    }
+    // Past `MAX_WORLD_R` the clamp bites and it degrades to what it always did, rather than
+    // eating memory. `zMax` never reaches there — this pins where the boundary is.
+    expect(Z_MAX).toBeLessThan(MAX_WORLD_R);
+    expect(scaleOf(worldStyle({ x: 0, y: 0, z: MAX_WORLD_R + 5 }, 1).transform)).toBeGreaterThan(1);
+  });
+
+  // The device scale is divided out, not ignored: a Retina panel meets the same criterion with
+  // a quarter of the backing store, so it must not buy supersampling it cannot resolve.
+  it('does not supersample what the device scale already covers', () => {
+    expect(worldRaster(1.35, 2)).toBe(1);
+    expect(worldRaster(1.35, 1)).toBe(2);
+    expect(rasterStyle({ x: 0, y: 0, z: 1.35 }, 2).zoom).toBe(1);
   });
 });
 
