@@ -151,11 +151,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         return Err(e);
     }
 
-    // Launch the updater (it waits for our exit), then quit gracefully so Tauri
-    // flushes tab/session state the relaunched app reattaches by `tab_id`. If the
-    // updater fails to launch AFTER we armed, DISARM synchronously — otherwise
-    // the host stays armed and a later normal quit would orphan sessions instead
-    // of tearing down (design §10.5 "updater-launch failure → synchronous Disarm").
+    // Launch the updater (it waits for our exit), then quit — the relaunched app
+    // reattaches sessions by `tab_id`. If the updater fails to launch AFTER we
+    // armed, DISARM synchronously — otherwise the host stays armed and a later
+    // normal quit would orphan sessions instead of tearing down (design §10.5
+    // "updater-launch failure → synchronous Disarm").
     if let Err(e) = tokio::task::spawn_blocking(move || apply(info))
         .await
         .map_err(|e| e.to_string())
@@ -185,6 +185,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     let _ = crate::sibling_coord::disarm_siblings(
         &siblings, &armed_siblings, &crate::sibling_coord::http_call,
     ).await;
+    // Let every window persist its state (cwd snapshot included) before we drop
+    // it. `app_handle.exit(0)` is a hard process termination — the comment above
+    // used to assume Tauri would still "flush tab/session state" on the way out,
+    // but nothing actually asked the windows to; see `commands::flush_all_windows`.
+    crate::commands::flush_all_windows(&state.app_handle).await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     state.app_handle.exit(0);
     Ok(())
@@ -248,6 +253,30 @@ mod arm_lifecycle_wiring_tests {
             success_tail.contains("disarm_siblings"),
             "a successful update must disarm the siblings it armed, on the \
              success path — not only on failure. Tail after the last failure return:\n{success_tail}"
+        );
+    }
+
+    /// The reported bug's twin in the real Velopack path: `update_and_restart`
+    /// armed and exited with no chance for the renderer to persist a just-`cd`'d
+    /// tab's cwd — the comment above the exit even claimed "Tauri flushes
+    /// tab/session state" on a hard `app_handle.exit(0)`, which nothing actually
+    /// did. Pins that it now runs `commands::flush_all_windows` before exiting,
+    /// same as `restart_for_update` (see
+    /// `commands::the_offload_path_flushes_cwd_state_before_exiting`).
+    #[test]
+    fn update_and_restart_flushes_cwd_state_before_exiting() {
+        let body = fn_body(&source(), "pub async fn update_and_restart");
+        assert!(
+            body.contains("flush_all_windows"),
+            "update_and_restart must flush every window's state (cwd snapshot \
+             included) before exiting. Body:\n{body}"
+        );
+        let flush_at = body.find("flush_all_windows").expect("checked above");
+        let exit_at = body.find(".exit(").expect("update_and_restart must still exit");
+        assert!(
+            flush_at < exit_at,
+            "flush_all_windows must be awaited BEFORE exit(0) — after would persist \
+             nothing, the process is already gone. Body:\n{body}"
         );
     }
 }
