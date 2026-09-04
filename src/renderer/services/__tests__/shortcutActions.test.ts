@@ -6,8 +6,8 @@ import {
 } from '../shortcutActions';
 
 describe('SHORTCUT_ACTIONS', () => {
-  it('has 20 unique action ids with unique default combos', () => {
-    expect(SHORTCUT_ACTIONS).toHaveLength(20);
+  it('has 21 unique action ids with unique default combos', () => {
+    expect(SHORTCUT_ACTIONS).toHaveLength(21);
     const ids = SHORTCUT_ACTIONS.map(a => a.id);
     const combos = SHORTCUT_ACTIONS.map(a => a.defaultCombo);
     expect(new Set(ids).size).toBe(ids.length);

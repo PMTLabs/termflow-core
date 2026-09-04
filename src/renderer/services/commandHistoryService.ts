@@ -172,6 +172,31 @@ class CommandHistoryService {
     return all.slice(0, limit).map((c) => c.cmd);
   }
 
+  /** Top `limit` history entries for a browse list (no typed query), re-ranked by
+   *  directory affinity when the cwd's weights are cached. Mirrors match()'s ranking
+   *  minus the prefix/substring buckets — with a cold cache or no cwd this degrades to
+   *  plain recency (most-recent-first), same "never worse" guarantee as match(). Exists
+   *  because match('') deliberately returns [] and a browse list needs a code path with
+   *  no query typed. Does not mutate `this.commands`. */
+  recent(opts?: { cwd?: string; limit?: number }): string[] {
+    const limit = opts?.limit ?? DEFAULT_MATCH_LIMIT;
+    const norm = normalizeDir(opts?.cwd);
+    const weights = norm ? this.affinityCache.get(norm) : undefined;
+
+    type Cand = { cmd: string; order: number };
+    const all: Cand[] = this.commands.map((cmd, order) => ({ cmd, order }));
+
+    if (weights && weights.size > 0) {
+      all.sort((a, b) => {
+        const wa = weights.get(a.cmd) ?? 0;
+        const wb = weights.get(b.cmd) ?? 0;
+        if (wa !== wb) return wb - wa; // higher directory affinity first
+        return a.order - b.order; // then most-recent first
+      });
+    }
+    return all.slice(0, limit).map((c) => c.cmd);
+  }
+
   /** Test hook. */
   __reset(): void {
     this.commands = [];

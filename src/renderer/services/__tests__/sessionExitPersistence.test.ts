@@ -48,8 +48,15 @@ describe('saveState never persists sessionExit', () => {
     const blob = localStorage.getItem(keys[0])!;
     // Both the slice name and its payload: a field renamed on the way out would still leak the
     // exit code, and it is the VALUE that would resurrect a banner.
-    expect(blob).not.toContain('sessionExit');
-    expect(blob).not.toContain('137');
+    //
+    // `timestamp` is dropped before the substring search. It is a live `Date.now()`, so it
+    // contains the digits '137' a few runs in every thousand - which failed this test at
+    // random with nothing wrong. StateManager writes that field itself and it can never
+    // carry an exit code, so excluding it costs the oracle nothing.
+    const { timestamp: _written, ...persisted } = JSON.parse(blob);
+    const searchable = JSON.stringify(persisted);
+    expect(searchable).not.toContain('sessionExit');
+    expect(searchable).not.toContain('137');
     expect(JSON.parse(blob).sessionExit).toBeUndefined();
 
     // ...and the store really did hold it, so the assertions above are not passing on an empty

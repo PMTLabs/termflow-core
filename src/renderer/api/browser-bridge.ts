@@ -260,6 +260,27 @@ class BrowserBridge implements ElectronAPI {
         return null;
     }
 
+    // Snippets import/export (plan/029 §8). The browser dev host has no native
+    // dialogs and no filesystem access. All four refuse loudly rather than
+    // returning null/void: `snippetPorting` reads a null picker as "the user
+    // cancelled", so a quiet stub would report a cancellation that never
+    // happened — and a quiet export would look successful while writing nothing.
+    async pickSnippetsExportPath(): Promise<string | null> {
+        throw new Error('Exporting snippets requires the desktop app.');
+    }
+
+    async pickSnippetsImportPath(): Promise<string | null> {
+        throw new Error('Importing snippets requires the desktop app.');
+    }
+
+    async exportSnippetsFile(_path: string, _json: string): Promise<void> {
+        throw new Error('Exporting snippets requires the desktop app.');
+    }
+
+    async importSnippetsFile(_path: string): Promise<string> {
+        throw new Error('Importing snippets requires the desktop app.');
+    }
+
     // --- PTY Communication Aliases ---
 
     async sendToPty(processId: string, data: string): Promise<void> {

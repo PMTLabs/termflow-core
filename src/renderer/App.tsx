@@ -36,6 +36,10 @@ import {
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
+  setSnippets,
+  setSnippetsViewMode,
+  isValidSnippet,
+  isSnippetsViewMode,
   setCustomKeybindings,
   setKeepRunningInBackground,
   setNotifySoundEnabled,
@@ -596,6 +600,22 @@ const App: React.FC = () => {
         }
         if (config.agentColorSchemes && typeof config.agentColorSchemes === 'object') {
           dispatch(setAgentColorSchemes(config.agentColorSchemes));
+        }
+        if (Array.isArray(config.snippets)) {
+          // Hand-editable config.json — validate each entry rather than trusting the
+          // array wholesale, so one malformed record doesn't drop every snippet.
+          dispatch(setSnippets(
+            config.snippets.filter(isValidSnippet).map((s: any) => ({
+              ...s,
+              // `Number.isFinite`, not `typeof === 'number'` (D-05): a hand-edited
+              // config.json with `createdAt: NaN`/`Infinity` is `typeof 'number'` but
+              // serializes to `null` and breaks snippetSearch.ts's sort comparator.
+              createdAt: Number.isFinite(s.createdAt) ? s.createdAt : Date.now(),
+            }))
+          ));
+        }
+        if (isSnippetsViewMode(config.snippetsViewMode)) {
+          dispatch(setSnippetsViewMode(config.snippetsViewMode));
         }
         if (config.customKeybindings && typeof config.customKeybindings === 'object') {
           // Drop any actionId not in the current registry (stale config from a

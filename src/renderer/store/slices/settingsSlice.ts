@@ -1,4 +1,4 @@
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, current, isDraft, PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_COLOR_SCHEMA_ID } from '../colorSchemas';
 import { EULA_ACCEPTED_KEY } from '../../legal';
 // Type-only, and imported rather than restated: the modes are the gesture rule's vocabulary, and
@@ -32,6 +32,57 @@ export interface Theme {
 // covers every value the engine used to hard-code — no separate 'normal'/'bold'
 // aliases needed, which would otherwise show as confusing duplicate options.
 export type TerminalFontWeight = '300' | '400' | '500' | '600' | '700' | '800' | '900';
+
+// One saved, reusable piece of terminal input (plan/029). `text` is inserted verbatim
+// (paste, never appends Enter). `folder` is a plain string on the item, not a separate
+// entity (D6) — one level only (D7); absent/'' is unfiled.
+export interface Snippet {
+  id: string;
+  /** Menu row. Blank → truncated first line of `text`. */
+  label?: string;
+  text: string;
+  folder?: string;
+  tags?: string[];
+  createdAt: number;
+}
+
+/**
+ * Validates a hand-editable config.json entry before it reaches the store (plan/029 link 8).
+ * Requires `id`/`text` as strings; `label`/`folder` are string-or-absent; `tags` an array of
+ * strings or absent. `createdAt` is intentionally NOT checked here — a missing/invalid one is
+ * defaulted by the caller rather than rejecting an otherwise-good record.
+ */
+export function isValidSnippet(x: unknown): x is Snippet {
+  if (!x || typeof x !== 'object') return false;
+  const s = x as Record<string, unknown>;
+  if (typeof s.id !== 'string' || typeof s.text !== 'string') return false;
+  if (s.label !== undefined && typeof s.label !== 'string') return false;
+  if (s.folder !== undefined && typeof s.folder !== 'string') return false;
+  if (s.tags !== undefined) {
+    if (!Array.isArray(s.tags) || !s.tags.every((t) => typeof t === 'string')) return false;
+  }
+  return true;
+}
+
+/**
+ * How the Snippets flyout arranges its rows when nothing has been typed (plan/029 §4.3).
+ *
+ *  - `'flat'` (DEFAULT) — every snippet as one row, its folder shown as a `📁 name` chip.
+ *  - `'folders'` — one row per folder, its snippets in a nested panel, unfiled ones flat.
+ *
+ * Flat is the default because it is the arrangement that needs no decisions from the user:
+ * every snippet is one click away whether or not they have ever filed anything, and a
+ * library with no folders at all — which is what a new one is — looks identical in both
+ * modes anyway. Folders are the opt-in for a library that has outgrown one list.
+ *
+ * Only the BROWSE list is affected. A non-empty query already flattens across folders in
+ * both modes, so this is not a search setting and must never be consulted on that path.
+ */
+export type SnippetsViewMode = 'folders' | 'flat';
+
+export function isSnippetsViewMode(x: unknown): x is SnippetsViewMode {
+  return x === 'folders' || x === 'flat';
+}
 
 export const TERMINAL_FONT_WEIGHTS: ReadonlyArray<{ value: TerminalFontWeight; label: string }> = [
   { value: '300', label: 'Light (300)' },
@@ -98,6 +149,14 @@ interface SettingsState {
   // pane, that pane adopts this scheme over its tab/global schema. Global and
   // persisted; see docs/plan/007-agent-color-schemes-plan.md.
   agentColorSchemes: Record<string, string>;
+  // Saved reusable terminal inputs (plan/029), shown in the context menu's Snippets flyout
+  // and the Settings "Snippets" panel. Persisted via config.json (`settings.snippets`),
+  // applies live — no Save button for this category.
+  snippets: Snippet[];
+  // How the Snippets flyout groups its BROWSE list (see SnippetsViewMode). Persisted
+  // rather than kept in component state: the flyout is rebuilt from scratch on every
+  // open, so anything held locally would silently reset to the default each time.
+  snippetsViewMode: SnippetsViewMode;
   // Backlog 011: command history suggestion popup (capture + popup). Default on.
   // Independent of scrollback history persistence (backlog 009).
   commandSuggestions: boolean;
@@ -183,6 +242,8 @@ const initialState: SettingsState = {
   colorSchemaId: DEFAULT_COLOR_SCHEMA_ID,
   nonFocusedPaneOpacity: 50,
   agentColorSchemes: {},
+  snippets: [],
+  snippetsViewMode: 'flat',
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
@@ -196,6 +257,34 @@ const initialState: SettingsState = {
   eulaAcceptedVersion: null,
   eulaHydrated: false,
 };
+
+/** Optional fields on a Snippet — the only ones an update may CLEAR. */
+const CLEARABLE_SNIPPET_KEYS = ['label', 'folder', 'tags'] as const;
+
+/**
+ * Persist the snippets collection from inside a reducer.
+ *
+ * `current()` takes a DEEP plain snapshot; a shallow `map(s => ({ ...s }))` does not.
+ * The shallow form copies `s.tags` BY REFERENCE, and that reference is a child Immer
+ * draft whose proxy Immer revokes the moment the reducer returns. `setConfigValue`
+ * serialises asynchronously, so by the time it reads `tags` it throws
+ * "Cannot perform 'get' on a proxy that has been revoked" — and `updateConfig`
+ * swallows that, so nothing ever reaches config.json.
+ *
+ * Measured, not inferred (round-1 review D-01): with one snippet carrying `tags` — an
+ * EMPTY array is enough — updateSnippet, renameSnippetFolder and removeSnippet each
+ * produced an unstringifiable snapshot. Snippets with no `tags` key were unaffected,
+ * which is exactly why the shallow version looked correct in every test whose fixture
+ * omitted tags. And because the whole array is one payload, a single tagged snippet
+ * takes every untagged one down with it.
+ *
+ * `addSnippet` happened to be safe (a pushed action payload is never drafted), which is
+ * why this must live in one helper rather than be judged per reducer.
+ */
+function persistSnippets(snippets: Snippet[]): void {
+  if (!window.electronAPI) return;
+  window.electronAPI.setConfigValue('snippets', isDraft(snippets) ? current(snippets) : snippets);
+}
 
 const settingsSlice = createSlice({
   name: 'settings',
@@ -422,6 +511,64 @@ const settingsSlice = createSlice({
       }
     },
 
+    setSnippetsViewMode: (state, action: PayloadAction<SnippetsViewMode>) => {
+      state.snippetsViewMode = action.payload;
+      // Not routed through `persistSnippets` — that helper exists for the `snippets`
+      // ARRAY, whose Immer draft has to be unwrapped before it can be stringified. A
+      // string has no such hazard, and reusing the helper would imply one.
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('snippetsViewMode', state.snippetsViewMode);
+      }
+    },
+
+    // Bulk-replace the whole snippets list (hydration, import, D9).
+    setSnippets: (state, action: PayloadAction<Snippet[]>) => {
+      state.snippets = action.payload;
+      persistSnippets(state.snippets);
+    },
+
+    addSnippet: (state, action: PayloadAction<Snippet>) => {
+      state.snippets.push(action.payload);
+      persistSnippets(state.snippets);
+    },
+
+    // Merges `patch` into the matching record; no-op on an unknown id.
+    updateSnippet: (state, action: PayloadAction<{ id: string; patch: Partial<Snippet> }>) => {
+      const target = state.snippets.find((s) => s.id === action.payload.id);
+      if (!target) return;
+      // An explicit `undefined` in the patch means CLEAR THIS FIELD, not "leave it
+      // alone" — that distinction is the whole of review finding D-04, where a user
+      // could not remove a label, unfile a snippet or drop its tags. Object.assign
+      // cannot express it: it writes `undefined` in, leaving a key that is present in
+      // memory and absent once serialised. Deleting keeps the two identical.
+      // Only the optional fields are clearable; a stray `undefined` for `id`, `text`
+      // or `createdAt` is ignored rather than corrupting the record.
+      const rec = target as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(action.payload.patch)) {
+        if (v !== undefined) rec[k] = v;
+        else if ((CLEARABLE_SNIPPET_KEYS as readonly string[]).includes(k)) delete rec[k];
+      }
+      persistSnippets(state.snippets);
+    },
+
+    removeSnippet: (state, action: PayloadAction<string>) => {
+      state.snippets = state.snippets.filter((s) => s.id !== action.payload);
+      persistSnippets(state.snippets);
+    },
+
+    // Bulk rename: every snippet whose folder === `from` moves to `to`. `to === ''`
+    // unfiles them (consequence of D6 — folder is just a repeated string on the item).
+    renameSnippetFolder: (state, action: PayloadAction<{ from: string; to: string }>) => {
+      const { from, to } = action.payload;
+      for (const s of state.snippets) {
+        if (s.folder === from) {
+          if (to === '') delete s.folder;
+          else s.folder = to;
+        }
+      }
+      persistSnippets(state.snippets);
+    },
+
     // Bulk-replace the whole keybindings map. Used on config-load hydration
     // (App.tsx) and as the discard-revert target from the Shortcuts settings
     // category's dirty-tracking baseline.
@@ -530,6 +677,12 @@ export const {
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,
+  setSnippets,
+  setSnippetsViewMode,
+  addSnippet,
+  updateSnippet,
+  removeSnippet,
+  renameSnippetFolder,
   setCustomKeybindings,
   setCustomKeybinding,
   resetCustomKeybinding,

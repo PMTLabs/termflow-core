@@ -41,6 +41,7 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default",
     "autostart:allow-enable",
     "autostart:allow-disable",

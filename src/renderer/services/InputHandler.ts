@@ -3,10 +3,11 @@ import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
 import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
-import { pasteToTerminal } from '@termflow/terminal-core';
+import { insertTextIntoTerminal } from './insertTextIntoTerminal';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
 import { resolveKeyboardTerminalId } from './keyboardTerminal';
+import { getSurfaceChrome } from './surfaceChrome';
 import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
@@ -91,6 +92,7 @@ export class InputHandler {
     // registration is OS-aware out of the box: Ctrl+, on Windows/Linux and
     // Cmd+, on macOS — matching every other shortcut in this app.
     this.registerShortcut(this.defaultComboFor('openSettings'), openSettingsTab);
+    this.registerShortcut(this.defaultComboFor('openSnippets'), this.handleOpenSnippets);
     this.registerShortcut(this.defaultComboFor('toggleFullScreen'), this.handleToggleFullScreen);
     this.registerShortcut(this.defaultComboFor('toggleCanvasMode'), this.handleToggleCanvasMode);
     // Note: Ctrl/Cmd +/-/0 zoom is intentionally NOT bound here. Zoom is per-surface
@@ -161,6 +163,7 @@ export class InputHandler {
       paste: this.handlePaste,
       clearTerminal: this.handleClearTerminal,
       openSettings: openSettingsTab,
+      openSnippets: this.handleOpenSnippets,
       toggleFullScreen: this.handleToggleFullScreen,
       toggleCanvasMode: this.handleToggleCanvasMode,
     };
@@ -462,15 +465,9 @@ export class InputHandler {
     }
 
     if (targetId) {
-      // Route through xterm (cacheKey === terminalId) so multi-line pastes get
-      // bracketed-paste markers + CRLF→CR normalization — CLIs (Claude Code, Gemini)
-      // then treat the whole paste as one literal block instead of submitting each
-      // line. Falls back to a raw PTY write if the terminal isn't currently mounted.
-      if (!pasteToTerminal(targetId, text)) {
-        terminalService.writeToTerminal(targetId, text).catch(err => {
-          console.error('Failed to paste to terminal:', err);
-        });
-      }
+      // Insertion itself (xterm route + raw-write fallback) lives in the shared
+      // helper — see insertTextIntoTerminal.ts for why the xterm route matters.
+      insertTextIntoTerminal(targetId, text);
     } else {
       console.warn('InputHandler: Could not determine target terminal for paste');
     }
@@ -487,6 +484,22 @@ export class InputHandler {
         console.error('Failed to clear terminal:', err);
       });
     }
+  };
+
+  /**
+   * Open the Snippets flyout on the terminal the keyboard is talking to.
+   *
+   * `resolveKeyboardTerminalId`, not the active pane — same as paste and clear above, and
+   * for the same reason: while the canvas holds the keyboard, "the active pane" names a
+   * terminal on a different screen.
+   *
+   * The registry is read HERE, at press time, rather than captured: a terminal that is
+   * mid-spawn, or one whose `TerminalDisplay` has unmounted, is simply absent, and the
+   * shortcut does nothing instead of opening a menu that writes into a dead PTY.
+   */
+  private handleOpenSnippets = (): void => {
+    const targetId = resolveKeyboardTerminalId(store.getState());
+    if (targetId) getSurfaceChrome(targetId)?.openSnippets();
   };
 
   private handleToggleFullScreen = (): void => {

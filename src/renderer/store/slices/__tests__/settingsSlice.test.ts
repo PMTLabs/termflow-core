@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, isValidSnippet, Snippet } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -326,5 +326,195 @@ describe('settingsSlice canvasBusyCue', () => {
     } finally {
       delete (global as any).window.electronAPI;
     }
+  });
+});
+
+describe('settingsSlice snippets (plan/029)', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  const mk = (over: Partial<Snippet> = {}): Snippet => ({
+    id: 's1',
+    text: 'kubectl get pods',
+    createdAt: 1000,
+    ...over,
+  });
+
+  it('defaults to [] — no built-in snippets ship, the list is entirely user-authored', () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.snippets).toEqual([]);
+  });
+
+  it('setSnippets bulk-replaces the list', () => {
+    const state = settingsReducer(undefined, setSnippets([mk(), mk({ id: 's2' })]));
+    expect(state.snippets.map((s) => s.id)).toEqual(['s1', 's2']);
+  });
+
+  it('addSnippet appends', () => {
+    let state = settingsReducer(undefined, setSnippets([mk()]));
+    state = settingsReducer(state, addSnippet(mk({ id: 's2', text: 'docker compose up -d' })));
+    expect(state.snippets.map((s) => s.id)).toEqual(['s1', 's2']);
+  });
+
+  it('updateSnippet merges a patch into the matching record', () => {
+    let state = settingsReducer(undefined, setSnippets([mk()]));
+    state = settingsReducer(state, updateSnippet({ id: 's1', patch: { label: 'Pods', folder: 'k8s' } }));
+    expect(state.snippets[0]).toEqual(expect.objectContaining({ label: 'Pods', folder: 'k8s', text: 'kubectl get pods' }));
+  });
+
+  it('updateSnippet on an unknown id is a no-op', () => {
+    const before = settingsReducer(undefined, setSnippets([mk()]));
+    const after = settingsReducer(before, updateSnippet({ id: 'nope', patch: { label: 'x' } }));
+    expect(after.snippets).toEqual(before.snippets);
+  });
+
+  it('removeSnippet drops the matching record', () => {
+    let state = settingsReducer(undefined, setSnippets([mk(), mk({ id: 's2' })]));
+    state = settingsReducer(state, removeSnippet('s1'));
+    expect(state.snippets.map((s) => s.id)).toEqual(['s2']);
+  });
+
+  it('renameSnippetFolder moves every snippet in the old folder to the new one', () => {
+    let state = settingsReducer(undefined, setSnippets([
+      mk({ id: 's1', folder: 'Git' }),
+      mk({ id: 's2', folder: 'Git' }),
+      mk({ id: 's3', folder: 'Docker' }),
+    ]));
+    state = settingsReducer(state, renameSnippetFolder({ from: 'Git', to: 'Version Control' }));
+    expect(state.snippets.map((s) => s.folder)).toEqual(['Version Control', 'Version Control', 'Docker']);
+  });
+
+  it("renameSnippetFolder with to: '' unfiles the matching snippets", () => {
+    let state = settingsReducer(undefined, setSnippets([mk({ id: 's1', folder: 'Git' })]));
+    state = settingsReducer(state, renameSnippetFolder({ from: 'Git', to: '' }));
+    expect(state.snippets[0].folder).toBeUndefined();
+  });
+
+  // Regression: same trap as agentColorSchemes — the persistence side-effect must hand the
+  // async config writer a PLAIN array snapshot, not the live Immer draft (revoked once the
+  // reducer returns), or the write silently never happens.
+  describe('persistence', () => {
+    let setConfigValue: jest.Mock;
+
+    beforeEach(() => {
+      setConfigValue = jest.fn();
+      (global as any).window.electronAPI = { setConfigValue };
+    });
+
+    afterEach(() => {
+      delete (global as any).window.electronAPI;
+    });
+
+    const persistedSnippetsArgs = () =>
+      setConfigValue.mock.calls.filter(([key]) => key === 'snippets').map(([, value]) => value);
+
+    /**
+     * The oracle that matters. `setConfigValue` serialises ASYNCHRONOUSLY, after the
+     * reducer has returned and Immer has revoked its drafts — so "is it an array?" is
+     * not the question. The question is whether it still serialises at that point.
+     *
+     * Round-1 review D-01: `state.snippets.map(s => ({ ...s }))` copies `tags` by
+     * reference, and that reference is a revoked child draft. `Array.isArray` was true
+     * of the broken snapshot too, which is why four green tests never saw it.
+     */
+    const stringifyError = (v: unknown): string | null => {
+      try { JSON.stringify(v); return null; } catch (e) { return String((e as Error).message); }
+    };
+
+    // Every fixture here carries `tags`. An EMPTY array is enough to trigger the defect,
+    // and a fixture without the key cannot detect it at all.
+    const tagged = (over: Partial<Snippet> = {}): Snippet => mk({ tags: ['k8s', 'ops'], ...over });
+
+    it.each([
+      ['setSnippets', () => settingsReducer(undefined, setSnippets([tagged()]))],
+      ['addSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([])), addSnippet(tagged()))],
+      ['updateSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged()])), updateSnippet({ id: 's1', patch: { label: 'x' } }))],
+      ['removeSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged()])), removeSnippet('nope'))],
+      ['renameSnippetFolder', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged({ folder: 'Git' })])), renameSnippetFolder({ from: 'Git', to: 'VCS' }))],
+    ])('%s persists a snapshot that still serialises after the reducer returns', (_name, run) => {
+      run();
+      const arg = persistedSnippetsArgs().at(-1);
+      // Kills: `map(s => ({ ...s }))`, which leaves `tags` as a revoked proxy.
+      expect(stringifyError(arg)).toBeNull();
+    });
+
+    it('persists the exact contents, not merely something array-shaped', () => {
+      settingsReducer(undefined, setSnippets([tagged()]));
+      const [arg] = persistedSnippetsArgs();
+      // Kills: persisting `[]`, or persisting the pre-change list.
+      expect(arg).toEqual([tagged()]);
+    });
+
+    it('persists the POST-change list for each mutating reducer', () => {
+      const state = settingsReducer(undefined, setSnippets([tagged(), tagged({ id: 's2' })]));
+      settingsReducer(state, removeSnippet('s2'));
+      // Kills: persisting the unmodified list — the commonest way a "plain array" assertion lies.
+      expect(persistedSnippetsArgs().at(-1)).toEqual([tagged()]);
+    });
+
+    it('one tagged snippet must not take the untagged ones down with it', () => {
+      // The amplification measured in round 1: the list is ONE payload, so a single
+      // unserialisable member loses every sibling too.
+      const state = settingsReducer(undefined, setSnippets([mk({ id: 'plain' }), tagged({ id: 'withTags' })]));
+      settingsReducer(state, removeSnippet('no-such-id'));
+      const arg = persistedSnippetsArgs().at(-1);
+      expect(stringifyError(arg)).toBeNull();
+      expect((arg as Snippet[]).map((x) => x.id)).toEqual(['plain', 'withTags']);
+    });
+
+    it('persists a frozen snapshot that cannot be used to reach back into store state', () => {
+      const state = settingsReducer(undefined, setSnippets([tagged()]));
+      const arg = persistedSnippetsArgs().at(-1) as Snippet[];
+      // `current()` returns a deep plain snapshot, and Immer's auto-freeze — which RTK
+      // relies on to catch accidental state mutation — freezes it all the way down,
+      // the nested `tags` array included. So the snapshot is not a route back into the
+      // store, and it holds no proxy that could be revoked before it is serialised.
+      //
+      // Kills the previous `map(s => ({ ...s }))`: that built fresh, UNFROZEN objects,
+      // so every assertion below fails on it.
+      expect(Object.isFrozen(arg)).toBe(true);
+      expect(Object.isFrozen(arg[0])).toBe(true);
+      expect(Object.isFrozen(arg[0].tags)).toBe(true);
+      expect(arg).toEqual([tagged()]);
+      expect(state.snippets).toEqual([tagged()]);
+    });
+  });
+});
+
+describe('isValidSnippet (plan/029 link 8 — hydration validation)', () => {
+  const valid: Snippet = {
+    id: 's1',
+    label: 'Pods',
+    text: 'kubectl get pods',
+    folder: 'k8s',
+    tags: ['k8s', 'read'],
+    createdAt: 1000,
+  };
+
+  it('accepts a fully valid record', () => {
+    expect(isValidSnippet(valid)).toBe(true);
+  });
+
+  it('rejects a record missing id', () => {
+    const { id, ...rest } = valid;
+    expect(isValidSnippet(rest)).toBe(false);
+  });
+
+  it('rejects a record missing text', () => {
+    const { text, ...rest } = valid;
+    expect(isValidSnippet(rest)).toBe(false);
+  });
+
+  it('rejects tags that is not an array', () => {
+    expect(isValidSnippet({ ...valid, tags: 'k8s' })).toBe(false);
+  });
+
+  it('rejects tags containing a non-string', () => {
+    expect(isValidSnippet({ ...valid, tags: ['k8s', 42] })).toBe(false);
+  });
+
+  it('accepts an extra unknown key (forward-compat)', () => {
+    expect(isValidSnippet({ ...valid, futureField: 'anything' })).toBe(true);
   });
 });

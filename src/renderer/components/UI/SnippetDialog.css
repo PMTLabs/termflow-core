@@ -1,0 +1,171 @@
+/* Snippet create/edit modal (plan/029 §7.3), shared by the Settings panel and the
+ * terminal context menu's "Add New Snippet". Self-contained and namespaced under
+ * `.snippet-dialog*` deliberately — this component is used from two very different
+ * parents (a settings tab, a portalled context menu), so it must not lean on another
+ * screen's global classes (`setting-input`, `confirm-btn`, ...) happening to be
+ * loaded. Every selector below is scoped to a specific control, not a bare
+ * descendant selector — the repo has already been bitten once by
+ * `.form-group input` stretching a set of radio buttons it never meant to touch. */
+
+.snippet-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.snippet-dialog {
+  background: var(--tab-active-background, #141414);
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.snippet-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 12px;
+}
+
+.snippet-dialog-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--tab-active-foreground, #ffffff);
+}
+
+.snippet-dialog-close {
+  background: transparent;
+  border: none;
+  color: var(--tab-foreground, #cccccc);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.snippet-dialog-close:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--tab-active-foreground, #ffffff);
+}
+
+.snippet-dialog-body {
+  padding: 0 24px 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.snippet-dialog-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tab-foreground, #cccccc);
+  margin: 14px 0 6px;
+}
+
+.snippet-dialog-label:first-child {
+  margin-top: 0;
+}
+
+.snippet-dialog-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 6px;
+  color: var(--tab-active-foreground, #ffffff);
+  font-family: var(--mono-font, 'Cascadia Code', Consolas, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.snippet-dialog-textarea:focus {
+  outline: none;
+  border-color: var(--accent-color, #0078d4);
+}
+
+.snippet-dialog-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color, #3e3e42);
+  border-radius: 6px;
+  color: var(--tab-active-foreground, #ffffff);
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.snippet-dialog-input:focus {
+  outline: none;
+  border-color: var(--accent-color, #0078d4);
+}
+
+.snippet-dialog-input::placeholder,
+.snippet-dialog-textarea::placeholder {
+  color: var(--tab-foreground, #888888);
+  opacity: 0.7;
+}
+
+.snippet-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.snippet-dialog-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.snippet-dialog-btn--cancel {
+  background: transparent;
+  color: var(--tab-foreground, #cccccc);
+  border-color: var(--border-color, #3e3e42);
+}
+
+.snippet-dialog-btn--cancel:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--tab-active-foreground, #ffffff);
+}
+
+.snippet-dialog-btn--save {
+  background: var(--accent-color, #0078d4);
+  color: white;
+}
+
+.snippet-dialog-btn--save:hover:not(:disabled) {
+  background: #1a86d9;
+}
+
+.snippet-dialog-btn--save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.snippet-dialog-btn:focus-visible,
+.snippet-dialog-close:focus-visible {
+  outline: 2px solid var(--accent-color, #0078d4);
+  outline-offset: 2px;
+}

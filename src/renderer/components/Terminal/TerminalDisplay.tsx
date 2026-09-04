@@ -10,13 +10,16 @@ import { automationMenuItems } from '../Automation/AutomationMenuSection';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
+import { SnippetDialog } from '../UI/SnippetDialog';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
+import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
+import { insertTextIntoTerminal } from '../../services/insertTextIntoTerminal';
 import { terminalService } from '../../services/TerminalService';
 import { termDiag, isTermDiagEnabled, setTermDiag } from '../../utils/diag';
 import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
@@ -30,7 +33,7 @@ import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
-import { setAgentColorScheme, removeAgentColorScheme } from '../../store/slices/settingsSlice';
+import { setAgentColorScheme, removeAgentColorScheme, addSnippet, setSnippetsViewMode } from '../../store/slices/settingsSlice';
 import { addToast } from '../../store/slices/uiSlice';
 import { listen } from '@tauri-apps/api/event';
 import { isAbsolutePath, joinCwd } from '../../utils/pathResolve';
@@ -113,6 +116,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // never renders its own TerminalDisplay (there is exactly one instantiation
   // site, TerminalPane.tsx), it only borrows this engine's context menu.
   const { paneMuted, tabMuted, effectiveMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
+  // plan/029 link 9: MUST be a live store read, never a hard-coded list — the
+  // Snippets flyout (and Settings' own CRUD panel, T7) both read this same slice.
+  const snippets = useSelector((s: RootState) => s.settings.snippets);
+  // Same rule as `snippets` above: a live store read, so the flyout redraws in the
+  // arrangement the toggle just persisted rather than the one it opened with.
+  const snippetsViewMode = useSelector((s: RootState) => s.settings.snippetsViewMode);
+  const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
+  /**
+   * The Snippets flyout opened by the KEYBOARD (plan/029 §6), as opposed to by a
+   * right-click. Its own slot rather than a flag on `contextMenu`: it is a different
+   * menu — one item, its flyout already open — and folding the two together would
+   * mean every read of `contextMenu.link` had to ask which kind it was looking at.
+   */
+  const [snippetsMenu, setSnippetsMenu] = useState<{ x: number; y: number } | null>(null);
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
   const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -209,6 +226,61 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     engineRef.current?.focus();
   }, []);
   /**
+   * Mirrors `snippetDialogOpen` for code that runs BEFORE React has re-rendered.
+   *
+   * "Add New Snippet" opens the dialog and dismisses the menu in one click handler, so
+   * `refocusTerminal` below runs while the state variable still reads `false`. Reading
+   * the ref is what lets that one path opt out of the refocus.
+   */
+  const snippetDialogOpenRef = useRef(false);
+  /**
+   * Put the keyboard back in the terminal.
+   *
+   * Opening any of these menus moves DOM focus off the terminal — onto a menu button,
+   * or the flyout's search box — and dismissing the menu unmounts whatever held it, so
+   * focus lands on `document.body` and the terminal is deaf until the user clicks it.
+   * That is a property of the MENU, not of any one item, so it belongs on the shared
+   * close path rather than on the snippet row that happened to expose it: an item added
+   * tomorrow inherits the fix instead of rediscovering the bug.
+   *
+   * The one exception is a menu item that opens a dialog. `SnippetDialog` focuses its
+   * textarea from an effect, which runs after this synchronous call and would therefore
+   * win anyway — but only by ordering, and ordering that no test could pin. The ref is
+   * checked so the intent is stated rather than implied.
+   */
+  const refocusTerminal = useCallback(() => {
+    if (snippetDialogOpenRef.current) return;
+    engineRef.current?.focus();
+  }, []);
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+    refocusTerminal();
+  }, [refocusTerminal]);
+  const closeSnippetsMenu = useCallback(() => {
+    setSnippetsMenu(null);
+    refocusTerminal();
+  }, [refocusTerminal]);
+  const closePathPicker = useCallback(() => {
+    setPathPicker(null);
+    refocusTerminal();
+  }, [refocusTerminal]);
+  const closeSchemaPicker = useCallback(() => {
+    setSchemaPicker(null);
+    refocusTerminal();
+  }, [refocusTerminal]);
+  const openSnippetDialog = useCallback(() => {
+    snippetDialogOpenRef.current = true;
+    setSnippetDialogOpen(true);
+  }, []);
+  /** Both dialog exits (Save and Cancel) land here. `useDialogA11y` restores focus to the
+   *  element that opened the dialog — a menu button that has since unmounted — so the
+   *  terminal has to be asked for explicitly or the keyboard is left on `<body>`. */
+  const closeSnippetDialog = useCallback(() => {
+    snippetDialogOpenRef.current = false;
+    setSnippetDialogOpen(false);
+    refocusTerminal();
+  }, [refocusTerminal]);
+  /**
    * Open the terminal's context menu at a point in VIEWPORT coordinates.
    *
    * Declared up here with the other published callbacks rather than beside its DOM handler
@@ -239,6 +311,32 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       setAgentForMenu(agentSchemeTracker.getDetectedAgentForTerminal(terminalId)),
     );
   }, [terminalId]);
+  /**
+   * The container the ENGINE is currently mounted in — the canvas node while relocated,
+   * this pane's own div otherwise. Held in a ref so `openSnippetsMenu` below can read it
+   * without taking a dependency on it: that callback is published into `surfaceChrome`,
+   * where a fresh identity on every relocation would republish and wake every canvas node.
+   */
+  const engineHostRef = useRef<HTMLElement | null>(null);
+  /**
+   * Open the Snippets flyout at the terminal's CURSOR (plan/029 §6) — the keyboard
+   * equivalent of right-clicking and picking Snippets.
+   *
+   * Anchored at the cursor rather than at a corner because that is where the user is
+   * already looking, and because it is the point the inserted text will appear at.
+   * `getCursorPixelPosition` is relative to the engine's container and returns null when
+   * the cursor is scrolled out of view, so the container's own top-left is the fallback.
+   */
+  const openSnippetsMenu = useCallback(() => {
+    const rect = engineHostRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const cursor = engineRef.current?.getCursorPixelPosition() ?? null;
+    setSnippetsMenu({
+      x: rect.left + (cursor?.left ?? 0),
+      y: rect.top + (cursor ? cursor.top + cursor.cellHeight : 0),
+    });
+  }, []);
+
   // Stable identities for the two pane-owned actions, so an absent prop does not publish a fresh
   // no-op closure on every render — `same()` compares these by reference, and a new function each
   // time would make every write a change and wake every canvas node.
@@ -273,9 +371,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       restartSession: restartSessionCb,
       dismissSessionClosed: dismissSessionClosedCb,
       openSearch: search.openSearch,
+      openSnippets: openSnippetsMenu,
     });
   }, [
-    terminalId, atBottom, scrollToBottomCb, suggest.pick, openContextMenuAt,
+    terminalId, atBottom, scrollToBottomCb, suggest.pick, openContextMenuAt, openSnippetsMenu,
     suggest.open, suggest.items, suggest.selectedIndex, suggest.focused, suggest.anchor,
     restartSessionCb, dismissSessionClosedCb,
     // Every published `search` sub-field, one at a time. The object itself is a fresh wrapper
@@ -334,6 +433,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // (ContextMenu.tsx:63, :67), so a menu opened before the move floats at a
       // viewport point unrelated to the terminal. Same for both pickers.
       setContextMenu(null);
+      setSnippetsMenu(null);
       setPathPicker(null);
       setSchemaPicker(null);
       // The SEARCH BAR is deliberately left open with its state intact (§8): it
@@ -349,6 +449,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       dispatch(addToast({ message: 'Could not move this terminal', type: 'error' }));
     },
   });
+
+  // Kept current from the render that knows it; `openSnippetsMenu` (declared with the other
+  // published callbacks, far above) reads it lazily at press time. Same shape as
+  // `suggestRef.current = suggest` further up.
+  engineHostRef.current = relocationHost ?? terminalRef.current;
 
   // The overlay's engine gate. Extracted to its own hook so its DEPENDENCIES can be tested —
   // they are the whole feature, and this component cannot be mounted under the root Jest config
@@ -657,6 +762,22 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     openContextMenuAt(e.clientX, e.clientY);
   };
 
+  /**
+   * The Snippets item, built ONCE for both of its hosts: the right-click menu and the
+   * `Ctrl+Shift+S` menu. Two call sites building their own would be two places for a
+   * prop to be forgotten — and the toggle, the insert target and the dialog hook all
+   * have to behave identically whichever way the flyout was opened.
+   */
+  const snippetsMenuItem = () => buildSnippetsMenuItem({
+    snippets,
+    viewMode: snippetsViewMode,
+    insert: (text) => insertTextIntoTerminal(terminalId, text),
+    onAddNew: openSnippetDialog,
+    onToggleViewMode: () => dispatch(
+      setSnippetsViewMode(snippetsViewMode === 'flat' ? 'folders' : 'flat'),
+    ),
+  });
+
   const getContextMenuItems = () => {
     const engine = engineRef.current;
     const actions = engine?.getContextMenuActions();
@@ -803,6 +924,16 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         },
       ] : []),
       { type: 'separator' as const },
+      // plan/029 §6. Command History ABOVE Snippets (stated acceptance criterion).
+      // Both ungated — they must work while a TUI/CLI is running (P1), same class
+      // as Copy/Paste/Clear/Mute above: they act on the terminal's own PTY write
+      // path via `insertTextIntoTerminal`, not on anything pane-tree-specific.
+      buildCommandHistoryMenuItem({
+        cwd: getCwdSnapshot(terminalId),
+        insert: (command) => insertTextIntoTerminal(terminalId, command),
+      }),
+      snippetsMenuItem(),
+      { type: 'separator' as const },
       {
         label: 'Clear',
         icon: '🧹',
@@ -886,7 +1017,18 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           x={contextMenu.x}
           y={contextMenu.y}
           items={getContextMenuItems()}
-          onClose={() => setContextMenu(null)}
+          onClose={closeContextMenu}
+        />
+      )}
+      {/* plan/029 §6 — the same flyout the right-click menu carries, opened straight from
+          the keyboard: the panel alone, at the cursor, with its search box focused. */}
+      {snippetsMenu && (
+        <ContextMenu
+          x={snippetsMenu.x}
+          y={snippetsMenu.y}
+          items={[snippetsMenuItem()]}
+          standaloneSubmenu={0}
+          onClose={closeSnippetsMenu}
         />
       )}
       {pathPicker && (
@@ -899,7 +1041,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
             title: c,
             click: () => { void openResolved(c, pathPicker.line, pathPicker.col); },
           }))}
-          onClose={() => setPathPicker(null)}
+          onClose={closePathPicker}
         />
       )}
       {schemaPicker && (
@@ -920,9 +1062,23 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
               click: () => dispatch(setAgentColorScheme({ agent: schemaPicker.agent, colorSchemaId: s.id })),
             })),
           ]}
-          onClose={() => setSchemaPicker(null)}
+          onClose={closeSchemaPicker}
         />
       )}
+      {/* plan/029 §6 — opened by the Snippets flyout's "Add New Snippet" footer row.
+          Create mode only here (`snippet={null}`); editing lives in the Settings
+          panel (T7). Never dispatches itself — this component owns the choice of
+          `addSnippet` vs. `updateSnippet`. */}
+      <SnippetDialog
+        isOpen={snippetDialogOpen}
+        snippet={null}
+        snippets={snippets}
+        onSave={(snippet) => {
+          dispatch(addSnippet(snippet));
+          closeSnippetDialog();
+        }}
+        onCancel={closeSnippetDialog}
+      />
     </div>
   );
 };
