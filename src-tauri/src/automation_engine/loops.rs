@@ -1128,4 +1128,63 @@ mod tests {
             .is_some_and(|p| p.missing)
     }
 
+    // =============================================================================================
+    // §10.9b — the half `reload`'s own test cannot make: no SECOND message
+    // =============================================================================================
+
+    /// **Disabling one rule must not make another one send again.**
+    ///
+    /// `automation_engine.rs` asserts that rule B's arm keys survive rule A's toggle. That is the
+    /// mechanism; this is the requirement. The easy `reload` — build a fresh map, drop the old keys —
+    /// makes every B pair `Unseen`, and settled decision 7 then counts an already-true condition as a
+    /// first sight: B goes silent until its next genuine crossing, with no log line and nothing on
+    /// screen. The visible half of that bug is the opposite one, and it is this test: a pair put back
+    /// to `Armed` types a second message into the user's terminal on the very next tick.
+    #[tokio::test(start_paused = true)]
+    async fn disabling_one_rule_does_not_make_another_one_send_again() {
+        let (engine, fake, host) = wire(vec![
+            ctx_rule_saying("au-a", "alpha speaking", 1),
+            ctx_rule_saying("au-b", "bravo speaking", 2),
+        ]);
+        for id in ["au-a", "au-b"] {
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(times_sent(&fake, "bravo speaking"), 1, "the premise: B has fired once");
+
+        // The user flips A off. Nothing about B changed.
+        let mut off = ctx_rule_saying("au-a", "alpha speaking", 1);
+        off.enabled = false;
+        off.updated_at = 2_000;
+        fake.store.save_rule(&off).unwrap();
+        engine.reload(&fake.store, 2_000).unwrap();
+
+        // The value is still above the threshold, and B is still watching.
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 5_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "bravo speaking"),
+            1,
+            "B sent a second message because the reload re-armed it: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            engine.runtime.arm_state("au-b", "tm-1"),
+            ArmState::Fired { at_ms: 1_000 },
+            "and it is still Fired, at the instant it FIRST became true"
+        );
+        assert!(
+            log_kinds(&fake.store).contains(&"Held".to_string()),
+            "the decision must be `held`, and be visible as one: {:?}",
+            log_kinds(&fake.store)
+        );
+        assert!(!engine.is_live("au-a"), "the premise: A really did leave the live set");
+    }
+
 }
