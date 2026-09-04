@@ -97,6 +97,10 @@
    fixed-width chip. */
 .canvas-gchip-title { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .canvas-gchip-count { font-size: 11px; color: var(--text-secondary, #969696); flex: none; margin-left: auto; }
+/* The armed-automation badge's size on the chip, handed over as a variable rather than restated as
+   a `font-size` here — `automationSurfaces.css` is the only owner of that property, so the two
+   cannot compose the way the two `.au-tog` rules did. Matches `.canvas-gchip-count`. */
+.canvas-gchip .au-armed { --au-armed-size: 11px; margin-left: 0; }
 .canvas-gchip-run { width: 7px; height: 7px; border-radius: 50%; background: var(--tab-running-accent, #3aa6ff); flex: none; }
 
 /* ---- Nodes -------------------------------------------------------------- */
@@ -209,6 +213,8 @@
    `flex: none` + `max-width` + ellipsis for the same reason as the agent chip: a long tab title
    must shrink itself, never push the header's buttons out of the node. */
 .canvas-node-group { flex: none; max-width: 34%; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-secondary, #9a9a9a); border: 1px solid var(--border-color, #3e3e42); border-radius: 999px; padding: 1px 6px; position: relative; z-index: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Same hand-off, at the node header's own metrics — the size the shell and agent chips use. */
+.canvas-node-head-inner .au-armed { --au-armed-size: 9.5px; }
 .canvas-node-shell { flex: none; font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-tertiary, #666666); border: 1px solid var(--border-color, #3e3e42); border-radius: 2px; padding: 1px 4px; position: relative; z-index: 1; }
 /* The agent/CLI chip (item 6). Shares the shell badge's metrics so the two sit as a pair, and
    differs only where the difference carries meaning: it is ACCENT-coloured and pill-shaped

@@ -157,6 +157,7 @@ dependencies = [
  "notify-rust",
  "parking_lot",
  "portable-pty",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

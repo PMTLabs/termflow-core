@@ -39,6 +39,16 @@ export interface DialogA11yOptions {
   mnemonics?: Mnemonic[];
   /** Where focus lands when the dialog opens. Defaults to 'first'. */
   initialFocus?: InitialFocus;
+  /**
+   * Keep Tab inside the dialog. Defaults to `true`, which is every modal dialog in the app.
+   *
+   * Pass `false` for a NON-MODAL surface — one the user is meant to leave without closing, so the
+   * rest of the window stays live behind it. Escape, Enter and the mnemonics are unaffected: they
+   * are bound to the container in the bubble phase and so already only fire while focus is inside.
+   * A trap is the one part of this hook that reaches OUTSIDE the dialog to hold focus in, and it is
+   * the one part a non-modal dialog must not have.
+   */
+  trapFocus?: boolean;
 }
 
 /** Input types that accept free text (so bare-letter mnemonics must suppress). */
@@ -186,6 +196,8 @@ export function useDialogA11y(
       }
 
       if (e.key === 'Tab') {
+        // Non-modal: let Tab walk out of the dialog into the window behind it.
+        if (o.trapFocus === false) return;
         const focusables = getFocusable(container);
         if (focusables.length === 0) {
           e.preventDefault();

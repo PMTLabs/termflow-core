@@ -3,6 +3,7 @@ import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } 
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
+import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import type { CanvasBusyCue } from './canvasBusyCue';
 import type { CanvasCombos } from './canvasGestures';
 
@@ -221,6 +222,17 @@ export const CanvasNode: React.FC<{
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node
               and there is room for a title and nothing else. */}
+          {/* The automations armed on this terminal (`plan/028` item D) — the canvas's answer to
+              the pane title's badge, and suppressed at the chip tier for the same reason the agent
+              and shell chips beside it are: there the header IS the node.
+
+              COMPACT everywhere but the overlay. The rule's name is printed only at 1:1, which is
+              the rule `canvas-node-group` two lines up already follows — a preview node's header is
+              competing with its own title at a fraction of natural size, and the `+N` plus the
+              hover text carry the rest. The right-click menu is where the list is read. */}
+          {!isChip && (
+            <AutomationArmedForTerminal terminalId={node.terminalId} compact={!overlaid} />
+          )}
           {!isChip && <CanvasNodeAgent terminalId={node.terminalId} />}
           {!isChip && <span className="canvas-node-shell">{node.shellType}</span>}
           {/* Every handler on these buttons stops propagation, and each one is stopping a

@@ -320,6 +320,31 @@ pub fn set_terminal_owning_tab(
     Ok(())
 }
 
+/// Push the renderer's tab/pane title down to a live terminal, keyed by the durable `tm-` LEAF.
+///
+/// Fired from `services/terminalLabelSync.ts`, which derives the answer from the store rather than
+/// from a lifecycle hook — the same reasoning `paneOwnership.ts` states in its own header, and for the
+/// same reason: a moved pane already has a mapping and never re-binds, so a hook misses it.
+///
+/// This writes `Terminal.display_label`, **never `Terminal.name`**: `name` is on the wire in
+/// `/api/terminals` and is what MCP's `get_terminal_detail` returns, so changing what it holds would
+/// change what agents see. Plan 028 §4.2.
+///
+/// Best-effort, like `set_terminal_owning_tab`: an unmatched leaf is not an error.
+#[tauri::command]
+pub fn set_terminal_display_label(
+    state: State<'_, AppState>,
+    renderer_terminal_id: String,
+    label: Option<String>,
+) -> Result<(), String> {
+    if !crate::state::set_display_label(&state.terminals, &renderer_terminal_id, label.as_deref())? {
+        log::debug!(
+            "set_terminal_display_label: no live terminal carries leaf {renderer_terminal_id}"
+        );
+    }
+    Ok(())
+}
+
 /// Everything a spawn needs, independent of WHO asked for it — the renderer
 /// (`create_terminal`), the REST/MCP API (`api_server::create_terminal`), or the
 /// fleet responder (`api_server::fleet_local_run`).
@@ -609,6 +634,7 @@ fn register_host_terminal(
             last_input_source: None,
             last_input_at: None,
             prompt_hook,
+            display_label: None,
         },
     );
 }
@@ -2868,6 +2894,7 @@ mod scrollback_restore_tests {
                 last_input_source: None,
                 last_input_at: None,
                 prompt_hook: false,
+                display_label: None,
             },
         );
     }

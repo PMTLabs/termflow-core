@@ -181,6 +181,7 @@ class BrowserBridge implements ElectronAPI {
     /// No-op in the browser: the REST surface exposes no ownership update, and a
     /// browser session has no pane-drag/detach paths to move a pane between tabs.
     async setTerminalOwningTab(_rendererTerminalId: string, _owningTabId: string): Promise<void> { }
+    async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
 
     async closeTerminal(id: string): Promise<void> {
         try {
@@ -565,6 +566,19 @@ class BrowserBridge implements ElectronAPI {
     async setKeepRunningInBackground(_enabled: boolean): Promise<void> {
         // No tray / background process in the browser host.
     }
+
+    // --- Terminal Automations (Plan 028) ---
+    //
+    // DELIBERATELY NOT IMPLEMENTED, and the absence is the interface. The rule store is SQLite
+    // inside the desktop process and the engine runs there too, so there is nothing to proxy.
+    // `ElectronAPI` declares all eleven as optional, so this class still satisfies it.
+    //
+    // The first version defined eleven throwing stubs, with a comment saying the panel would
+    // "render an explicit unavailable card". It would not have: the panel detects absence with
+    // `!api?.listAutomations`, and a stub that throws is still a truthy property. So the browser
+    // host reached the list surface, the throw was caught as an ordinary fetch error, and the user
+    // was shown "No automations yet" over a feature that is simply not present. Not defining them
+    // is what makes the detection true.
 
     // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
     async canvasApiRequest(path: string, init?: { method?: string; body?: unknown }): Promise<unknown> {

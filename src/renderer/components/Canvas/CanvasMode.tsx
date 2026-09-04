@@ -1209,6 +1209,7 @@ export const CanvasMode: React.FC = () => {
           x={nodeMenu.x}
           y={nodeMenu.y}
           title={nodeMenu.node.title}
+          terminalId={nodeMenu.node.terminalId}
           // Read from `overlayId` rather than remembered when the menu opened: the overlay can be
           // dismissed by a backdrop click while the menu is up, and a stale copy would then offer
           // "Shrink back to the canvas" for a node that is already back on it.

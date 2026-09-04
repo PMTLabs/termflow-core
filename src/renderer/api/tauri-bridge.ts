@@ -3,7 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, DryRunReport } from '../types/electron';
+import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
@@ -59,6 +60,11 @@ interface ElectronAPI {
   /// root. Shape comes only from the pane tree, and a leaf keeps its id when
   /// moved — see services/paneOwnership.ts.
   setTerminalOwningTab: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
+  /// Push the tab/pane title this window shows for a terminal down to the backend, keyed by the
+  /// durable `tm-` LEAF. Writes `Terminal.display_label`, never `Terminal.name` — `name` is on the
+  /// wire in `/api/terminals` and is what MCP returns, so changing what it holds would change what
+  /// agents see. See services/terminalLabelSync.ts.
+  setTerminalDisplayLabel: (rendererTerminalId: string, label: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   /// Ask the backend to open/activate the Settings tab in the current main window
@@ -203,6 +209,18 @@ interface ElectronAPI {
   fabricStatus: () => Promise<FabricStatus>;
   // Background mode (Plan 010)
   setKeepRunningInBackground: (enabled: boolean) => Promise<void>;
+  // Terminal Automations (Plan 028)
+  listAutomations: () => Promise<AutomationRule[]>;
+  getAutomationRuntime: () => Promise<AutomationStatePayload>;
+  loadAutomationLog: (ruleId: string | null, newestFirst: boolean, limit: number) => Promise<AutomationLogEntry[]>;
+  listWatchableTerminals: (ruleId: string | null, includeIds: string[] | null) => Promise<WatchableTerminal[]>;
+  dryRunAutomation: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
+  saveAutomation: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
+  deleteAutomation: (id: string, origin: string) => Promise<boolean>;
+  duplicateAutomation: (id: string, origin: string) => Promise<AutomationRule>;
+  setAutomationEnabled: (id: string, enabled: boolean, origin: string) => Promise<void>;
+  resetAutomation: (id: string, origin: string) => Promise<void>;
+  rearmAutomation: (ruleId: string, terminalId: string | null) => Promise<void>;
 }
 
 // Every listen() returns Promise<UnlistenFn>; discarding it makes the
@@ -341,6 +359,10 @@ const tauriBridge: ElectronAPI = {
   setTerminalOwningTab: async (rendererTerminalId: string, owningTabId: string) => {
     // Tauri maps camelCase JS keys onto the snake_case Rust parameters.
     await invoke('set_terminal_owning_tab', { rendererTerminalId, owningTabId });
+  },
+
+  setTerminalDisplayLabel: async (rendererTerminalId: string, label: string) => {
+    await invoke('set_terminal_display_label', { rendererTerminalId, label });
   },
 
   closeTerminal: async (id) => {
@@ -818,6 +840,36 @@ const tauriBridge: ElectronAPI = {
   // Background mode (Plan 010): persist + mirror into the Rust AppState atomic.
   setKeepRunningInBackground: async (enabled) => {
     await invoke('set_keep_running_in_background', { enabled });
+  },
+
+  // --- Terminal Automations (Plan 028) ---
+  //
+  // Thin `invoke` wrappers over `automation_commands.rs`, one per command and in that
+  // file's own order. Every argument name here is the camelCase form Tauri derives from
+  // the Rust parameter — `rule_id` on the Rust side is `ruleId` on the wire, and a
+  // mismatch is a silent 422 rather than a type error (`mcp-split-pane-422`), which is
+  // why these live in one place instead of at each call site.
+  listAutomations: async () => invoke<AutomationRule[]>('list_automations'),
+  getAutomationRuntime: async () => invoke<AutomationStatePayload>('get_automation_runtime'),
+  loadAutomationLog: async (ruleId, newestFirst, limit) =>
+    invoke<AutomationLogEntry[]>('load_automation_log', { ruleId, newestFirst, limit }),
+  listWatchableTerminals: async (ruleId, includeIds) =>
+    invoke<WatchableTerminal[]>('list_watchable_terminals', { ruleId, includeIds }),
+  dryRunAutomation: async (rule, terminalId) =>
+    invoke<DryRunReport>('dry_run_automation', { rule, terminalId }),
+  saveAutomation: async (rule, origin) =>
+    invoke<AutomationSaveResult>('save_automation', { rule, origin }),
+  deleteAutomation: async (id, origin) => invoke<boolean>('delete_automation', { id, origin }),
+  duplicateAutomation: async (id, origin) =>
+    invoke<AutomationRule>('duplicate_automation', { id, origin }),
+  setAutomationEnabled: async (id, enabled, origin) => {
+    await invoke('set_automation_enabled', { id, enabled, origin });
+  },
+  resetAutomation: async (id, origin) => {
+    await invoke('reset_automation', { id, origin });
+  },
+  rearmAutomation: async (ruleId, terminalId) => {
+    await invoke('rearm_automation', { ruleId, terminalId });
   },
 };
 

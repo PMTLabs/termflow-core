@@ -18,6 +18,7 @@ import {
 } from '../../services/closeTabs';
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
+import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
@@ -336,6 +337,23 @@ const TabItem: React.FC<TabItemProps> = ({
   const processIds = resolveTabProcessIds(tabTree, tab.id);
 
   /**
+   * How many automation rules are armed on terminals in THIS tab (`plan/028` item D).
+   *
+   * Read here rather than threaded through `TabItemProps`, for the reason `isCanvasHere` below
+   * gives: this component already subscribes for its pane tree, and the value is per-tab.
+   *
+   * A COUNT, not the entries. `automation:state` is emitted up to once a second for as long as
+   * anything is live, and `useSyncExternalStore` compares with `Object.is` — so a rule ticking from
+   * *armed* to *just fired* returns the same number and re-renders no tab at all. The rules' names
+   * belong on the pane, which has room to print one; a tab holding four terminals would be naming
+   * one of several arbitrarily.
+   *
+   * Keyed on the tab's own tm- leaves, which is the same id space the automation runtime pins its
+   * pairs by (`App.tsx` mints `terminalId: leafId`) — item D needs no translation anywhere.
+   */
+  const tabTerminalIds = getAllTerminalIds(tabTree);
+
+  /**
    * Canvas Mode's "you are here" marker (design 010 D9, §5.1).
    *
    * Read here rather than threaded through `TabItemProps` because this component already
@@ -397,6 +415,10 @@ const TabItem: React.FC<TabItemProps> = ({
         {tab.hasUnseenOutput && !tab.isActive && (
           <span className="tab-unseen-bell" title="New output you haven't seen yet">🔔</span>
         )}
+        {/* Before the muted bell and after the unseen one: this is a property of the tab that
+            holds whether or not anything has happened, so it sits with the other standing states
+            rather than among the event receipts. */}
+        <AutomationArmedForTerminals terminalIds={tabTerminalIds} />
         {tab.notifyMuted && (
           <span className="tab-muted-icon" title="Notifications muted for this tab">
             <BellIcon muted />

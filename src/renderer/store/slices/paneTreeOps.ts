@@ -30,6 +30,10 @@ export type EdgeZone = 'left' | 'right' | 'top' | 'bottom';
 export const TERMINAL_BOUND_FIELDS = [
   'terminalId',
   'name',
+  // Travels with `name` or it is worse than useless: a split copies the name across but would
+  // leave the flag behind, silently demoting a name the USER typed to a default — and
+  // `terminalLabelSync` would then let the tab title override it.
+  'nameIsCustom',
   'shellType',
   'notifyMuted',
   'sessionKey',

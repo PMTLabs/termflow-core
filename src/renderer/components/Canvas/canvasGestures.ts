@@ -12,10 +12,21 @@ export interface SpacePanKey {
   key: string;
   code: string;
   repeat: boolean;
-  target: { tagName?: string; isContentEditable?: boolean } | null;
+  target: { tagName?: string; isContentEditable?: boolean; role?: string | null } | null;
 }
 
 const EDITABLE = /^(INPUT|TEXTAREA|SELECT)$/;
+
+/**
+ * Elements for which Space is the ACTIVATION key, so arming the pan would swallow a click.
+ *
+ * `BUTTON` is the one that bit: the automation editor is a modal full of buttons over a canvas whose
+ * space-pan listener is on `window`, so every palette item, preset token, terminal row, drawer tab
+ * and dialog button in it silently refused Space — the key a user reaches for on a tick row. The
+ * canvas has the same shape with fewer buttons, and this is where both are decided.
+ */
+const ACTIVATES_ON_SPACE = /^(BUTTON|SUMMARY|A)$/;
+const ROLE_ACTIVATES_ON_SPACE = /^(button|switch|checkbox|radio|menuitem|option|tab)$/;
 
 /**
  * Should this keypress arm the hand tool?
@@ -30,6 +41,8 @@ const EDITABLE = /^(INPUT|TEXTAREA|SELECT)$/;
  *    is a space. Panning instead would swallow the keypress and move the canvas — from the
  *    user's side, a shell that dropped a character.
  *  - **An editable target owns Space**, so a rename box keeps its spaces.
+ *  - **A focused button owns Space**, because that is how a button is pressed. Without this the pan
+ *    arms and `preventDefault()` eats the activation, and the user sees nothing happen.
  *
  * `repeat` is refused because the OS auto-repeats a held key ~30 times a second, and each one
  * would re-enter a state that is already entered — a stream of no-op state writes underneath a
@@ -43,6 +56,8 @@ export function shouldArmSpacePan(e: SpacePanKey, focusedNodeId: string | null):
   if (e.repeat) return false;
   const t = e.target;
   if (t && (t.isContentEditable || EDITABLE.test(t.tagName ?? ''))) return false;
+  if (t && ACTIVATES_ON_SPACE.test(t.tagName ?? '')) return false;
+  if (t && ROLE_ACTIVATES_ON_SPACE.test(t.role ?? '')) return false;
   return true;
 }
 

@@ -6,6 +6,7 @@ import type { FontWeight } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
 import type { TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
+import { automationMenuItems } from '../Automation/AutomationMenuSection';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
@@ -900,6 +901,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           click: () => engine?.setSelectionMode(!selectionMode),
         },
       ] : []),
+      // The automations armed on THIS terminal (Tam, follow-up to `plan/028` item D: the terminal
+      // area's menu must offer the same thing the pane title's does). One flat row per rule,
+      // built by `automationMenuItems` — the same `armedEntryViews` the pane and canvas menus
+      // list from, so the three cannot name or order the rules differently.
+      //
+      // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute below is: the
+      // rules are pinned to the terminal, so they are right wherever its surface is drawn.
+      ...automationMenuItems(terminalId),
       // plan/025 §2.7. Ungated — `paneId` is set on both surfaces (the canvas
       // overlay never renders its own TerminalDisplay; see the header comment
       // on usePaneMuteState above) — unlike the pane-tree items further up,
