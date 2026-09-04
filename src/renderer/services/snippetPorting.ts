@@ -7,7 +7,15 @@
 // normal outcome (`{ ok: 'cancelled' }`) and is kept distinct from a failure so a
 // caller cannot report "Import failed" at somebody who simply pressed Escape.
 
-import { isValidSnippet, type Snippet } from '../store/slices/settingsSlice';
+import { type Snippet } from '../store/slices/settingsSlice';
+import {
+  SNIPPET_FORMAT_LABEL,
+  convertForeignExport,
+  convertTermFlowEntries,
+  detectSnippetImportFormat,
+  type ConversionResult,
+  type SnippetImportFormat,
+} from './snippetImportFormats';
 
 /** The only envelope version this build reads/writes (§8.1). */
 export const SNIPPETS_EXPORT_VERSION = 1;
@@ -35,9 +43,15 @@ export type SnippetImportResult =
       ok: true;
       /** The records to append — fresh ids, duplicates and malformed entries already removed. */
       added: Snippet[];
+      /** Which product wrote the file (plan/030 §4.1). Detected, never chosen by the user. */
+      format: SnippetImportFormat;
       imported: number;
       skippedDuplicates: number;
       rejected: number;
+      /** Valid records with no snippet representation — an InkSpoke app-control action, an
+       *  encrypted `SendKeys`, an archived Rephlo command. Never `rejected`: the file is
+       *  fine, these records simply are not snippets. Always 0 for a TermFlow import. */
+      skippedUnsupported: number;
     }
   | { ok: false; reason: string }
   | { ok: 'cancelled' };
@@ -63,6 +77,17 @@ const reasonFrom = (e: unknown, fallback: string): string => {
   const raw = typeof e === 'string' ? e : e instanceof Error ? e.message : '';
   return raw.trim() || fallback;
 };
+
+/**
+ * The one message for "we do not read this file at all" (plan/030, AC 6). It names all
+ * three formats rather than saying "not a TermFlow export", because with detection in
+ * place that older wording would now be actively misleading: a real InkSpoke file IS
+ * readable, and a user told otherwise would have no way to tell a genuine refusal from a
+ * bug. Shared by the not-an-object case and the no-format-matched case — both mean the
+ * same thing to the person reading it.
+ */
+const UNSUPPORTED_FORMAT_REASON =
+  'That file is not a TermFlow, InkSpoke, or Rephlo export. Snippets import reads a TermFlow snippets export, an InkSpoke Command Mappings export, or a Rephlo commands export.';
 
 const describeVersion = (v: unknown): string => {
   if (v === undefined) return 'missing';
@@ -142,60 +167,102 @@ export async function importSnippets(existing: Snippet[]): Promise<SnippetImport
     return { ok: false, reason: 'That file is not valid JSON.' };
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, reason: 'That file is not a TermFlow snippets export.' };
+    return { ok: false, reason: UNSUPPORTED_FORMAT_REASON };
   }
 
   const envelope = parsed as Record<string, unknown>;
-  if (envelope.version !== SNIPPETS_EXPORT_VERSION) {
-    // Named, not parsed hopefully (§8.1) — a newer file may use fields this build
-    // would silently drop, so refusing is the honest outcome.
-    return {
-      ok: false,
-      reason: `Unsupported snippets file version ${describeVersion(envelope.version)}. This version of TermFlow reads version ${SNIPPETS_EXPORT_VERSION}.`,
-    };
-  }
-  if (!Array.isArray(envelope.snippets)) {
-    return { ok: false, reason: 'That file has no "snippets" list.' };
+  const format = detectSnippetImportFormat(envelope);
+  if (format === null) {
+    return { ok: false, reason: UNSUPPORTED_FORMAT_REASON };
   }
 
+  let conversion: ConversionResult;
+  if (format === 'termflow') {
+    // The version gate stays FIRST and stays inside this branch — a wrong-version TermFlow
+    // file must get its own named refusal, not be handed to a foreign parser that would
+    // report every record as malformed. Detection is loosest for TermFlow precisely so
+    // that such a file lands here rather than falling through to "unsupported format".
+    if (envelope.version !== SNIPPETS_EXPORT_VERSION) {
+      // Named, not parsed hopefully (§8.1) — a newer file may use fields this build
+      // would silently drop, so refusing is the honest outcome.
+      return {
+        ok: false,
+        reason: `Unsupported snippets file version ${describeVersion(envelope.version)}. This version of TermFlow reads version ${SNIPPETS_EXPORT_VERSION}.`,
+      };
+    }
+    if (!Array.isArray(envelope.snippets)) {
+      return { ok: false, reason: 'That file has no "snippets" list.' };
+    }
+    conversion = convertTermFlowEntries(envelope.snippets);
+  } else {
+    conversion = convertForeignExport(format, envelope);
+  }
+
+  // ── one merge stage, whatever the format ────────────────────────────────────────────
   // Seeded with the local texts, then grown as records are accepted, so a file that
   // repeats the same text twice imports it once and counts the second as a duplicate
-  // rather than manufacturing a duplicate the user never had.
+  // rather than manufacturing a duplicate the user never had. Running this AFTER
+  // conversion is what makes "duplicate" mean the same thing for all three formats: an
+  // InkSpoke mapping is compared on the text it produces, not on its raw record.
   const seenTexts = new Set(existing.map((s) => s.text));
 
   const added: Snippet[] = [];
   let skippedDuplicates = 0;
-  let rejected = 0;
 
-  for (const entry of envelope.snippets) {
-    if (!isValidSnippet(entry)) {
-      rejected++;
-      continue;
-    }
-    if (seenTexts.has(entry.text)) {
+  for (const draft of conversion.drafts) {
+    if (seenTexts.has(draft.text)) {
       skippedDuplicates++;
       continue;
     }
-    seenTexts.add(entry.text);
+    seenTexts.add(draft.text);
     added.push({
-      ...entry,
+      ...draft,
       id: mintSnippetId(),
       // `isValidSnippet` deliberately does not check `createdAt`; a missing or
       // non-numeric one is defaulted here rather than costing an otherwise-good record.
       // `Number.isFinite`, not `typeof === 'number'` (D-05): `NaN`/`Infinity` are both
       // `typeof 'number'` but serialize to `null` and break `snippetSearch.ts`'s
-      // `b.createdAt - a.createdAt` sort comparator.
-      createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
+      // `b.createdAt - a.createdAt` sort comparator. Foreign records have no `createdAt`
+      // of their own and land on the same default by the same route.
+      createdAt: Number.isFinite(draft.createdAt) ? (draft.createdAt as number) : Date.now(),
     });
   }
 
-  return { ok: true, added, imported: added.length, skippedDuplicates, rejected };
+  return {
+    ok: true,
+    added,
+    format,
+    imported: added.length,
+    skippedDuplicates,
+    rejected: conversion.rejected,
+    skippedUnsupported: conversion.skippedUnsupported,
+  };
 }
 
-/** One-line summary for the Settings panel's result row (§8.4 step 8). */
+/**
+ * One-line summary for the Settings panel's result row (§8.4 step 8, plan/030 §4.3).
+ *
+ * The original sentence is emitted verbatim and unconditionally; the two clauses added by
+ * plan/030 only APPEND, and only when they have something to say. A TermFlow import
+ * therefore reads exactly as it did before this feature existed — no "skipped 0
+ * unsupported" noise on the overwhelmingly common path — while an InkSpoke or Rephlo
+ * import gets the counts and the provenance it needs to be intelligible.
+ */
 export const describeImport = (r: {
   imported: number;
   skippedDuplicates: number;
   rejected: number;
-}): string =>
-  `Imported ${r.imported}, skipped ${r.skippedDuplicates} duplicate${r.skippedDuplicates === 1 ? '' : 's'}, rejected ${r.rejected} malformed.`;
+  skippedUnsupported?: number;
+  format?: SnippetImportFormat;
+}): string => {
+  const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const parts = [
+    `Imported ${r.imported}, skipped ${plural(r.skippedDuplicates, 'duplicate')}, rejected ${r.rejected} malformed.`,
+  ];
+  const unsupported = r.skippedUnsupported ?? 0;
+  if (unsupported > 0) parts.push(`Skipped ${plural(unsupported, 'unsupported record')}.`);
+  if (r.format && r.format !== 'termflow') {
+    parts.push(`Source: ${SNIPPET_FORMAT_LABEL[r.format]} export.`);
+  }
+  return parts.join(' ');
+};

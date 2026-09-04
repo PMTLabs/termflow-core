@@ -9,7 +9,7 @@
 // own `{ ok: 'cancelled' }` branch so a caller can never surface it as a failure.
 
 import type { Snippet } from '../../store/slices/settingsSlice';
-import { exportSnippets, importSnippets } from '../snippetPorting';
+import { describeImport, exportSnippets, importSnippets } from '../snippetPorting';
 
 const pickSnippetsExportPath = jest.fn();
 const pickSnippetsImportPath = jest.fn();
@@ -345,5 +345,223 @@ describe('importSnippets', () => {
     // that threw the picker-failure or read-failure generic fallback instead of the
     // host-unavailable message would still pass `ok === false`.
     expect(result.reason).toBe('Importing snippets is not available in this host.');
+  });
+});
+
+/* ── plan/030 — cross-product import ──────────────────────────────────────────────── */
+
+describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
+  /** Feed `importSnippets` a whole envelope, however shaped, through the mocked host. */
+  const givenFile = (envelope: unknown): void => {
+    pickSnippetsImportPath.mockResolvedValue('C:/tmp/in.json');
+    importSnippetsFile.mockResolvedValue(JSON.stringify(envelope));
+  };
+
+  const inkSpokeMapping = (
+    over: Record<string, unknown>,
+    params: Record<string, unknown> | string = { Text: 'body' },
+  ): Record<string, unknown> => ({
+    Id: 'm-1',
+    SpokenPhrase: 'phrase',
+    ActionType: 'SendKeys',
+    ActionParamsJson: typeof params === 'string' ? params : JSON.stringify(params),
+    IsEnabled: true,
+    IsParameterized: false,
+    ...over,
+  });
+
+  it('AC: a valid InkSpoke export becomes snippets tagged InkSpoke', async () => {
+    givenFile({
+      SchemaVersion: 2,
+      ExportedAt: '2026-09-04T21:40:20Z',
+      Groups: [{ Id: 'g1', Name: 'Terminal' }],
+      Mappings: [
+        inkSpokeMapping({ Id: 'a', SpokenPhrase: 'list files', GroupId: 'g1' }, { Text: 'ls -la' }),
+        inkSpokeMapping({ Id: 'b', ActionType: 'OpenUrl' }, { Url: 'https://example.test' }),
+      ],
+    });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.format).toBe('inkspoke');
+    expect(result.imported).toBe(2);
+    expect(result.added.every((s) => s.tags?.includes('InkSpoke'))).toBe(true);
+    expect(result.added[0]).toMatchObject({ text: 'ls -la', label: 'list files', folder: 'Terminal' });
+    // A fresh id and a real timestamp, exactly as the TermFlow path mints them (D9).
+    expect(result.added.map((s) => s.id)).toEqual(result.added.map((s) => expect.stringMatching(/^sn-/)));
+    expect(result.added.every((s) => Number.isFinite(s.createdAt))).toBe(true);
+  });
+
+  it('AC: a valid Rephlo export becomes snippets tagged Rephlo', async () => {
+    givenFile({
+      version: '1.3',
+      exportedAt: '2026-09-04T21:42:39Z',
+      commands: [
+        { name: 'Rewrite', instruction: 'rewrite this text', groupName: 'Developing', isArchived: false },
+      ],
+    });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.format).toBe('rephlo');
+    expect(result.added).toHaveLength(1);
+    expect(result.added[0]).toMatchObject({
+      text: 'rewrite this text',
+      label: 'Rewrite',
+      folder: 'Developing',
+      tags: ['Rephlo'],
+    });
+  });
+
+  it('AC: a native TermFlow export still reports format termflow and nothing unsupported', async () => {
+    givenFile({ version: 1, exportedAt: 1, snippets: [snip({ text: 'unchanged' })] });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result).toMatchObject({ format: 'termflow', imported: 1, skippedUnsupported: 0 });
+    expect(result.added[0].text).toBe('unchanged');
+  });
+
+  it('AC: valid records import while malformed ones in the SAME file are rejected', async () => {
+    givenFile({
+      SchemaVersion: 2,
+      Mappings: [
+        inkSpokeMapping({ Id: 'ok-1' }, { Text: 'first' }),
+        inkSpokeMapping({ Id: 'broken' }, ''), // the real file's empty ActionParamsJson
+        inkSpokeMapping({ Id: 'ok-2' }, { Text: 'second' }),
+      ],
+    });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.added.map((s) => s.text)).toEqual(['first', 'second']);
+    expect(result.rejected).toBe(1);
+  });
+
+  it('AC: an imported command with text identical to an existing snippet is skipped', async () => {
+    givenFile({
+      SchemaVersion: 2,
+      Mappings: [
+        inkSpokeMapping({ Id: 'dupe-of-local' }, { Text: 'already here' }),
+        inkSpokeMapping({ Id: 'fresh' }, { Text: 'brand new' }),
+        inkSpokeMapping({ Id: 'dupe-in-file' }, { Text: 'brand new' }),
+      ],
+    });
+
+    // Dedup must compare the text a mapping PRODUCES, not its raw record — which is only
+    // true because the merge stage runs after conversion, once, for every format.
+    const result = await importSnippets([snip({ id: 'sn-local', text: 'already here' })]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.added.map((s) => s.text)).toEqual(['brand new']);
+    expect(result.skippedDuplicates).toBe(2);
+  });
+
+  it('AC: an unsupported JSON file adds nothing and says so clearly', async () => {
+    givenFile({ tool: 'something-else', items: [{ cmd: 'ls' }] });
+
+    const result = await importSnippets([]);
+    expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    expect(result).not.toHaveProperty('added');
+    // Names all three, because "not a TermFlow export" would now be a lie: an InkSpoke
+    // file genuinely IS readable, and the user needs to tell refusal from bug.
+    expect(result.reason).toContain('TermFlow');
+    expect(result.reason).toContain('InkSpoke');
+    expect(result.reason).toContain('Rephlo');
+  });
+
+  it('a file that merely has a `commands` key is unsupported, not parsed as Rephlo', async () => {
+    // Without the corroborating version check this would import as Rephlo and report
+    // "rejected 2 malformed", which reads as "your file is broken" rather than
+    // "this is not one of ours".
+    givenFile({ commands: ['ls', 'cd'] });
+
+    const result = await importSnippets([]);
+    expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    expect(result.reason).toContain('InkSpoke');
+  });
+
+  it('accounts for every record in FOUR buckets, not three', async () => {
+    givenFile({
+      SchemaVersion: 2,
+      Mappings: [
+        inkSpokeMapping({ Id: 'i1' }, { Text: 'fresh a' }),
+        inkSpokeMapping({ Id: 'i2' }, { Text: 'fresh b' }),
+        inkSpokeMapping({ Id: 'i3' }, { Text: 'already here' }), // duplicate of existing
+        inkSpokeMapping({ Id: 'i4' }, { Text: 'fresh a' }), // within-file duplicate
+        inkSpokeMapping({ Id: 'i5' }, ''), // malformed params
+        inkSpokeMapping({ Id: 'i6', ActionType: 'CloseApp' }, { AppIdentifier: 'auto' }),
+        inkSpokeMapping({ Id: 'i7' }, { Text: 'Y2lwaGVy', IsSecret: true, Nonce: 'bm9uY2U=' }),
+      ],
+    });
+
+    const result = await importSnippets([snip({ id: 'sn-local', text: 'already here' })]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(
+      result.imported + result.skippedDuplicates + result.rejected + result.skippedUnsupported,
+    ).toBe(7);
+    expect(result.imported).toBe(2);
+    expect(result.skippedDuplicates).toBe(2);
+    expect(result.rejected).toBe(1);
+    expect(result.skippedUnsupported).toBe(2); // the app action AND the encrypted one
+    expect(result.added).toHaveLength(result.imported);
+  });
+
+  it('never lets an encrypted InkSpoke payload reach the store', async () => {
+    // The strongest statement of plan/030 D5, made at the boundary the user actually
+    // touches rather than only inside the converter.
+    givenFile({
+      SchemaVersion: 2,
+      Mappings: [inkSpokeMapping({ Id: 'secret' }, { Text: 'Y2lwaGVydGV4dA==', IsSecret: true })],
+    });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.added).toEqual([]);
+    expect(result.skippedUnsupported).toBe(1);
+  });
+
+  it('still refuses a wrong-version TermFlow file rather than guessing a foreign format', async () => {
+    // Detection must not steal this case: the honest answer names the version.
+    givenFile({ version: 2, exportedAt: 1, snippets: [snip()] });
+
+    const result = await importSnippets([]);
+    expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    expect(result.reason).toContain('version');
+    expect(result.reason).not.toContain('InkSpoke');
+  });
+});
+
+describe('describeImport (plan/030 §4.3)', () => {
+  it('is byte-for-byte unchanged for a TermFlow import', () => {
+    // The common path must not grow "skipped 0 unsupported" noise.
+    expect(
+      describeImport({ imported: 3, skippedDuplicates: 1, rejected: 0, skippedUnsupported: 0, format: 'termflow' }),
+    ).toBe('Imported 3, skipped 1 duplicate, rejected 0 malformed.');
+    // ...and it still works for a caller that knows nothing about the new fields.
+    expect(describeImport({ imported: 2, skippedDuplicates: 2, rejected: 5 })).toBe(
+      'Imported 2, skipped 2 duplicates, rejected 5 malformed.',
+    );
+  });
+
+  it('appends the unsupported count and the source, both correctly pluralised', () => {
+    expect(
+      describeImport({ imported: 37, skippedDuplicates: 0, rejected: 1, skippedUnsupported: 5, format: 'inkspoke' }),
+    ).toBe(
+      'Imported 37, skipped 0 duplicates, rejected 1 malformed. Skipped 5 unsupported records. Source: InkSpoke export.',
+    );
+    expect(
+      describeImport({ imported: 1, skippedDuplicates: 1, rejected: 0, skippedUnsupported: 1, format: 'rephlo' }),
+    ).toBe(
+      'Imported 1, skipped 1 duplicate, rejected 0 malformed. Skipped 1 unsupported record. Source: Rephlo export.',
+    );
+  });
+
+  it('omits the unsupported clause at zero, even for a foreign source', () => {
+    expect(
+      describeImport({ imported: 5, skippedDuplicates: 0, rejected: 0, skippedUnsupported: 0, format: 'rephlo' }),
+    ).toBe('Imported 5, skipped 0 duplicates, rejected 0 malformed. Source: Rephlo export.');
   });
 });

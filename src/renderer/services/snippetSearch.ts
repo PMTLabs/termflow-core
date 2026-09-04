@@ -28,20 +28,107 @@ export function parseSnippetQuery(query: string): { tags: string[]; words: strin
   return { tags, words };
 }
 
-/** Rank tier for a single snippet against parsed words (lower is better): 0 = label
- *  starts with a word, 1 = label contains a word, 2 = only the text contains a word,
- *  3 = no word match (only relevant when `words` is empty, i.e. tag-only/empty query). */
+/** The rung meaning "this word matched nothing". One past the last real tier, so adding a
+ *  tier is a single-line change here rather than a hunt for scattered `3`s. */
+const NO_MATCH_TIER = 5;
+
+/**
+ * Shortest query word that may match by initials (plan/030 D2) — a pure short-circuit,
+ * NOT a filter, and the distinction is worth stating because it is easy to mis-test.
+ *
+ * Every character of a field's initials is by construction also a character OF that
+ * field, so a one-letter word that matches the initials necessarily matches the field as
+ * a substring too, and `wordTier` has already returned rung 2 or better before it ever
+ * reaches `matchesInitials`. Dropping this constant changes no result anywhere; it only
+ * saves computing (and caching) the initials of a whole library on a single keystroke.
+ * Do not write a test asserting it changes what comes back — such a test passes vacuously.
+ */
+const MIN_INITIALS_QUERY_LENGTH = 2;
+
+/**
+ * First character of every word in `s`, joined: `'context handoff'` → `'ch'`, and
+ * `'please do a context handoff now'` → `'pdachn'`. A "word" is a run of letters or
+ * digits, so punctuation splits the way a reader would expect (`context-handoff` is two
+ * words, not one). `codePointAt` rather than `[0]` so an astral first letter survives as
+ * one character instead of half a surrogate pair.
+ */
+function computeWordInitials(s: string): string {
+  const words = s.toLowerCase().match(/[\p{L}\p{N}]+/gu);
+  if (!words) return '';
+  return words.map((w) => String.fromCodePoint(w.codePointAt(0) as number)).join('');
+}
+
+/**
+ * `[labelInitials, textInitials]`, memoised per Snippet OBJECT.
+ *
+ * Safe to key on identity: `label` and `text` are immutable for a given object, because
+ * every reducer that edits a snippet goes through Immer and therefore hands back a NEW
+ * object. A stale entry is unreachable, and a deleted snippet's entry frees itself.
+ *
+ * Worth doing at all because the flyout re-filters on every keystroke, and without a
+ * cache each one would rescan the full body of every snippet in the library.
+ *
+ * Kept as two strings rather than one joined string on purpose: joining would run the
+ * label's initials into the text's, so a snippet labelled `Cat` with body `house` would
+ * answer to `ch`. Nothing in either field should be able to match across that seam.
+ */
+const initialsCache = new WeakMap<Snippet, readonly [string, string]>();
+
+function snippetInitials(s: Snippet): readonly [string, string] {
+  let cached = initialsCache.get(s);
+  if (!cached) {
+    cached = [computeWordInitials(s.label ?? ''), computeWordInitials(s.text)] as const;
+    initialsCache.set(s, cached);
+  }
+  return cached;
+}
+
+function matchesTag(s: Snippet, w: string): boolean {
+  return (s.tags ?? []).some((t) => t.toLowerCase().includes(w));
+}
+
+function matchesInitials(s: Snippet, w: string): boolean {
+  if (w.length < MIN_INITIALS_QUERY_LENGTH) return false;
+  const [labelInitials, textInitials] = snippetInitials(s);
+  return labelInitials.includes(w) || textInitials.includes(w);
+}
+
+/**
+ * The ladder, and the ONLY place it is written down (plan/030 §3). Lower is better:
+ *
+ *   0  label starts with the word
+ *   1  label contains it
+ *   2  text contains it
+ *   3  a tag contains it
+ *   4  the word-initials of the label or the text contain it
+ *   5  no match
+ *
+ * `rankSnippet` and `matchesAllWords` are both defined in terms of this, so the set of
+ * things that COUNT as a match and the order they sort in cannot drift apart — widening
+ * one without the other is what makes a new rung either unreachable or unsorted.
+ *
+ * `label`/`text` are passed in already lower-cased because the caller looks at every word
+ * against the same snippet and there is no reason to re-case per word.
+ */
+function wordTier(s: Snippet, label: string, text: string, w: string): number {
+  if (label.startsWith(w)) return 0;
+  if (label.includes(w)) return 1;
+  if (text.includes(w)) return 2;
+  if (matchesTag(s, w)) return 3;
+  if (matchesInitials(s, w)) return 4;
+  return NO_MATCH_TIER;
+}
+
+/** Best (lowest) tier this snippet achieves across the parsed words — see {@link wordTier}
+ *  for the rungs. Returns {@link NO_MATCH_TIER} when `words` is empty, i.e. for the
+ *  tag-only and empty queries, where ranking by word is meaningless. */
 export function rankSnippet(s: Snippet, words: string[]): number {
-  if (words.length === 0) return 3;
+  if (words.length === 0) return NO_MATCH_TIER;
   const label = (s.label ?? '').toLowerCase();
   const text = s.text.toLowerCase();
-  let bestTier = 3;
+  let bestTier = NO_MATCH_TIER;
   for (const w of words) {
-    let tier: number;
-    if (label.startsWith(w)) tier = 0;
-    else if (label.includes(w)) tier = 1;
-    else if (text.includes(w)) tier = 2;
-    else continue; // this word doesn't match at all — matchesWords() already excluded it
+    const tier = wordTier(s, label, text, w);
     if (tier < bestTier) bestTier = tier;
   }
   return bestTier;
@@ -57,13 +144,15 @@ function matchesAllWords(s: Snippet, words: string[]): boolean {
   if (words.length === 0) return true;
   const label = (s.label ?? '').toLowerCase();
   const text = s.text.toLowerCase();
-  return words.every((w) => label.includes(w) || text.includes(w));
+  return words.every((w) => wordTier(s, label, text, w) < NO_MATCH_TIER);
 }
 
-/** Filter + rank snippets against a raw query. Every parsed tag must be present (AND);
- *  every parsed word must appear in `label` or `text` (AND). Empty query (no tags, no
- *  words) returns every snippet, unfiltered, in input order. Ranking: label-prefix >
- *  label-substring > text-substring, ties broken by `createdAt` descending. */
+/** Filter + rank snippets against a raw query. Every parsed `#tag` must be present (AND,
+ *  exact); every parsed word must match the snippet on some rung of {@link wordTier} —
+ *  label, text, a tag, or word-initials — again AND, so a second word narrows rather than
+ *  widens. Empty query (no tags, no words) returns every snippet, unfiltered, in input
+ *  order. Ranking is the best rung any single word reaches, ties broken by `createdAt`
+ *  descending. */
 export function filterSnippets(snippets: Snippet[], query: string): Snippet[] {
   const { tags, words } = parseSnippetQuery(query);
   if (tags.length === 0 && words.length === 0) return [...snippets];

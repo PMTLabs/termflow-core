@@ -147,7 +147,16 @@ export const SnippetsPanel: React.FC = () => {
                 <button type="button" className="link-btn" onClick={openCreate}>
                     New Snippet
                 </button>
-                <button type="button" className="link-btn" onClick={() => { void runImport(); }} disabled={portBusy}>
+                <button
+                    type="button"
+                    className="link-btn"
+                    onClick={() => { void runImport(); }}
+                    disabled={portBusy}
+                    // The format is detected, never chosen (plan/030 §4.1), so the only place
+                    // a user can learn that a foreign export is accepted at all is here —
+                    // otherwise the feature is invisible until they guess.
+                    title="Import a TermFlow snippets export, an InkSpoke Command Mappings export, or a Rephlo commands export. The format is detected automatically."
+                >
                     Import…
                 </button>
                 <button type="button" className="link-btn" onClick={() => { void runExport(); }} disabled={portBusy}>
