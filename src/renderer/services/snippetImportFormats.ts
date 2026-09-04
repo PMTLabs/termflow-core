@@ -58,18 +58,19 @@ const trimmedOrUndefined = (x: unknown): string | undefined => {
 };
 
 /**
- * The first candidate that is a string with something in it, returned **verbatim**.
+ * A string with something in it, returned **verbatim** — otherwise `undefined`.
  *
  * Untrimmed on purpose: this reads snippet BODIES, and trailing whitespace or a final
  * newline is content the user typed. Trimming here would also silently change what the
  * exact-text duplicate check downstream compares.
+ *
+ * Takes ONE candidate, not a list of spellings. It used to accept several so a caller
+ * could try `Text` then `text`; that shape is what let the case-tolerance be applied to
+ * the body and forgotten on the encryption flags. Spelling is `paramField`'s job now, and
+ * leaving the variadic form here would keep advertising the mistake.
  */
-const firstNonBlank = (...candidates: unknown[]): string | undefined => {
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim().length > 0) return c;
-  }
-  return undefined;
-};
+const nonBlankString = (candidate: unknown): string | undefined =>
+  typeof candidate === 'string' && candidate.trim().length > 0 ? candidate : undefined;
 
 /* ── detection ────────────────────────────────────────────────────────────────────── */
 
@@ -127,6 +128,40 @@ export function convertTermFlowEntries(entries: unknown[]): ConversionResult {
 
 /* ── InkSpoke ─────────────────────────────────────────────────────────────────────── */
 
+/**
+ * One params field, looked up the way InkSpoke's own deserializer looks it up.
+ *
+ * InkSpoke sets `PropertyNameCaseInsensitive = true`, so `Text`, `text` and `TEXT` are all
+ * the same field to it — and the reference export really does contain both a lowercase
+ * `text` and a lowercase `url` sitting beside PascalCase siblings. So a reader here that
+ * enumerates spellings is wrong twice over: it covers two of the infinitely many a
+ * case-insensitive writer may emit, and — the part that actually bites — it invites the
+ * tolerance to be applied to the CONTENT keys while the SECRET keys stay strict. A payload
+ * spelled `{"text": "<ciphertext>", "isSecret": true}` would then have its body read and
+ * its encryption flag missed, and the ciphertext would be imported: precisely the outcome
+ * D5 exists to prevent, reached through the guard rather than around it.
+ *
+ * Every read of a params field goes through here — body, URL, and both encryption tells —
+ * so the tolerance cannot be present at one site and absent at the next.
+ *
+ * Exact match first, then case-insensitive, which is what System.Text.Json itself does.
+ *
+ * `hasOwnProperty` rather than `in` is defensive only, and honestly so: none of the four
+ * names ever passed here (`Text`, `Url`, `IsSecret`, `Nonce`) collides with a member of
+ * `Object.prototype`, so swapping it for `in` changes no result today and no test can
+ * catch the swap. It earns its place against the fifth name somebody adds, not against
+ * anything currently reachable — so do not write a test asserting it matters, and do not
+ * delete it as untested.
+ */
+function paramField(params: Record<string, unknown>, name: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(params, name)) return params[name];
+  const wanted = name.toLowerCase();
+  for (const key of Object.keys(params)) {
+    if (key.toLowerCase() === wanted) return params[key];
+  }
+  return undefined;
+}
+
 /** `ActionParamsJson` is DOUBLE-encoded — a JSON string holding JSON — so it needs a
  *  second parse. One record in the reference export holds the bare empty string, which is
  *  not parseable and must land in `rejected` rather than throwing. */
@@ -175,7 +210,10 @@ function inkSpokeGroupNames(groups: unknown): Map<string, string> {
  * payloads are never imported" quietly untrue for a hand-edited file.
  */
 function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
-  return Boolean(params.IsSecret) || trimmedOrUndefined(params.Nonce) !== undefined;
+  return (
+    Boolean(paramField(params, 'IsSecret')) ||
+    trimmedOrUndefined(paramField(params, 'Nonce')) !== undefined
+  );
 }
 
 /**
@@ -231,11 +269,10 @@ export function convertInkSpokeExport(envelope: Record<string, unknown>): Conver
       continue;
     }
 
-    // Lower-case key variants are real: the reference export contains one `text` and one
-    // `url`, and InkSpoke reads them because its deserializer is case-insensitive.
-    const text = isSendKeys
-      ? firstNonBlank(params.Text, params.text)
-      : firstNonBlank(params.Url, params.url);
+    // Case variants are real: the reference export contains one `text` and one `url`
+    // beside PascalCase siblings. `paramField` is the single place that tolerance lives —
+    // see its comment for why enumerating spellings here was the wrong shape.
+    const text = nonBlankString(paramField(params, isSendKeys ? 'Text' : 'Url'));
     if (text === undefined) {
       rejected++;
       continue;
@@ -290,7 +327,7 @@ export function convertRephloExport(envelope: Record<string, unknown>): Conversi
       continue;
     }
 
-    const text = firstNonBlank(command.instruction);
+    const text = nonBlankString(command.instruction);
     if (text === undefined) {
       rejected++;
       continue;

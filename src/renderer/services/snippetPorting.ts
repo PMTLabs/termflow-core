@@ -128,14 +128,23 @@ export async function exportSnippets(snippets: Snippet[]): Promise<SnippetExport
 }
 
 /**
- * Import from a user-picked `.json` file and return the records to append (§8.4, D9).
+ * Import from a user-picked `.json` file and return the records to append (§8.4, D9,
+ * plan/030 §4).
  *
- * Order is load-bearing: refuse an unknown version *before* looking at any entry, then
- * validate per entry (a malformed record is dropped and counted, it never fails the
- * whole file), then mint a fresh id, then skip exact-text duplicates.
+ * Order: detect the format, then — **for TermFlow only** — refuse an unknown version
+ * before looking at any entry, then convert per record (a malformed one is dropped and
+ * counted, it never fails the whole file), then skip exact-text duplicates, then mint a
+ * fresh id for each survivor.
  *
- * `imported + skippedDuplicates + rejected` always equals the number of entries in the
- * file — every record is accounted for in exactly one bucket.
+ * The version gate is scoped to TermFlow deliberately, and saying so matters: neither
+ * foreign format is version-gated at all. InkSpoke's own reader only warns on a newer
+ * `SchemaVersion` and Rephlo's never branches on `version`, so refusing an unseen bump
+ * would be stricter than the producers themselves — detection type-checks those fields
+ * and nothing more.
+ *
+ * `imported + skippedDuplicates + rejected + skippedUnsupported` always equals the number
+ * of records in the file — every record is accounted for in exactly one bucket. The
+ * fourth term is always 0 for TermFlow, whose records are snippets by construction.
  */
 export async function importSnippets(existing: Snippet[]): Promise<SnippetImportResult> {
   const api = window.electronAPI;

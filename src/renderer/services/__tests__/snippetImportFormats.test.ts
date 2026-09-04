@@ -178,12 +178,85 @@ describe('convertInkSpokeExport', () => {
         // payloads that say they are encrypted, not about one action type, and a guard
         // gated on the action type is one somebody has to remember to repeat.
         mapping({ Id: 'url-flagged', ActionType: 'OpenUrl' }, { Url: 'https://x.test', IsSecret: true }),
+        // Body that looks nothing like ciphertext. Every other fixture here is
+        // base64-shaped, so without this one an implementation that sniffed the TEXT
+        // instead of reading the flag would pass the whole block.
+        mapping({ Id: 'plain-looking' }, { Text: 'hunter two', IsSecret: true }),
+      ]),
+    );
+    expect(r.drafts).toEqual([]);
+    expect(r.skippedUnsupported).toBe(5);
+    expect(r.rejected).toBe(0); // an encrypted record is not MALFORMED
+    expectFullyAccounted(r, 5);
+  });
+
+  it('refuses an encrypted payload spelled in ANY case, not just PascalCase', () => {
+    // The defect this test exists for shipped once. The body reader was case-tolerant
+    // (`Text` or `text`) while the guard read only `IsSecret`/`Nonce`, so a payload
+    // spelled entirely in camelCase had its ciphertext read and its encryption flag
+    // missed — the guard walked straight past the one record it exists for.
+    //
+    // Not hypothetical: the reference export already contains `{"text":"{last}"}` and
+    // `{"url":"..."}`, so a producer that writes params camelCase demonstrably exists,
+    // and that same producer writes `isSecret`/`nonce`.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'camel-both' }, { text: 'Y2lwaGVy', isSecret: true, nonce: 'bm9uY2U=' }),
+        mapping({ Id: 'camel-flag' }, { text: 'Y2lwaGVy', isSecret: true }),
+        // The two tells are checked independently, so each needs its own row.
+        mapping({ Id: 'camel-nonce' }, { text: 'Y2lwaGVy', nonce: 'bm9uY2U=' }),
+        mapping({ Id: 'shouty' }, { TEXT: 'Y2lwaGVy', ISSECRET: true }),
       ]),
     );
     expect(r.drafts).toEqual([]);
     expect(r.skippedUnsupported).toBe(4);
-    expect(r.rejected).toBe(0); // an encrypted record is not MALFORMED
-    expectFullyAccounted(r, 4);
+    expect(r.rejected).toBe(0);
+  });
+
+  it('reads a body under any casing, so a tolerated spelling is not called malformed', () => {
+    // The mirror of the row above. InkSpoke's deserializer is case-insensitive for every
+    // field, so a record it reads happily must not be reported to the user as malformed
+    // just because we only thought of two spellings.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'shouty' }, { TEXT: 'ls -la' }),
+        mapping({ Id: 'mixed' }, { tExT: 'pwd' }),
+        mapping({ Id: 'url-shouty', ActionType: 'OpenUrl' }, { URL: 'https://example.test' }),
+      ]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['ls -la', 'pwd', 'https://example.test']);
+    expect(r.rejected).toBe(0);
+  });
+
+  it('prefers the exact-case key when both spellings are present, as System.Text.Json does', () => {
+    // The folded spelling is listed FIRST on purpose. JSON key order is preserved, so with
+    // `Text` first this test would pass even with the exact-match check deleted — the
+    // case-insensitive scan would reach `Text` first anyway and the assertion would prove
+    // nothing about precedence.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([mapping({}, { text: 'folded loses', Text: 'exact wins' })]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['exact wins']);
+  });
+
+  it('is unbothered by a params key named after an Object.prototype member', () => {
+    // Named for what it pins: a payload carrying `constructor` or `__proto__` as a KEY
+    // still converts normally and neither key reads as an encryption tell.
+    //
+    // It does NOT prove `paramField` uses hasOwnProperty rather than `in` — verified by
+    // mutation: that swap survives, because none of the four names looked up (`Text`,
+    // `Url`, `IsSecret`, `Nonce`) collides with anything on `Object.prototype`. The
+    // hasOwnProperty is defence against the fifth name somebody adds, and there is no
+    // non-vacuous way to assert it until then.
+    // Raw JSON, not an object literal: `__proto__:` in a literal is the prototype setter,
+    // so it would never survive JSON.stringify and the key would silently not be tested.
+    // Parsed from text it is an ordinary own property, which is the case that matters.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([mapping({}, '{"Text":"body","constructor":"x","__proto__":"y"}')]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['body']);
+    expect(r.skippedUnsupported).toBe(0);
+    expect(r.rejected).toBe(0);
   });
 
   it('imports an ordinary OpenUrl, so the encryption guard has not eaten the action', () => {
