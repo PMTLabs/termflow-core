@@ -743,6 +743,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 confirmText="Save and close"
                 cancelText="Keep editing"
                 secondaryText="Discard"
+                secondaryDestructive
                 onSecondary={() => {
                     setPendingClose(false);
                     onClose();

@@ -64,6 +64,41 @@ describe('ConfirmDialog — the optional third action', () => {
         expect(footerButtons()).toEqual(['Cancel', 'Switch off instead', 'Delete']);
     });
 
+    /**
+     * **Which button is red is a property of the ACTION, not of its position.**
+     *
+     * `destructive` describes the primary; `secondaryDestructive` describes the third button, and
+     * they are independent because a dialog can put the safe action first: *Save and close* as the
+     * primary with *Discard* beside it destroys work while the primary preserves it. Asserting both
+     * classes in the same test is the point — a single implementation that reddened "whichever
+     * button is dangerous" would pass either assertion alone and fail this one.
+     *
+     * `destructive` is the GHOST variant, deliberately not `danger`: it must read as the dangerous
+     * alternative rather than as a second primary.
+     */
+    it('reddens the secondary without reddening the primary, and vice versa', async () => {
+        const classesOf = (label: string) =>
+            [...document.querySelectorAll('.confirm-dialog-footer button')]
+                .find((b) => b.textContent === label)!.className;
+
+        await render({
+            secondaryText: 'Discard',
+            onSecondary: () => {},
+            secondaryDestructive: true,
+            confirmText: 'Save and close',
+        });
+        expect(classesOf('Discard')).toContain('destructive');
+        expect(classesOf('Save and close')).toContain('primary');
+        expect(classesOf('Save and close')).not.toContain('danger');
+
+        // The opposite arrangement, so neither assertion above can be satisfied by a rule that
+        // simply paints one fixed position red.
+        await render({ secondaryText: 'Switch off instead', onSecondary: () => {}, destructive: true });
+        expect(classesOf('Switch off instead')).toContain('secondary');
+        expect(classesOf('Switch off instead')).not.toContain('destructive');
+        expect(classesOf('Delete')).toContain('danger');
+    });
+
     it('renders nothing extra when only one half of the pair is passed', async () => {
         // A label with no handler is a button that silently does nothing; a handler with no label
         // is unreachable. Neither is a state worth rendering.

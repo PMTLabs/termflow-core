@@ -38,6 +38,19 @@ interface ConfirmDialogProps {
    */
   secondaryText?: string;
   onSecondary?: () => void;
+  /**
+   * Is the SECONDARY action the destructive one?
+   *
+   * Distinct from `destructive`, which describes the PRIMARY. The two are independent because a
+   * dialog can put the safe action first and the dangerous one beside it: *"Save and close"* as the
+   * primary with *"Discard"* next to it throws work away while the primary keeps it, so the red
+   * belongs on the secondary and the primary must stay blue.
+   *
+   * Renders `.confirm-btn.destructive` — the GHOST red that has existed in the stylesheet, with a
+   * comment describing exactly this case, since before anything applied it. Ghost rather than solid,
+   * so it reads as the dangerous ALTERNATIVE and not as a second primary competing for the eye.
+   */
+  secondaryDestructive?: boolean;
 }
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
@@ -53,6 +66,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   cancelMnemonic,
   secondaryText,
   onSecondary,
+  secondaryDestructive = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -104,7 +118,10 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
           {secondaryText && onSecondary && (
-            <button className="confirm-btn secondary" onClick={onSecondary}>
+            <button
+              className={`confirm-btn ${secondaryDestructive ? 'destructive' : 'secondary'}`}
+              onClick={onSecondary}
+            >
               {secondaryText}
             </button>
           )}
