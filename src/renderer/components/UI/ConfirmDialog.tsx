@@ -27,6 +27,17 @@ interface ConfirmDialogProps {
   confirmMnemonic?: string;
   /** Bare-letter shortcut + underlined mnemonic for the cancel button, e.g. "A". */
   cancelMnemonic?: string;
+  /**
+   * An optional THIRD action, sitting between Cancel and the primary — the reversible middle
+   * ground, offered before the destructive one: *"Switch off instead"* beside *Delete*.
+   *
+   * Both props are required together and both are optional: with neither, this dialog renders
+   * exactly the two buttons it always has, which is what keeps every existing caller unchanged.
+   * Generalising a dialog for a second caller with every addition optional is precedented here —
+   * `UnsavedChangesDialog`'s own doc comment records the same move.
+   */
+  secondaryText?: string;
+  onSecondary?: () => void;
 }
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
@@ -40,6 +51,8 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   destructive = false,
   confirmMnemonic,
   cancelMnemonic,
+  secondaryText,
+  onSecondary,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -90,6 +103,11 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
+          {secondaryText && onSecondary && (
+            <button className="confirm-btn secondary" onClick={onSecondary}>
+              {secondaryText}
+            </button>
+          )}
           <button
             className={`confirm-btn ${destructive ? 'danger' : 'primary'}`}
             data-dialog-confirm

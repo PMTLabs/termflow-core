@@ -1,3 +1,9 @@
+// The automation event payloads live beside their event-name constants in
+// `services/automationEvents.ts` — a `.d.ts` cannot hold runtime values, and the whole
+// point of those constants is that they are imported rather than spelled inline. The
+// runtime payload is also what `get_automation_runtime` returns, so it is needed here.
+import type { AutomationStatePayload } from '../services/automationEvents';
+
 // Faithful styled snapshot of a terminal's current visible screen, used for
 // reconnect/hydration. Shared by the Tauri and browser bridges.
 export interface TerminalSnapshot {
@@ -357,6 +363,32 @@ export interface ElectronAPI {
   // into the Rust AppState atomic that the window-close/exit guard reads. Tauri-only
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
+
+  // Terminal Automations (Plan 028) — the eleven commands of `automation_commands.rs`,
+  // in the order that file declares them. All optional and all Tauri-only: the store is
+  // SQLite in the desktop process, so the browser host throws rather than pretending.
+  // `origin` is the window label, carried so a `saved` log line can name which window
+  // made the change (§3.5, GUI 19) — never for concurrency control.
+  listAutomations?: () => Promise<AutomationRule[]>;
+  getAutomationRuntime?: () => Promise<AutomationStatePayload>;
+  loadAutomationLog?: (
+    ruleId: string | null,
+    newestFirst: boolean,
+    limit: number,
+  ) => Promise<AutomationLogEntry[]>;
+  listWatchableTerminals?: (
+    ruleId: string | null,
+    includeIds: string[] | null,
+  ) => Promise<WatchableTerminal[]>;
+  dryRunAutomation?: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
+  /** Resolves to the row's PREVIOUS `updatedAt`, or null if this was an insert. */
+  saveAutomation?: (rule: AutomationRule, origin: string) => Promise<number | null>;
+  deleteAutomation?: (id: string, origin: string) => Promise<boolean>;
+  duplicateAutomation?: (id: string, origin: string) => Promise<AutomationRule>;
+  setAutomationEnabled?: (id: string, enabled: boolean, origin: string) => Promise<void>;
+  resetAutomation?: (id: string, origin: string) => Promise<void>;
+  /** `terminalId: null` re-arms every pair this rule watches. */
+  rearmAutomation?: (ruleId: string, terminalId: string | null) => Promise<void>;
 }
 
 declare global {
@@ -501,6 +533,34 @@ export interface AutomationLogEntry {
   kind: AutomationLogKind;
   detail: string;
   at: number;
+}
+
+/**
+ * One step of a dry run, as the editor's Test panel draws it. Mirrors
+ * `automation_engine::dry::StepTrace`.
+ */
+export interface DryRunStep {
+  /** `monitor` | `parse` | `cond` | `action` — always all four, always in the graph's order. */
+  kind: 'monitor' | 'parse' | 'cond' | 'action';
+  /**
+   * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
+   * not be drawn as one.
+   */
+  status: 'ok' | 'failed' | 'skipped';
+  detail: string;
+}
+
+/**
+ * What one dry run found. `unreadable` is its own verdict rather than a *would not fire*: the rule
+ * was never judged at all, and telling a user their pattern does not match when nothing was read
+ * sends them off to edit a pattern that is fine.
+ */
+export interface DryRunReport {
+  verdict: 'would-fire' | 'would-not-fire' | 'unreadable';
+  terminalId: string;
+  /** Resolved through `label_at`, exactly as a log row's is. Never invented (§2.8). */
+  terminalName?: string | null;
+  steps: DryRunStep[];
 }
 
 /** One row of the §04 picker. `alive: false` rows still carry `label` and `folder` from the snapshot. */

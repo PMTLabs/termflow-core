@@ -93,6 +93,19 @@
   color: var(--tab-active-foreground, #ffffff);
 }
 
+/* The optional THIRD action — the reversible middle ground between Cancel and a
+   destructive primary ("Switch off instead" beside "Delete"). Outlined rather than
+   filled: it must read as an alternative to the primary, not as a second primary. */
+.confirm-btn.secondary {
+  background: transparent;
+  color: var(--tab-active-foreground, #ffffff);
+  border-color: var(--border-color, #3e3e42);
+}
+
+.confirm-btn.secondary:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
 /* The SOLID red, for a dialog whose primary action is itself destructive:
    Delete, Reset, Quit, Close Pane, Revoke.
    Renamed from `.confirm-btn.confirm`, which read as "the confirm button" and

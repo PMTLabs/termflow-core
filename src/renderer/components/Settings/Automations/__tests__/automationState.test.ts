@@ -1,0 +1,285 @@
+/**
+ * §10.24 — the row's runtime state.
+ *
+ * The seven-state table, the disagree case asserting the qualifier string exactly, and a Completed
+ * rule's switch reported disabled. Q5's order is not written down anywhere else, and getting it
+ * wrong makes rows describe rules incorrectly — a rule with one dead terminal and one happily armed
+ * one must not read *Armed · waiting*.
+ */
+import type { AutomationRule } from '../../../../types/electron';
+import type { AutomationRuntimePairState } from '../../../../services/automationEvents';
+import {
+    automationRowState,
+    describeCadence,
+    describeCriterion,
+    describeRule,
+    JUST_FIRED_MS,
+} from '../automationState';
+
+const NOW = 1_700_000_000_000;
+
+function rule(over: Partial<AutomationRule> = {}): AutomationRule {
+    return {
+        id: 'au-1',
+        name: 'Context handoff reminder',
+        enabled: true,
+        runsOnce: false,
+        targetMode: 'rule',
+        criterion: 'commandContains',
+        criterionValue: 'claude',
+        followNew: true,
+        targetIds: [],
+        completedAt: null,
+        verboseUntil: null,
+        sortOrder: 0,
+        schemaVersion: 1,
+        graph: {
+            monitor: { read: 'newOutput', cadence: 'timer', everyMs: 30000 },
+            parse: { preset: 'percentage', literal: null, find: 'ctx:(\\d+)%', keep: 'brackets' },
+            cond: { kind: 'number', op: 'gt', threshold: 25 },
+            action: { message: 'hand off', sendTo: 'matched', submit: true, cliType: 'default' },
+        },
+        createdAt: 0,
+        updatedAt: 0,
+        ...over,
+    };
+}
+
+function pair(over: Partial<AutomationRuntimePairState> = {}): AutomationRuntimePairState {
+    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, ...over };
+}
+
+describe('automationRowState — the state table', () => {
+    it('reports off for a disabled rule, whatever its pairs say', () => {
+        // Off outranks everything: the user's own decision is the most important thing a row can
+        // say, and a disabled rule's runtime state is stale by definition.
+        const state = automationRowState(
+            rule({ enabled: false }),
+            { 'tm-1': pair({ missing: true }) },
+            NOW,
+        );
+        expect(state.id).toBe('off');
+        expect(state.pillText).toBe('Off');
+    });
+
+    it('reports completed, with the toggle on but INERT', () => {
+        const state = automationRowState(
+            rule({ runsOnce: true, completedAt: NOW - 1000 }),
+            { 'tm-1': pair() },
+            NOW,
+        );
+        expect(state.id).toBe('completed');
+        // Switching it off and on again would be a confusing way to re-arm it, so it isn't the
+        // mechanism — the toggle stays on and stops responding, and Reset is what re-admits it.
+        expect(state.toggleDisabled).toBe(true);
+    });
+
+    it('a completed rule the user then switched OFF reads off, not completed', () => {
+        const state = automationRowState(
+            rule({ runsOnce: true, enabled: false, completedAt: NOW - 1000 }),
+            { 'tm-1': pair() },
+            NOW,
+        );
+        expect(state.id).toBe('off');
+    });
+
+    it('reports error for a missing pinned terminal', () => {
+        const state = automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW);
+        expect(state.id).toBe('error');
+    });
+
+    it('reports error for an enabled rule the engine is running with nothing to watch', () => {
+        expect(automationRowState(rule(), {}, NOW).id).toBe('error');
+    });
+
+    it('does NOT report error before the engine has reported the rule at all', () => {
+        // A live set is not existence. On first paint, before `get_automation_runtime` resolves,
+        // every enabled rule would otherwise flash *Error · nothing to watch* and then silently
+        // retract it — the same trap that made the backend hold missing ids behind a grace period.
+        expect(automationRowState(rule(), undefined, NOW).id).toBe('waiting');
+    });
+
+    it('reports "just fired" only while the receipt is fresh, then waiting to re-arm', () => {
+        const fresh = automationRowState(
+            rule(),
+            { 'tm-1': pair({ state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1 }) },
+            NOW,
+        );
+        expect(fresh.id).toBe('fired');
+        expect(fresh.label).toBe('Just fired');
+
+        const settled = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({
+                    state: 'fired',
+                    lastFiredAt: NOW - JUST_FIRED_MS - 1,
+                    firedCount: 1,
+                }),
+            },
+            NOW,
+        );
+        expect(settled.id).toBe('rearm');
+        expect(settled.label).toBe('Fired · waiting to re-arm');
+    });
+
+    it('reports armed and waiting for both unseen and armed pairs', () => {
+        expect(automationRowState(rule(), { 'tm-1': pair({ state: 'unseen' }) }, NOW).id)
+            .toBe('waiting');
+        expect(automationRowState(rule(), { 'tm-1': pair({ state: 'armed' }) }, NOW).id)
+            .toBe('waiting');
+    });
+
+    /**
+     * `matched` is in the union because mockup §09 teaches the word and M5's editor uses the same
+     * seven ids — but **nothing produces it**, and this test says so in a way that goes red the
+     * moment that stops being true. The evaluator advances the arm to `Fired` in the same statement
+     * that decides the crossing (deliberately, so a second tick mid-send cannot queue a duplicate),
+     * so a pair is never observed armed-and-true.
+     *
+     * Exhaustive over every shape `RuntimePairState` can take, rather than over the three or four a
+     * hand-written table would have thought of.
+     */
+    it('matched has no producer, over every possible pair shape', () => {
+        const seen = new Set<string>();
+        for (const state of ['unseen', 'armed', 'fired'] as const) {
+            for (const missing of [false, true]) {
+                for (const lastFiredAt of [null, NOW, NOW - JUST_FIRED_MS - 1]) {
+                    for (const firedCount of [0, 3]) {
+                        seen.add(
+                            automationRowState(
+                                rule(),
+                                { 'tm-1': { state, lastFiredAt, firedCount, missing } },
+                                NOW,
+                            ).id,
+                        );
+                    }
+                }
+            }
+        }
+        expect(seen.has('matched')).toBe(false);
+        // The premise: the sweep really did reach the other states, so the assertion above is not
+        // passing because nothing ran.
+        expect([...seen].sort()).toEqual(['error', 'fired', 'rearm', 'waiting']);
+    });
+});
+
+describe('automationRowState — the qualifier', () => {
+    it("says '1 of 2' when the pairs disagree, and names the state's own noun", () => {
+        const state = automationRowState(
+            rule(),
+            { 'tm-1': pair({ missing: true }), 'tm-2': pair() },
+            NOW,
+        );
+        expect(state.id).toBe('error');
+        expect(state.qualifier).toBe('1 of 2');
+        expect(state.pillText).toBe('Error · 1 of 2 missing');
+    });
+
+    it('says nothing when every pair agrees', () => {
+        // *Error · 2 of 2 missing* says nothing *Error* did not.
+        const state = automationRowState(
+            rule(),
+            { 'tm-1': pair({ missing: true }), 'tm-2': pair({ missing: true }) },
+            NOW,
+        );
+        expect(state.qualifier).toBeNull();
+        expect(state.pillText).toBe('Error');
+    });
+
+    it('says nothing for a single watched terminal', () => {
+        expect(automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW).qualifier)
+            .toBeNull();
+    });
+});
+
+describe('automationRowState — severity, pair by pair', () => {
+    /**
+     * The order itself, asserted as a LIST rather than at one sample. Q5's order is not written
+     * down anywhere but the plan, and the first version of this suite only ever put `error` against
+     * `waiting` — so a mutation that moved `error` BELOW `fired` and `rearm` survived, because no
+     * test ever made those two compete. Every adjacent pair in the order is now exercised.
+     */
+    const CASES: Array<[string, AutomationRuntimePairState, AutomationRuntimePairState, string]> = [
+        [
+            'error beats just-fired',
+            pair({ missing: true }),
+            pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
+            'error',
+        ],
+        [
+            'error beats waiting-to-re-arm',
+            pair({ missing: true }),
+            pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+            'error',
+        ],
+        [
+            'just-fired beats waiting-to-re-arm',
+            pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
+            pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+            'fired',
+        ],
+        [
+            'waiting-to-re-arm beats armed and waiting',
+            pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+            pair({ state: 'armed' }),
+            'rearm',
+        ],
+    ];
+
+    it.each(CASES)('%s', (_label, a, b, expected) => {
+        // Both orders, so the answer cannot come from which key happened to be enumerated first.
+        expect(automationRowState(rule(), { 'tm-1': a, 'tm-2': b }, NOW).id).toBe(expected);
+        expect(automationRowState(rule(), { 'tm-1': b, 'tm-2': a }, NOW).id).toBe(expected);
+    });
+});
+
+describe('the row reads as a sentence', () => {
+    it('uses the crossing verb, never an operator symbol', () => {
+        // "Rises above", not ">", because the crossing IS the semantics: a user who reads the row
+        // has already been told it will not nag.
+        const s = describeRule(rule());
+        expect(s.lead).toBe('when the number in');
+        expect(s.subject).toBe('ctx:(\\d+)%');
+        expect(s.verb).toBe('rises above');
+        expect(s.threshold).toBe('25');
+        expect(s.verbSend).toBe('send');
+        expect(s.sendNote).toBeNull();
+    });
+
+    it('says "type … — no Enter" for an action that deliberately does not submit', () => {
+        const r = rule();
+        r.graph.action.submit = false;
+        r.graph.action.message = '1';
+        const s = describeRule(r);
+        expect(s.verbSend).toBe('type');
+        expect(s.sendNote).toBe(' — no Enter');
+    });
+
+    it('shows the literal the user typed, not its regex-escaped form', () => {
+        const r = rule();
+        r.graph.cond = { kind: 'text', op: null, threshold: null };
+        r.graph.parse = {
+            preset: 'exactWords',
+            literal: 'Do you want to proceed?',
+            find: 'Do you want to proceed\\?',
+            keep: 'whole',
+        };
+        const s = describeRule(r);
+        expect(s.lead).toBe('when output starts matching');
+        expect(s.subject).toBe('Do you want to proceed?');
+        expect(s.verb).toBeNull();
+    });
+
+    it('describes the criterion and the cadence in the picker′s own words', () => {
+        expect(describeCriterion(rule())).toBe('command contains "claude"');
+        expect(describeCriterion(rule({ criterion: 'allTerminals' }))).toBe('all terminals');
+        expect(describeCadence(rule())).toBe('Checks every 30s');
+        const timed = rule();
+        timed.graph.monitor.everyMs = 300000;
+        expect(describeCadence(timed)).toBe('Checks every 5 min');
+        const streamed = rule();
+        streamed.graph.monitor.cadence = 'onOutput';
+        expect(describeCadence(streamed)).toBe('On every new line');
+    });
+});

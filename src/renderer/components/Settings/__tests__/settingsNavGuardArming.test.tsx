@@ -28,6 +28,9 @@ import { configureStore } from '@reduxjs/toolkit';
 // own stylesheet imports out of the module graph.
 jest.mock('../SettingsPage.css', () => ({}));
 jest.mock('../PeersPanel', () => ({ PeersPanel: () => null }));
+// The Automations panel pulls its own stylesheet, the Tauri event API and the automation bridge
+// through this module graph, none of which this suite is about (plan 028 §10.30).
+jest.mock('../Automations/AutomationsPanel', () => ({ AutomationsPanel: () => null }));
 jest.mock('../AboutLegalPanel', () => ({ AboutLegalPanel: () => null }));
 jest.mock('../McpConnectModal', () => ({ McpConnectModal: () => null }));
 jest.mock('../../UI/ConfirmDialog', () => ({ ConfirmDialog: () => null }));
