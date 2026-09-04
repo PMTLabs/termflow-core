@@ -24,9 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub mod due;
+pub mod dry;
 pub mod eval;
 pub mod host;
 pub mod loops;
+#[cfg(test)]
+pub mod test_host;
 
 use regex::Regex;
 

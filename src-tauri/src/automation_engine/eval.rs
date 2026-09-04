@@ -323,7 +323,7 @@ pub fn compare(op: CompareOp, value: f64, threshold: f64) -> bool {
 }
 
 /// Print a value the way the log should read it: `63`, not `63.0`.
-fn fmt_num(v: f64) -> String {
+pub(crate) fn fmt_num(v: f64) -> String {
     if v.fract() == 0.0 && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {
@@ -332,7 +332,7 @@ fn fmt_num(v: f64) -> String {
 }
 
 /// How deep the read went, in the log's own words.
-fn depth_words(depth: ReadDepth) -> String {
+pub(crate) fn depth_words(depth: ReadDepth) -> String {
     match depth {
         ReadDepth::Window(n) => format!("in the last {} lines", n),
         ReadDepth::VisibleScreen => "on screen".to_string(),
