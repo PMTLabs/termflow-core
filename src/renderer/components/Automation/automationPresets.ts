@@ -164,8 +164,12 @@ type Tok =
     | { t: 'word'; sample: string }
     | { t: 'space'; sample: string }
     | { t: 'any'; sample: string }
-    | { t: 'open' }
+    /** `name` is the group's own, when it has one — the engine prefers a group called `value`. */
+    | { t: 'open'; name: string | null }
     | { t: 'close' };
+
+/** A token that carries text — everything except the bracket markers. */
+type FlatTok = Extract<Tok, { sample: string }>;
 
 /** Digits and simple digit ranges — `[45]`, `[0-9]`. Anything else is not a "number" we can word. */
 function digitClass(body: string): string | null {
@@ -200,14 +204,25 @@ function tokenize(find: string): Tok[] | null {
     const out: Tok[] = [];
     let i = 0;
 
-    /** A `+` or `*` immediately after the current atom, consumed and reported. */
+    /**
+     * A `+` immediately after the current atom, consumed and reported.
+     *
+     * **`*` is not one of them, and the caller bails on it.** It used to be treated as identical to
+     * `+`, so `ctx:\s*(\d+)%` — which matches `ctx:50%` perfectly well — was paraphrased as *"find
+     * `ctx:` followed by a space followed by a number"*, telling the user a space is REQUIRED. A
+     * zero-or-more atom is not a thing this vocabulary can word, and `)` already bails on `*` for
+     * the same reason one atom further out.
+     */
     const takesMany = (): boolean => {
-        if (find[i] === '+' || find[i] === '*') {
+        if (find[i] === '+') {
             i += 1;
             return true;
         }
         return false;
     };
+
+    /** `*` after an atom this function just emitted — the whole paraphrase gives up. */
+    const optional = (): boolean => find[i] === '*';
 
     while (i < find.length) {
         const c = find[i];
@@ -216,16 +231,28 @@ function tokenize(find: string): Tok[] | null {
             const next = find[i + 1];
             if (next === undefined) return null;
             i += 2;
-            if (next === 'b' || next === 'B') continue;
+            // A word boundary at the pattern's EDGE — `\b([45]\d\d)\b`, the *HTTP error code*
+            // preset — is decoration on "the whole match stands alone", and is dropped rather than
+            // worded, exactly as the optional decimal tail of *Any number* is. In the MIDDLE it
+            // constrains something the words do not mention, and `\B` inverts even that: `\B(\d+)`
+            // read *"find a number"*, which is the one reading it rules out.
+            if (next === 'b') {
+                if (i === 2 || i === find.length) continue;
+                return null;
+            }
+            if (next === 'B') return null;
             if (next === 'd') {
+                if (optional()) return null;
                 out.push({ t: 'num', sample: takesMany() ? '63' : '7' });
                 continue;
             }
             if (next === 'w') {
+                if (optional()) return null;
                 out.push({ t: 'word', sample: takesMany() ? 'abc' : 'a' });
                 continue;
             }
             if (next === 's') {
+                if (optional()) return null;
                 takesMany();
                 out.push({ t: 'space', sample: ' ' });
                 continue;
@@ -266,7 +293,10 @@ function tokenize(find: string): Tok[] | null {
             }
             const named = /^\(\?<([A-Za-z][A-Za-z0-9]*)>/.exec(find.slice(i));
             i += named ? named[0].length : 1;
-            out.push({ t: 'open' });
+            // The NAME is kept, because the engine keeps the group called `value` in preference to
+            // the first one, and a paraphrase that cannot tell them apart says the wrong thing
+            // about which value gets compared.
+            out.push({ t: 'open', name: named ? named[1] : null });
             continue;
         }
 
@@ -283,12 +313,14 @@ function tokenize(find: string): Tok[] | null {
             const sample = digitClass(find.slice(i + 1, end));
             if (sample === null) return null;
             i = end + 1;
+            if (optional()) return null;
             out.push({ t: 'num', sample: takesMany() ? `${sample}3` : sample });
             continue;
         }
 
         if (c === '.') {
             i += 1;
+            if (optional()) return null;
             out.push({ t: 'any', sample: takesMany() ? 'something' : 'x' });
             continue;
         }
@@ -309,6 +341,36 @@ function tokenize(find: string): Tok[] | null {
             out.push({ t: 'lit', text: c, sample: c });
         }
     }
+    return splitEdgeSpace(out);
+}
+
+/**
+ * Whitespace at the EDGE of a literal run becomes its own word; whitespace inside one stays put.
+ *
+ * `sayToken` used to `.trim()` the run instead, and a deleted space is a deleted requirement:
+ * `ctx: (\d+)%` and `ctx:(\d+)%` rendered the identical sentence, so a user reading it would expect
+ * `ctx:63%` to match the rule that needs `ctx: 63%`. Saying *"followed by"* does not answer the
+ * question either — it is silent about whether a space belongs between the two.
+ *
+ * The split is only at the edges because interior whitespace is part of a phrase: `k tokens left` is
+ * three words the user typed, and *"`k` followed by a space followed by `tokens`"* describes the
+ * same thing far worse. A run that is ALL whitespace becomes one space token, which is also what
+ * stops `sayToken` ever needing to decline.
+ */
+function splitEdgeSpace(toks: Tok[]): Tok[] {
+    const out: Tok[] = [];
+    for (const tok of toks) {
+        if (tok.t !== 'lit') {
+            out.push(tok);
+            continue;
+        }
+        const lead = /^\s*/.exec(tok.text)?.[0] ?? '';
+        const core = tok.text.slice(lead.length).replace(/\s*$/, '');
+        const tail = tok.text.slice(lead.length + core.length);
+        if (lead) out.push({ t: 'space', sample: lead });
+        if (core) out.push({ t: 'lit', text: core, sample: core });
+        if (tail) out.push({ t: 'space', sample: tail });
+    }
     return out;
 }
 
@@ -328,26 +390,30 @@ function matchingParen(s: string, open: number): number {
     return -1;
 }
 
-/** `a number` / `` `ctx:` `` — one token's words. Adjacent numbers have already been merged. */
-function sayToken(tok: Tok): SayingSegment[] | null {
+/**
+ * `a number` / `` `ctx:` `` — one token's words. Adjacent numbers have already been merged.
+ *
+ * **Total over the tokens a paraphrase can contain**, which is what killed *"find the words a
+ * number"*: it used to return `null` for a whitespace-only literal and the caller skipped those
+ * silently, so the flat token list and the worded list could end up different lengths — and the
+ * "one literal, say *the words*" branch then tested the wrong array's first element. A function
+ * that cannot decline cannot desynchronise them.
+ */
+function sayToken(tok: FlatTok): SayingSegment[] {
     switch (tok.t) {
         case 'num':
             return [{ t: 'text', text: 'a number' }];
         case 'word':
             return [{ t: 'text', text: 'a word' }];
         case 'space':
-            return [{ t: 'text', text: 'a space' }];
+            return [{ t: 'text', text: tok.sample.length > 1 ? 'spaces' : 'a space' }];
         case 'any':
             return [{ t: 'text', text: 'anything' }];
-        case 'lit': {
-            const text = tok.text.trim();
-            if (text.length === 0) return null;
-            return text.length === 1 && !/[A-Za-z0-9]/.test(text)
-                ? [{ t: 'text', text: 'a ' }, { t: 'code', text }]
-                : [{ t: 'code', text }];
-        }
+        case 'lit':
         default:
-            return null;
+            return tok.text.length === 1 && !/[A-Za-z0-9]/.test(tok.text)
+                ? [{ t: 'text', text: 'a ' }, { t: 'code', text: tok.text }]
+                : [{ t: 'code', text: tok.text }];
     }
 }
 
@@ -370,22 +436,31 @@ export function sayPattern(find: string, keep: AutomationKeep): PatternSaying | 
     const toks = tokenize(find);
     if (!toks) return null;
 
-    // What the brackets contain, so the keep clause can say "the number" rather than "the part".
-    const depth = { open: 0 };
-    let capturedIsNumber = false;
-    let sawCapture = false;
-    const flat: Tok[] = [];
+    // What each bracketed group contains, so the keep clause can name the value the ENGINE takes.
+    //
+    // `eval.rs`: `caps.name("value").or_else(|| caps.get(1))` — the group called `value`, else group
+    // ONE. This used to be a single flag set by any digit inside ANY group, so `(\w+):(\d+)` was
+    // paraphrased *"and keep the number"* directly under the same panel's `parse.manyGroups`
+    // warning — *"This pattern has more than one bracketed group. The first one is used"* — while
+    // the first one is the word. Two surfaces, one rule, contradictory, eight pixels apart: the
+    // failure `automationDerive` exists to prevent, at the one displayed string that does not go
+    // through `stepValues`.
+    const inside: FlatTok[][] = [];
+    const names: (string | null)[] = [];
+    const stack: number[] = [];
+    const flat: FlatTok[] = [];
     for (const tok of toks) {
         if (tok.t === 'open') {
-            depth.open += 1;
-            sawCapture = true;
+            names.push(tok.name);
+            inside.push([]);
+            stack.push(inside.length - 1);
             continue;
         }
         if (tok.t === 'close') {
-            depth.open = Math.max(0, depth.open - 1);
+            stack.pop();
             continue;
         }
-        if (depth.open > 0 && tok.t === 'num') capturedIsNumber = true;
+        for (const g of stack) inside[g].push(tok);
         const last = flat[flat.length - 1];
         // `[45]\d\d` is three tokens and one idea.
         if (last && last.t === 'num' && tok.t === 'num') {
@@ -395,15 +470,19 @@ export function sayPattern(find: string, keep: AutomationKeep): PatternSaying | 
         flat.push(tok);
     }
 
-    const parts: SayingSegment[][] = [];
-    for (const tok of flat) {
-        const said = sayToken(tok);
-        if (said) parts.push(said);
-    }
+    const named = names.indexOf('value');
+    const keptGroup = named >= 0 ? named : 0;
+    const kept = inside[keptGroup] ?? [];
+    // ONLY a group that is entirely digits is "the number". `(\d+px)` captures `63px`, which is not
+    // a number and does not coerce to one; `(\w+)` captures a word; `(\s)` captures a space.
+    const capturedIsNumber = kept.length > 0 && kept.every((t) => t.t === 'num');
+    const sawCapture = inside.length > 0;
+
+    const parts: SayingSegment[][] = flat.map(sayToken);
     if (parts.length === 0) return null;
 
     const words: SayingSegment[] = [{ t: 'text', text: 'find ' }];
-    if (parts.length === 1 && flat[0].t === 'lit') {
+    if (flat.length === 1 && flat[0].t === 'lit') {
         words.push({ t: 'text', text: 'the words ' }, ...parts[0]);
     } else {
         parts.forEach((part, index) => {
@@ -423,7 +502,7 @@ export function sayPattern(find: string, keep: AutomationKeep): PatternSaying | 
         words.push({ t: 'text', text: ' — and keep the whole match' });
     }
 
-    const example = flat.map((t) => (t.t === 'open' || t.t === 'close' ? '' : t.sample)).join('');
+    const example = flat.map((t) => t.sample).join('');
     return { words, example: example.length > 0 && re.test(example) ? example : null };
 }
 

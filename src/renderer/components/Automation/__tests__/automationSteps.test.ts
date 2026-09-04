@@ -13,18 +13,25 @@ import {
     allPorts,
     canAddStep,
     canConnect,
-    canRemoveStep,
     defaultWires,
 } from '../automationSteps';
 import type { PortRef, StepKind } from '../automationSteps';
 
 const key = (p: PortRef) => `${p.step}.${p.port}`;
 
+/**
+ * The three wires a rule IMPLIES, and nothing else.
+ *
+ * `cond.false->action.in` used to be in here, and it passed every check: right direction, matching
+ * `verdict` type, a free input. It is the one accepted pair that draws a rule TermFlow does not run
+ * — delete the `yes` chip, draw the `no` one, and the canvas says the rule fires when the comparison
+ * FAILS while the engine goes on firing when it succeeds. `wires` is session-only canvas state and
+ * no behaviour derives from it, so the drawing was the only thing that changed.
+ */
 const LEGAL = new Set([
     'monitor.out->parse.in',
     'parse.out->cond.in',
     'cond.true->action.in',
-    'cond.false->action.in',
 ]);
 
 describe('canConnect — the ordered-pair matrix', () => {
@@ -42,7 +49,7 @@ describe('canConnect — the ordered-pair matrix', () => {
         ]);
     });
 
-    it('accepts exactly four of the forty-nine ordered pairs', () => {
+    it('accepts exactly three of the forty-nine ordered pairs', () => {
         const accepted: string[] = [];
         for (const from of ports) {
             for (const to of ports) {
@@ -81,16 +88,25 @@ describe('canConnect — the ordered-pair matrix', () => {
         expect(reason('parse.out', 'action.in')).toBe(
             `${STEP_LABELS.parse} sends a value, and ${STEP_LABELS.action} expects a yes or no.`,
         );
+        // Shape. The one refusal that is not about direction, self or type: `cond.false` is a real
+        // output of the right type into a free input, and wiring it would draw the opposite of what
+        // the rule does. The reason names the port that DOES drive the step, not the one tried.
+        expect(reason('cond.false', 'action.in')).toBe(
+            `${STEP_LABELS.action} runs on ${STEP_LABELS.cond}'s yes output. The canvas draws the `
+            + 'rule, and a wire the rule would not follow is a picture of something else.',
+        );
     });
 
-    it('refuses a second wire into an input, but allows an output to fan out', () => {
+    it('refuses a second wire into an input, BEFORE it asks about shape', () => {
+        // The order is the message: a user dragging onto a port that is already wired should be
+        // told to remove that wire, not lectured about which output drives the step.
         const taken = { wires: [{ from: { step: 'cond' as StepKind, port: 'true' }, to: { step: 'action' as StepKind, port: 'in' } }] };
         expect(canConnect(taken, { step: 'cond', port: 'false' }, { step: 'action', port: 'in' })?.reason)
             .toBe(`${STEP_LABELS.action} already has an input. Remove that wire first.`);
-        // The same output driving a second input is not refused — a rule with two actions is a
-        // shape this table has no opinion about, and refusing it would be a rule about today's
-        // step list rather than about wiring.
-        expect(canConnect(taken, { step: 'cond', port: 'true' }, { step: 'parse', port: 'in' })).not.toBeNull();
+        // And the same pair on an EMPTY canvas is refused for the other reason, so neither check is
+        // shadowing the other.
+        expect(canConnect({ wires: [] }, { step: 'cond', port: 'false' }, { step: 'action', port: 'in' })?.reason)
+            .toContain('yes output');
     });
 
     it('refuses a port that does not exist', () => {
@@ -99,7 +115,7 @@ describe('canConnect — the ordered-pair matrix', () => {
     });
 });
 
-describe('canAddStep / canRemoveStep', () => {
+describe('canAddStep', () => {
     it('refuses a second copy of a step, naming it', () => {
         expect(canAddStep(['monitor'], 'monitor')?.reason).toContain(STEP_LABELS.monitor);
         expect(canAddStep(['monitor'], 'monitor')?.reason).toContain('already has');
@@ -121,12 +137,6 @@ describe('canAddStep / canRemoveStep', () => {
         }
         // And the whole chain accepts nothing more.
         for (const step of STEP_ORDER) expect(canAddStep(built, step)).not.toBeNull();
-    });
-
-    it('refuses removing a step something else depends on', () => {
-        expect(canRemoveStep(['monitor', 'parse'], 'monitor')?.reason).toContain(STEP_LABELS.parse);
-        expect(canRemoveStep(['monitor', 'parse'], 'parse')).toBeNull();
-        expect(canRemoveStep(STEP_ORDER, 'action')).toBeNull();
     });
 });
 

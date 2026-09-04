@@ -153,7 +153,8 @@ describe('automationDerive — missing values are marked, not blank', () => {
         };
         expect(stepValues(empty, 'parse').find).toEqual({ text: 'nothing to look for', missing: true });
         expect(stepValues(empty, 'action').message).toEqual({ text: 'nothing to send', missing: true });
-        // And a pinned rule with no picks, which is every template's one problem.
+        // And a pinned rule with no picks — which no template is, hence the forced `targetMode`
+        // on the next line rather than reaching for a template that already has the shape.
         expect(stepValues({ ...empty, targetMode: 'pinned', targetIds: [] }, 'monitor').terminals)
             .toEqual({ text: 'no terminals chosen', missing: true });
     });

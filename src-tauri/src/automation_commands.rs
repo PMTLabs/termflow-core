@@ -290,30 +290,28 @@ pub async fn save_automation(
 ) -> Result<AutomationSaveResult, String> {
     let owned = state.inner().clone();
     let mut rule = rule;
-    let inserting = rule.id.trim().is_empty();
-    if inserting {
+    if rule.id.trim().is_empty() {
         // The same shape `duplicate_automation` mints, and deliberately the same prefix: one id
         // vocabulary, minted in one crate.
         rule.id = format!("au-{}", uuid::Uuid::new_v4());
     }
     let id = rule.id.clone();
     let origin_for_log = origin.clone();
+    let at = now_ms();
     let (previous, reloaded) = tokio::task::spawn_blocking(move || {
-        if inserting {
-            // Where a new rule lands is the store's decision too — `blankDraft()` sends `sortOrder: 0`
-            // precisely because the renderer must not invent a fact about a row that does not exist
-            // yet, and 0 would file every new rule ABOVE every existing one, tie-broken by a uuid.
-            // Ties are benign rather than prevented: `ORDER BY sort_order, id` is total, and
-            // `duplicate_automation` renumbers the whole list when it needs an exact slot.
-            rule.sort_order = owned.automation_store.next_sort_order().map_err(to_string_err)?;
-        }
-        let previous = owned.automation_store.save_rule(&rule).map_err(to_string_err)?;
-        // §3.5: the `saved` entry's detail carries the origin window, and `save_rule` returns the
+        // `save_rule_as_of`, not `save_rule`: **`sort_order`, `created_at` and `updated_at` are the
+        // row's own facts and the renderer must not author any of them.** Minting the id here and
+        // the slot only on the insert path fixed one member of that class and left three — the
+        // second Save of a new rule wrote `sortOrder: 0` through and sent it back to the top of the
+        // list, and no save ever moved `updated_at`, which is the field `reload` watches to drop a
+        // rule's arm state (Q11).
+        let previous = owned.automation_store.save_rule_as_of(&rule, at).map_err(to_string_err)?;
+        // §3.5: the `saved` entry's detail carries the origin window, and the store returns the
         // previous `updated_at` from INSIDE its own transaction so the line can name what it replaced.
         // Two windows may hold one rule open and the later save wins whole; the log entry IS the
         // requirement, not concurrency control. GUI step 19 checks this line.
         note(&owned, &rule.id, LogKind::Saved, &saved_detail(&origin_for_log, previous));
-        let reloaded = reload_after_commit(&owned, now_ms());
+        let reloaded = reload_after_commit(&owned, at);
         Ok::<_, String>((previous, reloaded))
     })
     .await
@@ -538,6 +536,9 @@ mod source_tests {
         // completion itself and drops the rule from its live set in the same critical section (§7.8).
         let mutators = [
             "save_rule(",
+            // The renderer's own save path. A separate needle rather than a looser `save_rule`,
+            // because a substring that matched both would also match a comment naming either.
+            "save_rule_as_of(",
             "delete_rule(",
             "duplicate_automation(",
             "set_enabled_checked(",
@@ -761,9 +762,13 @@ mod source_tests {
             saving.contains("rule.id.trim().is_empty()") && saving.contains("format!(\"au-{}\""),
             "save_automation mints no id for a new rule, so two new rules collide on the empty string"
         );
+        // And the whole class, not just the id. A draft carries `sortOrder: 0`, `createdAt: 0` and
+        // a stale `updatedAt` for its whole life, so the save path has to take all four columns
+        // from the store — the FIRST fix took the id and the insert-path slot only, and the second
+        // Save of a new rule then wrote `sortOrder: 0` through and sent the rule back to the top.
         assert!(
-            saving.contains("next_sort_order()"),
-            "a minted rule keeps sortOrder 0 and files itself above every existing rule"
+            saving.contains("save_rule_as_of(") && !saving.contains("automation_store.save_rule("),
+            "save_automation writes the renderer's own sort_order/created_at/updated_at through"
         );
         assert!(
             body("save_automation").contains("note(") && body("save_automation").contains("Saved"),

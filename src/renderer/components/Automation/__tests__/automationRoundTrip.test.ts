@@ -63,11 +63,15 @@ describe('draft ⇄ row', () => {
     it('does not let the canvas state leak into what a save sends', () => {
         // `present`, `wires` and `layout` are session-only: the graph blob has no place for a node
         // position, and a save that carried them would be inventing a schema field.
-        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
-        const moved = draftReducer(draft, { type: 'moveStep', step: 'cond', pos: { x: 999, y: 999 } });
-        const trimmed = draftReducer(moved, { type: 'removeStep', step: 'action' });
-        expect(JSON.stringify(ruleFromDraft(trimmed))).not.toContain('999');
-        expect(ruleFromDraft(trimmed)).toEqual(ruleFromDraft(draft));
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        // A FRESH canvas, so `present` can be varied without a remove — which no longer exists,
+        // and cannot: see `automationSteps.ts`.
+        const draft = draftFromRule(rule, true);
+        const moved = draftReducer(draft, { type: 'moveStep', step: 'monitor', pos: { x: 999, y: 999 } });
+        const grown = draftReducer(moved, { type: 'addStep', step: 'monitor' });
+        expect(grown.present).not.toEqual(draft.present);
+        expect(JSON.stringify(ruleFromDraft(grown))).not.toContain('999');
+        expect(ruleFromDraft(grown)).toEqual(ruleFromDraft(draft));
     });
 });
 
@@ -182,19 +186,54 @@ describe('the reducer', () => {
         expect(d.wires).toEqual(defaultWires(STEP_ORDER));
     });
 
-    it('re-derives the wires when a step is removed', () => {
-        const full = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
-        const cut = draftReducer(full, { type: 'removeStep', step: 'cond' });
-        expect(cut.wires).toEqual(defaultWires(['monitor', 'parse', 'action']));
-        expect(cut.wires.some((w) => w.from.step === 'cond' || w.to.step === 'cond')).toBe(false);
+    it('re-derives the wires as steps are added, rather than appending in drop order', () => {
+        // Built in the order the palette enforces — `canAddStep` gates the gesture, and the
+        // reducer trusts it, so arranging an order the palette refuses would be testing a state the
+        // editor cannot reach.
+        const fresh = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), true);
+        const one = draftReducer(fresh, { type: 'addStep', step: 'monitor' });
+        expect(one.wires).toEqual([]);
+        const two = draftReducer(one, { type: 'addStep', step: 'parse' });
+        expect(two.wires).toEqual(defaultWires(['monitor', 'parse']));
+        const three = draftReducer(two, { type: 'addStep', step: 'cond' });
+        expect(three.wires).toEqual(defaultWires(['monitor', 'parse', 'cond']));
+        expect(three.wires.some((w) => w.to.step === 'action')).toBe(false);
     });
 
-    it('clears the selection when the selected step is removed', () => {
-        const full = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
-        const selected = draftReducer(full, { type: 'select', step: 'action' });
-        expect(draftReducer(selected, { type: 'removeStep', step: 'action' }).selected).toBeNull();
-        // But not when a different one is.
-        expect(draftReducer(selected, { type: 'removeStep', step: 'cond' }).selected).toBe('action');
+    it('is not dirty when a target set comes back to where it started', () => {
+        // `toggleTarget` APPENDS, so unticking a terminal and ticking it straight back rotates the
+        // array: ['tm-1','tm-2'] becomes ['tm-2','tm-1']. `targetIds` is a SET — `write_rule`
+        // replaces the pick set row by row and the engine resolves it with a lookup — so nothing
+        // downstream can tell those apart, but `JSON.stringify` could, and the draft then read dirty
+        // forever with a *Leave without saving?* dialog over an identical rule.
+        const base = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            targetMode: 'pinned',
+            targetIds: ['tm-1', 'tm-2'],
+        });
+        expect(isDirty(base)).toBe(false);
+
+        const off = draftReducer(base, { type: 'toggleTarget', id: 'tm-1' });
+        expect(isDirty(off)).toBe(true);
+
+        const back = draftReducer(off, { type: 'toggleTarget', id: 'tm-1' });
+        expect(back.rule.targetIds).toEqual(['tm-2', 'tm-1']);
+        expect(isDirty(back)).toBe(false);
+
+        // And the normalisation is for the COMPARISON only — what a save sends is still the user's
+        // own array, not a sorted copy.
+        expect(ruleFromDraft(back).targetIds).toEqual(['tm-2', 'tm-1']);
+    });
+
+    it('IS dirty when the target set really changes', () => {
+        // The paired positive: sorting both sides could have been written as sorting nothing.
+        const base = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            targetMode: 'pinned',
+            targetIds: ['tm-1', 'tm-2'],
+        });
+        expect(isDirty(draftReducer(base, { type: 'toggleTarget', id: 'tm-3' }))).toBe(true);
+        expect(isDirty(draftReducer(base, { type: 'targets', ids: ['tm-2'] }))).toBe(true);
     });
 
     it('toggles a target without disturbing the others', () => {

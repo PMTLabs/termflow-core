@@ -24,8 +24,14 @@
  * awaited nor decline, so a rejected save would still have let the navigation through and destroyed
  * the draft — the exact blocker the guard exists to prevent, reintroduced through its own remedy.
  *
- * Validation gates the **Enable toggle only. Save is never gated** (§07: *"losing work to a
- * validation rule is its own bug"*).
+ * **4. A save never loses work, and never sends a rule the store would refuse.** Validation gates
+ * the *Enable* toggle; a Save is not refused, but it is not unconditional either. `save_rule`
+ * rejects an **enabled** rule that has a blocking problem (R10 — an empty message makes `deliver`
+ * press a bare Enter into whatever is running), so clearing the Message on a live rule to retype it
+ * would have met that refusal mid-edit with *Discard* as the only exit. The editor writes the draft
+ * whole and drops the one thing that cannot survive the trip: it saves such a rule **switched off**,
+ * says which problem cost it, and leaves it one click from running again. §07: *"losing work to a
+ * validation rule is its own bug."*
  */
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -188,6 +194,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // rule looked like when the editor opened.
     const latest = useRef({ draft, api, origin, onChanged });
     latest.current = { draft, api, origin, onChanged };
+    /** True from the moment a save is decided to the moment it settles. See `save` below. */
+    const inFlight = useRef(false);
 
     const save = useCallback(async (): Promise<boolean> => {
         const { draft: current, api: bridge, origin: from, onChanged: changed } = latest.current;
@@ -195,15 +203,42 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             toast('Automations are not available in this window.', 'error');
             return false;
         }
+        // **One save at a time.** `disabled={saving}` guards the BUTTON and nothing else, and the
+        // Ctrl+S listener is a second door: two presses inside one round-trip — or one held key —
+        // each read `id: ''`, and the store mints a fresh id per call, so one draft became several
+        // rows. A ref rather than the `saving` state because the state lands a render later, which
+        // is exactly the window this is closing.
+        if (inFlight.current) return false;
+
+        // **A blocked draft is saved SWITCHED OFF, never refused.** §07: *"losing work to a
+        // validation rule is its own bug."* The store refuses an enabled rule with a blocking
+        // problem (R10 — an empty message makes `deliver` press a bare Enter into whatever is
+        // running), so an editor that sent one would meet that refusal mid-edit and leave *Discard*
+        // as the only exit. Clearing the Message on an enabled rule to retype it is enough to reach
+        // it. So the rule the user drew is written whole, and the one thing that cannot survive the
+        // trip — permission to RUN — is dropped, said out loud, and one click from being restored.
+        const blockingNow = blockingProblems(validate(current.rule));
+        const disarmed = current.rule.enabled && blockingNow.length > 0;
+        const outgoing = disarmed ? { ...current.rule, enabled: false } : current.rule;
+
+        inFlight.current = true;
         setSaving(true);
         try {
-            const result = await bridge.saveAutomation(current.rule, from);
+            const result = await bridge.saveAutomation(outgoing, from);
             // The store MINTS an id for a new rule, and it has to reach the draft: without it the
             // next Save mints a second one and one draft becomes two rows. `saved` sets both the
             // rule and the dirty baseline in one action.
-            dispatch({ type: 'saved', rule: { ...current.rule, id: result?.id ?? current.rule.id } });
+            dispatch({ type: 'saved', rule: { ...outgoing, id: result?.id ?? outgoing.id } });
             await changed();
-            toast(`Saved “${current.rule.name || 'Untitled automation'}”.`, 'success');
+            if (disarmed) {
+                toast(
+                    `Saved “${outgoing.name || 'Untitled automation'}” and switched it off — `
+                        + `${blockingNow[0].message} Switch it back on once that is fixed.`,
+                    'info',
+                );
+            } else {
+                toast(`Saved “${outgoing.name || 'Untitled automation'}”.`, 'success');
+            }
             return true;
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the
@@ -211,6 +246,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             toast(`Could not save: ${e instanceof Error ? e.message : String(e)}`, 'error');
             return false;
         } finally {
+            inFlight.current = false;
             setSaving(false);
         }
     }, []);
@@ -240,11 +276,18 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // ConfirmDialog opened inside this editor gets its own Escape and this one does not steal it.
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's') {
-                e.preventDefault();
-                e.stopPropagation();
-                void save();
+            if (!((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 's')) {
+                return;
             }
+            // Taken whatever happens next, so the browser's own Save-page dialog never appears.
+            e.preventDefault();
+            e.stopPropagation();
+            // The OS auto-repeats a held key ~30 times a second and every one of them is a separate
+            // keydown. `save` refuses a second call while one is in flight, which covers the round
+            // trip; this covers the repeats that arrive *after* one settles, and it is the same
+            // refusal `shouldArmSpacePan` makes for the same reason.
+            if (e.repeat) return;
+            void save();
         };
         window.addEventListener('keydown', onKey, true);
         return () => window.removeEventListener('keydown', onKey, true);
@@ -280,8 +323,32 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             toast('Save this automation first — the engine can only run a rule that exists.', 'info');
             return;
         }
+        // **This switch applies to the row in the STORE, not to the draft on screen**, because
+        // `set_automation_enabled` writes one column on a row SQLite already holds and the engine
+        // then reloads that row. Switching ON while the draft is dirty therefore starts the version
+        // the user has just edited away from: retarget the picker from `tm-A` to `tm-B`, flip the
+        // switch, and the message is typed into `tm-A` while the canvas, the picker and the palette
+        // summary all describe `tm-B`.
+        //
+        // Only the ON direction is refused. Switching OFF the stored row is exactly what a user who
+        // wants it to stop right now is asking for, and it cannot start anything.
+        if (enabled && isDirty(draft)) {
+            toast(
+                'Save this automation first — switching it on runs the version that is saved, '
+                    + 'not the one on screen.',
+                'info',
+            );
+            return;
+        }
+        if (!api?.setAutomationEnabled) {
+            // An optional call that RESOLVES is not a call that happened: `await api?.x?.()` yields
+            // `undefined` and falls into the success path, which then moved the dirty baseline for a
+            // write that never took place (`a-refusal-must-be-heard-by-every-caller`).
+            toast('Automations are not available in this window.', 'error');
+            return;
+        }
         try {
-            await api?.setAutomationEnabled?.(draft.rule.id, enabled, origin);
+            await api.setAutomationEnabled(draft.rule.id, enabled, origin);
             // `persisted`, because this one field went to the store on its own: the draft's other
             // unsaved edits are still unsaved, and marking the WHOLE draft clean here would tell
             // the navigation guard there is nothing to lose while the user's edits sit in memory.

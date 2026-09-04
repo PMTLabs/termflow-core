@@ -70,6 +70,21 @@ describe('shouldArmSpacePan', () => {
     expect(shouldArmSpacePan(key({ target: { tagName: 'DIV' } }), null)).toBe(true);
   });
 
+  it('refuses a focused button, because Space is how a button is pressed', () => {
+    // The automation editor is a modal full of buttons over a canvas whose space-pan listener is on
+    // `window`, so without this every palette item, preset token, terminal row, drawer tab and
+    // dialog button in it silently ate Space — the pan armed, `preventDefault()` ran, and the
+    // activation never happened. Decided here rather than in either canvas, so both get it.
+    for (const tagName of ['BUTTON', 'SUMMARY', 'A']) {
+      expect(shouldArmSpacePan(key({ target: { tagName } }), null)).toBe(false);
+    }
+    for (const role of ['button', 'switch', 'checkbox', 'radio', 'menuitem', 'option', 'tab']) {
+      expect(shouldArmSpacePan(key({ target: { tagName: 'DIV', role } }), null)).toBe(false);
+    }
+    // And a plain div with no role still pans, or the hand tool would be unreachable.
+    expect(shouldArmSpacePan(key({ target: { tagName: 'DIV', role: null } }), null)).toBe(true);
+  });
+
   it('refuses auto-repeat', () => {
     expect(shouldArmSpacePan(key({ repeat: true }), null)).toBe(false);
   });

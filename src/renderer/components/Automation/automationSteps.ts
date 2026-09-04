@@ -139,6 +139,27 @@ export function canConnect(
         };
     }
 
+    // **A wire is a DRAWING of the rule, and a saved rule has exactly one shape.** `wires` is canvas
+    // state: nothing in the graph, the store or the engine derives behaviour from it. Every check
+    // above passes `cond.false → action.in` — same type, right direction, free input — so a user
+    // could delete the `yes` wire, draw the `no` one, and be looking at a picture of a rule that
+    // fires when the comparison FAILS while the engine goes on firing when it succeeds. The canvas
+    // would be drawing the exact opposite of what runs, which is the one thing `AuWires`' own header
+    // promises it cannot do.
+    const canonical = defaultWires(STEP_ORDER);
+    if (!canonical.some((w) => samePort(w.from, from) && samePort(w.to, to))) {
+        // Name the port that DOES drive it, not the one that was tried — a refusal that only says
+        // no leaves the user guessing which of two outputs was meant.
+        const wanted = canonical.find((w) => samePort(w.to, to));
+        return {
+            reason: wanted
+                ? `${STEP_LABELS[to.step]} runs on ${STEP_LABELS[wanted.from.step]}'s `
+                    + `${portSpec(wanted.from)?.label ?? wanted.from.port} output. The canvas draws `
+                    + 'the rule, and a wire the rule would not follow is a picture of something else.'
+                : `Nothing drives ${STEP_LABELS[to.step]} in this rule.`,
+        };
+    }
+
     return null;
 }
 
@@ -169,22 +190,19 @@ export function canAddStep(present: readonly StepKind[], kind: StepKind): Refusa
 }
 
 /**
- * Whether a step may be REMOVED, and why not.
+ * **There is no `canRemoveStep`, because there is no remove.**
  *
- * The mirror of `canAddStep`: removing the step something else depends on would leave the canvas in
- * a shape the palette refuses to build, which is a state no gesture should be able to reach.
+ * There was one — a mirror of `canAddStep`, with a test, and no caller. Wiring it to a control on
+ * the card would have been the honest-looking fix and the wrong one: `present` is session-only
+ * canvas state, and a rule's graph carries all four steps whatever is drawn. Taking *Send a message*
+ * off the canvas would hide the card and leave the message, the Enter and the send-to intact, so the
+ * rule would go on typing into terminals with nothing on screen to say so.
+ *
+ * `addStep` is coherent for the same reason this is not: on a fresh canvas it REVEALS a step so the
+ * user can fill it in, and everything it reveals is blank and blocking until they do. Undoing an
+ * add would need `present` to mean something the saved rule agrees with, which is a schema question
+ * (§7.7), not a gesture.
  */
-export function canRemoveStep(present: readonly StepKind[], kind: StepKind): Refusal | null {
-    const dependent = (Object.keys(REQUIRES) as StepKind[]).find(
-        (k) => REQUIRES[k] === kind && present.includes(k),
-    );
-    if (dependent) {
-        return {
-            reason: `${STEP_LABELS[dependent]} depends on ${STEP_LABELS[kind]}. Remove that first.`,
-        };
-    }
-    return null;
-}
 
 /**
  * The wires implied by a set of steps — the chain, plus the `yes` branch into the action.

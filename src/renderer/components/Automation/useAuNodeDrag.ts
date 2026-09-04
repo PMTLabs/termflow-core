@@ -85,12 +85,17 @@ export function useAuNodeDrag({ toWorld, layout, onMove }: AuNodeDragOptions): A
             setDragging(null);
         };
         window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', up);
-        window.addEventListener('pointercancel', up);
+        // CAPTURE. A release over a PORT — and the port dots sit on the card's own edges, so this is
+        // an ordinary miss rather than a contrivance — calls `stopPropagation()` in `AuNode`, and
+        // React 18 attaches its delegated listener to the portal container (`document.body`), which
+        // is below `window` in the path. In the bubble phase this listener simply never ran, and the
+        // card stayed glued to the cursor. Nothing here needs to run after a target handler.
+        window.addEventListener('pointerup', up, true);
+        window.addEventListener('pointercancel', up, true);
         return () => {
             window.removeEventListener('pointermove', move);
-            window.removeEventListener('pointerup', up);
-            window.removeEventListener('pointercancel', up);
+            window.removeEventListener('pointerup', up, true);
+            window.removeEventListener('pointercancel', up, true);
         };
     }, []);
 

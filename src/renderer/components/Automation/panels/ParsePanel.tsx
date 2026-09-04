@@ -15,7 +15,7 @@ import React from 'react';
 import type { AutomationKeep, AutomationParsePreset, DryRunReport } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
-import { AUTOMATION_PRESETS, displayedPattern, sayPattern } from '../automationPresets';
+import { AUTOMATION_PRESETS, displayedPattern } from '../automationPresets';
 import { AuField, AuHelp, AuRadio } from './AuFields';
 
 export interface ParsePanelProps {
@@ -30,8 +30,11 @@ export interface ParsePanelProps {
 export const ParsePanel: React.FC<ParsePanelProps> = ({ draft, model, report, dispatch, onTest }) => {
     const { parse } = draft.rule.graph;
     const exact = parse.preset === 'exactWords';
+    // A CONTROL BINDING — the input's `value`, not something this panel displays about the rule.
     const shown = displayedPattern(parse);
-    const saying = sayPattern(parse.find, parse.keep);
+    // DISPLAYED, so it comes from the model like everything else this panel says out loud. It used
+    // to be this component's own `sayPattern(parse.find, parse.keep)` call.
+    const saying = model.saying;
     const parseStep = report?.steps.find((s) => s.kind === 'parse') ?? null;
     const bracketProblem = model.problems.find((p) => p.code === 'parse.noBrackets');
 
@@ -100,7 +103,7 @@ export const ParsePanel: React.FC<ParsePanelProps> = ({ draft, model, report, di
                             parse.find.trim().length > 0 && (
                                 <div className="au-plainsay">
                                     This pattern is more than plain words can describe. It runs
-                                    exactly as written: <code>{parse.find}</code>
+                                    exactly as written: <code>{model.values.find.text}</code>
                                 </div>
                             )
                         )}

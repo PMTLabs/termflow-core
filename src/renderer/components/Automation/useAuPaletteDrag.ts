@@ -37,11 +37,17 @@ export interface AuPaletteDrag {
 
 export function useAuPaletteDrag({ toWorld, onAdd }: AuPaletteDragOptions): AuPaletteDrag {
     const [ghost, setGhost] = useState<{ step: StepKind; x: number; y: number } | null>(null);
+    // What is held, readable synchronously from an event handler that must not run effects inside a
+    // state updater. Assigned during render AND at `begin`, so a `pointerup` arriving before React
+    // has re-rendered still sees the gesture.
+    const heldRef = useRef<{ step: StepKind; x: number; y: number } | null>(null);
+    heldRef.current = ghost;
     const latest = useRef({ toWorld, onAdd });
     latest.current = { toWorld, onAdd };
 
     const begin = useCallback((step: StepKind, e: { clientX: number; clientY: number }) => {
-        setGhost({ step, x: e.clientX, y: e.clientY });
+        heldRef.current = { step, x: e.clientX, y: e.clientY };
+        setGhost(heldRef.current);
     }, []);
 
     useEffect(() => {
@@ -52,26 +58,35 @@ export function useAuPaletteDrag({ toWorld, onAdd }: AuPaletteDragOptions): AuPa
             // first move back inside arrives with `buttons === 0` and the card, wire or ghost is
             // still glued to the cursor with nothing held down.
             if (e.buttons === 0) {
+                heldRef.current = null;
                 setGhost(null);
                 return;
             }
             setGhost((held) => (held ? { ...held, x: e.clientX, y: e.clientY } : held));
         };
         const up = (e: PointerEvent) => {
-            setGhost((held) => {
-                if (!held) return null;
-                const { toWorld: convert, onAdd: add } = latest.current;
-                const world = convert(e.clientX, e.clientY);
-                // Dropped outside the canvas: not a refusal, just not a drop. Saying "that step
-                // cannot go there" for a gesture the user abandoned would be noise.
-                if (!world) return null;
-                add(held.step, { x: world.x - AU_NODE_W / 2, y: world.y - AU_NODE_H / 2 });
-                return null;
-            });
+            // The held step comes from a REF, not from inside a `setGhost` updater. A state updater
+            // must be pure: React invokes it twice under StrictMode, so adding a step (and toasting
+            // its refusal) from inside one fires it twice for one drop — two dispatches, or a toast
+            // saying the step is already there, from one gesture, and only in development, which is
+            // where it would be dismissed as noise.
+            const held = heldRef.current;
+            heldRef.current = null;
+            setGhost(null);
+            if (!held) return;
+            const { toWorld: convert, onAdd: add } = latest.current;
+            const world = convert(e.clientX, e.clientY);
+            // Dropped outside the canvas: not a refusal, just not a drop. Saying "that step cannot
+            // go there" for a gesture the user abandoned would be noise.
+            if (!world) return;
+            add(held.step, { x: world.x - AU_NODE_W / 2, y: world.y - AU_NODE_H / 2 });
         };
         // Named, not inline: `removeEventListener` compares by identity, so an inline arrow here is
         // a listener that outlives its component and holds the whole closure with it.
-        const cancel = () => setGhost(null);
+        const cancel = () => {
+            heldRef.current = null;
+            setGhost(null);
+        };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
         window.addEventListener('pointercancel', cancel);

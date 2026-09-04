@@ -124,7 +124,13 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                     code: e.code,
                     repeat: e.repeat,
                     target: target
-                        ? { tagName: target.tagName, isContentEditable: target.isContentEditable }
+                        ? {
+                            tagName: target.tagName,
+                            isContentEditable: target.isContentEditable,
+                            // Read from the attribute rather than the `role` IDL property, which is
+                            // ARIA reflection and is not in every runtime this code is tested in.
+                            role: target.getAttribute?.('role') ?? null,
+                        }
                         : null,
                 },
                 // No node ever holds the keyboard here: these cards have no terminal in them, which
@@ -175,6 +181,16 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
         const move = (e: PointerEvent) => {
             const start = panning.current;
             if (!start) return;
+            // A BUTTON THAT IS NO LONGER DOWN ended this gesture, whatever the browser told us — the
+            // same guard the three drag hooks carry, for the same two reasons. Releasing outside the
+            // window never delivers `pointerup`, and a release over a PORT does not deliver one here
+            // either: `AuNode`'s port handler calls `stopPropagation()`, React 18 attaches its
+            // delegated listener to the portal container (`document.body`), and a native event
+            // stopped at `body` never reaches `window`.
+            if (e.buttons === 0) {
+                up();
+                return;
+            }
             panning.current = { x: e.clientX, y: e.clientY };
             setVp((v) => panBy(v, e.clientX - start.x, e.clientY - start.y));
         };
@@ -182,10 +198,13 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             panning.current = null;
         };
         window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', up);
+        // CAPTURE, so a `stopPropagation()` on the way up cannot leave the world panning. Nothing
+        // here depends on running after a target handler; the wire drag is the one gesture that
+        // does, and it keeps its own bubble-phase listener for exactly that reason.
+        window.addEventListener('pointerup', up, true);
         return () => {
             window.removeEventListener('pointermove', move);
-            window.removeEventListener('pointerup', up);
+            window.removeEventListener('pointerup', up, true);
         };
     }, []);
 

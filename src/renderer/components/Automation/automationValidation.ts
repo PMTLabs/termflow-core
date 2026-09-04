@@ -17,9 +17,13 @@
  * Every message below is the Rust one, character for character, because the fixture asserts the
  * `code` and this file's own test asserts the prose — and the prose is what the user reads.
  *
- * **What is NOT here: Save.** Validation gates the *Enable* toggle only. §07 is explicit — "losing
- * work to a validation rule is its own bug" — so a draft with five problems saves happily and comes
- * back exactly as it was.
+ * **What this gates: the *Enable* toggle, and one thing about Save.** §07 is explicit — "losing work
+ * to a validation rule is its own bug" — so a draft with five problems saves happily and comes back
+ * exactly as it was. A draft that is already **enabled** is the one exception, and it is the
+ * backend's rule rather than this one's: `save_rule` refuses an enabled rule with a blocking
+ * problem, because R10's failure is a live rule with an empty message pressing a bare Enter. The
+ * editor resolves that without losing anything, by saving such a rule **switched off** — see
+ * `AutomationEditor.tsx`'s header, point 4.
  */
 import type {
     AutomationGraph,
@@ -86,9 +90,32 @@ const problem = (
  */
 export function compilePattern(find: string): RegExp | null {
     try {
-        return new RegExp(find);
+        return new RegExp(browserSource(find));
     } catch {
         return null;
+    }
+}
+
+/**
+ * The pattern as **V8** must spell it, so this side stays the permissive one.
+ *
+ * `regex` keeps `(?P<name>…)` as its own historical spelling of a named group and runs it; V8
+ * accepts only `(?<name>…)` and throws `Invalid group`. Left alone, the editor blocked the Enable
+ * toggle and printed *"That pattern could not be understood"* for a pattern **the authority would
+ * run** — the strict direction the sentence above says cannot happen.
+ *
+ * A RESCUE, never a rewrite: the substitution is reached only after V8 has already refused the
+ * pattern as typed, so it can turn a refusal into an acceptance and can never change the meaning of
+ * a pattern V8 accepts. The two spellings mean the same thing to `regex`, so the group this reports
+ * is the group the engine keeps.
+ */
+function browserSource(find: string): string {
+    try {
+        // eslint-disable-next-line no-new
+        new RegExp(find);
+        return find;
+    } catch {
+        return find.includes('(?P<') ? find.replace(/\(\?P</g, '(?<') : find;
     }
 }
 
@@ -116,7 +143,7 @@ function compileError(find: string): string {
  */
 function groupsOf(find: string): { count: number; hasNamedValue: boolean } {
     try {
-        const probe = new RegExp(`${find}|`);
+        const probe = new RegExp(`${browserSource(find)}|`);
         const m = probe.exec('');
         if (!m) return { count: 0, hasNamedValue: false };
         const groups = m.groups as Record<string, unknown> | undefined;
@@ -274,7 +301,12 @@ export function problems(rule: AutomationRule): Problem[] {
         // load-bearing: an empty regex matches every position of every string, so without it every
         // draft with a message and no pattern yet is told its message matches a pattern it does not
         // have.
-        const re = compilePattern(parse.find.trim());
+        // The pattern **as typed**, matching the compile above it and the engine below it. This used
+        // to compile `find.trim()`, twelve lines under a comment forbidding exactly that: trimming
+        // can only widen the match, so ` HANDOFF` — which the engine will never match against the
+        // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
+        // bug, so the shared fixture agreed with itself and could not see it.
+        const re = compilePattern(parse.find);
         if (re && re.test(action.message)) {
             out.push(
                 problem(

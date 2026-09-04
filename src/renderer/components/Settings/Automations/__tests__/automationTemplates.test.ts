@@ -28,9 +28,15 @@ describe('AUTOMATION_TEMPLATES', () => {
         }
     });
 
-    it('gives every draft NO terminals, so a fresh template has exactly one problem left', () => {
+    it('gives every draft NO pinned terminals, and lands it switched off', () => {
         // Which terminals to watch is never a sensible default (decision 13), so the draft arrives
-        // pointed at nothing and validation blocks *enabling* until the user picks.
+        // with an empty pick set — and targets by CRITERION, which is a complete choice rather than
+        // a gap. `enabled: false` is the safety property here, not validation: nothing a template
+        // does can happen without one deliberate act.
+        //
+        // This test used to be named "...so a fresh template has exactly one problem left", which is
+        // false for all six and was asserted nowhere. `automationValidation.test.ts` now asserts the
+        // truth, and the paired positive beside it — that a PINNED rule with no picks does block.
         for (const t of AUTOMATION_TEMPLATES) {
             const draft = draftFromTemplate(t);
             expect(draft.targetIds).toEqual([]);

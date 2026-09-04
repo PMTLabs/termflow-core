@@ -10,7 +10,13 @@
 //! A `Problem` carries `severity`: only `blocks` gates the toggle. `warns` exists for the case a rule
 //! whose own message text matches its own pattern (the echo failure of §2.6) and for a pattern with
 //! more than one capture group (§2.2b) — unusual, not invalid, and losing work to a validation rule is
-//! its own bug. **Save is never gated.**
+//! its own bug.
+//!
+//! **A save is gated only when the rule arrives enabled**, which is the same question as an enable
+//! and is asked for the same reason: R10. A disabled draft with five problems is written exactly as
+//! it was drawn. The editor never meets the refusal, because it saves a blocked draft with `enabled`
+//! cleared rather than sending one the store would reject and stranding the user's work behind a
+//! *Discard* button.
 //!
 //! **M2 lands `compile` and the PATTERN rules** — the ones §2.2b specifies and §10.2b gates, which are
 //! about the parse step alone and need nothing but the graph. **M3 lands the whole-rule rules** (no
@@ -269,7 +275,12 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         // be trusted with a warning about a subtle failure, spent on a rule that has no pattern at
         // all. Found by the M5 shared fixture: writing the expected list for the empty-pattern case
         // is what made it impossible not to see.
-        if let Ok(re) = compile(rule.graph.parse.find.trim()) {
+        // The pattern **as typed**, matching `pattern_problems` above and the engine below it. This
+        // used to compile `find.trim()`, in a file whose own comment forbids exactly that: trimming
+        // can only widen the match, so ` HANDOFF` — which the engine will never match against the
+        // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
+        // bug, so the shared fixture agreed with itself and could not see it.
+        if let Ok(re) = compile(&rule.graph.parse.find) {
             if re.is_match(&rule.graph.action.message) {
                 out.push(Problem::new(
                     Severity::Warns,

@@ -795,25 +795,76 @@ impl AutomationStore {
         Ok(out)
     }
 
-    /// Where a rule the user has just created belongs: after every rule that already exists.
+    /// A save from a **renderer**: the store owns the columns the renderer must not author.
     ///
-    /// `list_rules` is `ORDER BY sort_order, id`, so a new row saved with the renderer's `sortOrder: 0`
-    /// would file itself above everything, tie-broken by a uuid — a new automation appearing at a
-    /// random point near the top of the list. The renderer cannot pick this number (it would be
-    /// inventing a fact about a row that does not exist yet), so the save path asks for it.
+    /// Four fields on `AutomationRule` are facts about the ROW rather than about the rule the user
+    /// drew — `id`, `sort_order`, `created_at` and `updated_at` — and an editor has no way to know
+    /// any of them for a rule it is creating. `blankDraft()` therefore sends `""` and three zeros,
+    /// and every one of them would be written through verbatim by `save_rule`:
     ///
-    /// **Not unique, and not required to be.** Two windows inserting at the same moment can land on
-    /// the same slot; the ordering stays total because `id` breaks the tie, and `duplicate_automation`
-    /// renumbers when it needs an exact position.
-    pub fn next_sort_order(&self) -> Result<i64, AutomationStoreError> {
-        let guard = self.conn.lock().unwrap();
-        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-        let next: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM automation_rules",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(next)
+    ///  - **`sort_order`** — `list_rules` is `ORDER BY sort_order, id`, so `0` files a rule above
+    ///    everything, tie-broken by a uuid. The command used to mint this only on the INSERT path,
+    ///    which fixed the first save and left the second: the editor stays open, its draft still
+    ///    holds `sortOrder: 0`, and one more keystroke plus Save sent the rule back to the top.
+    ///  - **`created_at`** — `0` stamps every automation created through the editor 1970-01-01.
+    ///  - **`updated_at`** — the one that changes behaviour. `reload` drops a rule's arm keys only
+    ///    when this field MOVES (Q11: *"treat a save like a disable/enable — editing the pattern or
+    ///    threshold makes the old crossing state meaningless"*), so a save that leaves it alone
+    ///    leaves a fired rule latched at a threshold it no longer has.
+    ///
+    /// **One transaction, not a read followed by a write.** `get_rule(id)?; save_rule(new)?` is two
+    /// locked calls with a race between them — the same race `save_rule`'s own doc refuses for the
+    /// `previous` value it returns — so the lookup that decides these columns happens inside the
+    /// transaction that writes them.
+    ///
+    /// `sort_order` is **not unique and not required to be**: two windows inserting at the same
+    /// moment can land on the same slot, the ordering stays total because `id` breaks the tie, and
+    /// `duplicate_automation` renumbers when it needs an exact position.
+    pub fn save_rule_as_of(
+        &self,
+        rule: &AutomationRule,
+        at: i64,
+    ) -> Result<Option<i64>, AutomationStoreError> {
+        // The same gate `save_rule` applies, applied before any row is read: a refused save must
+        // not have looked at the database at all.
+        if rule.enabled {
+            Self::refuse_if_it_would_run_wrong(rule)?;
+        }
+
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+
+        let existing: Option<(i64, i64)> = optional_row(tx.query_row(
+            "SELECT sort_order, created_at FROM automation_rules WHERE id = ?1",
+            [&rule.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ))?;
+
+        let mut owned = rule.clone();
+        match existing {
+            // A re-save KEEPS its slot and its birthday. This is the half that was missing.
+            Some((sort_order, created_at)) => {
+                owned.sort_order = sort_order;
+                owned.created_at = created_at;
+            }
+            None => {
+                owned.sort_order = tx.query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM automation_rules",
+                    [],
+                    |r| r.get(0),
+                )?;
+                owned.created_at = at;
+            }
+        }
+        owned.updated_at = at;
+
+        let previous = Self::write_rule(&tx, &owned)?;
+        tx.commit()?;
+        drop(guard);
+        // Write through rather than invalidate, for the reason `save_rule` gives.
+        self.verbose_cache.insert(owned.id.clone(), owned.verbose_until);
+        Ok(previous)
     }
 
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
@@ -2046,27 +2097,67 @@ mod tests {
         assert_eq!(store.get_rule("au-1").unwrap().unwrap().updated_at, 3_000);
     }
 
-    /// A new rule belongs AFTER every rule that already exists.
+    /// A new rule belongs AFTER every rule that already exists — **and stays where it landed**.
     ///
     /// `list_rules` is `ORDER BY sort_order, id`, and the renderer sends `sortOrder: 0` for a draft
-    /// because where a new rule lands is not its decision. Without this, every new automation filed
-    /// itself above everything the user already had, tie-broken by a uuid.
+    /// because where a new rule lands is not its decision. The first fix minted the slot on the
+    /// INSERT path only, which is the half of the class that is easy to see: the editor stays open
+    /// after that first Save, its draft still holds `sortOrder: 0`, and the second Save wrote that
+    /// zero through and sent the rule back to the top. **The second save is the assertion.**
     #[test]
-    fn next_sort_order_puts_a_new_rule_at_the_end() {
+    fn a_renderer_save_takes_its_slot_from_the_store_every_time() {
         let store = AutomationStore::new_in_memory();
-        assert_eq!(store.next_sort_order().unwrap(), 0, "the first rule takes slot 0");
 
         let mut a = rule("au-1");
         a.sort_order = 0;
         store.save_rule(&a).unwrap();
-        assert_eq!(store.next_sort_order().unwrap(), 1);
-
         // A gap, which `duplicate_automation`'s renumbering can leave: the next slot is past the
         // HIGHEST, not one past the count.
         let mut b = rule("au-2");
         b.sort_order = 7;
         store.save_rule(&b).unwrap();
-        assert_eq!(store.next_sort_order().unwrap(), 8);
+
+        // The renderer's draft: a placeholder zero in every column that is the row's own fact.
+        let mut fresh = rule("au-3");
+        fresh.sort_order = 0;
+        fresh.created_at = 0;
+        fresh.updated_at = 0;
+
+        assert_eq!(store.save_rule_as_of(&fresh, 5_000).unwrap(), None, "this rule is new");
+        let after_insert = store.get_rule("au-3").unwrap().unwrap();
+        assert_eq!(after_insert.sort_order, 8, "a new rule files after the highest slot in use");
+        assert_eq!(after_insert.created_at, 5_000);
+        assert_eq!(after_insert.updated_at, 5_000);
+
+        // The SECOND save, from the same still-open editor, whose draft never learned any of this.
+        assert_eq!(
+            store.save_rule_as_of(&fresh, 6_000).unwrap(),
+            Some(5_000),
+            "the previous `updated_at` names the version this one replaced"
+        );
+        let after_update = store.get_rule("au-3").unwrap().unwrap();
+        assert_eq!(after_update.sort_order, 8, "a re-save must not move the rule in the list");
+        assert_eq!(after_update.created_at, 5_000, "a re-save must not change when it was created");
+        assert_eq!(
+            after_update.updated_at, 6_000,
+            "`reload` drops a rule's arm keys only when this moves — Q11 has no other path"
+        );
+    }
+
+    /// The save gate applies on this path too, and **before anything is read**.
+    ///
+    /// `save_rule_as_of` is a second door to the same table, and a second door that skipped
+    /// `refuse_if_it_would_run_wrong` would let a rule saved with its toggle already on go live
+    /// unjudged — R10's exact failure, through the one path a renderer actually uses.
+    #[test]
+    fn a_renderer_save_is_gated_exactly_as_save_rule_is() {
+        let store = AutomationStore::new_in_memory();
+        let mut bad = rule("au-1");
+        bad.enabled = true;
+        bad.graph.action.message = String::new();
+
+        assert!(store.save_rule_as_of(&bad, 1_000).is_err(), "an enabled rule with no message");
+        assert!(store.get_rule("au-1").unwrap().is_none(), "and nothing was written");
     }
 
     /// `LogClass` is derived from `kind` inside `append` and is not a parameter, so a caller cannot

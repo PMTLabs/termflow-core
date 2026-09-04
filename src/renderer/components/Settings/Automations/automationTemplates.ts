@@ -253,8 +253,12 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
  *
  * `id` is empty because a rule id is the store's to mint, and `sortOrder` is 0 because where a new
  * rule lands is the store's decision too — the renderer supplying either would be inventing a fact
- * about a row that does not exist yet. `targetIds` is empty **by construction**, not by omission:
- * every template returns a draft with exactly one problem left.
+ * about a row that does not exist yet, and `save_automation` takes all four of those columns from
+ * the store on every save rather than trusting what arrives.
+ *
+ * `targetIds` is empty **by construction**, not by omission — but that is not a problem the rule
+ * has: every template targets by CRITERION, and only a pinned rule can be empty in a way validation
+ * can see. All six report zero problems, which `automationValidation.test.ts` asserts.
  */
 export function draftFromTemplate(template: AutomationTemplate): AutomationRule {
     return {

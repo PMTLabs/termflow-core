@@ -148,11 +148,74 @@ describe('sayPattern — the plain-words paraphrase', () => {
         expect(say(presetById('number').find)).toBe('find a number — and keep the number');
         expect(say(presetById('errorCode').find)).toBe('find a number — and keep the number');
         expect(say('(\\d+)k tokens left')).toBe('find a number and `k tokens left` — and keep the number');
-        expect(say('FAILED \\d+ test', 'whole')).toBe('find `FAILED` followed by a number and `test` — and keep the whole match');
+        // The two spaces are WORDS now, not silently trimmed: `FAILED \d+ test` really does need
+        // them, and this sentence used to read as though `FAILED12test` would match.
+        expect(say('FAILED \\d+ test', 'whole')).toBe('find `FAILED` followed by a space followed by a number followed by a space and `test` — and keep the whole match');
         expect(say('Do you want to proceed\\?', 'whole')).toBe('find the words `Do you want to proceed?`');
 
         // The disk template uses an optional group this vocabulary does not cover.
         expect(say('(\\d+(?:\\.\\d+)?)G(?:i?B)? free')).toBeNull();
+    });
+
+    /**
+     * **The paraphrase must name the value the ENGINE keeps.**
+     *
+     * `eval.rs`: `caps.name("value").or_else(|| caps.get(1))` — the group called `value`, else group
+     * ONE. The flag was set by any digit inside ANY group, so the first row below said *"keep the
+     * number"* directly under the same panel's `parse.manyGroups` warning: *"This pattern has more
+     * than one bracketed group. The first one is used."* Two surfaces, one rule, contradictory,
+     * eight pixels apart.
+     */
+    it('says which value is kept by asking the group the engine would take', () => {
+        // Group 1 is the WORD. Not "the number", whatever else is in brackets.
+        expect(say('(\\w+):(\\d+)')).toBe('find a word followed by a `:` and a number — and keep the part in brackets');
+        // A named `value` group beats group 1 — and here it is a word, so still not "the number".
+        expect(say('(\\d+):(?<value>\\w+)')).toBe('find a number followed by a `:` and a word — and keep the part in brackets');
+        // …and when the named group IS the number, it says so even though group 1 is not.
+        expect(say('(\\w+):(?<value>\\d+)')).toBe('find a word followed by a `:` and a number — and keep the number');
+        // `63px` is not a number and does not coerce to one.
+        expect(say('(\\d+px)')).toBe('find a number and `px` — and keep the part in brackets');
+        expect(say('(\\s)(\\d+)')).toBe('find a space and a number — and keep the part in brackets');
+    });
+
+    /**
+     * `*` is zero-or-more, and there is no wording for it in this vocabulary that a user could act
+     * on. It used to be consumed by the same branch as `+`, so `ctx:\s*(\d+)%` — which matches
+     * `ctx:50%` perfectly well — announced that a space is required.
+     */
+    it('bails on a zero-or-more atom rather than describing it as required', () => {
+        for (const find of ['ctx:\\s*(\\d+)%', 'ctx:(\\d*)%', '(\\w*)', '.*x', '[0-9]*']) {
+            expect(sayPattern(find, 'brackets')).toBeNull();
+        }
+        // The paired positive: `+` is one-or-more and stays wordable.
+        expect(say('ctx:\\s+(\\d+)%')).toBe('find `ctx:` followed by a space followed by a number and a `%` — and keep the number');
+    });
+
+    /**
+     * A word boundary at the pattern's edge is decoration on "the whole match stands alone" and is
+     * dropped, exactly as the optional decimal tail of *Any number* is. In the middle it constrains
+     * something the words never mention, and `\B` inverts even that.
+     */
+    it('drops an edge word boundary and bails on one that carries meaning', () => {
+        expect(say('\\b([45]\\d\\d)\\b')).toBe('find a number — and keep the number');
+        expect(sayPattern('\\B(\\d+)', 'brackets')).toBeNull();
+        expect(sayPattern('a\\bb', 'whole')).toBeNull();
+    });
+
+    /**
+     * Edge whitespace is a word, not something to trim away.
+     *
+     * These two patterns match different text. Trimming the literal made them render one sentence —
+     * and the one it rendered was the sentence for the pattern WITHOUT the space.
+     */
+    it('tells two patterns apart when the only difference is a space', () => {
+        expect(say('ctx: (\\d+)%')).not.toBe(say('ctx:(\\d+)%'));
+        expect(say('ctx: (\\d+)%')).toBe('find `ctx:` followed by a space followed by a number and a `%` — and keep the number');
+        // And a run that is nothing but whitespace is still a word rather than a silent skip: this
+        // used to read "find the words a number", because the skipped token left the flat list and
+        // the worded list at different lengths and the "one literal" branch tested the wrong one.
+        expect(say(' (\\d+)')).toBe('find a space and a number — and keep the number');
+        expect(say('  ERROR', 'whole')).toBe('find spaces and `ERROR` — and keep the whole match');
     });
 
     it('bails on every construct it cannot word', () => {

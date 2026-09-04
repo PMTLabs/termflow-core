@@ -1,11 +1,15 @@
 /**
  * Dragging a wire between two ports.
  *
- * The gesture may start at **either** end — dragging back from an input to rewire it is a real
- * affordance — and the orientation is decided at the drop, by which end is the output. That is why
- * `canConnect`'s direction refusal is reachable rather than theoretical: dragging one output onto
- * another has no orientation that works, and the user is told that rather than watching nothing
- * happen.
+ * The gesture may start at **either** end, and the orientation is decided at the drop, by which end
+ * is the output. That is why `canConnect`'s direction refusal is reachable rather than theoretical:
+ * dragging one output onto another has no orientation that works, and the user is told that rather
+ * than watching nothing happen.
+ *
+ * Starting at an INPUT is not a rewire, though it was once described here as one. A complete rule
+ * has every input already wired (`defaultWires`), so the drop meets the arity refusal — *"…already
+ * has an input. Remove that wire first."* — which is the affordance, in that order: remove the chip,
+ * then drag.
  *
  * The refusal is never swallowed. Mockup §03: *"the drop is refused with the reason, rather than
  * silently doing nothing."*
@@ -43,6 +47,8 @@ export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDra
     latest.current = { toWorld, draft, onConnect, onRefuse };
 
     const begin = useCallback((port: PortRef, e: { clientX: number; clientY: number }) => {
+        // The ref first, so a drop arriving before React has re-rendered still sees the anchor.
+        fromRef.current = port;
         setFrom(port);
         setPointer(latest.current.toWorld(e.clientX, e.clientY));
     }, []);
@@ -53,6 +59,7 @@ export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDra
         // from inside one fires the effect twice for one drop — two wires, or two toasts, from one
         // gesture, and only in development, which is where it would be dismissed as noise.
         const held = fromRef.current;
+        fromRef.current = null;
         setFrom(null);
         setPointer(null);
         if (!held) return;
@@ -86,6 +93,7 @@ export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDra
         // A pointerup anywhere that is not a port ends the gesture. The port's own handler runs
         // first (it is the target), so `from` is already null by the time this sees it.
         const up = () => {
+            fromRef.current = null;
             setFrom(null);
             setPointer(null);
         };

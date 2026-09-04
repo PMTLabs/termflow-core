@@ -124,7 +124,17 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                 <span>
                     Watching <span className="au-n">{picked.length}</span>
                 </span>
-                {picked.length > 0 && (
+                {/* The breakdown is a claim about the roster, so it waits for one. `open` and `gone`
+                    are counted against `rows`, and `rows` is empty both while the list is loading
+                    and when reading it FAILED — so a rule watching three terminals rendered
+                    "0 open, 3 not open right now" directly under a banner saying the list could not
+                    be read and the rule is still watching them. Two sentences on one screen making
+                    opposite claims about the same three terminals. */}
+                {picked.length > 0 && loading && <span className="au-picksay">· checking…</span>}
+                {picked.length > 0 && !loading && error !== null && (
+                    <span className="au-picksay">· whether they are open is not known right now</span>
+                )}
+                {picked.length > 0 && !loading && error === null && (
                     <span className="au-picksay">
                         · {open} open{gone > 0 ? `, ${gone} not open right now` : ''}
                     </span>
@@ -148,8 +158,9 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
             <div className="au-fhelp">
                 A terminal that closes keeps its tick, greyed. The rule keeps running on the others
                 and says so on its row; it starts watching that id again only if the terminal comes
-                back — session restore brings ids back, closing a tab for good does not.{' '}
-                <b>Forget it</b> on the row drops the dead id.
+                back — session restore brings ids back, closing a tab for good does not. Untick it
+                here to drop the id, or use <b>Forget it</b> on the automation&apos;s own row in the
+                list, which drops every dead id it is holding at once.
             </div>
         </div>
     );

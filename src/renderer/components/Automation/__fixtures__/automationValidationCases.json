@@ -456,6 +456,59 @@
         { "severity": "blocks", "field": "cond", "code": "cond.incomplete" },
         { "severity": "blocks", "field": "action", "code": "action.empty" }
       ]
+    },
+    {
+      "name": "edge whitespace in the pattern is part of it, so this is not an echo",
+      "why": "The echo check used to compile `find.trim()` on BOTH sides, twelve lines under a comment forbidding exactly that. Trimming only ever widens the match, so this rule — whose pattern needs a leading space the message does not have — was warned about as an echo of itself. Both mirrors had the bug, so no fixture case could see it until one had edge whitespace.",
+      "rule": {
+        "id": "au-ws", "name": "Handoff watch", "enabled": false, "runsOnce": false,
+        "targetMode": "rule", "criterion": "commandContains", "criterionValue": "claude",
+        "followNew": true, "targetIds": [], "completedAt": null, "verboseUntil": null,
+        "sortOrder": 0, "schemaVersion": 1, "createdAt": 0, "updatedAt": 0,
+        "graph": {
+          "monitor": { "read": "newOutput", "cadence": "timer", "everyMs": 30000 },
+          "parse": { "preset": "custom", "literal": null, "find": " HANDOFF", "keep": "whole" },
+          "cond": { "kind": "text", "op": null, "threshold": null },
+          "action": { "message": "HANDOFF now", "sendTo": "matched", "submit": true, "cliType": "default" }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "the same pattern against a message it really does match still warns",
+      "why": "The paired positive. Without it, `action.echo` could be deleted outright and the case above would still pass.",
+      "rule": {
+        "id": "au-ws2", "name": "Handoff watch", "enabled": false, "runsOnce": false,
+        "targetMode": "rule", "criterion": "commandContains", "criterionValue": "claude",
+        "followNew": true, "targetIds": [], "completedAt": null, "verboseUntil": null,
+        "sortOrder": 0, "schemaVersion": 1, "createdAt": 0, "updatedAt": 0,
+        "graph": {
+          "monitor": { "read": "newOutput", "cadence": "timer", "everyMs": 30000 },
+          "parse": { "preset": "custom", "literal": null, "find": " HANDOFF", "keep": "whole" },
+          "cond": { "kind": "text", "op": null, "threshold": null },
+          "action": { "message": "and then HANDOFF", "sendTo": "matched", "submit": true, "cliType": "default" }
+        }
+      },
+      "expected": [
+        { "severity": "warns", "field": "action", "code": "action.echo" }
+      ]
+    },
+    {
+      "name": "regex's own `(?P<value>)` spelling is understood, not blocked",
+      "why": "`regex` keeps `(?P<name>...)` as a named group and RUNS it; V8 throws `Invalid group`. The editor blocked the Enable toggle and printed `That pattern could not be understood` for a pattern the authority would run — the strict direction `automationValidation.ts` says cannot happen. Two groups with none named `value` would warn; naming one is what suppresses it, so this case pins the rescue AND the name detection.",
+      "rule": {
+        "id": "au-pname", "name": "Named group", "enabled": false, "runsOnce": false,
+        "targetMode": "rule", "criterion": "commandContains", "criterionValue": "claude",
+        "followNew": true, "targetIds": [], "completedAt": null, "verboseUntil": null,
+        "sortOrder": 0, "schemaVersion": 1, "createdAt": 0, "updatedAt": 0,
+        "graph": {
+          "monitor": { "read": "newOutput", "cadence": "timer", "everyMs": 30000 },
+          "parse": { "preset": "custom", "literal": null, "find": "(\\d+):(?P<value>\\d+)", "keep": "brackets" },
+          "cond": { "kind": "number", "op": "gt", "threshold": 25 },
+          "action": { "message": "slow down", "sendTo": "matched", "submit": true, "cliType": "default" }
+        }
+      },
+      "expected": []
     }
   ]
 }

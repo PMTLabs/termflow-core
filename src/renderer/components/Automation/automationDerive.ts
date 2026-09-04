@@ -21,7 +21,8 @@ import {
     describeCadence,
     describeCriterion,
 } from '../Settings/Automations/automationState';
-import { displayedPattern, presetById } from './automationPresets';
+import { displayedPattern, presetById, sayPattern } from './automationPresets';
+import type { PatternSaying } from './automationPresets';
 import type { Problem, ProblemField } from './automationValidation';
 import { badgeFor } from './automationValidation';
 import type { StepKind } from './automationSteps';
@@ -142,6 +143,8 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
 
 export interface FaceRow {
     label: string;
+    /** Which key of `stepValues` this row draws — the name, so a test can ask for one by it. */
+    key: string;
     value: StepValue;
 }
 
@@ -182,7 +185,7 @@ export function problemsForStep(problems: Problem[], step: StepKind): Problem[] 
 
 export function faceFor(rule: AutomationRule, step: StepKind, ctx: DeriveContext): NodeFace {
     const values = stepValues(rule, step);
-    const rows = FACE_ROWS[step].map(({ label, key }) => ({ label, value: values[key] }));
+    const rows = FACE_ROWS[step].map(({ label, key }) => ({ label, key, value: values[key] }));
 
     const blocking = problemsForStep(ctx.problems, step).find((p) => p.severity === 'blocks');
     if (blocking) {
@@ -233,6 +236,17 @@ export interface PanelModel {
     /** **The same record the face reads.** The whole point of this module. */
     values: Record<string, StepValue>;
     problems: Problem[];
+    /**
+     * The plain-words paraphrase, for the parse panel — `null` on every other step, and on a
+     * pattern the vocabulary cannot word.
+     *
+     * It lives here rather than in the panel because it is DISPLAYED prose derived from the rule,
+     * which is the one thing this module exists to keep in one place. It was the panel's own call
+     * to `sayPattern`, and it was also the one displayed string in the editor that was wrong: it
+     * announced *"keep the number"* about a group the engine does not keep, eight pixels under a
+     * warning saying the first group is used.
+     */
+    saying: PatternSaying | null;
 }
 
 /**
@@ -255,6 +269,7 @@ export function panelFor(rule: AutomationRule, step: StepKind, ctx: DeriveContex
                 : `Step ${index} · ${STEP_SUBTITLES[step]}`,
         values: stepValues(rule, step),
         problems: mine,
+        saying: step === 'parse' ? sayPattern(rule.graph.parse.find, rule.graph.parse.keep) : null,
     };
 }
 

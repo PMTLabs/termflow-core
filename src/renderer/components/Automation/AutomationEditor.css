@@ -1140,6 +1140,13 @@
     color: #cfd2d8;
 }
 
+/* The same modifier the node face uses (`.au-nval.warn`), so a stand-in for a missing value reads
+   the same in both renderings rather than plain in one of them. */
+.au-editor .au-storedas .au-v.warn {
+    color: #ffaea8;
+    font-style: italic;
+}
+
 .au-editor .au-termcount {
     font-size: 11.2px;
     color: #a9adb6;

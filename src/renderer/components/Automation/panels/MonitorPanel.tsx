@@ -138,7 +138,12 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 <span className="au-c">// what the rule stores</span>
                 <br />
                 <span className="au-k">watch</span>{' '}
-                <span className="au-v">{model.values.terminals.text}</span>
+                {/* `missing` comes with the value and is part of it: the face draws a stand-in in
+                    the warning colour, and a panel drawing the same words plain would be the two
+                    renderers disagreeing about whether the rule is finished. */}
+                <span className={`au-v${model.values.terminals.missing ? ' warn' : ''}`}>
+                    {model.values.terminals.text}
+                </span>
             </div>
 
             <AuField label="What to read">

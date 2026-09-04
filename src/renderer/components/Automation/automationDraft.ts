@@ -119,7 +119,24 @@ export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
  * be a fifth place to add a field to (§7.7 already names four), and the one that fails silently.
  */
 export function isDirty(draft: AutomationDraft): boolean {
-    return JSON.stringify(draft.rule) !== JSON.stringify(draft.saved);
+    return comparable(draft.rule) !== comparable(draft.saved);
+}
+
+/**
+ * The rule as a string, with the one field whose ORDER means nothing put in a fixed one.
+ *
+ * `targetIds` is a set: `write_rule` replaces the pick set row by row and the engine resolves it
+ * with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from `['tm-2','tm-1']`. The
+ * picker's toggle appends, though, so unticking a terminal and ticking it straight back rotated the
+ * array — and the draft then read dirty forever, with a *Leave without saving?* dialog over an
+ * identical rule.
+ *
+ * **Both sides go through this**, which is the whole point: normalising one side of a comparison and
+ * not the other can only invent differences (`transform-on-one-side-of-a-comparison`). And it
+ * normalises for the COMPARISON only — the array that goes to the store is still the user's own.
+ */
+function comparable(rule: AutomationRule): string {
+    return JSON.stringify({ ...rule, targetIds: [...rule.targetIds].sort() });
 }
 
 export type DraftAction =
@@ -148,7 +165,6 @@ export type DraftAction =
     | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
-    | { type: 'removeStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
     | { type: 'addWire'; wire: Wire }
     | { type: 'removeWire'; wire: Wire }
@@ -220,15 +236,6 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             );
             return { ...draft, present, wires: defaultWires(present), selected: action.step };
         }
-        case 'removeStep': {
-            const present = draft.present.filter((s) => s !== action.step);
-            return {
-                ...draft,
-                present,
-                wires: defaultWires(present),
-                selected: draft.selected === action.step ? null : draft.selected,
-            };
-        }
         case 'moveStep':
             return { ...draft, layout: { ...draft.layout, [action.step]: action.pos } };
         case 'addWire':
@@ -248,16 +255,23 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             // has to be the sent value rather than the current one, or a keystroke that landed while
             // the save was in flight would be counted as already saved.
             //
-            // The DRAFT keeps whatever it holds now, and adopts only the minted id — which it must,
-            // or the next save mints a second one and the same draft becomes two rows. Replacing it
-            // wholesale would discard every character typed during the save: the save's own echo
-            // overwriting the user's newer text, with no error and no way to notice except by
-            // re-reading what you typed.
+            // The DRAFT keeps whatever it holds now, and adopts exactly two fields — which it must,
+            // because they are the two the editor does not get to decide. Replacing it wholesale
+            // would discard every character typed during the save: the save's own echo overwriting
+            // the user's newer text, with no error and no way to notice except by re-reading what
+            // you typed.
+            //
+            //  - **`id`**, or the next save mints a second one and the same draft becomes two rows.
+            //  - **`enabled`**, because a draft with a blocking problem is written SWITCHED OFF
+            //    rather than refused, and a header still reading *Enabled* over a row that is not
+            //    would be the editor lying about the only field that decides whether it runs.
             return {
                 ...draft,
-                rule: draft.rule.id.length === 0
-                    ? { ...draft.rule, id: action.rule.id }
-                    : draft.rule,
+                rule: {
+                    ...draft.rule,
+                    id: draft.rule.id.length === 0 ? action.rule.id : draft.rule.id,
+                    enabled: action.rule.enabled,
+                },
                 saved: action.rule,
             };
         default:

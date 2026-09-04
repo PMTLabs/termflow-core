@@ -9,6 +9,7 @@ import React, { useRef } from 'react';
 import type { AutomationSendTo } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
+import { SEND_PHRASES } from '../automationDerive';
 import { AuField, AuHelp, AuRadio } from './AuFields';
 
 /** The placeholders the engine substitutes at send time. Shown as buttons, inserted at the caret. */
@@ -102,7 +103,13 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
             <AuField label="Preview">
                 <div className="au-preview">
                     &gt; <span className="au-cap">{model.values.message.text}</span>
-                    {action.submit && <span className="au-enter">⏎</span>}
+                    {/* From the MODEL, like the message beside it. `stepValues(rule,'action').send`
+                        exists for exactly this fact, and a panel reading `action.submit` directly
+                        for something it draws is the shape `automationDerive` is here to keep out —
+                        one renderer describing the rule from a second source. */}
+                    {model.values.send.text === SEND_PHRASES.submit && (
+                        <span className="au-enter">⏎</span>
+                    )}
                 </div>
             </AuField>
         </>
