@@ -4360,9 +4360,32 @@ mod tests {
             elapsed
         );
 
-        // The in-flight send still owns its cloned Arc and completes successfully.
+        // **Changed deliberately by the §7.10 send extraction: a send whose terminal vanishes
+        // mid-flight now REPORTS that, where it used to answer `{"success": true}`.**
+        //
+        // Before the extraction this handler cloned the writer `Arc` once, up front, so an in-flight
+        // send went on writing into a terminal already removed from the map and still returned 200 —
+        // telling an MCP agent its prompt had been submitted to a terminal that no longer exists.
+        // `TerminalWriter` resolves per write instead (see that impl's own doc comment), which both
+        // keeps the shard guard out of the `.await`s — the property this test is NAMED for, asserted
+        // above and still true — and lets the submit refuse.
+        //
+        // The assertion here used to be `result.is_ok()`, justified by a comment about the MECHANISM
+        // ("still owns its cloned Arc") rather than by any stated contract. It stayed green on every
+        // local run because this test is `#[cfg(feature = "integration-tests")]` and only Linux CI
+        // compiles that feature — so the behaviour change was invisible until CI said otherwise.
         let result = sender.await.unwrap();
-        assert!(result.is_ok(), "send should still succeed after the concurrent remove");
+        let (status, message) = result
+            .expect_err("a send whose terminal was removed mid-flight must not report success");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // The SPECIFIC refusal, not merely "some error": without this the assertion would also pass
+        // if the send had failed at its very first write — i.e. if the barrier above never worked and
+        // nothing was ever delivered — which is the opposite of the scenario under test.
+        assert!(
+            message.contains("has no writer"),
+            "expected the missing-writer refusal, got {:?}",
+            message
+        );
     }
 
     // The `/health` contract the startup smoke test (scripts/smoke-test-release.mjs)
