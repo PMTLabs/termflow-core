@@ -1,11 +1,19 @@
 /**
  * The six built-in templates (mockup §02), frozen in the renderer — the `COLOR_SCHEMAS` precedent.
  *
- * **A template never reaches the engine.** It lands as an unsaved draft with no terminals picked,
- * and validation blocks *enabling* until they are (decision 13). That is why every template below
- * ships `targetIds: []` and `enabled: false`: which terminals to watch is the one part that is
- * never a sensible default, so a fresh template always has exactly one problem left to fix and §07
- * is what tells you so.
+ * **A template never reaches the engine until the user switches it on.** It lands as an unsaved
+ * draft with `enabled: false`, and that — not validation — is the safety property: nothing a
+ * template does can happen without one deliberate act.
+ *
+ * Every template ships `targetIds: []` and targets by **criterion**, which is a complete choice
+ * rather than a gap: *Context handoff reminder* watches every terminal whose command contains
+ * `claude`, exactly as mockup §04's first panel draws it. So a fresh template is **valid and
+ * enableable straight away**, and what the user changes is the threshold or the message.
+ *
+ * *(This comment used to say a fresh template "always has exactly one problem left to fix", and so
+ * did the gallery's own note and plan §10.19. It is not true of any of the six: only a **pinned**
+ * rule can be empty in a way validation can see, and none of these are pinned. M5's own validation
+ * test is what made the claim testable, and it failed on all six.)*
  *
  * They ship with the app and update with it. No import, no export, no sharing — each of those is a
  * file format and a trust boundary, and **Duplicate** already covers "start from one of mine".

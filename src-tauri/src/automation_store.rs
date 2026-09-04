@@ -795,6 +795,27 @@ impl AutomationStore {
         Ok(out)
     }
 
+    /// Where a rule the user has just created belongs: after every rule that already exists.
+    ///
+    /// `list_rules` is `ORDER BY sort_order, id`, so a new row saved with the renderer's `sortOrder: 0`
+    /// would file itself above everything, tie-broken by a uuid — a new automation appearing at a
+    /// random point near the top of the list. The renderer cannot pick this number (it would be
+    /// inventing a fact about a row that does not exist yet), so the save path asks for it.
+    ///
+    /// **Not unique, and not required to be.** Two windows inserting at the same moment can land on
+    /// the same slot; the ordering stays total because `id` breaks the tie, and `duplicate_automation`
+    /// renumbers when it needs an exact position.
+    pub fn next_sort_order(&self) -> Result<i64, AutomationStoreError> {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+        let next: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM automation_rules",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(next)
+    }
+
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
@@ -2023,6 +2044,29 @@ mod tests {
         r.updated_at = 3_000;
         assert_eq!(store.save_rule(&r).unwrap(), Some(2_000));
         assert_eq!(store.get_rule("au-1").unwrap().unwrap().updated_at, 3_000);
+    }
+
+    /// A new rule belongs AFTER every rule that already exists.
+    ///
+    /// `list_rules` is `ORDER BY sort_order, id`, and the renderer sends `sortOrder: 0` for a draft
+    /// because where a new rule lands is not its decision. Without this, every new automation filed
+    /// itself above everything the user already had, tie-broken by a uuid.
+    #[test]
+    fn next_sort_order_puts_a_new_rule_at_the_end() {
+        let store = AutomationStore::new_in_memory();
+        assert_eq!(store.next_sort_order().unwrap(), 0, "the first rule takes slot 0");
+
+        let mut a = rule("au-1");
+        a.sort_order = 0;
+        store.save_rule(&a).unwrap();
+        assert_eq!(store.next_sort_order().unwrap(), 1);
+
+        // A gap, which `duplicate_automation`'s renumbering can leave: the next slot is past the
+        // HIGHEST, not one past the count.
+        let mut b = rule("au-2");
+        b.sort_order = 7;
+        store.save_rule(&b).unwrap();
+        assert_eq!(store.next_sort_order().unwrap(), 8);
     }
 
     /// `LogClass` is derived from `kind` inside `append` and is not a parameter, so a caller cannot

@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, WatchableTerminal, DryRunReport } from '../types/electron';
+import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -211,7 +211,7 @@ interface ElectronAPI {
   loadAutomationLog: (ruleId: string | null, newestFirst: boolean, limit: number) => Promise<AutomationLogEntry[]>;
   listWatchableTerminals: (ruleId: string | null, includeIds: string[] | null) => Promise<WatchableTerminal[]>;
   dryRunAutomation: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
-  saveAutomation: (rule: AutomationRule, origin: string) => Promise<number | null>;
+  saveAutomation: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
   deleteAutomation: (id: string, origin: string) => Promise<boolean>;
   duplicateAutomation: (id: string, origin: string) => Promise<AutomationRule>;
   setAutomationEnabled: (id: string, enabled: boolean, origin: string) => Promise<void>;
@@ -820,7 +820,7 @@ const tauriBridge: ElectronAPI = {
   dryRunAutomation: async (rule, terminalId) =>
     invoke<DryRunReport>('dry_run_automation', { rule, terminalId }),
   saveAutomation: async (rule, origin) =>
-    (await invoke<number | null>('save_automation', { rule, origin })) ?? null,
+    invoke<AutomationSaveResult>('save_automation', { rule, origin }),
   deleteAutomation: async (id, origin) => invoke<boolean>('delete_automation', { id, origin }),
   duplicateAutomation: async (id, origin) =>
     invoke<AutomationRule>('duplicate_automation', { id, origin }),

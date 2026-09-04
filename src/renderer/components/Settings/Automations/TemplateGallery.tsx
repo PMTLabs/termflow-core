@@ -64,11 +64,11 @@ export const TemplateGallery: React.FC<TemplateGalleryProps> = ({ onBack, onPick
         <div className="au-tplnote">
             <span aria-hidden="true">ⓘ</span>
             <span>
-                <b>A template arrives as a draft, switched off, pointed at nothing.</b> It fills in
-                the pattern, the comparison and the message — the parts that are the same for
-                everyone — and deliberately leaves <em>which terminals</em> empty, because that part
-                is never a sensible default. So a fresh template always has exactly one problem left
-                to fix.
+                <b>A template arrives as a draft, switched off.</b> It fills in the pattern, the
+                comparison and the message — the parts that are the same for everyone — and points
+                itself at terminals <em>by description</em> rather than by a list you have to tick,
+                so it is ready to run as soon as you switch it on. Nothing a template does can happen
+                before that.
             </span>
         </div>
     </div>

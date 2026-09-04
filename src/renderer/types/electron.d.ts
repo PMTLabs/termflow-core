@@ -381,8 +381,7 @@ export interface ElectronAPI {
     includeIds: string[] | null,
   ) => Promise<WatchableTerminal[]>;
   dryRunAutomation?: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
-  /** Resolves to the row's PREVIOUS `updatedAt`, or null if this was an insert. */
-  saveAutomation?: (rule: AutomationRule, origin: string) => Promise<number | null>;
+  saveAutomation?: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
   deleteAutomation?: (id: string, origin: string) => Promise<boolean>;
   duplicateAutomation?: (id: string, origin: string) => Promise<AutomationRule>;
   setAutomationEnabled?: (id: string, enabled: boolean, origin: string) => Promise<void>;
@@ -561,6 +560,19 @@ export interface DryRunReport {
   /** Resolved through `label_at`, exactly as a log row's is. Never invented (§2.8). */
   terminalName?: string | null;
   steps: DryRunStep[];
+}
+
+/**
+ * What a save produced. **`id` is the authority**, because a save can MINT one.
+ *
+ * A draft the editor has never saved carries `id: ''`, and `save_rule` INSERTs the id verbatim — so
+ * `save_automation` mints one and hands it back. The editor must adopt it: without that, its next
+ * Save mints a second id and one draft becomes two rows.
+ */
+export interface AutomationSaveResult {
+  id: string;
+  /** The `updatedAt` the row held before this write, or `null` when this was an insert. */
+  previousUpdatedAt: number | null;
 }
 
 /** One row of the §04 picker. `alive: false` rows still carry `label` and `folder` from the snapshot. */

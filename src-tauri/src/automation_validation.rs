@@ -38,6 +38,13 @@ pub struct Problem {
     /// Which step owns it, so the editor can point at the right panel: `parse`, `cond`, `action`,
     /// `monitor`, `targets`.
     pub field: String,
+    /// A stable identity for the RULE that fired, e.g. `parse.noBrackets`. **The shared fixture
+    /// compares this, not the prose** (M5, §10.19b): one of these cases is an uncompilable pattern,
+    /// whose message quotes the regex engine's own error text — and Rust's `regex` and the browser's
+    /// `RegExp` word that differently, so a fixture keyed on the message could only be satisfied by
+    /// weakening it to a prefix for every case. It is also what lets the editor pick a node badge
+    /// per rule without sniffing the message for a substring.
+    pub code: String,
     pub message: String,
 }
 
@@ -46,8 +53,13 @@ impl Problem {
         self.severity == Severity::Blocks
     }
 
-    fn new(severity: Severity, field: &str, message: impl Into<String>) -> Self {
-        Self { severity, field: field.to_string(), message: message.into() }
+    fn new(severity: Severity, field: &str, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            severity,
+            field: field.to_string(),
+            code: code.to_string(),
+            message: message.into(),
+        }
     }
 }
 
@@ -101,7 +113,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let mut out = Vec::new();
 
     if graph.parse.find.trim().is_empty() {
-        out.push(Problem::new(Severity::Blocks, "parse", "Enter something to look for."));
+        out.push(Problem::new(Severity::Blocks, "parse", "parse.empty", "Enter something to look for."));
         return out;
     }
 
@@ -116,6 +128,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
             out.push(Problem::new(
                 Severity::Blocks,
                 "parse",
+                "parse.uncompilable",
                 format!("That pattern could not be understood: {}", first_line(&e)),
             ));
             return out;
@@ -141,6 +154,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
         out.push(Problem::new(
             Severity::Blocks,
             "parse",
+            "parse.noBrackets",
             "This pattern has no brackets, so there is no value to keep. \
              Put brackets around the part you want, or keep the whole match instead.",
         ));
@@ -150,6 +164,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
         out.push(Problem::new(
             Severity::Warns,
             "parse",
+            "parse.manyGroups",
             "This pattern has more than one bracketed group. The first one is used; \
              name one of them `value` to choose a different one.",
         ));
@@ -189,6 +204,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                 out.push(Problem::new(
                     Severity::Blocks,
                     "targets",
+                    "targets.empty",
                     "Pick at least one terminal for this rule to watch.",
                 ));
             }
@@ -199,6 +215,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                 out.push(Problem::new(
                     Severity::Blocks,
                     "targets",
+                    "targets.criterion",
                     "Fill in what the terminals must match, or watch all terminals instead.",
                 ));
             }
@@ -210,6 +227,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         out.push(Problem::new(
             Severity::Blocks,
             "monitor",
+            "monitor.interval",
             format!("Check no more often than every {} ms.", MIN_TIMER_MS),
         ));
     }
@@ -226,6 +244,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         out.push(Problem::new(
             Severity::Blocks,
             "cond",
+            "cond.incomplete",
             "Choose how to compare the value, and the number to compare it with.",
         ));
     }
@@ -235,22 +254,36 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         out.push(Problem::new(
             Severity::Blocks,
             "action",
+            "action.empty",
             "Enter the message this rule should type.",
         ));
-    } else if let Ok(re) = compile(rule.graph.parse.find.trim()) {
+    } else if !rule.graph.parse.find.trim().is_empty() {
         // §2.6's failure, told to the user before it happens: a rule whose own message matches its
         // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
         // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
-        if re.is_match(&rule.graph.action.message) {
-            out.push(Problem::new(
-                Severity::Warns,
-                "action",
-                "This message matches the rule's own pattern, so the rule can see what it types. \
-                 TermFlow ignores its own message, but a shorter pattern is safer.",
-            ));
+        //
+        // **The emptiness guard is load-bearing, not defensive.** An empty regex compiles into an
+        // expression that matches every position of every string, so without it EVERY draft with a
+        // message and no pattern yet — which is every draft in the seconds after it is created —
+        // was told its message "matches the rule's own pattern". The one place the feature has to
+        // be trusted with a warning about a subtle failure, spent on a rule that has no pattern at
+        // all. Found by the M5 shared fixture: writing the expected list for the empty-pattern case
+        // is what made it impossible not to see.
+        if let Ok(re) = compile(rule.graph.parse.find.trim()) {
+            if re.is_match(&rule.graph.action.message) {
+                out.push(Problem::new(
+                    Severity::Warns,
+                    "action",
+                    "action.echo",
+                    "This message matches the rule's own pattern, so the rule can see what it types. \
+                     TermFlow ignores its own message, but a shorter pattern is safer.",
+                ));
+            }
         }
     }
 
+    // STABLE, so within each severity the problems stay in step order — targets, monitor, parse,
+    // cond, action — which is the order the inspector's problem list draws them in.
     out.sort_by_key(|p| !p.blocks());
     out
 }
@@ -542,4 +575,116 @@ mod tests {
         assert!(!found[1].blocks() && found[1].field == "parse", "{:?}", found);
     }
 
+    // =============================================================================================
+    // PLAN 10.19b: THE SHARED FIXTURE
+    // =============================================================================================
+
+    /// **The whole point of this module.**
+    ///
+    /// One case list, read by this test and by `automationValidation.test.ts`. Two implementations
+    /// of one rule set diverge the first time only one of them is edited, and the divergence is
+    /// silent in both directions: the editor greys a toggle the backend would have allowed, or the
+    /// editor allows one the backend refuses and the user's rule is rejected by a command they
+    /// cannot see.
+    ///
+    /// It compares `(severity, field, code)` **in order**, not the prose. One case is an
+    /// uncompilable pattern, whose message quotes the regex engine's own error text — and Rust's
+    /// `regex` and the browser's `RegExp` word that differently, so a fixture keyed on the message
+    /// could only be satisfied by weakening every case to a prefix match. Each side asserts its own
+    /// wording separately; the fixture asserts they agree about WHAT is wrong.
+    #[test]
+    fn the_shared_fixture_agrees_case_for_case() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            rule: AutomationRule,
+            expected: Vec<Expected>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Expected {
+            severity: Severity,
+            field: String,
+            code: String,
+        }
+
+        let raw = include_str!(
+            "../../src/renderer/components/Automation/__fixtures__/automationValidationCases.json"
+        );
+        let fixture: Fixture = serde_json::from_str(raw).expect("the shared fixture parses");
+
+        // A fixture that shrank to nothing would pass this test by having nothing to disagree
+        // about. The count is a floor, not the exact number, so adding a case is not a two-file
+        // edit.
+        assert!(
+            fixture.cases.len() >= 20,
+            "the shared fixture has shrunk to {} cases",
+            fixture.cases.len()
+        );
+
+        let mut codes = std::collections::HashSet::new();
+        for case in &fixture.cases {
+            let got: Vec<(Severity, String, String)> = problems(&case.rule)
+                .into_iter()
+                .map(|p| (p.severity, p.field, p.code))
+                .collect();
+            let want: Vec<(Severity, String, String)> = case
+                .expected
+                .iter()
+                .map(|e| (e.severity, e.field.clone(), e.code.clone()))
+                .collect();
+            assert_eq!(got, want, "fixture case: {}", case.name);
+            codes.extend(case.expected.iter().map(|e| e.code.clone()));
+        }
+
+        // Every rule this module can report has to appear in the fixture, or the two
+        // implementations are only pinned to each other on the paths someone remembered.
+        for code in [
+            "targets.empty",
+            "targets.criterion",
+            "monitor.interval",
+            "parse.empty",
+            "parse.uncompilable",
+            "parse.noBrackets",
+            "parse.manyGroups",
+            "cond.incomplete",
+            "action.empty",
+            "action.echo",
+        ] {
+            assert!(codes.contains(code), "no fixture case produces `{code}`");
+        }
+    }
+
+    /// An empty pattern matches every position of every string, so an unguarded echo check told
+    /// every half-built draft that its message matched a pattern it does not have.
+    #[test]
+    fn an_empty_pattern_does_not_warn_about_an_echo() {
+        let mut rule = AutomationRule {
+            id: "au-1".into(),
+            name: "r".into(),
+            enabled: false,
+            runs_once: false,
+            target_mode: TargetMode::Rule,
+            criterion: Criterion::AllTerminals,
+            criterion_value: String::new(),
+            follow_new: true,
+            target_ids: vec![],
+            completed_at: None,
+            verbose_until: None,
+            sort_order: 0,
+            schema_version: 1,
+            graph: graph("", Keep::Whole),
+            created_at: 0,
+            updated_at: 0,
+        };
+        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.action.message = "anything at all".into();
+
+        let found = problems(&rule);
+        assert_eq!(found.len(), 1, "only the empty pattern, no echo warning: {found:?}");
+        assert_eq!(found[0].code, "parse.empty");
+    }
 }

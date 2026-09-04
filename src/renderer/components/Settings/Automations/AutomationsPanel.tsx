@@ -15,6 +15,7 @@ import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { AutomationRow } from './AutomationRow';
 import { TemplateGallery } from './TemplateGallery';
 import { ActivityLogView } from './ActivityLogView';
+import { AutomationEditor } from '../../Automation/AutomationEditor';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
 import './AutomationsPanel.css';
@@ -26,7 +27,8 @@ type View =
     | { kind: 'list' }
     | { kind: 'gallery' }
     | { kind: 'log'; ruleId: string | null }
-    | { kind: 'editor'; draft: AutomationRule };
+    /** `fresh` is the blank card, which opens on an EMPTY canvas (mockup §03's third state). */
+    | { kind: 'editor'; draft: AutomationRule; fresh: boolean };
 
 export const AutomationsPanel: React.FC = () => {
     const {
@@ -116,7 +118,8 @@ export const AutomationsPanel: React.FC = () => {
         return () => clearTimeout(id);
     }, [nextExpiry]);
 
-    const openEditor = (draft: AutomationRule) => setView({ kind: 'editor', draft });
+    const openEditor = (draft: AutomationRule, fresh = false) =>
+        setView({ kind: 'editor', draft, fresh });
 
     const showLog = (ruleId: string | null) => {
         setLogScope({ ruleId, newestFirst: false });
@@ -128,69 +131,7 @@ export const AutomationsPanel: React.FC = () => {
         setView({ kind: 'list' });
     };
 
-    if (unavailable) {
-        return (
-            <div className="au-panel">
-                <div className="au-panelhead">
-                    <div className="au-panelhead-text">
-                        <h3>Terminal automations</h3>
-                        <p>
-                            Automations run inside the desktop app, where the rule store and the
-                            engine live. This window is connected over the web API, which has no
-                            access to either.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        );
-    }
-
-    if (view.kind === 'gallery') {
-        return (
-            <TemplateGallery
-                onBack={backToList}
-                onPick={(draft) => openEditor(draft)}
-            />
-        );
-    }
-
-    if (view.kind === 'log') {
-        return (
-            <ActivityLogView
-                rule={rules.find((r) => r.id === view.ruleId) ?? null}
-                entries={log}
-                newestFirst={logScope?.newestFirst ?? false}
-                error={logError}
-                now={now}
-                onScopeChange={(ruleId) => showLog(ruleId)}
-                onSetVerbose={(r, until) =>
-                    void run('Changing the log detail', () =>
-                        api!.saveAutomation!({ ...r, verboseUntil: until }, origin))}
-                onBack={backToList}
-            />
-        );
-    }
-
-    if (view.kind === 'editor') {
-        // TODO(M5): the rule editor mounts here. The seam is deliberately one branch and one
-        // value — the draft — so the milestone that builds the editor replaces exactly this block
-        // and nothing else, and so the panel's navigation is already written and tested around it.
-        return (
-            <div className="au-panel">
-                <div className="au-panelhead">
-                    <div className="au-panelhead-text">
-                        <h3>{view.draft.name || 'Untitled automation'}</h3>
-                        <p>The rule editor arrives with M5.</p>
-                    </div>
-                    <button type="button" className="au-btn" onClick={backToList}>
-                        ← Back to the list
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
-    return (
+    const list = (
         <div className="au-panel">
             <div className="au-panelhead">
                 <div className="au-panelhead-text">
@@ -355,4 +296,70 @@ export const AutomationsPanel: React.FC = () => {
             />
         </div>
     );
+
+    if (unavailable) {
+        return (
+            <div className="au-panel">
+                <div className="au-panelhead">
+                    <div className="au-panelhead-text">
+                        <h3>Terminal automations</h3>
+                        <p>
+                            Automations run inside the desktop app, where the rule store and the
+                            engine live. This window is connected over the web API, which has no
+                            access to either.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    if (view.kind === 'gallery') {
+        return (
+            <TemplateGallery
+                onBack={backToList}
+                onPick={(draft, templateId) => openEditor(draft, templateId === 'blank')}
+            />
+        );
+    }
+
+    if (view.kind === 'log') {
+        return (
+            <ActivityLogView
+                rule={rules.find((r) => r.id === view.ruleId) ?? null}
+                entries={log}
+                newestFirst={logScope?.newestFirst ?? false}
+                error={logError}
+                now={now}
+                onScopeChange={(ruleId) => showLog(ruleId)}
+                onSetVerbose={(r, until) =>
+                    void run('Changing the log detail', () =>
+                        api!.saveAutomation!({ ...r, verboseUntil: until }, origin))}
+                onBack={backToList}
+            />
+        );
+    }
+
+    if (view.kind === 'editor') {
+        // The editor is a PORTALLED modal over Settings, so the list stays mounted underneath it
+        // rather than being replaced: closing it is then a state change and not a refetch, and the
+        // rows the user came from are still where they left them.
+        return (
+            <>
+                {list}
+                <AutomationEditor
+                    rule={view.draft}
+                    freshCanvas={view.fresh}
+                    pairs={runtime.rules[view.draft.id]}
+                    now={now}
+                    origin={origin}
+                    onClose={() => setView({ kind: 'list' })}
+                    onOpenFullLog={(ruleId) => showLog(ruleId)}
+                    onChanged={refresh}
+                />
+            </>
+        );
+    }
+
+    return list;
 };

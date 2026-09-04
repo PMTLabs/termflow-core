@@ -260,16 +260,53 @@ pub async fn dry_run_automation(
 // Definition mutations — every one of these reloads
 // =================================================================================================
 
+/// What a save produced. **`id` is the authority**, because a save can MINT one.
+///
+/// This used to be a bare `Option<i64>` — the previous `updated_at`, for the log line — and the
+/// command wrote whatever id the caller sent. `save_rule` `INSERT`s `rule.id` verbatim, so an editor
+/// saving a new draft (`id: ""`) created a row whose primary key is the empty string, and the
+/// **second** new rule then `ON CONFLICT`-overwrote the first: two rules created, one row, no error,
+/// and the user's first automation simply gone. Nothing in M1–M4 saves a new rule, so nothing could
+/// hit it; the editor hits it on its first Save.
+///
+/// The mint belongs here rather than in the renderer because "what does a new rule's id look like"
+/// is the store's question — a renderer that minted one would be the second id vocabulary §9 exists
+/// to prevent. And it has to be *returned*, because the editor stays open on the rule it just saved:
+/// without the id back, the next Save mints a second id and the same draft becomes two rows.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationSaveResult {
+    /// The row's id — minted here when the caller sent an empty one, echoed back otherwise.
+    pub id: String,
+    /// The `updated_at` the row held before this write, or `None` when this was an insert.
+    pub previous_updated_at: Option<i64>,
+}
+
 #[tauri::command]
 pub async fn save_automation(
     state: State<'_, AppState>,
     rule: AutomationRule,
     origin: String,
-) -> Result<Option<i64>, String> {
+) -> Result<AutomationSaveResult, String> {
     let owned = state.inner().clone();
+    let mut rule = rule;
+    let inserting = rule.id.trim().is_empty();
+    if inserting {
+        // The same shape `duplicate_automation` mints, and deliberately the same prefix: one id
+        // vocabulary, minted in one crate.
+        rule.id = format!("au-{}", uuid::Uuid::new_v4());
+    }
     let id = rule.id.clone();
     let origin_for_log = origin.clone();
     let (previous, reloaded) = tokio::task::spawn_blocking(move || {
+        if inserting {
+            // Where a new rule lands is the store's decision too — `blankDraft()` sends `sortOrder: 0`
+            // precisely because the renderer must not invent a fact about a row that does not exist
+            // yet, and 0 would file every new rule ABOVE every existing one, tie-broken by a uuid.
+            // Ties are benign rather than prevented: `ORDER BY sort_order, id` is total, and
+            // `duplicate_automation` renumbers the whole list when it needs an exact slot.
+            rule.sort_order = owned.automation_store.next_sort_order().map_err(to_string_err)?;
+        }
         let previous = owned.automation_store.save_rule(&rule).map_err(to_string_err)?;
         // §3.5: the `saved` entry's detail carries the origin window, and `save_rule` returns the
         // previous `updated_at` from INSIDE its own transaction so the line can name what it replaced.
@@ -281,9 +318,9 @@ pub async fn save_automation(
     })
     .await
     .map_err(|e| e.to_string())??;
-    announce(&state, vec![id], vec![], origin);
+    announce(&state, vec![id.clone()], vec![], origin);
     reloaded?;
-    Ok(previous)
+    Ok(AutomationSaveResult { id, previous_updated_at: previous })
 }
 
 #[tauri::command]
@@ -713,6 +750,20 @@ mod source_tests {
         assert!(
             body("list_watchable_terminals").contains("newest_snapshots()"),
             "§4.3's fallback: with no rule to scope to, every closed terminal draws as a bare id"
+        );
+        // M5's P0. `save_rule` INSERTs `rule.id` verbatim, so a draft saved with `id: ""` becomes a
+        // row keyed on the empty string — and the SECOND new rule ON CONFLICT-overwrites the first.
+        // Two rules created, one row, no error. Nothing in M1–M4 saves a new rule, so nothing could
+        // reach it; the editor reaches it on its first Save. Pinned in source because minting lives
+        // inside a command, where §7.10 says no Windows test can call it.
+        let saving = body("save_automation");
+        assert!(
+            saving.contains("rule.id.trim().is_empty()") && saving.contains("format!(\"au-{}\""),
+            "save_automation mints no id for a new rule, so two new rules collide on the empty string"
+        );
+        assert!(
+            saving.contains("next_sort_order()"),
+            "a minted rule keeps sortOrder 0 and files itself above every existing rule"
         );
         assert!(
             body("save_automation").contains("note(") && body("save_automation").contains("Saved"),

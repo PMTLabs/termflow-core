@@ -16,6 +16,8 @@ import { toggleCanvasTab } from './openCanvas';
 export class InputHandler {
   private shortcuts: Map<string, () => void | Promise<void>>;
   private enabled: boolean = true;
+  /** How many modal surfaces have borrowed the keyboard. See `suspendGlobalShortcuts`. */
+  private suspensions: number = 0;
 
   // Stored so removeEventListener can actually detach it — the old
   // `this.handleKeyEvent.bind(this)` result was unreferenced and permanent.
@@ -247,6 +249,8 @@ export class InputHandler {
 
   handleKeyEvent(event: KeyboardEvent): boolean {
     if (!this.enabled) return false;
+    // A near-fullscreen surface has borrowed the keyboard. See `suspendGlobalShortcuts`.
+    if (this.suspensions > 0) return false;
 
     // Some keydown events carry no usable `key` (undefined) — e.g. autofill /
     // IME-injected events from WebView2, or synthetic events. They can never
@@ -512,7 +516,54 @@ export class InputHandler {
   isEnabled(): boolean {
     return this.enabled;
   }
+
+  /**
+   * Borrow the keyboard for a modal surface, and give it back with the returned function.
+   *
+   * **Ref-counted, and never the `disable()` boolean.** This handler is registered on `window` in
+   * the CAPTURE phase, so it sees Ctrl+W, Ctrl+1–9, Ctrl+Shift+D/W/Enter, Alt+[/], Ctrl+V, Ctrl+,
+   * and F11 before any dialog's own listener does — which is why every existing dialog in this app
+   * leaks those keys to the app behind it, and why an editor that owns the whole window has to say
+   * so rather than hope.
+   *
+   * A boolean cannot hold overlapping ownership: two surfaces that both suspend would be re-enabled
+   * by whichever left first, and the shape that goes wrong the other way — a release that never
+   * arrives — leaves the app permanently deaf to every shortcut with no visible cause
+   * (`boolean-cannot-hold-overlapping-ownership`). A counter answers both.
+   *
+   * The release is **one-shot**: React runs an effect cleanup exactly once, but a component that
+   * captured the function and called it defensively as well would otherwise decrement twice and
+   * hand the keyboard back on someone else's behalf.
+   */
+  suspendGlobalShortcuts(): () => void {
+    this.suspensions += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.suspensions = Math.max(0, this.suspensions - 1);
+    };
+  }
+
+  /** How many surfaces currently hold the keyboard. Zero means shortcuts are live. */
+  suspensionCount(): number {
+    return this.suspensions;
+  }
 }
 
 // Create singleton instance
 export const inputHandler = new InputHandler();
+
+/**
+ * Borrow the app's global shortcuts for as long as a modal surface is mounted.
+ *
+ * The intended shape is a `useEffect` whose **cleanup is the release**, so the keyboard comes back
+ * on unmount whatever route the surface was left by:
+ *
+ * ```ts
+ * useEffect(() => suspendGlobalShortcuts(), []);
+ * ```
+ */
+export function suspendGlobalShortcuts(): () => void {
+  return inputHandler.suspendGlobalShortcuts();
+}
