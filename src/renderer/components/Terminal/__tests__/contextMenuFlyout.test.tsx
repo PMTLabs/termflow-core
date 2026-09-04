@@ -418,6 +418,12 @@ describe('standaloneSubmenu', () => {
         const block = css.slice(start, css.indexOf('}', start));
         expect(block).toMatch(/background:\s*none/);
         expect(block).toMatch(/border:\s*none/);
+        // The one that actually MOVES the panel: `.context-menu` is `min-width: 200px`,
+        // and the empty host inside stretches to it, so `left: 100%` would place the
+        // flyout 200px right of the point the caller anchored it at.
+        expect(block).toMatch(/min-width:\s*0/);
+        const base = css.slice(css.indexOf('.context-menu {'), css.indexOf('}', css.indexOf('.context-menu {')));
+        expect(base).toMatch(/min-width:\s*\d+px/);
     });
 });
 

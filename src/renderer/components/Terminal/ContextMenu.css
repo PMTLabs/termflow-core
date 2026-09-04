@@ -149,6 +149,13 @@
   background: none;
   border: none;
   box-shadow: none;
+  /* Load-bearing, and invisible in jsdom. `.context-menu` above is `min-width: 200px`,
+     which the empty submenu host inside would stretch to as a block child - putting the
+     panel's `left: 100%` a full 200px to the RIGHT of the point the caller asked for.
+     Zeroed here, the container shrink-wraps to nothing and the panel lands on the
+     cursor. */
+  min-width: 0;
+  width: 0;
 }
 
 /* Applied when the viewport edge is nearer than the flyout is wide. */
