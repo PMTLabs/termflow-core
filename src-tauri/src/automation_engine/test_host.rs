@@ -192,6 +192,7 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
         sort_order: 1,
         schema_version: SUPPORTED_SCHEMA_VERSION,
         graph: AutomationGraph {
+            layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
             parse: ParseStep {
                 preset: ParsePreset::Custom,

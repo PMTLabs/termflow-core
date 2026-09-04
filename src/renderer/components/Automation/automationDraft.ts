@@ -8,12 +8,17 @@
  * ## What round-trips, and what does not
  *
  * `rule` is the wire DTO — it goes to `save_automation` unchanged, and comes back from the store the
- * same shape. `present`, `wires` and `layout` are **session-only canvas state**: the `graph` blob has
- * exactly four steps and no place to put a node position, and adding one would be a schema field
- * that nothing reads back. So the canvas is a *drawing of* the rule, re-derived every time the editor
- * opens, and dragging a node is a comfort rather than an edit. That is stated here because the
- * alternative — a layout that silently fails to persist — is the kind of thing a user discovers by
- * losing work.
+ * same shape. `present` and `wires` are **session-only canvas state**, re-derived from the four steps
+ * on every open: they carry no user choice, so the canvas is a *drawing of* the rule.
+ *
+ * **`layout` DOES round-trip, corrected here.** This paragraph used to say it did not, on the
+ * grounds that the `graph` blob had "no place to put a node position, and adding one would be a
+ * schema field that nothing reads back" — and it warned, correctly, that "a layout that silently
+ * fails to persist is the kind of thing a user discovers by losing work". That warning is what
+ * overturned the ruling rather than a change of mind about schemas: a card's position IS a user
+ * choice, dragging one made the editor read clean, and closing threw the arrangement away without a
+ * word. `graph.layout` now carries it (`Option`al, so older rows still load), which is also what
+ * makes the *Leave without saving?* prompt's "Saving keeps them" true for a drag.
  *
  * `draftFromRule` / `ruleFromDraft` are therefore the only place the editor's shape and the store's
  * shape meet (§7.7), and the round-trip test asserts draft → wire → row → wire → draft is identity
@@ -36,8 +41,10 @@ export const AU_NODE_H = 160;
 // 232/206 that gap was 26px. A port label is centred on its port, and a port sits ON the node's
 // edge — so an output label and the next node's input label were each half-overhanging into the
 // same 26px and printed on top of each other (`lines lines`, `value value`). 116px is measured
-// from that: two half-labels plus air. Safe to change freely because the layout is NOT persisted
-// (see the note at the top of this file) — every editor open re-derives it from DEFAULT_LAYOUT.
+// from that: two half-labels plus air.
+//
+// Changing this moves NEW rules and rules saved before `graph.layout` existed; a rule that has been
+// dragged and saved keeps its own arrangement and is unaffected, which is the point of persisting it.
 const AU_GAP_X = 360;
 
 export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
@@ -102,19 +109,53 @@ export interface AutomationDraft {
  */
 export function draftFromRule(rule: AutomationRule, emptyCanvas = false): AutomationDraft {
     const present = emptyCanvas ? [] : [...STEP_ORDER];
+    const layout = layoutOf(rule);
+    // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
+    // before this field existed has no `graph.layout`, so the arrangement it opens with is the
+    // default one — and if the baseline kept the absent field while the draft carried the resolved
+    // one, every such rule would read dirty the instant it opened, with a *Leave without saving?*
+    // prompt over an untouched rule. Resolving once and using it for both sides is the same
+    // both-sides rule `comparable` follows below.
+    const resolved: AutomationRule = { ...rule, graph: { ...rule.graph, layout } };
     return {
-        rule,
+        rule: resolved,
         present,
         wires: defaultWires(present),
-        layout: { ...DEFAULT_LAYOUT },
+        layout,
         selected: emptyCanvas ? null : 'monitor',
-        saved: rule,
+        saved: resolved,
     };
 }
 
-/** What a save sends. The canvas state is deliberately not part of it. */
+/** The saved arrangement, or the default one for a rule that predates the field. */
+function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
+    const saved = rule.graph.layout;
+    if (!saved) return { ...DEFAULT_LAYOUT };
+    const out = { ...DEFAULT_LAYOUT };
+    // Step by step rather than a spread of `saved`, so a blob carrying a key this build does not
+    // know cannot put an unplaceable card into the layout.
+    for (const step of STEP_ORDER) {
+        const pos = saved[step];
+        if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+            out[step] = { x: pos.x, y: pos.y };
+        }
+    }
+    return out;
+}
+
+/**
+ * What a save sends.
+ *
+ * The canvas ARRANGEMENT is part of it; which steps are drawn and how they are wired still is not.
+ * `present` and `wires` are re-derived from the four steps on every open and carry no user choice,
+ * but a card's position is a choice, and one the user expects to survive — which is exactly what
+ * makes it dirty-able and therefore what makes the unsaved-changes prompt honest.
+ *
+ * Injected HERE rather than mirrored into `draft.rule` on every drag, so `draft.layout` stays the
+ * single owner of the arrangement and the two cannot disagree.
+ */
 export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
-    return draft.rule;
+    return { ...draft.rule, graph: { ...draft.rule.graph, layout: draft.layout } };
 }
 
 /**
@@ -125,7 +166,10 @@ export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
  * be a fifth place to add a field to (§7.7 already names four), and the one that fails silently.
  */
 export function isDirty(draft: AutomationDraft): boolean {
-    return comparable(draft.rule) !== comparable(draft.saved);
+    // `ruleFromDraft`, not `draft.rule` — dirtiness has to be asked of exactly what a save would
+    // WRITE, or a change that only reaches the DTO at save time (the layout) is invisible here and
+    // the editor closes without a word over work the user can see on screen.
+    return comparable(ruleFromDraft(draft)) !== comparable(draft.saved);
 }
 
 /**
@@ -142,7 +186,22 @@ export function isDirty(draft: AutomationDraft): boolean {
  * normalises for the COMPARISON only — the array that goes to the store is still the user's own.
  */
 function comparable(rule: AutomationRule): string {
-    return JSON.stringify({ ...rule, targetIds: [...rule.targetIds].sort() });
+    // The layout is normalised for the same reason `targetIds` is, and it is a stronger case: this
+    // one crosses the wire into a Rust `BTreeMap` and comes back with ITS key order, while the
+    // draft's own object carries insertion order. Two orders of the same four positions are the
+    // same arrangement, and `JSON.stringify` cannot know that.
+    const layout = rule.graph.layout;
+    const graph = layout
+        ? {
+              ...rule.graph,
+              layout: Object.fromEntries(
+                  Object.keys(layout)
+                      .sort()
+                      .map((k) => [k, layout[k]]),
+              ),
+          }
+        : rule.graph;
+    return JSON.stringify({ ...rule, graph, targetIds: [...rule.targetIds].sort() });
 }
 
 export type DraftAction =

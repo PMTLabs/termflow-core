@@ -479,6 +479,12 @@ export interface AutomationGraph {
   parse: AutomationParseStep;
   cond: AutomationCondStep;
   action: AutomationActionStep;
+  /**
+   * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —
+   * it rides in the rule so that ONE save writes the whole document. Absent on any rule written
+   * before the field existed; `draftFromRule` falls back to the default arrangement.
+   */
+  layout?: Record<string, { x: number; y: number }>;
 }
 
 export interface AutomationRule {

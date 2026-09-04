@@ -520,6 +520,7 @@ mod tests {
 
     fn graph(find: &str, kind: CondKind, op: Option<CompareOp>, threshold: Option<f64>) -> AutomationGraph {
         AutomationGraph {
+            layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
             parse: ParseStep {
                 preset: ParsePreset::Custom,

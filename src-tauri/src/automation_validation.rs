@@ -322,6 +322,7 @@ mod tests {
 
     fn graph(find: &str, keep: Keep) -> AutomationGraph {
         AutomationGraph {
+            layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
             parse: ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep },
             cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },

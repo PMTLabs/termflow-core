@@ -407,6 +407,7 @@ mod tests {
             sort_order: 0,
             schema_version: 1,
             graph: AutomationGraph {
+                layout: None,
                 monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
                 parse: ParseStep {
                     preset: ParsePreset::Custom,

@@ -242,6 +242,29 @@ pub struct AutomationGraph {
     pub parse: ParseStep,
     pub cond: CondStep,
     pub action: ActionStep,
+    /// Where the editor's four cards sit on its canvas.
+    ///
+    /// **View state, deliberately inside the rule's blob.** The plan originally kept the layout out
+    /// of here on the grounds that it would be "a schema field that nothing reads back" — true while
+    /// dragging a card was a comfort that evaporated on close. It is not true now: a rearrangement is
+    /// a change the user expects to keep, which makes the *Leave without saving?* prompt's promise
+    /// ("Saving keeps them") either honest or a lie depending on this field existing.
+    ///
+    /// The engine never reads it. It rides along because the alternative — a second persistence path
+    /// beside `save_rule`, with its own dirty baseline — is two ways to save one document.
+    ///
+    /// `BTreeMap`, not `HashMap`: this is re-serialised on every save and compared as a STRING by the
+    /// editor's dirty check, so a map that shuffles its key order would make a rule read dirty at
+    /// random. `Option` + `serde(default)` so every row written before this field still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<std::collections::BTreeMap<String, NodePos>>,
+}
+
+/// One card's position on the editor canvas. Pure view data; see `AutomationGraph::layout`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NodePos {
+    pub x: f64,
+    pub y: f64,
 }
 
 /// One rule, as it crosses the wire and as it sits in `automation_rules`.
@@ -1639,6 +1662,7 @@ mod tests {
 
     fn graph() -> AutomationGraph {
         AutomationGraph {
+            layout: None,
             monitor: MonitorStep {
                 read: ReadMode::NewOutput,
                 cadence: Cadence::OnOutput,

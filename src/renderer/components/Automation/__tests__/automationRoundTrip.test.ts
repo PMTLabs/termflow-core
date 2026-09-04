@@ -31,10 +31,28 @@ describe('draft ⇄ row', () => {
         ['a blank draft', blankDraft()],
     ];
 
+    /**
+     * **Idempotence from the first pass, not equality with the template.**
+     *
+     * A template has never been opened, so it carries no `graph.layout`; opening one materialises
+     * the default arrangement into it. That single addition is intended — it is what lets a drag be
+     * saved — so asserting `andBack` equals the raw template would now fail for a reason that is not
+     * a defect, and "fixing" it by stripping layout before comparing would blind the test to the
+     * field entirely.
+     *
+     * So the property is stated in two halves: the first pass adds `graph.layout` AND NOTHING ELSE
+     * (asserted against the template with that one key removed, so any other drift still fails), and
+     * every pass after it is identity. The second half is the one that catches a dropped or mangled
+     * field, and it is unweakened.
+     */
     it.each(subjects)('%s survives draft → wire → row → wire → draft unchanged', (_name, rule) => {
         const there = ruleFromDraft(draftFromRule(overTheWire(rule)));
         const andBack = ruleFromDraft(draftFromRule(overTheWire(there)));
-        expect(andBack).toEqual(rule);
+        expect(andBack).toEqual(there);
+
+        expect(there.graph.layout).toEqual(DEFAULT_LAYOUT);
+        const { layout: _added, ...graphWithoutLayout } = there.graph;
+        expect({ ...there, graph: graphWithoutLayout }).toEqual(rule);
     });
 
     it('carries every field the DTO declares, not just the ones a template happens to set', () => {
@@ -56,22 +74,46 @@ describe('draft ⇄ row', () => {
             schemaVersion: 1,
             createdAt: 111,
             updatedAt: 222,
+            // A layout that is NOT the default, so this also pins that a saved arrangement survives
+            // the wire rather than being quietly replaced by `DEFAULT_LAYOUT` on the way through.
+            graph: {
+                ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph,
+                layout: {
+                    monitor: { x: 11, y: 12 },
+                    parse: { x: 21, y: 22 },
+                    cond: { x: 31, y: 32 },
+                    action: { x: 41, y: 42 },
+                },
+            },
         };
         expect(ruleFromDraft(draftFromRule(overTheWire(full)))).toEqual(full);
     });
 
-    it('does not let the canvas state leak into what a save sends', () => {
-        // `present`, `wires` and `layout` are session-only: the graph blob has no place for a node
-        // position, and a save that carried them would be inventing a schema field.
+    /**
+     * **The arrangement is saved; which cards are drawn is not.** The two used to travel together as
+     * "session-only canvas state" and they no longer do, so the line between them is asserted rather
+     * than described: `present`/`wires` are re-derived from the four steps and carry no user choice,
+     * while a card's POSITION is a choice the user expects to keep.
+     *
+     * Both directions in one test on purpose. A save that carried `present` would be inventing a
+     * schema field; a save that dropped `layout` would put the *Leave without saving?* prompt back to
+     * promising "Saving keeps them" over an arrangement it silently discards.
+     */
+    it('sends the layout, and still does not send which steps are drawn', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         // A FRESH canvas, so `present` can be varied without a remove — which no longer exists,
         // and cannot: see `automationSteps.ts`.
         const draft = draftFromRule(rule, true);
         const moved = draftReducer(draft, { type: 'moveStep', step: 'monitor', pos: { x: 999, y: 999 } });
         const grown = draftReducer(moved, { type: 'addStep', step: 'monitor' });
+
         expect(grown.present).not.toEqual(draft.present);
-        expect(JSON.stringify(ruleFromDraft(grown))).not.toContain('999');
-        expect(ruleFromDraft(grown)).toEqual(ruleFromDraft(draft));
+        expect(ruleFromDraft(grown).graph.layout?.monitor).toEqual({ x: 999, y: 999 });
+        // Nothing else moved with it, and no step list rode along.
+        const sent = ruleFromDraft(grown) as unknown as Record<string, unknown>;
+        expect(sent.present).toBeUndefined();
+        expect(sent.wires).toBeUndefined();
+        expect(ruleFromDraft(grown).graph.layout?.cond).toEqual(DEFAULT_LAYOUT.cond);
     });
 });
 
@@ -113,11 +155,39 @@ describe('isDirty', () => {
         expect(isDirty(back)).toBe(false);
     });
 
-    it('ignores canvas moves, because a save does not carry them', () => {
-        // Otherwise leaving the editor after nudging a card would raise the unsaved-work prompt for
-        // a change that cannot be saved and cannot be lost.
-        const moved = draftReducer(draft(), { type: 'moveStep', step: 'cond', pos: { x: 40, y: 40 } });
-        expect(isDirty(moved)).toBe(false);
+    /**
+     * **A canvas move is a change.** This assertion used to be `false`, on the reasoning that the
+     * prompt should not appear "for a change that cannot be saved and cannot be lost" — sound while
+     * the layout went nowhere, and exactly backwards once it does: the change could be lost, and
+     * silently, which is the case the prompt exists for.
+     *
+     * Paired with the undo, so this cannot pass as "dirty forever after any move".
+     */
+    it('counts a canvas move as unsaved work', () => {
+        const start = draft();
+        const moved = draftReducer(start, { type: 'moveStep', step: 'cond', pos: { x: 40, y: 40 } });
+        expect(isDirty(moved)).toBe(true);
+
+        const back = draftReducer(moved, {
+            type: 'moveStep',
+            step: 'cond',
+            pos: start.layout.cond,
+        });
+        expect(isDirty(back)).toBe(false);
+    });
+
+    /** A rule reopened on its own saved arrangement is not dirty just for having one. */
+    it('is not dirty when a rule opens on the layout it was saved with', () => {
+        const arranged = {
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: {
+                ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph,
+                layout: { ...DEFAULT_LAYOUT, cond: { x: 77, y: 88 } },
+            },
+        };
+        const reopened = draftFromRule(arranged);
+        expect(reopened.layout.cond).toEqual({ x: 77, y: 88 });
+        expect(isDirty(reopened)).toBe(false);
     });
 
     it('is cleared by a save, and adopts the id the store minted', () => {
