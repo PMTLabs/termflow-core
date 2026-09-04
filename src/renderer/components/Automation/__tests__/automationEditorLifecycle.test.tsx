@@ -269,6 +269,25 @@ describe('the editor, mounted', () => {
     });
 
     /**
+     * **Dimmed AND non-modal — the two halves are one decision, so they are asserted together.**
+     *
+     * Read apart they look contradictory: there is a full-bleed backdrop at 70% black, and the
+     * dialog does not block the window behind it. Both were asked for. The backdrop is a DIM, not a
+     * barrier — it inherits `pointer-events: none` from `.au-editor` and never opts back in — so a
+     * later reading of "this scrim is broken, backdrops should catch clicks" would satisfy one half
+     * by destroying the other, silently and with the dialog still looking correct.
+     *
+     * `aria-modal` is the honest half to assert: it is the machine-readable claim about whether the
+     * rest of the window is inert, and it is what a screen reader acts on. The scrim's presence is
+     * asserted beside it so removing the dim also fails, rather than quietly passing.
+     */
+    it('renders a backdrop while still declaring itself non-modal', async () => {
+        await openEditorOn(rule({ enabled: false }));
+        expect(editor()!.getAttribute('aria-modal')).toBe('false');
+        expect(editor()!.querySelector('.au-scrim')).not.toBeNull();
+    });
+
+    /**
      * `set_automation_enabled` writes one column on the row SQLite already holds, and the engine
      * reloads THAT row. Switching on while the draft is dirty therefore starts the version the user
      * has just edited away from — retarget the picker, flip the switch, and the message goes to the

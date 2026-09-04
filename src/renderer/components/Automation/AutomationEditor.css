@@ -33,16 +33,61 @@
     pointer-events: none;
 }
 
+.au-editor .au-scrim {
+    position: absolute;
+    inset: 0;
+    /* 70% black. Dim only — `pointer-events` is inherited as `none` from `.au-editor` and is
+       deliberately NOT set to `auto` here: this backdrop must never take a click, or the editor
+       stops being non-modal. */
+    background: rgba(0, 0, 0, 0.7);
+}
+
+/**
+ * One scrollbar for everything inside the dialog.
+ *
+ * A DESCENDANT selector (note the space) rather than a list of the scrollable classes, because the
+ * dialog has several — the inspector column, the activity drawer, the terminal picker's list — and
+ * naming them individually is how one of them silently keeps the default chrome scrollbar the next
+ * time a panel is added. That breadth is the intent here and not a leak: the only thing this can
+ * ever match is a scrollbar, so unlike a bare `.x input` it cannot reach a control it was not meant
+ * for. The picker's list is inside `.au-editor` (it does not portal out), so it is covered by this.
+ *
+ * `border` on the thumb rather than a narrower `width` is what insets it from the track without
+ * making the hit area harder to grab, and its colour must track `.au-modal`'s background.
+ */
+.au-editor ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+.au-editor ::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.au-editor ::-webkit-scrollbar-thumb {
+    background: #3a3c44;
+    border: 2px solid #17181c;
+    border-radius: 6px;
+}
+
+.au-editor ::-webkit-scrollbar-thumb:hover {
+    background: #4f535e;
+}
+
+.au-editor ::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
 .au-editor .au-modal {
     position: relative;
     display: flex;
     flex-direction: column;
     pointer-events: auto;
-    /* 80% of the window, and `vw`/`vh` are what make that track a resize with no listener and no
-       re-render — the box simply re-lays-out. The `max` floors stop it collapsing to unusable on a
-       small window, and are themselves viewport-relative so they can never exceed it. */
-    width: max(80vw, min(660px, calc(100vw - 24px)));
-    height: max(80vh, min(460px, calc(100vh - 24px)));
+    /* ALWAYS 85% of the window — no px floor and no px cap, deliberately, because either one stops
+       it being 85% at some window size. `vw`/`vh` are what make it track a resize with no listener,
+       no re-render and no `ResizeObserver`: the box simply re-lays-out. */
+    width: 85vw;
+    height: 85vh;
     background: #17181c;
     border: 1px solid #33353c;
     border-radius: 12px;

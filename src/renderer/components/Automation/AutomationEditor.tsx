@@ -487,11 +487,17 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // that gap is real and worth raising, but widening a GUI-pass fix into the shared hook is
         // not this change.
         //
-        // **Non-modal**, so the window behind it stays usable: no scrim, `aria-modal="false"`, no
-        // focus trap, and `.au-editor` is `pointer-events: none` so only `.au-modal` itself takes
-        // clicks. Switching tabs, dragging the window by its title bar (this app draws its own —
-        // there is no OS one) and typing in a terminal all keep working with the editor open.
+        // **Non-modal**, so the window behind it stays usable: `aria-modal="false"`, no focus trap,
+        // and `.au-editor` is `pointer-events: none` so only `.au-modal` itself takes clicks.
+        // Switching tabs, dragging the window by its title bar (this app draws its own — there is no
+        // OS one) and typing in a terminal all keep working with the editor open.
+        //
+        // The scrim below is therefore DIM ONLY. It looks like a modal backdrop and blocks nothing —
+        // it inherits `pointer-events: none` from this container and never opts back in, which is
+        // the one thing about it that must not be "tidied up" later. `aria-hidden` keeps the
+        // contradiction away from assistive tech, which reads `aria-modal="false"` and is right to.
         <div className="au-editor" role="dialog" aria-modal="false" aria-label="Automation editor" tabIndex={-1} ref={containerRef}>
+            <div className="au-scrim" aria-hidden="true" />
             <div className="au-modal">
                 <div className="au-mhead">
                     <button type="button" className="au-x" aria-label="Close editor" onClick={requestClose}>
