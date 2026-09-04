@@ -870,6 +870,21 @@ impl AutomationStore {
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+        Self::read_rule_on(conn, id)
+    }
+
+    /// `get_rule`'s body with the locking taken out, so a caller that must **decide** something from
+    /// a rule and then write that decision can do both inside ONE transaction.
+    ///
+    /// `Transaction` derefs to `Connection`, so one reader serves both the single-shot locked call
+    /// above and the transactional call sites. It exists because `save_rule_as_of` fixed the
+    /// read-then-write race for its own `previous` value and documented it there - and nothing swept
+    /// the rest of the file, where `set_enabled_checked` and `duplicate_automation` had the identical
+    /// shape. A fix applied at one site of a class is not a fix.
+    fn read_rule_on(
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<Option<AutomationRule>, AutomationStoreError> {
         let raw = optional_row(conn.query_row(
             &format!("SELECT {RULE_COLUMNS} FROM automation_rules WHERE id = ?1"),
             [id],
@@ -1074,18 +1089,29 @@ impl AutomationStore {
         rule_id: &str,
         enabled: bool,
     ) -> Result<(), AutomationStoreError> {
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+
+        // **The row this validates is the row it flips.** `get_rule` takes and releases its own lock,
+        // so a `get_rule` + `UPDATE` pair is two locked calls with a gap - and this gate is only worth
+        // having if nothing can replace the rule inside that gap. A save may legally persist a
+        // DISABLED rule with an empty message (the save gate's `refuse_if_it_would_run_wrong` runs
+        // only `if rule.enabled`), so the losing interleaving is not exotic: window A saves that
+        // draft while window B switches the rule on, B validates the pre-A row, A's write lands, and
+        // B's `UPDATE` sets `enabled = 1` on it. `reload` never re-checks message content, so the
+        // rule runs and `deliver` presses a bare Enter into the terminal - the exact R10 outcome this
+        // gate exists to prevent.
         if enabled {
-            let rule = self
-                .get_rule(rule_id)?
+            let rule = Self::read_rule_on(&tx, rule_id)?
                 .ok_or_else(|| AutomationStoreError::Invalid(format!("no rule {}", rule_id)))?;
             Self::refuse_if_invalid(&rule)?;
         }
-        let guard = self.conn.lock().unwrap();
-        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-        conn.execute(
+        tx.execute(
             "UPDATE automation_rules SET enabled = ?1 WHERE id = ?2",
             rusqlite::params![enabled as i64, rule_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1170,8 +1196,15 @@ impl AutomationStore {
         id: &str,
         at: i64,
     ) -> Result<AutomationRule, AutomationStoreError> {
-        let original = self
-            .get_rule(id)?
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+
+        // **Read inside the transaction that writes the copy**, for `save_rule_as_of`'s reason. The
+        // editor's Duplicate button is gated only on the draft HAVING an id - deliberately not on the
+        // in-flight save that `disabled={saving}` guards for the Save button - so Save followed by
+        // Duplicate before the round trip commits clones the version the save is replacing.
+        let original = Self::read_rule_on(&tx, id)?
             .ok_or_else(|| AutomationStoreError::Invalid(format!("no such rule {id}")))?;
         let mut copy = original.clone();
         copy.id = format!("au-{}", uuid::Uuid::new_v4());
@@ -1184,10 +1217,6 @@ impl AutomationStore {
         // `touch_target` already do — and so this is testable.
         copy.created_at = at;
         copy.updated_at = at;
-
-        let mut guard = self.conn.lock().unwrap();
-        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
-        let tx = conn.transaction()?;
 
         // Renumber the whole list densely rather than shifting the tail by one.
         //
@@ -2827,6 +2856,58 @@ mod tests {
         assert_eq!(after.updated_at, rule.updated_at, "and it is not an edit");
 
         assert!(!store.clear_completed("au-ghost").unwrap());
+    }
+
+    /// **The row a gate validates must be the row that gate writes.**
+    ///
+    /// `save_rule_as_of` names this race in its own doc and folds its read into its transaction - and
+    /// nothing swept the rest of the file, so `set_enabled_checked` and `duplicate_automation` kept
+    /// the `get_rule(...)`-then-write shape. `get_rule` takes and releases its own lock, so another
+    /// window fits between the two calls. A save may legally persist a DISABLED rule with an empty
+    /// message (the save gate runs only `if rule.enabled`), so an enable that validated the row
+    /// before that save lands then sets `enabled = 1` on the row after it; `reload` never re-checks
+    /// message content, the rule runs, and `deliver` presses a bare Enter into the terminal - the
+    /// R10 outcome the gate exists to prevent.
+    ///
+    /// **Asserted on the source, because the defect is an interleaving.** The two shapes are
+    /// behaviourally identical on any single-threaded run, so a behavioural test cannot tell them
+    /// apart, and a threaded one would pin one schedule rather than the property. What is pinned here
+    /// is the structural claim the fix actually makes. Both halves are needed: deleting the read
+    /// altogether would satisfy the negative on its own.
+    #[test]
+    fn every_read_that_decides_a_write_happens_on_that_write_s_own_transaction() {
+        let module = crate::automation_engine::test_host::strip_comments(include_str!(
+            "automation_store.rs"
+        ));
+        // The test MODULE, not the first `#[cfg(test)]` - `new_in_memory` carries one hundreds of
+        // lines above these functions, and truncating there left `code` holding neither of them while
+        // the test still reported success on two `assert!`s it never reached.
+        let code = &module[..module
+            .find("#[cfg(test)]\nmod tests")
+            .expect("the test module must follow the code")];
+
+        let mut checked = 0;
+        for name in ["set_enabled_checked", "duplicate_automation"] {
+            let start = code
+                .find(&format!("fn {}(", name))
+                .unwrap_or_else(|| panic!("`{}` moved; this test was checking nothing", name));
+            let rest = &code[start + 4..];
+            let end = rest.find("\n    pub fn ").unwrap_or(rest.len());
+            let body = &rest[..end];
+            assert!(
+                !body.contains("self.get_rule("),
+                "`{}` decides from a `get_rule` that takes its own lock: the row it validates is not \
+                 guaranteed to be the row it writes",
+                name
+            );
+            assert!(
+                body.contains("read_rule_on(&tx"),
+                "`{}` no longer reads on its own transaction",
+                name
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "both call sites of the class must be checked");
     }
 
 }

@@ -386,6 +386,19 @@ pub async fn run_send(
         return fail(&engine, &host, &send, "the terminal closed before the message was sent");
     };
 
+    // **And it can close AND COME BACK, which resolving by leaf alone cannot see.** `tm-` is durable
+    // across a restart and `IdentityIndex::index` overwrites `leaf_to_process[tm]` unconditionally on
+    // every spawn, so a Ctrl+R inside the queue wait — up to `SEND_QUEUE_TIMEOUT_MS`, and any second
+    // rule watching this terminal puts us in that wait — leaves the lookup above returning a `pc` for
+    // a run that never printed the matched text. The closed-terminal guard cannot catch it, because
+    // the question it asks ("does this leaf resolve?") has the same answer for a live terminal and a
+    // replaced one. `Pair` already carries the `pc` this crossing was READ from, so ask the question
+    // that does distinguish them: a message decided from one run must never be typed into the next,
+    // which with `submit: true` also executes it there.
+    if pc != send.pair.pc {
+        return fail(&engine, &host, &send, "the terminal restarted before the message was sent");
+    }
+
     // And so can the RULE. The queue wait is up to ten seconds, and a user who disables a rule inside
     // it must not still be typed into afterwards. Checked in the same critical section as the
     // terminal, because it is the same question: is this crossing still something the user wants?
@@ -449,10 +462,39 @@ pub async fn run_send(
     // the in-memory removal the rule stays live in `Fired`, re-arms the moment its value drops, and
     // sends a SECOND message in the same session from a row the UI already shows as Completed.
     if rule.runs_once {
-        if let Err(e) = host.store().mark_completed(&rule.id, at) {
-            log::warn!("automations: could not mark {} completed: {}", rule.id, e);
-        }
+        // `Ok(false)` is "no row matched" — the rule was deleted from another window inside this very
+        // crossing — and the completion has then reached disk exactly as little as it does on `Err`.
+        // Reading only the `Err` arm let that case pass for a successful write.
+        let persisted = match host.store().mark_completed(&rule.id, at) {
+            Ok(stamped) => stamped,
+            Err(e) => {
+                log::warn!("automations: could not mark {} completed: {}", rule.id, e);
+                false
+            }
+        };
         engine.complete_rule(&rule.id);
+        if !persisted {
+            // **The in-memory removal above stays, and that is the deliberate half.** It is what
+            // stops this rule sending a SECOND message in this session, and dropping it to keep
+            // memory and disk in step would reintroduce precisely the defect §7.8's ordering exists
+            // to prevent: the rule re-arms on the next dip and fires again, on every crossing.
+            //
+            // What no ordering can save is the next launch. `reload` filters on `completed_at`, so a
+            // completion that never reached disk lets the rule run again in a later session, and that
+            // stamp is the only durable record there is. So the honest move is to make the divergence
+            // VISIBLE rather than leave a `log::warn` nobody reads beside a row that will go on
+            // describing the rule as armed. This append can fail for the same reason the stamp did —
+            // it is the same database — and then the warning above is genuinely all that is left.
+            append(
+                &host,
+                &rule.id,
+                Some(&tm),
+                None,
+                LogKind::Failed,
+                "fired, but its completion could not be recorded — it may run again after a restart",
+                at,
+            );
+        }
         // And TELL the windows, which nothing else does. `mark_state_dirty` below is not this: it
         // announces arm transitions, and `complete_rule` has just removed this rule from the live
         // set, so the next state payload omits it and every open row falls back to *Armed · waiting*
@@ -460,10 +502,15 @@ pub async fn run_send(
         // `completed_at`, and that is what makes the pill read *Completed*, the toggle go inert and
         // Reset appear.
         //
-        // Announced even when the store write above failed. The rule is out of the live set either
-        // way, so a window that refetches and finds no `completed_at` is looking at the truth on
-        // disk — which is the same reason the command layer never lets a failed reload skip its
-        // `announce`.
+        // Announced whether or not the stamp persisted. On the success path that is the whole point;
+        // on the failure path the rules refetch carries nothing new — the `failed` row above is what
+        // the user sees, through `append`'s own activity emit — and one unconditional call beats a
+        // branch whose only effect is to skip a cheap no-op.
+        //
+        // This is **not** the command layer's "a failed reload still announces" rule, which an
+        // earlier version of this comment claimed it was. There the write has already committed and
+        // only the re-read failed, so *refetch, disk is truth* is exactly right. Here the write is
+        // the thing that failed, which makes disk stale rather than true.
         host.emit_changed(vec![rule.id.clone()]);
     }
     engine.mark_state_dirty();
@@ -1379,6 +1426,90 @@ mod tests {
             vec!["au-once".to_string()],
             "a completed rule must tell the windows to refetch it, and a repeatable fire must not"
         );
+    }
+
+    /// **A completion that never reached disk must still retire the rule, and must not be silent.**
+    ///
+    /// `mark_completed` reports `Ok(false)` when no row matched — the rule was deleted from another
+    /// window inside this very crossing — which is as un-persisted as `Err`, and the old code read
+    /// only the `Err` arm, so this case passed for a successful write.
+    ///
+    /// The review's proposed remedy was to skip `complete_rule` when the write fails, so that memory
+    /// and disk agree. **That is the one change this test forbids.** Dropping the in-memory
+    /// retirement re-arms the rule on the next dip and fires it again in this same session, on every
+    /// crossing — the defect §7.8's ordering exists to prevent. What the failure genuinely costs is
+    /// the NEXT launch, which no ordering can save, so the honest answer is to say so where a user
+    /// will see it rather than leave the row describing the rule as armed with nothing anywhere to
+    /// contradict it.
+    #[tokio::test(start_paused = true)]
+    async fn a_completion_that_did_not_reach_disk_still_retires_the_rule_and_says_so() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        let (engine, fake, host) = wire(vec![once]);
+        engine.runtime.set_arm("au-once", "tm-1", ArmState::armed());
+
+        // The row goes away between load and crossing, so the stamp has nothing to write to.
+        fake.store.delete_rule("au-once").unwrap();
+
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "the rule never fired, so nothing below is proved"
+        );
+        assert!(
+            !engine.is_live("au-once"),
+            "a failed stamp took the in-memory retirement with it, so the rule can fire again now"
+        );
+        assert_eq!(fake.announced(), vec!["au-once".to_string()], "the windows were not told");
+        let log = log_details(&fake.store);
+        assert!(
+            log.iter().any(|(kind, detail)| kind == "Failed"
+                && detail.contains("may run again after a restart")),
+            "a completion that did not persist left nothing a user could ever see: {:?}",
+            log
+        );
+    }
+
+    /// **A `tm-` leaf outlives the run it points at, and `process_for_leaf` cannot say so.**
+    ///
+    /// The leaf is durable across Ctrl+R and `IdentityIndex::index` overwrites its mapping on every
+    /// spawn, so a send that queued against one run resolves to its REPLACEMENT by the time it
+    /// reaches the front of the queue. The closed-terminal guard is blind to this: it asks only
+    /// whether the leaf still resolves, and it does — at a shell that never printed the matched
+    /// text, which with `submit: true` then runs the message there.
+    ///
+    /// A table, because the negative alone passes vacuously — "nothing was typed" is equally true of
+    /// a rule that never fired. And `pc-2` goes into `leaves`, which is what makes it a process the
+    /// fake will accept a write to: an unregistered id would have been refused by the fake for its
+    /// own reasons and made this guard look effective while doing nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_that_restarted_inside_the_queue_wait_is_never_typed_into() {
+        for (restarted, want) in [(true, 0usize), (false, 1usize)] {
+            let (engine, fake, host) = wire(vec![ctx_rule_saying("au-1", "handing off", 1)]);
+            engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+            fake.say("pc-1", "ctx:63%\n");
+            engine.runtime.mark_dirty("pc-1");
+
+            // The crossing is DECIDED here and written during the sleep below — the restart lands in
+            // exactly that window.
+            evaluate_tick(&engine, &host, 0, 1_000).await;
+            if restarted {
+                fake.leaves.lock().unwrap().insert("tm-1".into(), "pc-2".into());
+            }
+            tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+            assert_eq!(
+                times_sent(&fake, "handing off"),
+                want,
+                "restarted={}: a message decided from one run reached a different one",
+                restarted
+            );
+        }
     }
 
     // =============================================================================================
