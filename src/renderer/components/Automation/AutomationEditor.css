@@ -83,11 +83,11 @@
     display: flex;
     flex-direction: column;
     pointer-events: auto;
-    /* ALWAYS 85% of the window — no px floor and no px cap, deliberately, because either one stops
-       it being 85% at some window size. `vw`/`vh` are what make it track a resize with no listener,
+    /* ALWAYS 95% of the window — no px floor and no px cap, deliberately, because either one stops
+       it being 95% at some window size. `vw`/`vh` are what make it track a resize with no listener,
        no re-render and no `ResizeObserver`: the box simply re-lays-out. */
-    width: 85vw;
-    height: 85vh;
+    width: 95vw;
+    height: 95vh;
     background: #17181c;
     border: 1px solid #33353c;
     border-radius: 12px;
