@@ -150,8 +150,17 @@ describe('convertInkSpokeExport', () => {
   });
 
   it('accepts a lower-cased ActionType, as InkSpoke’s own Enum.TryParse does', () => {
-    const r = convertInkSpokeExport(inkSpokeFile([mapping({ ActionType: 'sendkeys' })]));
-    expect(r.drafts).toHaveLength(1);
+    // Both supported actions, not just the first: a case-fold applied to one arm of the
+    // branch and not the other is exactly the half-fix this pairing exists to catch.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'sk', ActionType: 'sendkeys' }, { Text: 'lowered' }),
+        mapping({ Id: 'ou', ActionType: 'openurl' }, { Url: 'https://example.test' }),
+        mapping({ Id: 'mixed', ActionType: 'SeNdKeYs' }, { Text: 'mixed case' }),
+      ]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['lowered', 'https://example.test', 'mixed case']);
+    expect(r.skippedUnsupported).toBe(0);
   });
 
   it('NEVER imports an encrypted payload, flagged either way', () => {
@@ -164,12 +173,27 @@ describe('convertInkSpokeExport', () => {
         mapping({ Id: 'flagged' }, { Text: 'Y2lwaGVy', IsSecret: true, Nonce: 'bm9uY2U=' }),
         mapping({ Id: 'nonce-only' }, { Text: 'Y2lwaGVy', Nonce: 'bm9uY2U=' }),
         mapping({ Id: 'flag-only' }, { Text: 'Y2lwaGVy', IsSecret: true }),
+        // ...and on EVERY action, not only SendKeys. Only SendKeysParams declares these
+        // fields today, so InkSpoke itself cannot write this row — but the rule is about
+        // payloads that say they are encrypted, not about one action type, and a guard
+        // gated on the action type is one somebody has to remember to repeat.
+        mapping({ Id: 'url-flagged', ActionType: 'OpenUrl' }, { Url: 'https://x.test', IsSecret: true }),
       ]),
     );
     expect(r.drafts).toEqual([]);
-    expect(r.skippedUnsupported).toBe(3);
+    expect(r.skippedUnsupported).toBe(4);
     expect(r.rejected).toBe(0); // an encrypted record is not MALFORMED
-    expectFullyAccounted(r, 3);
+    expectFullyAccounted(r, 4);
+  });
+
+  it('imports an ordinary OpenUrl, so the encryption guard has not eaten the action', () => {
+    // The negative half of the row above. Without this, moving the guard to cover every
+    // action could have silently refused ALL OpenUrl records and the suite would agree.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([mapping({ ActionType: 'OpenUrl' }, { Url: 'https://example.test' })]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['https://example.test']);
+    expect(r.skippedUnsupported).toBe(0);
   });
 
   it('imports a SendKeys whose IsSecret is explicitly false', () => {

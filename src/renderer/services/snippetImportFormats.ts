@@ -156,7 +156,7 @@ function inkSpokeGroupNames(groups: unknown): Map<string, string> {
 }
 
 /**
- * Does this `SendKeys` payload hold ciphertext rather than text (plan/030 D5)?
+ * Does this action's payload hold ciphertext rather than text (plan/030 D5)?
  *
  * Two independent tells, and either is enough. `IsSecret` is the flag InkSpoke sets, and a
  * `Nonce` is present only because something was encrypted with it — treating the pair as
@@ -166,6 +166,13 @@ function inkSpokeGroupNames(groups: unknown): Map<string, string> {
  * lives in the OS credential store on the machine that wrote it (DPAPI CurrentUser on
  * Windows), never in the export. There is nothing to decrypt with, so importing would
  * create a snippet that types ciphertext into a terminal.
+ *
+ * Asked of EVERY payload, not just `SendKeys`. Only `SendKeysParams` declares these two
+ * fields today, so on a file InkSpoke itself wrote the extra check can never fire — but
+ * the class here is "a payload that says it is encrypted", not "a SendKeys payload", and
+ * a guard that has to be re-derived at each new call site is the guard that gets left off
+ * the next one. Gating it on the action type also made the plainly-stated rule "encrypted
+ * payloads are never imported" quietly untrue for a hand-edited file.
  */
 function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
   return Boolean(params.IsSecret) || trimmedOrUndefined(params.Nonce) !== undefined;
@@ -219,7 +226,7 @@ export function convertInkSpokeExport(envelope: Record<string, unknown>): Conver
       rejected++;
       continue;
     }
-    if (isSendKeys && holdsEncryptedPayload(params)) {
+    if (holdsEncryptedPayload(params)) {
       skippedUnsupported++;
       continue;
     }

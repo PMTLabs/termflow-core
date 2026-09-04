@@ -387,6 +387,9 @@ describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
     expect(result.imported).toBe(2);
     expect(result.added.every((s) => s.tags?.includes('InkSpoke'))).toBe(true);
     expect(result.added[0]).toMatchObject({ text: 'ls -la', label: 'list files', folder: 'Terminal' });
+    // The SECOND record's body too. Asserting only the first lets an implementation that
+    // reads the URL from the wrong key — or drops it — still satisfy `imported === 2`.
+    expect(result.added[1]).toMatchObject({ text: 'https://example.test', folder: undefined });
     // A fresh id and a real timestamp, exactly as the TermFlow path mints them (D9).
     expect(result.added.map((s) => s.id)).toEqual(result.added.map((s) => expect.stringMatching(/^sn-/)));
     expect(result.added.every((s) => Number.isFinite(s.createdAt))).toBe(true);
@@ -442,9 +445,13 @@ describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
     givenFile({
       SchemaVersion: 2,
       Mappings: [
-        inkSpokeMapping({ Id: 'dupe-of-local' }, { Text: 'already here' }),
-        inkSpokeMapping({ Id: 'fresh' }, { Text: 'brand new' }),
-        inkSpokeMapping({ Id: 'dupe-in-file' }, { Text: 'brand new' }),
+        // Distinct SpokenPhrases on purpose. With the fixture's shared default phrase,
+        // an implementation that de-duplicated on the LABEL rather than the text would
+        // collapse these three identically and the test could not tell the two rules
+        // apart. Here the labels are all different and only the texts collide.
+        inkSpokeMapping({ Id: 'dupe-of-local', SpokenPhrase: 'say hello' }, { Text: 'already here' }),
+        inkSpokeMapping({ Id: 'fresh', SpokenPhrase: 'do the new thing' }, { Text: 'brand new' }),
+        inkSpokeMapping({ Id: 'dupe-in-file', SpokenPhrase: 'a different phrase' }, { Text: 'brand new' }),
       ],
     });
 
@@ -453,6 +460,9 @@ describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
     const result = await importSnippets([snip({ id: 'sn-local', text: 'already here' })]);
     if (result.ok !== true) throw new Error('expected ok');
     expect(result.added.map((s) => s.text)).toEqual(['brand new']);
+    // The survivor is the FIRST of the colliding pair, carrying its own label — not the
+    // last one seen, and not a merge of the two.
+    expect(result.added.map((s) => s.label)).toEqual(['do the new thing']);
     expect(result.skippedDuplicates).toBe(2);
   });
 

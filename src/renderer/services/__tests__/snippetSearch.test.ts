@@ -197,22 +197,41 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     expect(filterSnippets([hyphen], 'ch').map((x) => x.id)).toEqual(['hy']);
   });
 
-  it('a combining mark does NOT split a word (decomposed text)', () => {
-    // 'naïve handoff' with the diaeresis as a separate combining codepoint, as it arrives
-    // from a macOS filesystem or some clipboards. Treating U+0308 as a separator would
-    // split 'naïve' into 'nai' + 've' and give initials 'nvh', so this snippet would
-    // answer to 'nv' and NOT to the 'nh' a reader would actually type.
-    // Written as explicit escapes: the two spellings are indistinguishable in an editor,
-    // so a literal would silently become whichever form the file is saved in and this
-    // test would stop testing decomposition without ever going red.
-    const nfd = s({ id: 'nfd', text: 'nai\u0308ve handoff', createdAt: 0 });
-    expect(nfd.text).toHaveLength('naive handoff'.length + 1); // the mark is its own codepoint
-    expect(filterSnippets([nfd], 'nh').map((x) => x.id)).toEqual(['nfd']);
-    expect(filterSnippets([nfd], 'nv')).toEqual([]);
-    // The precomposed spelling of the same phrase must behave identically.
-    const nfc = s({ id: 'nfc', text: 'na\u00efve handoff', createdAt: 0 });
-    expect(nfc.text).toHaveLength('naive handoff'.length);
-    expect(filterSnippets([nfc], 'nh').map((x) => x.id)).toEqual(['nfc']);
+  it('a mark INSIDE a word does not split it, even where NFC cannot compose it', () => {
+    // 'q\u0308uick handoff' - q followed by a combining diaeresis. NO precomposed character
+    // for that pair exists, so normalising cannot rescue it and the \p{M} continuation
+    // class is the only thing holding the word together. Without it the mark reads as a
+    // separator, the word becomes 'q' + 'uick', and the initials are 'quh' not 'qh'.
+    //
+    // Deliberately NOT 'naive-with-diaeresis': that one DOES compose, so normalize('NFC')
+    // alone would rescue it and this test would still pass with \p{M} deleted - pinning
+    // nothing. The fixture has to be a sequence normalisation cannot reach.
+    const marked = s({ id: 'm', text: 'q\u0308uick handoff', createdAt: 0 });
+    expect(marked.text.normalize('NFC')).toHaveLength(marked.text.length); // NFC can't compose it
+    expect(filterSnippets([marked], 'qh').map((x) => x.id)).toEqual(['m']);
+    expect(filterSnippets([marked], 'qu')).toEqual([]);
+  });
+
+  it('the same phrase searches the same however it is encoded', () => {
+    // The other half of the class, and \p{M} does NOT help here: a mark on a word's
+    // FIRST letter is skipped by codePointAt(0), which takes the base letter. Decomposed
+    // 'Ecole-with-acute' therefore starts 'e' while the composed spelling starts '\u00e9'.
+    // Same visible phrase, different initials, and a query that finds one and misses the
+    // other. normalize('NFC') on the haystack is what makes these two rows agree.
+    const nfc = s({ id: 'nfc', text: '\u00c9cole handoff', createdAt: 0 });
+    const nfd = s({ id: 'nfd', text: 'E\u0301cole handoff', createdAt: 0 });
+    expect(nfc.text).not.toBe(nfd.text); // genuinely different bytes...
+    expect(nfc.text.normalize('NFC')).toBe(nfd.text.normalize('NFC')); // ...same phrase
+    expect(filterSnippets([nfc], '\u00e9h').map((x) => x.id)).toEqual(['nfc']);
+    expect(filterSnippets([nfd], '\u00e9h').map((x) => x.id)).toEqual(['nfd']);
+  });
+
+  it('a decomposed QUERY matches too - both sides are normalised, or neither', () => {
+    // Needle-side half of the same class. Pasting an accented query from a document can
+    // hand us 'e' + U+0301; the initials hold '\u00e9', so without normalising the needle
+    // this misses while the identical-looking composed query hits.
+    const item = s({ id: 'e', text: '\u00c9cole handoff', createdAt: 0 });
+    expect(filterSnippets([item], 'e\u0301h').map((x) => x.id)).toEqual(['e']);
   });
 
   it('a text of only punctuation has no initials and matches nothing', () => {
@@ -241,6 +260,20 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     ]);
   });
 
+  it('orders the two NEW rungs against each other: tag beats initials', () => {
+    // The adjacent pair. Every other ordering test pits a new rung against an OLD one, so
+    // swapping rungs 3 and 4 with each other would leave them all green.
+    const byTag = s({ id: 'by-tag', text: 'unrelated body', tags: ['ch'], createdAt: 0 });
+    const byInitials = s({ id: 'by-initials', text: 'context handoff', createdAt: 0 });
+    expect(filterSnippets([byInitials, byTag], 'ch').map((x) => x.id)).toEqual([
+      'by-tag',
+      'by-initials',
+    ]);
+    // ...and directly, so the ladder's numbers are pinned and not just their order.
+    expect(rankSnippet(byTag, ['ch'])).toBe(3);
+    expect(rankSnippet(byInitials, ['ch'])).toBe(4);
+  });
+
   it('multiple words still AND together across the widened rungs', () => {
     // 'ch' by initials AND 'database' by text — only the snippet with both survives.
     const both = s({ id: 'both', text: 'context handoff for the database', createdAt: 0 });
@@ -248,14 +281,23 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     expect(filterSnippets([both, onlyOne], 'ch database').map((x) => x.id)).toEqual(['both']);
   });
 
-  it('re-filtering the same snippet objects returns the same answer (initials cache)', () => {
-    // The WeakMap is keyed on identity; a second pass over the SAME objects must not
-    // drift. A cache that stored the query, or keyed on something mutable, breaks here.
+  it('never serves a stale or query-contaminated initials result', () => {
+    // Named for what it actually pins. It does NOT prove the WeakMap is consulted — an
+    // implementation with no cache at all passes every line below, and that is fine,
+    // because caching is a performance choice whose only behavioural contract is
+    // "indistinguishable from not caching". These are the ways a cache could break that
+    // contract: drifting between passes, keying on the query, or outliving its subject.
     expect(filterSnippets(items, 'ch').map((x) => x.id)).toEqual(['h']);
     expect(filterSnippets(items, 'ch').map((x) => x.id)).toEqual(['h']);
-    // ...and an edited snippet is a NEW object, so it must be re-derived, not served stale.
-    const edited = { ...handoff, text: 'restart the database' };
+    // A different query in between must not poison the entry.
+    expect(filterSnippets(items, 'zzz')).toEqual([]);
+    expect(filterSnippets(items, 'ch').map((x) => x.id)).toEqual(['h']);
+    // An edited snippet is a NEW object, so it must be re-derived rather than served the
+    // old text's initials. This is the one that would fail if the cache were keyed on
+    // something stable across an edit, such as the snippet's id.
+    const edited = { ...handoff, id: handoff.id, text: 'restart the database' };
     expect(filterSnippets([edited], 'ch')).toEqual([]);
+    expect(filterSnippets([edited], 'rtd').map((x) => x.id)).toEqual(['h']);
   });
 });
 

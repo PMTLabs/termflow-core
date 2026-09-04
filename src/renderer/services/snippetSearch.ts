@@ -51,11 +51,21 @@ const MIN_INITIALS_QUERY_LENGTH = 2;
  * digit and continues through letters, digits and COMBINING MARKS, so punctuation splits
  * the way a reader would expect (`context-handoff` is two words, not one).
  *
- * The `\p{M}` in the continuation class is load-bearing, not decoration. Without it a
- * decomposed (NFD) string breaks mid-word: `'naïve handoff'` written as `n a i ◌̈ v e` has
- * its combining diaeresis treated as a separator, splitting `naïve` into `nai` + `ve` and
- * yielding `nvh` where the reader plainly means `nh`. Text arrives decomposed from macOS
- * filesystems and from some clipboards, so this is a real input, not a hypothetical one.
+ * TWO defences are needed, because a combining mark breaks this in two different places
+ * and fixing either one alone leaves the other. The rule both serve: text that LOOKS the
+ * same must search the same, whichever way it happens to be encoded. Decomposed text is a
+ * real input — it arrives that way from macOS filesystems and from some clipboards.
+ *
+ *  1. `normalize('NFC')` fixes a mark on a word's FIRST letter. `'École Handoff'` composed
+ *     starts the word with `é` (U+00E9); decomposed it starts with a bare `E`, and
+ *     `codePointAt(0)` then takes only that base letter — so the same visible phrase gives
+ *     `éh` one way and `eh` the other, and a query matches one spelling but not the other.
+ *  2. `\p{M}` in the CONTINUATION class fixes a mark INSIDE a word, for the sequences NFC
+ *     cannot compose because no precomposed character exists — `q̈` is one. Without it the
+ *     mark reads as a separator, splitting `q̈uick` into `q` + `uick` and yielding `qu…`
+ *     where the reader means `q…`. (NFC alone would rescue `naïve`, which does compose;
+ *     it cannot rescue `q̈uick`, which does not.)
+ *
  * A mark can never START a word, which is why the first class excludes it.
  *
  * `codePointAt` rather than `[0]` so an astral first letter survives as one character
@@ -66,7 +76,7 @@ const MIN_INITIALS_QUERY_LENGTH = 2;
  * limit of the technique, not a defect: those snippets remain findable by substring.
  */
 function computeWordInitials(s: string): string {
-  const words = s.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu);
+  const words = s.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu);
   if (!words) return '';
   return words.map((w) => String.fromCodePoint(w.codePointAt(0) as number)).join('');
 }
@@ -103,7 +113,15 @@ function matchesTag(s: Snippet, w: string): boolean {
 function matchesInitials(s: Snippet, w: string): boolean {
   if (w.length < MIN_INITIALS_QUERY_LENGTH) return false;
   const [labelInitials, textInitials] = snippetInitials(s);
-  return labelInitials.includes(w) || textInitials.includes(w);
+  // The needle gets the same normalisation as the haystack, or the fix is only half
+  // applied: initials are built from NFC text, so a query pasted in decomposed form
+  // ('e' + U+0301) would never match the 'é' sitting in them. Both sides, or neither.
+  //
+  // Scoped to this rung on purpose. The substring rungs above have always compared raw
+  // against raw, and widening them is a different, pre-existing question — but within
+  // initials matching the two sides must at least agree with each other.
+  const needle = w.normalize('NFC');
+  return labelInitials.includes(needle) || textInitials.includes(needle);
 }
 
 /**
