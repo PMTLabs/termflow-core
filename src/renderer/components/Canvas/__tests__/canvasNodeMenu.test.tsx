@@ -65,15 +65,24 @@ const render = (overlaid: boolean) => {
 };
 
 /**
- * Every row, in order, as the WORDS a user reads — the icon deliberately excluded.
+ * Every row, in order, as the WORDS a user reads — the glyphs deliberately excluded.
  *
- * `CanvasMenuItem` renders the glyph as a `.menu-icon` span inside the same button, so a bare
+ * `CanvasMenuItem` renders its glyph as a `.menu-icon` span inside the same button, so a bare
  * `textContent` returns `"⛶Enlarge on the canvas"`. The icon has its own assertions below; a
  * label check that carried it would fail on a glyph change and read as a wording regression.
+ *
+ * `.context-menu-expand-arrow` is stripped for the same reason and one more: it is the ▸/▾ of an
+ * accordion header, so carrying it would make this list assert the section's EXPANDED STATE as
+ * part of a row's name — two unrelated properties in one equality, and the one that reads as a
+ * wording regression is the one that is not.
  */
 const labels = (): string[] =>
   [...document.querySelectorAll('.canvas-menu .context-menu-item')]
-    .map((b) => (b.textContent ?? '').replace(b.querySelector('.menu-icon')?.textContent ?? '', ''));
+    .map((b) => {
+      const chrome = [...b.querySelectorAll('.menu-icon, .context-menu-expand-arrow')]
+        .map((g) => g.textContent ?? '');
+      return chrome.reduce((text, glyph) => text.replace(glyph, ''), b.textContent ?? '');
+    });
 
 const itemMatching = (fragment: string): HTMLButtonElement => {
   const found = [...document.querySelectorAll<HTMLButtonElement>('.canvas-menu .context-menu-item')]
@@ -86,11 +95,15 @@ const click = (el: Element) =>
   act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
 
 describe('the node menu offers more than the destructive action', () => {
-  it('lists enlarge, open-in-tab and close, in that order', () => {
+  it('lists enlarge, open-in-tab, automations and close, in that order', () => {
     render(false);
+    // `Automations` is present with NOTHING armed, and uncounted: the section is no longer a list
+    // of armed rules that can be empty, it is where "New automation for this terminal" lives. An
+    // `Automations (0)` here would be a count whose only content is that there is nothing to count.
     expect(labels()).toEqual([
       'Enlarge on the canvas',
       'Open in its tab',
+      'Automations',
       'Close Terminal',
     ]);
   });
@@ -114,10 +127,15 @@ describe('the node menu offers more than the destructive action', () => {
     // ...and the two above it are NOT, or `danger` would say nothing about which is which.
     expect(items.slice(0, -1).some((i) => i.classList.contains('danger'))).toBe(false);
 
+    // Three: under the header, above the automations section, and above Close. Still an EXACT
+    // count rather than a floor — a fourth separator appearing is a change to how this menu is
+    // grouped and should have to be looked at, which is the whole value of the number being here.
     const dividers = [...document.querySelectorAll('.canvas-menu .context-menu-divider')];
-    expect(dividers.length).toBe(2);
-    expect(dividers[1].compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING)
-      .toBeTruthy();
+    expect(dividers.length).toBe(3);
+    // Indexed from the END, because the property is "the destructive item is behind the LAST
+    // separator" — an ordinal into the middle of the list re-states the menu's current shape and
+    // silently stops testing that property the next time a section is added above.
+    expect(close.previousElementSibling).toBe(dividers[dividers.length - 1]);
   });
 });
 

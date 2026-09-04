@@ -901,12 +901,16 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           click: () => engine?.setSelectionMode(!selectionMode),
         },
       ] : []),
-      // The automations armed on THIS terminal (Tam, follow-up to `plan/028` item D: the terminal
-      // area's menu must offer the same thing the pane title's does). ONE item that opens a
-      // hover flyout of the rules — the Snippets/Command History shape, asked for by name once
-      // that machinery existed — built by `automationMenuItems` from the same `armedEntryViews`
-      // the pane and canvas menus list from, so the three cannot name or order the rules
-      // differently. Nothing at all when nothing is armed, which is why it is still a spread.
+      // This terminal's automations (Tam, follow-up to `plan/028` item D: the terminal area's menu
+      // must offer the same thing the pane title's does). ONE item that opens a hover flyout — the
+      // Snippets/Command History shape, asked for by name once that machinery existed — built by
+      // `automationMenuItems` from the same `armedEntryViews` the pane and canvas menus list from,
+      // so the three cannot name or order the rules differently.
+      //
+      // **Present whether or not anything is armed**, since the flyout gained "New automation for
+      // this terminal" and "Add to an existing automation" — actions whose whole point is the
+      // unarmed case. Still a spread, but for the one remaining empty case: a pane with no
+      // terminal at all, where `automationMenuItems(null)` is `[]`.
       //
       // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute below is: the
       // rules are pinned to the terminal, so they are right wherever its surface is drawn.

@@ -274,9 +274,11 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🔍</span>
         Find…
       </button>
-      {/* The automations armed on THIS terminal, and the way into each one's editor
-          (`plan/028` item D). Grouped with Find and Mute rather than given a section of its own:
-          all three act on this pane's terminal, unlike the tab/window/split items above them.
+      {/* This terminal's automations: the rules armed on it and the way into each one's editor
+          (`plan/028` item D), plus — whether or not anything is armed — creating a new rule for it
+          or adding it to an existing rule's targets. Grouped with Find and Mute rather than given
+          a section of its own: all three act on this pane's terminal, unlike the tab/window/split
+          items above them. Renders nothing only for a pane with no terminal.
           The component is shared verbatim with `CanvasNodeMenu` — see its header. */}
       <AutomationMenuSection terminalId={terminalId ?? null} onDismiss={onClose} />
       <button

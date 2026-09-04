@@ -52,9 +52,14 @@ export function armedEntryViews(armed: readonly ArmedAutomation[], now: number):
  * accordion; it was lifted here rather than copied when the flyout needed the same row.
  *
  * Singular and uncounted for one rule: `Automations (1)` is a count that exists only to say there
- * is nothing to count.
+ * is nothing to count. Zero follows the same argument one step further: both surfaces are now
+ * always present, whether or not anything is armed (there is a "new automation" and an "add to an
+ * existing one" action either way), so `count === 0` is reachable in ordinary use rather than only
+ * in a stale render — and `Automations (0)` would be a count whose only content is that there is
+ * nothing to count. `'Automations'`, plain, says the same nothing without pretending to measure it.
  */
 export function armedMenuLabel(count: number): string {
+    if (count === 0) return 'Automations';
     return count === 1 ? 'Automation' : `Automations (${count})`;
 }
 

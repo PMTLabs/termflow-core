@@ -72,10 +72,12 @@ export const CanvasNodeMenu: React.FC<{
     >
       Open in its tab
     </CanvasMenuItem>
-    {/* Renders nothing unless a rule is armed here, so a plain terminal's menu is unchanged. It
-        sits above the divider that separates the destructive item, with the navigation actions it
-        belongs with — opening a rule's editor is another way OUT of the canvas, not a change to
-        this terminal. */}
+    {/* ALWAYS present for a node that has a terminal — it stopped being armed-only when the
+        section gained "New automation for this terminal" and "Add to an existing automation",
+        which are things to do precisely when nothing is armed yet. (It still renders nothing for a
+        `terminalId` of `null`.) It sits above the divider that separates the destructive item,
+        with the navigation actions it belongs with — opening a rule's editor is another way OUT of
+        the canvas, not a change to this terminal. */}
     <AutomationMenuSection terminalId={terminalId} onDismiss={onDismiss} />
     {/* Separated and LAST, for the reason the close button is last in the header: the
         destructive item must not sit where a click aimed at either one above it can land. */}

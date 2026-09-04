@@ -1,21 +1,31 @@
 /**
- * Opening the automation editor from OUTSIDE Settings (`plan/028` item D).
+ * Opening the automation editor from OUTSIDE Settings (`plan/028` item D, extended for "Automation
+ * is always available").
  *
- * Tam's ask: right-clicking a terminal that has a rule armed on it offers that rule, and clicking
- * it opens the edit dialog. The dialog is `AutomationEditor`, which until now was rendered only by
- * `AutomationsPanel` — so the request has to cross from a portalled context menu, or from Canvas
- * Mode's own tab, to a component mounted at the app root. Module-level rather than a prop chain,
- * for the reason `automationEditorGuard.ts` gives for the same shape: the two ends are a leaf and
- * the app shell.
+ * Tam's original ask: right-clicking a terminal that has a rule armed on it offers that rule, and
+ * clicking it opens the edit dialog. The dialog is `AutomationEditor`, which until now was rendered
+ * only by `AutomationsPanel` — so the request has to cross from a portalled context menu, or from
+ * Canvas Mode's own tab, to a component mounted at the app root. Module-level rather than a prop
+ * chain, for the reason `automationEditorGuard.ts` gives for the same shape: the two ends are a leaf
+ * and the app shell.
  *
- * **This is only the request.** `GlobalAutomationEditor` is what renders, and it resolves the rule
- * from `automationArmed`'s live list rather than being handed a snapshot — a rule object captured
- * when a menu opened is already stale by the time it is clicked if another window saved it.
+ * **This is only the request.** `GlobalAutomationEditor` is what renders. For an EXISTING rule it
+ * resolves the id out of `automationArmed`'s live list rather than being handed a snapshot — a rule
+ * object captured when a menu opened is already stale by the time it is clicked if another window
+ * saved it. A rule that does not exist yet has no id to resolve, which is what
+ * `openAutomationEditorForDraft` below is for: the menu hands over the whole draft, because there is
+ * nothing live to look up.
  */
+import type { AutomationRule } from '../types/electron';
 import { isAutomationEditorMounted } from './automationEditorGuard';
 
 /**
- * Toast the refusal, reaching the Redux store through a DYNAMIC import.
+ * Toast a one-line notice, reaching the Redux store through a DYNAMIC import.
+ *
+ * Exported, because the editor's "one at a time" refusal is no longer the only thing in this
+ * feature that has to speak up from inside a context menu: `AutomationMenuSection`'s "Add to an
+ * existing automation" writes to the store and can be refused too. One implementation, so the
+ * dynamic-import reasoning below is stated once and cannot be half-copied.
  *
  * A static `import { store }` here would pull the whole app graph in at module load —
  * `store/index` → `layoutsSlice` → `StateManager` → `TerminalContainer` → `TerminalDisplay` →
@@ -23,7 +33,7 @@ import { isAutomationEditorMounted } from './automationEditorGuard';
  * the shared menu section every terminal's context menu now mounts, would drag that in with it. The
  * cost is paid only on the rare refusal path, and a toast is already asynchronous to the user.
  */
-async function toastRefusal(message: string): Promise<void> {
+export async function toastAutomationNotice(message: string): Promise<void> {
     try {
         const [{ store }, { addToast }] = await Promise.all([
             import('../store'),
@@ -36,6 +46,13 @@ async function toastRefusal(message: string): Promise<void> {
 }
 
 let openRuleId: string | null = null;
+/**
+ * A draft rule the host should open instead of an existing one — set by
+ * `openAutomationEditorForDraft` for "New automation for this terminal". Mutually exclusive with
+ * `openRuleId`: only one request is ever pending, because only one editor may ever be mounted (see
+ * the guard below), so there is nothing to disambiguate between the two fields at read time.
+ */
+let openDraft: AutomationRule | null = null;
 const listeners = new Set<() => void>();
 
 function emit(): void {
@@ -53,17 +70,37 @@ function emit(): void {
  */
 export function openAutomationEditorFor(ruleId: string): void {
     if (isAutomationEditorMounted()) {
-        void toastRefusal('An automation is already open for editing — close it first.');
+        void toastAutomationNotice('An automation is already open for editing — close it first.');
         return;
     }
+    openDraft = null;
     openRuleId = ruleId;
+    emit();
+}
+
+/**
+ * Ask the app-level host to open a brand-new, UNSAVED rule — "New automation for this terminal" in
+ * `AutomationMenuSection` / `automationMenuItems`.
+ *
+ * Same refusal as `openAutomationEditorFor`, for the same reason: there is one dirty-guard slot,
+ * and a second open — new draft or existing rule, it does not matter which — cannot be allowed to
+ * take it over while the first editor's unsaved work is still sitting in it.
+ */
+export function openAutomationEditorForDraft(draft: AutomationRule): void {
+    if (isAutomationEditorMounted()) {
+        void toastAutomationNotice('An automation is already open for editing — close it first.');
+        return;
+    }
+    openRuleId = null;
+    openDraft = draft;
     emit();
 }
 
 /** Close whatever the host is showing. */
 export function closeAutomationEditor(): void {
-    if (openRuleId === null) return;
+    if (openRuleId === null && openDraft === null) return;
     openRuleId = null;
+    openDraft = null;
     emit();
 }
 
@@ -74,9 +111,16 @@ export function subscribeAutomationEditorHost(listener: () => void): () => void 
     };
 }
 
-/** The rule id the host should be showing, or `null`. */
+/** The rule id the host should be showing, or `null` — including while a DRAFT is open, since a
+ *  draft has no id yet. Callers that also need the draft itself read `getOpenAutomationDraft`. */
 export function getOpenAutomationRuleId(): string | null {
     return openRuleId;
+}
+
+/** The unsaved draft the host should be showing, or `null` when the open request (if any) named an
+ *  existing rule id instead. */
+export function getOpenAutomationDraft(): AutomationRule | null {
+    return openDraft;
 }
 
 /**
@@ -107,6 +151,7 @@ export function consumePendingAutomationLog(): string | null {
 /** Test-only: forget the open request and every subscriber. */
 export function __resetAutomationEditorHostForTest(): void {
     openRuleId = null;
+    openDraft = null;
     pendingLogRuleId = null;
     listeners.clear();
 }

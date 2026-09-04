@@ -32,8 +32,21 @@ import {
     __resetAutomationArmedForTest,
     __seedAutomationArmedForTest,
 } from '../../../services/automationArmed';
+// Namespace imports, so the two module-level functions the menu calls can be spied on: the CJS
+// output turns those call sites into `ns.fn(...)`, which is the only shape a spy can intercept.
+//
+// **That is a property of the TRANSFORM, not of the code under test, and it fails silently.** If
+// this suite is ever emitted as real ESM (live bindings rather than a mutable namespace object),
+// `jest.spyOn` on these namespaces stops intercepting anything: the menu keeps calling the real
+// `toastAutomationNotice` / `refreshAutomationArmed`, the spies record nothing, and every
+// `not.toHaveBeenCalled()` below passes VACUOUSLY while the assertions that expect a call fail
+// loudly. So the failure is loud on one side and green on the other — if a `toHaveBeenCalled`
+// assertion here starts failing after a build-config change, suspect the spy before the feature.
+import * as automationArmedModule from '../../../services/automationArmed';
+import * as automationEditorHostModule from '../../../services/automationEditorHost';
 import {
     __resetAutomationEditorHostForTest,
+    getOpenAutomationDraft,
     getOpenAutomationRuleId,
     openAutomationEditorFor,
 } from '../../../services/automationEditorHost';
@@ -80,6 +93,13 @@ function flyoutRows(item: ContextMenuItem): ContextMenuFlyoutRow[] {
     return typeof rows === 'function' ? rows('') : rows;
 }
 
+/** Installs a `saveAutomation` mock on `window.electronAPI`, for "Add to an existing automation". */
+function installSaveApi(): jest.Mock {
+    const saveAutomation = jest.fn(() => Promise.resolve({ id: 'r1', previousUpdatedAt: null }));
+    (window as unknown as { electronAPI: unknown }).electronAPI = { saveAutomation };
+    return saveAutomation;
+}
+
 describe('the shared indicator and menu section', () => {
     let container: HTMLDivElement;
     let root: Root;
@@ -100,6 +120,7 @@ describe('the shared indicator and menu section', () => {
         __resetAutomationArmedForTest();
         __resetAutomationEditorHostForTest();
         clearAutomationEditorGuard();
+        delete (window as unknown as { electronAPI?: unknown }).electronAPI;
     });
 
     const render = async (node: React.ReactNode) => {
@@ -151,11 +172,45 @@ describe('the shared indicator and menu section', () => {
         expect(container.querySelector('.au-armed')).toBeNull();
     });
 
-    it('hides the menu section entirely when nothing is armed', async () => {
+    it('still renders the section — with no `(0)` in its label — when nothing is armed', async () => {
+        // The old cut hid the whole section at zero. Now there is always something to do (create a
+        // rule, or join an existing one), so the header row must still be there, and its count must
+        // read as "nothing", not as the literal digit zero.
         seedTwoRules();
         await render(<AutomationMenuSection terminalId="tm-other" onDismiss={() => {}} />);
 
+        const header = container.querySelector('.context-menu-item') as HTMLButtonElement;
+        expect(header).not.toBeNull();
+        expect(header.textContent).not.toMatch(/\(0\)/);
+    });
+
+    it('renders the section for a pane with no terminal as nothing at all', async () => {
+        // `terminalId === null` is the one case that still hides completely — a pane with no
+        // terminal has nothing to automate, armed or not.
+        await render(<AutomationMenuSection terminalId={null} onDismiss={() => {}} />);
         expect(container.querySelector('.context-menu-item')).toBeNull();
+    });
+
+    it('offers both footer actions whether or not anything is armed', async () => {
+        seedTwoRules();
+
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const armedActionLabels = [...container.querySelectorAll('.au-menu-action')]
+            .map((el) => el.textContent);
+        expect(armedActionLabels.some((t) => t?.includes('New automation for this terminal'))).toBe(true);
+        expect(armedActionLabels.some((t) => t?.includes('Add to an existing automation'))).toBe(true);
+
+        // Re-rendering with a different `terminalId` reuses the same component instance (same
+        // position in the tree), so `expanded` is already `true` from the click above — clicking
+        // the header again would toggle it back closed rather than opening it.
+        await render(<AutomationMenuSection terminalId="tm-other" onDismiss={() => {}} />);
+        const unarmedActionLabels = [...container.querySelectorAll('.au-menu-action')]
+            .map((el) => el.textContent);
+        expect(unarmedActionLabels.some((t) => t?.includes('New automation for this terminal'))).toBe(true);
+        expect(unarmedActionLabels.some((t) => t?.includes('Add to an existing automation'))).toBe(true);
     });
 
     it('opens the editor for the rule that was clicked, and closes the menu first', async () => {
@@ -249,8 +304,10 @@ describe('the shared indicator and menu section', () => {
             );
         });
 
+        // The two footer actions ("New automation…", "Add to an existing automation") now render
+        // alongside the armed rules, so only the first two rows are the rules under test here.
         const rendered = [...document.querySelectorAll('.context-menu-flyout-row')];
-        expect(rendered.map((r) => r.querySelector('.context-menu-flyout-label')!.textContent))
+        expect(rendered.slice(0, 2).map((r) => r.querySelector('.context-menu-flyout-label')!.textContent))
             .toEqual(['Watch the build', 'Answer the prompt']);
         expect(rendered[0].querySelector('.context-menu-flyout-detail')!.textContent)
             .toBe('Armed · waiting');
@@ -262,12 +319,298 @@ describe('the shared indicator and menu section', () => {
         expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves the terminal-area menu untouched when nothing is armed', async () => {
-        // A parent row over an empty panel is the item that looks live and does nothing. The
-        // spread at the call site is what turns this empty array into no row at all.
+    it('still offers ONE item for an unarmed terminal, with no `(0)` in its label', async () => {
+        // The old cut returned `[]` here — nothing armed meant nothing to show. Now there is always
+        // something behind the item (create a rule, join an existing one), so it must still be
+        // offered, worded as "nothing", not as the literal count zero.
         seedTwoRules();
-        expect(automationMenuItems('tm-other')).toEqual([]);
+        const items = automationMenuItems('tm-other');
+        expect(items).toHaveLength(1);
+        expect(items[0].label).not.toMatch(/\(0\)/);
+        expect(flyoutRows(items[0])).toEqual([]);
+    });
+
+    it('never offers anything for a pane with no terminal', async () => {
+        // A parent row over an empty panel is the item that looks live and does nothing. `null`
+        // means there is no terminal to automate at all, so this is the one case that still spreads
+        // in as no row.
+        seedTwoRules();
         expect(automationMenuItems(null)).toEqual([]);
+    });
+
+    it('the empty row distinguishes "nothing armed" from "nothing matched"', async () => {
+        seedTwoRules();
+        const items = automationMenuItems('tm-other');
+        const emptyRowFn = items[0].submenu!.emptyRow as (q: string) => ContextMenuFlyoutRow;
+        expect(emptyRowFn('').label).toBe('No automation is armed on this terminal');
+        expect(emptyRowFn('nope').label).toBe("No automations match 'nope'");
+    });
+
+    it('the footer actions are present in both the armed and unarmed cases', async () => {
+        seedTwoRules();
+        for (const terminalId of ['tm-1', 'tm-other']) {
+            const items = automationMenuItems(terminalId);
+            const footer = items[0].submenu!.footerRows!;
+            expect(footer.map((r) => r.label)).toEqual([
+                'New automation for this terminal',
+                'Add to an existing automation',
+            ]);
+        }
+    });
+
+    it('"New automation for this terminal" opens a draft targeting this terminal, disabled', async () => {
+        seedTwoRules();
+        const items = automationMenuItems('tm-9');
+        const newRow = items[0].submenu!.footerRows!.find((r) => r.id === 'new-automation')!;
+        newRow.onSelect!();
+
+        const draft = getOpenAutomationDraft();
+        expect(draft).not.toBeNull();
+        expect(draft!.targetMode).toBe('pinned');
+        expect(draft!.targetIds).toEqual(['tm-9']);
+        expect(draft!.enabled).toBe(false);
+    });
+
+    it('"Add to an existing automation" lists only pinned-mode rules', async () => {
+        const pinned: AutomationRule = {
+            ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [],
+        };
+        __seedAutomationArmedForTest(
+            [pinned, { ...rule('r2', 'Criterion rule'), targetMode: 'rule', targetIds: [] }],
+            { rules: {} },
+        );
+        installSaveApi();
+
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        const children = addRow.children!;
+        expect(children.map((c) => c.label)).toEqual(['Pinned rule']);
+
+        children[0].onSelect!();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        const api = (window as unknown as { electronAPI: { saveAutomation: jest.Mock } }).electronAPI;
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        const [savedRule] = api.saveAutomation.mock.calls[0];
+        // The WHOLE payload, against the fixture with only `targetIds` moved. "Every other field
+        // rides through untouched, via the spread" is the write's own claim, and three sampled
+        // fields cannot hold it: a mutant that dropped `graph`, flipped `enabled`, or rebuilt the
+        // object from a handful of keys satisfies `targetIds` + `name` + `targetMode` and then
+        // upserts a rule that no longer does anything.
+        expect(savedRule).toEqual({ ...pinned, targetIds: ['tm-9'] });
+    });
+
+    /**
+     * **The row's rule is re-resolved at CLICK time, so a deleted rule cannot be resurrected.**
+     *
+     * `save_automation` is an unconditional upsert with no version token — deliberately, per
+     * `automation_commands.rs` — so writing the copy a menu captured when it opened INSERTS a rule
+     * another window has since deleted. Two halves, asserted separately because they fail apart: no
+     * write at all, and a notice saying why, since a menu row that silently does nothing is the
+     * failure this whole feature's docs keep refusing.
+     */
+    it('writes nothing, and says so, when the rule was deleted while the menu was open', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        const saveAutomation = installSaveApi();
+        // Spying through the NAMESPACE only works while the transform emits `ns.fn(...)` at the
+        // menu's call site — see the note at this file's imports for how that goes green rather
+        // than red if it ever stops.
+        const toast = jest
+            .spyOn(automationEditorHostModule, 'toastAutomationNotice')
+            .mockResolvedValue(undefined);
+
+        // Assembled while the rule existed…
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        expect(addRow.children!.map((c) => c.label)).toEqual(['Pinned rule']);
+        // …deleted in another window before the row was clicked.
+        __seedAutomationArmedForTest([], { rules: {} });
+
+        addRow.children![0].onSelect!();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(saveAutomation).not.toHaveBeenCalled();
+        expect(toast).toHaveBeenCalledTimes(1);
+        expect(toast.mock.calls[0][0]).toMatch(/no longer exists/i);
+
+        toast.mockRestore();
+    });
+
+    /**
+     * …and the same re-resolution is what keeps the write from CLOBBERING an edit made elsewhere.
+     *
+     * The upsert takes whatever object it is handed, so a stale copy silently reverts every field
+     * another window changed while the menu sat open. Asserted as exact equality against the LIVE
+     * rule, because that is the only form that catches "some fields are fresh and some are stale" —
+     * a spread of the captured rule with a re-resolved `name` patched in would pass a name check.
+     */
+    it('saves the rule as it is NOW, not as the menu captured it', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        const saveAutomation = installSaveApi();
+
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+
+        // Another window renames the rule, switches it off and rewrites the message it sends.
+        const edited: AutomationRule = {
+            ...rule('r1', 'Renamed elsewhere'),
+            targetMode: 'pinned',
+            targetIds: [],
+            enabled: false,
+            graph: {
+                parse: { find: 'y', literal: null },
+                cond: { kind: 'text', op: null, threshold: null },
+                action: { message: 'edited elsewhere', submit: false },
+            },
+        } as unknown as AutomationRule;
+        __seedAutomationArmedForTest([edited], { rules: {} });
+
+        addRow.children![0].onSelect!();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(saveAutomation).toHaveBeenCalledTimes(1);
+        expect(saveAutomation.mock.calls[0][0]).toEqual({ ...edited, targetIds: ['tm-9'] });
+    });
+
+    /**
+     * **The addable list is LIVE on an unarmed terminal** — the case the section exists for.
+     *
+     * `useArmedAutomations`' snapshot for a terminal with nothing armed on it is
+     * `automationArmed`'s module constant `EMPTY`, whose identity is stable by design, so a
+     * `reindex()` → `emit()` re-renders this component through that hook exactly never. A list read
+     * bare from `getAutomationRules()` during render therefore froze at the render that opened the
+     * menu: a rule created, deleted or retargeted in another window stayed invisible for as long as
+     * the menu was up. The re-seed below emits on the same store and changes nothing else.
+     */
+    it('follows rules created and deleted elsewhere while the menu is open', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'First rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        await render(<AutomationMenuSection terminalId="tm-9" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const addToggle = [...container.querySelectorAll('.au-menu-action')]
+            .find((el) => el.textContent?.includes('Add to an existing automation')) as HTMLButtonElement;
+        await act(async () => addToggle.click());
+        // Nothing is armed on `tm-9`, so every `.au-menu-rule-name` on screen is an addable row.
+        expect([...container.querySelectorAll('.au-menu-rule-name')].map((n) => n.textContent))
+            .toEqual(['First rule']);
+
+        await act(async () => {
+            __seedAutomationArmedForTest(
+                [{ ...rule('r2', 'Second rule'), targetMode: 'pinned', targetIds: [] }],
+                { rules: {} },
+            );
+        });
+
+        expect([...container.querySelectorAll('.au-menu-rule-name')].map((n) => n.textContent))
+            .toEqual(['Second rule']);
+    });
+
+    /**
+     * **A refused write must be heard.** Both call sites invoke `addTerminalToRule` as
+     * `void addTerminalToRule(…)` from a row that dismisses its own menu, so before this guard a
+     * rejected `saveAutomation` had nowhere at all to land: the user clicked "Add to <rule>", the
+     * menu closed, and the terminal was simply never watched. `save_automation` genuinely refuses —
+     * the store's own docs call a `SQLITE_BUSY` against the 30 s scrollback flush routine.
+     *
+     * Both halves are asserted, because they fail apart: a toast with a stale re-index still tells
+     * the pane badge a write happened that did not.
+     */
+    it('says so when the save is refused, and does not report the write as done', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        const saveAutomation = jest.fn(() => Promise.reject(new Error('database is locked')));
+        (window as unknown as { electronAPI: unknown }).electronAPI = { saveAutomation };
+        const toast = jest
+            .spyOn(automationEditorHostModule, 'toastAutomationNotice')
+            .mockResolvedValue(undefined);
+        const refresh = jest
+            .spyOn(automationArmedModule, 'refreshAutomationArmed')
+            .mockImplementation(() => {});
+
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        addRow.children![0].onSelect!();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(toast).toHaveBeenCalledTimes(1);
+        // The rule is named, so the message is about a thing the user just clicked rather than a
+        // generic failure they cannot place.
+        expect(toast.mock.calls[0][0]).toContain('Pinned rule');
+        expect(toast.mock.calls[0][0]).toContain('database is locked');
+        expect(refresh).not.toHaveBeenCalled();
+
+        toast.mockRestore();
+        refresh.mockRestore();
+    });
+
+    /** ...and the success path stays silent, so the toast means something when it appears. */
+    it('says nothing when the save succeeds, and re-indexes once', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        installSaveApi();
+        const toast = jest
+            .spyOn(automationEditorHostModule, 'toastAutomationNotice')
+            .mockResolvedValue(undefined);
+        const refresh = jest
+            .spyOn(automationArmedModule, 'refreshAutomationArmed')
+            .mockImplementation(() => {});
+
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        addRow.children![0].onSelect!();
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(toast).not.toHaveBeenCalled();
+        expect(refresh).toHaveBeenCalledTimes(1);
+
+        toast.mockRestore();
+        refresh.mockRestore();
+    });
+
+    it('skips a pinned rule that already watches this terminal', async () => {
+        __seedAutomationArmedForTest(
+            [
+                { ...rule('r1', 'Already watching'), targetMode: 'pinned', targetIds: ['tm-9'] },
+                { ...rule('r2', 'Not yet watching'), targetMode: 'pinned', targetIds: [] },
+            ],
+            { rules: {} },
+        );
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        expect(addRow.children!.map((c) => c.label)).toEqual(['Not yet watching']);
+    });
+
+    it('names the reason when no rule can be added to', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r2', 'Criterion rule'), targetMode: 'rule', targetIds: [] }],
+            { rules: {} },
+        );
+        const items = automationMenuItems('tm-9');
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        expect(addRow.children).toHaveLength(1);
+        expect(addRow.children![0].disabled).toBe(true);
+        expect(addRow.children![0].label).toMatch(/criterion/i);
     });
 
     it('refuses to open a second editor while one is already mounted', async () => {

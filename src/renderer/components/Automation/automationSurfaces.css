@@ -82,3 +82,19 @@
     font-size: 11px;
     color: var(--text-tertiary, #969696);
 }
+
+/* "New automation for this terminal" / "Add to an existing automation" — the two actions that
+   keep the accordion useful when nothing is armed. Plain `.context-menu-item` rows otherwise;
+   this only marks them as the always-available tier under the (possibly empty) rule list, the
+   way `.au-menu-rule` marks a rule row. */
+.au-menu-action {
+    color: var(--text-secondary, #b0b0b0);
+}
+
+/* "No automation is armed…" / "No automations can be added to…" — an inert line, not a button,
+   so it never claims to be clickable. Same left inset as a rule row so the panel doesn't jump. */
+.au-menu-empty {
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--text-tertiary, #969696);
+}
