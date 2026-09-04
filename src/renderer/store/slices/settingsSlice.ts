@@ -33,6 +33,37 @@ export interface Theme {
 // aliases needed, which would otherwise show as confusing duplicate options.
 export type TerminalFontWeight = '300' | '400' | '500' | '600' | '700' | '800' | '900';
 
+// One saved, reusable piece of terminal input (plan/029). `text` is inserted verbatim
+// (paste, never appends Enter). `folder` is a plain string on the item, not a separate
+// entity (D6) — one level only (D7); absent/'' is unfiled.
+export interface Snippet {
+  id: string;
+  /** Menu row. Blank → truncated first line of `text`. */
+  label?: string;
+  text: string;
+  folder?: string;
+  tags?: string[];
+  createdAt: number;
+}
+
+/**
+ * Validates a hand-editable config.json entry before it reaches the store (plan/029 link 8).
+ * Requires `id`/`text` as strings; `label`/`folder` are string-or-absent; `tags` an array of
+ * strings or absent. `createdAt` is intentionally NOT checked here — a missing/invalid one is
+ * defaulted by the caller rather than rejecting an otherwise-good record.
+ */
+export function isValidSnippet(x: unknown): x is Snippet {
+  if (!x || typeof x !== 'object') return false;
+  const s = x as Record<string, unknown>;
+  if (typeof s.id !== 'string' || typeof s.text !== 'string') return false;
+  if (s.label !== undefined && typeof s.label !== 'string') return false;
+  if (s.folder !== undefined && typeof s.folder !== 'string') return false;
+  if (s.tags !== undefined) {
+    if (!Array.isArray(s.tags) || !s.tags.every((t) => typeof t === 'string')) return false;
+  }
+  return true;
+}
+
 export const TERMINAL_FONT_WEIGHTS: ReadonlyArray<{ value: TerminalFontWeight; label: string }> = [
   { value: '300', label: 'Light (300)' },
   { value: '400', label: 'Normal (400)' },
@@ -98,6 +129,10 @@ interface SettingsState {
   // pane, that pane adopts this scheme over its tab/global schema. Global and
   // persisted; see docs/plan/007-agent-color-schemes-plan.md.
   agentColorSchemes: Record<string, string>;
+  // Saved reusable terminal inputs (plan/029), shown in the context menu's Snippets flyout
+  // and the Settings "Snippets" panel. Persisted via config.json (`settings.snippets`),
+  // applies live — no Save button for this category.
+  snippets: Snippet[];
   // Backlog 011: command history suggestion popup (capture + popup). Default on.
   // Independent of scrollback history persistence (backlog 009).
   commandSuggestions: boolean;
@@ -183,6 +218,7 @@ const initialState: SettingsState = {
   colorSchemaId: DEFAULT_COLOR_SCHEMA_ID,
   nonFocusedPaneOpacity: 50,
   agentColorSchemes: {},
+  snippets: [],
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
@@ -422,6 +458,73 @@ const settingsSlice = createSlice({
       }
     },
 
+    // Bulk-replace the whole snippets list (hydration, import, D9).
+    setSnippets: (state, action: PayloadAction<Snippet[]>) => {
+      state.snippets = action.payload;
+      if (window.electronAPI) {
+        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
+        // is revoked once this reducer returns, and setConfigValue's async
+        // JSON.stringify would then throw "proxy has been revoked" (silently
+        // swallowed by updateConfig → the list never persisted, lost on restart).
+        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      }
+    },
+
+    addSnippet: (state, action: PayloadAction<Snippet>) => {
+      state.snippets.push(action.payload);
+      if (window.electronAPI) {
+        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
+        // is revoked once this reducer returns, and setConfigValue's async
+        // JSON.stringify would then throw "proxy has been revoked" (silently
+        // swallowed by updateConfig → the list never persisted, lost on restart).
+        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      }
+    },
+
+    // Merges `patch` into the matching record; no-op on an unknown id.
+    updateSnippet: (state, action: PayloadAction<{ id: string; patch: Partial<Snippet> }>) => {
+      const target = state.snippets.find((s) => s.id === action.payload.id);
+      if (!target) return;
+      Object.assign(target, action.payload.patch);
+      if (window.electronAPI) {
+        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
+        // is revoked once this reducer returns, and setConfigValue's async
+        // JSON.stringify would then throw "proxy has been revoked" (silently
+        // swallowed by updateConfig → the list never persisted, lost on restart).
+        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      }
+    },
+
+    removeSnippet: (state, action: PayloadAction<string>) => {
+      state.snippets = state.snippets.filter((s) => s.id !== action.payload);
+      if (window.electronAPI) {
+        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
+        // is revoked once this reducer returns, and setConfigValue's async
+        // JSON.stringify would then throw "proxy has been revoked" (silently
+        // swallowed by updateConfig → the list never persisted, lost on restart).
+        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      }
+    },
+
+    // Bulk rename: every snippet whose folder === `from` moves to `to`. `to === ''`
+    // unfiles them (consequence of D6 — folder is just a repeated string on the item).
+    renameSnippetFolder: (state, action: PayloadAction<{ from: string; to: string }>) => {
+      const { from, to } = action.payload;
+      for (const s of state.snippets) {
+        if (s.folder === from) {
+          if (to === '') delete s.folder;
+          else s.folder = to;
+        }
+      }
+      if (window.electronAPI) {
+        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
+        // is revoked once this reducer returns, and setConfigValue's async
+        // JSON.stringify would then throw "proxy has been revoked" (silently
+        // swallowed by updateConfig → the list never persisted, lost on restart).
+        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      }
+    },
+
     // Bulk-replace the whole keybindings map. Used on config-load hydration
     // (App.tsx) and as the discard-revert target from the Shortcuts settings
     // category's dirty-tracking baseline.
@@ -530,6 +633,11 @@ export const {
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,
+  setSnippets,
+  addSnippet,
+  updateSnippet,
+  removeSnippet,
+  renameSnippetFolder,
   setCustomKeybindings,
   setCustomKeybinding,
   resetCustomKeybinding,

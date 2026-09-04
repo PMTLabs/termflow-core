@@ -172,4 +172,52 @@ describe('commandHistoryService cwd-relevant ranking (Stream 4)', () => {
     commandHistoryService.record('newcmd', 'c:/other');
     expect(commandHistoryService.match('c', { cwd: 'c:/proj/a' })[0]).toBe('curl x'); // global fallback
   });
+
+  describe('recent() — browse list, no typed query', () => {
+    it('respects limit', async () => {
+      loadCommandHistory.mockResolvedValue(['a', 'b', 'c', 'd']);
+      await commandHistoryService.hydrate();
+      expect(commandHistoryService.recent({ limit: 2 })).toEqual(['a', 'b']);
+    });
+
+    it('plain recency order with a cold cache (no cwd)', async () => {
+      await commandHistoryService.hydrate(); // curl x, cargo build, git status
+      expect(commandHistoryService.recent()).toEqual(['curl x', 'cargo build', 'git status']);
+      expect(loadCommandDirUsage).not.toHaveBeenCalled();
+    });
+
+    it('plain recency order with a cold cache (cwd given but never loaded)', async () => {
+      await commandHistoryService.hydrate();
+      expect(commandHistoryService.recent({ cwd: 'c:/unknown' })).toEqual([
+        'curl x',
+        'cargo build',
+        'git status',
+      ]);
+    });
+
+    it('re-ranks by directory affinity with a warm cache', async () => {
+      loadCommandHistory.mockResolvedValue(['a-cmd', 'b-cmd', 'c-cmd']);
+      await commandHistoryService.hydrate();
+      loadCommandDirUsage.mockResolvedValue([
+        { command: 'c-cmd', dir: 'c:/proj/a', useCount: 1, lastUsedAt: 1 },     // exact
+        { command: 'b-cmd', dir: 'c:/proj/a/sub', useCount: 1, lastUsedAt: 2 }, // descendant
+        { command: 'a-cmd', dir: 'c:/proj', useCount: 1, lastUsedAt: 3 },       // ancestor
+      ]);
+      await commandHistoryService.ensureDirLoaded('c:/proj/a');
+      expect(commandHistoryService.recent({ cwd: 'c:/proj/a' })).toEqual(['c-cmd', 'b-cmd', 'a-cmd']);
+    });
+
+    it('empty history returns []', async () => {
+      loadCommandHistory.mockResolvedValue([]);
+      await commandHistoryService.hydrate();
+      expect(commandHistoryService.recent()).toEqual([]);
+    });
+
+    it('does not mutate the underlying history array', async () => {
+      loadCommandHistory.mockResolvedValue(['x', 'y', 'z']);
+      await commandHistoryService.hydrate();
+      commandHistoryService.recent({ limit: 1 });
+      expect(commandHistoryService.recent()).toEqual(['x', 'y', 'z']);
+    });
+  });
 });

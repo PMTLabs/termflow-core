@@ -3,7 +3,7 @@ import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
 import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
-import { pasteToTerminal } from '@termflow/terminal-core';
+import { insertTextIntoTerminal } from './insertTextIntoTerminal';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
 import { resolveKeyboardTerminalId } from './keyboardTerminal';
@@ -458,15 +458,9 @@ export class InputHandler {
     }
 
     if (targetId) {
-      // Route through xterm (cacheKey === terminalId) so multi-line pastes get
-      // bracketed-paste markers + CRLF→CR normalization — CLIs (Claude Code, Gemini)
-      // then treat the whole paste as one literal block instead of submitting each
-      // line. Falls back to a raw PTY write if the terminal isn't currently mounted.
-      if (!pasteToTerminal(targetId, text)) {
-        terminalService.writeToTerminal(targetId, text).catch(err => {
-          console.error('Failed to paste to terminal:', err);
-        });
-      }
+      // Insertion itself (xterm route + raw-write fallback) lives in the shared
+      // helper — see insertTextIntoTerminal.ts for why the xterm route matters.
+      insertTextIntoTerminal(targetId, text);
     } else {
       console.warn('InputHandler: Could not determine target terminal for paste');
     }

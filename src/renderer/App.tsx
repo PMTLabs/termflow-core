@@ -35,6 +35,8 @@ import {
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
+  setSnippets,
+  isValidSnippet,
   setCustomKeybindings,
   setKeepRunningInBackground,
   setNotifySoundEnabled,
@@ -595,6 +597,16 @@ const App: React.FC = () => {
         }
         if (config.agentColorSchemes && typeof config.agentColorSchemes === 'object') {
           dispatch(setAgentColorSchemes(config.agentColorSchemes));
+        }
+        if (Array.isArray(config.snippets)) {
+          // Hand-editable config.json — validate each entry rather than trusting the
+          // array wholesale, so one malformed record doesn't drop every snippet.
+          dispatch(setSnippets(
+            config.snippets.filter(isValidSnippet).map((s: any) => ({
+              ...s,
+              createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+            }))
+          ));
         }
         if (config.customKeybindings && typeof config.customKeybindings === 'object') {
           // Drop any actionId not in the current registry (stale config from a
