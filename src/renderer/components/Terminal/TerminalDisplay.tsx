@@ -9,13 +9,16 @@ import { ContextMenu } from './ContextMenu';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
+import { SnippetDialog } from '../UI/SnippetDialog';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
+import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
+import { insertTextIntoTerminal } from '../../services/insertTextIntoTerminal';
 import { terminalService } from '../../services/TerminalService';
 import { termDiag, isTermDiagEnabled, setTermDiag } from '../../utils/diag';
 import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
@@ -29,7 +32,7 @@ import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
-import { setAgentColorScheme, removeAgentColorScheme } from '../../store/slices/settingsSlice';
+import { setAgentColorScheme, removeAgentColorScheme, addSnippet } from '../../store/slices/settingsSlice';
 import { addToast } from '../../store/slices/uiSlice';
 import { listen } from '@tauri-apps/api/event';
 import { isAbsolutePath, joinCwd } from '../../utils/pathResolve';
@@ -112,6 +115,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // never renders its own TerminalDisplay (there is exactly one instantiation
   // site, TerminalPane.tsx), it only borrows this engine's context menu.
   const { paneMuted, tabMuted, effectiveMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
+  // plan/029 link 9: MUST be a live store read, never a hard-coded list — the
+  // Snippets flyout (and Settings' own CRUD panel, T7) both read this same slice.
+  const snippets = useSelector((s: RootState) => s.settings.snippets);
+  const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
   const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -794,6 +801,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         },
       ] : []),
       { type: 'separator' as const },
+      // plan/029 §6. Command History ABOVE Snippets (stated acceptance criterion).
+      // Both ungated — they must work while a TUI/CLI is running (P1), same class
+      // as Copy/Paste/Clear/Mute above: they act on the terminal's own PTY write
+      // path via `insertTextIntoTerminal`, not on anything pane-tree-specific.
+      buildCommandHistoryMenuItem({
+        cwd: getCwdSnapshot(terminalId),
+        insert: (command) => insertTextIntoTerminal(terminalId, command),
+      }),
+      buildSnippetsMenuItem({
+        snippets,
+        insert: (text) => insertTextIntoTerminal(terminalId, text),
+        onAddNew: () => setSnippetDialogOpen(true),
+      }),
+      { type: 'separator' as const },
       {
         label: 'Clear',
         icon: '🧹',
@@ -914,6 +935,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           onClose={() => setSchemaPicker(null)}
         />
       )}
+      {/* plan/029 §6 — opened by the Snippets flyout's "Add New Snippet" footer row.
+          Create mode only here (`snippet={null}`); editing lives in the Settings
+          panel (T7). Never dispatches itself — this component owns the choice of
+          `addSnippet` vs. `updateSnippet`. */}
+      <SnippetDialog
+        isOpen={snippetDialogOpen}
+        snippet={null}
+        snippets={snippets}
+        onSave={(snippet) => {
+          dispatch(addSnippet(snippet));
+          setSnippetDialogOpen(false);
+        }}
+        onCancel={() => setSnippetDialogOpen(false)}
+      />
     </div>
   );
 };
