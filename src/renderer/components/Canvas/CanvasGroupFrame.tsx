@@ -3,6 +3,7 @@ import {
   CanvasGroupModel, counterScale, labelScale, labelMaxWidth, LABEL_TOP, LABEL_LEFT,
 } from './canvasSelectors';
 import { drawnFrameRect } from './canvasLayout';
+import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { useCanvasMetrics } from './canvasMetricsContext';
 
 /**
@@ -62,6 +63,14 @@ export const CanvasGroupFrame: React.FC<{
         title={`Zoom in to ${group.title}`}
       >
         <span className="canvas-gchip-title">{group.title}</span>
+        {/* The tab-level armed count (`plan/028` item D), on the CHIP only.
+            A collapsed chip is the whole tab standing in for its terminals, so it is the one place
+            on the canvas where the per-node badges are not on screen to say it. The frame's label
+            deliberately gets none: it `overflow: hidden`s and ellipsises a long tab name, so a
+            badge appended inside it would be silently clipped away exactly when the title is long
+            — and at that zoom every node inside the frame is drawing its own badge already, which
+            is the more precise answer. */}
+        <AutomationArmedForTerminals terminalIds={group.nodeIds} />
         <span className="canvas-gchip-count">
           {group.nodeIds.length} {group.nodeIds.length === 1 ? 'terminal' : 'terminals'}
         </span>

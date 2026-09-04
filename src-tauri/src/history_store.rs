@@ -89,6 +89,12 @@ impl HistoryStore {
 
     fn open(path: &Path) -> rusqlite::Result<Connection> {
         let conn = Connection::open(path)?;
+        // SQLite's default busy handler is NONE, so a write that lands while another connection holds
+        // the lock fails instantly with SQLITE_BUSY. That was survivable while this file had two
+        // writers; plan 028's automation store is a third, and its saves and log trims take the write
+        // lock at times the user is actively doing something. Without this, the 30 s scrollback flush
+        // can be dropped outright. Matches `automation_store::init`.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS terminal_history (
                 renderer_id TEXT PRIMARY KEY,

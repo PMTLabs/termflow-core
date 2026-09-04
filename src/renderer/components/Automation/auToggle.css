@@ -1,0 +1,63 @@
+/**
+ * The ONE `.au-tog` switch, imported by both owners.
+ *
+ * It lives in its own file because there used to be two definitions of this class — one in
+ * `Settings/Automations/AutomationsPanel.css`, one in `Automation/AutomationEditor.css` — and the
+ * cascade could not resolve them. Each moved the knob with a DIFFERENT property: the panel with
+ * `left: 15px`, the editor with `transform: translateX(16px)`. Different properties do not compete,
+ * so in the editor (which loads both) they COMPOSED: the knob was pushed to 15 + 16 = 31px inside a
+ * 32px track and hung off the right-hand end of the switch.
+ *
+ * Specificity was never going to save this. `.au-editor .au-tog` outranks `.au-tog` on every
+ * property they both declare, and the bug lived entirely in the property only ONE of them declared.
+ * So the fix is not a stronger selector, it is one owner: both stylesheets import this file and
+ * neither may restate `.au-tog`.
+ */
+
+.au-tog {
+    position: relative;
+    /* 34 border-box − 2 border = a 32px padding box, which is the containing block for the knob
+       below. Every number in this file is derived from that 32, so read them as a set. */
+    width: 34px;
+    height: 18px;
+    flex: none;
+    border: 1px solid #3a3c44;
+    border-radius: 999px;
+    background: #26282f;
+    cursor: pointer;
+    transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.au-tog::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #7d818c;
+    /* `left` alone, never `left` AND `transform` — see the note at the top of this file. */
+    transition: left 0.14s ease, background 0.14s ease;
+}
+
+.au-tog[aria-checked='true'] {
+    background: rgba(63, 185, 80, 0.22);
+    border-color: #2f6b39;
+}
+
+/* 32 padding box − 2 right gap − 12 knob = 18, which mirrors the 2px left gap exactly. */
+.au-tog[aria-checked='true']::after {
+    left: 18px;
+    background: #3fb950;
+}
+
+.au-tog:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.au-tog:focus-visible {
+    outline: 2px solid #4da6e0;
+    outline-offset: 1px;
+}

@@ -1,3 +1,9 @@
+// The automation event payloads live beside their event-name constants in
+// `services/automationEvents.ts` — a `.d.ts` cannot hold runtime values, and the whole
+// point of those constants is that they are imported rather than spelled inline. The
+// runtime payload is also what `get_automation_runtime` returns, so it is needed here.
+import type { AutomationStatePayload } from '../services/automationEvents';
+
 // Faithful styled snapshot of a terminal's current visible screen, used for
 // reconnect/hydration. Shared by the Tauri and browser bridges.
 export interface TerminalSnapshot {
@@ -154,6 +160,11 @@ export interface ElectronAPI {
    * bridges backed by a real terminal registry implement it.
    */
   setTerminalOwningTab?: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
+  /** Push the tab/pane title this window shows for a terminal down to the backend, keyed by the
+   *  durable `tm-` LEAF. Writes `Terminal.display_label`, never `Terminal.name` — `name` is on the
+   *  wire in `/api/terminals` and is what MCP's `get_terminal_detail` returns, so changing what it
+   *  HOLDS would change what agents see. See services/terminalLabelSync.ts (plan 028 §4.2). */
+  setTerminalDisplayLabel?: (rendererTerminalId: string, label: string) => Promise<void>;
   // P0a active-window routing: which window receives API/MCP-created terminals.
   // Optional — only the Tauri bridge implements it (browser bridge is single-window).
   getActiveWindow?: () => Promise<string>;
@@ -352,10 +363,251 @@ export interface ElectronAPI {
   // into the Rust AppState atomic that the window-close/exit guard reads. Tauri-only
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
+
+  // Terminal Automations (Plan 028) — the eleven commands of `automation_commands.rs`,
+  // in the order that file declares them. All optional and all Tauri-only: the store is
+  // SQLite in the desktop process, so the browser host throws rather than pretending.
+  // `origin` is the window label, carried so a `saved` log line can name which window
+  // made the change (§3.5, GUI 19) — never for concurrency control.
+  listAutomations?: () => Promise<AutomationRule[]>;
+  getAutomationRuntime?: () => Promise<AutomationStatePayload>;
+  loadAutomationLog?: (
+    ruleId: string | null,
+    newestFirst: boolean,
+    limit: number,
+  ) => Promise<AutomationLogEntry[]>;
+  listWatchableTerminals?: (
+    ruleId: string | null,
+    includeIds: string[] | null,
+  ) => Promise<WatchableTerminal[]>;
+  dryRunAutomation?: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
+  saveAutomation?: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
+  deleteAutomation?: (id: string, origin: string) => Promise<boolean>;
+  duplicateAutomation?: (id: string, origin: string) => Promise<AutomationRule>;
+  setAutomationEnabled?: (id: string, enabled: boolean, origin: string) => Promise<void>;
+  resetAutomation?: (id: string, origin: string) => Promise<void>;
+  /** `terminalId: null` re-arms every pair this rule watches. */
+  rearmAutomation?: (ruleId: string, terminalId: string | null) => Promise<void>;
 }
 
 declare global {
   interface Window {
     electronAPI: ElectronAPI;
   }
+}
+
+// --- Terminal Automations (Plan 028) ---
+//
+// The mirror of `src-tauri/src/automation_store.rs`. THE STORE'S SERDE NAMES ARE THE AUTHORITY:
+// `draftFromRule`/`ruleFromDraft` in the editor is the only place these and the editor's draft meet,
+// and a round-trip test asserts draft -> wire -> row -> wire -> draft is identity for all six
+// templates. The boundary audit found a draft whose `runMode` was silently defaulted onto a column
+// called `runsOnce`, which would have saved successfully and produced a rule that does nothing.
+//
+// The event names and their payloads are in `services/automationEvents.ts`, not here: a `.d.ts` cannot
+// hold runtime values, and the whole point of those constants is that they are imported rather than
+// spelled inline.
+
+export type AutomationCriterion =
+  | 'commandContains'
+  | 'tabNameContains'
+  | 'workingFolderUnder'
+  | 'terminalIdIs'
+  | 'allTerminals';
+
+export type AutomationTargetMode = 'pinned' | 'rule';
+
+/** `newOutput` = the last 200 lines. `onScreen` = the visible rows only. */
+export type AutomationReadMode = 'newOutput' | 'onScreen';
+
+export type AutomationCadence = 'onOutput' | 'timer';
+
+export type AutomationParsePreset = 'percentage' | 'number' | 'errorCode' | 'exactWords' | 'custom';
+
+/** `brackets` = capture group 1 (or a group named `value`). `whole` = group 0. */
+export type AutomationKeep = 'brackets' | 'whole';
+
+/**
+ * Stored, not inferred from whether `op` is set: it selects a different READ DEPTH for re-arming, and
+ * that must not turn on a data-entry accident. These are the mockup's own two values.
+ */
+export type AutomationCondKind = 'number' | 'text';
+
+export type AutomationCompareOp = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq';
+
+/** Q2: a recipient's arm state does not change — re-arm belongs to the observation. */
+export type AutomationSendTo = 'matched' | 'all';
+
+export interface AutomationMonitorStep {
+  read: AutomationReadMode;
+  cadence: AutomationCadence;
+  /** Only meaningful for `cadence: 'timer'`. */
+  everyMs: number;
+}
+
+export interface AutomationParseStep {
+  preset: AutomationParsePreset;
+  /** `exactWords` only: what the user typed, before regex-escaping into `find`. */
+  literal?: string | null;
+  find: string;
+  keep: AutomationKeep;
+}
+
+export interface AutomationCondStep {
+  kind: AutomationCondKind;
+  /** Absent when `kind === 'text'`. */
+  op?: AutomationCompareOp | null;
+  /** Absent when `kind === 'text'`. */
+  threshold?: number | null;
+}
+
+export interface AutomationActionStep {
+  message: string;
+  sendTo: AutomationSendTo;
+  /**
+   * The mockup's `action.enter`. `false` leaves the text in the composer unsubmitted — which the
+   * *Answer a confirmation* template requires: it types `1` and must NOT press Enter.
+   */
+  submit: boolean;
+  /** Q1's hybrid. `'default'` rather than route A's own `'copilot'`, which navigates history in a shell. */
+  cliType: string;
+}
+
+/** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */
+export interface AutomationGraph {
+  monitor: AutomationMonitorStep;
+  parse: AutomationParseStep;
+  cond: AutomationCondStep;
+  action: AutomationActionStep;
+  /**
+   * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —
+   * it rides in the rule so that ONE save writes the whole document. Absent on any rule written
+   * before the field existed; `draftFromRule` falls back to the default arrangement.
+   */
+  layout?: Record<string, { x: number; y: number }>;
+}
+
+export interface AutomationRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** R6: a single-run rule that has fired never evaluates again, enforced in memory the moment it does. */
+  runsOnce: boolean;
+
+  targetMode: AutomationTargetMode;
+  criterion: AutomationCriterion;
+  criterionValue: string;
+  /** `false` freezes the matched set, so a terminal the user excluded cannot join later. */
+  followNew: boolean;
+  /** Durable `tm-` leaves. Never `pc-` process ids, which are per-run. */
+  targetIds: string[];
+
+  completedAt?: number | null;
+  verboseUntil?: number | null;
+  /** Explicit, because a duplicate must land directly under its original. */
+  sortOrder: number;
+  schemaVersion: number;
+
+  graph: AutomationGraph;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type AutomationLogKind =
+  | 'sent'
+  | 'held'
+  | 'reArmed'
+  | 'noMatch'
+  | 'failed'
+  | 'enabled'
+  | 'disabled'
+  | 'saved'
+  | 'testRun'
+  | 'check';
+
+export interface AutomationLogEntry {
+  id: number;
+  ruleId: string;
+  terminalId?: string | null;
+  /**
+   * A SNAPSHOT written with the entry, never a display-time lookup (R17). The
+   * `failed - the terminal closed` line is written after the terminal is gone, so a lookup returns
+   * nothing for exactly the line the feature uses to prove itself — and a rename would rewrite history.
+   */
+  terminalName?: string | null;
+  kind: AutomationLogKind;
+  detail: string;
+  at: number;
+}
+
+/**
+ * One step of a dry run, as the editor's Test panel draws it. Mirrors
+ * `automation_engine::dry::StepTrace`.
+ */
+export interface DryRunStep {
+  /** `monitor` | `parse` | `cond` | `action` — always all four, always in the graph's order. */
+  kind: 'monitor' | 'parse' | 'cond' | 'action';
+  /**
+   * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
+   * not be drawn as one.
+   */
+  status: 'ok' | 'failed' | 'skipped';
+  detail: string;
+}
+
+/**
+ * What one dry run found. `unreadable` is its own verdict rather than a *would not fire*: the rule
+ * was never judged at all, and telling a user their pattern does not match when nothing was read
+ * sends them off to edit a pattern that is fine.
+ */
+export interface DryRunReport {
+  verdict: 'would-fire' | 'would-not-fire' | 'unreadable';
+  terminalId: string;
+  /** Resolved through `label_at`, exactly as a log row's is. Never invented (§2.8). */
+  terminalName?: string | null;
+  steps: DryRunStep[];
+}
+
+/**
+ * What a save produced. **`id` is the authority**, because a save can MINT one.
+ *
+ * A draft the editor has never saved carries `id: ''`, and `save_rule` INSERTs the id verbatim — so
+ * `save_automation` mints one and hands it back. The editor must adopt it: without that, its next
+ * Save mints a second id and one draft becomes two rows.
+ */
+export interface AutomationSaveResult {
+  id: string;
+  /** The `updatedAt` the row held before this write, or `null` when this was an insert. */
+  previousUpdatedAt: number | null;
+}
+
+/**
+ * One row of the §04 picker.
+ *
+ * **The field names are `automation::roster::WatchableTerminal`'s serde output, verbatim** — §7.7's
+ * rule that the store's names are the authority, applied to a return type rather than an argument.
+ *
+ * This mirror originally read `{ id, label, folder, alive, busy }`, taken from §7.8's prose row model
+ * rather than from the struct M2 actually built. Three of the five were wrong: `id` is `terminalId`,
+ * `folder` is `cwd`, and **`busy` does not exist at all**. Nothing type-checked it — `invoke<T>` is an
+ * unchecked assertion — so the picker drew blank id chips and blank folders, ticking a row pushed
+ * `undefined` into `targetIds`, the "N open" bar always said zero, and ▶ Test always answered *"no
+ * terminal is open to test against"*. M4's review verified all eleven commands' ARGUMENTS
+ * argument-by-argument and never their return shapes; this is that gap, at the one command whose
+ * return the renderer reads field by field.
+ *
+ * `alive: false` rows still carry `label` and `cwd` from the rule's own snapshot — that is the entire
+ * reason `automation_targets` keeps one, and the mockup draws the dead row with its name and folder.
+ */
+export interface WatchableTerminal {
+  /** The durable `tm-` leaf. The same string the rule stores, the log shows and the MCP tools use. */
+  terminalId: string;
+  /** The `pc-` process id of the run it is currently attached to, or null when it is not open. */
+  processId?: string | null;
+  label?: string | null;
+  shell?: string | null;
+  pid?: number | null;
+  /** The working folder, from OSC or the process snapshot. `folder` in §7.8's prose. */
+  cwd?: string | null;
+  alive: boolean;
 }

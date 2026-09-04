@@ -27,6 +27,30 @@ interface ConfirmDialogProps {
   confirmMnemonic?: string;
   /** Bare-letter shortcut + underlined mnemonic for the cancel button, e.g. "A". */
   cancelMnemonic?: string;
+  /**
+   * An optional THIRD action, sitting between Cancel and the primary — the reversible middle
+   * ground, offered before the destructive one: *"Switch off instead"* beside *Delete*.
+   *
+   * Both props are required together and both are optional: with neither, this dialog renders
+   * exactly the two buttons it always has, which is what keeps every existing caller unchanged.
+   * Generalising a dialog for a second caller with every addition optional is precedented here —
+   * `UnsavedChangesDialog`'s own doc comment records the same move.
+   */
+  secondaryText?: string;
+  onSecondary?: () => void;
+  /**
+   * Is the SECONDARY action the destructive one?
+   *
+   * Distinct from `destructive`, which describes the PRIMARY. The two are independent because a
+   * dialog can put the safe action first and the dangerous one beside it: *"Save and close"* as the
+   * primary with *"Discard"* next to it throws work away while the primary keeps it, so the red
+   * belongs on the secondary and the primary must stay blue.
+   *
+   * Renders `.confirm-btn.destructive` — the GHOST red that has existed in the stylesheet, with a
+   * comment describing exactly this case, since before anything applied it. Ghost rather than solid,
+   * so it reads as the dangerous ALTERNATIVE and not as a second primary competing for the eye.
+   */
+  secondaryDestructive?: boolean;
 }
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
@@ -40,6 +64,9 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   destructive = false,
   confirmMnemonic,
   cancelMnemonic,
+  secondaryText,
+  onSecondary,
+  secondaryDestructive = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -90,6 +117,14 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
+          {secondaryText && onSecondary && (
+            <button
+              className={`confirm-btn ${secondaryDestructive ? 'destructive' : 'secondary'}`}
+              onClick={onSecondary}
+            >
+              {secondaryText}
+            </button>
+          )}
           <button
             className={`confirm-btn ${destructive ? 'danger' : 'primary'}`}
             data-dialog-confirm

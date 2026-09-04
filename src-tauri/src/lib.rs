@@ -12,6 +12,14 @@ pub mod net_ports;
 pub mod window_registry;
 mod history_store;
 pub mod canvas_store;
+// Terminal Automations (plan 028). ONE `automation*` prefix for the whole feature, chosen so it
+// cannot be confused with `spawn_pipeline_watchdog` below — that one watches the output PIPELINE for
+// a stalled consumer and is unrelated.
+pub mod automation;
+pub mod automation_commands;
+pub mod automation_engine;
+pub mod automation_store;
+pub mod automation_validation;
 pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
@@ -1469,12 +1477,15 @@ pub fn run() {
             // returns an Option — there is no path to hand it when the DB is unavailable,
             // and the store stays disabled, reporting Err rather than an empty graph.
             state.canvas_store.init(&db);
+            state.automation_store.init(&db);
             // Backlog 011: cap the global command history at startup.
             state.history_store.prune_commands(5000);
             // Stream 4: per-directory usage has higher (command,dir) cardinality; cap larger.
             state.history_store.prune_dir_usage(20000);
         }
         spawn_history_flush_task(state.clone());
+        // Terminal Automations (plan 028 §2.1): the tap, the evaluator and the targeting tick.
+        automation_engine::spawn(state.clone());
 
         Ok(())
     })
@@ -1482,6 +1493,18 @@ pub fn run() {
         commands::create_terminal,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
+        commands::set_terminal_display_label,
+        automation_commands::list_automations,
+        automation_commands::get_automation_runtime,
+        automation_commands::load_automation_log,
+        automation_commands::list_watchable_terminals,
+        automation_commands::dry_run_automation,
+        automation_commands::save_automation,
+        automation_commands::delete_automation,
+        automation_commands::duplicate_automation,
+        automation_commands::set_automation_enabled,
+        automation_commands::reset_automation,
+        automation_commands::rearm_automation,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::update_available,
@@ -1759,6 +1782,21 @@ pub fn run() {
     .run(|app_handle, event| {
         if let RunEvent::Exit = event {
             if let Some(state) = app_handle.try_state::<AppState>() {
+                // Plan 028 §2.1: the ONLY writer of the automation engine's stop flag, and it runs
+                // FIRST. The three loops check it at the top of every iteration and a send checks it
+                // before its first write, so a quit leaves every send either unstarted or complete —
+                // but only for the sends that had not started when the flag was set. Below
+                // `flush_all_history` (30 s of scrollback) and two sidecar shutdowns, the engine went
+                // on evaluating and could START a send through the whole of them.
+                //
+                // There is no log flush to perform here. Plan §7.5's table planned an internal batch
+                // buffer flushed every 2 s and synchronously on Exit; M1 shipped
+                // `AutomationStore::append` as write-through — the INSERT happens inside the call —
+                // and did not record the change. Write-through is the better end state (a row that
+                // exists is already committed, and there is no 2 s window a crash can lose) and it
+                // makes §7.5's actual requirement — each entry keeping its own decision timestamp
+                // rather than a flush-time `now` — trivially true. Corrected in the plan.
+                state.automations.stop();
                 // Persist every terminal's scrollback before the process dies.
                 flush_all_history(&state);
                 // Gracefully shutdown MCP server on app exit

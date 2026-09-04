@@ -13,6 +13,7 @@ import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { usePaneMuteState } from './usePaneMuteState';
 import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
+import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -273,6 +274,11 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🔍</span>
         Find…
       </button>
+      {/* The automations armed on THIS terminal, and the way into each one's editor
+          (`plan/028` item D). Grouped with Find and Mute rather than given a section of its own:
+          all three act on this pane's terminal, unlike the tab/window/split items above them.
+          The component is shared verbatim with `CanvasNodeMenu` — see its header. */}
+      <AutomationMenuSection terminalId={terminalId ?? null} onDismiss={onClose} />
       <button
         className="context-menu-item"
         onClick={() => runAndClose(toggleMute)}

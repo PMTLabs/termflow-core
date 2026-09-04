@@ -11,6 +11,20 @@ export interface PaneNode {
   children?: PaneNode[];
   terminalId?: string;
   name?: string; // Custom name for the pane
+  /**
+   * Did a PERSON type `name`, or did a create path default it?
+   *
+   * `name` is never empty in practice — every create path fills it in (`'Terminal'`,
+   * `'Terminal Right'`, the tab's unique title, a surviving leaf's fallback) — so "the pane has a
+   * name" cannot mean "the user named this pane". `terminalLabelSync` needs exactly that
+   * distinction: a pane name the user typed outranks the tab title, a DEFAULT one must not, or
+   * renaming a tab changes nothing the Automations picker, the activity log's Name column or the
+   * `Tab name contains` criterion can see. Set only by `renamePanes`, which is the sole user-rename
+   * path (the pane header, and Canvas Mode's sidebar).
+   *
+   * The same shape `tabsSlice` already uses for `titleIsCustom`, for the same reason.
+   */
+  nameIsCustom?: boolean;
   shellType?: string; // Shell type for terminal panes
   // Per-pane notification mute. undefined/false = notifications behave normally;
   // true = this pane's terminal activity never rings the bell / toast / OS
@@ -520,6 +534,9 @@ const panesSlice = createSlice({
       const findAndRenamePane = (node: PaneNode): boolean => {
         if (node.id === paneId) {
           node.name = name;
+          // This is the ONLY path a person renames a pane by, so it is the only place that may
+          // claim the name is theirs. See `PaneNode.nameIsCustom`.
+          node.nameIsCustom = true;
           return true;
         }
 

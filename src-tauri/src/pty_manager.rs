@@ -920,6 +920,7 @@ pub fn spawn_terminal(
         // Mirrors the injected-hook decision above, so reattach can re-arm the
         // command-suggest prompt gate (see shell_emits_prompt_osc).
         prompt_hook: is_powershell && !has_command_flag,
+        display_label: None,
     });
 
     // Spawn thread to read output
@@ -1100,6 +1101,31 @@ pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) ->
     }
 
     (current_pid, current_name)
+}
+
+/// The full COMMAND LINE of the deepest foreground descendant of `parent_pid`.
+///
+/// `Command contains` reads this rather than the process NAME because an npm-installed agent is
+/// `node.exe` — which is exactly why `detect_agent` reads the cmdline to disambiguate. Matching the
+/// name would select every node process on the machine at once.
+///
+/// It projects off `get_foreground_process_info`'s returned pid so the youngest-child descent is not
+/// implemented a third time. `None` when sysinfo cannot report the process (a protected or cross-arch
+/// process on Windows) — and `None` must read as "no match", never as "matches everything". Falls back
+/// to the executable name when argv is empty, which is what sysinfo returns for some system
+/// processes. Plan 028 §4.4.
+pub fn foreground_command_line(parent_pid: u32, sys: &System) -> Option<String> {
+    let (pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
+    let process = sys.process(Pid::from(pid as usize))?;
+    let argv: Vec<String> = process
+        .cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    if argv.is_empty() {
+        return Some(process.name().to_string_lossy().to_string());
+    }
+    Some(argv.join(" "))
 }
 
 /// Derive a friendly label for the foreground program in a pane, from a
@@ -1660,6 +1686,30 @@ mod cwd_tests {
         let label_only = get_foreground_agent(pid, &sys);
         let with_exe = get_foreground_agent_with_exe(pid, &sys);
         assert_eq!(label_only, with_exe.clone().map(|(a, _)| a));
+    }
+
+    /// `Command contains` matches against this, and it must be the COMMAND LINE rather than the
+    /// process name: an npm-installed agent is `node.exe`, so matching the name selects every node
+    /// process on the machine at once. Run against this test binary, whose own argv is known.
+    #[test]
+    fn foreground_command_line_returns_argv_not_just_the_exe_name() {
+        let sys = System::new_all();
+        let me = std::process::id();
+        let line = super::foreground_command_line(me, &sys)
+            .expect("this process is in its own snapshot");
+        assert!(!line.is_empty());
+        // The exe name appears, and so does at least one thing that is NOT the exe name — which is
+        // what separates a cmdline from `p.name()`.
+        let exe_stem = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        assert!(
+            line.to_lowercase().contains(&exe_stem.to_lowercase()),
+            "expected {:?} to name this executable ({:?})",
+            line,
+            exe_stem
+        );
     }
 
     /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid

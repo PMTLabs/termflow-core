@@ -27,6 +27,12 @@ import { SplitButton } from '../UI/SplitButton';
 import { connectionStatus } from './connectionStatus';
 import { PeersPanel } from './PeersPanel';
 import { AboutLegalPanel } from './AboutLegalPanel';
+import { AutomationsPanel } from './Automations/AutomationsPanel';
+import {
+    discardAutomationEditorDraft,
+    isAutomationEditorDirty,
+    saveAutomationEditorDraft,
+} from '../../services/automationEditorGuard';
 import './SettingsPage.css';
 
 const IS_DEV = process.env.NODE_ENV === 'development';
@@ -121,7 +127,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'updates' | 'about';
+    // SEVEN sites enumerate this union, not six, and a missed one is a silently dead category:
+    // this type, CATEGORY_LABELS, isTracked, the `categories` array, the deep-link handler's
+    // duplicate union, renderActiveCategory's switch, and (for Automations) the editor's
+    // dirty-guard hook-up in requestCategoryChange. Plan 028 §5.1 lists them.
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
     // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
@@ -183,14 +193,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
         notifications: 'Notifications', startup: 'Startup & Integration',
-        profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
+        profiles: 'Shell Profiles', automations: 'Automations',
+        shortcuts: 'Shortcuts', connections: 'Connections',
         peers: 'Peers', updates: 'Updates', about: 'About & Legal',
     };
     // Peers/Connections own their own live flow; About & Legal and Updates are
     // action-only (no saved fields); Startup and Notifications apply live
     // (persisted on change) — none are dirty-tracked.
+    //
+    // `isTracked` is an EXCLUSION list, so a new category is dirty-tracked BY DEFAULT. Left out,
+    // `snapshotCategory('automations', …)` falls off the end of an exhaustive switch and returns
+    // `undefined` at runtime while type-checking clean. Automation rules live in SQLite and the
+    // tracker snapshots a subset of the settings Redux slice and undoes by re-dispatching settings
+    // setters, so it has nothing to snapshot and nothing to revert — the editor owns its own dirty
+    // guard instead (§5.2, `automationEditorGuard.ts`), and §10.30 asserts that split as a contract.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -320,11 +338,30 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         setBaseline(isTracked(cat) ? snapshotCategory(cat, settings) : null);
     }, [settings]);
 
+    // Which surface raised the unsaved prompt, because Save and Discard mean different things to
+    // each: for a settings category the edits are already applied live and Discard re-dispatches the
+    // baseline, while for an automation draft nothing has been written at all and only the editor
+    // knows how to persist or drop it. Routing both through one handler would have made "Save" on a
+    // dirty automation draft save the *settings* and then throw the draft away.
+    const [unsavedOwner, setUnsavedOwner] = useState<'settings' | 'automations'>('settings');
+
     // Guard the internal category switch.
     const requestCategoryChange = useCallback((target: SettingsCategory) => {
         if (target === activeCategory) return;
         const go = () => { setActiveCategory(target); resnapshot(target); };
+        // Site 7 (§5.1) and the blocker BOTH independent verifiers found (§5.2): Automations is
+        // excluded from `isTracked`, so without this clause one ordinary click on another sidebar
+        // category silently discarded an unsaved rule. The deep-link handler above and the tab-close
+        // guard below reach the same code, which is why the check lives here rather than in the
+        // sidebar's onClick.
+        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
+            setUnsavedOwner('automations');
+            setPendingAction(() => go);
+            setShowUnsaved(true);
+            return;
+        }
         if (isDirty()) {
+            setUnsavedOwner('settings');
             setPendingAction(() => go);
             setShowUnsaved(true);
         } else {
@@ -338,7 +375,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
-            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'updates' || c === 'about';
+            c === 'profiles' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
+            c === 'peers' || c === 'updates' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
             requestCategoryChange(pending);
@@ -366,16 +404,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
+        if (unsavedOwner === 'automations') {
+            // The navigation is CONDITIONAL on the save succeeding. A refused save that still
+            // navigated would unmount the editor and take the draft with it — the loss this whole
+            // guard exists to prevent, arrived at by way of its own Save button. The prompt is
+            // re-raised so the user is not left believing the work was stored.
+            void saveAutomationEditorDraft().then((saved) => {
+                if (!saved) {
+                    setShowUnsaved(true);
+                    return;
+                }
+                const act = pendingAction; setPendingAction(null); act?.();
+            });
+            return;
+        }
         // Changes already persisted live; just clear dirty for the current category.
         setBaseline(isTracked(activeCategory) ? snapshotCategory(activeCategory, settings) : null);
         const act = pendingAction; setPendingAction(null); act?.();
-    }, [activeCategory, settings, pendingAction]);
+    }, [activeCategory, settings, pendingAction, unsavedOwner]);
 
     const handleUnsavedDiscard = useCallback(() => {
         setShowUnsaved(false);
-        revertToBaseline();
+        if (unsavedOwner === 'automations') {
+            discardAutomationEditorDraft();
+        } else {
+            revertToBaseline();
+        }
         const act = pendingAction; setPendingAction(null); act?.();
-    }, [revertToBaseline, pendingAction]);
+    }, [revertToBaseline, pendingAction, unsavedOwner]);
 
     const handleUnsavedCancel = useCallback(() => {
         setShowUnsaved(false);
@@ -387,7 +443,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // callback always sees current state.
     const guardImplRef = useRef<(proceed: () => void) => boolean>(() => false);
     guardImplRef.current = (proceed: () => void) => {
+        // Closing the Settings TAB discards an unsaved automation draft exactly as switching
+        // category did (§5.2 names all three routes), so the same question is asked here.
+        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
+            setUnsavedOwner('automations');
+            setPendingAction(() => proceed);
+            setShowUnsaved(true);
+            return true;
+        }
         if (!isDirty()) return false;
+        setUnsavedOwner('settings');
         setPendingAction(() => proceed);
         setShowUnsaved(true);
         return true;
@@ -874,6 +939,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><path d="M9 13h6" /><path d="M9 17h3" />
+                </svg>
+            ),
+        },
+        {
+            id: 'automations',
+            label: 'Automations',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3.5" /><path d="M12 3v3" /><path d="M12 18v3" />
                 </svg>
             ),
         },
@@ -1907,6 +1981,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'notifications': return renderNotifications();
             case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
+            case 'automations': return <AutomationsPanel />;
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
