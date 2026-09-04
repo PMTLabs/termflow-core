@@ -52,10 +52,11 @@ impl<T> ProcSnapshot<T> {
         // and rebuilding is safe, so recover rather than propagating a panic into the evaluation loop.
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let fresh = guard.as_ref().is_some_and(|e| {
-            // A NEGATIVE age is not freshness. `saturating_sub` saturates at `i64::MIN`, not at zero,
-            // so a wall clock that moved backwards (an NTP correction, or a resume — both of which
-            // this app already handles) would otherwise pin one snapshot for the length of the
-            // correction and every `Command contains` rule would match the world as it was.
+            // A NEGATIVE age is not freshness, which is why this is a plain `-` inside a range
+            // check and NOT `saturating_sub`: that saturates at `i64::MIN`, not at zero, so a wall
+            // clock that moved backwards (an NTP correction, or a resume — both of which this app
+            // already handles) would read as freshly taken, pinning one snapshot for the length of
+            // the correction while every `Command contains` rule matched the world as it was.
             let age = now_ms - e.taken_at_ms;
             (0..self.ttl_ms).contains(&age)
         });

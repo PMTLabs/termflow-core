@@ -18,10 +18,26 @@ use crate::automation::roster::RosterRow;
 use crate::automation_store::{AutomationRule, Criterion, TargetMode};
 use crate::open_commands::to_native_path;
 
-/// Split a normalised path into components, dropping a trailing separator but **keeping a leading
-/// one**: `/a/b` and `a/b` are different paths and must not compare equal.
+/// Split a normalised path into components, dropping a trailing separator but **keeping the leading
+/// run**: `/a/b` and `a/b` are different paths and must not compare equal, and `\\\\server\\share` is a
+/// third thing again — so the leading run is kept up to two, which is exactly what distinguishes a
+/// UNC root from an absolute one.
+///
+/// An empty component ANYWHERE ELSE is a repeated separator and carries no path information:
+/// `/work//termflow` is `/work/termflow`. The three cwd sources this compares genuinely disagree
+/// about separators, so a doubled one is a spelling difference and must not become a component that
+/// no real path can ever match.
 fn components(path: &str) -> Vec<&str> {
-    let mut parts: Vec<&str> = path.split(['/', '\\']).collect();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut at_start = true;
+    for p in path.split(['/', '\\']) {
+        if !p.is_empty() {
+            at_start = false;
+            parts.push(p);
+        } else if at_start && parts.len() < 2 {
+            parts.push(p);
+        }
+    }
     while parts.len() > 1 && parts.last().is_some_and(|p| p.is_empty()) {
         parts.pop();
     }
@@ -41,10 +57,14 @@ fn same_component(a: &str, b: &str) -> bool {
 /// **Component-wise, never `starts_with`.** A string prefix makes `~/work/termflow-site` sit under
 /// `~/work/termflow`, and those are two different projects that sit side by side in the mockup.
 ///
-/// An empty `ancestor` is under nothing rather than an ancestor of everything: a criterion with no
-/// value must match no terminals, because the failure mode here is typing into the wrong one.
+/// **Neither side may be empty, and that is one guard with two halves.** An empty `ancestor` is an
+/// ancestor of nothing rather than of everything: a criterion with no value must match no terminals,
+/// because the failure mode here is typing into the wrong one. An empty `child` is under nothing for
+/// the mirror reason — a terminal whose cwd has not been resolved yet carries an empty string, and
+/// `components("")` is `[""]`, which is precisely the single component that `/` normalises to. Guard
+/// one side only and every unresolved terminal sits under a `Working folder is under /` rule.
 pub fn path_is_under(child: &str, ancestor: &str) -> bool {
-    if ancestor.trim().is_empty() {
+    if child.trim().is_empty() || ancestor.trim().is_empty() {
         return false;
     }
     let child_native = to_native_path(child.trim());
@@ -127,6 +147,13 @@ pub fn set_delta(previous: &BTreeSet<String>, next: &BTreeSet<String>) -> SetDel
 /// - **Rule without `follow_new`**: the set is **frozen** at whatever it first resolved to. A terminal
 ///   the user deliberately excluded cannot join later, and — the half a re-resolve would break — one
 ///   that closes and comes back is not silently dropped in between.
+///
+/// **An EMPTY previous set is not a resolution to freeze on**, and that is not a special case: an
+/// empty frozen set is the absence of a set, not a set, and freezing it makes `follow_new: false`
+/// mean "never watch anything, ever". The first targeting tick can easily land before session restore
+/// has registered a single terminal — the same t=0 emptiness §4.5's missing-target grace exists for —
+/// and "a previous set exists" cannot tell that apart from "this rule genuinely matches nothing".
+/// `a-live-set-is-not-existence`.
 pub fn watched_set(
     rule: &AutomationRule,
     rows: &[RosterRow],
@@ -135,7 +162,7 @@ pub fn watched_set(
     match rule.target_mode {
         TargetMode::Pinned => rule.target_ids.iter().cloned().collect(),
         TargetMode::Rule => match (rule.follow_new, previous) {
-            (false, Some(frozen)) => frozen.clone(),
+            (false, Some(frozen)) if !frozen.is_empty() => frozen.clone(),
             _ => resolve(rule.criterion, &rule.criterion_value, rows),
         },
     }
@@ -203,6 +230,19 @@ mod tests {
             // leaves it alone (`/a/b` would become `A:` and never reach this shape).
             ("/ab/c", "", false),
             ("/ab/c", "   ", false),
+            // ...and the OTHER half of that guard, which shipped missing. An unresolved cwd is under
+            // nothing, not under root: `components("")` is `[""]`, the very component `/` normalises
+            // to, so without the child half every terminal with no cwd yet matches a `/` rule.
+            ("", "/", false),
+            ("   ", "/", false),
+            ("", "/ab", false),
+            ("", "", false),
+            // A repeated separator is a spelling difference, not a component: the three cwd sources
+            // disagree about separators, and an empty inner component matches no real path segment.
+            ("/work//termflow/src", "/work/termflow", true),
+            ("~/work//termflow", "~/work/termflow", true),
+            // But a UNC root is not an absolute path with a stutter — the leading run is kept.
+            ("//server/share/x", "/server/share", false),
         ];
         for (child, ancestor, want) in cases {
             assert_eq!(
@@ -236,10 +276,16 @@ mod tests {
     }
 
     /// An absolute path and a relative one that spell the same components are different paths.
+    ///
+    /// **Two-letter segments, for the reason the list above already names**: on Windows a
+    /// single-letter first segment is read as a drive, so `/a/b` becomes `A:\\b` and neither
+    /// assertion would touch a leading empty component at all — the property this test is named for
+    /// would be untested on the platform it is developed on, and only red in CI. The list test three
+    /// functions above carries that fix; this one was the site of the class still missing it.
     #[test]
     fn a_leading_separator_is_part_of_the_path() {
-        assert!(!path_is_under("a/b", "/a"));
-        assert!(path_is_under("/a/b", "/a"));
+        assert!(!path_is_under("ab/c", "/ab"));
+        assert!(path_is_under("/ab/c", "/ab"));
     }
 
     // -----------------------------------------------------------------------------------------
@@ -406,12 +452,42 @@ mod tests {
         );
     }
 
-    /// A frozen rule that has never resolved must resolve once — freezing "nothing" forever would make
-    /// `follow_new: false` mean "never watch anything".
+    /// A frozen rule resolves until it has something to freeze.
+    ///
+    /// **The fixture has to vary the ROSTER as well as `previous`.** Freezing is a function of both,
+    /// and the version of this test that shipped only ever resolved against a populated roster — so
+    /// it asserted the first tick resolves and could not see that a first tick resolving to NOTHING
+    /// froze the rule dead for the session. A fixture that varies one dimension cannot test a
+    /// decision that reads two.
     #[test]
-    fn a_frozen_rule_resolves_on_its_first_tick() {
+    fn a_frozen_rule_resolves_until_it_has_something_to_freeze() {
+        let none: [RosterRow; 0] = [];
         let rows = [row(Some("tm-a"), Some("codex"), None, None)];
         let frozen = rule(TargetMode::Rule, Criterion::TabNameContains, "codex", false);
+
+        // Tick 1, before session restore has registered anything: nothing matches yet.
+        let first = watched_set(&frozen, &none, None);
+        assert!(first.is_empty());
+
+        // Tick 2, the terminals are up. An empty tick 1 is not a resolution, so this must resolve.
+        let second = watched_set(&frozen, &rows, Some(&first));
+        assert_eq!(
+            ids(second.clone()),
+            vec!["tm-a"],
+            "an empty first tick must not freeze the rule at nothing for the session"
+        );
+
+        // Tick 3: NOW it is frozen for real, and a newcomer does not join.
+        let more = [
+            row(Some("tm-a"), Some("codex"), None, None),
+            row(Some("tm-new"), Some("codex"), None, None),
+        ];
+        assert_eq!(ids(watched_set(&frozen, &more, Some(&second))), vec!["tm-a"]);
+
+        // And a terminal that closes is still not dropped — the half a re-resolve would break.
+        assert_eq!(ids(watched_set(&frozen, &none, Some(&second))), vec!["tm-a"]);
+
+        // The original property, unchanged: a first tick with a live roster resolves.
         assert_eq!(ids(watched_set(&frozen, &rows, None)), vec!["tm-a"]);
     }
 

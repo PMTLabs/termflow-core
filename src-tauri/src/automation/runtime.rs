@@ -102,7 +102,9 @@ impl AutomationRuntime {
     ///
     /// It deliberately does NOT touch `watched`: the targeting tick re-resolves the whole set every
     /// 2 s, and a stale leaf there costs at most one tick in which the evaluator finds it not live and
-    /// skips it — whereas removing it here would give `watched` a second writer.
+    /// skips it — whereas editing MEMBERSHIP here would give that the second writer. (Whole-rule
+    /// removal is a different thing and already has two: `forget_rule` drops the entry, which §7.8
+    /// requires on completion. What must stay single-writer is which leaves a live rule watches.)
     pub fn forget_terminal(&self, tm: &str) {
         self.arm.retain(|(_, t), _| t != tm);
         self.last_eval_ms.retain(|(_, t), _| t != tm);
@@ -176,6 +178,10 @@ impl AutomationRuntime {
         self.watched.insert(rule_id.to_string(), leaves);
     }
 
+    /// Deliberately NOT `Option`: nothing consumes the difference. `watched_set` re-resolves an
+    /// empty frozen set rather than treating it as a decision, so "never resolved" and "resolved to
+    /// nothing" produce the same behaviour, and a distinction no caller reads is the inert
+    /// scaffolding §2.1's own review finding is about.
     pub fn watched_for(&self, rule_id: &str) -> HashSet<String> {
         self.watched.get(rule_id).map(|e| e.value().clone()).unwrap_or_default()
     }
@@ -235,9 +241,11 @@ mod tests {
         }
         assert_eq!(rt.echoes_for("tm-test-2", 0), vec!["HANDOFF now".to_string()]);
 
-        // And nothing else: `dirty` is process-keyed and `watched` has one writer.
+        // And nothing else: `dirty` is process-keyed, and a leaf's MEMBERSHIP of a watched set has
+        // one writer — the targeting tick. (`forget_rule` removes whole entries; that is §7.8's
+        // completion path, not a second writer of membership.)
         assert!(rt.is_dirty("pc-test-1"), "forget_terminal must not touch the pc-keyed dirty map");
-        assert!(rt.watches("au-1", "tm-test-1"), "watched has ONE writer — the targeting tick");
+        assert!(rt.watches("au-1", "tm-test-1"), "membership has ONE writer — the targeting tick");
     }
 
     /// The paired negative: a PROCESS id passed to the leaf-keyed purge must find nothing. This is

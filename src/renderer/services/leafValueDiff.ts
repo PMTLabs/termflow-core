@@ -40,6 +40,11 @@ export interface LeafChange<V> {
  * A leaf that disappeared from `next` produces nothing — the backend forgets it when the
  * terminal is torn down, and a push for a leaf that no longer exists would be a no-op that
  * costs an invoke.
+ *
+ * **So a caller must never spell "this value was cleared" as absence.** Absence here means "not
+ * mine any more", the two are indistinguishable from inside this function, and the clear is the
+ * one of the pair that must reach the backend. Map the cleared state to a VALUE and let
+ * `firstSightNeedsPush` decide whether a leaf that arrives already cleared is worth an invoke.
  */
 export function diffLeafValues<V>(
   previous: LeafValues<V> | null,

@@ -37,9 +37,12 @@ interface TabTitles {
 /**
  * Flatten every tab's pane tree into leaf -> label.
  *
- * A pane with a blank or whitespace-only name falls back to the tab title rather than pushing an
- * empty string: `label_at` treats an absence as "try the next source", and an empty string that
- * reached the backend would be stored as an empty label and beat the snapshot that exists for it.
+ * A pane with a blank or whitespace-only name falls back to the tab title. A leaf with neither is
+ * mapped to the EMPTY STRING and **not left out of the map**: leaving it out is what a leaf that has
+ * left this window looks like, and `diffLeafValues` deliberately says nothing about those — so a
+ * label the user CLEARED produced no push at all and the backend kept the stale one for the life of
+ * the terminal. The empty string is the value that clears it: `set_display_label` stores a blank as
+ * `None`, which is exactly the absence `label_at` needs in order to fall through to the next source.
  */
 export function collectLeafLabels(
   treesByTabId: Record<string, PaneNode | null>,
@@ -51,8 +54,7 @@ export function collectLeafLabels(
     if (!node) return;
     if (node.type === 'terminal' && node.terminalId) {
       const paneName = node.name?.trim();
-      const label = paneName || titleByTabId.get(tabId)?.trim() || '';
-      if (label) labels.set(node.terminalId, label);
+      labels.set(node.terminalId, paneName || titleByTabId.get(tabId)?.trim() || '');
     }
     node.children?.forEach((child) => walk(child, tabId));
   };
@@ -63,17 +65,23 @@ export function collectLeafLabels(
 /**
  * The label pushes this window owes the backend.
  *
- * **A leaf with no prior binding always pushes once**, unconditionally — unlike ownership, which
- * suppresses that case. Labels are not a `create_terminal` parameter, so suppressing the first
- * push would mean a brand-new solo terminal that is never split and never renamed has its label
- * pushed NEVER, and every log line and picker row for it stays blank forever. That is most first
- * terminals.
+ * **A leaf with no prior binding pushes once if it has a label to push** — unlike ownership, which
+ * suppresses that case whatever the value. Labels are not a `create_terminal` parameter, so
+ * suppressing every first push would mean a brand-new solo terminal that is never split and never
+ * renamed has its label pushed NEVER, and every log line and picker row for it stays blank forever.
+ * That is most first terminals.
+ *
+ * The one first sight worth suppressing is an EMPTY label: the backend's default already is no
+ * label, so pushing it would be one invoke per unlabelled pane at every startup to assert what is
+ * already true. A leaf that becomes empty LATER is a genuine clear and always pushes — that is the
+ * whole reason `collectLeafLabels` maps it to `''` rather than dropping it.
  */
 export function diffLabelChanges(
   previous: LeafLabels | null,
   next: LeafLabels,
 ): Array<{ rendererTerminalId: string; label: string }> {
-  return diffLeafValues(previous, next, () => true).map(({ rendererTerminalId, value }) => ({
+  const worthAFirstPush = (id: string): boolean => (next.get(id) ?? '') !== '';
+  return diffLeafValues(previous, next, worthAFirstPush).map(({ rendererTerminalId, value }) => ({
     rendererTerminalId,
     label: value,
   }));
@@ -95,7 +103,7 @@ interface LabelSyncStore {
  */
 let labelStore: LabelSyncStore | null = null;
 
-/** The last map this window pushed, so a re-assert can advance it rather than re-sending. */
+/** The last map this window pushed, so the next store change diffs against it rather than re-sending. */
 let lastLabels: LeafLabels | null = null;
 
 function push(rendererTerminalId: string, label: string): void {
@@ -125,8 +133,8 @@ export function reassertLabelAfterSpawn(rendererTerminalId: string): void {
   const label = collectLeafLabels(state.panes.treesByTabId, state.tabs.tabs).get(
     rendererTerminalId,
   );
-  // No entry means the pane left this window, or the tree has not been committed yet; either way
-  // this window has nothing to assert.
+  // Nothing to assert, in either of two ways: no entry means the pane left this window or the tree
+  // has not been committed yet, and an empty label means the backend's default is already right.
   if (!label) return;
   push(rendererTerminalId, label);
 }

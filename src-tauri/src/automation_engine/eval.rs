@@ -5,12 +5,15 @@
 //!
 //! ```text
 //! [pick the depth from the previous arm state] -> window text
-//!    -> strip live echo needles (M3, §2.6) -> extract -> coerce -> compare
-//!    -> condition_now: bool -> next_state
+//!    -> strip live echo needles (§2.6) -> extract -> coerce -> compare
+//!    -> Truth -> next_state
 //! ```
 //!
 //! Echo stripping happens BEFORE extraction, never after: a needle removed afterwards could not
-//! change which occurrence was "last", which is the whole point of the echo guard.
+//! change which occurrence was "last", which is the whole point of the echo guard. It is a
+//! **parameter of both entry points** rather than something the caller does first: a guard in the
+//! caller lets the next call site opt out by forgetting, and §2.6 is the failure that looks exactly
+//! like success. An empty slice says "no needles" out loud.
 //!
 //! Nothing here touches `AppState`. `AppState::new` takes an `AppHandle`, so anything reachable only
 //! through it is testable only behind `--features integration-tests`, which `Cargo.toml` says breaks
@@ -113,7 +116,8 @@ impl ArmState {
 pub enum Decision {
     /// First sight of this pair, or the condition went from unknown to true without a crossing.
     Armed,
-    /// Armed and still false. The ordinary outcome, and the only one the verbose gate can drop.
+    /// Armed and still false, **or a read that learned nothing, from any state**. The ordinary
+    /// outcome, and the only one the verbose gate can drop.
     Checked,
     /// The crossing. **The only decision that sends.**
     Sent,
@@ -130,28 +134,64 @@ impl Decision {
     }
 }
 
+/// What one read said about the condition.
+///
+/// **`Unknown` is not `false`.** A numeric read that found no value has learned nothing about that
+/// value, and `ArmState::Unseen` exists precisely because "never observed" and "observed below the
+/// threshold" are different facts (settled decision 7). Collapsing them one layer down re-introduces
+/// the same conflation: a rule whose value merely scrolled out of the read depth would re-arm as
+/// though it had dropped, and then send a second message the next time that same unchanged value is
+/// printed. That is "once per line" wearing "once per crossing"'s clothes, and §2.2c's promise that
+/// a numeric rule "re-arms when the newest PRINTED value drops" is only true with this distinction.
+///
+/// A PRESENCE read is never `Unknown`: the absence of the words IS the observation, which is the
+/// asymmetry the whole of §2.2c is built on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Truth {
+    True,
+    False,
+    /// The read carried no information: no match at all, or a match whose span is not a number.
+    Unknown,
+}
+
+impl Truth {
+    /// A comparison's answer. Only a real `Read::Value` ever reaches this.
+    pub fn from_compare(held: bool) -> Self {
+        if held {
+            Truth::True
+        } else {
+            Truth::False
+        }
+    }
+}
+
 /// The whole of R3, R4, R5 and R8, as one total function.
 ///
-/// | prev | condition now | next | decision | sends? |
+/// | prev | condition | next | decision | sends? |
 /// |---|---|---|---|---|
+/// | *any* | **unknown** | *unchanged* | `checked` | no |
 /// | `Unseen` | true | `Fired` | `armed` | **no** |
 /// | `Unseen` | false | `Armed` | `armed` | no |
 /// | `Armed` | false | `Armed` | `checked` | no |
 /// | `Armed` | true | `Fired` | **`sent`** | **yes** |
 /// | `Fired` | true | `Fired` | `held` | no |
 /// | `Fired` | false | `Armed` | `re-armed` | no |
-pub fn next_state(prev: ArmState, condition_now: bool, now_ms: i64) -> (ArmState, Decision) {
-    match (prev, condition_now) {
-        (ArmState::Unseen, true) => (ArmState::Fired { at_ms: now_ms }, Decision::Armed),
-        (ArmState::Unseen, false) => (ArmState::armed(), Decision::Armed),
+pub fn next_state(prev: ArmState, condition: Truth, now_ms: i64) -> (ArmState, Decision) {
+    match (prev, condition) {
+        // A read that learned nothing moves nothing. Answering `false` here is what made a numeric
+        // rule re-arm on a value that had merely scrolled away and then send again on the next print
+        // of that same unchanged value — see `Truth::Unknown`.
+        (prev, Truth::Unknown) => (prev, Decision::Checked),
+        (ArmState::Unseen, Truth::True) => (ArmState::Fired { at_ms: now_ms }, Decision::Armed),
+        (ArmState::Unseen, Truth::False) => (ArmState::armed(), Decision::Armed),
         // The `seen_fire` bit is CARRIED across a check, never recomputed: it is a fact about this
         // pair's history, and losing it would put the rule back to reading the deep window.
-        (prev @ ArmState::Armed { .. }, false) => (prev, Decision::Checked),
-        (ArmState::Armed { .. }, true) => (ArmState::Fired { at_ms: now_ms }, Decision::Sent),
+        (prev @ ArmState::Armed { .. }, Truth::False) => (prev, Decision::Checked),
+        (ArmState::Armed { .. }, Truth::True) => (ArmState::Fired { at_ms: now_ms }, Decision::Sent),
         // `at_ms` is carried, not refreshed: it records when the condition became true, and a rule
         // that has held for ten minutes must not look like it just fired.
-        (ArmState::Fired { at_ms }, true) => (ArmState::Fired { at_ms }, Decision::Held),
-        (ArmState::Fired { .. }, false) => (ArmState::re_armed(), Decision::ReArmed),
+        (ArmState::Fired { at_ms }, Truth::True) => (ArmState::Fired { at_ms }, Decision::Held),
+        (ArmState::Fired { .. }, Truth::False) => (ArmState::re_armed(), Decision::ReArmed),
     }
 }
 
@@ -304,7 +344,12 @@ fn depth_words(depth: ReadDepth) -> String {
 /// The two failure outcomes must read DIFFERENTLY: `Unparsed` is the one failure validation cannot
 /// catch — the pattern compiles, the capture is just the wrong span — so it is the dry run and this
 /// line that a user meets it through.
-pub fn read_detail(outcome: &Outcome, pattern: &str, depth: ReadDepth) -> String {
+pub fn read_detail(
+    outcome: &Outcome,
+    pattern: &str,
+    depth: ReadDepth,
+    decision: Decision,
+) -> String {
     match outcome {
         Outcome::Numeric(Read::NoMatch) => {
             format!("nothing matching `{}` {}", pattern, depth_words(depth))
@@ -313,9 +358,16 @@ pub fn read_detail(outcome: &Outcome, pattern: &str, depth: ReadDepth) -> String
             format!("matched, but `{}` is not a number", saw)
         }
         Outcome::Numeric(Read::Value(v)) => format!("last value {}", fmt_num(*v)),
-        Outcome::Presence(true) => match depth {
-            ReadDepth::VisibleScreen => format!("`{}` is still on screen", pattern),
-            ReadDepth::Window(n) => format!("`{}` matched in the last {} lines", pattern, n),
+        // "still" is a claim about a match this pair had ALREADY acted on. On the crossing itself
+        // the match is new, and a log line reading "still on screen" beside the message it just sent
+        // describes an engine that had been watching it for a while — which is the one thing a user
+        // reads that line to find out.
+        Outcome::Presence(true) => match (depth, decision) {
+            (ReadDepth::VisibleScreen, Decision::Held) => {
+                format!("`{}` is still on screen", pattern)
+            }
+            (ReadDepth::VisibleScreen, _) => format!("`{}` matched on screen", pattern),
+            (ReadDepth::Window(n), _) => format!("`{}` matched in the last {} lines", pattern, n),
         },
         Outcome::Presence(false) => match depth {
             ReadDepth::VisibleScreen => format!("`{}` is no longer on screen", pattern),
@@ -330,12 +382,36 @@ pub fn read_detail(outcome: &Outcome, pattern: &str, depth: ReadDepth) -> String
 // One evaluation
 // ---------------------------------------------------------------------------------------------
 
+/// Remove this terminal's live echo needles from the text before anything reads it (§2.6, layer 1).
+///
+/// The **last** occurrence of each needle, not all of them: a needle is a message this engine typed,
+/// and an earlier identical line the user typed themselves is genuine output. Needles are recorded
+/// against the TERMINAL rather than the rule, so overlapping rules recognise each other's injections
+/// — which is why this takes a flat slice and not a rule id.
+///
+/// M3 owns the map that produces this slice (cap 4, TTL 10 min, `normalise`d on record). What lands
+/// here is the step the pipeline in this module's header has always claimed happens before
+/// extraction — as a parameter of both entry points, so that claim is now structurally true rather
+/// than a convention a new caller can forget.
+pub fn strip_echoes(text: &str, echoes: &[String]) -> String {
+    let mut out = text.to_string();
+    for needle in echoes {
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(at) = out.rfind(needle.as_str()) {
+            out.replace_range(at..at + needle.len(), "");
+        }
+    }
+    out
+}
+
 /// Everything one evaluation of one `(rule, terminal)` pair decided.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Evaluation {
     pub depth: ReadDepth,
     pub outcome: Outcome,
-    pub condition_now: bool,
+    pub condition: Truth,
     pub next: ArmState,
     pub decision: Decision,
     pub detail: String,
@@ -346,56 +422,61 @@ pub struct Evaluation {
 /// `None` means the source had no text for that process id — the terminal is not live. Per §4.5 that
 /// is DORMANT, not dead: no evaluation, no log line, and the arm state is left exactly as it was.
 ///
-/// `text` arrives already stripped of this terminal's live echo needles by the caller (M3, §2.6),
-/// which is why stripping is not done here: doing it after extraction could not change which
-/// occurrence was last.
+/// `echoes` is this TERMINAL's live needles (§2.6). It is a required argument rather than something
+/// the caller strips first, because both entry points must honour the header's stated order and a
+/// caller that forgets produces a rule stuck in `Fired` on its own message — indistinguishable from
+/// working. Pass `&[]` when there are none.
 pub fn evaluate(
     graph: &AutomationGraph,
     re: &Regex,
+    echoes: &[String],
     prev: ArmState,
     src: &dyn ScreenSource,
     process_id: &str,
     now_ms: i64,
 ) -> Option<Evaluation> {
-    evaluate_text(graph, re, prev, &|d| src.tail(process_id, d), now_ms)
+    evaluate_text(graph, re, echoes, prev, &|d| src.tail(process_id, d), now_ms)
 }
 
-/// `evaluate` over an already-resolved reader, so the echo guard can wrap the text without a second
-/// `ScreenSource` implementation.
+/// `evaluate` over an already-resolved reader, for a caller that has the text by another route.
+/// Strips the same needles, for the same reason.
 pub fn evaluate_text(
     graph: &AutomationGraph,
     re: &Regex,
+    echoes: &[String],
     prev: ArmState,
     read: &dyn Fn(ReadDepth) -> Option<String>,
     now_ms: i64,
 ) -> Option<Evaluation> {
     let depth = depth_for(graph.cond.kind, graph.monitor.read, prev);
-    let text = read(depth)?;
+    let text = strip_echoes(&read(depth)?, echoes);
 
-    let (outcome, condition_now) = match graph.cond.kind {
+    let (outcome, condition) = match graph.cond.kind {
         CondKind::Text => {
             let hit = re.is_match(&text);
-            (Outcome::Presence(hit), hit)
+            (Outcome::Presence(hit), Truth::from_compare(hit))
         }
         CondKind::Number => {
             let value = extract(re, graph.parse.keep, &text);
             let now = match (&value, graph.cond.op, graph.cond.threshold) {
-                (Read::Value(v), Some(op), Some(t)) => compare(op, *v, t),
-                // A numeric rule with no operator or no threshold cannot be true of anything. It is a
-                // blocking validation problem, so this is unreachable through the enable path — but it
-                // must not read as "always fires" if it ever is reached.
-                _ => false,
+                (Read::Value(v), Some(op), Some(t)) => Truth::from_compare(compare(op, *v, t)),
+                // No value read, or a match whose span is not a number: nothing was learned, and
+                // `Unknown` says so rather than claiming the condition is false. A numeric rule with
+                // no operator or threshold cannot be true of anything either — that is a blocking
+                // validation problem and so unreachable through the enable path, and `Unknown` is the
+                // reading that neither fires nor spuriously re-arms if it is ever reached.
+                _ => Truth::Unknown,
             };
             (Outcome::Numeric(value), now)
         }
     };
 
-    let (next, decision) = next_state(prev, condition_now, now_ms);
+    let (next, decision) = next_state(prev, condition, now_ms);
     Some(Evaluation {
         depth,
-        detail: read_detail(&outcome, &graph.parse.find, depth),
+        detail: read_detail(&outcome, &graph.parse.find, depth, decision),
         outcome,
-        condition_now,
+        condition,
         next,
         decision,
     })
@@ -483,32 +564,47 @@ mod tests {
         Regex::new(p).unwrap()
     }
 
+    /// Said out loud at every call site that is not about the echo guard, so a reader can see which
+    /// tests exercise §2.6 and which deliberately do not.
+    const NO_ECHOES: &[String] = &[];
+
     // -----------------------------------------------------------------------------------------
     // §10.3 — the arm machine
     // -----------------------------------------------------------------------------------------
 
-    /// All six transitions as a TABLE, asserting the next state AND the decision AND whether it
-    /// sends. Three facts per row, because an implementation that returns the right state with the
-    /// wrong decision is exactly the bug that makes a crossing silent.
+    /// Every transition as a TABLE, asserting the next state AND the decision AND whether it sends.
+    /// Three facts per row, because an implementation that returns the right state with the wrong
+    /// decision is exactly the bug that makes a crossing silent.
+    ///
+    /// The `Unknown` rows are the ones that make "once per crossing" true of a numeric rule whose
+    /// value scrolled out of the read depth: from EVERY state, a read that learned nothing leaves the
+    /// state exactly where it was. An implementation folding `Unknown` into `false` — which is what
+    /// this shipped as — passes all eight of the other rows.
     #[test]
-    fn next_state_covers_all_six_transitions() {
+    fn next_state_covers_every_transition() {
         let f = ArmState::Fired { at_ms: 100 };
-        let cases: &[(ArmState, bool, ArmState, Decision, bool)] = &[
-            (ArmState::Unseen, true, ArmState::Fired { at_ms: 500 }, Decision::Armed, false),
-            (ArmState::Unseen, false, ArmState::armed(), Decision::Armed, false),
-            (ArmState::armed(), false, ArmState::armed(), Decision::Checked, false),
-            (ArmState::armed(), true, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
-            (f, true, ArmState::Fired { at_ms: 100 }, Decision::Held, false),
-            (f, false, ArmState::re_armed(), Decision::ReArmed, false),
+        let cases: &[(ArmState, Truth, ArmState, Decision, bool)] = &[
+            (ArmState::Unseen, Truth::True, ArmState::Fired { at_ms: 500 }, Decision::Armed, false),
+            (ArmState::Unseen, Truth::False, ArmState::armed(), Decision::Armed, false),
+            (ArmState::armed(), Truth::False, ArmState::armed(), Decision::Checked, false),
+            (ArmState::armed(), Truth::True, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
+            (f, Truth::True, ArmState::Fired { at_ms: 100 }, Decision::Held, false),
+            (f, Truth::False, ArmState::re_armed(), Decision::ReArmed, false),
             // The `seen_fire` bit survives a check, in both directions.
-            (ArmState::re_armed(), false, ArmState::re_armed(), Decision::Checked, false),
-            (ArmState::re_armed(), true, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
+            (ArmState::re_armed(), Truth::False, ArmState::re_armed(), Decision::Checked, false),
+            (ArmState::re_armed(), Truth::True, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
+            // A read that learned nothing moves nothing, from every state — in particular it does NOT
+            // re-arm a `Fired` pair, which is the spurious second send.
+            (ArmState::Unseen, Truth::Unknown, ArmState::Unseen, Decision::Checked, false),
+            (ArmState::armed(), Truth::Unknown, ArmState::armed(), Decision::Checked, false),
+            (ArmState::re_armed(), Truth::Unknown, ArmState::re_armed(), Decision::Checked, false),
+            (f, Truth::Unknown, ArmState::Fired { at_ms: 100 }, Decision::Checked, false),
         ];
         for (prev, cond, want_next, want_decision, want_sends) in cases {
             let (next, decision) = next_state(*prev, *cond, 500);
-            assert_eq!(next, *want_next, "state for {:?} + {}", prev, cond);
-            assert_eq!(decision, *want_decision, "decision for {:?} + {}", prev, cond);
-            assert_eq!(decision.sends(), *want_sends, "sends for {:?} + {}", prev, cond);
+            assert_eq!(next, *want_next, "state for {:?} + {:?}", prev, cond);
+            assert_eq!(decision, *want_decision, "decision for {:?} + {:?}", prev, cond);
+            assert_eq!(decision.sends(), *want_sends, "sends for {:?} + {:?}", prev, cond);
         }
     }
 
@@ -516,7 +612,7 @@ mod tests {
     /// while a terminal already reads 63% must arm, not type.
     #[test]
     fn a_first_sight_above_the_threshold_arms_and_never_sends() {
-        let (next, decision) = next_state(ArmState::Unseen, true, 7);
+        let (next, decision) = next_state(ArmState::Unseen, Truth::True, 7);
         assert_eq!(decision, Decision::Armed);
         assert!(!decision.sends(), "first sight must never send");
         assert_eq!(next, ArmState::Fired { at_ms: 7 });
@@ -526,11 +622,11 @@ mod tests {
     /// look like it just fired, so `held` carries the original stamp rather than refreshing it.
     #[test]
     fn holding_carries_the_original_fired_at_and_re_firing_takes_a_new_one() {
-        let (held, _) = next_state(ArmState::Fired { at_ms: 100 }, true, 9_000);
+        let (held, _) = next_state(ArmState::Fired { at_ms: 100 }, Truth::True, 9_000);
         assert_eq!(held, ArmState::Fired { at_ms: 100 }, "held must not refresh at_ms");
-        let (rearmed, _) = next_state(held, false, 9_500);
+        let (rearmed, _) = next_state(held, Truth::False, 9_500);
         assert_eq!(rearmed, ArmState::re_armed());
-        let (refired, d) = next_state(rearmed, true, 10_000);
+        let (refired, d) = next_state(rearmed, Truth::True, 10_000);
         assert_eq!(d, Decision::Sent);
         assert_eq!(refired, ArmState::Fired { at_ms: 10_000 }, "a new crossing takes a new stamp");
     }
@@ -559,7 +655,8 @@ mod tests {
         let mut state = ArmState::Unseen;
         let mut sends = 0;
         for (i, (v, want)) in values.iter().zip(expected.iter()).enumerate() {
-            let (next, decision) = next_state(state, compare(CompareOp::Gt, *v, 25.0), i as i64);
+            let (next, decision) =
+                next_state(state, Truth::from_compare(compare(CompareOp::Gt, *v, 25.0)), i as i64);
             assert_eq!(decision, *want, "step {} (ctx:{}%)", i, v);
             if decision.sends() {
                 sends += 1;
@@ -654,13 +751,15 @@ mod tests {
             assert_eq!(&extract(&r, Keep::Brackets, text), want, "coercing {:?}", text);
         }
 
-        // Both failures give `condition_now == false` and DISTINCT details.
+        // Both failures are `Truth::Unknown` — NOT false — and read DISTINCTLY.
         let depth = ReadDepth::Window(200);
-        let no_match = read_detail(&Outcome::Numeric(Read::NoMatch), "ctx:(\\d+)%", depth);
+        let d = Decision::Checked;
+        let no_match = read_detail(&Outcome::Numeric(Read::NoMatch), "ctx:(\\d+)%", depth, d);
         let unparsed = read_detail(
             &Outcome::Numeric(Read::Unparsed("63%".to_string())),
             "ctx:(\\d+)%",
             depth,
+            d,
         );
         assert_ne!(no_match, unparsed, "the two failure modes must not read the same");
         assert!(no_match.contains("nothing matching"), "{}", no_match);
@@ -673,9 +772,9 @@ mod tests {
     #[test]
     fn a_non_finite_read_cannot_satisfy_any_operator() {
         let g = graph(r"v:(\S+)", CondKind::Number, Some(CompareOp::Neq), Some(25.0));
-        let ev = evaluate_text(&g, &re(r"v:(\S+)"), ArmState::armed(), &|_| Some("v:NaN".into()), 1)
+        let ev = evaluate_text(&g, &re(r"v:(\S+)"), NO_ECHOES, ArmState::armed(), &|_| Some("v:NaN".into()), 1)
             .expect("text was available");
-        assert!(!ev.condition_now, "NaN must not satisfy `neq`");
+        assert_eq!(ev.condition, Truth::Unknown, "a value that is not a number is not a reading");
         assert_eq!(ev.decision, Decision::Checked);
         // The premise the `is_finite` guard exists for: every comparison against `NaN` is false, so
         // the natural spelling of `neq` — "not equal" — reports TRUE for a value that is not a number.
@@ -768,7 +867,7 @@ mod tests {
         let r = re(&g.parse.find);
         let mut state = ArmState::Unseen;
         let step = |src: &VtSource, state: &mut ArmState, at: i64| -> Decision {
-            let ev = evaluate(&g, &r, *state, src, "pc-1", at).expect("terminal is live");
+            let ev = evaluate(&g, &r, NO_ECHOES, *state, src, "pc-1", at).expect("terminal is live");
             *state = ev.next;
             ev.decision
         };
@@ -815,14 +914,14 @@ mod tests {
         let mut state = ArmState::Unseen;
 
         src.feed("FAILED 1 test");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 1).unwrap();
         assert_eq!(ev.decision, Decision::Armed, "first sight arms, never sends");
         state = ev.next;
 
         // Type into the prompt, one character at a time, rewriting the bottom line each time.
         for i in 0..12 {
             src.parser.borrow_mut().process(format!("\r$ {}", "x".repeat(i)).as_bytes());
-            let ev = evaluate(&g, &r, state, &src, "pc-1", 10 + i as i64).unwrap();
+            let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 10 + i as i64).unwrap();
             assert_eq!(
                 ev.decision,
                 Decision::Held,
@@ -837,10 +936,10 @@ mod tests {
         for i in 0..rows + 2 {
             src.feed(&format!("later {}", i));
         }
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 100).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 100).unwrap();
         assert_eq!(ev.decision, Decision::ReArmed);
         state = ev.next;
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 101).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 101).unwrap();
         assert_eq!(ev.decision, Decision::Checked, "re-arming happens once, not every tick");
     }
 
@@ -855,13 +954,13 @@ mod tests {
             src.feed("working... | working... | working...");
         }
         let mut state = ArmState::Unseen;
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 1).unwrap();
         assert_eq!(ev.decision, Decision::Armed);
         state = ev.next;
 
         src.feed("FAILED 4 test");
         src.feed("done");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 2).unwrap();
         assert_eq!(ev.decision, Decision::Sent, "new lines after identical ones must be seen");
     }
 
@@ -873,17 +972,17 @@ mod tests {
         let r = re(&g.parse.find);
         let mut state = ArmState::Unseen;
         src.feed("hello");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 1).unwrap();
         assert_eq!(ev.decision, Decision::Armed);
         state = ev.next;
         src.feed("FAILED 9 test");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 2).unwrap();
         assert_eq!(ev.decision, Decision::Sent);
         state = ev.next;
         // Push it off a two-row screen.
         src.feed("a");
         src.feed("b");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 3).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 3).unwrap();
         assert_eq!(ev.decision, Decision::ReArmed);
     }
 
@@ -897,27 +996,128 @@ mod tests {
         let mut state = ArmState::Unseen;
 
         src.feed("ctx:18%");
-        state = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap().next;
+        state = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 1).unwrap().next;
         src.feed("ctx:63%");
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 2).unwrap();
         assert_eq!(ev.decision, Decision::Sent);
         state = ev.next;
 
-        // Scroll it well off the visible screen and stop printing values.
-        for i in 0..20 {
+        // Out of the 200-line WINDOW entirely, not merely off the visible screen, and no new value
+        // printed. Twenty lines proves nothing here: the value is still inside the window, so an
+        // implementation that re-arms the moment it stops seeing a value passes anyway. This fixture
+        // varied only "off screen" and that is exactly why it could not see the defect.
+        for i in 0..260 {
             src.feed(&format!("build step {}", i));
         }
         src.clear_depths();
-        let ev = evaluate(&g, &r, state, &src, "pc-1", 3).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, state, &src, "pc-1", 3).unwrap();
+        assert_eq!(
+            ev.outcome,
+            Outcome::Numeric(Read::NoMatch),
+            "premise: the fixture must really have lost the value, or this asserts nothing"
+        );
         assert_eq!(
             ev.decision,
-            Decision::Held,
-            "a value persists — it must not re-arm merely because it scrolled off screen"
+            Decision::Checked,
+            "a value persists — losing sight of it is not the same as watching it drop, so this is             an ordinary check and NOT a re-arm"
+        );
+        assert_eq!(
+            ev.next,
+            state,
+            "and the arm state must not move on a read that learned nothing"
         );
         assert_eq!(
             src.depths(),
             vec![ReadDepth::Window(200)],
             "a numeric rule must never switch to the visible screen"
+        );
+
+        // The other half of the same sentence, so "never re-arms" cannot be how this passes: a value
+        // that is actually PRINTED below the threshold re-arms on the spot.
+        src.feed("ctx:10%");
+        let ev = evaluate(&g, &r, NO_ECHOES, ev.next, &src, "pc-1", 4).unwrap();
+        assert_eq!(ev.decision, Decision::ReArmed);
+        src.feed("ctx:63%");
+        assert_eq!(
+            evaluate(&g, &r, NO_ECHOES, ev.next, &src, "pc-1", 5).unwrap().decision,
+            Decision::Sent,
+            "and the next genuine crossing sends exactly once"
+        );
+    }
+
+    /// §2.6's needle removal, on BOTH entry points — which is the whole reason it is a parameter.
+    ///
+    /// A presence rule re-arms off the visible screen, so the rule's own echoed message sitting there
+    /// keeps the condition true and the rule never re-arms again: silent, and indistinguishable from
+    /// working. The oracle is the DECISION, not the text, because that is the symptom a user meets.
+    #[test]
+    fn both_entry_points_strip_the_terminals_live_echo_needles() {
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        let echo = "FAILED 3 test — see the log".to_string();
+
+        for entry in ["evaluate", "evaluate_text"] {
+            let src = VtSource::new(4, 80);
+            src.feed("FAILED 3 test");
+            let fired = evaluate(&g, &r, NO_ECHOES, ArmState::armed(), &src, "pc-1", 1).unwrap();
+            assert_eq!(fired.decision, Decision::Sent, "{}: setup", entry);
+
+            // The engine's own message is echoed at the prompt, and the original match scrolls off.
+            for i in 0..6 {
+                src.feed(&format!("line {}", i));
+            }
+            src.feed(&echo);
+
+            let needles = [echo.clone()];
+            let guarded = if entry == "evaluate" {
+                evaluate(&g, &r, &needles, fired.next, &src, "pc-1", 2).unwrap()
+            } else {
+                evaluate_text(&g, &r, &needles, fired.next, &|d| src.tail("pc-1", d), 2).unwrap()
+            };
+            assert_eq!(
+                guarded.decision,
+                Decision::ReArmed,
+                "{}: the rule must not read its own echo as a live match",
+                entry
+            );
+
+            // The paired positive: WITHOUT the needle the same text holds, so the assertion above is
+            // about stripping and not about the fixture having lost the line anyway.
+            let unguarded = if entry == "evaluate" {
+                evaluate(&g, &r, NO_ECHOES, fired.next, &src, "pc-1", 2).unwrap()
+            } else {
+                evaluate_text(&g, &r, NO_ECHOES, fired.next, &|d| src.tail("pc-1", d), 2).unwrap()
+            };
+            assert_eq!(unguarded.decision, Decision::Held, "{}: premise", entry);
+        }
+    }
+
+    /// Last occurrence, not every occurrence: an identical line the USER typed earlier is genuine
+    /// output and must survive.
+    #[test]
+    fn stripping_removes_the_last_occurrence_of_each_needle_only() {
+        let needles = ["hand off now".to_string()];
+        assert_eq!(
+            strip_echoes("hand off now\nwork\nhand off now\n", &needles),
+            "hand off now\nwork\n\n"
+        );
+        assert_eq!(strip_echoes("nothing here", &needles), "nothing here");
+        assert_eq!(strip_echoes("keep me", &[]), "keep me", "no needles changes nothing");
+        assert_eq!(
+            strip_echoes("keep me", &["".to_string()]),
+            "keep me",
+            "an empty needle must not match everywhere"
+        );
+    }
+
+    /// §2.6 keys needles by the TERMINAL, so rule B recognises rule A's injection. Two needles, both
+    /// stripped, in one pass.
+    #[test]
+    fn every_needle_recorded_against_the_terminal_is_stripped_whichever_rule_recorded_it() {
+        let needles = ["from rule A".to_string(), "from rule B".to_string()];
+        assert_eq!(
+            strip_echoes("x from rule A y from rule B z", &needles),
+            "x  y  z"
         );
     }
 
@@ -930,12 +1130,12 @@ mod tests {
         let r = re(&g.parse.find);
         src.feed("FAILED 1 test");
         // Armed -> reads the window.
-        let ev = evaluate(&g, &r, ArmState::armed(), &src, "pc-1", 1).unwrap();
+        let ev = evaluate(&g, &r, NO_ECHOES, ArmState::armed(), &src, "pc-1", 1).unwrap();
         assert_eq!(src.depths(), vec![ReadDepth::Window(200)]);
         assert_eq!(ev.decision, Decision::Sent);
         // Fired -> reads the visible screen.
         src.clear_depths();
-        let _ = evaluate(&g, &r, ev.next, &src, "pc-1", 2).unwrap();
+        let _ = evaluate(&g, &r, NO_ECHOES, ev.next, &src, "pc-1", 2).unwrap();
         assert_eq!(src.depths(), vec![ReadDepth::VisibleScreen]);
     }
 
@@ -953,7 +1153,7 @@ mod tests {
         let r = re(&g.parse.find);
 
         src.feed("FAILED 3 test");
-        let mut state = evaluate(&g, &r, ArmState::armed(), &src, "pc-1", 1).unwrap();
+        let mut state = evaluate(&g, &r, NO_ECHOES, ArmState::armed(), &src, "pc-1", 1).unwrap();
         assert_eq!(state.decision, Decision::Sent);
         let mut arm = state.next;
 
@@ -961,7 +1161,7 @@ mod tests {
         for i in 0..rows + 2 {
             src.feed(&format!("next {}", i));
         }
-        state = evaluate(&g, &r, arm, &src, "pc-1", 2).unwrap();
+        state = evaluate(&g, &r, NO_ECHOES, arm, &src, "pc-1", 2).unwrap();
         assert_eq!(state.decision, Decision::ReArmed);
         arm = state.next;
 
@@ -972,7 +1172,7 @@ mod tests {
         );
 
         src.clear_depths();
-        state = evaluate(&g, &r, arm, &src, "pc-1", 3).unwrap();
+        state = evaluate(&g, &r, NO_ECHOES, arm, &src, "pc-1", 3).unwrap();
         assert_eq!(
             state.decision,
             Decision::Checked,
@@ -990,7 +1190,7 @@ mod tests {
     fn a_dormant_terminal_is_skipped_rather_than_re_armed() {
         let g = failed_rule();
         assert!(
-            evaluate_text(&g, &re(&g.parse.find), ArmState::Fired { at_ms: 1 }, &|_| None, 5)
+            evaluate_text(&g, &re(&g.parse.find), NO_ECHOES, ArmState::Fired { at_ms: 1 }, &|_| None, 5)
                 .is_none(),
             "no text means dormant, not false"
         );
@@ -1001,24 +1201,54 @@ mod tests {
     #[test]
     fn a_numeric_rule_without_an_operator_is_never_true() {
         let g = graph(r"ctx:(\d+)%", CondKind::Number, None, Some(25.0));
-        let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
+        let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), NO_ECHOES, ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
             .unwrap();
-        assert!(!ev.condition_now);
+        assert_eq!(ev.condition, Truth::Unknown);
         assert_eq!(ev.decision, Decision::Checked);
+    }
+
+    /// "Still" is a claim about a match this pair had ALREADY acted on, so the crossing itself — the
+    /// log line sitting beside the message the rule just sent — must not use it. `read_detail` had no
+    /// way to tell the two apart, because it was not given the decision it was describing.
+    #[test]
+    fn the_crossing_does_not_describe_its_own_match_as_already_standing() {
+        let screen = ReadDepth::VisibleScreen;
+        let sent = read_detail(&Outcome::Presence(true), "FAILED", screen, Decision::Sent);
+        let held = read_detail(&Outcome::Presence(true), "FAILED", screen, Decision::Held);
+        assert_eq!(sent, "`FAILED` matched on screen");
+        assert_eq!(held, "`FAILED` is still on screen");
+        assert_ne!(sent, held, "the crossing and the hold must not read the same");
+        // The deep window is about NOTICING an event, so it never says "still" whatever the decision.
+        for d in [Decision::Sent, Decision::Held, Decision::Armed] {
+            assert_eq!(
+                read_detail(&Outcome::Presence(true), "FAILED", ReadDepth::Window(200), d),
+                "`FAILED` matched in the last 200 lines",
+                "window read, decision {:?}",
+                d
+            );
+        }
     }
 
     /// The re-arm detail is the sentence Q13 approved, and it must not be the numeric one.
     #[test]
     fn the_two_read_modes_report_themselves_differently() {
-        let window = read_detail(&Outcome::Presence(false), "FAILED", ReadDepth::Window(200));
-        let screen = read_detail(&Outcome::Presence(false), "FAILED", ReadDepth::VisibleScreen);
+        let window =
+            read_detail(&Outcome::Presence(false), "FAILED", ReadDepth::Window(200), Decision::Checked);
+        let screen = read_detail(
+            &Outcome::Presence(false),
+            "FAILED",
+            ReadDepth::VisibleScreen,
+            Decision::ReArmed,
+        );
         assert_eq!(window, "nothing matching `FAILED` in the last 200 lines");
         assert_eq!(screen, "`FAILED` is no longer on screen");
     }
 
     #[test]
     fn a_whole_number_reads_as_an_integer_in_the_log() {
-        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.0)), "p", ReadDepth::Window(200)), "last value 63");
-        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.5)), "p", ReadDepth::Window(200)), "last value 63.5");
+        let d = Decision::Held;
+        let w = ReadDepth::Window(200);
+        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.0)), "p", w, d), "last value 63");
+        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.5)), "p", w, d), "last value 63.5");
     }
 }

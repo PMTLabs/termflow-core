@@ -18,7 +18,7 @@
 
 use regex::{Regex, RegexBuilder};
 
-use crate::automation_store::{AutomationGraph, Keep};
+use crate::automation_store::{AutomationGraph, CondKind, Keep};
 
 /// Whether a problem stops the rule running, or merely tells the user something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -90,7 +90,16 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let groups = compiled.captures_len().saturating_sub(1);
     let has_named_value = compiled.capture_names().any(|n| n == Some("value"));
 
-    if graph.parse.keep == Keep::Brackets && groups == 0 {
+    // `keep` is a NUMERIC-only concern. §2.2b's presence branch is `re.is_match(text)` — "no group,
+    // no coercion, no `keep`" — and `Keep::Brackets` is the struct default a text rule carries around
+    // without ever consulting it. Blocking on it refuses R8's own canonical rule
+    // (`FAILED \d+ test`), so the entire word-matching half of the feature was un-enableable while
+    // every test stayed green, because no test ran this against a text rule at all. That is the
+    // `validation-rule-strands-a-scoped-default` class: a rule written for the step that READS a
+    // field, applied to every rule that merely HAS it.
+    let numeric = graph.cond.kind == CondKind::Number;
+
+    if numeric && graph.parse.keep == Keep::Brackets && groups == 0 {
         // Never a silent fall-back to the whole match: the user asked for the bracketed part, and
         // comparing something else is how a rule types the wrong thing into a terminal.
         out.push(Problem::new(
@@ -101,7 +110,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
         ));
     }
 
-    if graph.parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
+    if numeric && graph.parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
         out.push(Problem::new(
             Severity::Warns,
             "parse",
@@ -121,9 +130,17 @@ fn first_line(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::automation_store::{
-        ActionStep, Cadence, CompareOp, CondKind, CondStep, MonitorStep, ParsePreset, ParseStep,
-        ReadMode, SendTo,
+        ActionStep, Cadence, CompareOp, CondStep, MonitorStep, ParsePreset, ParseStep, ReadMode,
+        SendTo,
     };
+
+    /// The same graph as a PRESENCE rule. `keep` is deliberately left at whatever the caller passed:
+    /// the point is that a text rule carries the field and never reads it.
+    fn text_graph(find: &str, keep: Keep) -> AutomationGraph {
+        let mut g = graph(find, keep);
+        g.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        g
+    }
 
     fn graph(find: &str, keep: Keep) -> AutomationGraph {
         AutomationGraph {
@@ -197,6 +214,35 @@ mod tests {
     #[test]
     fn keep_whole_never_warns_about_groups() {
         assert!(pattern_problems(&graph(r"(\w+):(\d+)%", Keep::Whole)).is_empty());
+    }
+
+    /// R8's own canonical rule, and the dimension this suite was missing entirely: **a presence rule
+    /// needs no brackets whatever `keep` says**, because `re.is_match` never reads the field. Both
+    /// `keep` rules shipped scoped to the field instead of to the step that reads it, so every text
+    /// rule was refused by the enable path.
+    #[test]
+    fn a_presence_rule_is_never_judged_on_a_field_it_does_not_read() {
+        for keep in [Keep::Brackets, Keep::Whole] {
+            let g = text_graph(r"FAILED \d+ test", keep);
+            assert!(
+                pattern_problems(&g).is_empty(),
+                "a text rule with keep={:?} has nothing wrong with it: {:?}",
+                keep,
+                pattern_problems(&g)
+            );
+            // Same scoping at the warning, not just the block — the group COUNT is not a text rule's
+            // business either.
+            let many = text_graph(r"(\w+):(\d+)%", keep);
+            assert!(pattern_problems(&many).is_empty(), "got {:?}", pattern_problems(&many));
+        }
+    }
+
+    /// The paired positive, so "never reports anything" cannot be how the test above passes: the same
+    /// group-less pattern IS a blocking problem for the numeric rule that actually reads `keep`.
+    #[test]
+    fn the_same_pattern_still_blocks_for_the_numeric_rule_that_reads_keep() {
+        assert!(blocks(&graph(r"FAILED \d+ test", Keep::Brackets)));
+        assert!(!blocks(&text_graph(r"FAILED \d+ test", Keep::Brackets)));
     }
 
     /// JS regex syntax is a superset, so a pattern that previews fine in the editor can fail here —

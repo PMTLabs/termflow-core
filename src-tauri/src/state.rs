@@ -1848,10 +1848,12 @@ impl<R: Runtime> AppState<R> {
     /// the reader thread on an explicit close.
     pub fn cleanup_terminal_state(&self, id: &str) {
         // FIRST STATEMENT, before anything is removed: the Automations engine keys its per-terminal
-        // state by the durable `tm-` LEAF, and the leaf is only reachable through `terminals[id]` and
-        // `identity`, both of which this function is about to tear down. Reading it afterwards yields
-        // `None` and the purge silently does nothing — which is invisible, because the symptom is a
-        // restarted terminal that is never nagged again rather than an error. Plan 028 §2.4, §10.4c.
+        // state by the durable `tm-` LEAF, and `terminals[id]` is the ONLY place that mapping lives.
+        // `IdentityIndex` maps leaf -> process and never the reverse, and the sidecar exit path has
+        // already called `identity.unindex(id)` before it reaches here — so there is no second route
+        // to fall back on. Reading the leaf after `terminals.remove` yields `None` and the purge
+        // silently does nothing, which is invisible: the symptom is a restarted terminal that is
+        // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
         let leaf = self
             .terminals
             .get(id)
@@ -2079,8 +2081,10 @@ pub fn render_full_scrollback(screen: &mut vt100::Screen) -> Option<Vec<u8>> {
 ///
 /// The offsets follow `render_full_scrollback`'s own idiom: at offset `total_sb - emitted` the
 /// window's first visible row is logical index `emitted`, so stepping `emitted` by the rows actually
-/// consumed tiles the buffer with no overlap or gap. Only the FIRST window can need a non-zero skip,
-/// which is what bounds the total at `max_lines + rows`.
+/// consumed tiles the buffer with no overlap or gap. While `emitted <= total_sb` the offset has not
+/// saturated, so `window_first == emitted` and the skip is identically zero; only the LAST window —
+/// the one whose offset is pinned at 0 — can need a non-zero skip, and it takes every remaining row.
+/// That is what bounds the total at `max_lines + rows`.
 pub(crate) fn tail_windows(
     total_sb: usize,
     rows: usize,
@@ -2393,14 +2397,29 @@ mod tail_read_tests {
 mod automation_teardown_source_tests {
     /// The body of `cleanup_terminal_state`, from its signature to the first line that closes a block
     /// at method indentation.
-    fn cleanup_body() -> &'static str {
-        let source = include_str!("state.rs");
+    ///
+    /// **Normalised, because a Windows checkout is CRLF** (`core.autocrlf=true`, no `.gitattributes`)
+    /// and every slice below is newline delimited. Without it `find("\n    }\n")` returns `None` on
+    /// the file git actually checks out and this whole module panics — so the only Windows-runnable
+    /// pin on the `tm-`/`pc-` teardown order would be dead exactly where it is needed, §10.4 being
+    /// `[int]`/Linux-only. This file's own `source()` below carries the same line, as do three sites
+    /// in `canvas_endpoints.rs`; this was the one place in that class still missing it, and it read
+    /// green only because M2 rewrote this file in the working tree.
+    fn cleanup_body() -> String {
+        let source = include_str!("state.rs").replace("\r\n", "\n");
         let start = source
             .find("pub fn cleanup_terminal_state(&self, id: &str) {")
             .expect("cleanup_terminal_state must exist");
-        let body = &source[start..];
-        let end = body.find("\n    }\n").expect("its body must be closed at method indentation");
-        &body[..end]
+        let rest = &source[start..];
+        let end = rest.find("\n    }\n").expect("its body must be closed at method indentation");
+        let body = rest[..end].to_string();
+        // Vacuity guard: if that marker ever moved, the slice would swallow the rest of the file and
+        // every ordering assertion below would pass against unrelated code.
+        assert!(
+            !body.contains("\n    pub fn "),
+            "cleanup_body over-ran the end of the method — the assertions below would be vacuous"
+        );
+        body
     }
 
     #[test]
@@ -2991,6 +3010,94 @@ mod terminal_identity_serde_tests {
         assert_eq!(back.id, "pc-abc123def");
         assert_eq!(back.renderer_terminal_id.as_deref(), Some("tm-9f2c1a4b7"));
         assert_eq!(back.owning_tab_id.as_deref(), Some("tb-4e8d0c2f1"));
+    }
+}
+
+/// §4.2's write end. The doc on `set_display_label` says it is a free function so it can be tested
+/// without an `AppHandle`, and until this module existed that sentence was a claim the file did not
+/// support — the label chain was pinned at the renderer end (`terminalLabelSync.test.ts`) and at the
+/// read end (`label_at`) with nothing in the middle.
+#[cfg(test)]
+mod set_display_label_tests {
+    use super::{set_display_label, Terminal, TerminalBackend};
+    use dashmap::DashMap;
+
+    /// Two live terminals, so every assertion can show the OTHER one was left alone — a writer that
+    /// labels every row passes a one-row fixture.
+    fn two_panes() -> DashMap<String, Terminal> {
+        let map = DashMap::new();
+        for (pc, tm, label) in [("pc-1", "tm-x", Some("codex · core")), ("pc-2", "tm-y", None)] {
+            map.insert(
+                pc.to_string(),
+                Terminal {
+                    id: pc.into(),
+                    pid: 4242,
+                    shell: "pwsh".into(),
+                    name: "Terminal-pwsh".into(),
+                    created_at: "2026-09-04T00:00:00+07:00".into(),
+                    session_key: tm.into(),
+                    cols: 80,
+                    rows: 24,
+                    backend: TerminalBackend::PortablePty,
+                    renderer_terminal_id: Some(tm.into()),
+                    owning_tab_id: Some("tb-a".into()),
+                    last_input_source: None,
+                    last_input_at: None,
+                    prompt_hook: false,
+                    display_label: label.map(str::to_string),
+                },
+            );
+        }
+        map
+    }
+
+    fn label_of(map: &DashMap<String, Terminal>, pc: &str) -> Option<String> {
+        map.get(pc).and_then(|t| t.display_label.clone())
+    }
+
+    /// Keyed by the `tm-` LEAF, and it writes exactly the row that owns it.
+    #[test]
+    fn it_writes_the_row_that_owns_the_leaf_and_no_other() {
+        let terminals = two_panes();
+        assert_eq!(set_display_label(&terminals, "tm-y", Some("build")), Ok(true));
+        assert_eq!(label_of(&terminals, "pc-2").as_deref(), Some("build"));
+        assert_eq!(
+            label_of(&terminals, "pc-1").as_deref(),
+            Some("codex · core"),
+            "the sibling must be untouched"
+        );
+    }
+
+    /// A blank label stores `None`, never `Some("")`. `label_at` treats an absence as "try the next
+    /// source"; an empty string stored as a label would beat the snapshot that exists for it and
+    /// render the Name column blank for good.
+    #[test]
+    fn a_blank_label_clears_rather_than_storing_an_empty_string() {
+        for blank in [Some(""), Some("   "), None] {
+            let terminals = two_panes();
+            assert_eq!(set_display_label(&terminals, "tm-x", blank), Ok(true));
+            assert_eq!(label_of(&terminals, "pc-1"), None, "clearing with {:?}", blank);
+        }
+    }
+
+    /// Trimmed on the way in, so a label the renderer padded matches one an operator typed.
+    #[test]
+    fn the_label_is_trimmed() {
+        let terminals = two_panes();
+        assert_eq!(set_display_label(&terminals, "  tm-y  ", Some("  build  ")), Ok(true));
+        assert_eq!(label_of(&terminals, "pc-2").as_deref(), Some("build"), "both sides trimmed");
+    }
+
+    /// An unmatched leaf is `Ok(false)`, NOT an error: the renderer fires this off its own store
+    /// subscription and a pane's PTY may legitimately not exist yet. `false` is what tells the caller
+    /// a re-assert after spawn is worth making — an `Err` here would turn a normal race into a
+    /// console warning on every startup.
+    #[test]
+    fn an_unmatched_leaf_is_a_successful_no_op_and_an_empty_one_is_an_error() {
+        let terminals = two_panes();
+        assert_eq!(set_display_label(&terminals, "tm-gone", Some("x")), Ok(false));
+        assert!(set_display_label(&terminals, "   ", Some("x")).is_err());
+        assert_eq!(label_of(&terminals, "pc-1").as_deref(), Some("codex · core"));
     }
 }
 

@@ -159,6 +159,25 @@ describe('attachTerminalLabelSync', () => {
     expect(setTerminalDisplayLabel).toHaveBeenCalledWith('tm-fromOtherWindow', 'window B');
   });
 
+  /**
+   * The clear, which is the direction this originally could not express at all: a leaf whose label
+   * goes away must PUSH the empty string. Dropping it from the map instead looked identical to a
+   * leaf that had left the window, `diffLeafValues` says nothing about those on purpose, and the
+   * backend therefore kept the stale label for the life of the terminal — in every log line and
+   * every picker row.
+   */
+  it('pushes an empty label when the last label a leaf had is taken away', () => {
+    store.dispatch(tab('tb-c', 'core'));
+    store.dispatch(addTabTree({ tabId: 'tb-c', tree: leaf('pn-c', 'tm-c') }));
+    expect(setTerminalDisplayLabel).toHaveBeenCalledWith('tm-c', 'core');
+    setTerminalDisplayLabel.mockClear();
+
+    store.dispatch(updateTabTitle({ id: 'tb-c', title: '' }));
+
+    expect(setTerminalDisplayLabel).toHaveBeenCalledTimes(1);
+    expect(setTerminalDisplayLabel).toHaveBeenCalledWith('tm-c', '');
+  });
+
   /** A tree committed before its tab exists must not push an empty label the backend would store. */
   it('pushes nothing for a leaf whose tab has no title yet', () => {
     store.dispatch(addTabTree({ tabId: 'tb-orphan', tree: leaf('pn-o', 'tm-o') }));
@@ -217,6 +236,14 @@ describe('collectLeafLabels', () => {
   });
 
   /** A whitespace-only pane name is not a name — it must fall through, never be pushed. */
+  it('maps a leaf with no label at all to the empty string rather than omitting it', () => {
+    const labels = collectLeafLabels({ 'tb-1': leaf('a', 'tm-a') }, [
+      { id: 'tb-1', title: '   ' },
+    ]);
+    expect(labels.has('tm-a')).toBe(true);
+    expect(labels.get('tm-a')).toBe('');
+  });
+
   it('treats a whitespace-only pane name as absent', () => {
     const labels = collectLeafLabels({ 'tb-1': leaf('a', 'tm-a', '   ') }, [
       { id: 'tb-1', title: 'core' },
