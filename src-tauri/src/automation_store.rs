@@ -421,7 +421,12 @@ const EMIT_MIN_INTERVAL_MS: i64 = 1000;
 /// the snapshot the picker's "not open" row draws. Plan §7.6.
 const LAST_SEEN_THROTTLE_MS: i64 = 5 * 60 * 1000;
 
-const RULE_COLUMNS: &str = "id, name, enabled, runs_once, target_mode, criterion, criterion_value, \
+/// One rule's pinned target ids, in the list's own order. `list_rules` runs the same predicate and
+/// order as one bulk query across every rule; this is the single-rule shape.
+const PINNED_TARGET_IDS_SQL: &str = "SELECT terminal_id FROM automation_targets \
+     WHERE rule_id = ?1 AND source = 'pinned' ORDER BY added_at, terminal_id";
+
+const RULE_COLUMNS: &str ="id, name, enabled, runs_once, target_mode, criterion, criterion_value, \
      follow_new, completed_at, verbose_until, sort_order, schema_version, graph, created_at, updated_at";
 
 /// Whether an entry is subject to the verbose gate. **Derived from `kind` inside `append`, never
@@ -456,6 +461,23 @@ fn enum_to_db<T: serde::Serialize>(v: &T) -> Result<String, AutomationStoreError
 fn enum_from_db<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, AutomationStoreError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|e| AutomationStoreError::Invalid(format!("unknown stored value {s:?}: {e}")))
+}
+
+/// "No such row" from a single-row query, **without** flattening every other failure into it.
+///
+/// `query_row(..).ok()` is the trap this exists to close: it turns `SQLITE_BUSY` — which the 30 s
+/// scrollback flush makes a routine event on this file — into a confident "that rule does not exist".
+/// `get_rule` would answer `Ok(None)` to a caller holding the rule in front of the user, `save_rule`
+/// would report an existing rule as new and log the wrong loser of a two-window race, `touch_target`
+/// would follow up with an INSERT and fail on the primary key, and the verbose gate would silently
+/// drop a Check entry. That is the exact collapse the module doc says returning `Result` prevents, so
+/// the doc was only true of the methods that did this. One helper, every site.
+fn optional_row<T>(r: rusqlite::Result<T>) -> Result<Option<T>, AutomationStoreError> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AutomationStoreError::Sqlite(e)),
+    }
 }
 
 /// A rule row exactly as SQLite hands it over, before any JSON is parsed.
@@ -544,6 +566,15 @@ pub struct AutomationStore {
     log_counts: DashMap<String, i64>,
     /// `(rule_id, terminal_id)` → the `at` of the last `Check` entry written for that pair.
     last_verbose: DashMap<(String, Option<String>), i64>,
+    /// `rule_id` → its `verbose_until`, so the gate does not hit SQLite on the evaluator's hot path.
+    ///
+    /// `class_of` sends **`NoMatch`** to the gate as well as `Check`, and `NoMatch` is the ordinary
+    /// outcome of a rule whose pattern did not match — most evaluations of most pairs. Without this
+    /// cache every one of them costs a lock plus a `SELECT verbose_until` against `history.db`;
+    /// at §2.3's `MAX_EVALS_PER_TICK` of 400 and a 4/s cadence that is ~1600 discarded SELECTs a
+    /// second, contending with the same 30 s multi-MB flush `busy_timeout` exists because of.
+    /// Written through by `save_rule` and the sweep, dropped by `delete_rule`.
+    verbose_cache: DashMap<String, Option<i64>>,
     emit: Mutex<EmitState>,
 }
 
@@ -560,6 +591,7 @@ impl AutomationStore {
             conn: Mutex::new(None),
             log_counts: DashMap::new(),
             last_verbose: DashMap::new(),
+            verbose_cache: DashMap::new(),
             emit: Mutex::new(EmitState::default()),
         }
     }
@@ -585,6 +617,29 @@ impl AutomationStore {
             }
             Err(e) => log::warn!("[AUTOMATION] store disabled (open failed): {}", e),
         }
+        drop(guard);
+        // §3.3's startup sweep. The GATE does not need it — it is a comparison and a past deadline
+        // already fails — but the column is user-visible, and without this the editor renders
+        // "verbose until 10:17" for a deadline three days old.
+        if let Err(e) = self.sweep_expired_verbose(chrono::Utc::now().timestamp_millis()) {
+            log::warn!("[AUTOMATION] verbose sweep failed: {}", e);
+        }
+    }
+
+    /// NULL every `verbose_until` that is already in the past. Takes `now` so it is testable; `init`
+    /// supplies the wall clock, which is the right clock here for the same reason §3.3 gives for the
+    /// column itself — the deadline is user-visible in wall-clock terms and must survive a restart.
+    pub fn sweep_expired_verbose(&self, now: i64) -> Result<usize, AutomationStoreError> {
+        let swept = {
+            let guard = self.conn.lock().unwrap();
+            let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+            conn.execute(
+                "UPDATE automation_rules SET verbose_until = NULL WHERE verbose_until <= ?1",
+                [now],
+            )?
+        };
+        self.verbose_cache.clear();
+        Ok(swept)
     }
 
     #[cfg(test)]
@@ -732,26 +787,28 @@ impl AutomationStore {
     }
 
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
-        let targets: Vec<String> = self
-            .targets_for(id)?
-            .into_iter()
-            .filter(|(_, source, ..)| source == "pinned")
-            .map(|(terminal_id, ..)| terminal_id)
-            .collect();
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-        let raw = conn
-            .query_row(
-                &format!("SELECT {RULE_COLUMNS} FROM automation_rules WHERE id = ?1"),
-                [id],
-                read_rule_row,
-            )
-            .ok();
+        let raw = optional_row(conn.query_row(
+            &format!("SELECT {RULE_COLUMNS} FROM automation_rules WHERE id = ?1"),
+            [id],
+            read_rule_row,
+        ))?;
         match raw {
             None => Ok(None),
             Some(raw) => {
                 let mut rule = hydrate_rule(raw)?;
-                rule.target_ids = targets;
+                // The SAME predicate and order `list_rules` uses, in SQL, rather than reading every
+                // source and filtering in Rust. The two shapes differ deliberately — `list_rules`
+                // does one bulk query to avoid N+1 — but the definition of "this rule's pinned
+                // targets" must not, or `two-implementations-one-fix` says how it ends.
+                let mut stmt = conn.prepare(PINNED_TARGET_IDS_SQL)?;
+                let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    ids.push(row?);
+                }
+                rule.target_ids = ids;
                 Ok(Some(rule))
             }
         }
@@ -765,22 +822,38 @@ impl AutomationStore {
     /// name the wrong loser. Last-save-wins is the policy (§3.5); the log entry is the requirement, so
     /// it has to be true. `Ok(None)` means this rule is new.
     pub fn save_rule(&self, rule: &AutomationRule) -> Result<Option<i64>, AutomationStoreError> {
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+        let previous = Self::write_rule(&tx, rule)?;
+        tx.commit()?;
+        drop(guard);
+        // Write through rather than invalidate: the new value is right here, and a rule saved with
+        // verbose just switched on must not wait for a cache miss to start logging.
+        self.verbose_cache.insert(rule.id.clone(), rule.verbose_until);
+        Ok(previous)
+    }
+
+    /// The upsert and the target-set replacement, on a caller-supplied transaction.
+    ///
+    /// Split out so `duplicate_automation` can put its reordering and this write in **one**
+    /// transaction. It used to reorder in its own autocommit statement and then call `save_rule`; a
+    /// failure in between left the order permanently mutated, with a gap where the copy should have
+    /// been and nothing to notice it.
+    fn write_rule(
+        tx: &rusqlite::Transaction<'_>,
+        rule: &AutomationRule,
+    ) -> Result<Option<i64>, AutomationStoreError> {
         let graph = serde_json::to_string(&rule.graph)
             .map_err(|e| AutomationStoreError::Invalid(format!("graph is not serialisable: {e}")))?;
         let target_mode = enum_to_db(&rule.target_mode)?;
         let criterion = enum_to_db(&rule.criterion)?;
 
-        let mut guard = self.conn.lock().unwrap();
-        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
-        let tx = conn.transaction()?;
-
-        let previous: Option<i64> = tx
-            .query_row(
-                "SELECT updated_at FROM automation_rules WHERE id = ?1",
-                [&rule.id],
-                |r| r.get(0),
-            )
-            .ok();
+        let previous: Option<i64> = optional_row(tx.query_row(
+            "SELECT updated_at FROM automation_rules WHERE id = ?1",
+            [&rule.id],
+            |r| r.get(0),
+        ))?;
 
         tx.execute(
             "INSERT INTO automation_rules (
@@ -824,22 +897,29 @@ impl AutomationStore {
         // delete-all-then-insert: a re-save must KEEP an existing row's label/folder snapshot, which
         // the backend refreshes on its own cadence through `touch_target`. Deleting and reinserting
         // would throw away the label the picker's "not open" row draws — the one case it exists for.
-        let placeholders = if rule.target_ids.is_empty() {
-            "''".to_string()
+        if rule.target_ids.is_empty() {
+            // No `NOT IN (…)` clause at all. The previous spelling used the literal `''` to stand in
+            // for an empty list, and `'' NOT IN ('')` is FALSE — so clearing a rule's targets spared
+            // any row whose terminal id was itself the empty string, and the next `list_rules` read it
+            // straight back into `target_ids`. An empty pick set means delete them all; say that.
+            tx.execute(
+                "DELETE FROM automation_targets WHERE rule_id = ?1 AND source = 'pinned'",
+                [&rule.id],
+            )?;
         } else {
-            rule.target_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
-        };
-        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&rule.id];
-        for id in &rule.target_ids {
-            params.push(id);
+            let placeholders = rule.target_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let mut params: Vec<&dyn rusqlite::ToSql> = vec![&rule.id];
+            for id in &rule.target_ids {
+                params.push(id);
+            }
+            tx.execute(
+                &format!(
+                    "DELETE FROM automation_targets
+                      WHERE rule_id = ?1 AND source = 'pinned' AND terminal_id NOT IN ({placeholders})"
+                ),
+                params.as_slice(),
+            )?;
         }
-        tx.execute(
-            &format!(
-                "DELETE FROM automation_targets
-                  WHERE rule_id = ?1 AND source = 'pinned' AND terminal_id NOT IN ({placeholders})"
-            ),
-            params.as_slice(),
-        )?;
         for id in &rule.target_ids {
             tx.execute(
                 "INSERT OR IGNORE INTO automation_targets
@@ -856,7 +936,6 @@ impl AutomationStore {
                 rusqlite::params![rule.id, id],
             )?;
         }
-        tx.commit()?;
         Ok(previous)
     }
 
@@ -874,6 +953,7 @@ impl AutomationStore {
         };
         self.log_counts.remove(id);
         self.last_verbose.retain(|(rule_id, _), _| rule_id != id);
+        self.verbose_cache.remove(id);
         Ok(n > 0)
     }
 
@@ -896,7 +976,11 @@ impl AutomationStore {
     ///
     /// Deliberately not a bare clone-with-a-new-id: an enabled duplicate starts firing the moment it
     /// is created, and a copied `completed_at` makes it Completed before it has ever run.
-    pub fn duplicate_automation(&self, id: &str) -> Result<AutomationRule, AutomationStoreError> {
+    pub fn duplicate_automation(
+        &self,
+        id: &str,
+        at: i64,
+    ) -> Result<AutomationRule, AutomationStoreError> {
         let original = self
             .get_rule(id)?
             .ok_or_else(|| AutomationStoreError::Invalid(format!("no such rule {id}")))?;
@@ -906,19 +990,57 @@ impl AutomationStore {
         copy.enabled = false;
         copy.completed_at = None;
         copy.verbose_until = None;
-        copy.sort_order = original.sort_order + 1;
+        // A copy was created now, not when its original was. `at` is a parameter rather than a call to
+        // the clock, so the store keeps taking time from its caller the way `mark_completed` and
+        // `touch_target` already do — and so this is testable.
+        copy.created_at = at;
+        copy.updated_at = at;
 
-        {
-            let guard = self.conn.lock().unwrap();
-            let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-            // Shift the tail first so the copy's slot is free. `> original`, not `>=`: the original
-            // keeps its own place.
-            conn.execute(
-                "UPDATE automation_rules SET sort_order = sort_order + 1 WHERE sort_order > ?1",
-                [original.sort_order],
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+
+        // Renumber the whole list densely rather than shifting the tail by one.
+        //
+        // A `sort_order + 1 WHERE sort_order > original` shift assumes sort orders are unique, and
+        // nothing enforces that. With a second rule already sharing the original's slot, the shift
+        // moves that rule into the copy's intended slot, the tie is broken by id, and the copy can
+        // still land beneath a rule that is not its original — which is the whole requirement. There
+        // is also no integer between `n` and `n+1` to escape to. Rewriting the order is deterministic,
+        // self-healing for duplicate slots already stored, and this table holds tens of rows and is
+        // renumbered only on an explicit duplicate.
+        let existing: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM automation_rules ORDER BY sort_order, id")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            let mut v = Vec::new();
+            for row in rows {
+                v.push(row?);
+            }
+            v
+        };
+        Self::write_rule(&tx, &copy)?;
+
+        let mut order = Vec::with_capacity(existing.len() + 1);
+        for rule_id in existing {
+            let is_original = rule_id == original.id;
+            order.push(rule_id);
+            if is_original {
+                order.push(copy.id.clone());
+            }
+        }
+        for (slot, rule_id) in order.iter().enumerate() {
+            tx.execute(
+                "UPDATE automation_rules SET sort_order = ?1 WHERE id = ?2",
+                rusqlite::params![slot as i64, rule_id],
             )?;
         }
-        self.save_rule(&copy)?;
+        tx.commit()?;
+
+        copy.sort_order = order
+            .iter()
+            .position(|r| r == &copy.id)
+            .map(|p| p as i64)
+            .unwrap_or(copy.sort_order);
         Ok(copy)
     }
 
@@ -945,14 +1067,13 @@ impl AutomationStore {
     ) -> Result<(), AutomationStoreError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-        let existing: Option<(Option<String>, Option<String>, Option<i64>)> = conn
-            .query_row(
+        let existing: Option<(Option<String>, Option<String>, Option<i64>)> =
+            optional_row(conn.query_row(
                 "SELECT label, folder, last_seen_at FROM automation_targets
                   WHERE rule_id = ?1 AND terminal_id = ?2",
                 rusqlite::params![rule_id, terminal_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .ok();
+            ))?;
 
         let Some((old_label, old_folder, last_seen)) = existing else {
             conn.execute(
@@ -963,6 +1084,13 @@ impl AutomationStore {
             )?;
             return Ok(());
         };
+
+        // `None` means "I have no new value for this", never "clear the stored one". `label_at`
+        // returns `None` once a terminal is gone, and that is exactly when the snapshot has to
+        // survive — clearing it there empties the picker's "not open" row of the label it exists to
+        // draw, which is the one case §7.6 was written for.
+        let label = label.or(old_label.as_deref());
+        let folder = folder.or(old_folder.as_deref());
 
         if old_label.as_deref() != label || old_folder.as_deref() != folder {
             conn.execute(
@@ -1052,11 +1180,21 @@ impl AutomationStore {
             self.last_verbose
                 .insert((entry.rule_id.clone(), entry.terminal_id.clone()), entry.at);
         }
-        self.bump_and_trim(&entry.rule_id)?;
+        if let Err(e) = self.bump_and_trim(&entry.rule_id) {
+            // The row is already written. A failure to TRIM is not a failure to append, and returning
+            // it as one would make the caller log a failed send that actually landed.
+            log::warn!("[AUTOMATION] log trim failed for {}: {}", entry.rule_id, e);
+        }
 
         let mut emit = self.emit.lock().unwrap();
         if !emit.pending.contains(&entry.rule_id) {
             emit.pending.push(entry.rule_id.clone());
+        }
+        if entry.at < emit.last_ms {
+            // The wall clock moved backwards. Left alone, `last_ms` sits in the future and NO
+            // `automation:activity` is emitted until real time catches up — the panel silently stops
+            // repainting for the length of the correction. Resync instead of waiting it out.
+            emit.last_ms = entry.at;
         }
         let due = entry.at - emit.last_ms >= EMIT_MIN_INTERVAL_MS;
         let rule_ids = if due {
@@ -1075,25 +1213,39 @@ impl AutomationStore {
     /// A `Check` entry writes only while verbose is on for its rule AND its pair has been quiet for a
     /// second. `Decision` entries never reach here.
     fn check_passes_gate(&self, entry: &AutomationLogEntry) -> Result<bool, AutomationStoreError> {
-        let verbose_until: Option<i64> = {
-            let guard = self.conn.lock().unwrap();
-            let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-            conn.query_row(
-                "SELECT verbose_until FROM automation_rules WHERE id = ?1",
-                [&entry.rule_id],
-                |r| r.get(0),
-            )
-            .unwrap_or(None)
+        // Copied out so the shard guard drops before anything else takes a lock.
+        let cached = self.verbose_cache.get(&entry.rule_id).map(|r| *r);
+        let verbose_until: Option<i64> = match cached {
+            Some(v) => v,
+            None => {
+                let v = {
+                    let guard = self.conn.lock().unwrap();
+                    let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+                    optional_row(conn.query_row(
+                        "SELECT verbose_until FROM automation_rules WHERE id = ?1",
+                        [&entry.rule_id],
+                        |r| r.get(0),
+                    ))?
+                    .flatten()
+                };
+                self.verbose_cache.insert(entry.rule_id.clone(), v);
+                v
+            }
         };
         if !matches!(verbose_until, Some(until) if entry.at < until) {
             return Ok(false);
         }
-        // Copied out so the shard guard is dropped before anything else takes a lock.
         let last = self
             .last_verbose
             .get(&(entry.rule_id.clone(), entry.terminal_id.clone()))
             .map(|r| *r);
         Ok(match last {
+            // A stored instant in the FUTURE means the wall clock moved backwards — an NTP
+            // correction, or a resume, which this app already handles as an event and which the
+            // `automation_log` schema comment above names explicitly. Treat it as no history rather
+            // than suppressing every Check until real time catches up: verbose mode is precisely the
+            // state the user turned on in order to watch.
+            Some(prev) if prev > entry.at => true,
             Some(prev) => entry.at - prev >= VERBOSE_MIN_INTERVAL_MS,
             None => true,
         })
@@ -1157,8 +1309,12 @@ impl AutomationStore {
             LogScope::Rule(_) => "WHERE rule_id = ?1",
             LogScope::All => "",
         };
-        // `limit` is an i64 from our own callers, never user text; SQLite will not bind a parameter
-        // inside this subquery's LIMIT alongside the optional ?1 without renumbering.
+        // `limit` is interpolated rather than bound purely so the optional `?1` above keeps index 1
+        // in both scopes — SQLite binds parameters in LIMIT perfectly well, so this is a readability
+        // choice, not a limitation. It is injection-safe because the value is an `i64`; it is clamped
+        // because SQLite reads a NEGATIVE limit as *unlimited*, and this value reaches the store from
+        // a Tauri command once M4 lands.
+        let limit = limit.max(0);
         let sql = format!(
             "SELECT id, rule_id, terminal_id, terminal_name, kind, detail, at
                FROM (SELECT * FROM automation_log {where_clause} ORDER BY id DESC LIMIT {limit})
@@ -1259,16 +1415,45 @@ mod tests {
 
     // -- §10.14 -------------------------------------------------------------------------------
 
+    /// The second `init` names a **different** file, which is what makes this able to fail. Pointed at
+    /// the same path, an implementation with no guard at all re-opens the same database, reads the
+    /// same row back, and passes — the oracle could not tell "ignored" from "redone".
     #[test]
     fn init_twice_is_ignored() {
-        let path = std::env::temp_dir().join(format!("automation-init-{}.db", uuid::Uuid::new_v4()));
+        let first = std::env::temp_dir().join(format!("automation-init-a-{}.db", uuid::Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("automation-init-b-{}.db", uuid::Uuid::new_v4()));
         let store = AutomationStore::new();
-        store.init(&path);
+        store.init(&first);
         store.save_rule(&rule("au-1")).unwrap();
-        // A second init must not swap the connection out from under a store that already has rows.
-        store.init(&path);
-        assert_eq!(store.list_rules().unwrap().len(), 1);
-        let _ = std::fs::remove_file(&path);
+
+        store.init(&second);
+
+        let listed = store.list_rules().unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["au-1"],
+            "the store still reads the database it was initialised with"
+        );
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// Clearing a rule's targets must clear ALL of them. The empty pick set used to be spelled as
+    /// `terminal_id NOT IN ('')`, and `'' NOT IN ('')` is FALSE — so an empty-string terminal id
+    /// survived, and the next `list_rules` put it straight back into `target_ids`.
+    #[test]
+    fn clearing_the_pick_set_deletes_every_pinned_row() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-1");
+        r.target_ids = vec!["tm-a".into(), String::new()];
+        store.save_rule(&r).unwrap();
+        assert_eq!(store.targets_for("au-1").unwrap().len(), 2);
+
+        r.target_ids = vec![];
+        store.save_rule(&r).unwrap();
+
+        assert_eq!(store.targets_for("au-1").unwrap(), vec![]);
+        assert_eq!(store.get_rule("au-1").unwrap().unwrap().target_ids, Vec::<String>::new());
     }
 
     /// Every field, asserted by comparing the WHOLE struct. A field-by-field spot check is how a new
@@ -1365,7 +1550,7 @@ mod tests {
         assert!(is_disabled(store.save_rule(&rule("au-1")).unwrap_err()));
         assert!(is_disabled(store.delete_rule("au-1").unwrap_err()));
         assert!(is_disabled(store.mark_completed("au-1", 1).unwrap_err()));
-        assert!(is_disabled(store.duplicate_automation("au-1").unwrap_err()));
+        assert!(is_disabled(store.duplicate_automation("au-1", 1).unwrap_err()));
         assert!(is_disabled(store.touch_target("au-1", "tm-a", None, None, 1).unwrap_err()));
         assert!(is_disabled(store.targets_for("au-1").unwrap_err()));
         assert!(is_disabled(store.append(&entry("au-1", LogKind::Sent, 1)).unwrap_err()));
@@ -1413,7 +1598,7 @@ mod tests {
 
         store.append(&entry("au-1", LogKind::Sent, 1_000)).unwrap();
 
-        let copy = store.duplicate_automation("au-1").unwrap();
+        let copy = store.duplicate_automation("au-1", 8_888).unwrap();
 
         assert!(!copy.enabled, "a copy must not start firing the moment it is created");
         assert_eq!(copy.completed_at, None);
@@ -1428,24 +1613,42 @@ mod tests {
             0,
             "a copy inherits no history"
         );
-        assert_eq!(copy.sort_order, original.sort_order + 1);
+        // Created now, not when its original was.
+        assert_eq!((copy.created_at, copy.updated_at), (8_888, 8_888));
 
-        // …and the tail shifted, so the copy sits directly beneath its original rather than sharing a
-        // slot with the rule that used to follow it.
-        let order: Vec<(String, i64)> = store
-            .list_rules()
-            .unwrap()
-            .into_iter()
-            .map(|r| (r.id, r.sort_order))
-            .collect();
+        // The requirement is a POSITION, not an arithmetic relation: the copy sits directly beneath
+        // its original in the list's own order.
+        let order: Vec<String> =
+            store.list_rules().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(order, vec!["au-1".to_string(), copy.id.clone(), "au-tail".to_string()]);
+        // And the stored slots agree with that order, so it survives a reload.
         assert_eq!(
-            order,
-            vec![
-                ("au-1".to_string(), 2),
-                (copy.id.clone(), 3),
-                ("au-tail".to_string(), 4),
-            ]
+            store.list_rules().unwrap().into_iter().map(|r| r.sort_order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
+        assert_eq!(store.get_rule(&copy.id).unwrap().unwrap().sort_order, copy.sort_order);
+    }
+
+    /// Nothing enforces that `sort_order` is unique, and a shift by one cannot place the copy when a
+    /// sibling already occupies the original's slot: the sibling moves into the copy's intended slot
+    /// and the tie falls to whichever id sorts first. Asserted as the position, which is the actual
+    /// requirement.
+    #[test]
+    fn duplicate_lands_beneath_its_original_even_when_a_sibling_shares_the_slot() {
+        let store = AutomationStore::new_in_memory();
+        let mut a = rule("au-a");
+        a.sort_order = 2;
+        store.save_rule(&a).unwrap();
+        // Same slot, and an id that sorts AFTER the original — so it sorts between the original and
+        // anything placed at `original.sort_order + 1`.
+        let mut sibling = rule("au-b");
+        sibling.sort_order = 2;
+        store.save_rule(&sibling).unwrap();
+
+        let copy = store.duplicate_automation("au-a", 1).unwrap();
+
+        let order: Vec<String> = store.list_rules().unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(order, vec!["au-a".to_string(), copy.id, "au-b".to_string()]);
     }
 
     // -- §10.15 -------------------------------------------------------------------------------
@@ -1483,12 +1686,21 @@ mod tests {
         let store = AutomationStore::new_in_memory();
         store.save_rule(&rule("au-1")).unwrap();
         // Same millisecond, verbose off — three sends are three rows.
-        for _ in 0..3 {
-            assert!(store.append(&entry("au-1", LogKind::Sent, 1_000)).unwrap().is_some());
+        for i in 0..3 {
+            let mut e = entry("au-1", LogKind::Sent, 1_000);
+            e.detail = format!("send {i}");
+            assert!(store.append(&e).unwrap().is_some());
         }
+        // By content, not by count: three rows of the wrong kind or the wrong rule would satisfy a
+        // length assertion.
+        let log = store.load_automation_log(&LogScope::All, LogOrder::Asc, 10).unwrap();
         assert_eq!(
-            store.load_automation_log(&LogScope::All, LogOrder::Desc, 10).unwrap().len(),
-            3
+            log.iter().map(|e| (e.rule_id.as_str(), e.kind, e.detail.as_str())).collect::<Vec<_>>(),
+            vec![
+                ("au-1", LogKind::Sent, "send 0"),
+                ("au-1", LogKind::Sent, "send 1"),
+                ("au-1", LogKind::Sent, "send 2"),
+            ]
         );
     }
 
@@ -1500,18 +1712,20 @@ mod tests {
         assert!(store.append(&entry("au-1", LogKind::Check, 1_000)).unwrap().is_none());
         assert!(store.append(&entry("au-1", LogKind::NoMatch, 2_000)).unwrap().is_none());
         assert_eq!(
-            store.load_automation_log(&LogScope::All, LogOrder::Desc, 10).unwrap().len(),
-            0
+            store.load_automation_log(&LogScope::All, LogOrder::Desc, 10).unwrap(),
+            vec![]
         );
 
-        // Turn verbose on and the same entry lands.
+        // Turn verbose on and the same entry lands — identified by its own kind and instant, so a row
+        // written for some other reason cannot stand in for it.
         let mut r = rule("au-1");
         r.verbose_until = Some(60_000);
         store.save_rule(&r).unwrap();
         assert!(store.append(&entry("au-1", LogKind::Check, 3_000)).unwrap().is_some());
+        let log = store.load_automation_log(&LogScope::All, LogOrder::Desc, 10).unwrap();
         assert_eq!(
-            store.load_automation_log(&LogScope::All, LogOrder::Desc, 10).unwrap().len(),
-            1
+            log.iter().map(|e| (e.kind, e.at)).collect::<Vec<_>>(),
+            vec![(LogKind::Check, 3_000)]
         );
     }
 
@@ -1682,16 +1896,16 @@ mod tests {
         assert!(store.delete_rule("au-1").unwrap());
         assert!(!store.delete_rule("au-1").unwrap(), "already absent is Ok(false), not an error");
 
-        assert_eq!(store.targets_for("au-1").unwrap().len(), 0);
+        assert_eq!(store.get_rule("au-1").unwrap(), None, "the rule itself is gone");
+        assert_eq!(store.targets_for("au-1").unwrap(), vec![]);
+        // Asserted by IDENTITY, not by count: `DELETE … WHERE rule_id != ?1` also leaves one row.
+        let surviving = store.load_automation_log(&LogScope::All, LogOrder::Asc, 10).unwrap();
         assert_eq!(
-            details_of(store.load_automation_log(&LogScope::All, LogOrder::Asc, 10).unwrap()).len(),
-            1,
-            "au-2's history is untouched"
+            surviving.iter().map(|e| e.rule_id.as_str()).collect::<Vec<_>>(),
+            vec!["au-2"],
+            "au-2's history is what survived"
         );
-    }
-
-    fn details_of(v: Vec<AutomationLogEntry>) -> Vec<String> {
-        v.into_iter().map(|e| e.detail).collect()
+        assert!(store.get_rule("au-2").unwrap().is_some());
     }
 
     #[test]
@@ -1733,5 +1947,253 @@ mod tests {
             .touch_target("au-1", "tm-m", Some("claude"), Some("D:/a"), 3_000 + LAST_SEEN_THROTTLE_MS)
             .unwrap();
         assert_eq!(row(&store).4, Some(3_000 + LAST_SEEN_THROTTLE_MS));
+    }
+
+    // -- Added after the M1 dual review: guards whose absence let a wrong implementation pass -----
+
+    /// The rate-limit key is the PAIR, and until this test both single-field keys passed the whole
+    /// suite. §3.3 spends a paragraph on the terminal-only variant: *"one chatty rule consumes the
+    /// whole 1/sec budget and a second rule watching the same terminal writes nothing — its log
+    /// empty, which reads as 'the rule isn't running'."* Nothing pinned it.
+    #[test]
+    fn the_verbose_rate_limit_is_keyed_by_rule_and_terminal_together() {
+        let store = AutomationStore::new_in_memory();
+        for id in ["au-1", "au-2"] {
+            let mut r = rule(id);
+            r.verbose_until = Some(100_000);
+            store.save_rule(&r).unwrap();
+        }
+        let check = |rule_id: &str, terminal: &str, at: i64| {
+            let mut e = entry(rule_id, LogKind::Check, at);
+            e.terminal_id = Some(terminal.to_string());
+            e
+        };
+
+        // Two RULES, one terminal, 10 ms apart. A terminal-only key drops the second.
+        assert!(store.append(&check("au-1", "tm-1", 10_000)).unwrap().is_some());
+        assert!(
+            store.append(&check("au-2", "tm-1", 10_010)).unwrap().is_some(),
+            "a second rule watching the same terminal has its own budget"
+        );
+        // One rule, two TERMINALS, 10 ms apart. A rule-only key drops the second.
+        assert!(
+            store.append(&check("au-1", "tm-2", 10_020)).unwrap().is_some(),
+            "the same rule watching a second terminal has its own budget"
+        );
+        // …and the pair that really did just write is still limited.
+        assert!(store.append(&check("au-1", "tm-1", 10_030)).unwrap().is_none());
+
+        let written: Vec<(String, Option<String>)> = store
+            .load_automation_log(&LogScope::All, LogOrder::Asc, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.rule_id, e.terminal_id))
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                ("au-1".to_string(), Some("tm-1".to_string())),
+                ("au-2".to_string(), Some("tm-1".to_string())),
+                ("au-1".to_string(), Some("tm-2".to_string())),
+            ]
+        );
+    }
+
+    /// A `Decision` entry must not spend the pair's `Check` budget. The `if class == Check` around the
+    /// `last_verbose` write is what stops a `Sent` suppressing the next second of verbose output, and
+    /// removing it left every test green.
+    #[test]
+    fn a_decision_entry_does_not_consume_the_check_budget() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-1");
+        r.verbose_until = Some(100_000);
+        store.save_rule(&r).unwrap();
+
+        store.append(&entry("au-1", LogKind::Sent, 10_000)).unwrap();
+        assert!(
+            store.append(&entry("au-1", LogKind::Check, 10_010)).unwrap().is_some(),
+            "the Sent 10 ms earlier must not have spent the Check budget"
+        );
+    }
+
+    /// §3.1 gives this its own paragraph — two entries can share a millisecond, and the wall clock can
+    /// move backwards after an NTP correction or a resume. Swapping both `ORDER BY id` clauses to
+    /// `ORDER BY at` left every other test green, because in all of them `at` rose with insertion.
+    #[test]
+    fn the_log_is_ordered_by_id_and_never_by_at() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        for (detail, at) in [("first", 5_000), ("second", 5_000), ("third", 1_000)] {
+            let mut e = entry("au-1", LogKind::Sent, at);
+            e.detail = detail.to_string();
+            store.append(&e).unwrap();
+        }
+        let details = |order| {
+            store
+                .load_automation_log(&LogScope::All, order, 10)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.detail)
+                .collect::<Vec<_>>()
+        };
+        // Two share an instant and the third went backwards; insertion order still decides.
+        assert_eq!(details(LogOrder::Asc), vec!["first", "second", "third"]);
+        assert_eq!(details(LogOrder::Desc), vec!["third", "second", "first"]);
+    }
+
+    /// The `limit` takes the newest rows by `id` too, not by `at`.
+    #[test]
+    fn the_log_limit_takes_the_newest_by_id() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        for (detail, at) in [("oldest", 9_000), ("middle", 1_000), ("newest", 5_000)] {
+            let mut e = entry("au-1", LogKind::Sent, at);
+            e.detail = detail.to_string();
+            store.append(&e).unwrap();
+        }
+        assert_eq!(
+            store
+                .load_automation_log(&LogScope::All, LogOrder::Asc, 2)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.detail)
+                .collect::<Vec<_>>(),
+            vec!["middle", "newest"]
+        );
+    }
+
+    /// `ensure_column` had a production caller and nothing proved it: deleting the call from
+    /// `schema()` left all twenty tests green, while every existing install of this branch would fail
+    /// on the first `SELECT … folder`. This opens a real file holding the PRE-`folder` table.
+    #[test]
+    fn init_migrates_a_pre_folder_targets_table() {
+        let path = std::env::temp_dir().join(format!("automation-migrate-{}.db", uuid::Uuid::new_v4()));
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute(
+                "CREATE TABLE automation_targets (
+                     rule_id TEXT NOT NULL, terminal_id TEXT NOT NULL, source TEXT NOT NULL,
+                     label TEXT, label_at INTEGER, last_seen_at INTEGER, added_at INTEGER NOT NULL,
+                     PRIMARY KEY (rule_id, terminal_id))",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = AutomationStore::new();
+        store.init(&path);
+
+        // Every read of this table names `folder`; without the migration each one is a hard error.
+        store.touch_target("au-1", "tm-a", Some("codex"), Some("D:/w"), 1_000).unwrap();
+        let rows = store.targets_for("au-1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3.as_deref(), Some("D:/w"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The emit window must DRAIN its pending list. Replacing `mem::take` with `clone()` passed every
+    /// assertion the suite had, while in production every later emit would name every rule that ever
+    /// wrote — a payload that grows forever and repaints rows that did nothing.
+    #[test]
+    fn the_activity_emit_drains_its_pending_rules() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        store.save_rule(&rule("au-2")).unwrap();
+
+        store.append(&entry("au-1", LogKind::Sent, 10_000)).unwrap();
+        store.append(&entry("au-2", LogKind::Sent, 10_300)).unwrap();
+        let second_emit = store.append(&entry("au-1", LogKind::Sent, 11_000)).unwrap().unwrap();
+        assert!(second_emit.emit);
+
+        // A later window must name ONLY what wrote since the last emit.
+        let third = store.append(&entry("au-1", LogKind::Sent, 12_200)).unwrap().unwrap();
+        assert!(third.emit);
+        assert_eq!(third.rule_ids, vec!["au-1".to_string()]);
+    }
+
+    /// Both rate limits do interval arithmetic on a wall clock that the schema comment three hundred
+    /// lines above says moves backwards. Untreated, a correction of N ms silences every activity emit
+    /// and drops every verbose entry for N ms — in the one mode the user turned on to watch.
+    #[test]
+    fn a_backwards_wall_clock_does_not_silence_either_gate() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-1");
+        r.verbose_until = Some(1_000_000);
+        store.save_rule(&r).unwrap();
+
+        store.append(&entry("au-1", LogKind::Check, 500_000)).unwrap();
+        // …and now the clock jumps back a minute.
+        assert!(
+            store.append(&entry("au-1", LogKind::Check, 440_000)).unwrap().is_some(),
+            "a Check after a backwards correction still writes"
+        );
+        let outcome = store.append(&entry("au-1", LogKind::Sent, 441_000)).unwrap().unwrap();
+        assert!(outcome.emit, "and the activity emit resyncs rather than waiting out the skew");
+    }
+
+    /// `None` means "no new value", never "clear the stored one". `label_at` returns `None` once a
+    /// terminal is gone — exactly when the picker's "not open" row needs the snapshot most.
+    #[test]
+    fn touch_target_never_clears_a_stored_label_with_none() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        store.touch_target("au-1", "tm-m", Some("codex"), Some("D:/a"), 1_000).unwrap();
+
+        // The terminal closed: the resolver has no label to offer any more.
+        store.touch_target("au-1", "tm-m", None, None, 2_000).unwrap();
+
+        let row = store.targets_for("au-1").unwrap().into_iter().next().unwrap();
+        assert_eq!(row.2.as_deref(), Some("codex"), "the label survived the terminal");
+        assert_eq!(row.3.as_deref(), Some("D:/a"), "and so did the folder");
+    }
+
+    /// §3.3's startup sweep. The gate is a comparison and does not need it; the column is
+    /// user-visible and does, or the editor renders "verbose until 10:17" for a deadline days past.
+    #[test]
+    fn the_startup_sweep_nulls_deadlines_already_past() {
+        let store = AutomationStore::new_in_memory();
+        let mut past = rule("au-past");
+        past.verbose_until = Some(1_000);
+        store.save_rule(&past).unwrap();
+        let mut future = rule("au-future");
+        future.verbose_until = Some(9_000);
+        store.save_rule(&future).unwrap();
+
+        assert_eq!(store.sweep_expired_verbose(5_000).unwrap(), 1);
+
+        assert_eq!(store.get_rule("au-past").unwrap().unwrap().verbose_until, None);
+        assert_eq!(store.get_rule("au-future").unwrap().unwrap().verbose_until, Some(9_000));
+    }
+
+    /// §3.2 leans on `id <= NULL` being a safe no-op — *"no separate guard needed"* — but the early
+    /// return below the cap means the DELETE never ran with a short log, so the claim was untested.
+    /// Counter drift makes that reachable in production, so drive it directly.
+    #[test]
+    fn the_watermark_delete_is_a_no_op_below_the_cap() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        for i in 0..5 {
+            let mut e = entry("au-1", LogKind::Sent, 1_000 + i);
+            e.detail = format!("entry {i}");
+            store.append(&e).unwrap();
+        }
+        // Pretend the lazily-seeded counter drifted far past the cap, which forces the trim to run
+        // against a log of five rows.
+        store.log_counts.insert("au-1".to_string(), LOG_CAP + LOG_SLACK + 100);
+        let mut e = entry("au-1", LogKind::Sent, 2_000);
+        e.detail = "entry 5".to_string();
+        store.append(&e).unwrap();
+
+        let details = store
+            .load_automation_log(&LogScope::All, LogOrder::Asc, 100)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.detail)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            details,
+            vec!["entry 0", "entry 1", "entry 2", "entry 3", "entry 4", "entry 5"],
+            "a trim below the cap deletes nothing"
+        );
     }
 }

@@ -121,6 +121,11 @@ impl CanvasStore {
             return;
         }
         match Connection::open(path).and_then(|c| {
+            // SQLite's default busy handler is NONE. Plan 028's automation store is a third writer on
+            // this file, and its saves and log trims take the write lock while the user is working —
+            // without a timeout an edge insert landing in that window fails instantly with
+            // SQLITE_BUSY. Matches `automation_store::init`.
+            c.busy_timeout(std::time::Duration::from_secs(5))?;
             Self::schema(&c)?;
             Ok(c)
         }) {
