@@ -957,6 +957,46 @@ impl AutomationStore {
         Ok(n > 0)
     }
 
+    /// Flip a rule's `enabled` flag, **re-validating on the way in** (plan §7.8, R10).
+    ///
+    /// The boundary audit's finding was that the enable path had no gate at all: the editor validated
+    /// its own toggle, the store validated nothing semantic, and the engine refused only an
+    /// uncompilable pattern — so a rule with no terminals and an empty message went live straight from
+    /// the list row, where the editor's validation never runs. The backend owns *"is this rule allowed
+    /// to run"* and must not be talked into it by a stale renderer.
+    ///
+    /// Disabling is never refused. A rule the user wants stopped is stopped, whatever is wrong with
+    /// it — refusing to turn off an invalid rule would trap it running.
+    ///
+    /// The Tauri command is a two-line wrapper over this, per §7.10: this is the thing worth testing,
+    /// and it needs no `AppHandle`.
+    pub fn set_enabled_checked(
+        &self,
+        rule_id: &str,
+        enabled: bool,
+    ) -> Result<(), AutomationStoreError> {
+        if enabled {
+            let rule = self
+                .get_rule(rule_id)?
+                .ok_or_else(|| AutomationStoreError::Invalid(format!("no rule {}", rule_id)))?;
+            let blocking: Vec<String> = crate::automation_validation::problems(&rule)
+                .into_iter()
+                .filter(crate::automation_validation::Problem::blocks)
+                .map(|p| p.message)
+                .collect();
+            if !blocking.is_empty() {
+                return Err(AutomationStoreError::Invalid(blocking.join(" ")));
+            }
+        }
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+        conn.execute(
+            "UPDATE automation_rules SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled as i64, rule_id],
+        )?;
+        Ok(())
+    }
+
     /// Stamp a runs-once rule as completed. `Ok(false)` = no such rule.
     ///
     /// This row is the SECOND line of defence, not the mechanism: the engine also drops the rule from
@@ -969,6 +1009,20 @@ impl AutomationStore {
         Ok(conn.execute(
             "UPDATE automation_rules SET completed_at = ?1 WHERE id = ?2",
             rusqlite::params![at, rule_id],
+        )? > 0)
+    }
+
+    /// Un-complete a runs-once rule, so it can run again. `Ok(false)` = no such rule.
+    ///
+    /// The engine purge is the caller's other half and they are one command (§7.8): a rule whose row
+    /// says it may run again while its arm keys still say `Fired` re-arms on its next false read and
+    /// fires with no crossing.
+    pub fn clear_completed(&self, rule_id: &str) -> Result<bool, AutomationStoreError> {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+        Ok(conn.execute(
+            "UPDATE automation_rules SET completed_at = NULL WHERE id = ?1",
+            [rule_id],
         )? > 0)
     }
 
@@ -2231,4 +2285,95 @@ mod tests {
             "a trim below the cap deletes nothing"
         );
     }
+    /// The store's own `rule()` fixture has an EMPTY pick set, which `problems()` blocks on — so the
+    /// enable-path tests need one that could legitimately run. That the base fixture is invalid is
+    /// itself the point: nothing before now judged a rule at all.
+    fn enableable(id: &str) -> AutomationRule {
+        let mut r = rule(id);
+        r.target_ids = vec!["tm-1".to_string()];
+        r
+    }
+
+    // =============================================================================================
+    // §10.18b — the enable path actually refuses (R10's only backend oracle)
+    // =============================================================================================
+
+    fn enabled_flag(store: &AutomationStore, id: &str) -> bool {
+        store.get_rule(id).unwrap().expect("the rule must still be there").enabled
+    }
+
+    /// **The row toggle bypasses the editor entirely**, which is where the boundary audit found this:
+    /// the editor gated its own toggle, the store validated nothing semantic, and the engine refused
+    /// only an uncompilable pattern — so a rule with no terminals and an empty message went live
+    /// straight from the list. The backend owns *"is this rule allowed to run"*.
+    #[test]
+    fn the_enable_path_refuses_an_invalid_rule_and_leaves_it_disabled() {
+        let store = AutomationStore::new_in_memory();
+        let mut rule = enableable("au-bad");
+        rule.enabled = false;
+        rule.target_ids.clear();
+        rule.graph.action.message = String::new();
+        store.save_rule(&rule).unwrap();
+
+        let refused = store.set_enabled_checked("au-bad", true);
+
+        assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
+        assert!(!enabled_flag(&store, "au-bad"), "refused, and yet the row says enabled");
+
+        // Paired positive: the same call on a rule with nothing wrong with it goes through, so
+        // "refuses everything" cannot be how the assertion above passes.
+        let good = enableable("au-good");
+        store.save_rule(&good).unwrap();
+        store.set_enabled_checked("au-good", true).unwrap();
+        assert!(enabled_flag(&store, "au-good"));
+    }
+
+    /// **Disabling is never refused.** A rule the user wants stopped is stopped, whatever is wrong
+    /// with it — refusing to turn off an invalid rule would trap it running, which is the opposite of
+    /// what the gate is for.
+    #[test]
+    fn disabling_is_never_refused_however_broken_the_rule_is() {
+        let store = AutomationStore::new_in_memory();
+        let mut rule = enableable("au-bad");
+        rule.enabled = true;
+        rule.target_ids.clear();
+        rule.graph.action.message = String::new();
+        store.save_rule(&rule).unwrap();
+
+        store.set_enabled_checked("au-bad", false).unwrap();
+        assert!(!enabled_flag(&store, "au-bad"));
+    }
+
+    /// A rule that is not there is an error, not a silent no-op: the command's caller shows the
+    /// message, and an `Ok(())` for a row that was deleted in another window looks like success.
+    #[test]
+    fn enabling_a_rule_that_is_not_there_says_so() {
+        let store = AutomationStore::new_in_memory();
+        assert!(matches!(
+            store.set_enabled_checked("au-ghost", true),
+            Err(AutomationStoreError::Invalid(_))
+        ));
+    }
+
+    /// `clear_completed` is *Reset*'s store half. `Ok(false)` for a rule that is not there, and it
+    /// touches nothing else on the row.
+    #[test]
+    fn clear_completed_un_completes_a_rule_and_leaves_the_rest_of_it_alone() {
+        let store = AutomationStore::new_in_memory();
+        let mut rule = enableable("au-1");
+        rule.runs_once = true;
+        store.save_rule(&rule).unwrap();
+        store.mark_completed("au-1", 5_000).unwrap();
+        assert_eq!(store.get_rule("au-1").unwrap().unwrap().completed_at, Some(5_000));
+
+        assert!(store.clear_completed("au-1").unwrap());
+        let after = store.get_rule("au-1").unwrap().unwrap();
+        assert_eq!(after.completed_at, None);
+        assert_eq!(after.runs_once, true, "reset must not un-tick `run once`");
+        assert_eq!(after.enabled, rule.enabled);
+        assert_eq!(after.updated_at, rule.updated_at, "and it is not an edit");
+
+        assert!(!store.clear_completed("au-ghost").unwrap());
+    }
+
 }

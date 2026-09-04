@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use crate::automation::roster::RosterRow;
+use crate::automation_store::Criterion;
 use crate::automation::send::TerminalWriter;
 use crate::automation_engine::eval::{ReadDepth, ScreenSource};
 use crate::automation_store::AutomationStore;
@@ -31,7 +32,12 @@ pub trait EngineHost: Send + Sync {
     fn process_for_leaf(&self, tm: &str) -> Option<String>;
 
     /// Every live terminal, as the targeting tick resolves criteria against it.
-    fn roster(&self) -> Vec<RosterRow>;
+    ///
+    /// `criteria` is what the live rules actually ask about, and it is an argument rather than
+    /// something the implementation works out because of §10.13: `Command contains` is the only
+    /// criterion that needs the machine's process table, and a profile whose rules never use it must
+    /// never enumerate one. The caller is the only place that knows.
+    fn roster(&self, criteria: &[Criterion]) -> Vec<RosterRow>;
 
     /// Every live `pc-`, for the tap's `Lagged` recovery.
     fn live_processes(&self) -> Vec<String>;

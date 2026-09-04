@@ -85,7 +85,7 @@ impl EngineHost for FakeHost {
     fn process_for_leaf(&self, tm: &str) -> Option<String> {
         self.leaves.lock().unwrap().get(tm).cloned()
     }
-    fn roster(&self) -> Vec<RosterRow> {
+    fn roster(&self, _criteria: &[Criterion]) -> Vec<RosterRow> {
         self.roster.lock().unwrap().clone()
     }
     fn live_processes(&self) -> Vec<String> {

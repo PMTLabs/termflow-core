@@ -25,7 +25,7 @@ use crate::automation_engine::due::{
 use crate::automation_engine::eval::{self, ArmState, Decision, Evaluation, Outcome, Read};
 use crate::automation_engine::host::{EngineHost, HostPort};
 use crate::automation_engine::{AutomationEngine, LiveRule};
-use crate::automation_store::{AutomationLogEntry, LogKind};
+use crate::automation_store::{AutomationLogEntry, Criterion, LogKind, TargetMode};
 use crate::state::ChannelPayload;
 
 /// How long a send waits for the terminal's queue before giving up and rolling back (§2.5).
@@ -392,22 +392,45 @@ fn append(
 /// a spawn path is added; the tick covers every path, every window and session restore by
 /// construction, and the mockup already promises "refreshed every few seconds".
 pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>) {
+    let mut last: HashMap<String, HashSet<String>> = HashMap::new();
     loop {
         if engine.stopping.load(Ordering::Relaxed) {
             return;
         }
-        targeting_tick(&engine, &host, now_ms());
+        // `spawn_blocking`, because `AppState`'s roster may take a `System` snapshot:
+        // `new_all()` is 50-200 ms, and `ProcSnapshot`'s own doc says this call belongs off a
+        // tokio worker.
+        let (e, h) = (engine.clone(), host.clone());
+        let missing = tokio::task::spawn_blocking(move || targeting_tick(&e, &h, now_ms()))
+            .await
+            .unwrap_or_default();
+        // Only when the answer CHANGED. A pill that says *not open* is state the UI shows, so a
+        // change has to reach it — but emitting every 2 s regardless would repaint every open
+        // Settings page for the life of the app to say nothing happened.
+        if missing != last {
+            last = missing;
+            host.emit_state();
+        }
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS)).await;
     }
 }
 
-/// One pass of the targeting tick. Returns which pinned ids are reportably missing, by rule.
+/// One pass of the targeting tick. Returns which pinned ids are reportably missing, by rule, **and
+/// parks the same answer on the engine** for the two consumers that have no roster of their own.
 pub fn targeting_tick(
     engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     now_ms: i64,
 ) -> HashMap<String, HashSet<String>> {
-    let rows = host.roster();
+    // §10.13: only the criteria live RULE-mode rules actually resolve. A pinned rule answers from
+    // its own id list, so it must not be the reason the machine's process table is enumerated.
+    let criteria: Vec<Criterion> = engine
+        .snapshot_live()
+        .iter()
+        .filter(|l| l.rule.target_mode == TargetMode::Rule)
+        .map(|l| l.rule.criterion)
+        .collect();
+    let rows = host.roster(&criteria);
     let live_leaves: HashSet<&str> = rows.iter().filter_map(|r| r.terminal_id.as_deref()).collect();
     let grace_over = crate::automation::roster::grace_elapsed(now_ms, engine.started_at_ms());
     let mut missing = HashMap::new();
@@ -433,6 +456,7 @@ pub fn targeting_tick(
             }
         }
     }
+    engine.set_missing(missing.clone());
     missing
 }
 
@@ -443,6 +467,7 @@ mod tests {
     // The fake, the canonical rule and the wiring are shared with the dry run's tests so there can
     // only ever be one of each.
     use crate::automation_engine::test_host::*;
+    use crate::automation::roster::RosterRow;
 
     // =============================================================================================
     // §10.5 — the tap
@@ -1050,6 +1075,57 @@ mod tests {
         evaluate_tick(&next, &host, 0, 7_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         assert_eq!(times_sent(&fake, "once only"), 1, "a completed rule ran after a reload");
+    }
+
+    // =============================================================================================
+    // §10.18d (local half) — the missing map reaches first paint
+    // =============================================================================================
+
+    /// **The targeting tick is the only thing that can compute `missing`, and neither consumer has a
+    /// roster.** So it parks its answer where they can read it — and the defect this pins is the
+    /// obvious alternative: `emit_state` and `get_automation_runtime` each passing an empty map,
+    /// which flickers every *not open* pill off the moment any rule fires and again on every repaint.
+    #[tokio::test(start_paused = true)]
+    async fn the_targeting_tick_parks_its_missing_map_where_first_paint_reads_it() {
+        let mut pinned = ctx_rule("au-1");
+        pinned.target_mode = TargetMode::Pinned;
+        pinned.target_ids = vec!["tm-gone".into()];
+        let (engine, _fake, host) = wire(vec![pinned]);
+
+        // Before any tick, and inside the grace window, nothing is reported missing — §4.5: at t=0 the
+        // live set is empty and session restore has not run.
+        assert!(!is_missing(&engine, "au-1", "tm-gone"), "reported before the grace elapsed");
+        targeting_tick(&engine, &host, 1_000);
+        assert!(!is_missing(&engine, "au-1", "tm-gone"), "the grace window did not hold");
+
+        // Past the grace, the pinned id is not in the roster and is reported — through the payload
+        // first paint actually calls, not through the tick's return value.
+        targeting_tick(&engine, &host, 120_000);
+        assert!(is_missing(&engine, "au-1", "tm-gone"), "first paint cannot see what the tick found");
+
+        // And it is retracted the moment the terminal comes back, rather than latching.
+        _fake.leaves.lock().unwrap().insert("tm-gone".into(), "pc-9".into());
+        _fake.roster.lock().unwrap().push(RosterRow {
+            terminal_id: Some("tm-gone".into()),
+            process_id: "pc-9".into(),
+            name: "Terminal-powershell".into(),
+            shell: "powershell".into(),
+            pid: 101,
+            display_label: None,
+            cwd: None,
+            command_line: None,
+        });
+        targeting_tick(&engine, &host, 130_000);
+        assert!(!is_missing(&engine, "au-1", "tm-gone"), "dormant, never dead — it came back");
+    }
+
+    fn is_missing(engine: &Arc<AutomationEngine>, rule_id: &str, tm: &str) -> bool {
+        engine
+            .runtime_payload()
+            .rules
+            .get(rule_id)
+            .and_then(|pairs| pairs.get(tm))
+            .is_some_and(|p| p.missing)
     }
 
 }

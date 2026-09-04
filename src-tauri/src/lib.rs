@@ -16,6 +16,7 @@ pub mod canvas_store;
 // cannot be confused with `spawn_pipeline_watchdog` below — that one watches the output PIPELINE for
 // a stalled consumer and is unrelated.
 pub mod automation;
+pub mod automation_commands;
 pub mod automation_engine;
 pub mod automation_store;
 pub mod automation_validation;
@@ -1483,6 +1484,8 @@ pub fn run() {
             state.history_store.prune_dir_usage(20000);
         }
         spawn_history_flush_task(state.clone());
+        // Terminal Automations (plan 028 §2.1): the tap, the evaluator and the targeting tick.
+        automation_engine::spawn(state.clone());
 
         Ok(())
     })
@@ -1491,6 +1494,17 @@ pub fn run() {
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
+        automation_commands::list_automations,
+        automation_commands::get_automation_runtime,
+        automation_commands::load_automation_log,
+        automation_commands::list_watchable_terminals,
+        automation_commands::dry_run_automation,
+        automation_commands::save_automation,
+        automation_commands::delete_automation,
+        automation_commands::duplicate_automation,
+        automation_commands::set_automation_enabled,
+        automation_commands::reset_automation,
+        automation_commands::rearm_automation,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::update_available,
@@ -1759,6 +1773,15 @@ pub fn run() {
                 shutdown_mcp_server(&state);
                 // Gracefully shutdown the peering fabric sidecar on app exit.
                 crate::fabric_manager::shutdown_fabric(&state);
+                // Plan 028 §2.1: the ONLY writer of the automation engine's stop flag. The three
+                // loops check it at the top of every iteration and a send checks it before its first
+                // write, so a quit leaves every send either unstarted or complete.
+                //
+                // There is no log flush to perform here, and that is by design rather than by
+                // omission: `AutomationStore::append` writes the row through to SQLite inside its own
+                // call, so a row that exists has already been committed. What Exit owes this feature
+                // is stopping the loops before the runtime is torn down under them.
+                state.automations.stop();
             }
             // Stop advertising this instance. A crash leaves the record behind,
             // which is why readers treat a dead pid as stale rather than trusting

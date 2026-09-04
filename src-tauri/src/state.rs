@@ -411,6 +411,12 @@ pub struct AppState<R: Runtime = Wry> {
     // a restarted terminal REUSES its `tm-` id, and `Unseen` protection engages only when the key is
     // absent, so a stale `Fired` would silently never nag that pane again. Plan 028 §2.1, §7.10.
     pub automations: Arc<crate::automation_engine::AutomationEngine>,
+    /// The one `System` snapshot the roster shares, TTL 2 s (plan §4.3).
+    ///
+    /// On `AppState` rather than inside the engine because it is a projection of the MACHINE, not of
+    /// the rules: `list_watchable_terminals` and the targeting tick both read it, arriving from
+    /// different threads within the same window, and `System::new_all()` is 50-200 ms.
+    pub proc_snapshot: Arc<crate::automation::proc_snapshot::SystemSnapshot>,
     // Renderer-published canvas metadata, partitioned by window so one window's
     // local model cannot erase another's. This is a boot-time projection, never
     // persisted; canvas_endpoints owns the payload types and merge policy.
@@ -546,6 +552,7 @@ impl<R: Runtime> Clone for AppState<R> {
             canvas_store: self.canvas_store.clone(),
             automation_store: self.automation_store.clone(),
             automations: self.automations.clone(),
+            proc_snapshot: self.proc_snapshot.clone(),
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
@@ -799,6 +806,9 @@ impl<R: Runtime> AppState<R> {
             automation_store: Arc::new(crate::automation_store::AutomationStore::new()),
             automations: Arc::new(crate::automation_engine::AutomationEngine::new(
                 chrono::Utc::now().timestamp_millis(),
+            )),
+            proc_snapshot: Arc::new(crate::automation::proc_snapshot::ProcSnapshot::new(
+                crate::automation::proc_snapshot::SNAPSHOT_TTL_MS,
             )),
             canvas_nodes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history_dirty: Arc::new(DashMap::new()),
@@ -2204,6 +2214,108 @@ where
             log::warn!("render_tail_lines panicked; the terminal's parser is intact and the read is skipped");
             None
         }
+    }
+}
+
+/// The running engine's view of this app (plan 028 §7.10).
+///
+/// **Every method here is a projection with no decision in it**, which is the rule the whole port
+/// exists to enforce: `AppState::new` takes an `AppHandle`, and `--features integration-tests` breaks
+/// the Windows test binary at loader time, so anything with a branch reachable only through
+/// `AppState` is a gate that cannot fail on the platform this is developed on. The engine's decisions
+/// all live in `automation_engine::loops`, against a fake.
+impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<R> {
+    fn process_for_leaf(&self, tm: &str) -> Option<String> {
+        // The ONE conversion (§7.4). Never `resolve_ref`: it returns its input unchanged when the
+        // leaf does not resolve, so it cannot double as an existence test and would hand a `tm-`
+        // string to a `pc-`keyed map.
+        self.identity.process_for_leaf(tm)
+    }
+
+    fn roster(&self, criteria: &[crate::automation_store::Criterion]) -> Vec<crate::automation::roster::RosterRow> {
+        let mut rows: Vec<crate::automation::roster::RosterRow> = self
+            .terminals
+            .iter()
+            .map(|entry| {
+                let t = entry.value();
+                crate::automation::roster::RosterRow {
+                    terminal_id: t.renderer_terminal_id.clone(),
+                    process_id: t.id.clone(),
+                    name: t.name.clone(),
+                    shell: t.shell.clone(),
+                    pid: t.pid,
+                    display_label: t.display_label.clone(),
+                    cwd: self.terminal_cwds.get(&t.id).map(|c| c.value().clone()),
+                    command_line: None,
+                }
+            })
+            .collect();
+
+        // §10.13. The process table is enumerated ONLY when a live rule actually asks a question that
+        // needs it — `Command contains` always, `Working folder is under` only when some terminal has
+        // not reported a cwd. A profile whose only rule is `Terminal ID is` never scans.
+        let any_missing_cwd = rows.iter().any(|r| r.cwd.is_none());
+        if crate::automation::proc_snapshot::scan_needed(criteria.iter().copied(), any_missing_cwd) {
+            let now = chrono::Utc::now().timestamp_millis();
+            self.proc_snapshot.with(now, sysinfo::System::new_all, |sys| {
+                for row in rows.iter_mut() {
+                    row.command_line = crate::pty_manager::foreground_command_line(row.pid, sys);
+                }
+            });
+        }
+        rows
+    }
+
+    fn live_processes(&self) -> Vec<String> {
+        self.terminals.iter().map(|e| e.key().clone()).collect()
+    }
+
+    fn tail(
+        &self,
+        pc: &str,
+        depth: crate::automation_engine::eval::ReadDepth,
+    ) -> Option<String> {
+        self.screen_tail_text(pc, depth)
+    }
+
+    fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
+        <Self as crate::automation::send::TerminalWriter>::write(self, pc, bytes)
+    }
+
+    fn label_for(&self, tm: &str) -> Option<String> {
+        // `label_at` is the ONLY resolver (§2.8). The rule's stored snapshot is not reachable from
+        // here — it is per `(rule, terminal)` and this port is per terminal — so a name for a
+        // terminal that is already gone comes from the pending send's carried label, resolved at
+        // DECIDE time, which is exactly why `PendingSend` carries one.
+        let pc = self.identity.process_for_leaf(tm)?;
+        let terminal = self.terminals.get(&pc)?;
+        crate::automation::labels::label_at(&crate::automation::labels::LabelInputs {
+            display_label: terminal.display_label.as_deref(),
+            name: Some(terminal.name.as_str()),
+            shell: Some(terminal.shell.as_str()),
+            snapshot: None,
+        })
+    }
+
+    fn store(&self) -> &std::sync::Arc<crate::automation_store::AutomationStore> {
+        &self.automation_store
+    }
+
+    fn emit_activity(&self, rule_ids: Vec<String>) {
+        use tauri::Emitter as _;
+        let _ = self.app_handle.emit(
+            crate::automation::events::AUTOMATION_ACTIVITY,
+            crate::automation::events::ActivityPayload { rule_ids },
+        );
+    }
+
+    fn emit_state(&self) {
+        use tauri::Emitter as _;
+        // `runtime_payload` is the SAME function `get_automation_runtime()` calls, so the event and
+        // first paint cannot disagree (§10.18d).
+        let _ = self
+            .app_handle
+            .emit(crate::automation::events::AUTOMATION_STATE, self.automations.runtime_payload());
     }
 }
 

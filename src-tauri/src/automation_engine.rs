@@ -40,6 +40,60 @@ use crate::automation_store::{
     AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError, LogKind,
 };
 
+/// Start the engine: load the rules, then the three tasks (plan §2.1, §2.3, §4.4).
+///
+/// **Called once, from `.setup()`, immediately after `spawn_history_flush_task`** — the same place
+/// and the same shape as every other long-lived task in this crate.
+///
+/// `reload` is attempted once and, on `Err(Disabled)`, once more after a short delay. `init` runs a
+/// few lines earlier in the same closure, so the store is normally ready; `Disabled` here means the
+/// history DB path was unavailable, and the retry costs one wake-up against a feature that would
+/// otherwise stay silently off for the whole session with nothing in the log to say why.
+///
+/// Takes the concrete `AppState<R>` and hands the loops an `Arc<dyn EngineHost>`: everything with a
+/// decision in it is on the far side of that port and is tested against a fake (§7.10).
+pub fn spawn<R: tauri::Runtime>(state: crate::state::AppState<R>) {
+    let engine = state.automations.clone();
+    let rx = state.output_tx.subscribe();
+    let host: Arc<dyn host::EngineHost> = Arc::new(state);
+
+    tokio::spawn({
+        let engine = engine.clone();
+        let host = host.clone();
+        async move {
+            for attempt in 0..2 {
+                match engine.reload(host.store(), chrono::Utc::now().timestamp_millis()) {
+                    Ok(report) => {
+                        log::info!(
+                            "automations: {} rule(s) running, {} refused",
+                            report.live,
+                            report.skipped.len()
+                        );
+                        if report.emit {
+                            host.emit_activity(
+                                report.skipped.iter().map(|(id, _)| id.clone()).collect(),
+                            );
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt == 0 {
+                            log::warn!("automations: rules could not be loaded ({}), retrying", e);
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        } else {
+                            log::error!("automations: rules could not be loaded: {}", e);
+                        }
+                    }
+                }
+            }
+
+            tokio::spawn(loops::run_tap(engine.clone(), host.clone(), rx));
+            tokio::spawn(loops::run_evaluator(engine.clone(), host.clone()));
+            tokio::spawn(loops::run_targeting(engine, host));
+        }
+    });
+}
+
 /// One rule the engine is actually running: its definition, and its pattern compiled once at load.
 ///
 /// Compiling per evaluation would recompile the same pattern four times a second per terminal, and
@@ -99,6 +153,17 @@ pub struct AutomationEngine {
     /// has not run, so reporting an absent pinned id immediately writes a "1 id not open" line on
     /// every normal restart and then silently retracts it.
     started_at_ms: i64,
+    /// Which pinned ids are reportably missing, by rule — **the targeting tick's answer, parked**.
+    ///
+    /// The tick is the only thing that can compute this (it holds the roster), and it runs every 2 s;
+    /// but the two consumers are the `automation:state` emit, which fires on a crossing, and
+    /// `get_automation_runtime()`, which fires when a Settings page paints. Neither has a roster. So
+    /// the tick's answer is stored where they can read it, rather than each of them either inventing
+    /// an empty map — which flickers every *not open* pill off the moment any rule fires — or growing
+    /// its own roster walk, which is the second implementation.
+    ///
+    /// One writer (`loops::targeting_tick`), two readers, exactly like `watched`.
+    missing: RwLock<HashMap<String, HashSet<String>>>,
 }
 
 impl AutomationEngine {
@@ -108,7 +173,21 @@ impl AutomationEngine {
             stopping: Arc::new(AtomicBool::new(false)),
             live: RwLock::new(HashMap::new()),
             started_at_ms,
+            missing: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// The targeting tick's only write to the missing map.
+    pub fn set_missing(&self, missing: HashMap<String, HashSet<String>>) {
+        *self.missing.write().unwrap_or_else(|e| e.into_inner()) = missing;
+    }
+
+    /// The runtime object every row's pill reads, with the missing map the targeting tick last
+    /// resolved. **This is what both the event and `get_automation_runtime()` call**, so §10.18d's
+    /// "they agree" is true by construction rather than by two call sites being kept in step.
+    pub fn runtime_payload(&self) -> StatePayload {
+        let missing = self.missing.read().unwrap_or_else(|e| e.into_inner()).clone();
+        self.state_payload(&missing)
     }
 
     pub fn started_at_ms(&self) -> i64 {

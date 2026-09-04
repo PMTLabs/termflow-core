@@ -18,7 +18,9 @@
 
 use regex::{Regex, RegexBuilder};
 
-use crate::automation_store::{AutomationGraph, CondKind, Keep};
+use crate::automation_store::{
+    AutomationGraph, AutomationRule, Cadence, CondKind, Criterion, Keep, TargetMode,
+};
 
 /// Whether a problem stops the rule running, or merely tells the user something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -122,6 +124,103 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     out
 }
 
+/// The floor on a timer rule's interval.
+///
+/// `due_now` clamps anything faster to [`EVENT_MIN_INTERVAL_MS`], so a rule asking for 100 ms would
+/// silently get 250 — and a validation rule that lets a user type a number the engine then ignores is
+/// worse than one that says so.
+pub const MIN_TIMER_MS: i64 = crate::automation_engine::due::EVENT_MIN_INTERVAL_MS;
+
+/// Everything wrong with a WHOLE rule — §6.5's five categories: **target, interval, pattern,
+/// threshold, message**.
+///
+/// Blocking problems come first, so a caller that shows one shows the one that matters (the row
+/// toggle's `title` is exactly that caller). `pattern_problems` is delegated to rather than
+/// re-derived: it is the half M2 landed and §10.2b gates, and two lists of pattern rules is the
+/// `two-implementations-one-fix` shape this whole module exists to avoid.
+///
+/// **M5 mirrors this in TypeScript from a shared case fixture.** Until that fixture exists, the risk
+/// is the documented one: a fixture written by the second implementation is a fixture shaped to make
+/// the second implementation pass.
+pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
+    let mut out = Vec::new();
+
+    // --- target ---------------------------------------------------------------------------------
+    // Only a PINNED rule can be empty in a way validation can see. A criterion rule that currently
+    // matches nothing is not invalid — terminals open and close, and that is the entire point of
+    // re-resolving every 2 s.
+    match rule.target_mode {
+        TargetMode::Pinned => {
+            if rule.target_ids.is_empty() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "targets",
+                    "Pick at least one terminal for this rule to watch.",
+                ));
+            }
+        }
+        TargetMode::Rule => {
+            let needs_value = !matches!(rule.criterion, Criterion::AllTerminals);
+            if needs_value && rule.criterion_value.trim().is_empty() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "targets",
+                    "Fill in what the terminals must match, or watch all terminals instead.",
+                ));
+            }
+        }
+    }
+
+    // --- interval -------------------------------------------------------------------------------
+    if rule.graph.monitor.cadence == Cadence::Timer && rule.graph.monitor.every_ms < MIN_TIMER_MS {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "monitor",
+            format!("Check no more often than every {} ms.", MIN_TIMER_MS),
+        ));
+    }
+
+    // --- pattern --------------------------------------------------------------------------------
+    out.extend(pattern_problems(&rule.graph));
+
+    // --- threshold ------------------------------------------------------------------------------
+    // A numeric rule with no operator or no threshold cannot be true of anything, and `evaluate`
+    // reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
+    if rule.graph.cond.kind == CondKind::Number
+        && (rule.graph.cond.op.is_none() || rule.graph.cond.threshold.is_none())
+    {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "cond",
+            "Choose how to compare the value, and the number to compare it with.",
+        ));
+    }
+
+    // --- message --------------------------------------------------------------------------------
+    if rule.graph.action.message.trim().is_empty() {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "action",
+            "Enter the message this rule should type.",
+        ));
+    } else if let Ok(re) = compile(rule.graph.parse.find.trim()) {
+        // §2.6's failure, told to the user before it happens: a rule whose own message matches its
+        // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
+        // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
+        if re.is_match(&rule.graph.action.message) {
+            out.push(Problem::new(
+                Severity::Warns,
+                "action",
+                "This message matches the rule's own pattern, so the rule can see what it types. \
+                 TermFlow ignores its own message, but a shorter pattern is safer.",
+            ));
+        }
+    }
+
+    out.sort_by_key(|p| !p.blocks());
+    out
+}
+
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or(s).trim().to_string()
 }
@@ -133,6 +232,7 @@ mod tests {
         ActionStep, Cadence, CompareOp, CondStep, MonitorStep, ParsePreset, ParseStep, ReadMode,
         SendTo,
     };
+    use crate::automation_store::{AutomationRule, Criterion, TargetMode};
 
     /// The same graph as a PRESENCE rule. `keep` is deliberately left at whatever the caller passed:
     /// the point is that a text rule carries the field and never reads it.
@@ -252,4 +352,160 @@ mod tests {
         assert!(compile(r"(?=lookahead)").is_err(), "Rust's regex has no lookahead");
         assert!(compile(r"ctx:(\d+)%").is_ok());
     }
+    // =============================================================================================
+    // §10.18b — the whole-rule rules, and R10's only backend oracle
+    // =============================================================================================
+
+    fn valid_rule() -> AutomationRule {
+        AutomationRule {
+            id: "au-1".into(),
+            name: "ctx".into(),
+            enabled: false,
+            runs_once: false,
+            target_mode: TargetMode::Pinned,
+            criterion: Criterion::AllTerminals,
+            criterion_value: String::new(),
+            follow_new: true,
+            target_ids: vec!["tm-1".into()],
+            completed_at: None,
+            verbose_until: None,
+            sort_order: 1,
+            schema_version: crate::automation_store::SUPPORTED_SCHEMA_VERSION,
+            graph: graph(r"ctx:(\d+)%", Keep::Brackets),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn fields(rule: &AutomationRule) -> Vec<String> {
+        problems(rule).into_iter().filter(Problem::blocks).map(|p| p.field).collect()
+    }
+
+    /// The canonical rule is clean, which is what makes every row below able to fail.
+    #[test]
+    fn the_canonical_rule_has_nothing_wrong_with_it() {
+        assert_eq!(problems(&valid_rule()), vec![], "the fixture itself is invalid");
+    }
+
+    /// **All five categories, as a table.** Each row breaks exactly one thing and names the step that
+    /// owns it, so the editor can point at the right panel — and so a rule that blocks for the wrong
+    /// reason fails here rather than being reported as "1 problem" and looking correct.
+    #[test]
+    fn each_of_the_five_categories_blocks_and_names_its_own_step() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut AutomationRule)>, &str)> = vec![
+            (
+                "a pinned rule with nothing picked",
+                Box::new(|r: &mut AutomationRule| r.target_ids.clear()),
+                "targets",
+            ),
+            (
+                "a criterion rule with nothing to match on",
+                Box::new(|r: &mut AutomationRule| {
+                    r.target_mode = TargetMode::Rule;
+                    r.criterion = Criterion::TabNameContains;
+                    r.criterion_value = "  ".into();
+                }),
+                "targets",
+            ),
+            (
+                "a timer faster than the engine can tick",
+                Box::new(|r: &mut AutomationRule| {
+                    r.graph.monitor.cadence = Cadence::Timer;
+                    r.graph.monitor.every_ms = MIN_TIMER_MS - 1;
+                }),
+                "monitor",
+            ),
+            (
+                "a pattern that will not compile",
+                Box::new(|r: &mut AutomationRule| r.graph.parse.find = r"ctx:(\d+%".into()),
+                "parse",
+            ),
+            (
+                "a numeric rule with no threshold",
+                Box::new(|r: &mut AutomationRule| r.graph.cond.threshold = None),
+                "cond",
+            ),
+            (
+                "a numeric rule with no operator",
+                Box::new(|r: &mut AutomationRule| r.graph.cond.op = None),
+                "cond",
+            ),
+            (
+                "nothing to type",
+                Box::new(|r: &mut AutomationRule| r.graph.action.message = "   ".into()),
+                "action",
+            ),
+        ];
+
+        for (what, break_it, field) in cases {
+            let mut rule = valid_rule();
+            break_it(&mut rule);
+            assert_eq!(fields(&rule), vec![field.to_string()], "{}", what);
+        }
+    }
+
+    /// A criterion rule watching **all** terminals needs no value — the one criterion that is complete
+    /// on its own. Without this the rule above would refuse the simplest rule in the feature.
+    #[test]
+    fn watching_all_terminals_needs_no_criterion_value() {
+        let mut rule = valid_rule();
+        rule.target_mode = TargetMode::Rule;
+        rule.criterion = Criterion::AllTerminals;
+        rule.criterion_value = String::new();
+        rule.target_ids.clear();
+        assert_eq!(problems(&rule), vec![]);
+    }
+
+    /// A timer AT the floor is fine; only faster than the engine can tick is refused. The off-by-one
+    /// is the whole content of the rule.
+    #[test]
+    fn a_timer_exactly_at_the_floor_is_allowed() {
+        let mut rule = valid_rule();
+        rule.graph.monitor.cadence = Cadence::Timer;
+        rule.graph.monitor.every_ms = MIN_TIMER_MS;
+        assert_eq!(problems(&rule), vec![]);
+
+        // And `every_ms` is meaningless for an output-driven rule, so it must not be judged there —
+        // the struct carries the field whatever the cadence says.
+        let mut on_output = valid_rule();
+        on_output.graph.monitor.cadence = Cadence::OnOutput;
+        on_output.graph.monitor.every_ms = 0;
+        assert_eq!(problems(&on_output), vec![], "a field is judged by the step that READS it");
+    }
+
+    /// §2.6, told to the user before it happens — and **only a warning**, because the needle guard
+    /// handles it and losing work to a validation rule is its own bug.
+    #[test]
+    fn a_message_matching_its_own_pattern_warns_and_never_blocks() {
+        let mut rule = valid_rule();
+        rule.graph.parse.find = "HANDOFF".into();
+        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.action.message = "HANDOFF now".into();
+
+        let found = problems(&rule);
+        assert_eq!(found.len(), 1, "{:?}", found);
+        assert_eq!(found[0].severity, Severity::Warns);
+        assert_eq!(found[0].field, "action");
+        assert!(fields(&rule).is_empty(), "a warning must not gate the toggle");
+    }
+
+    /// Blocking problems come first, whatever order they were found in: the row toggle's `title` shows
+    /// ONE of these, and showing a style note while the rule cannot run is the wrong one.
+    ///
+    /// **The fixture is chosen so discovery order is warning-THEN-block.** The multi-group warning
+    /// comes from the pattern step and the empty message from the action step, which is two steps
+    /// later — so an implementation that never sorts fails here. The first version of this test broke
+    /// the targets step, whose block is discovered first anyway, and the mutant lived.
+    #[test]
+    fn blocking_problems_come_before_warnings() {
+        let mut rule = valid_rule();
+        rule.graph.parse.find = r"ctx:(\d+)(%)".into();
+        rule.graph.action.message = String::new();
+
+        let found = problems(&rule);
+        assert_eq!(found.len(), 2, "{:?}", found);
+        assert!(found[0].blocks() && found[0].field == "action", "{:?}", found);
+        assert!(!found[1].blocks() && found[1].field == "parse", "{:?}", found);
+    }
+
 }
