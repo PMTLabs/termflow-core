@@ -224,6 +224,7 @@ mod tests {
         let w = RecordingWriter::new();
         deliver(&w, "pc-1", "default", DEFAULT, "hello", true).await.unwrap();
 
+        assert_eq!(w.log(), vec!["\x1b[200~hello\x1b[201~", "\x1b[I", "\r"]);
         let at = w.instants();
         assert!(
             at[1].duration_since(at[0]) >= Duration::from_millis(PASTE_SUBMIT_GAP_MS),
@@ -311,6 +312,10 @@ mod tests {
         let err = deliver(&w, "pc-1", "default", DEFAULT, "hello", true).await.unwrap_err();
 
         assert_eq!(err, "write 3 refused");
+        // The log assertion is what makes "write 3" mean the SUBMIT. Without it the oracle names its
+        // subject by position alone, and an implementation with a spurious extra write before the
+        // submit — failing there, then swallowing the real submit's error — passes.
+        assert_eq!(w.log(), vec!["\x1b[200~hello\x1b[201~", "\x1b[I", "\r"]);
     }
 
     /// Focus-in is best-effort, and stays best-effort: `send_prompt_to_terminal` ignored its result

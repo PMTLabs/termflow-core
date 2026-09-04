@@ -382,6 +382,11 @@ pub struct AppState<R: Runtime = Wry> {
     // share of the one above: SQLite allows several connections to one file, and a
     // standalone store can be tested against an in-memory database with no AppHandle.
     pub canvas_store: Arc<crate::canvas_store::CanvasStore>,
+    // Terminal Automations (plan 028): rules, their pinned terminals and the activity log.
+    // Its OWN connection to the same `history.db`, for the same reason as the line above — and
+    // it holds no AppHandle, so `append` reports whether an `automation:activity` emit is due
+    // and its caller performs the emit.
+    pub automation_store: Arc<crate::automation_store::AutomationStore>,
     // Renderer-published canvas metadata, partitioned by window so one window's
     // local model cannot erase another's. This is a boot-time projection, never
     // persisted; canvas_endpoints owns the payload types and merge policy.
@@ -515,6 +520,7 @@ impl<R: Runtime> Clone for AppState<R> {
             terminal_cwds: self.terminal_cwds.clone(),
             history_store: self.history_store.clone(),
             canvas_store: self.canvas_store.clone(),
+            automation_store: self.automation_store.clone(),
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
@@ -727,6 +733,7 @@ impl<R: Runtime> AppState<R> {
             terminal_cwds: Arc::new(DashMap::new()),
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             canvas_store: Arc::new(crate::canvas_store::CanvasStore::new()),
+            automation_store: Arc::new(crate::automation_store::AutomationStore::new()),
             canvas_nodes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),

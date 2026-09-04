@@ -1476,6 +1476,7 @@ pub fn run() {
             // returns an Option — there is no path to hand it when the DB is unavailable,
             // and the store stays disabled, reporting Err rather than an empty graph.
             state.canvas_store.init(&db);
+            state.automation_store.init(&db);
             // Backlog 011: cap the global command history at startup.
             state.history_store.prune_commands(5000);
             // Stream 4: per-directory usage has higher (command,dir) cardinality; cap larger.
