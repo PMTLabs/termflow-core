@@ -252,6 +252,41 @@ describe('SnippetsPanel', () => {
         expect(store.getState().settings.snippets).toHaveLength(1);
     });
 
+    // A-01: `renameSnippetFolder` treats `to === ''` as "unfile these snippets"
+    // (settingsSlice.ts), but the pre-fix `commitRename` guarded on
+    // `if (to && to !== renamingFolder)`, so clearing the rename box — the obvious way
+    // to unfile a whole folder from this UI — silently dispatched nothing.
+    it('clearing the folder name during rename unfiles every snippet in that folder', async () => {
+        const store = makeStore([
+            snip({ id: 'a', text: 'a', folder: 'git' }),
+            snip({ id: 'b', text: 'b', folder: 'git' }),
+            snip({ id: 'c', text: 'c' }), // already unfiled — must stay unaffected
+        ]);
+        await mount(store);
+
+        const renameBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Rename');
+        await click(renameBtn ?? null);
+
+        const renameInput = container.querySelector('.snippets-folder-rename-input') as HTMLInputElement;
+        await act(async () => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+            setter.call(renameInput, '');
+            renameInput.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        const saveBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Save');
+        await click(saveBtn ?? null);
+
+        // A wrong implementation guarding `if (to && ...)` never dispatches when
+        // `to === ''`, so both 'git' snippets would still carry `folder: 'git'` here.
+        const state = store.getState().settings.snippets;
+        expect(state.find((s) => s.id === 'a')!.folder).toBeUndefined();
+        expect(state.find((s) => s.id === 'b')!.folder).toBeUndefined();
+        expect(state.find((s) => s.id === 'c')!.folder).toBeUndefined();
+        // The rename UI itself must close (no longer treated as a no-op / stuck open).
+        expect(container.querySelector('.snippets-folder-rename-input')).toBeNull();
+    });
+
     // Link 9 mutation guard: replacing `useSelector((s) => s.settings.snippets)` with
     // a hard-coded literal array is a legal argument to the same call site — `tsc`
     // cannot see it — so this must be caught by behavior instead. A store seeded with

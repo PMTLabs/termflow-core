@@ -3,7 +3,7 @@
  *
  * The flyout submenu inside the terminal context menu (design 029 §4).
  *
- * Two traps decide the whole shape of this component, and both are pinned here:
+ * Three traps decide the whole shape of this component, and all three are pinned here:
  *
  *  1. **The flyout must live INSIDE the menu container.** `ContextMenu` closes on
  *     any `mousedown` whose target is not inside `menuRef` — a flyout portalled to
@@ -13,12 +13,18 @@
  *  2. **`ContextMenu` runs `item.click?.(); onClose();` on every item.** A submenu
  *     parent has to toggle its flyout *instead of* closing the menu, so the click
  *     handler must branch before that `onClose()`.
+ *  3. **…and it must live outside the SCROLLING LIST.** `.context-menu-flyout-list`
+ *     is `overflow-y:auto`, so a nested panel rendered inside a row of that list is
+ *     clipped at the list box by every real engine. Trap 1 and trap 3 pull in
+ *     opposite directions, which is why placement is asserted structurally below.
  *
  * Repo convention: no React Testing Library (the installed v13 predates React 19),
  * so this drives a real DOM render through `react-dom/client` inside `act()`.
  */
+import * as path from 'path';
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
+import { readSource } from '../../../utils/readSource';
 
 // jest has no CSS transform (the moduleNameMapper stub covers it too, but the
 // explicit mock keeps this file readable next to the other component suites).
@@ -230,7 +236,7 @@ describe('flyout DOM placement (the portal trap)', () => {
 /* ── Row activation ───────────────────────────────────────────────────────── */
 
 describe('activating a row', () => {
-    it('fires that row handler exactly once and leaves the menu open', async () => {
+    it('fires that row handler exactly once, and a row that did not ask to dismiss does not', async () => {
         const a = jest.fn();
         const b = jest.fn();
         await render(menuWith({ rows: [row('a', 'alpha', { onSelect: a }), row('b', 'beta', { onSelect: b })] }));
@@ -240,7 +246,12 @@ describe('activating a row', () => {
 
         expect(b).toHaveBeenCalledTimes(1);
         expect(a).not.toHaveBeenCalled();
-        // Default is "stay open" (§4.5: Add New Snippet is the *only* row that dismisses).
+        // §4.5 ("every row closes the menu") is a decision about the SNIPPET and HISTORY
+        // rows, and `snippetsHistoryMenu.ts` states it as `closeMenuOnSelect: true` on
+        // each one — where a test can read it as data. The component-level default stays
+        // opt-in, so a row that never considered dismissal cannot tear down the surface
+        // the user is mid-interaction with. This pins the default; do not read it as the
+        // product rule.
         expect(onClose).not.toHaveBeenCalled();
     });
 
@@ -436,6 +447,253 @@ describe('folder rows', () => {
         await key(search(), 'ArrowRight');
         await key(search(1), 'Enter');
         expect(pick).toHaveBeenCalledTimes(1);
+    });
+});
+
+/* ── Placement: the clip trap (D-02) and the cascade (D-03) ───────────────── */
+
+/**
+ * **Why these tests need a layout simulator.**
+ *
+ * jsdom implements no layout: `getBoundingClientRect()` is a zero rect for every
+ * element, and `FlyoutPanel`'s placement effect deliberately bails on a zero rect
+ * (there is genuinely nothing to measure). A placement test written without a stub
+ * therefore exercises none of the flip arithmetic and cannot fail — which is exactly
+ * how an inverted cascade shipped past 31 green tests in this file.
+ *
+ * `layout()` installs a simulator rather than a fixed rect table: each panel's box is
+ * derived from the flip class it is *currently* rendering with, the way a real engine
+ * resolves `left: 100%` against `right: 100%`. A child therefore measures its parent
+ * *where the parent actually ended up*, which is the entire substance of D-03. It also
+ * models the pre-fix DOM (a nested panel inside `.context-menu-flyout-item`) honestly,
+ * so the D-03 tests fail against the old structure for the real reason.
+ *
+ * Borders are ignored — a 1px modelling error, orders of magnitude below any assertion
+ * made here.
+ */
+interface Box {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+}
+
+/** `.context-menu-flyout`'s `margin-left` / `margin-right`. */
+const FLYOUT_GAP = 2;
+const ZERO_BOX: Box = { left: 0, top: 0, width: 0, height: 0 };
+
+function layout(opts: {
+    viewport: { width: number; height: number };
+    /** `.context-menu-submenu-host` — the depth-0 anchor (one menu row). */
+    host: Box;
+    /** Every flyout panel is modelled with the same intrinsic size. */
+    panel: { width: number; height: number };
+    /** Depths whose panel reports a ZERO rect — the "nothing to measure" case. */
+    unmeasurable?: number[];
+}) {
+    Object.defineProperty(window, 'innerWidth', { value: opts.viewport.width, configurable: true, writable: true });
+    Object.defineProperty(window, 'innerHeight', { value: opts.viewport.height, configurable: true, writable: true });
+
+    const boxOf = (el: HTMLElement): Box => {
+        if (el.classList.contains('context-menu-submenu-host')) return opts.host;
+        if (el.classList.contains('context-menu-flyout')) {
+            if (opts.unmeasurable?.includes(Number(el.dataset.flyoutDepth ?? -1))) return ZERO_BOX;
+            const anchor = el.parentElement ? boxOf(el.parentElement as HTMLElement) : ZERO_BOX;
+            const { width, height } = opts.panel;
+            const left = el.classList.contains('flip-left')
+                ? anchor.left - FLYOUT_GAP - width
+                : anchor.left + anchor.width + FLYOUT_GAP;
+            // `top: 0` inside the anchor, plus whatever lift the effect applied.
+            return { left, top: anchor.top + (parseFloat(el.style.top) || 0), width, height };
+        }
+        if (el.classList.contains('context-menu-flyout-item')) {
+            // A row wrapper spans the list, i.e. the panel it sits in. Modelled so the
+            // OLD (clipped) structure — where a nested panel's parent was a row — is
+            // measured the way a browser would have measured it.
+            const panelEl = el.closest('.context-menu-flyout') as HTMLElement | null;
+            return panelEl ? boxOf(panelEl) : ZERO_BOX;
+        }
+        return ZERO_BOX;
+    };
+
+    jest.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+        const b = boxOf(this);
+        return {
+            x: b.left,
+            y: b.top,
+            left: b.left,
+            top: b.top,
+            width: b.width,
+            height: b.height,
+            right: b.left + b.width,
+            bottom: b.top + b.height,
+            toJSON: () => ({}),
+        } as DOMRect;
+    });
+}
+
+describe('nested flyout placement', () => {
+    const withFolder = () =>
+        menuWith({
+            rows: [
+                row('git', 'Git', { icon: '📁', children: [row('g1', 'git status'), row('g2', 'git log')] }),
+                row('top', 'docker ps'),
+            ],
+        });
+
+    const openFolder = async () => {
+        await render(withFolder());
+        await click(menuItem('Snippets'));
+        await key(search(), 'ArrowRight');
+    };
+
+    const innerWidth = window.innerWidth;
+    const innerHeight = window.innerHeight;
+    afterEach(() => {
+        Object.defineProperty(window, 'innerWidth', { value: innerWidth, configurable: true, writable: true });
+        Object.defineProperty(window, 'innerHeight', { value: innerHeight, configurable: true, writable: true });
+    });
+
+    /* ── D-02: the panel must escape the scrolling list ───────────────────── */
+
+    it('renders the depth-1 panel OUTSIDE the scrolling list — a descendant of it would be clipped', async () => {
+        await openFolder();
+        const nested = panel(1)!;
+        expect(nested).toBeTruthy();
+
+        // Kills the shipped implementation, which rendered the nested panel inside
+        // `.context-menu-flyout-item` inside `.context-menu-flyout-list`. That list is
+        // `overflow-y: auto; overflow-x: hidden`, so every real engine clips a
+        // positioned descendant at the list box and the folder submenu is invisible.
+        // jsdom implements no clipping, so this has to be asserted structurally.
+        expect(nested.closest('.context-menu-flyout-list')).toBeNull();
+        // ...and it hangs off the parent PANEL, which declares no `overflow` at all.
+        expect(nested.parentElement).toBe(panel(0));
+    });
+
+    it('keeps the depth-1 panel inside the menu container (trap 1 still holds at depth 1)', async () => {
+        await openFolder();
+        // Kills a "fix" that escapes the clip by portalling the panel to document.body:
+        // it would be outside `menuRef`, and the mousedown below would close the menu.
+        expect(menu().contains(panel(1)!)).toBe(true);
+
+        await mousedown(rows(1)[0]);
+        expect(onClose).not.toHaveBeenCalled();
+        expect(panels()).toHaveLength(2);
+    });
+
+    it('activating a depth-1 row still works after the hoist', async () => {
+        const pick = jest.fn();
+        await render(
+            menuWith({
+                rows: [row('git', 'Git', { children: [row('g1', 'git status', { onSelect: pick })] })],
+            }),
+        );
+        await click(menuItem('Snippets'));
+        await key(search(), 'ArrowRight');
+        await click(rows(1)[0]);
+        expect(pick).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the list itself scrollable — the fix must NOT be "delete overflow-y" (§4.3)', () => {
+        // Kills the tempting non-fix: dropping the list's overflow would un-clip the
+        // nested panel and silently delete the long-list scrolling §4.3 requires.
+        const css = readSource(path.join(__dirname, '..', 'ContextMenu.css'));
+        const start = css.indexOf('.context-menu-flyout-list {');
+        expect(start).toBeGreaterThan(-1);
+        const block = css.slice(start, css.indexOf('}', start));
+        expect(block).toMatch(/max-height:\s*\d+px/);
+        expect(block).toMatch(/overflow-y:\s*auto/);
+    });
+
+    /* ── D-03: the cascade keeps its direction ────────────────────────────── */
+
+    it('does not flip either level when there is room on the right', async () => {
+        // Kills an implementation that flips unconditionally, and proves the two
+        // "flips" below are not simply the default.
+        layout({
+            viewport: { width: 1920, height: 1080 },
+            host: { left: 100, top: 100, width: 200, height: 24 },
+            panel: { width: 250, height: 300 },
+        });
+        await openFolder();
+        expect(panel(0)!.classList.contains('flip-left')).toBe(false);
+        expect(panel(1)!.classList.contains('flip-left')).toBe(false);
+    });
+
+    it('flips depth 0 left at the right edge, and depth 1 CASCADES left with it', async () => {
+        // The D-03 repro, with the review's own numbers. Depth 0: right edge 1800 +
+        // 250 = 2050 > 1915 ⇒ flip, landing at 1348..1598. Depth 1 then measures its
+        // parent at 1598 and finds 1598 + 250 = 1848 ≤ 1915 — "room on the right" —
+        // so a purely local decision sends it back to 1600..1850, directly on top of
+        // the root context menu it just flipped away from.
+        layout({
+            viewport: { width: 1920, height: 1080 },
+            host: { left: 1600, top: 100, width: 200, height: 24 },
+            panel: { width: 250, height: 300 },
+        });
+        await openFolder();
+        expect(panel(0)!.classList.contains('flip-left')).toBe(true);
+        // Kills the shipped `left: overflowsRight && fitsLeft`, which is false here.
+        expect(panel(1)!.classList.contains('flip-left')).toBe(true);
+    });
+
+    it('stops cascading left when the LEFT edge forbids it', async () => {
+        // Depth 0 flips to 48..298; depth 1 would need to start at -202. Kills the
+        // over-eager `left: parentFlippedLeft || (overflowsRight && fitsLeft)`, which
+        // inherits the direction without re-checking that the panel still fits.
+        layout({
+            viewport: { width: 700, height: 1080 },
+            host: { left: 300, top: 100, width: 200, height: 24 },
+            panel: { width: 250, height: 300 },
+        });
+        await openFolder();
+        expect(panel(0)!.classList.contains('flip-left')).toBe(true);
+        expect(panel(1)!.classList.contains('flip-left')).toBe(false);
+    });
+
+    it('inherits the parent direction when the child itself cannot be measured', async () => {
+        // Same geometry as the repro above, but the child reports a zero rect (the
+        // first paint, and every jsdom run). Measurement is impossible, so the only
+        // defensible direction for a child is its parent's. Kills a fix that threads
+        // `parentFlippedLeft` through the arithmetic but leaves the zero-rect path
+        // handing the child the un-flipped default.
+        layout({
+            viewport: { width: 1920, height: 1080 },
+            host: { left: 1600, top: 100, width: 200, height: 24 },
+            panel: { width: 250, height: 300 },
+            unmeasurable: [1],
+        });
+        await openFolder();
+        expect(panel(0)!.classList.contains('flip-left')).toBe(true);
+        expect(panel(1)!.classList.contains('flip-left')).toBe(true);
+    });
+
+    /* ── Vertical: lift a panel that runs off the bottom ──────────────────── */
+
+    it('lifts a panel that would run off the bottom of the viewport', async () => {
+        // 900 + 300 − (1000 − 5) = 205 of overflow. Kills an implementation that
+        // ignores bottom overflow entirely.
+        layout({
+            viewport: { width: 1920, height: 1000 },
+            host: { left: 100, top: 900, width: 200, height: 24 },
+            panel: { width: 250, height: 300 },
+        });
+        await openFolder();
+        expect(panel(0)!.style.top).toBe('-205px');
+    });
+
+    it('never lifts a panel past the top of the viewport', async () => {
+        // A panel taller than the viewport: 50 + 900 − 495 = 455 of overflow, but only
+        // 45px of room above. Kills an unclamped `shiftY = -overflowY`, which would
+        // push the search box 405px off the top of the screen.
+        layout({
+            viewport: { width: 1920, height: 500 },
+            host: { left: 100, top: 50, width: 200, height: 24 },
+            panel: { width: 250, height: 900 },
+        });
+        await openFolder();
+        expect(panel(0)!.style.top).toBe('-45px');
     });
 });
 

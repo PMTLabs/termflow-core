@@ -145,9 +145,11 @@ describe('snippetDisplayLabel', () => {
     expect(out.endsWith('…')).toBe(true);
   });
 
-  it('never returns an empty string for whitespace-only text', () => {
-    expect(snippetDisplayLabel(s({ id: 'a', text: '   \n  \n\t', createdAt: 0 }))).not.toBe('');
-    expect(snippetDisplayLabel(s({ id: 'a', text: '', createdAt: 0 }))).not.toBe('');
+  it('falls back to the "(empty snippet)" placeholder for whitespace-only text', () => {
+    // B-06: `not.toBe('')` also passes for `' '` or the literal string `'undefined'` —
+    // neither is what the implementation actually returns for an empty snippet.
+    expect(snippetDisplayLabel(s({ id: 'a', text: '   \n  \n\t', createdAt: 0 }))).toBe('(empty snippet)');
+    expect(snippetDisplayLabel(s({ id: 'a', text: '', createdAt: 0 }))).toBe('(empty snippet)');
   });
 });
 

@@ -18,8 +18,26 @@ const APP = src('App.tsx');
 const SLICE = src('store', 'slices', 'settingsSlice.ts');
 
 describe('the snippets setting survives a restart', () => {
+  /**
+   * Pin the PROPERTY, not the expression.
+   *
+   * The first version of this test asserted the literal
+   * `state.snippets.map((s) => ({ ...s }))` — so it pinned a BUG in place: that shallow
+   * copy left the nested `tags` array as a revoked Immer proxy, and correcting it would
+   * have turned this test red (round-1 review B-07 / D-01). A source-derived test must
+   * assert the invariant it wants, never today's spelling of it.
+   */
   it('is written to the config file when it changes (link 5)', () => {
-    expect(SLICE).toContain("window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));");
+    // Exactly ONE site writes the snippets key: the helper. A reducer that hand-rolled
+    // its own snapshot would add a second, and that is the defect class this guards.
+    expect(SLICE.match(/setConfigValue\('snippets',/g) ?? []).toHaveLength(1);
+    // Every mutating reducer reaches it through that one helper.
+    expect(SLICE).toMatch(/persistSnippets\(state\.snippets\)/);
+    // And the helper must take a DEEP snapshot. `current()` is what makes the payload
+    // survive serialisation after Immer revokes the reducer's drafts.
+    expect(SLICE).toMatch(/isDraft\(snippets\)\s*\?\s*current\(snippets\)\s*:\s*snippets/);
+    // The exact regression, spelled out so it cannot come back quietly.
+    expect(SLICE).not.toMatch(/setConfigValue\('snippets',\s*state\.snippets\.map/);
   });
 
   it('imports setSnippets in App.tsx', () => {

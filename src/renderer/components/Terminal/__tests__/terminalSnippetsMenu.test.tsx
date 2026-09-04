@@ -40,6 +40,12 @@ import { commandHistoryService } from '../../../services/commandHistoryService';
 // eslint-disable-next-line import/first
 import type { Snippet } from '../../../store/slices/settingsSlice';
 
+/* ── helpers ──────────────────────────────────────────────────────────────── */
+
+/** Block and line comments out, so a source-derived assertion reads CODE only. */
+const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
 /* ── fixtures ─────────────────────────────────────────────────────────────── */
 
 function makeSnippet(overrides: Partial<Snippet> & { id: string; text: string }): Snippet {
@@ -87,6 +93,15 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
     expect(insert).toHaveBeenCalledWith('echo one\necho two\necho three');
     expect(rows[0].closeMenuOnSelect).toBe(true);
     expect(rows[0].title).toBe('echo one\necho two\necho three'); // full text on hover
+
+    // …and a snippet whose LABEL differs from its TEXT. The multi-line fixture above
+    // has no label, so `insert(s.label ?? s.text)` is indistinguishable from
+    // `insert(s.text)` there — it inserts what the row displays instead of what the
+    // user saved (verified: that mutant survived until these three lines existed).
+    const labelled = (item.submenu!.rows as (q: string) => any[])('docker');
+    expect(labelled.map((r) => r.label)).toEqual(['docker up']);
+    labelled[0].onSelect();
+    expect(insert).toHaveBeenLastCalledWith('docker compose up -d');
   });
 
   it('empty states: no snippets at all vs. a query with no matches, Add New Snippet always enabled', () => {
@@ -110,13 +125,12 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
 describe('buildCommandHistoryMenuItem — pure row shape', () => {
   beforeEach(() => commandHistoryService.__reset());
 
-  it('browses recent() on an empty query, match() once typed, and never calls engine.insertCommand (D12)', () => {
+  it('browses recent() on an empty query and match() once typed', () => {
     commandHistoryService.record('git status', '/repo');
     commandHistoryService.record('git push', '/repo');
     commandHistoryService.record('docker ps', '/repo');
 
     const insert = jest.fn();
-    const engine = { insertCommand: jest.fn() };
     const item = buildCommandHistoryMenuItem({ cwd: '/repo', insert });
     const rowsFn = item.submenu!.rows as (q: string) => any[];
 
@@ -125,11 +139,49 @@ describe('buildCommandHistoryMenuItem — pure row shape', () => {
 
     const searched = rowsFn('git');
     expect(searched.map((r) => r.label)).toEqual(['git push', 'git status']);
+  });
 
-    searched[0].onSelect();
-    expect(insert).toHaveBeenCalledWith('git push');
-    expect(searched[0].closeMenuOnSelect).toBe(true);
-    expect(engine.insertCommand).not.toHaveBeenCalled();
+  /**
+   * **Decision D12: history insertion must not go through `engine.insertCommand()`,
+   * which deletes the whole typed input line before inserting.**
+   *
+   * The previous version of this test built `const engine = { insertCommand: jest.fn() }`
+   * and asserted `not.toHaveBeenCalled()` — but `buildCommandHistoryMenuItem` takes
+   * `{ cwd, insert }` and never saw that object, so the assertion passed for every
+   * possible implementation, an `engine.insertCommand()` call included. Two oracles
+   * that can actually fail replace it.
+   */
+  it('inserts through the injected callback ONLY — never engine.insertCommand (D12)', () => {
+    commandHistoryService.record('git status', '/repo');
+    commandHistoryService.record('git push', '/repo');
+
+    const insert = jest.fn();
+    const item = buildCommandHistoryMenuItem({ cwd: '/repo', insert });
+    const searched = (item.submenu!.rows as (q: string) => any[])('git');
+    expect(searched.map((r) => r.label)).toEqual(['git push', 'git status']);
+
+    // The SECOND row deliberately: activating the first would let an implementation
+    // that always inserts `commands[0]` pass (verified — that mutant survived until
+    // this line moved off index 0).
+    searched[1].onSelect();
+
+    // Oracle 1 — the callback that actually ran is the INJECTED one, exactly once,
+    // with the command belonging to the row that was activated. Kills an
+    // implementation that reaches for a terminal engine instead of `insert`
+    // (`insert` would never fire), one that inserts twice, and one that inserts a
+    // different row's text.
+    expect(insert.mock.calls).toEqual([['git status']]);
+    expect(searched[1].closeMenuOnSelect).toBe(true);
+
+    // Oracle 2 — source-derived, because an implementation that calls BOTH
+    // (`insert(cmd); engine.insertCommand(cmd);`) satisfies oracle 1 and still
+    // wipes the user's typed line. `insertCommand` must appear nowhere in the
+    // history/snippets menu CODE. Comments are stripped first: the module's own
+    // doc comment names the forbidden API in order to forbid it, and matching that
+    // would make this assertion fail on a correct implementation.
+    const MENU_SRC = stripComments(readSource(path.join(__dirname, '..', 'snippetsHistoryMenu.ts')));
+    expect(MENU_SRC).toMatch(/insert\(/); // the load generator ran: this IS the right file
+    expect(MENU_SRC).not.toMatch(/\binsertCommand\b/);
   });
 
   it('empty state when there is no history yet', () => {

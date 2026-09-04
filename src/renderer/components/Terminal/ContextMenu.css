@@ -99,11 +99,14 @@
   background-color: var(--menu-hover-background, #094771);
 }
 
-/* `position: absolute` (not fixed, not portalled) is load-bearing twice over:
+/* `position: absolute` (not fixed, not portalled) is load-bearing three times over:
    the flyout stays inside `menuRef` so a press on it cannot trip the menu's
-   outside-click close, and it stays out of the menu's flow so it contributes
+   outside-click close; it stays out of the menu's flow so it contributes
    nothing to the intrinsic width that `.context-menu-label`'s `nowrap` and the
-   edge-aware repositioning effect both depend on. */
+   edge-aware repositioning effect both depend on; and it makes THIS box the
+   containing block for a nested (folder) flyout, which is rendered as a sibling of
+   `.context-menu-flyout-list` below rather than inside it. Declaring no `overflow`
+   here is therefore not an omission — it is what lets the nested panel escape. */
 .context-menu-flyout {
   position: absolute;
   top: 0;
@@ -154,17 +157,23 @@
   color: var(--menu-accelerator-color, #969696);
 }
 
-/* Vertical overflow scrolls the LIST, not the panel, so the search box stays put. */
+/* Vertical overflow scrolls the LIST, not the panel, so the search box stays put.
+   §4.3 requires this scrolling, so it is not negotiable — but note what it costs:
+   an `overflow` other than `visible` CLIPS positioned descendants at this box, and
+   `overflow-y: auto` forces `overflow-x` to compute to at least `auto` too, so the
+   clip is on both axes whatever `overflow-x` says. A second-level flyout rendered
+   inside a row here is therefore cut off at ~240px and effectively invisible.
+   ContextMenu.tsx renders nested panels as a SIBLING of this element for exactly
+   that reason; nothing that has to escape the panel may live inside this list. */
 .context-menu-flyout-list {
   max-height: 320px;
   overflow-y: auto;
   overflow-x: hidden;
 }
 
-/* Positioned parent for a folder row's second-level flyout. */
-.context-menu-flyout-item {
-  position: relative;
-}
+/* Deliberately NOT `position: relative`. It used to be, to host a folder row's
+   second-level flyout — which is precisely the arrangement that got the flyout
+   clipped by the scroller above. The row wrapper is a keying/grouping element only. */
 
 .context-menu-flyout-row {
   display: flex;

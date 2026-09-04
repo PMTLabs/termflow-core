@@ -95,7 +95,10 @@ export const SnippetsPanel: React.FC = () => {
     const commitRename = () => {
         if (renamingFolder === null) return;
         const to = renameValue.trim();
-        if (to && to !== renamingFolder) dispatch(renameSnippetFolder({ from: renamingFolder, to }));
+        // No truthiness guard on `to` (A-01): the reducer treats `to === ''` as
+        // "unfile these snippets" (settingsSlice.ts), and clearing the rename box is
+        // the obvious way to do that from this UI. Only a true no-op rename is skipped.
+        if (to !== renamingFolder) dispatch(renameSnippetFolder({ from: renamingFolder, to }));
         setRenamingFolder(null);
     };
     const cancelRename = () => setRenamingFolder(null);

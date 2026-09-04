@@ -248,8 +248,74 @@ describe('SnippetDialog', () => {
         await act(async () => saveBtn().click());
 
         const draft = onSave.mock.calls[0][0] as Snippet;
-        expect(draft.folder).toBeDefined();
-        expect(draft.folder).not.toContain('/');
+        // B-05: exact expected string, not just "no slash". `'GitSub'` (strip) and
+        // `'Git'` (truncate at slash) both satisfy `not.toContain('/')` but are not
+        // what `flattenFolder` (replace '/' with ' ', collapse whitespace) produces.
+        expect(draft.folder).toBe('Git Sub');
+    });
+
+    /**
+     * D-04 (blocker): `buildDraft()` used to omit a cleared field entirely
+     * (`...(trimmedLabel ? { label: trimmedLabel } : {})`), and `updateSnippet` merges
+     * the returned patch into the stored snippet — an OMITTED key is left alone, so
+     * clearing a label/folder/tags in the dialog silently did nothing. The fix must
+     * return the key explicitly with value `undefined`, which the slice's patch merge
+     * treats as "delete this field". Absence and explicit-undefined are different
+     * things here, so the oracle below checks for the KEY, not just the value.
+     */
+    it('clearing an edited snippet\'s label, folder and tags produces explicit undefined keys, not omitted ones', async () => {
+        const existing: Snippet = {
+            id: 'snip-clear',
+            label: 'Old label',
+            text: 'text',
+            folder: 'Git',
+            tags: ['a', 'b'],
+            createdAt: 111,
+        };
+        const onSave = jest.fn();
+        const onCancel = jest.fn();
+        await render({ snippet: existing, onSave, onCancel });
+
+        await act(async () => {
+            setValue(labelInput(), '');
+            setValue(folderInput(), '');
+            setValue(tagsInput(), '');
+        });
+        await act(async () => saveBtn().click());
+
+        const draft = onSave.mock.calls[0][0] as Snippet;
+        // A wrong implementation that omits cleared keys (the pre-fix `buildDraft`)
+        // produces a draft object with NO `label`/`folder`/`tags` property at all —
+        // `'label' in draft` is `false` — even though `draft.label` reads as
+        // `undefined` either way via property access. `in` is what distinguishes them.
+        expect('label' in draft).toBe(true);
+        expect(draft.label).toBeUndefined();
+        expect('folder' in draft).toBe(true);
+        expect(draft.folder).toBeUndefined();
+        expect('tags' in draft).toBe(true);
+        expect(draft.tags).toBeUndefined();
+    });
+
+    it('preserves label, folder and tags when editing a snippet without clearing them', async () => {
+        const existing: Snippet = {
+            id: 'snip-keep',
+            label: 'Keep label',
+            text: 'text',
+            folder: 'Ops',
+            tags: ['x'],
+            createdAt: 222,
+        };
+        const onSave = jest.fn();
+        const onCancel = jest.fn();
+        await render({ snippet: existing, onSave, onCancel });
+
+        await act(async () => setValue(textarea(), 'text edited'));
+        await act(async () => saveBtn().click());
+
+        const draft = onSave.mock.calls[0][0] as Snippet;
+        expect(draft.label).toBe('Keep label');
+        expect(draft.folder).toBe('Ops');
+        expect(draft.tags).toEqual(['x']);
     });
 
     /**

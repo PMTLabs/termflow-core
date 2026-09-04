@@ -25,9 +25,16 @@ export interface ContextMenuFlyoutRow {
   /** Run on click / Enter. Ignored for folder rows. */
   onSelect?: () => void;
   /**
-   * Close the WHOLE context menu after `onSelect`. Defaults to **false**: per
-   * §4.5, "Add New Snippet … is the only one that dismisses rather than staying
-   * open", so inserting keeps the flyout up for a second insert.
+   * Close the WHOLE context menu after `onSelect`.
+   *
+   * §4.5 is "**every** row closes the menu" — and every row this repo builds
+   * (`snippetsHistoryMenu.ts`) says so explicitly. That is deliberately a decision
+   * stated at each call site rather than a default here, for two reasons: it is a
+   * product rule about snippet and history rows, not a property of a generic
+   * flyout (a folder row opens a submenu and dismisses nothing); and stated as
+   * data it is assertable straight off the builder's output, where a default
+   * cannot be. Defaults to **false** so a row that never considered dismissal
+   * cannot tear down the surface the user is mid-interaction with.
    */
   closeMenuOnSelect?: boolean;
   /** Inert placeholder (an empty-state message). Rendered, never activated, and
@@ -114,6 +121,12 @@ interface FlyoutPanelProps {
   flyout: ContextMenuFlyout;
   /** 0 for the flyout hanging off a menu item, 1+ for a folder inside one. */
   depth: number;
+  /**
+   * `true` when the panel this one hangs off is itself rendering to the LEFT of its
+   * anchor. A cascade that has started leftward must keep going leftward: see the
+   * placement effect.
+   */
+  parentFlippedLeft?: boolean;
   /** Escape / ArrowLeft / Tab — closes THIS panel and returns focus to its opener. */
   onCloseSelf: () => void;
   /** Dismiss the entire context menu (a row with `closeMenuOnSelect`). */
@@ -123,15 +136,38 @@ interface FlyoutPanelProps {
 /**
  * One flyout panel: a search box plus a keyboard-navigable row list.
  *
- * **It renders where it is mounted — never through a portal.** `ContextMenu`'s
- * outside-click handler closes on any mousedown that `menuRef` does not contain,
- * so a portalled panel would be "outside" the menu and the first press on a row
- * would close everything before the click landed (design 029 §4.2).
+ * **Two opposing constraints fix where this thing is allowed to live in the DOM.**
  *
- * The panel is `position: absolute` inside a `position: relative` row host, which
- * makes "top: the parent row's offset" automatic. Being absolutely positioned also
- * keeps it out of the menu's flow, so it contributes nothing to the menu's
- * intrinsic width and the edge-aware repositioning in `ContextMenu` is unaffected.
+ * 1. *Inside `menuRef`.* `ContextMenu`'s outside-click handler closes on any
+ *    mousedown that `menuRef` does not contain, so a panel portalled to
+ *    `document.body` would be "outside" the menu and the first press on a row would
+ *    close everything before the click landed (design 029 §4.2). **It therefore
+ *    renders where it is mounted — never through a portal.**
+ * 2. *Outside `.context-menu-flyout-list`.* That list is the `max-height` +
+ *    `overflow-y: auto` scroller §4.3 requires, and an `overflow` other than
+ *    `visible` clips positioned descendants at the list box. A nested panel rendered
+ *    inside a row of the list is invisible in any real engine — and invisibly fine in
+ *    jsdom, which implements neither layout nor clipping.
+ *
+ * The two are satisfied at once by hanging a nested panel off the **parent panel**
+ * rather than off the folder row: a nested `FlyoutPanel` is rendered as a sibling of
+ * the list, not inside it. `.context-menu-flyout` is `position: absolute` (so it is
+ * already the containing block) and declares no `overflow` (so it clips nothing), and
+ * it is still inside `menuRef`. That also generalises — depth 2+ would nest the same
+ * way — and it makes `panel.parentElement` the correct measuring anchor at every
+ * depth: the submenu host at depth 0, the parent panel at depth 1+, which is exactly
+ * the box a `left: 100%` / `right: 100%` child is positioned against.
+ *
+ * The one visible consequence is that a folder's panel opens level with the TOP of
+ * its parent panel rather than with the folder row. That reads well here rather than
+ * badly: `buildGroupedRows` puts every folder row first, so the row is near the top
+ * anyway, and search box lines up with search box, first row with first row. Aligning
+ * to the row instead would mean measuring the row and re-deriving `shiftY` from a top
+ * the panel does not yet have — real machinery bought for a few pixels.
+ *
+ * Being absolutely positioned also keeps it out of the menu's flow, so it contributes
+ * nothing to the menu's intrinsic width and the edge-aware repositioning in
+ * `ContextMenu` is unaffected.
  *
  * DOM focus stays in the search input the whole time; the "active" row is only
  * *styled* (`.is-active`) and announced via `aria-activedescendant`. That is what
@@ -139,7 +175,13 @@ interface FlyoutPanelProps {
  * navigation must not interfere with terminal input" holds by construction — an
  * editable non-terminal element owns the keyboard.
  */
-const FlyoutPanel: React.FC<FlyoutPanelProps> = ({ flyout, depth, onCloseSelf, onCloseMenu }) => {
+const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
+  flyout,
+  depth,
+  parentFlippedLeft = false,
+  onCloseSelf,
+  onCloseMenu,
+}) => {
   const uid = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -147,7 +189,12 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({ flyout, depth, onCloseSelf, o
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
-  const [flip, setFlip] = useState<{ left: boolean; shiftY: number }>({ left: false, shiftY: 0 });
+  // Starts on the parent's side of the cascade, so the direction is already right on
+  // the very first paint and stays right if nothing can ever be measured.
+  const [flip, setFlip] = useState<{ left: boolean; shiftY: number }>({
+    left: parentFlippedLeft,
+    shiftY: 0,
+  });
 
   const { rows, emptyRow, footerRows, searchPlaceholder } = flyout;
 
@@ -189,25 +236,39 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({ flyout, depth, onCloseSelf, o
     activeRowRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [activeId]);
 
-  // Edge-aware placement: flip to the left of the row when the panel would leave the
-  // viewport on the right, and lift it when it would run off the bottom. jsdom (and
-  // the first paint) report a zero-sized rect, where the default placement is correct.
+  // Edge-aware placement: flip to the left of the anchor when the panel would leave
+  // the viewport on the right, and lift it when it would run off the bottom.
   useLayoutEffect(() => {
     const panel = panelRef.current;
+    // The anchor this panel is absolutely positioned against — `.context-menu-submenu-host`
+    // at depth 0, the PARENT PANEL at depth 1+ (see the render, and the note on this
+    // component about why a nested panel may not hang off its folder row).
     const host = panel?.parentElement;
     if (!panel || !host) return;
     const p = panel.getBoundingClientRect();
     const h = host.getBoundingClientRect();
+    // Nothing to measure — jsdom, and the very first paint. Leave the state alone:
+    // it already starts on the parent's side of the cascade (see `useState` above),
+    // which is the only defensible direction when measurement is unavailable. Setting
+    // it here as well would be a second guard covering the same case, and one that
+    // no test could then distinguish from the first.
     if (p.width === 0 && p.height === 0) return;
     const overflowsRight = h.right + p.width > window.innerWidth - EDGE_MARGIN;
     const fitsLeft = h.left - p.width > EDGE_MARGIN;
     const overflowY = h.top + p.height - (window.innerHeight - EDGE_MARGIN);
     const next = {
-      left: overflowsRight && fitsLeft,
+      // `parentFlippedLeft ||` is the cascade rule, and it is not cosmetic. A child
+      // measures against its parent's box, so once the parent has flipped left there
+      // is by definition room to the *right* of it — room occupied by the menu the
+      // parent just flipped away from. Deciding locally sends the child straight back
+      // on top of the root menu and hides it. Standard cascading-menu behaviour: keep
+      // going the way the ancestor went, and `&& fitsLeft` is what stops the cascade
+      // when the left viewport edge finally forbids it.
+      left: (parentFlippedLeft || overflowsRight) && fitsLeft,
       shiftY: overflowY > 0 ? -Math.min(overflowY, Math.max(0, h.top - EDGE_MARGIN)) : 0,
     };
     setFlip((prev) => (prev.left === next.left && prev.shiftY === next.shiftY ? prev : next));
-  }, [visible]);
+  }, [visible, parentFlippedLeft]);
 
   const activate = useCallback(
     (row: ContextMenuFlyoutRow) => {
@@ -310,17 +371,18 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({ flyout, depth, onCloseSelf, o
           {row.detail && <span className="context-menu-flyout-detail">{row.detail}</span>}
           {folder && <span className="context-menu-submenu-arrow">▸</span>}
         </button>
-        {folder && openFolderId === row.id && (
-          <FlyoutPanel
-            flyout={{ ...flyout, rows: row.children!, footerRows: undefined }}
-            depth={depth + 1}
-            onCloseSelf={closeFolder}
-            onCloseMenu={onCloseMenu}
-          />
-        )}
       </div>
     );
   };
+
+  // Resolved from the rows currently on screen rather than kept as a node: a filter
+  // can take the open folder away (they are flattened while searching), and looking
+  // it up here means a stale id simply resolves to nothing.
+  const openFolder =
+    openFolderId === null
+      ? null
+      : ([...visible.head, ...visible.footer].find((r) => r.id === openFolderId && isFolder(r)) ??
+        null);
 
   return (
     <div
@@ -358,6 +420,18 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({ flyout, depth, onCloseSelf, o
         )}
         {visible.footer.map(renderRow)}
       </div>
+      {/* A SIBLING of the scrolling list, not a descendant of it: see the note on this
+          component. It is still inside `menuRef`, so the outside-click trap is not
+          reintroduced, and it is no longer inside anything that clips. */}
+      {openFolder && (
+        <FlyoutPanel
+          flyout={{ ...flyout, rows: openFolder.children!, footerRows: undefined }}
+          depth={depth + 1}
+          parentFlippedLeft={flip.left}
+          onCloseSelf={closeFolder}
+          onCloseMenu={onCloseMenu}
+        />
+      )}
     </div>
   );
 };

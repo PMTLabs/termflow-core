@@ -121,9 +121,14 @@ export const SnippetDialog: React.FC<SnippetDialogProps> = ({
         return {
             id: snippet?.id ?? mintSnippetId(),
             text: text.trim(),
-            ...(trimmedLabel ? { label: trimmedLabel } : {}),
-            ...(trimmedFolder ? { folder: trimmedFolder } : {}),
-            ...(tags.length > 0 ? { tags } : {}),
+            // Explicit keys, not omitted ones (D-04): `updateSnippet` merges this patch
+            // into the stored snippet, so an omitted key here would leave a stale value
+            // in place. `undefined` is a real instruction to clear the field, and the
+            // slice's patch merge (settingsSlice.ts) deletes a key whose patch value is
+            // `undefined` rather than ignoring it.
+            label: trimmedLabel || undefined,
+            folder: trimmedFolder || undefined,
+            tags: tags.length > 0 ? tags : undefined,
             createdAt: snippet?.createdAt ?? Date.now(),
         };
     };

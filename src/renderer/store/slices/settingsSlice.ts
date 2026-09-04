@@ -1,4 +1,4 @@
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, current, isDraft, PayloadAction } from '@reduxjs/toolkit';
 import { DEFAULT_COLOR_SCHEMA_ID } from '../colorSchemas';
 import { EULA_ACCEPTED_KEY } from '../../legal';
 // Type-only, and imported rather than restated: the modes are the gesture rule's vocabulary, and
@@ -233,6 +233,34 @@ const initialState: SettingsState = {
   eulaHydrated: false,
 };
 
+/** Optional fields on a Snippet — the only ones an update may CLEAR. */
+const CLEARABLE_SNIPPET_KEYS = ['label', 'folder', 'tags'] as const;
+
+/**
+ * Persist the snippets collection from inside a reducer.
+ *
+ * `current()` takes a DEEP plain snapshot; a shallow `map(s => ({ ...s }))` does not.
+ * The shallow form copies `s.tags` BY REFERENCE, and that reference is a child Immer
+ * draft whose proxy Immer revokes the moment the reducer returns. `setConfigValue`
+ * serialises asynchronously, so by the time it reads `tags` it throws
+ * "Cannot perform 'get' on a proxy that has been revoked" — and `updateConfig`
+ * swallows that, so nothing ever reaches config.json.
+ *
+ * Measured, not inferred (round-1 review D-01): with one snippet carrying `tags` — an
+ * EMPTY array is enough — updateSnippet, renameSnippetFolder and removeSnippet each
+ * produced an unstringifiable snapshot. Snippets with no `tags` key were unaffected,
+ * which is exactly why the shallow version looked correct in every test whose fixture
+ * omitted tags. And because the whole array is one payload, a single tagged snippet
+ * takes every untagged one down with it.
+ *
+ * `addSnippet` happened to be safe (a pushed action payload is never drafted), which is
+ * why this must live in one helper rather than be judged per reducer.
+ */
+function persistSnippets(snippets: Snippet[]): void {
+  if (!window.electronAPI) return;
+  window.electronAPI.setConfigValue('snippets', isDraft(snippets) ? current(snippets) : snippets);
+}
+
 const settingsSlice = createSlice({
   name: 'settings',
   initialState,
@@ -461,49 +489,36 @@ const settingsSlice = createSlice({
     // Bulk-replace the whole snippets list (hydration, import, D9).
     setSnippets: (state, action: PayloadAction<Snippet[]>) => {
       state.snippets = action.payload;
-      if (window.electronAPI) {
-        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
-        // is revoked once this reducer returns, and setConfigValue's async
-        // JSON.stringify would then throw "proxy has been revoked" (silently
-        // swallowed by updateConfig → the list never persisted, lost on restart).
-        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
-      }
+      persistSnippets(state.snippets);
     },
 
     addSnippet: (state, action: PayloadAction<Snippet>) => {
       state.snippets.push(action.payload);
-      if (window.electronAPI) {
-        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
-        // is revoked once this reducer returns, and setConfigValue's async
-        // JSON.stringify would then throw "proxy has been revoked" (silently
-        // swallowed by updateConfig → the list never persisted, lost on restart).
-        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
-      }
+      persistSnippets(state.snippets);
     },
 
     // Merges `patch` into the matching record; no-op on an unknown id.
     updateSnippet: (state, action: PayloadAction<{ id: string; patch: Partial<Snippet> }>) => {
       const target = state.snippets.find((s) => s.id === action.payload.id);
       if (!target) return;
-      Object.assign(target, action.payload.patch);
-      if (window.electronAPI) {
-        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
-        // is revoked once this reducer returns, and setConfigValue's async
-        // JSON.stringify would then throw "proxy has been revoked" (silently
-        // swallowed by updateConfig → the list never persisted, lost on restart).
-        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
+      // An explicit `undefined` in the patch means CLEAR THIS FIELD, not "leave it
+      // alone" — that distinction is the whole of review finding D-04, where a user
+      // could not remove a label, unfile a snippet or drop its tags. Object.assign
+      // cannot express it: it writes `undefined` in, leaving a key that is present in
+      // memory and absent once serialised. Deleting keeps the two identical.
+      // Only the optional fields are clearable; a stray `undefined` for `id`, `text`
+      // or `createdAt` is ignored rather than corrupting the record.
+      const rec = target as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(action.payload.patch)) {
+        if (v !== undefined) rec[k] = v;
+        else if ((CLEARABLE_SNIPPET_KEYS as readonly string[]).includes(k)) delete rec[k];
       }
+      persistSnippets(state.snippets);
     },
 
     removeSnippet: (state, action: PayloadAction<string>) => {
       state.snippets = state.snippets.filter((s) => s.id !== action.payload);
-      if (window.electronAPI) {
-        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
-        // is revoked once this reducer returns, and setConfigValue's async
-        // JSON.stringify would then throw "proxy has been revoked" (silently
-        // swallowed by updateConfig → the list never persisted, lost on restart).
-        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
-      }
+      persistSnippets(state.snippets);
     },
 
     // Bulk rename: every snippet whose folder === `from` moves to `to`. `to === ''`
@@ -516,13 +531,7 @@ const settingsSlice = createSlice({
           else s.folder = to;
         }
       }
-      if (window.electronAPI) {
-        // Snapshot to a plain array — `state.snippets` is a live Immer draft that
-        // is revoked once this reducer returns, and setConfigValue's async
-        // JSON.stringify would then throw "proxy has been revoked" (silently
-        // swallowed by updateConfig → the list never persisted, lost on restart).
-        window.electronAPI.setConfigValue('snippets', state.snippets.map((s) => ({ ...s })));
-      }
+      persistSnippets(state.snippets);
     },
 
     // Bulk-replace the whole keybindings map. Used on config-load hydration

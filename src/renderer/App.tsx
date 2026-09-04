@@ -604,7 +604,10 @@ const App: React.FC = () => {
           dispatch(setSnippets(
             config.snippets.filter(isValidSnippet).map((s: any) => ({
               ...s,
-              createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+              // `Number.isFinite`, not `typeof === 'number'` (D-05): a hand-edited
+              // config.json with `createdAt: NaN`/`Infinity` is `typeof 'number'` but
+              // serializes to `null` and breaks snippetSearch.ts's sort comparator.
+              createdAt: Number.isFinite(s.createdAt) ? s.createdAt : Date.now(),
             }))
           ));
         }

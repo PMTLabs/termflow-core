@@ -196,6 +196,13 @@ describe('importSnippets', () => {
 
     const result = await importSnippets([]);
     expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    // B-04: an implementation returning the same generic reason for every negative
+    // case (e.g. always 'Import failed.') passes `ok === false` here identically to
+    // the wrong-version and not-an-array cases below. This pins the version check
+    // specifically — it must name the file as missing a version, not just fail.
+    expect(result.reason).toContain('missing');
+    expect(result.reason).toContain(String(1));
   });
 
   it('refuses non-JSON content without throwing', async () => {
@@ -214,6 +221,11 @@ describe('importSnippets', () => {
 
     const result = await importSnippets([]);
     expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    // B-04: distinguishes this from the version-refusal case above — a version 1
+    // envelope reached the array check, so the reason must be about the missing
+    // "snippets" list, not a repeat of the version message.
+    expect(result.reason).toBe('That file has no "snippets" list.');
   });
 
   it('returns the cancelled outcome and reads nothing when the open dialog is dismissed', async () => {
@@ -282,6 +294,32 @@ describe('importSnippets', () => {
     expect(result.added[0].createdAt).toBeGreaterThan(0);
   });
 
+  // D-05: `typeof Infinity === 'number'`, so a `typeof === 'number'` guard (the
+  // pre-fix code) treats it as a valid timestamp. It then serializes to `null` in
+  // JSON and breaks `snippetSearch.ts`'s `b.createdAt - a.createdAt` sort comparator.
+  // `Number.isFinite` must reject it and fall back to `Date.now()` the same way a
+  // missing `createdAt` does.
+  //
+  // Built as a raw JSON string rather than through `file()`/`JSON.stringify`: there
+  // is no valid JSON spelling of `NaN`, and `JSON.stringify(Infinity)` itself
+  // produces `null` — the overflowing numeric literal `1e400` is how a real file
+  // can carry `Infinity` through `JSON.parse` while still being syntactically valid.
+  it.each([
+    ['Infinity', '1e400', Infinity],
+    ['-Infinity', '-1e400', -Infinity],
+  ])('defaults a non-finite createdAt (%s) instead of importing it verbatim', async (_label, literal, badValue) => {
+    pickSnippetsImportPath.mockResolvedValue('C:/tmp/in.json');
+    importSnippetsFile.mockResolvedValue(
+      `{"version":1,"exportedAt":1,"snippets":[{"id":"f1","text":"bad timestamp","createdAt":${literal}}]}`,
+    );
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.imported).toBe(1);
+    expect(Number.isFinite(result.added[0].createdAt)).toBe(true);
+    expect(result.added[0].createdAt).not.toBe(badValue);
+  });
+
   it('preserves folder and tags on an imported record', async () => {
     pickSnippetsImportPath.mockResolvedValue('C:/tmp/in.json');
     importSnippetsFile.mockResolvedValue(
@@ -302,5 +340,10 @@ describe('importSnippets', () => {
     (window as any).electronAPI = {};
     const result = await importSnippets([]);
     expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    // B-04: named "reports a clear reason" but never checked one — an implementation
+    // that threw the picker-failure or read-failure generic fallback instead of the
+    // host-unavailable message would still pass `ok === false`.
+    expect(result.reason).toBe('Importing snippets is not available in this host.');
   });
 });

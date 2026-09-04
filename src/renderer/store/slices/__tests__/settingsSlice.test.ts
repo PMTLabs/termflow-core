@@ -409,48 +409,75 @@ describe('settingsSlice snippets (plan/029)', () => {
     const persistedSnippetsArgs = () =>
       setConfigValue.mock.calls.filter(([key]) => key === 'snippets').map(([, value]) => value);
 
-    it('setSnippets persists a plain array', () => {
-      settingsReducer(undefined, setSnippets([mk()]));
+    /**
+     * The oracle that matters. `setConfigValue` serialises ASYNCHRONOUSLY, after the
+     * reducer has returned and Immer has revoked its drafts — so "is it an array?" is
+     * not the question. The question is whether it still serialises at that point.
+     *
+     * Round-1 review D-01: `state.snippets.map(s => ({ ...s }))` copies `tags` by
+     * reference, and that reference is a revoked child draft. `Array.isArray` was true
+     * of the broken snapshot too, which is why four green tests never saw it.
+     */
+    const stringifyError = (v: unknown): string | null => {
+      try { JSON.stringify(v); return null; } catch (e) { return String((e as Error).message); }
+    };
+
+    // Every fixture here carries `tags`. An EMPTY array is enough to trigger the defect,
+    // and a fixture without the key cannot detect it at all.
+    const tagged = (over: Partial<Snippet> = {}): Snippet => mk({ tags: ['k8s', 'ops'], ...over });
+
+    it.each([
+      ['setSnippets', () => settingsReducer(undefined, setSnippets([tagged()]))],
+      ['addSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([])), addSnippet(tagged()))],
+      ['updateSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged()])), updateSnippet({ id: 's1', patch: { label: 'x' } }))],
+      ['removeSnippet', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged()])), removeSnippet('nope'))],
+      ['renameSnippetFolder', () => settingsReducer(settingsReducer(undefined, setSnippets([tagged({ folder: 'Git' })])), renameSnippetFolder({ from: 'Git', to: 'VCS' }))],
+    ])('%s persists a snapshot that still serialises after the reducer returns', (_name, run) => {
+      run();
+      const arg = persistedSnippetsArgs().at(-1);
+      // Kills: `map(s => ({ ...s }))`, which leaves `tags` as a revoked proxy.
+      expect(stringifyError(arg)).toBeNull();
+    });
+
+    it('persists the exact contents, not merely something array-shaped', () => {
+      settingsReducer(undefined, setSnippets([tagged()]));
       const [arg] = persistedSnippetsArgs();
-      expect(Array.isArray(arg)).toBe(true);
-      expect(arg).toEqual([mk()]);
+      // Kills: persisting `[]`, or persisting the pre-change list.
+      expect(arg).toEqual([tagged()]);
     });
 
-    it('addSnippet persists a plain array', () => {
-      let state = settingsReducer(undefined, setSnippets([]));
-      settingsReducer(state, addSnippet(mk()));
+    it('persists the POST-change list for each mutating reducer', () => {
+      const state = settingsReducer(undefined, setSnippets([tagged(), tagged({ id: 's2' })]));
+      settingsReducer(state, removeSnippet('s2'));
+      // Kills: persisting the unmodified list — the commonest way a "plain array" assertion lies.
+      expect(persistedSnippetsArgs().at(-1)).toEqual([tagged()]);
+    });
+
+    it('one tagged snippet must not take the untagged ones down with it', () => {
+      // The amplification measured in round 1: the list is ONE payload, so a single
+      // unserialisable member loses every sibling too.
+      const state = settingsReducer(undefined, setSnippets([mk({ id: 'plain' }), tagged({ id: 'withTags' })]));
+      settingsReducer(state, removeSnippet('no-such-id'));
       const arg = persistedSnippetsArgs().at(-1);
-      expect(Array.isArray(arg)).toBe(true);
+      expect(stringifyError(arg)).toBeNull();
+      expect((arg as Snippet[]).map((x) => x.id)).toEqual(['plain', 'withTags']);
     });
 
-    it('updateSnippet persists a plain array', () => {
-      const state = settingsReducer(undefined, setSnippets([mk()]));
-      settingsReducer(state, updateSnippet({ id: 's1', patch: { label: 'x' } }));
-      const arg = persistedSnippetsArgs().at(-1);
-      expect(Array.isArray(arg)).toBe(true);
-    });
-
-    it('removeSnippet persists a plain array', () => {
-      const state = settingsReducer(undefined, setSnippets([mk()]));
-      settingsReducer(state, removeSnippet('s1'));
-      const arg = persistedSnippetsArgs().at(-1);
-      expect(Array.isArray(arg)).toBe(true);
-    });
-
-    it('renameSnippetFolder persists a plain array', () => {
-      const state = settingsReducer(undefined, setSnippets([mk({ folder: 'Git' })]));
-      settingsReducer(state, renameSnippetFolder({ from: 'Git', to: 'VCS' }));
-      const arg = persistedSnippetsArgs().at(-1);
-      expect(Array.isArray(arg)).toBe(true);
-    });
-
-    it('mutating the persisted snapshot afterwards does not affect store state', () => {
-      const state = settingsReducer(undefined, setSnippets([mk()]));
+    it('persists a frozen snapshot that cannot be used to reach back into store state', () => {
+      const state = settingsReducer(undefined, setSnippets([tagged()]));
       const arg = persistedSnippetsArgs().at(-1) as Snippet[];
-      // A plain snapshot is disconnected from the Immer draft; mutating it must be inert.
-      arg.push(mk({ id: 'intruder' }));
-      arg[0].text = 'tampered';
-      expect(state.snippets).toEqual([mk()]);
+      // `current()` returns a deep plain snapshot, and Immer's auto-freeze — which RTK
+      // relies on to catch accidental state mutation — freezes it all the way down,
+      // the nested `tags` array included. So the snapshot is not a route back into the
+      // store, and it holds no proxy that could be revoked before it is serialised.
+      //
+      // Kills the previous `map(s => ({ ...s }))`: that built fresh, UNFROZEN objects,
+      // so every assertion below fails on it.
+      expect(Object.isFrozen(arg)).toBe(true);
+      expect(Object.isFrozen(arg[0])).toBe(true);
+      expect(Object.isFrozen(arg[0].tags)).toBe(true);
+      expect(arg).toEqual([tagged()]);
+      expect(state.snippets).toEqual([tagged()]);
     });
   });
 });

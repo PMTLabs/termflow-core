@@ -182,7 +182,10 @@ export async function importSnippets(existing: Snippet[]): Promise<SnippetImport
       id: mintSnippetId(),
       // `isValidSnippet` deliberately does not check `createdAt`; a missing or
       // non-numeric one is defaulted here rather than costing an otherwise-good record.
-      createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
+      // `Number.isFinite`, not `typeof === 'number'` (D-05): `NaN`/`Infinity` are both
+      // `typeof 'number'` but serialize to `null` and break `snippetSearch.ts`'s
+      // `b.createdAt - a.createdAt` sort comparator.
+      createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : Date.now(),
     });
   }
 
