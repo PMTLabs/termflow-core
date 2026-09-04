@@ -251,4 +251,76 @@ describe('SnippetDialog', () => {
         expect(draft.folder).toBeDefined();
         expect(draft.folder).not.toContain('/');
     });
+
+    /**
+     * Regression, found by the Settings panel during integration.
+     *
+     * Callers render this dialog UNCONDITIONALLY — `isOpen` only chooses between `null`
+     * and the portal — so it never remounts on its own and the `useState` initializers
+     * run exactly once. Without a re-seed on open, the second open reuses the first
+     * open's state: "Edit snippet" over blank fields, or a create form still holding the
+     * snippet you were just editing.
+     *
+     * Pinned HERE rather than at a call site on purpose. There are two callers (the
+     * Settings panel and the terminal context menu) and a remount `key` in one of them
+     * leaves the other to rediscover the same bug.
+     */
+    describe('re-seeds its fields on every open', () => {
+        async function renderWith(isOpen: boolean, snippet: Snippet | null) {
+            await act(async () => {
+                root.render(
+                    <SnippetDialog
+                        isOpen={isOpen}
+                        snippet={snippet}
+                        snippets={[]}
+                        onSave={jest.fn()}
+                        onCancel={jest.fn()}
+                    />,
+                );
+            });
+        }
+
+        const existing: Snippet = {
+            id: 'snip-a',
+            label: 'Deploy',
+            text: 'kubectl apply -f .',
+            folder: 'Ops',
+            tags: ['k8s'],
+            createdAt: 1,
+        };
+
+        it('populates the fields when opened for edit after having been open for create', async () => {
+            await renderWith(true, null);
+            expect(textarea().value).toBe('');
+
+            await renderWith(false, null);
+            await renderWith(true, existing);
+
+            expect(textarea().value).toBe('kubectl apply -f .');
+            expect(labelInput().value).toBe('Deploy');
+            expect(folderInput().value).toBe('Ops');
+        });
+
+        it('clears the fields when opened for create after having been open for edit', async () => {
+            await renderWith(true, existing);
+            expect(textarea().value).toBe('kubectl apply -f .');
+
+            await renderWith(false, existing);
+            await renderWith(true, null);
+
+            expect(textarea().value).toBe('');
+            expect(labelInput().value).toBe('');
+            expect(folderInput().value).toBe('');
+        });
+
+        it('does not discard in-progress typing when the parent re-renders the same snippet', async () => {
+            await renderWith(true, existing);
+            await act(async () => setValue(textarea(), 'edited by the user'));
+
+            // A new object for the SAME snippet — exactly what a parent re-render produces.
+            await renderWith(true, { ...existing });
+
+            expect(textarea().value).toBe('edited by the user');
+        });
+    });
 });

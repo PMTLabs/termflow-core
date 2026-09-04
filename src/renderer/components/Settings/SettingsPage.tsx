@@ -26,6 +26,7 @@ import { getBuildInfo } from '../../services/buildInfo';
 import { SplitButton } from '../UI/SplitButton';
 import { connectionStatus } from './connectionStatus';
 import { PeersPanel } from './PeersPanel';
+import { SnippetsPanel } from './SnippetsPanel';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import './SettingsPage.css';
 
@@ -121,7 +122,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const [isApplying, setIsApplying] = useState(false);
 
     // Active sidebar category (Windows Terminal-style two-pane layout)
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'updates' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
 
     // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
@@ -184,13 +185,16 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         appearance: 'Appearance', terminal: 'Terminal Behavior',
         notifications: 'Notifications', startup: 'Startup & Integration',
         profiles: 'Shell Profiles', shortcuts: 'Shortcuts', connections: 'Connections',
-        peers: 'Peers', updates: 'Updates', about: 'About & Legal',
+        peers: 'Peers', snippets: 'Snippets', updates: 'Updates', about: 'About & Legal',
     };
     // Peers/Connections own their own live flow; About & Legal and Updates are
     // action-only (no saved fields); Startup and Notifications apply live
-    // (persisted on change) — none are dirty-tracked.
+    // (persisted on change) — none are dirty-tracked. Snippets also applies live,
+    // persisting per mutation with no Save button (plan/029 §7.1) — left untracked
+    // it falls off the end of `snapshotCategory`'s switch and returns `undefined`
+    // at runtime while type-checking clean.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'snippets';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -338,7 +342,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
-            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'updates' || c === 'about';
+            c === 'profiles' || c === 'shortcuts' || c === 'connections' || c === 'peers' || c === 'snippets' || c === 'updates' || c === 'about';
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
             requestCategoryChange(pending);
@@ -901,6 +905,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+            ),
+        },
+        {
+            id: 'snippets',
+            label: 'Snippets',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
                 </svg>
             ),
         },
@@ -1910,6 +1923,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
+            case 'snippets': return <SnippetsPanel />;
             case 'updates': return renderUpdates();
             case 'about': return <AboutLegalPanel />;
             default: return null;

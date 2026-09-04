@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import './SnippetDialog.css';
 import { useDialogA11y } from './useDialogA11y';
@@ -75,6 +75,31 @@ export const SnippetDialog: React.FC<SnippetDialogProps> = ({
     const [label, setLabel] = useState(snippet?.label ?? '');
     const [folder, setFolder] = useState(snippet?.folder ?? '');
     const [tagsRaw, setTagsRaw] = useState((snippet?.tags ?? []).join(', '));
+
+    /**
+     * Re-seed the fields whenever the dialog opens, or the snippet being edited changes
+     * while it is already open.
+     *
+     * The initializers above run ONCE. Callers render this component unconditionally —
+     * `isOpen` only chooses between `null` and the portal — so it never remounts on its
+     * own, and opening it for Edit after a create reused the previous, stale state:
+     * the title read "Edit snippet" over blank fields.
+     *
+     * This belongs here, not at the call sites. A remount `key` in one caller fixes that
+     * caller and leaves every other one to rediscover the same bug — and there are already
+     * two (the Settings panel and the terminal context menu).
+     *
+     * Keyed on `snippet?.id` rather than `snippet` so a parent re-render that produces a
+     * new object for the same snippet cannot wipe out what the user is typing.
+     */
+    useEffect(() => {
+        if (!isOpen) return;
+        setText(snippet?.text ?? '');
+        setLabel(snippet?.label ?? '');
+        setFolder(snippet?.folder ?? '');
+        setTagsRaw((snippet?.tags ?? []).join(', '));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, snippet?.id]);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const textRef = useRef<HTMLTextAreaElement>(null);
