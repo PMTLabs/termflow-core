@@ -78,15 +78,52 @@ impl AutomationEngine {
     pub fn stop(&self) {
         self.stopping.store(true, Ordering::Relaxed);
     }
-
-    /// A clone for a spawned loop to check without holding the whole engine.
-    pub fn stop_flag(&self) -> Arc<AtomicBool> {
-        self.stopping.clone()
-    }
 }
 
 impl Default for AutomationEngine {
     fn default() -> Self {
         Self::new(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automation_engine::eval::ArmState;
+
+    /// Launch must not look like shutdown, and `stop` must be the only thing that changes that.
+    #[test]
+    fn a_fresh_engine_is_not_stopping_until_it_is_stopped() {
+        let engine = AutomationEngine::new(1_700_000_000_000);
+        assert!(!engine.is_stopping(), "a fresh engine must not read as shutting down");
+        engine.stop();
+        assert!(engine.is_stopping());
+        // Idempotent: `RunEvent::Exit` can fire more than once on some shutdown paths.
+        engine.stop();
+        assert!(engine.is_stopping());
+    }
+
+    /// The grace in §4.5 is measured from THIS process's engine start, so the value has to survive
+    /// construction rather than being recomputed by whoever asks.
+    #[test]
+    fn the_engine_remembers_when_it_started() {
+        assert_eq!(AutomationEngine::new(1_700_000_000_000).started_at_ms(), 1_700_000_000_000);
+        assert_eq!(AutomationEngine::default().started_at_ms(), 0);
+    }
+
+    /// One runtime, reachable through the engine — `AppState` holds the engine, and
+    /// `cleanup_terminal_state` reaches the maps through it. Two owners would be two lifetimes.
+    #[test]
+    fn the_engine_owns_the_one_runtime_every_caller_sees() {
+        let engine = AutomationEngine::new(0);
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 5 });
+        let shared = engine.runtime.clone();
+        assert_eq!(shared.arm_state("au-1", "tm-1"), ArmState::Fired { at_ms: 5 });
+        shared.forget_terminal("tm-1");
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::Unseen,
+            "a clone of the Arc must be the same runtime, not a copy of it"
+        );
     }
 }

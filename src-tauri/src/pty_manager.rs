@@ -1691,6 +1691,31 @@ mod cwd_tests {
     /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
     /// against one shared `System::new_all()` instead of paying that scan per terminal.
     /// That reuse is only safe if it is a faithful projection of the owned-scan
+
+    /// `Command contains` matches against this, and it must be the COMMAND LINE rather than the
+    /// process name: an npm-installed agent is `node.exe`, so matching the name selects every node
+    /// process on the machine at once. Run against this test binary, whose own argv is known.
+    #[test]
+    fn foreground_command_line_returns_argv_not_just_the_exe_name() {
+        let sys = System::new_all();
+        let me = std::process::id();
+        let line = super::foreground_command_line(me, &sys)
+            .expect("this process is in its own snapshot");
+        assert!(!line.is_empty());
+        // The exe name appears, and so does at least one thing that is NOT the exe name — which is
+        // what separates a cmdline from `p.name()`.
+        let exe_stem = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+            .unwrap_or_default();
+        assert!(
+            line.to_lowercase().contains(&exe_stem.to_lowercase()),
+            "expected {:?} to name this executable ({:?})",
+            line,
+            exe_stem
+        );
+    }
+
     /// version, which is what this pins.
     #[test]
     fn process_cwd_with_a_shared_system_matches_the_owned_scan() {

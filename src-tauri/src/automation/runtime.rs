@@ -127,14 +127,6 @@ impl AutomationRuntime {
         self.dirty.contains_key(pc)
     }
 
-    pub fn clear_dirty(&self, pc: &str) {
-        self.dirty.remove(pc);
-    }
-
-    pub fn dirty_len(&self) -> usize {
-        self.dirty.len()
-    }
-
     // --- send serialisation --------------------------------------------------------------------
 
     /// The per-leaf send lock, minted on first use. Two rules firing into one terminal in one tick
