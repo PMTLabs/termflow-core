@@ -821,7 +821,23 @@ impl AutomationStore {
     /// log line — *"saved from window `main`, replacing the version saved at 20:14:07"* — would then
     /// name the wrong loser. Last-save-wins is the policy (§3.5); the log entry is the requirement, so
     /// it has to be true. `Ok(None)` means this rule is new.
+    ///
+    /// **A save that arrives with `enabled = true` is an enable, and §7.8 gates it** — otherwise a
+    /// draft saved with its toggle already on goes live unjudged, which is R10's exact failure: an
+    /// empty message makes `deliver` press a bare Enter into whatever is running.
+    ///
+    /// **The pattern is the one blocking problem this gate lets through**, and deliberately. §2.7
+    /// gives `reload` its own refusal for an uncompilable pattern, reported once per load; a store
+    /// that refused to write one would make that path dead code here while it stays genuinely
+    /// reachable in production, because a rule saved by an older build, arriving through a migration,
+    /// or written against a different regex version can still carry a pattern this build cannot
+    /// compile. Nothing is exposed by the exception: a bad pattern is still refused by the ENABLE
+    /// path (`set_enabled_checked`), and a rule saved enabled with one is skipped at the next
+    /// `reload` with a log row rather than run.
     pub fn save_rule(&self, rule: &AutomationRule) -> Result<Option<i64>, AutomationStoreError> {
+        if rule.enabled {
+            Self::refuse_if_it_would_run_wrong(rule)?;
+        }
 
         let mut guard = self.conn.lock().unwrap();
         let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
@@ -1017,8 +1033,32 @@ impl AutomationStore {
     /// A rule saved by an older build or arriving through a migration can still carry one, so the
     /// path is real and must stay testable. The ruling that reconciles those two is a design decision,
     /// and it is written up in the handoff rather than guessed at here.
+    /// The one blocking problem the ENGINE refuses on its own, at every load.
+    ///
+    /// §2.7: an uncompilable pattern is reported once per load and never per tick, from
+    /// `AutomationEngine::reload`. That path is excluded from the SAVE gate and only from the save
+    /// gate — see `save_rule` for why it has to stay reachable.
+    const RECHECKED_BY_THE_ENGINE: &'static str = "parse";
+
+    /// The ENABLE gate (§7.8): every blocking problem, because after this the rule RUNS.
     fn refuse_if_invalid(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
-        let blocking: Vec<String> = crate::automation_validation::problems(rule)
+        Self::refuse(crate::automation_validation::problems(rule))
+    }
+
+    /// The SAVE gate (§7.8): everything the engine does not independently re-check.
+    fn refuse_if_it_would_run_wrong(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
+        Self::refuse(
+            crate::automation_validation::problems(rule)
+                .into_iter()
+                .filter(|p| p.field != Self::RECHECKED_BY_THE_ENGINE)
+                .collect(),
+        )
+    }
+
+    fn refuse(
+        problems: Vec<crate::automation_validation::Problem>,
+    ) -> Result<(), AutomationStoreError> {
+        let blocking: Vec<String> = problems
             .into_iter()
             .filter(crate::automation_validation::Problem::blocks)
             .map(|p| p.message)
@@ -1501,7 +1541,9 @@ mod tests {
             criterion: Criterion::CommandContains,
             criterion_value: "claude".to_string(),
             follow_new: true,
-            target_ids: vec![],
+            // A PINNED rule with no targets is one the enable gate refuses, so a fixture that had
+            // none was every store test arranging a row the product cannot produce.
+            target_ids: vec!["tm-1".to_string()],
             completed_at: None,
             verbose_until: None,
             sort_order: 1,
@@ -1560,6 +1602,10 @@ mod tests {
         store.save_rule(&r).unwrap();
         assert_eq!(store.targets_for("au-1").unwrap().len(), 2);
 
+        // §7.8's save gate refuses a PINNED rule with no targets while it is enabled — which is
+        // what the editor's own blocked Save button already told the user. Clearing the picks is
+        // therefore something that happens to a rule that is off, and that is the save under test.
+        r.enabled = false;
         r.target_ids = vec![];
         store.save_rule(&r).unwrap();
 
@@ -2072,7 +2118,9 @@ mod tests {
         store.save_rule(&rule("au-1")).unwrap();
 
         store.touch_target("au-1", "tm-m", Some("codex"), Some("D:/a"), 1_000).unwrap();
-        let row = |s: &AutomationStore| s.targets_for("au-1").unwrap().into_iter().next().unwrap();
+        // By ID, never by position: the rule also has a PINNED row, and a test that says "the
+        // first row" is one ordering change away from asserting about the wrong terminal.
+        let row = |s: &AutomationStore| matched_row(s, "au-1", "tm-m");
         let first = row(&store);
         assert_eq!(first.1, "matched", "a never-pinned match still gets a row");
         assert_eq!(first.2.as_deref(), Some("codex"));
@@ -2277,6 +2325,21 @@ mod tests {
         assert!(outcome.emit, "and the activity emit resyncs rather than waiting out the skew");
     }
 
+    /// One rule's row for one terminal.
+    #[allow(clippy::type_complexity)]
+    fn matched_row(
+        store: &AutomationStore,
+        rule_id: &str,
+        tm: &str,
+    ) -> (String, String, Option<String>, Option<String>, Option<i64>) {
+        store
+            .targets_for(rule_id)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.0 == tm)
+            .unwrap_or_else(|| panic!("no row for {}", tm))
+    }
+
     /// `None` means "no new value", never "clear the stored one". `label_at` returns `None` once a
     /// terminal is gone — exactly when the picker's "not open" row needs the snapshot most.
     #[test]
@@ -2288,7 +2351,7 @@ mod tests {
         // The terminal closed: the resolver has no label to offer any more.
         store.touch_target("au-1", "tm-m", None, None, 2_000).unwrap();
 
-        let row = store.targets_for("au-1").unwrap().into_iter().next().unwrap();
+        let row = matched_row(&store, "au-1", "tm-m");
         assert_eq!(row.2.as_deref(), Some("codex"), "the label survived the terminal");
         assert_eq!(row.3.as_deref(), Some("D:/a"), "and so did the folder");
     }
@@ -2391,14 +2454,68 @@ mod tests {
     #[test]
     fn disabling_is_never_refused_however_broken_the_rule_is() {
         let store = AutomationStore::new_in_memory();
-        let mut rule = enableable("au-bad");
-        rule.enabled = true;
-        rule.target_ids.clear();
-        rule.graph.action.message = String::new();
-        store.save_rule(&rule).unwrap();
+
+        // Enabled AND broken, through the one route §7.8's save gate still allows: the PATTERN, which
+        // the engine re-checks at every load and this gate therefore leaves alone. That is not a
+        // convenient loophole, it is the whole shape of the exemption — and a rule in exactly this
+        // state is what a user meets after an upgrade changes what compiles.
+        let mut bad = enableable("au-bad");
+        bad.enabled = true;
+        bad.graph.parse.find = "ctx:(\\d+".into();
+        store.save_rule(&bad).unwrap();
+        assert!(enabled_flag(&store, "au-bad"), "the premise: it is on, and it cannot run");
 
         store.set_enabled_checked("au-bad", false).unwrap();
         assert!(!enabled_flag(&store, "au-bad"));
+
+        // And the other kind of broken, which can only be stored while it is off: turning a rule
+        // that is already off further off is still never a validation question.
+        let mut empty = enableable("au-empty");
+        empty.enabled = false;
+        empty.target_ids.clear();
+        empty.graph.action.message = String::new();
+        store.save_rule(&empty).unwrap();
+
+        store.set_enabled_checked("au-empty", false).unwrap();
+        assert!(!enabled_flag(&store, "au-empty"));
+    }
+
+    /// §7.8's SAVE gate, and the one field it lets through.
+    ///
+    /// The gate exists for R10: a draft saved with its toggle already on used to go live unjudged, and
+    /// an empty message makes `deliver` press a bare Enter into whatever is running. The exemption
+    /// exists for §2.7: `reload` compiles every pattern at load, refuses the ones it cannot, and
+    /// reports them once per load — a store that refused to write one would make that path dead code
+    /// here while it stays reachable in production through an older build, a migration, or a regex
+    /// version that no longer accepts what it once did.
+    #[test]
+    fn the_save_gate_refuses_an_enabled_draft_but_never_the_pattern() {
+        let store = AutomationStore::new_in_memory();
+
+        let mut broken = enableable("au-1");
+        broken.enabled = true;
+        broken.graph.action.message = String::new();
+        let refused = store.save_rule(&broken);
+        assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
+        assert!(store.get_rule("au-1").unwrap().is_none(), "refused, and yet the row was written");
+
+        // The same rule with its toggle OFF is a draft, and a draft is allowed to be incomplete.
+        broken.enabled = false;
+        store.save_rule(&broken).unwrap();
+        assert!(store.get_rule("au-1").unwrap().is_some());
+
+        // A pattern this build cannot compile is the exemption, enabled or not.
+        let mut bad_pattern = enableable("au-2");
+        bad_pattern.enabled = true;
+        bad_pattern.graph.parse.find = "ctx:(\\d+".into();
+        store.save_rule(&bad_pattern).unwrap();
+        assert!(enabled_flag(&store, "au-2"), "the engine refuses this one, at load, once");
+
+        // And the ENABLE gate still refuses it, so the exemption widens nothing: the only way an
+        // uncompilable pattern is stored enabled is by being saved that way.
+        store.set_enabled_checked("au-2", false).unwrap();
+        let refused = store.set_enabled_checked("au-2", true);
+        assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
     }
 
     /// A rule that is not there is an error, not a silent no-op: the command's caller shows the

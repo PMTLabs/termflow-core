@@ -590,7 +590,7 @@ mod tests {
     /// tap, so a runtime assertion could not make the claim at all.
     #[test]
     fn the_tap_body_never_reads_the_payload_bytes() {
-        let source = include_str!("loops.rs").replace("\r\n", "\n");
+        let source = strip_comments(include_str!("loops.rs"));
         let start = source.find("pub async fn run_tap(").expect("run_tap must exist");
         let rest = &source[start..];
         let end = rest.find("\n}\n").expect("its body must be closed at column zero");
@@ -1435,17 +1435,25 @@ mod tests {
     /// `spawn_history_flush_task`, the function this call sits directly beneath.
     #[test]
     fn the_engine_is_spawned_on_tauris_runtime_because_setup_has_none() {
-        let source = include_str!("../automation_engine.rs").replace("\r\n", "\n");
-        let start = source.find("pub fn spawn<R: tauri::Runtime>").expect("spawn must exist");
-        let body = &source[start..start + 1_400];
+        // **Comments stripped, and `ends_with` rather than `contains`.** The first version of this
+        // test searched the whole text preceding the call for `"tauri::async_runtime::"`, and that
+        // text was the comment explaining why the call must be `tauri::async_runtime::spawn`. The
+        // mutation to `tokio::spawn` survived it. `ends_with` can only be satisfied by the characters
+        // immediately before the call — by the call itself.
+        let engine = strip_comments(include_str!("../automation_engine.rs"));
+        let start = engine.find("pub fn spawn<R: tauri::Runtime>").expect("spawn must exist");
+        let body = &engine[start..];
         let outer = body.find("spawn({").expect("it must spawn something");
         assert!(
-            body[..outer].contains("tauri::async_runtime::"),
-            "the OUTER spawn runs from `.setup()`, where there is no entered runtime"
+            body[..outer].ends_with("tauri::async_runtime::"),
+            "the OUTER spawn runs from `.setup()`, where no runtime is entered, so it must go \
+             through Tauri's wrapper; the call reads `{}spawn({{`",
+            body[..outer].rsplit('\n').next().unwrap_or_default().trim_start()
         );
 
-        let lib = include_str!("../lib.rs").replace("\r\n", "\n");
-        let setup_start = lib.find("spawn_history_flush_task(state.clone());").expect("the setup site");
+        let lib = strip_comments(include_str!("../lib.rs"));
+        let setup_start =
+            lib.find("spawn_history_flush_task(state.clone());").expect("the setup site");
         let setup = &lib[setup_start..setup_start + 400];
         assert!(
             !setup.contains("tokio::spawn"),
@@ -1465,17 +1473,7 @@ mod tests {
         let mut once = ctx_rule_saying("au-once", "once only", 1);
         once.runs_once = true;
         let (engine, fake, host) = wire(vec![once]);
-        fake.roster.lock().unwrap().push(RosterRow {
-            terminal_id: Some("tm-2".into()),
-            process_id: "pc-2".into(),
-            name: "Terminal-powershell".into(),
-            shell: "powershell".into(),
-            pid: 102,
-            display_label: Some("second".into()),
-            cwd: None,
-            command_line: None,
-        });
-        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
+        open_second_terminal(&fake);
         engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-once", tm, ArmState::armed());
@@ -1500,6 +1498,85 @@ mod tests {
             "and it logged every one of them"
         );
         assert!(!engine.is_live("au-once"));
+    }
+
+    /// The other half of B-2's fix, and it had no oracle: **only a `runs_once` rule is deduped.**
+    ///
+    /// Dropping the `runs_once &&` guard is a one-word mutation that survived the whole suite. It
+    /// turns the per-tick dedupe into one send per RULE per tick forever, so the canonical rule
+    /// watching three terminals types into one of them and leaves the other two `Fired` with nothing
+    /// sent — silently, because the arm state advances either way. A fix needs its negative case
+    /// pinned as firmly as its positive one, or the next edit is free to over-apply it.
+    #[tokio::test(start_paused = true)]
+    async fn a_repeating_rule_still_sends_to_every_terminal_it_watches() {
+        let (engine, fake, host) = wire(vec![ctx_rule_saying("au-many", "every one", 1)]);
+        open_second_terminal(&fake);
+        engine.runtime.set_watched("au-many", ["tm-1".to_string(), "tm-2".to_string()].into());
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-many", tm, ArmState::armed());
+        }
+        fake.say("pc-1", "ctx:63%\n");
+        fake.say("pc-2", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        engine.runtime.mark_dirty("pc-2");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "every one"),
+            2,
+            "R6 bounds a runs-once rule, not every rule: {:?}",
+            fake.written()
+        );
+        assert!(engine.is_live("au-many"), "and nothing completed it");
+    }
+
+    /// **H-3's own fix had no oracle either.** `run_targeting` compares `(watched, missing)` against
+    /// the previous pass; reverting that tuple to `missing` alone survived the suite — the same hole
+    /// H-3 reported, fixed and then left unpinned, which is how a finding comes back.
+    ///
+    /// A terminal JOINING is the case that separates them: an `All terminals` rule pins nothing, so
+    /// `missing` cannot move, while the payload gains a row every open Settings page has to be told
+    /// about.
+    #[tokio::test(start_paused = true)]
+    async fn the_targeting_loop_notices_a_terminal_joining_and_not_only_one_going_missing() {
+        let (engine, fake, host) = wired();
+        let targeting = tokio::spawn(run_targeting(engine.clone(), host.clone()));
+
+        // The first pass adopts tm-1 and says so. Drained here, so what is asserted below is the
+        // SECOND change and not this one.
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS / 2)).await;
+        assert!(engine.take_state_emit(1_000), "the first pass must announce the rule's first leaf");
+        assert!(engine.runtime.watches("au-1", "tm-1"));
+
+        // A second terminal opens. `All terminals` + `follow_new` adopts it.
+        open_second_terminal(&fake);
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
+        engine.stop();
+
+        assert!(engine.runtime.watches("au-1", "tm-2"), "the premise: it was adopted");
+        assert!(
+            engine.take_state_emit(10_000),
+            "the watch set grew and no window was told; only `missing` was being diffed"
+        );
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
+        assert!(targeting.is_finished());
+    }
+
+    /// A second live terminal, with ids that share no substring with the first (§7.4).
+    fn open_second_terminal(fake: &Arc<FakeHost>) {
+        fake.roster.lock().unwrap().push(RosterRow {
+            terminal_id: Some("tm-2".into()),
+            process_id: "pc-2".into(),
+            name: "Terminal-powershell".into(),
+            shell: "powershell".into(),
+            pid: 102,
+            display_label: Some("second".into()),
+            cwd: None,
+            command_line: None,
+        });
+        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
     }
 
     /// **B-3: the log records transitions.** A rule that is working sits `Fired` with its condition

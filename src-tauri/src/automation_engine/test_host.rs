@@ -253,3 +253,25 @@ pub(crate) fn log_details(store: &AutomationStore) -> Vec<(String, String)> {
 pub(crate) fn times_sent(fake: &FakeHost, message: &str) -> usize {
     fake.written().iter().filter(|w| w.contains(message)).count()
 }
+
+/// A Rust source file with its line comments removed and its line endings normalised. **Every
+/// source-derived test in this feature reads through this.**
+///
+/// Two reasons. `core.autocrlf` is on with no `.gitattributes`, so the file git checks out is not
+/// the file a worktree rewrote — a needle
+/// containing a newline misses on one machine and hits on the other. And **a comment is prose about
+/// the code, which a needle cannot tell from the code**: for a positive `contains` that is a false
+/// PASS, and for a negative one a false failure. The source test guarding `tauri::async_runtime::spawn`
+/// searched for `"tauri::async_runtime::"` in the text preceding the call — and the text preceding the
+/// call was the comment explaining why it had to be `tauri::async_runtime::spawn`, so mutating the call
+/// to `tokio::spawn` left the test green while the app no longer started. *(That test is now anchored
+/// with `ends_with`, which is what actually kills the mutant; stripping is what the tests forced to use
+/// `contains` need.)*
+pub(crate) fn strip_comments(source: &str) -> String {
+    source
+        .replace("\r\n", "\n")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
