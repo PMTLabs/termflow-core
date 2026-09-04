@@ -59,6 +59,11 @@ interface ElectronAPI {
   /// root. Shape comes only from the pane tree, and a leaf keeps its id when
   /// moved — see services/paneOwnership.ts.
   setTerminalOwningTab: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
+  /// Push the tab/pane title this window shows for a terminal down to the backend, keyed by the
+  /// durable `tm-` LEAF. Writes `Terminal.display_label`, never `Terminal.name` — `name` is on the
+  /// wire in `/api/terminals` and is what MCP returns, so changing what it holds would change what
+  /// agents see. See services/terminalLabelSync.ts.
+  setTerminalDisplayLabel: (rendererTerminalId: string, label: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   /// Ask the backend to open/activate the Settings tab in the current main window
@@ -337,6 +342,10 @@ const tauriBridge: ElectronAPI = {
   setTerminalOwningTab: async (rendererTerminalId: string, owningTabId: string) => {
     // Tauri maps camelCase JS keys onto the snake_case Rust parameters.
     await invoke('set_terminal_owning_tab', { rendererTerminalId, owningTabId });
+  },
+
+  setTerminalDisplayLabel: async (rendererTerminalId: string, label: string) => {
+    await invoke('set_terminal_display_label', { rendererTerminalId, label });
   },
 
   closeTerminal: async (id) => {

@@ -113,6 +113,24 @@ pub struct Terminal {
     /// prompt gate and stop the history popup leaking into an agent CLI's input.
     #[serde(default)]
     pub prompt_hook: bool,
+    /// The tab/pane title the RENDERER shows for this terminal, pushed down by
+    /// `services/terminalLabelSync.ts` whenever it changes.
+    ///
+    /// An ADDITIVE field, deliberately not `Terminal.name`, for two reasons that
+    /// hold at two different times. `name` is a published contract — it is on the
+    /// wire in `/api/terminals` and is what MCP's `get_terminal_detail` returns —
+    /// so changing what it HOLDS is a user-visible change to what agents see. And
+    /// if `updateTerminalName`'s stub is ever repaired, `name` gains three writers
+    /// of two different granularities (`renameTabProcesses` writes a TAB title to
+    /// every leaf; `TerminalPane` writes a PANE name to one, from two call sites),
+    /// and an auto-title writer beside them would let the shell's next OSC title
+    /// silently undo a user's pane rename. The additive field avoids that by
+    /// construction rather than by timing.
+    ///
+    /// `None` until the renderer's first push, and for a headless API/fleet spawn
+    /// that has no pane at all. Plan 028 §4.2.
+    #[serde(default)]
+    pub display_label: Option<String>,
 }
 
 /// The pty-host session key for `t`, applying the documented empty-string fallback.
@@ -387,6 +405,12 @@ pub struct AppState<R: Runtime = Wry> {
     // it holds no AppHandle, so `append` reports whether an `automation:activity` emit is due
     // and its caller performs the emit.
     pub automation_store: Arc<crate::automation_store::AutomationStore>,
+    // The Automations engine: the per-terminal arm/echo/lock/cadence state it drives, and the one
+    // flag that stops its loops. Constructed inert like `CanvasStore::new()`; `automation_engine::
+    // spawn` starts the loops. Held here so `cleanup_terminal_state` can purge a closing terminal —
+    // a restarted terminal REUSES its `tm-` id, and `Unseen` protection engages only when the key is
+    // absent, so a stale `Fired` would silently never nag that pane again. Plan 028 §2.1, §7.10.
+    pub automations: Arc<crate::automation_engine::AutomationEngine>,
     // Renderer-published canvas metadata, partitioned by window so one window's
     // local model cannot erase another's. This is a boot-time projection, never
     // persisted; canvas_endpoints owns the payload types and merge policy.
@@ -521,6 +545,7 @@ impl<R: Runtime> Clone for AppState<R> {
             history_store: self.history_store.clone(),
             canvas_store: self.canvas_store.clone(),
             automation_store: self.automation_store.clone(),
+            automations: self.automations.clone(),
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
@@ -633,6 +658,44 @@ pub(crate) fn retarget_owning_tab(
     Ok(false)
 }
 
+/// Write a terminal's renderer-side tab/pane title, keyed by the durable `tm-` LEAF.
+///
+/// A free function taking the map rather than a method on `AppState`, exactly like
+/// `retarget_owning_tab` above and for the same reason: it can then be unit-tested without an
+/// `AppHandle`.
+///
+/// **Best-effort, like `set_terminal_owning_tab`.** An unmatched leaf is `Ok(false)`, not an error:
+/// the renderer fires this off its own store subscription and a pane's PTY may legitimately not exist
+/// yet, or any more. `Ok(false)` is what tells the caller a re-assert after spawn is worth making.
+///
+/// An empty or whitespace label stores `None` rather than `Some("")`, so `label_at` sees an absence
+/// and falls through to the next step instead of resolving a blank name. Plan 028 §4.2.
+pub(crate) fn set_display_label(
+    terminals: &DashMap<String, Terminal>,
+    renderer_terminal_id: &str,
+    label: Option<&str>,
+) -> Result<bool, String> {
+    let leaf = renderer_terminal_id.trim();
+    if leaf.is_empty() {
+        return Err("a renderer terminal (leaf) id is required".to_string());
+    }
+    let next = label
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string);
+    // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under the same shard guard.
+    for mut entry in terminals.iter_mut() {
+        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+            continue;
+        }
+        if entry.display_label != next {
+            entry.display_label = next.clone();
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Pure selection behind `active_window`/`main_window` promotion: given a
 /// preferred label, a label to treat as already gone (the window mid-close, which
 /// may still appear in `webview_windows()` when this runs from its own destroy
@@ -734,6 +797,9 @@ impl<R: Runtime> AppState<R> {
             history_store: Arc::new(crate::history_store::HistoryStore::new()),
             canvas_store: Arc::new(crate::canvas_store::CanvasStore::new()),
             automation_store: Arc::new(crate::automation_store::AutomationStore::new()),
+            automations: Arc::new(crate::automation_engine::AutomationEngine::new(
+                chrono::Utc::now().timestamp_millis(),
+            )),
             canvas_nodes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
@@ -889,6 +955,42 @@ impl<R: Runtime> AppState<R> {
             }
         };
         Some(parser.screen().contents())
+    }
+
+    /// Matchable PLAIN TEXT from the tail of a terminal's buffer — the Automations engine's read.
+    ///
+    /// **Takes a `pc-` process id**, like every other reader of `terminal_screens`, and does NOT
+    /// resolve internally: the engine converts the leaf once per pair before calling. A function that
+    /// silently accepted either id space is how the next call site gets it wrong.
+    ///
+    /// This is the `AppState` impl of the `ScreenSource` port and contains no decision of its own —
+    /// look the parser up, lock it, resolve the depth, call the pure walk. Everything with a branch in
+    /// it lives in `render_tail_lines`/`tail_text_with`, which take a `&mut Screen` and therefore need
+    /// no `AppHandle` to test. Plan 028 §2.2, §7.10.
+    ///
+    /// Why not the existing routes: `/output` is lossy twice over and `render_terminal_history`
+    /// returns the VISIBLE rows only, so it cannot return 200 lines at all; `/snapshot` returns an
+    /// escape-sequence blob; `screen_text` is the visible screen with no scrolled-off lines.
+    pub fn screen_tail_text(
+        &self,
+        process_id: &str,
+        depth: crate::automation_engine::eval::ReadDepth,
+    ) -> Option<String> {
+        use crate::automation_engine::eval::ReadDepth;
+        let entry = self.terminal_screens.get(process_id)?;
+        let mut parser = match entry.lock() {
+            Ok(parser) => parser,
+            Err(_) => {
+                log::warn!("screen_tail_text: screen parser mutex poisoned for {}", process_id);
+                return None;
+            }
+        };
+        let screen = parser.screen_mut();
+        let max_lines = match depth {
+            ReadDepth::Window(n) => n,
+            ReadDepth::VisibleScreen => screen.size().0 as usize,
+        };
+        tail_text_with(screen, |sc| render_tail_lines(sc, max_lines))
     }
 
     /// Escape sequences restoring the terminal's live input modes, appended to
@@ -1745,6 +1847,22 @@ impl<R: Runtime> AppState<R> {
     /// EOFs the reader thread's cloned reader — that's what unblocks and ends
     /// the reader thread on an explicit close.
     pub fn cleanup_terminal_state(&self, id: &str) {
+        // FIRST STATEMENT, before anything is removed: the Automations engine keys its per-terminal
+        // state by the durable `tm-` LEAF, and the leaf is only reachable through `terminals[id]` and
+        // `identity`, both of which this function is about to tear down. Reading it afterwards yields
+        // `None` and the purge silently does nothing — which is invisible, because the symptom is a
+        // restarted terminal that is never nagged again rather than an error. Plan 028 §2.4, §10.4c.
+        let leaf = self
+            .terminals
+            .get(id)
+            .and_then(|t| t.renderer_terminal_id.clone());
+        if let Some(leaf) = leaf {
+            self.automations.runtime.forget_terminal(&leaf);
+        }
+        // `dirty` is keyed by the PROCESS id (`ChannelPayload.id` is a process id), so it is purged
+        // with the id this function was given, never with the leaf. Plan 028 §7.4's table.
+        self.automations.runtime.forget_process(id);
+
         // ORDER MATTERS: `terminals` must be removed FIRST — the PTY output
         // listener's history guard (lib.rs) double-checks `terminals` after
         // inserting into `terminal_history`, and that check only closes the
@@ -1950,6 +2068,388 @@ pub fn render_full_scrollback(screen: &mut vt100::Screen) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// The paging plan for a tail read: one `(scrollback offset, rows to skip, rows to take)` per window.
+///
+/// Pure, and separate from the walk, because §10.1's real requirement — *never read more than
+/// `max_lines + rows` rows regardless of buffer depth* — is a claim about the PLAN. `vt100::Screen`
+/// cannot be instrumented to count what a walk touched, so a test that tried to assert it against the
+/// walk would have to measure time, which is not an oracle. Against the plan it is arithmetic.
+///
+/// The offsets follow `render_full_scrollback`'s own idiom: at offset `total_sb - emitted` the
+/// window's first visible row is logical index `emitted`, so stepping `emitted` by the rows actually
+/// consumed tiles the buffer with no overlap or gap. Only the FIRST window can need a non-zero skip,
+/// which is what bounds the total at `max_lines + rows`.
+pub(crate) fn tail_windows(
+    total_sb: usize,
+    rows: usize,
+    max_lines: usize,
+) -> Vec<(usize, usize, usize)> {
+    let mut plan = Vec::new();
+    if rows == 0 || max_lines == 0 {
+        return plan;
+    }
+    let total = total_sb.saturating_add(rows);
+    let want = max_lines.min(total);
+    let mut emitted = total - want;
+    while emitted < total {
+        let offset = total_sb.saturating_sub(emitted);
+        // The logical index of the first row visible at this offset.
+        let window_first = total.saturating_sub(rows + offset);
+        let skip = emitted.saturating_sub(window_first);
+        let take = (total - emitted).min(rows.saturating_sub(skip));
+        if take == 0 {
+            // Unreachable while `rows > 0`, and a `break` rather than an assert because this runs on
+            // the evaluation loop's hot path: a bad plan must cost a short read, never a panic that
+            // poisons the parser mutex.
+            break;
+        }
+        plan.push((offset, skip, take));
+        emitted += take;
+    }
+    plan
+}
+
+/// The last `max_lines` rows of a screen's buffer as PLAIN TEXT, soft-wrapped rows joined.
+///
+/// **Joining wrapped rows is not optional**: a `ctx:63%` straddling column 120 otherwise never
+/// matches. Trailing blank rows — the unused bottom of the visible screen — are dropped, so a mostly
+/// empty terminal does not return a wall of newlines.
+///
+/// Two hard constraints, both from review:
+///
+/// 1. **Never `screen.clone()`.** `vt100::Cell` is 32 bytes, so a 5000x120 buffer is ~19 MB PER
+///    EVALUATION. The clone-then-walk shape `full_scrollback_snapshot` uses is fine at the 30 s
+///    persist cadence and is not fine at 250 ms.
+/// 2. **No indexing, no slicing, no `unwrap`.** A panic inside this walk would poison
+///    `terminal_screens[id]`, and `feed_screen` responds to a poisoned lock by logging a warning and
+///    DROPPING THE BYTES — that terminal's authoritative parser would be dead for the life of the
+///    process: no snapshot, no scrollback persist, no hydration. A read-only feature would have
+///    silently destroyed the terminal it was watching. `tail_text_with` is the second half of that
+///    guard.
+///
+/// Bounded at `max_lines` because the walk holds the per-terminal parser mutex that `feed_screen`
+/// contends on, and this file's own note above `full_scrollback_snapshot` says holding it across an
+/// O(scrollback) render stalls output delivery for EVERY terminal.
+pub fn render_tail_lines(screen: &mut vt100::Screen, max_lines: usize) -> String {
+    let (rows, cols) = screen.size();
+    let saved = screen.scrollback();
+
+    screen.set_scrollback(usize::MAX);
+    let total_sb = screen.scrollback();
+
+    // One record per physical row: (plain text, soft-wraps-to-next).
+    let mut recs: Vec<(String, bool)> = Vec::new();
+    for (offset, skip, take) in tail_windows(total_sb, rows as usize, max_lines) {
+        screen.set_scrollback(offset);
+        for (i, text) in screen.rows(0, cols).skip(skip).take(take).enumerate() {
+            let row_index = skip.saturating_add(i).min(u16::MAX as usize) as u16;
+            let wrapped = screen.row_wrapped(row_index);
+            recs.push((text, wrapped));
+        }
+    }
+
+    // Unconditional, with no `?` between the set and the restore: reading must never move the user's
+    // own scrollback view.
+    screen.set_scrollback(saved);
+
+    while recs.last().is_some_and(|(t, _)| t.trim().is_empty()) {
+        recs.pop();
+    }
+
+    let mut out = String::new();
+    let mut line = String::new();
+    for (text, wrapped) in recs {
+        line.push_str(&text);
+        if !wrapped {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line.clear();
+        }
+    }
+    if !line.trim().is_empty() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// Run a screen walk with the parser mutex held, without letting a panic in the walk poison it.
+///
+/// The guard lives in the CALLER's frame and the unwind is caught here, so the guard drops normally
+/// and the mutex is never poisoned. The scrollback offset is restored in **both** arms — a walk that
+/// panicked half-way through paging would otherwise leave the user's view scrolled to an arbitrary
+/// position, which is visible and permanent.
+///
+/// Returns `None` when the walk panicked: no text is not the same as empty text, and the engine
+/// treats it the way it treats a terminal that is not live — no evaluation, no log line.
+pub fn tail_text_with<F>(screen: &mut vt100::Screen, walk: F) -> Option<String>
+where
+    F: FnOnce(&mut vt100::Screen) -> String,
+{
+    let saved = screen.scrollback();
+    let walked = {
+        let reborrow = &mut *screen;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || walk(reborrow)))
+    };
+    screen.set_scrollback(saved);
+    match walked {
+        Ok(text) => Some(text),
+        Err(_) => {
+            log::warn!("render_tail_lines panicked; the terminal's parser is intact and the read is skipped");
+            None
+        }
+    }
+}
+
+impl<R: tauri::Runtime> crate::automation_engine::eval::ScreenSource for AppState<R> {
+    fn tail(
+        &self,
+        process_id: &str,
+        depth: crate::automation_engine::eval::ReadDepth,
+    ) -> Option<String> {
+        self.screen_tail_text(process_id, depth)
+    }
+}
+
+#[cfg(test)]
+mod tail_read_tests {
+    use super::{render_tail_lines, tail_text_with, tail_windows};
+    use std::sync::Mutex;
+
+    fn parser(rows: u16, cols: u16) -> vt100::Parser {
+        vt100::Parser::new(rows, cols, super::SCROLLBACK_LINES)
+    }
+
+    /// §10.1 — the last `max_lines` lines, in order, as plain text.
+    ///
+    /// Fed WITHOUT a trailing newline so the bottom row holds `line 500` and the buffer has no unused
+    /// rows: "exactly the last 200" is then literally checkable rather than approximately.
+    #[test]
+    fn render_tail_lines_returns_exactly_the_last_lines_in_order() {
+        let mut p = parser(24, 80);
+        let body: Vec<String> = (1..=500).map(|i| format!("line {}", i)).collect();
+        p.process(body.join("\r\n").as_bytes());
+
+        let text = render_tail_lines(p.screen_mut(), 200);
+        let got: Vec<&str> = text.lines().collect();
+        assert_eq!(got.len(), 200, "exactly `max_lines` rows");
+        assert_eq!(got.first().copied(), Some("line 301"));
+        assert_eq!(got.last().copied(), Some("line 500"));
+        for (i, line) in got.iter().enumerate() {
+            assert_eq!(*line, format!("line {}", 301 + i), "out of order at {}", i);
+        }
+    }
+
+    /// A buffer shorter than the window returns everything it has, not a padded 200.
+    #[test]
+    fn a_short_buffer_returns_only_what_it_holds() {
+        let mut p = parser(24, 80);
+        p.process(b"alpha\r\nbeta\r\ngamma");
+        let text = render_tail_lines(p.screen_mut(), 200);
+        assert_eq!(text.lines().collect::<Vec<_>>(), vec!["alpha", "beta", "gamma"]);
+    }
+
+    /// The unused bottom of the visible screen is not 20 empty lines of "output".
+    #[test]
+    fn trailing_blank_rows_are_dropped() {
+        let mut p = parser(24, 80);
+        p.process(b"only line\r\n");
+        let text = render_tail_lines(p.screen_mut(), 200);
+        assert_eq!(text, "only line\n");
+    }
+
+    /// §10.2 — soft-wrap join. A value straddling the last column matches only when the rows are
+    /// joined, which is the entire reason `row_wrapped` is consulted.
+    #[test]
+    fn a_soft_wrapped_value_is_joined_and_matches() {
+        let mut p = parser(10, 20);
+        // 18 characters, then `ctx:63%` - the value straddles column 20.
+        p.process(b"..................ctx:63%");
+        let joined = render_tail_lines(p.screen_mut(), 200);
+        assert!(joined.contains("ctx:63%"), "wrapped rows must be joined: {:?}", joined);
+        assert_eq!(joined.lines().count(), 1, "one logical line, not two physical rows");
+    }
+
+    /// The counterpart: a HARD line break at the same place must NOT be joined, or every rule would
+    /// match across unrelated lines.
+    #[test]
+    fn a_hard_line_break_is_not_joined() {
+        let mut p = parser(10, 20);
+        p.process(b"..................ct\r\nx:63%");
+        let text = render_tail_lines(p.screen_mut(), 200);
+        assert!(!text.contains("ctx:63%"), "a hard break is a real line end: {:?}", text);
+        assert_eq!(text.lines().count(), 2);
+    }
+
+    /// The user's own scrollback position is not a thing a background read may move.
+    #[test]
+    fn the_scrollback_offset_is_restored() {
+        let mut p = parser(10, 40);
+        for i in 0..200 {
+            p.process(format!("line {}\r\n", i).as_bytes());
+        }
+        p.screen_mut().set_scrollback(37);
+        let before = p.screen().scrollback();
+        assert_eq!(before, 37, "premise: the view is scrolled");
+        let _ = render_tail_lines(p.screen_mut(), 50);
+        assert_eq!(p.screen().scrollback(), 37, "the walk moved the user's view");
+    }
+
+    /// §2.2's ruling, second half: a panicking walk must leave the parser USABLE. Without the catch,
+    /// the mutex is poisoned and `feed_screen` then drops that terminal's bytes for the life of the
+    /// process - no snapshot, no persist, no hydration.
+    #[test]
+    fn a_panicking_walk_neither_poisons_the_mutex_nor_moves_the_view() {
+        let cell = Mutex::new(parser(10, 40));
+        {
+            let mut guard = cell.lock().expect("fresh mutex");
+            // Enough lines to HAVE a scrollback: `set_scrollback` clamps to what exists, so a short
+            // buffer would leave the offset at 0 and the restore assertion below could not fail.
+            for i in 0..40 {
+                guard.process(format!("before {}\r\n", i).as_bytes());
+            }
+            guard.screen_mut().set_scrollback(3);
+            assert_eq!(guard.screen().scrollback(), 3, "premise: the view is genuinely scrolled");
+            let out = tail_text_with(guard.screen_mut(), |screen| {
+                // Move the view, THEN fail - the state a naive walk would leave behind.
+                screen.set_scrollback(9);
+                panic!("stub walk");
+            });
+            assert_eq!(out, None, "a panicked walk yields no text, never empty text");
+            assert_eq!(guard.screen().scrollback(), 3, "the view was restored on the error path");
+        }
+        // The guard dropped normally because the unwind was caught in the inner frame.
+        let mut guard = cell.lock().expect("the parser mutex must not be poisoned");
+        guard.process(b"after\r\n");
+        // The view is still parked three rows back — which is the point of the restore above — so
+        // look at the LIVE screen to see whether the bytes actually landed.
+        guard.screen_mut().set_scrollback(0);
+        assert!(
+            guard.screen().contents().contains("after"),
+            "the parser must still accept feed_screen"
+        );
+    }
+
+    /// §10.1's third clause, checked against the plan rather than the clock: whatever the buffer
+    /// depth, a tail read visits at most `max_lines + rows` rows.
+    #[test]
+    fn a_tail_read_never_visits_more_than_max_lines_plus_one_screen() {
+        for total_sb in [0usize, 1, 23, 199, 200, 201, 5_000, 50_000] {
+            for rows in [1usize, 2, 24, 50] {
+                for max_lines in [1usize, 200] {
+                    let plan = tail_windows(total_sb, rows, max_lines);
+                    let visited: usize = plan.iter().map(|(_, skip, take)| skip + take).sum();
+                    let taken: usize = plan.iter().map(|(_, _, take)| take).sum();
+                    assert!(
+                        visited <= max_lines + rows,
+                        "sb={} rows={} max={} visited {} rows",
+                        total_sb, rows, max_lines, visited
+                    );
+                    assert_eq!(
+                        taken,
+                        max_lines.min(total_sb + rows),
+                        "sb={} rows={} max={}",
+                        total_sb, rows, max_lines
+                    );
+                }
+            }
+        }
+    }
+
+    /// The plan tiles the buffer with no overlap and no gap - the property that keeps the returned
+    /// lines contiguous and in order.
+    #[test]
+    fn the_paging_plan_tiles_the_tail_exactly_once() {
+        let (total_sb, rows, max_lines) = (500usize, 24usize, 200usize);
+        let total = total_sb + rows;
+        let mut expected = total - max_lines;
+        for (offset, skip, take) in tail_windows(total_sb, rows, max_lines) {
+            let window_first = total - rows - offset;
+            assert_eq!(window_first + skip, expected, "gap or overlap at offset {}", offset);
+            assert!(skip + take <= rows, "a window cannot yield more rows than it has");
+            expected += take;
+        }
+        assert_eq!(expected, total, "the plan must reach the end of the buffer");
+    }
+
+    /// A zero-row screen cannot be paged, and must not loop forever trying.
+    #[test]
+    fn a_degenerate_screen_yields_an_empty_plan() {
+        assert!(tail_windows(0, 0, 200).is_empty());
+        assert!(tail_windows(500, 24, 0).is_empty());
+    }
+}
+
+/// §10.4c — the half of the restart guard that only a Linux CI run could otherwise check.
+///
+/// `cleanup_terminal_state` takes a PROCESS id and the engine keys its state by the durable LEAF, so
+/// the leaf has to be read out of `terminals` before this function removes it and before `identity`
+/// is unindexed. Get that order wrong and the purge silently does nothing — invisibly, because the
+/// symptom is a restarted terminal that is never nagged again rather than an error. §10.4 proves it
+/// at runtime and needs an `AppHandle`; asserting it in source keeps it honest on Windows too.
+#[cfg(test)]
+mod automation_teardown_source_tests {
+    /// The body of `cleanup_terminal_state`, from its signature to the first line that closes a block
+    /// at method indentation.
+    fn cleanup_body() -> &'static str {
+        let source = include_str!("state.rs");
+        let start = source
+            .find("pub fn cleanup_terminal_state(&self, id: &str) {")
+            .expect("cleanup_terminal_state must exist");
+        let body = &source[start..];
+        let end = body.find("\n    }\n").expect("its body must be closed at method indentation");
+        &body[..end]
+    }
+
+    #[test]
+    fn the_leaf_is_captured_before_terminals_and_identity_are_torn_down() {
+        let body = cleanup_body();
+        let capture = body
+            .find("renderer_terminal_id")
+            .expect("the leaf must be read out of `terminals` here");
+        let forget = body
+            .find("forget_terminal")
+            .expect("a closing terminal must purge the engine's per-leaf state");
+        let unindex = body
+            .find("self.identity.unindex(id)")
+            .expect("identity is unindexed here");
+        let remove = body
+            .find("self.terminals.remove(id)")
+            .expect("the terminal is removed here");
+
+        assert!(capture < remove, "the leaf must be read BEFORE `terminals.remove`");
+        assert!(capture < unindex, "the leaf must be read BEFORE `identity.unindex`");
+        assert!(forget < remove, "and spent before the maps it came from are gone");
+        assert!(forget < unindex);
+    }
+
+    /// The `test-arrange-right-assert-blind` guard: ordering says nothing about WHICH id was passed,
+    /// and forwarding the process id is the mistake this whole arrangement exists to prevent.
+    #[test]
+    fn forget_terminal_is_given_the_leaf_and_forget_process_is_given_the_process_id() {
+        let body = cleanup_body();
+        assert!(
+            body.contains("forget_terminal(&leaf)"),
+            "`forget_terminal` is `tm-`keyed and must be handed the captured leaf"
+        );
+        for wrong in ["forget_terminal(id)", "forget_terminal(&id)", "forget_terminal(process_id)"] {
+            assert!(
+                !body.contains(wrong),
+                "`{}` hands a `pc-` id to a `tm-`keyed map — it would purge nothing",
+                wrong
+            );
+        }
+        assert!(
+            body.contains("forget_process(id)"),
+            "`dirty` is `pc-`keyed and must be purged with the id this function was given"
+        );
+        assert!(
+            !body.contains("forget_process(&leaf)"),
+            "handing the leaf to the `pc-`keyed purge would leave the terminal permanently dirty"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2385,6 +2885,7 @@ mod terminal_identity_serde_tests {
             last_input_source: None,
             last_input_at: None,
             prompt_hook: false,
+            display_label: None,
         }
     }
 
@@ -2521,6 +3022,7 @@ mod retarget_owning_tab_tests {
                 last_input_source: None,
                 last_input_at: None,
                 prompt_hook: false,
+                display_label: None,
             },
         );
         map
@@ -2661,6 +3163,7 @@ mod session_key_fallback_tests {
             last_input_source: None,
             last_input_at: None,
             prompt_hook: false,
+            display_label: None,
         }
     }
 

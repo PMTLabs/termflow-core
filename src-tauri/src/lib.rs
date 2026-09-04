@@ -1490,6 +1490,7 @@ pub fn run() {
         commands::create_terminal,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
+        commands::set_terminal_display_label,
         commands::restart_for_update,
         commands::hotswap_available,
         commands::update_available,

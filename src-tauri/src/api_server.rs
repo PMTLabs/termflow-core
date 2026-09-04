@@ -3551,6 +3551,7 @@ mod tests {
             last_input_source: None,
             last_input_at: None,
             prompt_hook: true,
+            display_label: None,
         }
     }
 

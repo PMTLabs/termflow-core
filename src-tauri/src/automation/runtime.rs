@@ -10,11 +10,305 @@
 //!
 //! Holds: `arm`, `echoes`, `send_locks`, `last_eval_ms`, `dirty`, `watched`. Keyed by the durable `tm-`
 //! leaf, except `dirty`, which is keyed by the `pc-` process id because that is what
-//! `ChannelPayload.id` carries. Plan §7.4's table is the authority.
+//! `ChannelPayload.id` carries. Plan §7.4's table is the authority — and it is why there are **two**
+//! forget methods: `forget_terminal` takes the leaf and cannot reach a `pc-`keyed map, so
+//! `cleanup_terminal_state` calls `forget_process` for `dirty` with the id it already has.
+//! *(Plan §2.4 listed `dirty` among what `forget_terminal` purges, which §7.4's own table makes
+//! impossible. Corrected in the plan.)*
 //!
 //! Deliberately no per-pair "what did I see last time" state: an earlier design reconstructed a
 //! since-last-check delta from hashed line anchors, and it broke on the most ordinary thing a terminal
 //! does — the bottom line is the prompt, typing rewrites it, the anchor vanishes, and the fallback
 //! re-read the whole 200-line window on every keystroke. §2.2c replaced it with a second window depth.
-//!
-//! **M2 fills this in.** M0 claims the name.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use dashmap::DashMap;
+
+use crate::automation_engine::eval::ArmState;
+
+/// One live echo needle: text this feature itself typed into a terminal, which must be stripped from
+/// that terminal's window before any rule extracts from it.
+///
+/// Keyed per TERMINAL rather than per rule, because the failure is per terminal: rule A's message
+/// echoed into a pane is read by rule B watching the same pane, and B has no idea A wrote it. Plan
+/// §2.6 (the guard itself lands with M3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EchoNeedle {
+    pub text: String,
+    /// Wall-clock ms after which the needle is stale and stops being stripped. A needle that never
+    /// expired would blind the rule to the user typing the same words themselves.
+    pub until_ms: i64,
+}
+
+/// Every map the engine keys by a terminal or a rule.
+#[derive(Default)]
+pub struct AutomationRuntime {
+    /// `(rule_id, tm_id)` -> where that pair sits in the once-per-crossing cycle. In memory, never
+    /// persisted: launch starts empty, so every pair is `Unseen` and nothing fires on a value that
+    /// was already true when the app started.
+    arm: DashMap<(String, String), ArmState>,
+    /// `tm_id` -> needles this feature typed into that terminal.
+    echoes: DashMap<String, Vec<EchoNeedle>>,
+    /// `tm_id` -> the lock that serialises sends to it, so two rules firing in one tick cannot
+    /// interleave a paste with another rule's submit.
+    send_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// `(rule_id, tm_id)` -> when that pair last evaluated, for both cadences.
+    last_eval_ms: DashMap<(String, String), i64>,
+    /// **`pc_id`** -> this terminal printed something since the last evaluation. The one `pc-`keyed
+    /// map here, because `ChannelPayload.id` is a process id.
+    dirty: DashMap<String, ()>,
+    /// `rule_id` -> the leaves it watches. The targeting tick is its only writer.
+    watched: DashMap<String, HashSet<String>>,
+}
+
+impl AutomationRuntime {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // --- arm state -----------------------------------------------------------------------------
+
+    /// A pair with no entry is `Unseen`, which is what makes in-memory-only arm state safe.
+    pub fn arm_state(&self, rule_id: &str, tm: &str) -> ArmState {
+        self.arm
+            .get(&(rule_id.to_string(), tm.to_string()))
+            .map(|e| *e.value())
+            .unwrap_or(ArmState::Unseen)
+    }
+
+    pub fn set_arm(&self, rule_id: &str, tm: &str, state: ArmState) {
+        self.arm.insert((rule_id.to_string(), tm.to_string()), state);
+    }
+
+    /// Everything one rule owns: its arm keys, its evaluation stamps and its watched set. Called when
+    /// a rule is disabled, saved with changes, or completes.
+    pub fn forget_rule(&self, rule_id: &str) {
+        self.arm.retain(|(r, _), _| r != rule_id);
+        self.last_eval_ms.retain(|(r, _), _| r != rule_id);
+        self.watched.remove(rule_id);
+    }
+
+    // --- per-terminal teardown -----------------------------------------------------------------
+
+    /// Purge every `tm-`keyed map for one leaf — **across every rule**, and nothing else.
+    ///
+    /// Restarting a terminal (Ctrl+R) reuses the same `tm-` id for a brand-new PTY and a fresh vt100
+    /// parser. `Unseen` protection engages only when the key is ABSENT; a stale `Fired` left behind
+    /// means a restarted shell inherits the dead one's state and is silently never nagged again. That
+    /// is the re-minted-id class, and the codebase's own fix pattern sits two lines away in
+    /// `cleanup_terminal_state` (`history_persist_locks.remove`).
+    ///
+    /// It deliberately does NOT touch `watched`: the targeting tick re-resolves the whole set every
+    /// 2 s, and a stale leaf there costs at most one tick in which the evaluator finds it not live and
+    /// skips it — whereas removing it here would give `watched` a second writer.
+    pub fn forget_terminal(&self, tm: &str) {
+        self.arm.retain(|(_, t), _| t != tm);
+        self.last_eval_ms.retain(|(_, t), _| t != tm);
+        self.echoes.remove(tm);
+        self.send_locks.remove(tm);
+    }
+
+    /// The `pc-`keyed half of the same teardown. Separate because `dirty` is keyed by the process id
+    /// and `forget_terminal` only ever holds a leaf.
+    pub fn forget_process(&self, pc: &str) {
+        self.dirty.remove(pc);
+    }
+
+    // --- the dirty signal ----------------------------------------------------------------------
+
+    /// The tap's ONLY write. Takes a `pc-` process id.
+    pub fn mark_dirty(&self, pc: &str) {
+        self.dirty.insert(pc.to_string(), ());
+    }
+
+    pub fn is_dirty(&self, pc: &str) -> bool {
+        self.dirty.contains_key(pc)
+    }
+
+    pub fn clear_dirty(&self, pc: &str) {
+        self.dirty.remove(pc);
+    }
+
+    pub fn dirty_len(&self) -> usize {
+        self.dirty.len()
+    }
+
+    // --- send serialisation --------------------------------------------------------------------
+
+    /// The per-leaf send lock, minted on first use. Two rules firing into one terminal in one tick
+    /// take the same lock, so a paste can never land between another rule's paste and its submit.
+    pub fn send_lock(&self, tm: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.send_locks
+            .entry(tm.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .value()
+            .clone()
+    }
+
+    // --- echoes --------------------------------------------------------------------------------
+
+    pub fn push_echo(&self, tm: &str, text: &str, until_ms: i64) {
+        self.echoes
+            .entry(tm.to_string())
+            .or_default()
+            .push(EchoNeedle { text: text.to_string(), until_ms });
+    }
+
+    /// The live needles for one terminal, dropping any that have expired.
+    pub fn echoes_for(&self, tm: &str, now_ms: i64) -> Vec<String> {
+        let Some(mut entry) = self.echoes.get_mut(tm) else {
+            return Vec::new();
+        };
+        entry.retain(|n| n.until_ms > now_ms);
+        entry.iter().map(|n| n.text.clone()).collect()
+    }
+
+    // --- cadence -------------------------------------------------------------------------------
+
+    pub fn last_eval(&self, rule_id: &str, tm: &str) -> Option<i64> {
+        self.last_eval_ms
+            .get(&(rule_id.to_string(), tm.to_string()))
+            .map(|e| *e.value())
+    }
+
+    pub fn set_last_eval(&self, rule_id: &str, tm: &str, at_ms: i64) {
+        self.last_eval_ms.insert((rule_id.to_string(), tm.to_string()), at_ms);
+    }
+
+    // --- the watched set -----------------------------------------------------------------------
+
+    /// The targeting tick's only write.
+    pub fn set_watched(&self, rule_id: &str, leaves: HashSet<String>) {
+        self.watched.insert(rule_id.to_string(), leaves);
+    }
+
+    pub fn watched_for(&self, rule_id: &str) -> HashSet<String> {
+        self.watched.get(rule_id).map(|e| e.value().clone()).unwrap_or_default()
+    }
+
+    pub fn watches(&self, rule_id: &str, tm: &str) -> bool {
+        self.watched.get(rule_id).map(|e| e.value().contains(tm)).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two rules and two terminals, so a leaf-keyed purge cannot be confused with a rule-keyed one and
+    /// an implementation that clears the whole map still fails.
+    fn populated() -> AutomationRuntime {
+        let rt = AutomationRuntime::new();
+        for rule in ["au-1", "au-2"] {
+            for tm in ["tm-test-1", "tm-test-2"] {
+                rt.set_arm(rule, tm, ArmState::Fired { at_ms: 10 });
+                rt.set_last_eval(rule, tm, 99);
+            }
+            rt.set_watched(rule, ["tm-test-1".to_string(), "tm-test-2".to_string()].into());
+        }
+        for tm in ["tm-test-1", "tm-test-2"] {
+            rt.push_echo(tm, "HANDOFF now", 60_000);
+            let _ = rt.send_lock(tm);
+        }
+        // `dirty` is PROCESS-keyed; the two ids are deliberately different strings.
+        rt.mark_dirty("pc-test-1");
+        rt.mark_dirty("pc-test-2");
+        rt
+    }
+
+    /// §10.4b — the local half of the restart guard.
+    #[test]
+    fn forget_terminal_purges_one_leaf_across_every_rule_and_nothing_else() {
+        let rt = populated();
+        rt.forget_terminal("tm-test-1");
+
+        // Purged, for BOTH rules.
+        for rule in ["au-1", "au-2"] {
+            assert_eq!(
+                rt.arm_state(rule, "tm-test-1"),
+                ArmState::Unseen,
+                "{} kept a stale arm state for the restarted leaf",
+                rule
+            );
+            assert_eq!(rt.last_eval(rule, "tm-test-1"), None, "{} kept a stale eval stamp", rule);
+        }
+        assert!(rt.echoes_for("tm-test-1", 0).is_empty(), "echo needles survived");
+
+        // The sibling leaf is untouched — every map, both rules.
+        for rule in ["au-1", "au-2"] {
+            assert_eq!(rt.arm_state(rule, "tm-test-2"), ArmState::Fired { at_ms: 10 });
+            assert_eq!(rt.last_eval(rule, "tm-test-2"), Some(99));
+        }
+        assert_eq!(rt.echoes_for("tm-test-2", 0), vec!["HANDOFF now".to_string()]);
+
+        // And nothing else: `dirty` is process-keyed and `watched` has one writer.
+        assert!(rt.is_dirty("pc-test-1"), "forget_terminal must not touch the pc-keyed dirty map");
+        assert!(rt.watches("au-1", "tm-test-1"), "watched has ONE writer — the targeting tick");
+    }
+
+    /// The paired negative: a PROCESS id passed to the leaf-keyed purge must find nothing. This is
+    /// what fails when a caller forwards `id` instead of extracting `renderer_terminal_id`.
+    #[test]
+    fn forget_terminal_given_a_process_id_purges_nothing() {
+        let rt = populated();
+        rt.forget_terminal("pc-test-1");
+        assert_eq!(rt.arm_state("au-1", "tm-test-1"), ArmState::Fired { at_ms: 10 });
+        assert_eq!(rt.arm_state("au-1", "tm-test-2"), ArmState::Fired { at_ms: 10 });
+        assert_eq!(rt.last_eval("au-2", "tm-test-1"), Some(99));
+    }
+
+    #[test]
+    fn forget_process_clears_only_the_dirty_flag_for_that_process() {
+        let rt = populated();
+        rt.forget_process("pc-test-1");
+        assert!(!rt.is_dirty("pc-test-1"));
+        assert!(rt.is_dirty("pc-test-2"), "the sibling process stayed dirty");
+        assert_eq!(rt.arm_state("au-1", "tm-test-1"), ArmState::Fired { at_ms: 10 });
+    }
+
+    #[test]
+    fn forget_rule_clears_that_rules_keys_across_terminals_and_leaves_the_other_rule() {
+        let rt = populated();
+        rt.forget_rule("au-1");
+        for tm in ["tm-test-1", "tm-test-2"] {
+            assert_eq!(rt.arm_state("au-1", tm), ArmState::Unseen);
+            assert_eq!(rt.last_eval("au-1", tm), None);
+            assert_eq!(rt.arm_state("au-2", tm), ArmState::Fired { at_ms: 10 });
+            assert_eq!(rt.last_eval("au-2", tm), Some(99));
+        }
+        assert!(rt.watched_for("au-1").is_empty());
+        assert_eq!(rt.watched_for("au-2").len(), 2);
+    }
+
+    /// A pair with no entry is `Unseen` — the property that makes launch safe.
+    #[test]
+    fn an_unknown_pair_is_unseen() {
+        let rt = AutomationRuntime::new();
+        assert_eq!(rt.arm_state("au-ghost", "tm-ghost"), ArmState::Unseen);
+        assert_eq!(rt.last_eval("au-ghost", "tm-ghost"), None);
+    }
+
+    /// Two rules firing into one terminal must take the SAME lock; two terminals must not.
+    #[test]
+    fn the_send_lock_is_per_terminal_and_shared_across_rules() {
+        let rt = AutomationRuntime::new();
+        let a = rt.send_lock("tm-1");
+        let b = rt.send_lock("tm-1");
+        let other = rt.send_lock("tm-2");
+        assert!(Arc::ptr_eq(&a, &b), "one terminal, one lock");
+        assert!(!Arc::ptr_eq(&a, &other), "two terminals must not serialise against each other");
+    }
+
+    /// A needle that never expired would blind the rule to the user typing the same words themselves.
+    #[test]
+    fn echo_needles_expire() {
+        let rt = AutomationRuntime::new();
+        rt.push_echo("tm-1", "HANDOFF now", 5_000);
+        rt.push_echo("tm-1", "later", 9_000);
+        assert_eq!(rt.echoes_for("tm-1", 4_999).len(), 2);
+        assert_eq!(rt.echoes_for("tm-1", 5_000), vec!["later".to_string()]);
+        assert!(rt.echoes_for("tm-1", 9_000).is_empty());
+    }
+}

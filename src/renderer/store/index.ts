@@ -9,6 +9,7 @@ import peersReducer from './slices/peersSlice';
 import canvasReducer from './slices/canvasSlice';
 import sessionExitReducer from './slices/sessionExitSlice';
 import { attachPaneOwnershipSync } from '../services/paneOwnership';
+import { attachTerminalLabelSync } from '../services/terminalLabelSync';
 
 // Simple logging middleware for debugging
 const loggingMiddleware = (storeAPI: any) => (next: any) => (action: any) => {
@@ -65,6 +66,12 @@ if (typeof window !== 'undefined') {
   // reparent path can be added later that forgets to report itself — see
   // services/paneOwnership.ts.
   attachPaneOwnershipSync(store);
+
+  // And what the tab strip CALLS each terminal (plan 028 §4.2). Driven off the same two pieces of
+  // store state for the same reason — a moved pane never re-binds, so a spawn hook misses it — and
+  // through the same differ, so the two syncs cannot drift apart. Without this the Automations
+  // picker and every activity-log line show a bare `tm-…` id.
+  attachTerminalLabelSync(store);
 }
 
 export type RootState = ReturnType<typeof store.getState>;

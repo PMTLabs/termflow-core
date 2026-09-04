@@ -920,6 +920,7 @@ pub fn spawn_terminal(
         // Mirrors the injected-hook decision above, so reattach can re-arm the
         // command-suggest prompt gate (see shell_emits_prompt_osc).
         prompt_hook: is_powershell && !has_command_flag,
+        display_label: None,
     });
 
     // Spawn thread to read output
@@ -1100,6 +1101,31 @@ pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) ->
     }
 
     (current_pid, current_name)
+}
+
+/// The full COMMAND LINE of the deepest foreground descendant of `parent_pid`.
+///
+/// `Command contains` reads this rather than the process NAME because an npm-installed agent is
+/// `node.exe` — which is exactly why `detect_agent` reads the cmdline to disambiguate. Matching the
+/// name would select every node process on the machine at once.
+///
+/// It projects off `get_foreground_process_info`'s returned pid so the youngest-child descent is not
+/// implemented a third time. `None` when sysinfo cannot report the process (a protected or cross-arch
+/// process on Windows) — and `None` must read as "no match", never as "matches everything". Falls back
+/// to the executable name when argv is empty, which is what sysinfo returns for some system
+/// processes. Plan 028 §4.4.
+pub fn foreground_command_line(parent_pid: u32, sys: &System) -> Option<String> {
+    let (pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
+    let process = sys.process(Pid::from(pid as usize))?;
+    let argv: Vec<String> = process
+        .cmd()
+        .iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+    if argv.is_empty() {
+        return Some(process.name().to_string_lossy().to_string());
+    }
+    Some(argv.join(" "))
 }
 
 /// Derive a friendly label for the foreground program in a pane, from a

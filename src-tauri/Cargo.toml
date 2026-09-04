@@ -84,6 +84,11 @@ parking_lot = "0.12"
 reqwest = { version = "0.12", features = ["json"] }
 sysinfo = "0.33"
 vt100 = "0.16"
+# User-supplied match patterns, compiled ONCE at rule load with a size limit. Rust's `regex` has no
+# backtracking and guarantees linear-time matching, so a pattern typed into the Automations editor
+# cannot hang the 250 ms evaluation loop — a guarantee the renderer's `RegExp` preview cannot make.
+# Already in `Cargo.lock` (1.12.2) transitively; this only makes the edge direct. Plan 028 §2.7.
+regex = "1"
 # Per-terminal scrollback persistence (history.db). `bundled` compiles SQLite
 # from source (via cc/MSVC, already used for Tauri) so no system SQLite is needed.
 rusqlite = { version = "0.31", features = ["bundled"] }

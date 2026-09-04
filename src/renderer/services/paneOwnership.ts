@@ -30,6 +30,7 @@
  * module adds no import edge into the store's graph and no import-order hazard.
  */
 import type { PaneNode } from '../store/slices/panesSlice';
+import { diffLeafValues } from './leafValueDiff';
 
 /**
  * renderer leaf id -> the tab that owns it.
@@ -83,15 +84,10 @@ export function diffOwnerChanges(
   next: LeafOwners,
   hasLiveProcess: (rendererTerminalId: string) => boolean,
 ): OwnerChange[] {
-  const changes: OwnerChange[] = [];
-  for (const [leaf, owningTabId] of next) {
-    const before = previous?.get(leaf);
-    if (before === owningTabId) continue;
-    if (before !== undefined || hasLiveProcess(leaf)) {
-      changes.push({ rendererTerminalId: leaf, owningTabId });
-    }
-  }
-  return changes;
+  return diffLeafValues(previous, next, hasLiveProcess).map(({ rendererTerminalId, value }) => ({
+    rendererTerminalId,
+    owningTabId: value,
+  }));
 }
 
 /** The slice of the store this needs — structural, so no import of the store. */

@@ -1651,6 +1651,41 @@ mod tests {
         assert_eq!(order, vec!["au-a".to_string(), copy.id, "au-b".to_string()]);
     }
 
+    /// §10.14d's second half. Five rules, duplicate the MIDDLE one, and assert both the order and the
+    /// absence of collisions — a tail shift that merely increments produces the right ORDER while
+    /// leaving two rules sharing a slot, and the next duplicate then falls to whichever uuid sorts
+    /// first. Asserting the order alone cannot see that.
+    #[test]
+    fn duplicating_the_middle_of_five_renumbers_densely_with_no_collisions() {
+        let store = AutomationStore::new_in_memory();
+        for (i, id) in ["au-1", "au-2", "au-3", "au-4", "au-5"].iter().enumerate() {
+            let mut r = rule(id);
+            r.sort_order = i as i64;
+            r.name = id.to_string();
+            store.save_rule(&r).unwrap();
+        }
+
+        let copy = store.duplicate_automation("au-3", 1).unwrap();
+
+        let rules = store.list_rules().unwrap();
+        let order: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "au-1".to_string(),
+                "au-2".to_string(),
+                "au-3".to_string(),
+                copy.id.clone(),
+                "au-4".to_string(),
+                "au-5".to_string(),
+            ],
+            "the copy lands directly beneath its original, and the tail follows"
+        );
+
+        let slots: Vec<i64> = rules.iter().map(|r| r.sort_order).collect();
+        assert_eq!(slots, vec![0, 1, 2, 3, 4, 5], "dense, and every slot distinct");
+    }
+
     // -- §10.15 -------------------------------------------------------------------------------
 
     /// R17. The `failed — the terminal closed` line is written AFTER the terminal is gone, so a

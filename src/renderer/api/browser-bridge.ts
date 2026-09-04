@@ -181,6 +181,7 @@ class BrowserBridge implements ElectronAPI {
     /// No-op in the browser: the REST surface exposes no ownership update, and a
     /// browser session has no pane-drag/detach paths to move a pane between tabs.
     async setTerminalOwningTab(_rendererTerminalId: string, _owningTabId: string): Promise<void> { }
+    async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
 
     async closeTerminal(id: string): Promise<void> {
         try {

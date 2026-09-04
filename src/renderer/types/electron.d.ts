@@ -154,6 +154,11 @@ export interface ElectronAPI {
    * bridges backed by a real terminal registry implement it.
    */
   setTerminalOwningTab?: (rendererTerminalId: string, owningTabId: string) => Promise<void>;
+  /** Push the tab/pane title this window shows for a terminal down to the backend, keyed by the
+   *  durable `tm-` LEAF. Writes `Terminal.display_label`, never `Terminal.name` — `name` is on the
+   *  wire in `/api/terminals` and is what MCP's `get_terminal_detail` returns, so changing what it
+   *  HOLDS would change what agents see. See services/terminalLabelSync.ts (plan 028 §4.2). */
+  setTerminalDisplayLabel?: (rendererTerminalId: string, label: string) => Promise<void>;
   // P0a active-window routing: which window receives API/MCP-created terminals.
   // Optional — only the Tauri bridge implements it (browser bridge is single-window).
   getActiveWindow?: () => Promise<string>;

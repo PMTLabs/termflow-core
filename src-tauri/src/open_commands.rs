@@ -236,7 +236,7 @@ fn home_dir() -> Option<String> {
 /// `/mnt/d/…`) to `D:\…` and normalizes separators; on every other OS the tilde
 /// expansion is the whole job — a `/d/…` path there is a genuine POSIX path and is
 /// left alone.
-fn to_native_path(path: &str) -> String {
+pub(crate) fn to_native_path(path: &str) -> String {
     let path = expand_tilde(path, home_dir().as_deref());
     #[cfg(target_os = "windows")]
     {

@@ -1,0 +1,1024 @@
+//! The Automations engine's pure core — everything with a decision in it, over plain data.
+//!
+//! Extraction, coercion, comparison, the read-depth choice and the arm machine are ONE unit and land
+//! together, because they are one sentence of behaviour split across four steps:
+//!
+//! ```text
+//! [pick the depth from the previous arm state] -> window text
+//!    -> strip live echo needles (M3, §2.6) -> extract -> coerce -> compare
+//!    -> condition_now: bool -> next_state
+//! ```
+//!
+//! Echo stripping happens BEFORE extraction, never after: a needle removed afterwards could not
+//! change which occurrence was "last", which is the whole point of the echo guard.
+//!
+//! Nothing here touches `AppState`. `AppState::new` takes an `AppHandle`, so anything reachable only
+//! through it is testable only behind `--features integration-tests`, which `Cargo.toml` says breaks
+//! the Windows test binary at loader time. The two things this module needs from the running app —
+//! the terminal's text and its writer — arrive through ports (`ScreenSource` here,
+//! `automation::send::TerminalWriter` there). Plan 028 §2.2b, §2.2c, §2.4, §7.10.
+
+use regex::Regex;
+
+use crate::automation_store::{AutomationGraph, CompareOp, CondKind, Keep, ReadMode};
+
+/// How many lines back a "new output as it appears" read looks.
+///
+/// Bounded deliberately: the walk holds the per-terminal parser mutex that the output consumer
+/// contends on, and `state.rs`'s own note above `full_scrollback_snapshot` says holding it across an
+/// O(scrollback) render stalls output delivery for EVERY terminal. 200 rows is ~24k cell reads.
+pub const MATCH_WINDOW_LINES: usize = 200;
+
+// ---------------------------------------------------------------------------------------------
+// The screen port
+// ---------------------------------------------------------------------------------------------
+
+/// How much of a terminal's buffer to read.
+///
+/// **An enum rather than plan §7.10's literal `max_lines: usize`, and the reason is that a `usize`
+/// cannot express "the visible screen".** The visible screen is the last `rows` rows at scrollback
+/// offset 0, and `rows` is per-terminal state living on `AppState` — so a `usize` port would either
+/// force the engine to learn every terminal's row count (`AppState` knowledge, in the one module that
+/// must not have any) or reserve a sentinel value to mean "ask the terminal", which is the
+/// delete-as-sentinel trap: a legitimate 0 or `usize::MAX` then means something else entirely.
+///
+/// Saying the INTENT also makes §10.2d's oracle able to fail. A fake recording `50` versus `200`
+/// cannot tell a deliberate visible-screen read from a window read that coincidentally matched the
+/// terminal's height; `VisibleScreen` versus `Window(200)` can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadDepth {
+    /// The last `n` lines of the buffer, scrollback included.
+    Window(usize),
+    /// The visible rows only, at scrollback offset 0.
+    VisibleScreen,
+}
+
+/// Matchable text for one terminal.
+///
+/// **Takes a `pc-` process id**, like every other reader of `terminal_screens`. The engine resolves
+/// the leaf once per pair before calling it and never resolves inside — a function that silently
+/// accepts either id space is how the next call site gets it wrong. Plan §7.4.
+pub trait ScreenSource {
+    fn tail(&self, process_id: &str, depth: ReadDepth) -> Option<String>;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The arm machine (§2.4)
+// ---------------------------------------------------------------------------------------------
+
+/// Where one `(rule, terminal)` pair sits in the once-per-crossing cycle.
+///
+/// In memory, never persisted (settled decision 8): launch starts the map empty, so every pair is
+/// `Unseen`, and `Unseen + true` deliberately does NOT send (settled decision 7) — an app that starts
+/// while a terminal is already at 63% must not immediately type into it.
+///
+/// A boolean cannot express this. It cannot distinguish "never observed" from "observed below the
+/// threshold", which is the whole of decision 7.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArmState {
+    /// Never evaluated for this pair.
+    Unseen,
+    /// Observed, and the condition was false — the next crossing sends.
+    ///
+    /// `seen_fire` records whether this pair has ever observed its condition TRUE. It exists for one
+    /// reason, and it is a defect the mockup's own seven-check walk caught: a presence rule re-arms
+    /// when the match leaves the visible SCREEN, but the match is still in the 200-line WINDOW for
+    /// another 200 lines — so an `Armed` that always read the window would re-fire on the very line it
+    /// had just let go, on the next check, forever. See `depth_for`.
+    Armed { seen_fire: bool },
+    /// The condition is true and has already been acted on. `at_ms` is when it FIRST became true and
+    /// does not move while it stays true.
+    Fired { at_ms: i64 },
+}
+
+impl ArmState {
+    /// Armed, having never seen this condition true — a fresh pair.
+    pub fn armed() -> Self {
+        ArmState::Armed { seen_fire: false }
+    }
+
+    /// Armed again, after the condition had been true.
+    pub fn re_armed() -> Self {
+        ArmState::Armed { seen_fire: true }
+    }
+
+    /// Has this pair ever observed its condition true?
+    pub fn has_seen_fire(self) -> bool {
+        matches!(self, ArmState::Armed { seen_fire: true } | ArmState::Fired { .. })
+    }
+}
+
+/// What one evaluation decided. These are the mockup's own log words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// First sight of this pair, or the condition went from unknown to true without a crossing.
+    Armed,
+    /// Armed and still false. The ordinary outcome, and the only one the verbose gate can drop.
+    Checked,
+    /// The crossing. **The only decision that sends.**
+    Sent,
+    /// Fired and still true.
+    Held,
+    /// Fired and no longer true — the next crossing sends again.
+    ReArmed,
+}
+
+impl Decision {
+    /// The one place "does this send?" is answered, so a caller cannot invent a second rule.
+    pub fn sends(self) -> bool {
+        matches!(self, Decision::Sent)
+    }
+}
+
+/// The whole of R3, R4, R5 and R8, as one total function.
+///
+/// | prev | condition now | next | decision | sends? |
+/// |---|---|---|---|---|
+/// | `Unseen` | true | `Fired` | `armed` | **no** |
+/// | `Unseen` | false | `Armed` | `armed` | no |
+/// | `Armed` | false | `Armed` | `checked` | no |
+/// | `Armed` | true | `Fired` | **`sent`** | **yes** |
+/// | `Fired` | true | `Fired` | `held` | no |
+/// | `Fired` | false | `Armed` | `re-armed` | no |
+pub fn next_state(prev: ArmState, condition_now: bool, now_ms: i64) -> (ArmState, Decision) {
+    match (prev, condition_now) {
+        (ArmState::Unseen, true) => (ArmState::Fired { at_ms: now_ms }, Decision::Armed),
+        (ArmState::Unseen, false) => (ArmState::armed(), Decision::Armed),
+        // The `seen_fire` bit is CARRIED across a check, never recomputed: it is a fact about this
+        // pair's history, and losing it would put the rule back to reading the deep window.
+        (prev @ ArmState::Armed { .. }, false) => (prev, Decision::Checked),
+        (ArmState::Armed { .. }, true) => (ArmState::Fired { at_ms: now_ms }, Decision::Sent),
+        // `at_ms` is carried, not refreshed: it records when the condition became true, and a rule
+        // that has held for ten minutes must not look like it just fired.
+        (ArmState::Fired { at_ms }, true) => (ArmState::Fired { at_ms }, Decision::Held),
+        (ArmState::Fired { .. }, false) => (ArmState::re_armed(), Decision::ReArmed),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Read depth (§2.2c)
+// ---------------------------------------------------------------------------------------------
+
+/// Which depth this evaluation reads, given what the rule asks for and where the pair sits.
+///
+/// **Only a presence rule gets two depths, and only because only it is about an EVENT.** A value
+/// persists — `ctx:63%` is still the current usage even when nothing reprints it — so a numeric rule
+/// reads its own configured depth in both directions and re-arms when the newest PRINTED value drops.
+/// An event's continued presence in scrollback is not evidence it is still happening: against a
+/// 200-line window, "the words stopped" would mean `FAILED 3 test` has been pushed out of the last 200
+/// lines, which on a quiet terminal is never — so the rule would stick in `Fired` for the session.
+///
+/// So a presence rule reads the deep window to NOTICE the event and the visible screen to LET IT GO.
+/// When its own `monitor.read` is already `OnScreen` both depths are the screen and it behaves
+/// identically in both directions — no special case in the code, and the right behaviour for a
+/// full-screen TUI, which removes the match by redrawing.
+///
+/// **The switch is `has_seen_fire`, not `Fired`, and that distinction is a defect the mockup's own
+/// seven-check walk caught.** Re-arming means the match left the SCREEN; it is still in the 200-line
+/// WINDOW for another 200 lines. A rule that went back to reading the window the moment it re-armed
+/// would re-fire on the very line it had just let go — one spurious send per re-arm cycle, forever,
+/// and the plan's own walk asserts check 6 is `checked`. So: the deep window answers *"has this
+/// happened?"*, the screen answers *"is it happening now?"*, and a pair that has already answered
+/// "ever" only ever asks about now.
+///
+/// The cost is stated rather than hidden: after a pair's first fire, an event that appears and scrolls
+/// off the visible screen inside one check interval is missed. That is the same trade the re-arm rule
+/// already makes in the other direction, and `Re-arm now` is the manual backstop for both.
+pub fn depth_for(kind: CondKind, read: ReadMode, prev: ArmState) -> ReadDepth {
+    match (kind, prev) {
+        (CondKind::Text, p) if p.has_seen_fire() => ReadDepth::VisibleScreen,
+        _ => match read {
+            ReadMode::NewOutput => ReadDepth::Window(MATCH_WINDOW_LINES),
+            ReadMode::OnScreen => ReadDepth::VisibleScreen,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Extraction and comparison (§2.2b)
+// ---------------------------------------------------------------------------------------------
+
+/// What a numeric rule's parse step actually produced.
+///
+/// Three-way, not two, because the log has to tell the three apart and the mockup's own failure line
+/// already does. `Unparsed` carries what it actually saw.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Read {
+    Value(f64),
+    NoMatch,
+    Unparsed(String),
+}
+
+/// A numeric read, or a presence rule's plain bool.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    Numeric(Read),
+    Presence(bool),
+}
+
+/// Text -> number, deliberately narrow.
+///
+/// `trim`, then `f64::from_str`, then **reject anything not `is_finite()`**. No thousands separators,
+/// no unit suffixes, no percent sign — in `ctx:(\d+)%` the `%` sits outside the group on purpose.
+///
+/// The finiteness check is not defensive tidying. `"NaN".parse::<f64>()` returns `Ok`, and `NaN`
+/// poisons the comparison asymmetrically: `(NaN - t).abs() < 1e-9` is `false`, so `eq` is false and
+/// **`neq` is true** — a terminal printing `NaN%` would fire a "not equal to" rule, once, and look
+/// exactly like a real crossing.
+///
+/// *(Plan §2.2b also specified "strip one leading `+`". `f64::from_str` already accepts `+7`, so that
+/// step changes nothing except to also accept `++7`; it is omitted and the plan corrected.)*
+pub fn coerce(raw: &str) -> Option<f64> {
+    raw.trim().parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The value a numeric rule compares, from the LAST occurrence in the window.
+///
+/// **`captures_iter(..).last()`, never `captures()`.** `captures()` returns the FIRST match, so over a
+/// 200-line window the OLDEST `ctx:NN%` would win forever, the value would never rise, and the
+/// canonical rule would never fire. This is the single most likely wrong implementation, and it is
+/// silent.
+///
+/// `keep` names which part is the value: `Brackets` takes the group named `value` when the pattern has
+/// one, else group 1; `Whole` takes group 0. A `Brackets` pattern with no capture group is refused by
+/// validation before it can run — never a silent fall-back to the whole match — and if one reaches
+/// here anyway it reports `Unparsed` carrying the whole match rather than quietly comparing the wrong
+/// span.
+pub fn extract(re: &Regex, keep: Keep, text: &str) -> Read {
+    let Some(caps) = re.captures_iter(text).last() else {
+        return Read::NoMatch;
+    };
+    let whole = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+    let raw = match keep {
+        Keep::Whole => Some(whole),
+        Keep::Brackets => caps
+            .name("value")
+            .or_else(|| caps.get(1))
+            .map(|m| m.as_str()),
+    };
+    match raw {
+        None => Read::Unparsed(whole.to_string()),
+        Some(s) => match coerce(s) {
+            Some(v) => Read::Value(v),
+            None => Read::Unparsed(s.to_string()),
+        },
+    }
+}
+
+/// The six comparators the mockup's drop-down draws.
+///
+/// `Eq`/`Neq` use an epsilon, never `==`: a threshold of `0.1` typed by a user and a `0.1` parsed out
+/// of terminal text are two different `f64`s, and an exact float comparison that is almost always
+/// false is the worst kind of silent failure.
+pub fn compare(op: CompareOp, value: f64, threshold: f64) -> bool {
+    const EPS: f64 = 1e-9;
+    match op {
+        CompareOp::Gt => value > threshold,
+        CompareOp::Gte => value >= threshold,
+        CompareOp::Lt => value < threshold,
+        CompareOp::Lte => value <= threshold,
+        CompareOp::Eq => (value - threshold).abs() < EPS,
+        CompareOp::Neq => (value - threshold).abs() >= EPS,
+    }
+}
+
+/// Print a value the way the log should read it: `63`, not `63.0`.
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        format!("{}", v)
+    }
+}
+
+/// How deep the read went, in the log's own words.
+fn depth_words(depth: ReadDepth) -> String {
+    match depth {
+        ReadDepth::Window(n) => format!("in the last {} lines", n),
+        ReadDepth::VisibleScreen => "on screen".to_string(),
+    }
+}
+
+/// The activity log's detail line for one evaluation.
+///
+/// The two failure outcomes must read DIFFERENTLY: `Unparsed` is the one failure validation cannot
+/// catch — the pattern compiles, the capture is just the wrong span — so it is the dry run and this
+/// line that a user meets it through.
+pub fn read_detail(outcome: &Outcome, pattern: &str, depth: ReadDepth) -> String {
+    match outcome {
+        Outcome::Numeric(Read::NoMatch) => {
+            format!("nothing matching `{}` {}", pattern, depth_words(depth))
+        }
+        Outcome::Numeric(Read::Unparsed(saw)) => {
+            format!("matched, but `{}` is not a number", saw)
+        }
+        Outcome::Numeric(Read::Value(v)) => format!("last value {}", fmt_num(*v)),
+        Outcome::Presence(true) => match depth {
+            ReadDepth::VisibleScreen => format!("`{}` is still on screen", pattern),
+            ReadDepth::Window(n) => format!("`{}` matched in the last {} lines", pattern, n),
+        },
+        Outcome::Presence(false) => match depth {
+            ReadDepth::VisibleScreen => format!("`{}` is no longer on screen", pattern),
+            ReadDepth::Window(n) => {
+                format!("nothing matching `{}` in the last {} lines", pattern, n)
+            }
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// One evaluation
+// ---------------------------------------------------------------------------------------------
+
+/// Everything one evaluation of one `(rule, terminal)` pair decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Evaluation {
+    pub depth: ReadDepth,
+    pub outcome: Outcome,
+    pub condition_now: bool,
+    pub next: ArmState,
+    pub decision: Decision,
+    pub detail: String,
+}
+
+/// Read, extract, compare, advance the arm state. The whole pure pipeline, in order.
+///
+/// `None` means the source had no text for that process id — the terminal is not live. Per §4.5 that
+/// is DORMANT, not dead: no evaluation, no log line, and the arm state is left exactly as it was.
+///
+/// `text` arrives already stripped of this terminal's live echo needles by the caller (M3, §2.6),
+/// which is why stripping is not done here: doing it after extraction could not change which
+/// occurrence was last.
+pub fn evaluate(
+    graph: &AutomationGraph,
+    re: &Regex,
+    prev: ArmState,
+    src: &dyn ScreenSource,
+    process_id: &str,
+    now_ms: i64,
+) -> Option<Evaluation> {
+    evaluate_text(graph, re, prev, &|d| src.tail(process_id, d), now_ms)
+}
+
+/// `evaluate` over an already-resolved reader, so the echo guard can wrap the text without a second
+/// `ScreenSource` implementation.
+pub fn evaluate_text(
+    graph: &AutomationGraph,
+    re: &Regex,
+    prev: ArmState,
+    read: &dyn Fn(ReadDepth) -> Option<String>,
+    now_ms: i64,
+) -> Option<Evaluation> {
+    let depth = depth_for(graph.cond.kind, graph.monitor.read, prev);
+    let text = read(depth)?;
+
+    let (outcome, condition_now) = match graph.cond.kind {
+        CondKind::Text => {
+            let hit = re.is_match(&text);
+            (Outcome::Presence(hit), hit)
+        }
+        CondKind::Number => {
+            let value = extract(re, graph.parse.keep, &text);
+            let now = match (&value, graph.cond.op, graph.cond.threshold) {
+                (Read::Value(v), Some(op), Some(t)) => compare(op, *v, t),
+                // A numeric rule with no operator or no threshold cannot be true of anything. It is a
+                // blocking validation problem, so this is unreachable through the enable path — but it
+                // must not read as "always fires" if it ever is reached.
+                _ => false,
+            };
+            (Outcome::Numeric(value), now)
+        }
+    };
+
+    let (next, decision) = next_state(prev, condition_now, now_ms);
+    Some(Evaluation {
+        depth,
+        detail: read_detail(&outcome, &graph.parse.find, depth),
+        outcome,
+        condition_now,
+        next,
+        decision,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automation_store::{ActionStep, Cadence, CondStep, MonitorStep, ParsePreset, ParseStep, SendTo};
+    use std::cell::RefCell;
+
+    // -----------------------------------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------------------------------
+
+    fn graph(find: &str, kind: CondKind, op: Option<CompareOp>, threshold: Option<f64>) -> AutomationGraph {
+        AutomationGraph {
+            monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
+            parse: ParseStep {
+                preset: ParsePreset::Custom,
+                literal: None,
+                find: find.to_string(),
+                keep: Keep::Brackets,
+            },
+            cond: CondStep { kind, op, threshold },
+            action: ActionStep {
+                message: "prepare to do context-hand-off".to_string(),
+                send_to: SendTo::Matched,
+                submit: true,
+                cli_type: "default".to_string(),
+            },
+        }
+    }
+
+    fn ctx_rule() -> AutomationGraph {
+        graph(r"ctx:(\d+)%", CondKind::Number, Some(CompareOp::Gt), Some(25.0))
+    }
+
+    fn failed_rule() -> AutomationGraph {
+        graph(r"FAILED \d+ test", CondKind::Text, None, None)
+    }
+
+    /// A `ScreenSource` over a REAL `vt100::Parser`, resolving the depth exactly as `AppState`'s own
+    /// impl does. Round 2 killed the previous design here because its oracle used static synthetic
+    /// blocks — every case it was meant to catch passed while failing in production. Driving a real
+    /// parser means "the line scrolled off the screen" is a fact about a terminal, not about a
+    /// fixture.
+    struct VtSource {
+        parser: RefCell<vt100::Parser>,
+        asked: RefCell<Vec<ReadDepth>>,
+    }
+
+    impl VtSource {
+        fn new(rows: u16, cols: u16) -> Self {
+            Self {
+                parser: RefCell::new(vt100::Parser::new(rows, cols, crate::state::SCROLLBACK_LINES)),
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+        fn feed(&self, line: &str) {
+            self.parser.borrow_mut().process(format!("{}\r\n", line).as_bytes());
+        }
+        fn depths(&self) -> Vec<ReadDepth> {
+            self.asked.borrow().clone()
+        }
+        fn clear_depths(&self) {
+            self.asked.borrow_mut().clear();
+        }
+    }
+
+    impl ScreenSource for VtSource {
+        fn tail(&self, _process_id: &str, depth: ReadDepth) -> Option<String> {
+            self.asked.borrow_mut().push(depth);
+            let mut parser = self.parser.borrow_mut();
+            let screen = parser.screen_mut();
+            let max = match depth {
+                ReadDepth::Window(n) => n,
+                ReadDepth::VisibleScreen => screen.size().0 as usize,
+            };
+            Some(crate::state::render_tail_lines(screen, max))
+        }
+    }
+
+    fn re(p: &str) -> Regex {
+        Regex::new(p).unwrap()
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §10.3 — the arm machine
+    // -----------------------------------------------------------------------------------------
+
+    /// All six transitions as a TABLE, asserting the next state AND the decision AND whether it
+    /// sends. Three facts per row, because an implementation that returns the right state with the
+    /// wrong decision is exactly the bug that makes a crossing silent.
+    #[test]
+    fn next_state_covers_all_six_transitions() {
+        let f = ArmState::Fired { at_ms: 100 };
+        let cases: &[(ArmState, bool, ArmState, Decision, bool)] = &[
+            (ArmState::Unseen, true, ArmState::Fired { at_ms: 500 }, Decision::Armed, false),
+            (ArmState::Unseen, false, ArmState::armed(), Decision::Armed, false),
+            (ArmState::armed(), false, ArmState::armed(), Decision::Checked, false),
+            (ArmState::armed(), true, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
+            (f, true, ArmState::Fired { at_ms: 100 }, Decision::Held, false),
+            (f, false, ArmState::re_armed(), Decision::ReArmed, false),
+            // The `seen_fire` bit survives a check, in both directions.
+            (ArmState::re_armed(), false, ArmState::re_armed(), Decision::Checked, false),
+            (ArmState::re_armed(), true, ArmState::Fired { at_ms: 500 }, Decision::Sent, true),
+        ];
+        for (prev, cond, want_next, want_decision, want_sends) in cases {
+            let (next, decision) = next_state(*prev, *cond, 500);
+            assert_eq!(next, *want_next, "state for {:?} + {}", prev, cond);
+            assert_eq!(decision, *want_decision, "decision for {:?} + {}", prev, cond);
+            assert_eq!(decision.sends(), *want_sends, "sends for {:?} + {}", prev, cond);
+        }
+    }
+
+    /// `Unseen + true` is the settled decision that keeps this feature safe to launch: an app started
+    /// while a terminal already reads 63% must arm, not type.
+    #[test]
+    fn a_first_sight_above_the_threshold_arms_and_never_sends() {
+        let (next, decision) = next_state(ArmState::Unseen, true, 7);
+        assert_eq!(decision, Decision::Armed);
+        assert!(!decision.sends(), "first sight must never send");
+        assert_eq!(next, ArmState::Fired { at_ms: 7 });
+    }
+
+    /// `at_ms` records when the condition BECAME true. A rule that has held for ten minutes must not
+    /// look like it just fired, so `held` carries the original stamp rather than refreshing it.
+    #[test]
+    fn holding_carries_the_original_fired_at_and_re_firing_takes_a_new_one() {
+        let (held, _) = next_state(ArmState::Fired { at_ms: 100 }, true, 9_000);
+        assert_eq!(held, ArmState::Fired { at_ms: 100 }, "held must not refresh at_ms");
+        let (rearmed, _) = next_state(held, false, 9_500);
+        assert_eq!(rearmed, ArmState::re_armed());
+        let (refired, d) = next_state(rearmed, true, 10_000);
+        assert_eq!(d, Decision::Sent);
+        assert_eq!(refired, ArmState::Fired { at_ms: 10_000 }, "a new crossing takes a new stamp");
+    }
+
+    /// Mockup §08's ctx timeline, replayed as a sequence: start 18% -> armed; 27% -> fires; nine
+    /// checks above the threshold -> held; 22% -> re-arms; 27% -> fires again. Asserting the decision
+    /// at EVERY step, so an implementation that sends on every check above 25 fails on step 3.
+    #[test]
+    fn the_ctx_timeline_sends_exactly_once_per_crossing() {
+        let values = [18.0, 27.0, 30.0, 33.0, 41.0, 44.0, 48.0, 52.0, 58.0, 61.0, 63.0, 22.0, 27.0];
+        let expected = [
+            Decision::Armed,   // 18 — first sight, below
+            Decision::Sent,    // 27 — the crossing
+            Decision::Held,    // 30
+            Decision::Held,    // 33
+            Decision::Held,    // 41
+            Decision::Held,    // 44
+            Decision::Held,    // 48
+            Decision::Held,    // 52
+            Decision::Held,    // 58
+            Decision::Held,    // 61
+            Decision::Held,    // 63
+            Decision::ReArmed, // 22 — back under
+            Decision::Sent,    // 27 — the second crossing
+        ];
+        let mut state = ArmState::Unseen;
+        let mut sends = 0;
+        for (i, (v, want)) in values.iter().zip(expected.iter()).enumerate() {
+            let (next, decision) = next_state(state, compare(CompareOp::Gt, *v, 25.0), i as i64);
+            assert_eq!(decision, *want, "step {} (ctx:{}%)", i, v);
+            if decision.sends() {
+                sends += 1;
+            }
+            state = next;
+        }
+        assert_eq!(sends, 2, "two crossings, two sends — never one per check");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §10.2b — extraction
+    // -----------------------------------------------------------------------------------------
+
+    /// The single most likely wrong implementation is `captures()`, which takes the FIRST match.
+    ///
+    /// The window is fed BOTH ascending and descending so "last" cannot be confused with "largest" —
+    /// an implementation taking the max passes the ascending case and fails the descending one.
+    #[test]
+    fn extraction_takes_the_last_match_not_the_first_and_not_the_largest() {
+        let r = re(r"ctx:(\d+)%");
+        let ascending = "ctx:18%\nnoise\nctx:41%\nnoise\nctx:63%\n";
+        assert_eq!(extract(&r, Keep::Brackets, ascending), Read::Value(63.0));
+
+        let descending = "ctx:63%\nnoise\nctx:41%\nnoise\nctx:18%\n";
+        assert_eq!(
+            extract(&r, Keep::Brackets, descending),
+            Read::Value(18.0),
+            "`last` must mean the newest occurrence, never the largest"
+        );
+    }
+
+    /// `keep` names which span is the value, and a named `value` group outranks group 1.
+    #[test]
+    fn keep_selects_the_group_and_a_named_value_group_wins() {
+        let plain = re(r"ctx:(\d+)%");
+        assert_eq!(extract(&plain, Keep::Brackets, "ctx:63%"), Read::Value(63.0));
+        assert_eq!(
+            extract(&plain, Keep::Whole, "ctx:63%"),
+            Read::Unparsed("ctx:63%".to_string()),
+            "`whole` takes group 0, which here is not a number"
+        );
+        assert_eq!(extract(&re(r"(\d+)"), Keep::Whole, "63"), Read::Value(63.0));
+
+        let named = re(r"(?<first>c)tx:(?<value>\d+)%");
+        assert_eq!(
+            extract(&named, Keep::Brackets, "ctx:63%"),
+            Read::Value(63.0),
+            "a group named `value` must win over group 1"
+        );
+    }
+
+    /// A group-less pattern with `keep: brackets` must NOT silently fall back to the whole match.
+    /// Validation blocks it before it can run; if one reaches here it reports what it saw.
+    #[test]
+    fn brackets_on_a_group_less_pattern_never_falls_back_to_the_whole_match() {
+        let r = re(r"\d+");
+        assert_eq!(
+            extract(&r, Keep::Brackets, "ctx:63%"),
+            Read::Unparsed("63".to_string()),
+            "no capture group means no value — never the whole match"
+        );
+        // And the blocking half, so the two halves of the rule cannot drift apart.
+        let mut g = ctx_rule();
+        g.parse.find = r"\d+".to_string();
+        let problems = crate::automation_validation::pattern_problems(&g);
+        assert!(
+            problems.iter().any(|p| p.blocks()),
+            "keep: brackets with no capture group must BLOCK enabling, got {:?}",
+            problems
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §10.2c — coercion and the six operators
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn coercion_is_three_way_and_the_two_failures_read_differently() {
+        let r = re(r"v:(\S+)");
+        let cases: &[(&str, Read)] = &[
+            ("v:63", Read::Value(63.0)),
+            ("v:63.5", Read::Value(63.5)),
+            ("v:+7", Read::Value(7.0)),
+            ("v:-7", Read::Value(-7.0)),
+            ("v:63%", Read::Unparsed("63%".to_string())),
+            ("v:1,024", Read::Unparsed("1,024".to_string())),
+            ("v:NaN", Read::Unparsed("NaN".to_string())),
+            ("v:inf", Read::Unparsed("inf".to_string())),
+            ("nothing here", Read::NoMatch),
+        ];
+        for (text, want) in cases {
+            assert_eq!(&extract(&r, Keep::Brackets, text), want, "coercing {:?}", text);
+        }
+
+        // Both failures give `condition_now == false` and DISTINCT details.
+        let depth = ReadDepth::Window(200);
+        let no_match = read_detail(&Outcome::Numeric(Read::NoMatch), "ctx:(\\d+)%", depth);
+        let unparsed = read_detail(
+            &Outcome::Numeric(Read::Unparsed("63%".to_string())),
+            "ctx:(\\d+)%",
+            depth,
+        );
+        assert_ne!(no_match, unparsed, "the two failure modes must not read the same");
+        assert!(no_match.contains("nothing matching"), "{}", no_match);
+        assert!(unparsed.contains("is not a number") && unparsed.contains("63%"), "{}", unparsed);
+    }
+
+    /// `NaN` is the reason coercion checks `is_finite`, and the proof is that it would make `neq`
+    /// TRUE — a terminal printing `NaN%` firing a "not equal to" rule looks exactly like a real
+    /// crossing.
+    #[test]
+    fn a_non_finite_read_cannot_satisfy_any_operator() {
+        let g = graph(r"v:(\S+)", CondKind::Number, Some(CompareOp::Neq), Some(25.0));
+        let ev = evaluate_text(&g, &re(r"v:(\S+)"), ArmState::armed(), &|_| Some("v:NaN".into()), 1)
+            .expect("text was available");
+        assert!(!ev.condition_now, "NaN must not satisfy `neq`");
+        assert_eq!(ev.decision, Decision::Checked);
+        // The premise the `is_finite` guard exists for: every comparison against `NaN` is false, so
+        // the natural spelling of `neq` — "not equal" — reports TRUE for a value that is not a number.
+        assert!(
+            !((f64::NAN - 25.0f64).abs() < 1e-9),
+            "premise: spelling neq as `!eq` would fire on a terminal printing NaN%"
+        );
+    }
+
+    #[test]
+    fn the_six_operators_are_a_table() {
+        use CompareOp::*;
+        let cases: &[(CompareOp, f64, f64, bool)] = &[
+            (Gt, 26.0, 25.0, true), (Gt, 25.0, 25.0, false), (Gt, 24.0, 25.0, false),
+            (Gte, 26.0, 25.0, true), (Gte, 25.0, 25.0, true), (Gte, 24.0, 25.0, false),
+            (Lt, 24.0, 25.0, true), (Lt, 25.0, 25.0, false), (Lt, 26.0, 25.0, false),
+            (Lte, 24.0, 25.0, true), (Lte, 25.0, 25.0, true), (Lte, 26.0, 25.0, false),
+            (Eq, 25.0, 25.0, true), (Eq, 25.5, 25.0, false),
+            (Neq, 25.5, 25.0, true), (Neq, 25.0, 25.0, false),
+        ];
+        for (op, v, t, want) in cases {
+            assert_eq!(compare(*op, *v, *t), *want, "{:?} {} vs {}", op, v, t);
+        }
+    }
+
+    /// The epsilon is not decoration: `0.1` reconstructed from text and `0.1` typed by a user are two
+    /// different `f64`s, and `==` says so.
+    #[test]
+    fn eq_uses_an_epsilon_because_exact_float_equality_is_almost_always_false() {
+        let from_text: f64 = "0.1".parse::<f64>().unwrap() * 3.0;
+        let typed = 0.30000000000000004_f64;
+        assert!(compare(CompareOp::Eq, from_text, 0.3), "0.1*3 must compare equal to 0.3");
+        assert!(!(0.1f64 * 3.0 == 0.3), "premise: `==` fails here");
+        assert!(compare(CompareOp::Eq, typed, 0.3));
+        assert!(!compare(CompareOp::Neq, from_text, 0.3));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §10.2d — two depths
+    // -----------------------------------------------------------------------------------------
+
+    /// The SELECTION first, as a full table over all three dimensions — kind x read mode x prev.
+    ///
+    /// Varying only one dimension is how a wrong key survives a suite: an implementation that ignores
+    /// `prev` passes any test whose rows all share one arm state, and one that ignores `read` passes
+    /// any test whose rows all use `NewOutput`.
+    #[test]
+    fn depth_for_is_a_table_over_kind_read_mode_and_arm_state() {
+        let w = ReadDepth::Window(200);
+        let s = ReadDepth::VisibleScreen;
+        let fired = ArmState::Fired { at_ms: 0 };
+        let cases: &[(CondKind, ReadMode, ArmState, ReadDepth)] = &[
+            // Presence: the deep window while "has this happened?" is still open...
+            (CondKind::Text, ReadMode::NewOutput, ArmState::Unseen, w),
+            (CondKind::Text, ReadMode::NewOutput, ArmState::armed(), w),
+            // ...and the screen once it has been answered — INCLUDING after a re-arm, which is the
+            // case that re-fires on a stale scrollback line if it reads the window.
+            (CondKind::Text, ReadMode::NewOutput, fired, s),
+            (CondKind::Text, ReadMode::NewOutput, ArmState::re_armed(), s),
+            // Presence already reading on-screen: both directions are the screen, no special case.
+            (CondKind::Text, ReadMode::OnScreen, ArmState::Unseen, s),
+            (CondKind::Text, ReadMode::OnScreen, ArmState::armed(), s),
+            (CondKind::Text, ReadMode::OnScreen, fired, s),
+            (CondKind::Text, ReadMode::OnScreen, ArmState::re_armed(), s),
+            // Numeric: a value persists, so the rule's own depth in BOTH directions and after a fire.
+            (CondKind::Number, ReadMode::NewOutput, ArmState::Unseen, w),
+            (CondKind::Number, ReadMode::NewOutput, ArmState::armed(), w),
+            (CondKind::Number, ReadMode::NewOutput, fired, w),
+            (CondKind::Number, ReadMode::NewOutput, ArmState::re_armed(), w),
+            (CondKind::Number, ReadMode::OnScreen, ArmState::Unseen, s),
+            (CondKind::Number, ReadMode::OnScreen, ArmState::armed(), s),
+            (CondKind::Number, ReadMode::OnScreen, fired, s),
+            (CondKind::Number, ReadMode::OnScreen, ArmState::re_armed(), s),
+        ];
+        for (kind, read, prev, want) in cases {
+            assert_eq!(depth_for(*kind, *read, *prev), *want, "{:?} {:?} {:?}", kind, read, prev);
+        }
+    }
+
+    /// The mockup's seven-check word-matching walk, end to end, against a REAL terminal.
+    ///
+    /// Check 5 is the one that matters: the next run has pushed both `FAILED` lines off the visible
+    /// screen while they are still in scrollback, and the rule must RE-ARM. A one-depth
+    /// implementation reads the 200-line window there, still sees `FAILED`, and holds forever.
+    #[test]
+    fn the_seven_check_word_walk_re_arms_at_check_five() {
+        let rows = 6u16;
+        let src = VtSource::new(rows, 80);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        let mut state = ArmState::Unseen;
+        let step = |src: &VtSource, state: &mut ArmState, at: i64| -> Decision {
+            let ev = evaluate(&g, &r, *state, src, "pc-1", at).expect("terminal is live");
+            *state = ev.next;
+            ev.decision
+        };
+
+        // 1 — nothing yet.
+        src.feed("running tests");
+        assert_eq!(step(&src, &mut state, 1), Decision::Armed);
+        // 2 — the failure appears.
+        src.feed("FAILED 3 test");
+        assert_eq!(step(&src, &mut state, 2), Decision::Sent);
+        // 3 — same line, still on screen.
+        assert_eq!(step(&src, &mut state, 3), Decision::Held);
+        // 4 — a second failure, also on screen.
+        src.feed("FAILED 1 test");
+        assert_eq!(step(&src, &mut state, 4), Decision::Held);
+        // 5 — the next run pushes both off the VISIBLE screen. They are still in scrollback.
+        for i in 0..rows + 2 {
+            src.feed(&format!("run 2 line {}", i));
+        }
+        assert_eq!(
+            step(&src, &mut state, 5),
+            Decision::ReArmed,
+            "check 5 must re-arm: `FAILED` has left the screen even though scrollback still holds it"
+        );
+        // The proof that this was a DEPTH decision and not an empty terminal.
+        let deep = src.tail("pc-1", ReadDepth::Window(200)).unwrap();
+        assert!(deep.contains("FAILED 3 test"), "scrollback must still hold the line");
+        // 6 — nothing matching.
+        assert_eq!(step(&src, &mut state, 6), Decision::Checked);
+        // 7 — a third failure fires again.
+        src.feed("FAILED 2 test");
+        assert_eq!(step(&src, &mut state, 7), Decision::Sent);
+    }
+
+    /// (a) The bottom line is a prompt rewritten on every keystroke while `FAILED 1 test` sits in
+    /// scrollback. This is what killed round 2's delta design: the anchor vanished on every keystroke
+    /// and the fallback re-matched the scrollback forever.
+    #[test]
+    fn typing_at_the_prompt_neither_re_fires_nor_re_arms() {
+        let rows = 5u16;
+        let src = VtSource::new(rows, 80);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        let mut state = ArmState::Unseen;
+
+        src.feed("FAILED 1 test");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        assert_eq!(ev.decision, Decision::Armed, "first sight arms, never sends");
+        state = ev.next;
+
+        // Type into the prompt, one character at a time, rewriting the bottom line each time.
+        for i in 0..12 {
+            src.parser.borrow_mut().process(format!("\r$ {}", "x".repeat(i)).as_bytes());
+            let ev = evaluate(&g, &r, state, &src, "pc-1", 10 + i as i64).unwrap();
+            assert_eq!(
+                ev.decision,
+                Decision::Held,
+                "keystroke {} must not re-fire — nothing about the world changed",
+                i
+            );
+            state = ev.next;
+        }
+
+        // Now push it off the visible screen, and it re-arms EXACTLY once.
+        src.parser.borrow_mut().process(b"\r\n");
+        for i in 0..rows + 2 {
+            src.feed(&format!("later {}", i));
+        }
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 100).unwrap();
+        assert_eq!(ev.decision, Decision::ReArmed);
+        state = ev.next;
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 101).unwrap();
+        assert_eq!(ev.decision, Decision::Checked, "re-arming happens once, not every tick");
+    }
+
+    /// (b) Ten identical spinner lines followed by two new lines. A diff-based implementation lands
+    /// its anchor at the very end, computes an empty delta and drops the new output entirely.
+    #[test]
+    fn identical_spinner_lines_do_not_hide_the_output_that_follows() {
+        let src = VtSource::new(24, 80);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        for _ in 0..10 {
+            src.feed("working... | working... | working...");
+        }
+        let mut state = ArmState::Unseen;
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        assert_eq!(ev.decision, Decision::Armed);
+        state = ev.next;
+
+        src.feed("FAILED 4 test");
+        src.feed("done");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        assert_eq!(ev.decision, Decision::Sent, "new lines after identical ones must be seen");
+    }
+
+    /// (c) A terminal holding two lines total — too few to form round 2's eight-line anchor.
+    #[test]
+    fn a_two_line_terminal_behaves_like_any_other() {
+        let src = VtSource::new(2, 40);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        let mut state = ArmState::Unseen;
+        src.feed("hello");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap();
+        assert_eq!(ev.decision, Decision::Armed);
+        state = ev.next;
+        src.feed("FAILED 9 test");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        assert_eq!(ev.decision, Decision::Sent);
+        state = ev.next;
+        // Push it off a two-row screen.
+        src.feed("a");
+        src.feed("b");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 3).unwrap();
+        assert_eq!(ev.decision, Decision::ReArmed);
+    }
+
+    /// A numeric rule reads its own depth in BOTH directions, so a value that simply stops being
+    /// reprinted does not re-arm. The depth log is the oracle: every read is `Window(200)`.
+    #[test]
+    fn a_numeric_rule_reads_one_depth_in_both_directions() {
+        let src = VtSource::new(5, 80);
+        let g = ctx_rule();
+        let r = re(&g.parse.find);
+        let mut state = ArmState::Unseen;
+
+        src.feed("ctx:18%");
+        state = evaluate(&g, &r, state, &src, "pc-1", 1).unwrap().next;
+        src.feed("ctx:63%");
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 2).unwrap();
+        assert_eq!(ev.decision, Decision::Sent);
+        state = ev.next;
+
+        // Scroll it well off the visible screen and stop printing values.
+        for i in 0..20 {
+            src.feed(&format!("build step {}", i));
+        }
+        src.clear_depths();
+        let ev = evaluate(&g, &r, state, &src, "pc-1", 3).unwrap();
+        assert_eq!(
+            ev.decision,
+            Decision::Held,
+            "a value persists — it must not re-arm merely because it scrolled off screen"
+        );
+        assert_eq!(
+            src.depths(),
+            vec![ReadDepth::Window(200)],
+            "a numeric rule must never switch to the visible screen"
+        );
+    }
+
+    /// The depth log for a presence rule, asserted directly: a one-depth implementation fails HERE
+    /// rather than three tests later.
+    #[test]
+    fn a_presence_rule_asks_for_two_different_depths() {
+        let src = VtSource::new(4, 80);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+        src.feed("FAILED 1 test");
+        // Armed -> reads the window.
+        let ev = evaluate(&g, &r, ArmState::armed(), &src, "pc-1", 1).unwrap();
+        assert_eq!(src.depths(), vec![ReadDepth::Window(200)]);
+        assert_eq!(ev.decision, Decision::Sent);
+        // Fired -> reads the visible screen.
+        src.clear_depths();
+        let _ = evaluate(&g, &r, ev.next, &src, "pc-1", 2).unwrap();
+        assert_eq!(src.depths(), vec![ReadDepth::VisibleScreen]);
+    }
+
+    /// The defect the seven-check walk caught, isolated: a re-armed presence rule must not fire again
+    /// on the match it just let go, which is still sitting in scrollback.
+    ///
+    /// *Mutation check: make `depth_for` switch on `ArmState::Fired` instead of `has_seen_fire` and
+    /// this goes red — that is the plan's own design, and it sends a message the user never asked
+    /// for, once per re-arm cycle, forever.*
+    #[test]
+    fn a_re_armed_presence_rule_does_not_re_fire_on_the_line_it_just_let_go() {
+        let rows = 5u16;
+        let src = VtSource::new(rows, 80);
+        let g = failed_rule();
+        let r = re(&g.parse.find);
+
+        src.feed("FAILED 3 test");
+        let mut state = evaluate(&g, &r, ArmState::armed(), &src, "pc-1", 1).unwrap();
+        assert_eq!(state.decision, Decision::Sent);
+        let mut arm = state.next;
+
+        // A handful of new lines — enough to clear a 5-row screen, nowhere near 200.
+        for i in 0..rows + 2 {
+            src.feed(&format!("next {}", i));
+        }
+        state = evaluate(&g, &r, arm, &src, "pc-1", 2).unwrap();
+        assert_eq!(state.decision, Decision::ReArmed);
+        arm = state.next;
+
+        // The line is still well inside the 200-line window.
+        assert!(
+            src.tail("pc-1", ReadDepth::Window(200)).unwrap().contains("FAILED 3 test"),
+            "premise: the match is still in scrollback"
+        );
+
+        src.clear_depths();
+        state = evaluate(&g, &r, arm, &src, "pc-1", 3).unwrap();
+        assert_eq!(
+            state.decision,
+            Decision::Checked,
+            "a re-armed rule must ask about NOW, not about what is still in scrollback"
+        );
+        assert_eq!(
+            src.depths(),
+            vec![ReadDepth::VisibleScreen],
+            "and it must ask the screen to do it"
+        );
+    }
+
+    /// A terminal that is not live yields no evaluation, no log line and an untouched arm state.
+    #[test]
+    fn a_dormant_terminal_is_skipped_rather_than_re_armed() {
+        let g = failed_rule();
+        assert!(
+            evaluate_text(&g, &re(&g.parse.find), ArmState::Fired { at_ms: 1 }, &|_| None, 5)
+                .is_none(),
+            "no text means dormant, not false"
+        );
+    }
+
+    /// A numeric rule missing its operator cannot be true of anything — the one reading that must not
+    /// be "always fires".
+    #[test]
+    fn a_numeric_rule_without_an_operator_is_never_true() {
+        let g = graph(r"ctx:(\d+)%", CondKind::Number, None, Some(25.0));
+        let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
+            .unwrap();
+        assert!(!ev.condition_now);
+        assert_eq!(ev.decision, Decision::Checked);
+    }
+
+    /// The re-arm detail is the sentence Q13 approved, and it must not be the numeric one.
+    #[test]
+    fn the_two_read_modes_report_themselves_differently() {
+        let window = read_detail(&Outcome::Presence(false), "FAILED", ReadDepth::Window(200));
+        let screen = read_detail(&Outcome::Presence(false), "FAILED", ReadDepth::VisibleScreen);
+        assert_eq!(window, "nothing matching `FAILED` in the last 200 lines");
+        assert_eq!(screen, "`FAILED` is no longer on screen");
+    }
+
+    #[test]
+    fn a_whole_number_reads_as_an_integer_in_the_log() {
+        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.0)), "p", ReadDepth::Window(200)), "last value 63");
+        assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.5)), "p", ReadDepth::Window(200)), "last value 63.5");
+    }
+}
