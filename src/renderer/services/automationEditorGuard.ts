@@ -65,3 +65,18 @@ export function saveAutomationEditorDraft(): Promise<boolean> {
 export function discardAutomationEditorDraft(): void {
     guard?.discard();
 }
+
+/**
+ * Is an editor mounted anywhere right now?
+ *
+ * Distinct from `isAutomationEditorDirty()`, which answers about a DRAFT. Item D lets a rule be
+ * opened from a pane's context menu and from Canvas Mode, so a second editor can now be asked for
+ * while the Settings page already has one — and this slot holds exactly one guard. A second mount
+ * would silently take the slot over, leaving the first editor's unsaved draft with nothing to
+ * answer for it: the navigation guard would consult the newcomer, find it clean, and let the page
+ * throw the original away. That is the very blocker this module was written to close, arriving
+ * through a new door, so the second open is refused rather than the guard being made a stack.
+ */
+export function isAutomationEditorMounted(): boolean {
+    return guard !== null;
+}

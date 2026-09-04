@@ -11,6 +11,7 @@ import { ConfirmDialog } from './components/UI/ConfirmDialog';
 import { ToastContainer } from './components/UI/ToastContainer';
 import { GlobalPeerRequests } from './components/GlobalPeerRequests';
 import { EulaAcceptModal } from './components/EulaAcceptModal';
+import { GlobalAutomationEditor } from './components/Automation/GlobalAutomationEditor';
 import {
   setShellProfiles,
   setDefaultProfile,
@@ -1832,6 +1833,10 @@ const App: React.FC = () => {
 
       {/* First-run EULA acceptance gate (renders only until accepted). */}
       <EulaAcceptModal />
+
+      {/* The automation editor's second home, for the pane context menu and Canvas Mode
+          (`plan/028` item D). Renders nothing until one of them asks for a rule. */}
+      <GlobalAutomationEditor />
 
       <ConfirmDialog
         isOpen={showCloseConfirm}

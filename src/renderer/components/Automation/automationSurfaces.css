@@ -1,0 +1,84 @@
+/* The armed-automation indicator (`plan/028` item D).
+ *
+ * THE ONLY OWNER of `.au-armed`'s metrics and colour. Host surfaces size it by declaring
+ * `--au-armed-size` on an ancestor and nothing else — see the component's header for why. If you
+ * are about to add `.tab-item .au-armed { font-size: … }` in another stylesheet, set the variable
+ * there instead: two stylesheets moving one element with different properties is the defect that
+ * put the Enabled toggle's knob off the end of its track in round 1.
+ */
+
+.au-armed {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25em;
+    margin-left: 4px;
+    /* The fallback is the pane header's size; every other host overrides it. */
+    font-size: var(--au-armed-size, 11px);
+    line-height: 1;
+    color: var(--tab-activity-accent, #f0a020);
+}
+
+/* The glyph carries the meaning on its own at every size, so it never shrinks with the label. */
+.au-armed-glyph {
+    flex: none;
+}
+
+/* The rule's name, on the surfaces with room for it. Ellipsised rather than wrapped: the pane
+   header is a single-line flex row, and a rule named by a sentence must not be allowed to push the
+   header's buttons out of it — the constraint `.canvas-node-agent` states for the same reason. */
+.au-armed-label {
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+}
+
+/* `+2`. Dimmer than the glyph because it is the qualifier, not the signal. */
+.au-armed-more {
+    flex: none;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The tab strip is the densest host and the one whose glyph sits among four other status icons. */
+.au-armed.tabstrip {
+    --au-armed-size: 11px;
+}
+
+/* ---- The `Automation ▸` accordion in a context menu -----------------------
+ *
+ * An accordion INSIDE the menu rather than a side flyout, which is this app's settled answer for
+ * exactly this shape — `TabContextMenu.css` states it for the Color Schema section: "inset to read
+ * as 'expanded inside the menu' rather than a separate flyout". Following it costs nothing here
+ * and buys both hosts: `CanvasMenu` renders `pane-context-menu canvas-menu` and imports
+ * `PaneContextMenu.css`, so the `.context-menu-subpanel` and `.context-menu-expand-arrow` styling
+ * this section leans on is already live in the canvas menu too, with no second copy.
+ *
+ * The subpanel's own padding comes from that stylesheet; these rules only lay out a rule ROW,
+ * which is a name over its current state. */
+
+.au-menu-rule {
+    /* Overrides `.context-menu-item`'s row layout — a rule needs two lines, not one. */
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    text-align: left;
+}
+
+.au-menu-rule-name {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The state, in the same words the Settings list uses for it. Dimmer, because the name is what is
+   being chosen and this is what it is doing. */
+.au-menu-rule-state {
+    display: block;
+    font-size: 11px;
+    color: var(--text-tertiary, #969696);
+}

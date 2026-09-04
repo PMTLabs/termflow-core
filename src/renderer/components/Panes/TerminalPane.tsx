@@ -21,6 +21,7 @@ import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration }
 import { reattachPromptGate, takeArmProbePending } from '../../services/reattachGate';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
+import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -667,6 +668,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 {name || 'Terminal'}
               </span>
             )}
+            {/* Which automations are watching THIS terminal (`plan/028` item D). Inside the title
+                block rather than beside the controls: it describes the terminal, like the name it
+                follows, while everything on the right-hand side acts on the pane. The rule's own
+                name is printed because a pane has room for one; the `+N` is how the rest are
+                offered, and the context menu is where they are read. */}
+            <AutomationArmedForTerminal terminalId={terminalId ?? null} compact={false} />
           </div>
           <div className="terminal-pane-controls">
             <button

@@ -1,5 +1,6 @@
 import React from 'react';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 
 /**
  * Right-click menu for a terminal node (Tam, 2026-08-21).
@@ -28,6 +29,16 @@ export const CanvasNodeMenu: React.FC<{
   /** The terminal's own title — `PaneNode.name`, the same string the node header shows. */
   title: string;
   /**
+   * The node's durable `tm-` leaf, for the `Automation ▸` section (`plan/028` item D).
+   *
+   * The section is `AutomationMenuSection`, the SAME component `PaneContextMenu` mounts — Tam asked
+   * for shared code across the surfaces, and this menu can take it verbatim because `CanvasMenu`
+   * renders `pane-context-menu canvas-menu` and borrows that stylesheet, so the accordion's classes
+   * already mean the same thing here. An id rather than the rules themselves keeps this component
+   * props-only, as its header requires.
+   */
+  terminalId: string;
+  /**
    * True while THIS node is the overlay. Swaps the enlarge item for its shrink face.
    *
    * REQUIRED, not defaulted. A default would keep the menu compiling while it offered "Enlarge"
@@ -43,7 +54,7 @@ export const CanvasNodeMenu: React.FC<{
   onCloseTerminal: () => void;
   /** Dismiss the menu without doing anything. */
   onDismiss: () => void;
-}> = ({ x, y, title, overlaid, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => (
+}> = ({ x, y, title, terminalId, overlaid, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => (
   <CanvasMenu x={x} y={y} onClose={onDismiss}>
     <div className="context-menu-header">{title}</div>
     <div className="context-menu-divider" />
@@ -61,6 +72,11 @@ export const CanvasNodeMenu: React.FC<{
     >
       Open in its tab
     </CanvasMenuItem>
+    {/* Renders nothing unless a rule is armed here, so a plain terminal's menu is unchanged. It
+        sits above the divider that separates the destructive item, with the navigation actions it
+        belongs with — opening a rule's editor is another way OUT of the canvas, not a change to
+        this terminal. */}
+    <AutomationMenuSection terminalId={terminalId} onDismiss={onDismiss} />
     {/* Separated and LAST, for the reason the close button is last in the header: the
         destructive item must not sit where a click aimed at either one above it can land. */}
     <div className="context-menu-divider" />

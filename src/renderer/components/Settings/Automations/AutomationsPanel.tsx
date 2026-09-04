@@ -18,6 +18,7 @@ import { ActivityLogView } from './ActivityLogView';
 import { AutomationEditor } from '../../Automation/AutomationEditor';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
+import { consumePendingAutomationLog } from '../../../services/automationEditorHost';
 import '../../Automation/auToggle.css';
 import './AutomationsPanel.css';
 
@@ -126,6 +127,18 @@ export const AutomationsPanel: React.FC = () => {
         setLogScope({ ruleId, newestFirst: false });
         setView({ kind: 'log', ruleId });
     };
+
+    // A rule's full log, asked for from OUTSIDE Settings — the app-level editor's "open the full
+    // log" link (`plan/028` item D). Consumed exactly once on mount, before anything can navigate
+    // away from it; `openSettingsTab` returns before this panel exists, so a DOM event would race
+    // the mount and the value is handed over instead.
+    useEffect(() => {
+        const pending = consumePendingAutomationLog();
+        if (pending) showLog(pending);
+        // Mount only, and `showLog` is a fresh closure every render — listing it would re-run this
+        // on every render and re-open the log over whatever the user had navigated to.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const backToList = () => {
         setLogScope(null);
