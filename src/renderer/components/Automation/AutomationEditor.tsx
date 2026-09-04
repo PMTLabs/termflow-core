@@ -35,7 +35,7 @@ import type {
     DryRunReport,
     WatchableTerminal,
 } from '../../types/electron';
-import type { AutomationRuntimePairState } from '../../services/automationEvents';
+import type { AutomationStatePayload } from '../../services/automationEvents';
 import { store } from '../../store';
 import { addToast } from '../../store/slices/uiSlice';
 import { suspendGlobalShortcuts } from '../../services/InputHandler';
@@ -50,7 +50,7 @@ import { blockingProblems, problems as validate } from './automationValidation';
 import { faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { StepKind } from './automationSteps';
-import { STEP_ORDER } from './automationSteps';
+import { STEP_ORDER, canAddStep } from './automationSteps';
 import type { NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
@@ -69,7 +69,17 @@ export interface AutomationEditorProps {
     rule: AutomationRule;
     /** A brand-new rule opens on an empty canvas; a template or an existing rule does not. */
     freshCanvas: boolean;
-    pairs?: Record<string, AutomationRuntimePairState>;
+    /**
+        * The WHOLE runtime payload, indexed here by the draft's own id rather than by the caller.
+        *
+        * The panel used to index it: `pairs={runtime.rules[view.draft.id]}`. A new draft's id is `''`
+        * until the first save mints one, and the minted id lands in the EDITOR's reducer — the panel's
+        * `view.draft` still holds the empty string. So a rule saved and enabled from inside the editor
+        * showed no live state at all for the rest of the session, in the one panel whose whole job is
+        * to report it. Indexing where the id actually lives is the fix; passing an already-indexed
+        * value is what made a stale key invisible.
+        */
+    runtime: AutomationStatePayload;
     now: number;
     /** This window's label, for the log lines every mutation writes. */
     origin: string;
@@ -90,7 +100,7 @@ const toast = (message: string, type: 'success' | 'error' | 'info' = 'info') => 
 export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     rule,
     freshCanvas,
-    pairs,
+    runtime,
     now,
     origin,
     onClose,
@@ -119,6 +129,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const [saving, setSaving] = useState(false);
 
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
+    const pairs = draft.rule.id.length > 0 ? runtime.rules[draft.rule.id] : undefined;
     const dirty = isDirty(draft);
     const problems = useMemo(() => validate(draft.rule), [draft.rule]);
     const blocking = blockingProblems(problems);
@@ -241,7 +252,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
 
     // --- actions -------------------------------------------------------------------------------------
     const runDryRun = useCallback(async () => {
-        const target = testTarget ?? terminals.find((t) => t.alive)?.id ?? null;
+        const target = testTarget ?? terminals.find((t) => t.alive)?.terminalId ?? null;
         if (!target) {
             setDrawer('test');
             setTestError('no terminal is open to test against');
@@ -314,6 +325,24 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         };
     }, [report]);
 
+    /**
+     * **The one place a step is added**, whatever gesture asked for it.
+     *
+     * The palette item is both a drag source and a button, and the refusal used to live inside the
+     * drag hook — so the drag was gated and the click was not, and clicking *Compare it* on an empty
+     * canvas added it with nothing to compare, in a shape the drag refuses
+     * (`gate-in-the-caller-lets-new-callers-opt-out`).
+     */
+    const addStep = useCallback((step: StepKind, pos?: NodePos) => {
+        const refusal = canAddStep(latest.current.draft.present, step);
+        if (refusal) {
+            toast(refusal.reason, 'error');
+            return;
+        }
+        dispatch({ type: 'addStep', step });
+        if (pos) dispatch({ type: 'moveStep', step, pos });
+    }, []);
+
     const toWorldRef = useRef<(x: number, y: number) => NodePos | null>(() => null);
     // Stable, because `AuCanvas` calls it from an effect: a new identity every render would make
     // that effect re-run on every frame of a drag.
@@ -321,13 +350,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         toWorldRef.current = fn;
     }, []);
     const paletteDrag = useAuPaletteDrag({
-        present: draft.present,
         toWorld: (x, y) => toWorldRef.current(x, y),
-        onAdd: (step, pos) => {
-            dispatch({ type: 'addStep', step });
-            dispatch({ type: 'moveStep', step, pos });
-        },
-        onRefuse: (reason) => toast(reason, 'error'),
+        onAdd: addStep,
     });
 
     const rowState = pairs && Object.keys(pairs).length > 0
@@ -461,7 +485,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         present={draft.present}
                         summary={ruleSummary(draft.rule)}
                         onBeginDrag={(step, e) => paletteDrag.begin(step, e)}
-                        onAdd={(step) => dispatch({ type: 'addStep', step })}
+                        onAdd={(step) => addStep(step)}
                     />
 
                     <AuCanvas

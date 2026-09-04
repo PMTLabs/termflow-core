@@ -60,6 +60,15 @@ export function useAuNodeDrag({ toWorld, layout, onMove }: AuNodeDragOptions): A
         const move = (e: PointerEvent) => {
             const g = gesture.current;
             if (!g) return;
+            // A BUTTON THAT IS NO LONGER DOWN ended this gesture, whatever the browser told us.
+            // Releasing outside the window means `pointerup` is never delivered — the browser only
+            // reports events over its own surface and nothing here captures the pointer — so the
+            // first move back inside arrives with `buttons === 0` and the card, wire or ghost is
+            // still glued to the cursor with nothing held down.
+            if (e.buttons === 0) {
+                up();
+                return;
+            }
             if (!g.live) {
                 if (!exceedsDragSlop(e.clientX - g.startClient.x, e.clientY - g.startClient.y)) return;
                 g.live = true;

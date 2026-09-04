@@ -39,12 +39,12 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
         const needle = filter.trim().toLowerCase();
         if (needle.length === 0) return rows;
         return rows.filter((row) =>
-            [row.id, row.label ?? '', row.folder ?? ''].some((f) => f.toLowerCase().includes(needle)));
+            [row.terminalId, row.label ?? '', row.cwd ?? ''].some((f) => f.toLowerCase().includes(needle)));
     }, [rows, filter]);
 
     // Counted over the PICK SET, not over the filtered view: the bar reports what the rule watches,
     // and a filter is a way of looking at the table rather than a change to the rule.
-    const open = picked.filter((id) => rows.find((r) => r.id === id)?.alive).length;
+    const open = picked.filter((id) => rows.find((r) => r.terminalId === id)?.alive).length;
     const gone = picked.length - open;
 
     return (
@@ -90,26 +90,30 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                 )}
 
                 {shown.map((row) => {
-                    const on = picked.includes(row.id);
+                    const on = picked.includes(row.terminalId);
                     return (
                         <button
                             type="button"
-                            key={row.id}
+                            key={row.terminalId}
                             className={`au-tpickrow${on ? ' on' : ''}${row.alive ? '' : ' gone'}`}
                             aria-pressed={on}
-                            onClick={() => onToggle(row.id)}
+                            onClick={() => onToggle(row.terminalId)}
                         >
                             <span className="au-cmark" aria-hidden="true">
                                 ✓
                             </span>
-                            <span className={`au-idchip${row.alive ? '' : ' gone'}`}>{row.id}</span>
+                            <span className={`au-idchip${row.alive ? '' : ' gone'}`}>{row.terminalId}</span>
                             <span className="au-who">
                                 <span className="au-nm">{row.label ?? 'unnamed'}</span>
-                                <span className="au-cw">{row.folder ?? ''}</span>
+                                <span className="au-cw">{row.cwd ?? ''}</span>
                             </span>
                             <span className="au-st">
                                 <span className={`au-lv${row.alive ? '' : ' dead'}`} aria-hidden="true" />
-                                {row.alive ? (row.busy ? 'running' : 'idle') : 'not open'}
+                                {/* `open` / `not open`, and NOT the mockup's `running` / `idle`
+                                    third state: the roster carries no busy signal, and inventing
+                                    one from `pid` would be a guess drawn as a fact. §7.8's row
+                                    model names a `busy` field that no backend ever built. */}
+                                {row.alive ? 'open' : 'not open'}
                             </span>
                         </button>
                     );
@@ -132,7 +136,7 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                     // Select-all over the LIVE rows only. Ticking a closed terminal the user has
                     // never chosen would pin a dead id on their behalf — the one thing this screen
                     // warns about — and they can still tick it by hand if they mean it.
-                    onClick={() => onSet(Array.from(new Set([...picked, ...rows.filter((r) => r.alive).map((r) => r.id)])))}
+                    onClick={() => onSet(Array.from(new Set([...picked, ...rows.filter((r) => r.alive).map((r) => r.terminalId)])))}
                 >
                     Select all
                 </button>

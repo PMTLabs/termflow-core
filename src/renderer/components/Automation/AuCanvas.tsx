@@ -231,7 +231,13 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                         selected={draft.selected === step}
                         dropPorts={dropPorts[step]}
                         onSelect={() => onSelect(step)}
-                        onPointerDown={(e) => nodeDrag.begin(step, e)}
+                        // Space-pan wins over a node drag. React's bubble handler on the node runs
+                        // BEFORE the canvas's own, so without this a space+drag that happened to
+                        // start on a card moved the card AND the viewport, by the same delta, in
+                        // opposite directions — which looks like the card sticking to the cursor.
+                        onPointerDown={(e) => {
+                            if (!spacePan) nodeDrag.begin(step, e);
+                        }}
                         onPortPointerDown={(port: PortRef, e) => wireDrag.begin(port, e)}
                         onPortPointerUp={(port: PortRef) => wireDrag.drop(port)}
                     />

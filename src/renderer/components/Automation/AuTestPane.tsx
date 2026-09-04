@@ -58,8 +58,8 @@ export const AuTestPane: React.FC<AuTestPaneProps> = ({
                 >
                     <option value="">choose a terminal…</option>
                     {terminals.map((t) => (
-                        <option key={t.id} value={t.id} disabled={!t.alive}>
-                            {t.id} — {t.label ?? 'unnamed'}
+                        <option key={t.terminalId} value={t.terminalId} disabled={!t.alive}>
+                            {t.terminalId} — {t.label ?? 'unnamed'}
                             {t.alive ? '' : ' (not open)'}
                         </option>
                     ))}

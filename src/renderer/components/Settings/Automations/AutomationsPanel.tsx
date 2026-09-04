@@ -350,7 +350,7 @@ export const AutomationsPanel: React.FC = () => {
                 <AutomationEditor
                     rule={view.draft}
                     freshCanvas={view.fresh}
-                    pairs={runtime.rules[view.draft.id]}
+                    runtime={runtime}
                     now={now}
                     origin={origin}
                     onClose={() => setView({ kind: 'list' })}

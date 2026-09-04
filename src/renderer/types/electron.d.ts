@@ -575,11 +575,33 @@ export interface AutomationSaveResult {
   previousUpdatedAt: number | null;
 }
 
-/** One row of the §04 picker. `alive: false` rows still carry `label` and `folder` from the snapshot. */
+/**
+ * One row of the §04 picker.
+ *
+ * **The field names are `automation::roster::WatchableTerminal`'s serde output, verbatim** — §7.7's
+ * rule that the store's names are the authority, applied to a return type rather than an argument.
+ *
+ * This mirror originally read `{ id, label, folder, alive, busy }`, taken from §7.8's prose row model
+ * rather than from the struct M2 actually built. Three of the five were wrong: `id` is `terminalId`,
+ * `folder` is `cwd`, and **`busy` does not exist at all**. Nothing type-checked it — `invoke<T>` is an
+ * unchecked assertion — so the picker drew blank id chips and blank folders, ticking a row pushed
+ * `undefined` into `targetIds`, the "N open" bar always said zero, and ▶ Test always answered *"no
+ * terminal is open to test against"*. M4's review verified all eleven commands' ARGUMENTS
+ * argument-by-argument and never their return shapes; this is that gap, at the one command whose
+ * return the renderer reads field by field.
+ *
+ * `alive: false` rows still carry `label` and `cwd` from the rule's own snapshot — that is the entire
+ * reason `automation_targets` keeps one, and the mockup draws the dead row with its name and folder.
+ */
 export interface WatchableTerminal {
-  id: string;
+  /** The durable `tm-` leaf. The same string the rule stores, the log shows and the MCP tools use. */
+  terminalId: string;
+  /** The `pc-` process id of the run it is currently attached to, or null when it is not open. */
+  processId?: string | null;
   label?: string | null;
-  folder?: string | null;
+  shell?: string | null;
+  pid?: number | null;
+  /** The working folder, from OSC or the process snapshot. `folder` in §7.8's prose. */
+  cwd?: string | null;
   alive: boolean;
-  busy: boolean;
 }

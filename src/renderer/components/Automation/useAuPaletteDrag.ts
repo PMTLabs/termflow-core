@@ -12,14 +12,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NodePos } from './automationDraft';
 import { AU_NODE_H, AU_NODE_W } from './automationDraft';
 import type { StepKind } from './automationSteps';
-import { canAddStep } from './automationSteps';
 
 export interface AuPaletteDragOptions {
-    present: readonly StepKind[];
     /** Screen → world, and `null` when the pointer is not over the canvas at all. */
     toWorld: (clientX: number, clientY: number) => NodePos | null;
+    /**
+     * **The one entry point that decides whether a step may be added**, shared with the palette's
+     * keyboard/click path.
+     *
+     * This hook used to ask `canAddStep` itself, which made the DRAG the only gated route: the same
+     * palette item is also a button, and clicking it dispatched straight into the reducer — so
+     * clicking *Compare it* on an empty canvas added it with nothing to compare, in a shape the drag
+     * refuses. `gate-in-the-caller-lets-new-callers-opt-out`: a gate that lives in one caller is a
+     * gate the next caller opts out of by existing.
+     */
     onAdd: (step: StepKind, pos: NodePos) => void;
-    onRefuse: (reason: string) => void;
 }
 
 export interface AuPaletteDrag {
@@ -28,15 +35,10 @@ export interface AuPaletteDrag {
     begin: (step: StepKind, e: { clientX: number; clientY: number }) => void;
 }
 
-export function useAuPaletteDrag({
-    present,
-    toWorld,
-    onAdd,
-    onRefuse,
-}: AuPaletteDragOptions): AuPaletteDrag {
+export function useAuPaletteDrag({ toWorld, onAdd }: AuPaletteDragOptions): AuPaletteDrag {
     const [ghost, setGhost] = useState<{ step: StepKind; x: number; y: number } | null>(null);
-    const latest = useRef({ present, toWorld, onAdd, onRefuse });
-    latest.current = { present, toWorld, onAdd, onRefuse };
+    const latest = useRef({ toWorld, onAdd });
+    latest.current = { toWorld, onAdd };
 
     const begin = useCallback((step: StepKind, e: { clientX: number; clientY: number }) => {
         setGhost({ step, x: e.clientX, y: e.clientY });
@@ -44,19 +46,26 @@ export function useAuPaletteDrag({
 
     useEffect(() => {
         const move = (e: PointerEvent) => {
+            // A BUTTON THAT IS NO LONGER DOWN ended this gesture, whatever the browser told us.
+            // Releasing outside the window means `pointerup` is never delivered — the browser only
+            // reports events over its own surface and nothing here captures the pointer — so the
+            // first move back inside arrives with `buttons === 0` and the card, wire or ghost is
+            // still glued to the cursor with nothing held down.
+            if (e.buttons === 0) {
+                setGhost(null);
+                return;
+            }
             setGhost((held) => (held ? { ...held, x: e.clientX, y: e.clientY } : held));
         };
         const up = (e: PointerEvent) => {
             setGhost((held) => {
                 if (!held) return null;
-                const { present: on, toWorld: convert, onAdd: add, onRefuse: refuse } = latest.current;
+                const { toWorld: convert, onAdd: add } = latest.current;
                 const world = convert(e.clientX, e.clientY);
                 // Dropped outside the canvas: not a refusal, just not a drop. Saying "that step
                 // cannot go there" for a gesture the user abandoned would be noise.
                 if (!world) return null;
-                const refusal = canAddStep(on, held.step);
-                if (refusal) refuse(refusal.reason);
-                else add(held.step, { x: world.x - AU_NODE_W / 2, y: world.y - AU_NODE_H / 2 });
+                add(held.step, { x: world.x - AU_NODE_W / 2, y: world.y - AU_NODE_H / 2 });
                 return null;
             });
         };

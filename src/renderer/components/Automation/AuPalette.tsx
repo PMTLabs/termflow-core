@@ -36,9 +36,14 @@ export const AuPalette: React.FC<AuPaletteProps> = ({ present, summary, onBeginD
                         // saying why. It stays focusable and explains itself instead.
                         aria-disabled={refusal !== null}
                         title={refusal?.reason ?? `Add ${STEP_LABELS[step]}`}
-                        onPointerDown={(e) => {
-                            if (!refusal) onBeginDrag(step, e);
-                        }}
+                        // `canAddStep` above decides how this LOOKS. It does not decide whether the
+                        // add happens: both routes call through to the editor's one `onAdd`, which
+                        // is where the refusal is made and reported. A gate in one of two callers
+                        // is a gate the other opts out of by existing
+                        // (`gate-in-the-caller-lets-new-callers-opt-out`) — and that is exactly what
+                        // happened here: the DRAG asked, the CLICK on the same item did not, so
+                        // clicking *Compare it* on an empty canvas added it with nothing to compare.
+                        onPointerDown={(e) => onBeginDrag(step, e)}
                         onClick={() => onAdd(step)}
                     >
                         <span className="au-palico" aria-hidden="true">

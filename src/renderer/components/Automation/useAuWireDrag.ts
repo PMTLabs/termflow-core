@@ -35,6 +35,10 @@ export interface AuWireDrag {
 export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDragOptions): AuWireDrag {
     const [from, setFrom] = useState<PortRef | null>(null);
     const [pointer, setPointer] = useState<NodePos | null>(null);
+    // The anchor, readable synchronously from an event handler that must not run effects inside a
+    // state updater. Assigned during render, the way `latest` below is.
+    const fromRef = useRef<PortRef | null>(null);
+    fromRef.current = from;
     const latest = useRef({ toWorld, draft, onConnect, onRefuse });
     latest.current = { toWorld, draft, onConnect, onRefuse };
 
@@ -44,26 +48,39 @@ export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDra
     }, []);
 
     const drop = useCallback((port: PortRef) => {
-        setFrom((held) => {
-            if (!held) return null;
-            const a = portSpec(held);
-            const b = portSpec(port);
-            // Orient by which end is the output. When BOTH are outputs (or both inputs) there is no
-            // orientation, and `canConnect` says so in words — the case this ordering exists to let
-            // through to it rather than silently swallow.
-            const ordered = a && a.dir === 'out' ? { from: held, to: port }
-                : b && b.dir === 'out' ? { from: port, to: held }
-                    : { from: held, to: port };
-            const refusal = canConnect(latest.current.draft, ordered.from, ordered.to);
-            if (refusal) latest.current.onRefuse(refusal.reason);
-            else latest.current.onConnect(ordered);
-            return null;
-        });
+        // The held anchor comes from a REF, not from inside a `setFrom` updater. A state updater must
+        // be pure: React invokes it twice under StrictMode, so connecting (and toasting a refusal)
+        // from inside one fires the effect twice for one drop — two wires, or two toasts, from one
+        // gesture, and only in development, which is where it would be dismissed as noise.
+        const held = fromRef.current;
+        setFrom(null);
         setPointer(null);
+        if (!held) return;
+
+        const a = portSpec(held);
+        const b = portSpec(port);
+        // Orient by which end is the output. When BOTH are outputs (or both inputs) there is no
+        // orientation, and `canConnect` says so in words — the case this ordering exists to let
+        // through to it rather than silently swallow.
+        const ordered = a && a.dir === 'out' ? { from: held, to: port }
+            : b && b.dir === 'out' ? { from: port, to: held }
+                : { from: held, to: port };
+        const refusal = canConnect(latest.current.draft, ordered.from, ordered.to);
+        if (refusal) latest.current.onRefuse(refusal.reason);
+        else latest.current.onConnect(ordered);
     }, []);
 
     useEffect(() => {
         const move = (e: PointerEvent) => {
+            // A BUTTON THAT IS NO LONGER DOWN ended this gesture, whatever the browser told us.
+            // Releasing outside the window means `pointerup` is never delivered — the browser only
+            // reports events over its own surface and nothing here captures the pointer — so the
+            // first move back inside arrives with `buttons === 0` and the card, wire or ghost is
+            // still glued to the cursor with nothing held down.
+            if (e.buttons === 0 && fromRef.current !== null) {
+                up();
+                return;
+            }
             setPointer((held) => (held === null ? held : latest.current.toWorld(e.clientX, e.clientY)));
         };
         // A pointerup anywhere that is not a port ends the gesture. The port's own handler runs
