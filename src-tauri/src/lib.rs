@@ -1777,10 +1777,14 @@ pub fn run() {
                 // loops check it at the top of every iteration and a send checks it before its first
                 // write, so a quit leaves every send either unstarted or complete.
                 //
-                // There is no log flush to perform here, and that is by design rather than by
-                // omission: `AutomationStore::append` writes the row through to SQLite inside its own
-                // call, so a row that exists has already been committed. What Exit owes this feature
-                // is stopping the loops before the runtime is torn down under them.
+                // There is no log flush to perform here. Plan §7.5's table planned an internal batch
+                // buffer flushed every 2 s and synchronously on Exit; M1 shipped
+                // `AutomationStore::append` as write-through — the INSERT happens inside the call —
+                // and did not record the change. Write-through is the better end state (a row that
+                // exists is already committed, and there is no 2 s window a crash can lose) and it
+                // makes §7.5's actual requirement — each entry keeping its own decision timestamp
+                // rather than a flush-time `now` — trivially true. Corrected in the plan. What Exit
+                // owes this feature is stopping the loops before the runtime is torn down.
                 state.automations.stop();
             }
             // Stop advertising this instance. A crash leaves the record behind,
