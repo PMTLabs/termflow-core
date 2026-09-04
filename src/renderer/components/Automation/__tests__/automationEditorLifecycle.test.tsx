@@ -20,6 +20,8 @@ import { AutomationsPanel } from '../../Settings/Automations/AutomationsPanel';
 // eslint-disable-next-line import/first
 import { inputHandler } from '../../../services/InputHandler';
 // eslint-disable-next-line import/first
+import { ENABLE_FLASH_MS } from '../AutomationEditor';
+// eslint-disable-next-line import/first
 import type { AutomationRule, WatchableTerminal } from '../../../types/electron';
 
 function rule(over: Partial<AutomationRule> = {}): AutomationRule {
@@ -339,6 +341,10 @@ describe('the editor, mounted', () => {
         expect(sent.graph.action.message).toBe('');
         // And the header agrees with what was written, rather than still reading *Enabled*.
         expect(editor()!.querySelector('.au-tog')!.getAttribute('aria-checked')).toBe('false');
+        // The OTHER route to a rule that is stored switched off, and it must not flash either: the
+        // switch it would point at is disabled and would refuse. The table below covers a rule that
+        // was ALREADY off; this covers one this save turned off.
+        expect(editor()!.querySelector('.au-tog')!.classList.contains('flash')).toBe(false);
     });
 
     /** A rule with no problems is saved exactly as it is — the paired positive. */
@@ -378,6 +384,103 @@ describe('the editor, mounted', () => {
             expect(api.listWatchableTerminals.mock.calls.length).toBeGreaterThan(atMount);
         } finally {
             spy.mockRestore();
+        }
+    });
+
+    /**
+     * **A save that visibly does nothing, on the most common path into this editor.**
+     *
+     * A rule taken from a template lands `enabled: false` — `automationTemplates.ts` calls that its
+     * safety property and it is NOT being changed — and `save` above can only ever turn `enabled`
+     * OFF, never on. So: pick a template, edit it, save, and the screen reports a successful write
+     * of a rule that will never run, with nothing anywhere saying so. Tam's ruling was to keep the
+     * safety property and make the next step visible instead: the switch flashes.
+     *
+     * **Three cases, and two of them must NOT flash**, which is the half worth testing. Pointing a
+     * user at a control that is dimmed and will refuse them is worse than saying nothing at all, and
+     * a rule that saved switched ON is already running — there is nothing to prompt for. The
+     * blocking check is `blockingProblems(...)`, the SAME list the toggle's own `disabled` is
+     * computed from, so the cue and the control cannot disagree about whether the rule may run.
+     *
+     * `saveAutomation` is asserted to have happened in every row: without it, "did not flash" is
+     * green for a save that never took place, which is true of any mutation that breaks saving.
+     */
+    const tog = () => editor()!.querySelector<HTMLButtonElement>('.au-tog')!;
+
+    /** Disabled, and with a blocking problem — an empty message (`action.empty`). */
+    const blocked = () => {
+        const base = rule({ enabled: false });
+        return rule({
+            enabled: false,
+            graph: { ...base.graph, action: { ...base.graph.action, message: '' } },
+        });
+    };
+
+    // Ordered `[case, flashes, subject]` so both `%s` in the title land on the two values worth
+    // reading in the runner's output — with the factory second, jest prints its SOURCE as the name.
+    it.each([
+        ['off, with nothing wrong with it', true, () => rule({ enabled: false })],
+        ['on, so it is already running', false, () => rule({ enabled: true })],
+        ['off BECAUSE something blocks it', false, blocked],
+    ] as Array<[string, boolean, () => AutomationRule]>)(
+        'saved %s — the Enable toggle flashes: %s',
+        async (_case, flashes, subject) => {
+            const api = await openEditorOn(subject());
+            await pressCtrlS();
+            await settle();
+
+            expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+            expect(tog().classList.contains('flash')).toBe(flashes);
+            // `.au-tog` is never replaced by `.flash`, it is joined by it: every selector and every
+            // other test in this file reaches this control by that class.
+            expect(tog().classList.contains('au-tog')).toBe(true);
+        },
+    );
+
+    /**
+     * It stops on its own. A control that keeps blinking until it is clicked has started nagging.
+     *
+     * The registered callback is invoked directly rather than through fake timers, because this
+     * suite flushes promises on the real clock — the same technique the roster test above uses, and
+     * for the same reason. What is asserted is that a timeout of exactly `ENABLE_FLASH_MS` was
+     * registered and that running it ENDS the cue.
+     */
+    it('stops flashing by itself', async () => {
+        const spy = jest.spyOn(window, 'setTimeout');
+        try {
+            await openEditorOn(rule({ enabled: false }));
+            await pressCtrlS();
+            await settle();
+            expect(tog().classList.contains('flash')).toBe(true);
+
+            const ends = spy.mock.calls.filter(([, ms]) => ms === ENABLE_FLASH_MS);
+            expect(ends).toHaveLength(1);
+            await act(async () => { (ends[0][0] as () => void)(); });
+
+            expect(tog().classList.contains('flash')).toBe(false);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    /** …and if the editor is closed while it is still playing, the timer goes with it. */
+    it('clears the flash timer when the editor unmounts mid-flash', async () => {
+        const setSpy = jest.spyOn(window, 'setTimeout');
+        const clearSpy = jest.spyOn(window, 'clearTimeout');
+        try {
+            await openEditorOn(rule({ enabled: false }));
+            await pressCtrlS();
+            await settle();
+
+            const at = setSpy.mock.calls.findIndex(([, ms]) => ms === ENABLE_FLASH_MS);
+            expect(at).toBeGreaterThanOrEqual(0);
+            const handle = setSpy.mock.results[at].value;
+
+            await act(async () => root.unmount());
+            expect(clearSpy).toHaveBeenCalledWith(handle);
+        } finally {
+            setSpy.mockRestore();
+            clearSpy.mockRestore();
         }
     });
 });

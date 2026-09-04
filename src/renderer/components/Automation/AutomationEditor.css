@@ -549,12 +549,42 @@
     color: #7d818c;
 }
 
+/*
+ * TWO lines, then the ellipsis — not one.
+ *
+ * The monitor card's `Watch` row carries the criterion sentence (`command contains "claude" · 3
+ * now`), which is the longest value any face draws, and at one `nowrap` line it clipped inside the
+ * quotes on every real rule: the card named a terminal set it could not show. `AuNode` still hands
+ * every value a `title` with the untruncated text, because two lines truncate as well — later.
+ *
+ * `-webkit-line-clamp` is the only thing that ellipses a MULTI-line block, and it is inert without
+ * the `display`/`box-orient` pair beside it — they are the mechanism, not decoration. Prefixed and
+ * unprefixed both, because they are the old and new spellings of one rule and this app renders in
+ * three different engines: Tauri gives us WebView2/Chromium on Windows, **WKWebView on macOS and
+ * WebKitGTK on Linux**. What makes the clamp safe on all three is not that they are all Chromium
+ * (they are not) — it is that `-webkit-line-clamp` is WebKit's OWN feature, which every
+ * WebKit-descended engine implements under the prefix; `line-clamp` is the standardised spelling
+ * the newer ones also accept, and the one that will outlive the prefix.
+ *
+ * `line-height` is STATED rather than left at the UA's `normal` because `AU_NODE_H` is derived from
+ * it — see the arithmetic in `automationDraft.ts`. A card sized against one platform's idea of
+ * `normal` is a card that overflows on another.
+ *
+ * `overflow-wrap: anywhere` because a folder criterion is one long unbreakable token: without it a
+ * long `working folder is under …` value would put the whole path on a line of its own and waste
+ * the first one.
+ */
 .au-editor .au-nval {
     flex: 1;
+    min-width: 0;
     color: #cfd2d8;
-    white-space: nowrap;
+    line-height: 17px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 
 .au-editor .au-nval.warn {
@@ -1471,5 +1501,114 @@
     gap: 9px;
     padding-top: 9px;
     font-size: 0.85rem;
+    color: #6a6e77;
+}
+
+/* ------------------------------------------------- terminal hover card --- */
+
+/*
+ * `AuTerminalHoverCard`, and the ONE block in this file with no `.au-editor` ancestor selector.
+ *
+ * That is not an oversight and must not be "tidied up": the card portals to `document.body` to
+ * escape two clipping scrollers (the 340px inspector column and the picker's own 260px list), so
+ * `.au-editor .au-hovcard` would match nothing at all and the card would render unstyled at the
+ * top-left of the window. `.au-editor` itself is written the same way, one screen up, for the same
+ * reason.
+ *
+ * `pointer-events: none` is the whole "hover affordance, not a flyout" contract in one line: the
+ * pointer travels straight through, so a card describing the row above can never intercept a click
+ * meant for the row below it, and the card can never keep itself alive by being hovered.
+ *
+ * Placement is inline (`left`/`top`/`width`/`max-height` from `hoverCardPosition`), because it is
+ * computed per row from a live `getBoundingClientRect()`; `max-height` is repeated here so the
+ * clamp's assumption is enforced by the same rule that the clamp assumes.
+ */
+.au-hovcard {
+    position: fixed;
+    z-index: 9991;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    max-height: 280px;
+    overflow: hidden;
+    font-size: 0.85rem;
+    color: #cfd2d8;
+    background: #101115;
+    border: 1px solid #3a3c44;
+    border-radius: 9px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    pointer-events: none;
+}
+
+.au-hovcard .au-hovid {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.au-hovcard .au-hovfield {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
+    gap: 8px;
+    align-items: baseline;
+}
+
+.au-hovcard .au-hovk {
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #6a6e77;
+}
+
+/* The point of the card is the text the ROW could not show, so nothing here may ellipse. A folder
+   wraps onto as many lines as it needs, and `anywhere` is what lets an unbroken path do so. */
+.au-hovcard .au-hovv {
+    color: #e6e6e8;
+    overflow-wrap: anywhere;
+}
+
+.au-hovcard .au-hovv.mono {
+    font-family: var(--font-mono, monospace);
+    color: #9fd8f7;
+}
+
+.au-hovcard .au-hovv.none {
+    color: #6a6e77;
+    font-style: italic;
+}
+
+.au-hovcard .au-hovclosed {
+    margin: 0;
+    padding-top: 7px;
+    line-height: 1.5;
+    color: #82868f;
+    border-top: 1px solid #2b2d33;
+}
+
+.au-hovcard .au-hovprev {
+    min-height: 0;
+    padding: 7px 8px;
+    background: #0a0b0e;
+    border: 1px solid #2b2d33;
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+/* `pre` with no wrap: a terminal line that is wider than the card is CROPPED, not reflowed. A
+   reflowed screen is a different screen, and the last six lines silently becoming nine defeats the
+   fixed height this card is placed against. */
+.au-hovcard .au-hovprev pre {
+    margin: 0;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.78rem;
+    line-height: 1.35;
+    color: #a9adb6;
+    white-space: pre;
+    overflow: hidden;
+}
+
+.au-hovcard .au-hovwait {
+    font-size: 0.8rem;
     color: #6a6e77;
 }

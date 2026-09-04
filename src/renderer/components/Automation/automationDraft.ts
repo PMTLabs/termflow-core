@@ -36,7 +36,36 @@ export interface NodePos {
 
 /** A finished rule is four cards on a ~900×260 world (§6.5) — hence no minimap. */
 export const AU_NODE_W = 244;
-export const AU_NODE_H = 160;
+// The card is a FIXED box, so its height has to be big enough for the tallest face any step can
+// draw, and that is the monitor's: three rows (Watch / Read / Check) whose first value is the
+// criterion sentence — `command contains "claude" · 3 now` — the longest string on any card.
+// `.au-nval` clamps a value to TWO lines rather than ellipsing it at one, so a row is one line or
+// two, and the budget has to say WHICH rows take two.
+//
+// The value column is ~159px (`AU_NODE_W` less the node borders, the body's 11/9 padding, the 56px
+// label and the 7px row gap) at 0.85rem, so roughly 23 characters a line. Measured against that:
+// Watch wraps on any real criterion, and **Read wraps too** — `READ_PHRASES` are 24 and 26
+// characters. Check does not: every `describeCadence` string (`On every new line`,
+// `Checks every 30s`, `Checks every 5 min`) is 18 characters or fewer. That is FIVE text lines,
+// not the four this budget was first written for:
+//
+//   head    19px icon + 7/5 padding + 1px rule                     = 32
+//   body    12px padding + 2×3px gaps + 5×17px lines               = 103
+//   foot    the badge, plus its 7px padding                        ≈ 31
+//   borders                                                        =  2
+//                                                                  ≈ 168
+//
+// 180 rather than that 168 because two of those terms — the head's icon row and the foot's badge —
+// are set in the UA's `normal` line-height, which is not the same number on every platform. The
+// 17px in the body term is stated in `.au-nval` for exactly this reason; the other two cannot be
+// without restyling text this change has no business touching.
+//
+// **The slack is one line, and it is spent.** A third wrapped row would want ~185px, and `.au-node`
+// is `overflow: visible`, so a card that runs out of room does not clip — it spills over the card
+// below it. Anything that lengthens a monitor row's phrasing, widens the label column or raises
+// `.au-nval`'s line-height has to come back here; `auNodeTwoLineValue.test.tsx` derives this same
+// arithmetic from the stylesheet and the rendered face, and fails if it stops adding up.
+export const AU_NODE_H = 180;
 // Node PITCH, not the space between nodes: the gap is `AU_GAP_X - AU_NODE_W`, and at the old
 // 232/206 that gap was 26px. A port label is centred on its port, and a port sits ON the node's
 // edge — so an output label and the next node's input label were each half-overhanging into the

@@ -61,3 +61,52 @@
     outline: 2px solid #4da6e0;
     outline-offset: 1px;
 }
+
+/*
+ * **The post-save cue** (`ENABLE_FLASH_MS` in `AutomationEditor.tsx`).
+ *
+ * A rule from a template is stored switched off on purpose, and a Save can only ever switch a rule
+ * OFF — never on. So the last thing that happens on the template path is a save that changes
+ * nothing the user can see, on a screen with no hint that one more click is required. This is that
+ * hint: the switch pulses three times and stops.
+ *
+ * It lives HERE, in the one file that owns `.au-tog`, and not in either stylesheet that imports it.
+ * The whole reason this file exists is that `.au-tog` once had two definitions whose properties did
+ * not overlap, so the cascade could not choose between them and they COMPOSED — a knob pushed 31px
+ * along a 32px track. An animation added on one side of that split would be the same mistake with a
+ * different property.
+ *
+ * The green here is `#3fb950`, the colour the switch turns when it IS on: the cue shows the user
+ * the state they are being invited into, rather than introducing a fourth colour to this control.
+ */
+@keyframes au-tog-flash {
+    0%,
+    100% {
+        border-color: #3a3c44;
+        box-shadow: 0 0 0 0 rgba(63, 185, 80, 0);
+    }
+    50% {
+        border-color: #3fb950;
+        box-shadow: 0 0 0 4px rgba(63, 185, 80, 0.28);
+    }
+}
+
+.au-tog.flash {
+    animation: au-tog-flash 0.6s ease-in-out 3;
+}
+
+/*
+ * The same message, held still.
+ *
+ * `animation: none` alone would leave the reduced-motion user with no cue at all — the whole point
+ * of the class silently deleted for the people it is hardest to re-explain to. A steady ring in the
+ * same green says "look here" without moving, and it is removed by the same timer that ends the
+ * animation for everyone else, so it does not become a permanent second state of the switch.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .au-tog.flash {
+        animation: none;
+        border-color: #3fb950;
+        box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.28);
+    }
+}

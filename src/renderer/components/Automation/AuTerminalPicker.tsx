@@ -11,9 +11,29 @@
  * A terminal that closes keeps its tick, greyed, and keeps its NAME and FOLDER, because
  * `list_watchable_terminals` fills a missing id from the rule's own label snapshot. Nothing else can
  * describe an id that is gone, and a bare id in a list of names reads as corruption.
+ *
+ * **Every column of the row ellipses, so the row alone cannot identify a terminal.** The id chip,
+ * the name and the folder all clip, and the grid is `18px 108px minmax(0,1fr) 74px` — 108px holds
+ * about a dozen characters of a `tm-` id. Two agents in sibling folders therefore drew
+ * as two rows identical up to the characters neither of them showed, in a table whose entire job is
+ * telling terminals apart. The full text is now on the row's own `title`, and hovering a row opens
+ * `AuTerminalHoverCard`: every field the roster carries — including `shell` and `pid`, which were
+ * fetched and displayed nowhere — plus a few lines of what is on that terminal's screen right now.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { WatchableTerminal } from '../../types/electron';
+import { AuTerminalHoverCard, evictPreviewsOutside } from './AuTerminalHoverCard';
+
+/**
+ * The three fields `hoverCardPosition` actually reads.
+ *
+ * Compared field by field rather than by object identity, because `getBoundingClientRect()` mints a
+ * fresh `DOMRect` on every call: an identity check would report "moved" on every pointer move and
+ * re-render the card at the same coordinates a hundred times a second. Width and height are left
+ * out because nothing about the card's placement depends on them.
+ */
+const sameAnchor = (a: DOMRect, b: DOMRect): boolean =>
+    a.top === b.top && a.left === b.left && a.right === b.right;
 
 export interface AuTerminalPickerProps {
     rows: WatchableTerminal[];
@@ -34,6 +54,17 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
     onSet,
 }) => {
     const [filter, setFilter] = useState('');
+    /**
+     * Which row the pointer is on, by ID and not by object.
+     *
+     * The roster is re-fetched every few seconds while the editor is open (`ROSTER_POLL_MS`), and
+     * every poll replaces `rows` with freshly-deserialised objects. Holding the row itself would
+     * pin the card to the copy that was current when the pointer arrived, so a terminal that closed
+     * — or changed folder — while being hovered would keep describing itself as it was. The id is
+     * what survives a refetch, so the card is looked up from the CURRENT `shown` on every render
+     * and stays live.
+     */
+    const [hovered, setHovered] = useState<{ id: string; anchor: DOMRect } | null>(null);
 
     const shown = useMemo(() => {
         const needle = filter.trim().toLowerCase();
@@ -46,6 +77,32 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
     // and a filter is a way of looking at the table rather than a change to the rule.
     const open = picked.filter((id) => rows.find((r) => r.terminalId === id)?.alive).length;
     const gone = picked.length - open;
+
+    // Resolved against the FILTERED view, so typing a filter that hides the hovered row takes its
+    // card with it: the pointer never leaves that row (it is gone), so no `mouseleave` is coming.
+    const hoveredRow = hovered === null
+        ? null
+        : shown.find((r) => r.terminalId === hovered.id) ?? null;
+
+    /**
+     * Bound the hover card's snapshot cache to the roster, on the way OUT of a hover.
+     *
+     * That cache is module-level and therefore immortal, and it is keyed by a process id, which is
+     * the id that churns: a terminal closed and reopened is a new key, so every screen the pointer
+     * ever crossed accumulated for the life of the window. Evicting down to the current roster keeps
+     * the whole point of the cache — running the pointer up and down THIS list still never refetches
+     * — while making the key space "terminals on the list" rather than "terminals ever hovered".
+     *
+     * On the way out rather than on the way in: the hovered row's own entry is the one entry that
+     * must survive, and while it is hovered it is by definition still on the list.
+     */
+    useEffect(() => {
+        if (hovered !== null) return;
+        evictPreviewsOutside(rows);
+    }, [hovered, rows]);
+
+    /** And a closed picker needs none of them: nothing can be hovered from a list that is gone. */
+    useEffect(() => () => evictPreviewsOutside([]), []);
 
     return (
         <div className="au-fgroup">
@@ -97,6 +154,57 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                             key={row.terminalId}
                             className={`au-tpickrow${on ? ' on' : ''}${row.alive ? '' : ' gone'}`}
                             aria-pressed={on}
+                            // **The cheap half of "identify this terminal", and it must stay.**
+                            // The hover card is a portal, a fetch and a layout clamp; this is an
+                            // attribute. It is what a keyboard user, a screen reader and a viewer
+                            // whose snapshot never resolves still get, and it carries the three
+                            // fields the row itself clips.
+                            title={[
+                                row.terminalId,
+                                row.label ?? 'unnamed',
+                                row.cwd ?? 'folder not reported',
+                                row.alive ? 'open' : 'not open',
+                            ].join('\n')}
+                            // `mouseenter`/`mouseleave` rather than `pointerenter`: these do not
+                            // fire for a touch, and a card that appears under a finger it cannot be
+                            // dismissed from is worse than no card. The rect is read here, at the
+                            // moment of the gesture, because it is the only moment the row's
+                            // position is known to be settled.
+                            onMouseEnter={(e) => setHovered({
+                                id: row.terminalId,
+                                anchor: e.currentTarget.getBoundingClientRect(),
+                            })}
+                            // **The row moves under a pointer that does not.** `.au-tpick` is a
+                            // 260px scroller and the inspector column scrolls too, so a wheel can
+                            // slide this row up or down while the pointer rests on it — and no new
+                            // `mouseover` fires for an element that never stopped being under the
+                            // cursor. Captured once at `mouseenter`, the card stayed at the old
+                            // client-y and drifted off the row it is naming, on a card whose only
+                            // job is saying WHICH row this is.
+                            //
+                            // Re-read here rather than from a `scroll`/`resize` listener: that
+                            // would mean a listener to attach, tear down and keep pointed at
+                            // whichever ancestor actually scrolled, where this is one rect read on
+                            // a gesture the pointer is already making. Unchanged rects return the
+                            // same state object, so React bails out and a move across a row that
+                            // has not shifted costs no render at all.
+                            onMouseMove={(e) => {
+                                const box = e.currentTarget.getBoundingClientRect();
+                                setHovered((cur) => (
+                                    cur === null
+                                    || cur.id !== row.terminalId
+                                    || sameAnchor(cur.anchor, box)
+                                        ? cur
+                                        : { id: cur.id, anchor: box }
+                                ));
+                            }}
+                            // Cleared only if the card still belongs to THIS row. A leave that
+                            // arrives once the pointer has already opened the next row's card would
+                            // otherwise close it — one identity check, rather than depending on
+                            // React dispatching every leave before the enter that follows it.
+                            onMouseLeave={() => setHovered(
+                                (cur) => (cur?.id === row.terminalId ? null : cur),
+                            )}
                             onClick={() => onToggle(row.terminalId)}
                         >
                             <span className="au-cmark" aria-hidden="true">
@@ -119,6 +227,14 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                     );
                 })}
             </div>
+
+            {/* ONE card, for the row the pointer is actually on — never one per row.
+                Rendering a card (and therefore a `/snapshot` poll) per row would fetch the whole
+                roster every second for a question the user asked about exactly one terminal, and
+                the picker is the surface a user opens WHILE agents are running. */}
+            {hoveredRow !== null && hovered !== null && (
+                <AuTerminalHoverCard row={hoveredRow} anchor={hovered.anchor} />
+            )}
 
             <div className="au-pickbar">
                 <span>
