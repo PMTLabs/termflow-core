@@ -75,6 +75,15 @@ pub struct SubmitPattern<'a> {
 ///    input because it believes it is blurred. Best-effort: its failure is not the send's failure,
 ///    which is what `send_prompt_to_terminal` did before the extraction.
 /// 4. the **submit**, when `submit` is true.
+/// The form an echo needle is recorded in (plan §2.6).
+///
+/// Runs of ASCII whitespace collapse to one space and the ends are trimmed. A terminal re-wraps and
+/// re-indents what it echoes, so comparing the raw message against the raw window would miss on any
+/// message long enough to wrap — which is most of them, the canonical one being a sentence.
+pub fn normalise(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub async fn deliver(
     writer: &dyn TerminalWriter,
     pc: &str,

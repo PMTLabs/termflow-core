@@ -25,6 +25,8 @@ use std::sync::{Arc, RwLock};
 
 pub mod due;
 pub mod eval;
+pub mod host;
+pub mod loops;
 
 use regex::Regex;
 

@@ -28,6 +28,16 @@ use dashmap::DashMap;
 
 use crate::automation_engine::eval::ArmState;
 
+/// How many echo needles one terminal may carry at once (§2.6).
+pub const ECHO_CAP: usize = 4;
+
+/// How long a needle stays live. Long enough that a slow CLI echoing late is still recognised,
+/// short enough that a needle cannot outlive the scrollback it was typed into.
+pub const ECHO_TTL_MS: i64 = 10 * 60 * 1_000;
+
+/// How long after a send no rule evaluates that terminal.
+pub const ECHO_SETTLE_MS: i64 = 1_500;
+
 /// One live echo needle: text this feature itself typed into a terminal, which must be stripped from
 /// that terminal's window before any rule extracts from it.
 ///
@@ -66,6 +76,12 @@ pub struct AutomationRuntime {
     /// stamp that must survive a re-arm — *“fired 3 times, last 10 minutes ago”* on a row that is
     /// currently armed. Keyed like `arm`, and purged by both teardowns for the same reason.
     fires: DashMap<(String, String), (u32, i64)>,
+    /// `tm_id` -> no rule evaluates this terminal until then (§2.6 layer 2).
+    ///
+    /// Per TERMINAL and not per rule, for the same reason `echoes` is: the settle window exists to
+    /// let one rule's own message land and scroll, and a second rule reading that terminal in the
+    /// meantime sees the same injected text.
+    settled_until: DashMap<String, i64>,
     /// `rule_id` -> the leaves it watches. The targeting tick is its only writer.
     watched: DashMap<String, HashSet<String>>,
 }
@@ -119,6 +135,7 @@ impl AutomationRuntime {
         self.fires.retain(|(_, t), _| t != tm);
         self.echoes.remove(tm);
         self.send_locks.remove(tm);
+        self.settled_until.remove(tm);
     }
 
     /// The `pc-`keyed half of the same teardown. Separate because `dirty` is keyed by the process id
@@ -161,11 +178,34 @@ impl AutomationRuntime {
 
     // --- echoes --------------------------------------------------------------------------------
 
+    /// Record a needle, keeping at most [`ECHO_CAP`] per terminal (§2.6).
+    ///
+    /// The cap is not decoration: this map is only ever pruned by expiry, and a rule on a 10 s timer
+    /// that fires all day would otherwise grow an unbounded `Vec` that every evaluation of that
+    /// terminal walks. The OLDEST needle is dropped, because the newest is the one still on screen.
     pub fn push_echo(&self, tm: &str, text: &str, until_ms: i64) {
-        self.echoes
-            .entry(tm.to_string())
-            .or_default()
-            .push(EchoNeedle { text: text.to_string(), until_ms });
+        let mut entry = self.echoes.entry(tm.to_string()).or_default();
+        entry.push(EchoNeedle { text: text.to_string(), until_ms });
+        let overflow = entry.len().saturating_sub(ECHO_CAP);
+        if overflow > 0 {
+            entry.drain(0..overflow);
+        }
+    }
+
+    // --- the settle window (§2.6 layer 2) --------------------------------------------------------
+
+    /// Hold every rule off this terminal until `until_ms`.
+    ///
+    /// Taken after a send, so the echo of the message this engine just typed is not read as organic
+    /// output. It comfortably spans route A's 500 ms paste-to-submit gap, and it is what stops the
+    /// burst on the `OnOutput` cadence, where the echo chunk itself immediately marks the terminal
+    /// dirty.
+    pub fn settle_until(&self, tm: &str, until_ms: i64) {
+        self.settled_until.insert(tm.to_string(), until_ms);
+    }
+
+    pub fn is_settling(&self, tm: &str, now_ms: i64) -> bool {
+        self.settled_until.get(tm).is_some_and(|e| *e.value() > now_ms)
     }
 
     /// The live needles for one terminal, dropping any that have expired.

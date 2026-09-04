@@ -130,13 +130,23 @@ pub const MISSING_GRACE_MS: i64 = 30_000;
 ///
 /// Empty until the grace has elapsed — **not** because the ids are present, but because "absent" is
 /// not yet a fact about the world.
+/// Is this engine old enough for an absent id to mean anything? (plan §4.5)
+///
+/// At t=0 the live set is empty and session restore has not run, so reporting an absent pinned id
+/// immediately writes a "1 id not open" line on every normal restart and then silently retracts it.
+/// One implementation with two callers — this projection and the targeting tick — because the same
+/// window has to open for both, or the rule row and the activity log disagree about what is missing.
+pub fn grace_elapsed(now_ms: i64, engine_start_ms: i64) -> bool {
+    now_ms - engine_start_ms > MISSING_GRACE_MS
+}
+
 pub fn missing_to_report(
     rows: &[WatchableTerminal],
     pinned: &[String],
     now_ms: i64,
     engine_start_ms: i64,
 ) -> Vec<String> {
-    if now_ms - engine_start_ms <= MISSING_GRACE_MS {
+    if !grace_elapsed(now_ms, engine_start_ms) {
         return Vec::new();
     }
     pinned
