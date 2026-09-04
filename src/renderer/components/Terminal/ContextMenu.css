@@ -114,8 +114,12 @@
   margin-left: 2px;
   display: flex;
   flex-direction: column;
-  min-width: 240px;
-  max-width: 420px;
+  /* Wide enough that a row's folder chip and its first tag stay readable without
+     truncating the label away to nothing - the flat view puts all three on one line.
+     `max-width` still caps it and `.context-menu-flyout-detail` still ellipses, so a
+     long tag list degrades into a tooltip rather than an unbounded panel. */
+  min-width: 380px;
+  max-width: 640px;
   padding: 4px 0;
   background-color: var(--menu-background, #252526);
   border: 1px solid var(--menu-border, #454545);
@@ -126,6 +130,27 @@
   z-index: 1;
 }
 
+/* A panel showing FOLDER NAMES, not snippets. Roughly the width the flyout had before
+   snippet rows needed room for a folder chip and tags - short labels do not earn 380px.
+   A nested panel opening off a narrow root still gets the full width, because `narrow`
+   is stripped on the way down (ContextMenu.tsx). */
+.context-menu-flyout.is-narrow {
+  min-width: 200px;
+  max-width: 300px;
+}
+
+/* A menu that is only a flyout (`standaloneSubmenu`): the container still positions and
+   still owns the outside-click boundary, but it must not PAINT — a bordered 0x0 box would
+   sit at the anchor point as a stray few pixels beside the panel. The host inside it has
+   no button, so it collapses to nothing and the absolutely-positioned panel lands at the
+   requested point. */
+.context-menu.is-bare {
+  padding: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+
 /* Applied when the viewport edge is nearer than the flyout is wide. */
 .context-menu-flyout.flip-left {
   left: auto;
@@ -134,8 +159,20 @@
   margin-right: 2px;
 }
 
-.context-menu-flyout-search {
+/* Search box + its optional toggle on one line. The input owns the slack (`flex: 1`
+   over `min-width: 0`, or a long placeholder would push the button out of the panel);
+   the button keeps its intrinsic size. The margins that used to sit on the input live
+   here now, so a flyout with no toggle is pixel-identical to what it was before. */
+.context-menu-flyout-header {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
   margin: 2px 8px 6px;
+}
+
+.context-menu-flyout-search {
+  flex: 1;
+  min-width: 0;
   padding: 4px 6px;
   background-color: rgba(255, 255, 255, 0.06);
   border: 1px solid var(--menu-border, #454545);
@@ -155,6 +192,32 @@
 
 .context-menu-flyout-search::placeholder {
   color: var(--menu-accelerator-color, #969696);
+}
+
+.context-menu-flyout-toggle {
+  flex: 0 0 auto;
+  width: 24px;
+  padding: 0;
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 3px;
+  color: var(--menu-foreground, #cccccc);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.context-menu-flyout-toggle:hover {
+  background-color: var(--menu-hover-background, #094771);
+}
+
+/* The "not the default arrangement" state. Deliberately a border rather than a fill:
+   the fill is what :hover uses, and a pressed toggle that looked hovered would read as
+   "the pointer is here" instead of "this mode is on". */
+.context-menu-flyout-toggle.is-on {
+  border-color: var(--menu-hover-background, #094771);
+  background-color: rgba(255, 255, 255, 0.12);
 }
 
 /* Vertical overflow scrolls the LIST, not the panel, so the search box stays put.
@@ -228,7 +291,7 @@
 
 .context-menu-flyout-detail {
   flex: 0 0 auto;
-  max-width: 40%;
+  max-width: 52%;
   margin-left: 10px;
   overflow: hidden;
   font-size: 11px;

@@ -47,6 +47,17 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'paste', label: 'Paste', defaultCombo: 'Ctrl+V' },
   { id: 'clearTerminal', label: 'Clear Terminal', defaultCombo: 'Ctrl+Shift+X' },
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },
+  /*
+   * Snippets, without the right-click (plan/029). Global rather than canvas-scoped: it
+   * targets `resolveKeyboardTerminalId`, which already answers "the terminal the keyboard
+   * is talking to" on both the pane and the canvas overlay, so one registration serves
+   * both surfaces.
+   *
+   * `Ctrl+Shift+S` is free app-wide — not in RESERVED_COMBOS, not held by any action above,
+   * and, being a Ctrl+SHIFT chord, not a control code any shell reads (Ctrl+S alone is
+   * XOFF and would freeze the terminal, which is exactly why the Shift is not optional).
+   */
+  { id: 'openSnippets', label: 'Open Snippets Menu', defaultCombo: 'Ctrl+Shift+S' },
   { id: 'toggleFullScreen', label: 'Toggle Fullscreen', defaultCombo: 'F11' },
   { id: 'toggleCanvasMode', label: 'Toggle Canvas Mode', defaultCombo: 'Ctrl+Shift+Alt+Space' },
 

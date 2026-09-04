@@ -89,6 +89,36 @@ const fire = async (el: EventTarget, ev: Event) => {
     });
 };
 const click = (el: EventTarget) => fire(el, new MouseEvent('click', { bubbles: true }));
+/**
+ * Move the pointer onto `el`, coming from `from`.
+ *
+ * React synthesizes mouseenter/mouseleave from a delegated `mouseover`, using
+ * `relatedTarget` to work out which elements were entered and which were left. A null
+ * `from` therefore reads as "the pointer came from outside the document" and fires
+ * enter on `el` AND every ancestor - which is what entering a submenu host from
+ * off-menu does in a browser. Passing the previously-hovered element is what makes
+ * "moved from one item to another" distinguishable from "arrived".
+ */
+const hoverMove = (el: EventTarget, from: EventTarget | null) =>
+    from === null
+        ? { on: el, ev: new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }) }
+        // React IGNORES a `mouseover` whose relatedTarget is inside a React tree: it
+        // expects the paired `mouseout` to carry an intra-tree move, and handles the
+        // whole enter/leave pair from that one event. Dispatching `mouseover` here
+        // instead is a silent no-op, which looks exactly like a handler that is missing.
+        : { on: from, ev: new MouseEvent('mouseout', { bubbles: true, relatedTarget: el as EventTarget }) };
+const hover = (el: EventTarget, from: EventTarget | null = null) => {
+    const { on, ev } = hoverMove(el, from);
+    return fire(on, ev);
+};
+/** Synchronous twin, for the fake-timer suite: React's async `act` flushes through
+ *  timer APIs that `jest.useFakeTimers()` has replaced, and can hang there. */
+const hoverSync = (el: EventTarget, from: EventTarget | null = null) => {
+    const { on, ev } = hoverMove(el, from);
+    act(() => {
+        on.dispatchEvent(ev);
+    });
+};
 const mousedown = (el: EventTarget) =>
     fire(el, new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
 const key = (el: EventTarget, k: string) =>
@@ -147,13 +177,45 @@ describe('submenu parent item', () => {
         expect(parentClick).not.toHaveBeenCalled();
     });
 
-    it('toggles closed when clicked a second time', async () => {
+    it('opens on HOVER, with no click at all', async () => {
+        await render(menuWith({ rows: [row('a', 'kubectl get pods')] }));
+        expect(panels()).toHaveLength(0);
+        await hover(menuItem('Snippets'));
+        expect(panels()).toHaveLength(1);
+        expect(labels()).toEqual(['kubectl get pods']);
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('a click on the parent OPENS it and never toggles it shut', async () => {
+        // Hover has already opened the panel by the time any click can land, so a
+        // toggling click would make "click the item you are pointing at" the gesture
+        // that HIDES the thing you were reaching for.
         await render(menuWith({ rows: [row('a', 'x')] }));
+        await hover(menuItem('Snippets'));
+        expect(panels()).toHaveLength(1);
         await click(menuItem('Snippets'));
         expect(panels()).toHaveLength(1);
         await click(menuItem('Snippets'));
-        expect(panels()).toHaveLength(0);
+        expect(panels()).toHaveLength(1);
         expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('does not open a flyout when a DISABLED parent is hovered', async () => {
+        await render([{ label: 'Snippets', enabled: false, submenu: { rows: [row('a', 'x')] } }]);
+        await hover(menuItem('Snippets'));
+        expect(panels()).toHaveLength(0);
+    });
+
+    it('fires onOpen ONCE across a hover followed by a click', async () => {
+        // The hover handler is idempotent on purpose: the host's mouseenter fires again
+        // every time the pointer comes back from a neighbouring item, and onOpen is a
+        // cache warm (ensureDirLoaded), not a render hook.
+        const onOpen = jest.fn();
+        await render(menuWith({ rows: [row('a', 'x')], onOpen }));
+        await hover(menuItem('Snippets'));
+        await click(menuItem('Snippets'));
+        await hover(menuItem('Snippets'), menuItem('Copy'));
+        expect(onOpen).toHaveBeenCalledTimes(1);
     });
 
     it('keeps only ONE flyout open — opening a second closes the first', async () => {
@@ -192,6 +254,170 @@ describe('submenu parent item', () => {
         await click(menuItem('Copy'));
         expect(plainClick).toHaveBeenCalledTimes(1);
         expect(onClose).toHaveBeenCalledTimes(1);
+    });
+});
+
+/* -- hover: retiring the flyout again ------------------------------------- */
+
+/**
+ * The delay is the whole subtlety of hover-to-open, so it is asserted rather than
+ * described: a panel hangs at `left: 100%` of its item, so the pointer's route into it
+ * crosses the items BELOW that one. Closing on the first foreign hover would tear the
+ * panel down mid-reach; never closing would leave it up over an unrelated item.
+ */
+describe('hovering away', () => {
+    beforeEach(() => {
+        jest.useFakeTimers();
+    });
+    afterEach(() => {
+        // Runs BEFORE the outer afterEach (inner hooks first), so the unmount there
+        // happens on real timers.
+        jest.useRealTimers();
+    });
+
+    const renderSync = (items: ContextMenuItem[]) => {
+        act(() => {
+            root.render(<ContextMenu x={10} y={10} items={items} onClose={onClose} />);
+        });
+    };
+    const tick = (ms: number) => {
+        act(() => {
+            jest.advanceTimersByTime(ms);
+        });
+    };
+
+    it('closes the flyout once the pointer has sat on a plain item', () => {
+        renderSync(menuWith({ rows: [row('a', 'x')] }));
+        hoverSync(menuItem('Snippets'));
+        expect(panels()).toHaveLength(1);
+
+        hoverSync(menuItem('Copy'), menuItem('Snippets'));
+        // NOT yet: crossing an item on the way to the panel must not be enough.
+        expect(panels()).toHaveLength(1);
+
+        tick(400);
+        expect(panels()).toHaveLength(0);
+        // Retiring a flyout is not dismissing the menu.
+        expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('cancels the pending close when the pointer reaches the PANEL', () => {
+        renderSync(menuWith({ rows: [row('a', 'x')] }));
+        hoverSync(menuItem('Snippets'));
+        const host = menuItem('Snippets').parentElement!;
+
+        // Cross a neighbouring item, then arrive in the panel - the diagonal this exists for.
+        hoverSync(menuItem('Copy'), menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Copy'));
+        expect(host.contains(rows()[0])).toBe(true); // the panel really is inside the host
+
+        tick(400);
+        expect(panels()).toHaveLength(1);
+    });
+
+    it('switches directly to another submenu parent, with no gap', () => {
+        renderSync([
+            { label: 'Command History', submenu: { searchPlaceholder: 'history', rows: [row('h', 'ls -la')] } },
+            { label: 'Snippets', submenu: { searchPlaceholder: 'snippets', rows: [row('s', 'docker ps')] } },
+        ]);
+        hoverSync(menuItem('Command History'));
+        expect(search().placeholder).toBe('history');
+
+        hoverSync(menuItem('Snippets'), menuItem('Command History'));
+        expect(panels()).toHaveLength(1);
+        expect(search().placeholder).toBe('snippets');
+
+        // A close armed by the FIRST hover must not fire into the second panel.
+        tick(400);
+        expect(panels()).toHaveLength(1);
+        expect(search().placeholder).toBe('snippets');
+    });
+
+    it('a timer armed before the menu unmounts does not outlive it', () => {
+        renderSync(menuWith({ rows: [row('a', 'x')] }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(menuItem('Copy'), menuItem('Snippets'));
+        const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+        act(() => root.unmount());
+        tick(400);
+        expect(error).not.toHaveBeenCalled();
+        // Re-created so the shared afterEach still has something to unmount.
+        root = createRoot(container);
+    });
+});
+
+/* -- opening a flyout with no pointer at all ------------------------------- */
+
+describe('standaloneSubmenu', () => {
+    const onOpen = jest.fn();
+    const renderStandalone = async (index = 0) => {
+        onOpen.mockClear();
+        await act(async () => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    items={[
+                        { label: 'Copy', click: jest.fn() },
+                        { type: 'separator' },
+                        { label: 'Snippets', submenu: { rows: [row('a', 'docker ps')], onOpen } },
+                    ]}
+                    standaloneSubmenu={index}
+                    onClose={onClose}
+                />,
+            );
+        });
+    };
+
+    it('renders the panel on the FIRST paint, with no hover and no click', async () => {
+        await renderStandalone(2);
+        expect(panels()).toHaveLength(1);
+        expect(labels()).toEqual(['docker ps']);
+        // Warming the cache is part of opening; a shortcut-opened Command History that
+        // skipped it would browse an unloaded directory.
+        expect(onOpen).toHaveBeenCalledTimes(1);
+        // Focus lands in the search box, so the shortcut leads straight into typing.
+        expect(document.activeElement).toBe(search());
+    });
+
+    it('draws NO menu around it - not the parent row, not the other items, not a separator', async () => {
+        await renderStandalone(2);
+        // The row you would have clicked has nothing left to do, and it pushes the panel
+        // a row's width away from where the shortcut was aimed.
+        expect(menuItems()).toHaveLength(0);
+        expect(document.querySelectorAll('.context-menu-separator')).toHaveLength(0);
+        // …and the container itself must not paint a bordered box beside the panel.
+        expect(menu().classList.contains('is-bare')).toBe(true);
+    });
+
+    it('Escape dismisses the whole thing, since there is no menu to fall back to', async () => {
+        await renderStandalone(2);
+        await key(search(), 'Escape');
+        // Retiring the panel alone would leave an empty box on screen still swallowing
+        // the next outside click.
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows nothing at all when pointed at an item that has no flyout', async () => {
+        await renderStandalone(0);
+        expect(panels()).toHaveLength(0);
+        expect(menuItems()).toHaveLength(0);
+    });
+
+    it('is absent by default - an ordinary menu draws its items and opens nothing', async () => {
+        await render(menuWith({ rows: [row('a', 'x')] }));
+        expect(panels()).toHaveLength(0);
+        expect(menuItems().length).toBeGreaterThan(0);
+        expect(menu().classList.contains('is-bare')).toBe(false);
+    });
+
+    it('the bare container really is transparent - jsdom computes no layout, so read the CSS', () => {
+        const css = readSource(path.join(__dirname, '..', 'ContextMenu.css'));
+        const start = css.indexOf('.context-menu.is-bare {');
+        expect(start).toBeGreaterThan(-1);
+        const block = css.slice(start, css.indexOf('}', start));
+        expect(block).toMatch(/background:\s*none/);
+        expect(block).toMatch(/border:\s*none/);
     });
 });
 
@@ -757,6 +983,22 @@ describe('row rendering', () => {
         expect(r.querySelector('.context-menu-flyout-label')!.textContent).toBe('deploy');
         expect(r.querySelector('.context-menu-flyout-detail')!.textContent).toBe('infra');
         expect(r.title).toBe('full snippet text');
+    });
+
+    it('gives the detail its own tooltip, defaulting to the text it truncates', async () => {
+        await render(menuWith({
+            rows: [
+                row('a', 'one', { detail: 'a very long folder and tag line', title: 'the snippet text' }),
+                row('b', 'two', { detail: 'chip', detailTitle: 'Folder: Ops' }),
+            ],
+        }));
+        await click(menuItem('Snippets'));
+        const detail = (i: number) => rows()[i].querySelector('.context-menu-flyout-detail')!;
+        // No `detailTitle`: the chip still gets one, showing what the ellipsis hid.
+        expect(detail(0).getAttribute('title')).toBe('a very long folder and tag line');
+        expect(rows()[0].getAttribute('title')).toBe('the snippet text');
+        // With one: it wins, so a caller can expand the chip into something readable.
+        expect(detail(1).getAttribute('title')).toBe('Folder: Ops');
     });
 
     it('points aria-activedescendant at the active row', async () => {

@@ -170,6 +170,27 @@ describe('SnippetDialog', () => {
         expect(draft.label).toBeFalsy();
     });
 
+    it('a click on the OVERLAY does not throw the form away', async () => {
+        // ConfirmDialog dismisses this way and should: it holds a question. This holds a
+        // form, and a click landing a few pixels outside the panel — reaching for the
+        // Folder field, or a datalist suggestion — is easy to make and has no undo.
+        const onSave = jest.fn();
+        const onCancel = jest.fn();
+        await render({ onSave, onCancel });
+
+        await act(async () => setValue(textarea(), 'half-written'));
+        await act(async () => {
+            document
+                .querySelector('.snippet-dialog-overlay')!
+                .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+
+        expect(onCancel).not.toHaveBeenCalled();
+        expect(onSave).not.toHaveBeenCalled();
+        // Still open, and still holding what was typed.
+        expect(textarea().value).toBe('half-written');
+    });
+
     it('Escape calls onCancel and never onSave', async () => {
         const onSave = jest.fn();
         const onCancel = jest.fn();

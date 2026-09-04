@@ -36,7 +36,9 @@ import {
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
   setSnippets,
+  setSnippetsViewMode,
   isValidSnippet,
+  isSnippetsViewMode,
   setCustomKeybindings,
   setKeepRunningInBackground,
   setNotifySoundEnabled,
@@ -610,6 +612,9 @@ const App: React.FC = () => {
               createdAt: Number.isFinite(s.createdAt) ? s.createdAt : Date.now(),
             }))
           ));
+        }
+        if (isSnippetsViewMode(config.snippetsViewMode)) {
+          dispatch(setSnippetsViewMode(config.snippetsViewMode));
         }
         if (config.customKeybindings && typeof config.customKeybindings === 'object') {
           // Drop any actionId not in the current registry (stale config from a

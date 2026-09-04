@@ -7,6 +7,7 @@ import { insertTextIntoTerminal } from './insertTextIntoTerminal';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
 import { resolveKeyboardTerminalId } from './keyboardTerminal';
+import { getSurfaceChrome } from './surfaceChrome';
 import { runSettingsGuard } from './settingsNavGuard';
 import { openSettingsTab } from './openSettings';
 import { resolveDefaultProfile, buildNewTabFields } from './newTabActions';
@@ -89,6 +90,7 @@ export class InputHandler {
     // registration is OS-aware out of the box: Ctrl+, on Windows/Linux and
     // Cmd+, on macOS — matching every other shortcut in this app.
     this.registerShortcut(this.defaultComboFor('openSettings'), openSettingsTab);
+    this.registerShortcut(this.defaultComboFor('openSnippets'), this.handleOpenSnippets);
     this.registerShortcut(this.defaultComboFor('toggleFullScreen'), this.handleToggleFullScreen);
     this.registerShortcut(this.defaultComboFor('toggleCanvasMode'), this.handleToggleCanvasMode);
     // Note: Ctrl/Cmd +/-/0 zoom is intentionally NOT bound here. Zoom is per-surface
@@ -159,6 +161,7 @@ export class InputHandler {
       paste: this.handlePaste,
       clearTerminal: this.handleClearTerminal,
       openSettings: openSettingsTab,
+      openSnippets: this.handleOpenSnippets,
       toggleFullScreen: this.handleToggleFullScreen,
       toggleCanvasMode: this.handleToggleCanvasMode,
     };
@@ -477,6 +480,22 @@ export class InputHandler {
         console.error('Failed to clear terminal:', err);
       });
     }
+  };
+
+  /**
+   * Open the Snippets flyout on the terminal the keyboard is talking to.
+   *
+   * `resolveKeyboardTerminalId`, not the active pane — same as paste and clear above, and
+   * for the same reason: while the canvas holds the keyboard, "the active pane" names a
+   * terminal on a different screen.
+   *
+   * The registry is read HERE, at press time, rather than captured: a terminal that is
+   * mid-spawn, or one whose `TerminalDisplay` has unmounted, is simply absent, and the
+   * shortcut does nothing instead of opening a menu that writes into a dead PTY.
+   */
+  private handleOpenSnippets = (): void => {
+    const targetId = resolveKeyboardTerminalId(store.getState());
+    if (targetId) getSurfaceChrome(targetId)?.openSnippets();
   };
 
   private handleToggleFullScreen = (): void => {

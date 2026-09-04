@@ -64,6 +64,26 @@ export function isValidSnippet(x: unknown): x is Snippet {
   return true;
 }
 
+/**
+ * How the Snippets flyout arranges its rows when nothing has been typed (plan/029 §4.3).
+ *
+ *  - `'flat'` (DEFAULT) — every snippet as one row, its folder shown as a `📁 name` chip.
+ *  - `'folders'` — one row per folder, its snippets in a nested panel, unfiled ones flat.
+ *
+ * Flat is the default because it is the arrangement that needs no decisions from the user:
+ * every snippet is one click away whether or not they have ever filed anything, and a
+ * library with no folders at all — which is what a new one is — looks identical in both
+ * modes anyway. Folders are the opt-in for a library that has outgrown one list.
+ *
+ * Only the BROWSE list is affected. A non-empty query already flattens across folders in
+ * both modes, so this is not a search setting and must never be consulted on that path.
+ */
+export type SnippetsViewMode = 'folders' | 'flat';
+
+export function isSnippetsViewMode(x: unknown): x is SnippetsViewMode {
+  return x === 'folders' || x === 'flat';
+}
+
 export const TERMINAL_FONT_WEIGHTS: ReadonlyArray<{ value: TerminalFontWeight; label: string }> = [
   { value: '300', label: 'Light (300)' },
   { value: '400', label: 'Normal (400)' },
@@ -133,6 +153,10 @@ interface SettingsState {
   // and the Settings "Snippets" panel. Persisted via config.json (`settings.snippets`),
   // applies live — no Save button for this category.
   snippets: Snippet[];
+  // How the Snippets flyout groups its BROWSE list (see SnippetsViewMode). Persisted
+  // rather than kept in component state: the flyout is rebuilt from scratch on every
+  // open, so anything held locally would silently reset to the default each time.
+  snippetsViewMode: SnippetsViewMode;
   // Backlog 011: command history suggestion popup (capture + popup). Default on.
   // Independent of scrollback history persistence (backlog 009).
   commandSuggestions: boolean;
@@ -219,6 +243,7 @@ const initialState: SettingsState = {
   nonFocusedPaneOpacity: 50,
   agentColorSchemes: {},
   snippets: [],
+  snippetsViewMode: 'flat',
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
@@ -486,6 +511,16 @@ const settingsSlice = createSlice({
       }
     },
 
+    setSnippetsViewMode: (state, action: PayloadAction<SnippetsViewMode>) => {
+      state.snippetsViewMode = action.payload;
+      // Not routed through `persistSnippets` — that helper exists for the `snippets`
+      // ARRAY, whose Immer draft has to be unwrapped before it can be stringified. A
+      // string has no such hazard, and reusing the helper would imply one.
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('snippetsViewMode', state.snippetsViewMode);
+      }
+    },
+
     // Bulk-replace the whole snippets list (hydration, import, D9).
     setSnippets: (state, action: PayloadAction<Snippet[]>) => {
       state.snippets = action.payload;
@@ -643,6 +678,7 @@ export const {
   setAgentColorScheme,
   removeAgentColorScheme,
   setSnippets,
+  setSnippetsViewMode,
   addSnippet,
   updateSnippet,
   removeSnippet,

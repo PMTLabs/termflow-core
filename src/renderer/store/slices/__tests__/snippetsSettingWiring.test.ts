@@ -1,5 +1,6 @@
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
+import { isSnippetsViewMode } from '../settingsSlice';
 
 /**
  * plan/029 §3.2 — the snippets setting's nine-link chain, link 8 (hydrate) in particular.
@@ -60,5 +61,53 @@ describe('the snippets setting survives a restart', () => {
     const hydrateSite = APP.slice(APP.indexOf('Array.isArray(config.snippets)'));
     const nextBlock = hydrateSite.slice(0, hydrateSite.indexOf('\n        }') + 20);
     expect(nextBlock).toContain('isValidSnippet');
+  });
+});
+
+/**
+ * plan/029 §4.3 — the SECOND snippets setting, and a second full nine-link chain.
+ *
+ * `snippetsViewMode` is not a Settings-screen control; it is a toggle inside the flyout,
+ * which is rebuilt from scratch every time the menu opens. That is exactly what makes the
+ * chain load-bearing here: held in component state it would look correct in every test and
+ * silently reset to the default on each open, and a break in the hydrate link would reset
+ * it on each restart instead. Neither failure throws.
+ */
+describe('the snippets view mode survives a restart', () => {
+  it('has a default, and the default is FLAT', () => {
+    // The arrangement that needs nothing from the user: every snippet one click away,
+    // whether or not they have ever filed anything.
+    expect(SLICE).toMatch(/snippetsViewMode: 'flat',/);
+    expect(SLICE).toMatch(/snippetsViewMode: SnippetsViewMode;/);
+  });
+
+  it('is written to the config file when it changes (link 5)', () => {
+    expect(SLICE).toMatch(/setSnippetsViewMode: \(state, action: PayloadAction<SnippetsViewMode>\)/);
+    expect(SLICE.match(/setConfigValue\('snippetsViewMode',/g) ?? []).toHaveLength(1);
+  });
+
+  it('is exported as an action (link 4) — a reducer nothing can dispatch is invisible', () => {
+    const exportBlock = SLICE.slice(SLICE.lastIndexOf('export const {'));
+    expect(exportBlock).toMatch(/\bsetSnippetsViewMode\b/);
+  });
+
+  it('is read back at boot, through the type guard rather than trusted (links 8 + 7)', () => {
+    expect(APP).toMatch(/\bsetSnippetsViewMode\b/);
+    // `isSnippetsViewMode`, not a truthiness check: config.json is hand-editable, and any
+    // non-empty string would otherwise reach a union-typed field.
+    expect(APP).toMatch(/if \(isSnippetsViewMode\(config\.snippetsViewMode\)\) \{/);
+    const hydrateSite = APP.slice(APP.indexOf('isSnippetsViewMode(config.snippetsViewMode)'));
+    expect(hydrateSite.slice(0, 200)).toContain('dispatch(setSnippetsViewMode(config.snippetsViewMode))');
+  });
+
+  it('the guard actually rejects a non-member', () => {
+    // Source-derived tests above pin the WIRING; this pins the guard itself, so the
+    // hydrate assertion cannot pass against a function that returns true for anything.
+    expect(isSnippetsViewMode('flat')).toBe(true);
+    expect(isSnippetsViewMode('folders')).toBe(true);
+    expect(isSnippetsViewMode('FLAT')).toBe(false);
+    expect(isSnippetsViewMode('')).toBe(false);
+    expect(isSnippetsViewMode(undefined)).toBe(false);
+    expect(isSnippetsViewMode(1)).toBe(false);
   });
 });

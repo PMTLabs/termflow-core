@@ -88,6 +88,16 @@ export interface SurfaceChromeState {
    * overlay's element-bound hotkey fills.
    */
   openSearch: () => void;
+  /**
+   * Open the Snippets flyout for this terminal, ready to type in (plan/029 §6).
+   *
+   * Published for the same reason `openSearch` is, and with the same shape: the caller —
+   * InputHandler's `openSnippets` shortcut — renders nothing and holds no engine, so only
+   * the TRIGGER travels. `TerminalDisplay` still owns the menu, and anchors it at the
+   * cursor of whichever container the engine is currently mounted in, so the shortcut
+   * lands in the right place on the pane and on a canvas node alike.
+   */
+  openSnippets: () => void;
 }
 
 interface Entry {
@@ -138,6 +148,7 @@ function same(a: SurfaceChromeState, b: SurfaceChromeState): boolean {
     && a.restartSession === b.restartSession
     && a.dismissSessionClosed === b.dismissSessionClosed
     && a.openSearch === b.openSearch
+    && a.openSnippets === b.openSnippets
     && a.suggest.open === b.suggest.open
     && a.suggest.selectedIndex === b.suggest.selectedIndex
     && a.suggest.focused === b.suggest.focused

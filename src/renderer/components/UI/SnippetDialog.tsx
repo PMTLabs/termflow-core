@@ -147,7 +147,17 @@ export const SnippetDialog: React.FC<SnippetDialogProps> = ({
     if (!isOpen) return null;
 
     return createPortal(
-        <div className="snippet-dialog-overlay" onClick={onCancel}>
+        /*
+         * The overlay DELIBERATELY has no click handler.
+         *
+         * ConfirmDialog and UnsavedChangesDialog dismiss on an overlay click, and that is
+         * right for them: they hold a question, so a stray click costs the user nothing.
+         * This one holds a form. A click that lands a few pixels outside the panel — easy
+         * to do while reaching for the Folder field or a `<datalist>` suggestion — would
+         * throw away everything typed with no undo and no confirmation. Escape, Cancel and
+         * the ✕ remain, and all three are deliberate acts rather than a slip.
+         */
+        <div className="snippet-dialog-overlay">
             <div
                 className="snippet-dialog"
                 ref={containerRef}
@@ -155,7 +165,6 @@ export const SnippetDialog: React.FC<SnippetDialogProps> = ({
                 aria-modal="true"
                 aria-labelledby={titleId}
                 tabIndex={-1}
-                onClick={(e) => e.stopPropagation()}
             >
                 <div className="snippet-dialog-header">
                     <h3 id={titleId}>{isEdit ? 'Edit snippet' : 'New snippet'}</h3>

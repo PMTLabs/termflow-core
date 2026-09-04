@@ -6,7 +6,7 @@
 // under the root Jest config (see terminalMuteMenu.test.ts).
 
 import type { ContextMenuFlyoutRow, ContextMenuItem } from './ContextMenu';
-import type { Snippet } from '../../store/slices/settingsSlice';
+import type { Snippet, SnippetsViewMode } from '../../store/slices/settingsSlice';
 import { filterSnippets, snippetDisplayLabel, snippetFolders } from '../../services/snippetSearch';
 import { commandHistoryService } from '../../services/commandHistoryService';
 
@@ -20,10 +20,27 @@ function leafDetail(s: Snippet, showFolder: boolean): string | undefined {
   return parts.length > 0 ? parts.join('  ') : undefined;
 }
 
-/** One snippet as a leaf flyout row. `title` carries the full, untruncated text
- *  (§4.3) so a long or multi-line snippet is inspectable on hover. Insert rows
- *  always close the menu (product decision, §4.5 revision) — the user's next
- *  move is to look at or run what was just inserted. */
+/**
+ * The folder/tag chip's OWN tooltip, spelled out rather than repeated.
+ *
+ * `detail` is one dense line that the row ellipses at about half its width, so a snippet
+ * with a folder and two tags shows `📁 General #co…` and the rest is unreadable. This
+ * is what the pointer gets when it rests on that chip: the same facts, labelled, one per
+ * line, and never truncated. Absent when `detail` is — there is nothing to expand.
+ */
+function leafDetailTitle(s: Snippet, showFolder: boolean): string | undefined {
+  if (!leafDetail(s, showFolder)) return undefined;
+  const lines: string[] = [];
+  if (showFolder && s.folder) lines.push(`Folder: ${s.folder}`);
+  if (s.tags && s.tags.length > 0) lines.push(`Tags: ${s.tags.join(', ')}`);
+  return lines.join('\n');
+}
+
+/** One snippet as a leaf flyout row, carrying TWO tooltips: `title` is the full,
+ *  untruncated snippet text (§4.3), so a long or multi-line snippet is inspectable on
+ *  hover, and `detailTitle` expands the folder/tag chip that shares the row with it.
+ *  Insert rows always close the menu (product decision, §4.5 revision) — the user's
+ *  next move is to look at or run what was just inserted. */
 function buildSnippetLeafRow(
   s: Snippet,
   insert: (text: string) => void,
@@ -33,6 +50,7 @@ function buildSnippetLeafRow(
     id: `snippet-${s.id}`,
     label: snippetDisplayLabel(s),
     detail: leafDetail(s, showFolder),
+    detailTitle: leafDetailTitle(s, showFolder),
     title: s.text,
     onSelect: () => insert(s.text),
     closeMenuOnSelect: true,
@@ -56,23 +74,36 @@ function buildGroupedRows(snippets: Snippet[], insert: (text: string) => void): 
   return rows;
 }
 
+/** Flat shape (empty query): every snippet as one row, in registry order, each carrying
+ *  its own folder as a `📁 name` chip — so the grouping the folder view draws
+ *  structurally stays legible here as data rather than being dropped. */
+function buildFlatRows(snippets: Snippet[], insert: (text: string) => void): ContextMenuFlyoutRow[] {
+  return snippets.map((s) => buildSnippetLeafRow(s, insert, true));
+}
+
 /**
- * Build the "Snippets" context-menu item: search box + folder-grouped rows that
- * flatten the moment the query is non-empty (§4.3), an empty-state row that
+ * Build the "Snippets" context-menu item: search box + a browse list arranged either
+ * by folder or flat (`viewMode`), which flattens across folders either way the moment
+ * the query is non-empty (§4.3), an empty-state row that
  * distinguishes "no snippets at all" from "no matches", and an always-clickable
  * "Add New Snippet" footer (§4.5 — the submenu must never be a dead end).
  *
  * `snippets` MUST come from a live store read (`useSelector(s => s.settings.snippets)`)
  * in the caller — this function only renders whatever list it is handed (plan/029
- * link 9). `insert` and `onAddNew` are provided by the caller so this module never
- * has to know about terminal ids or dialog state.
+ * link 9), and the same goes for `viewMode`. `insert`, `onAddNew` and `onToggleViewMode`
+ * are provided by the caller so this module never has to know about terminal ids,
+ * dialog state or Redux.
  */
 export function buildSnippetsMenuItem(opts: {
   snippets: Snippet[];
+  /** Browse-list arrangement. See `SnippetsViewMode`; ignored once a query is typed. */
+  viewMode: SnippetsViewMode;
   insert: (text: string) => void;
   onAddNew: () => void;
+  onToggleViewMode: () => void;
 }): ContextMenuItem {
-  const { snippets, insert, onAddNew } = opts;
+  const { snippets, viewMode, insert, onAddNew, onToggleViewMode } = opts;
+  const flat = viewMode === 'flat';
 
   return {
     label: 'Snippets',
@@ -80,12 +111,28 @@ export function buildSnippetsMenuItem(opts: {
     title: 'Insert a saved snippet of text into this terminal. Search by name, text, or #tag.',
     submenu: {
       searchPlaceholder: 'Search snippets…  (#tag to filter by tag)',
+      // Folder mode's root panel lists folder NAMES, which are short; flat mode's lists
+      // snippets with their chips, which are not. The folder panel this opens keeps the
+      // full width — `narrow` is depth-0 only.
+      narrow: !flat,
+      // The icon names the mode you are IN, not the one you would switch to — the same
+      // convention `aria-pressed` describes, and the one that keeps the button readable
+      // when the list behind it happens to be empty.
+      headerToggle: {
+        icon: flat ? '☰' : '📁',
+        title: flat
+          ? 'Flat list. Click to group snippets by folder.'
+          : 'Grouped by folder. Click to show every snippet in one flat list.',
+        pressed: flat,
+        onToggle: onToggleViewMode,
+      },
       // Function form (not an array) so #tag filtering and the flatten-on-search
       // rule (§4.3) both live in filterSnippets rather than ContextMenu's own
       // label/detail substring filter.
       rows: (query: string): ContextMenuFlyoutRow[] => {
         const q = query.trim();
-        if (!q) return buildGroupedRows(snippets, insert);
+        // A query flattens in BOTH modes, so `viewMode` is read only on the browse path.
+        if (!q) return flat ? buildFlatRows(snippets, insert) : buildGroupedRows(snippets, insert);
         return filterSnippets(snippets, q).map((s) => buildSnippetLeafRow(s, insert, true));
       },
       emptyRow: (query: string): ContextMenuFlyoutRow =>

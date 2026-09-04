@@ -59,12 +59,30 @@ const multiline = makeSnippet({ id: 's4', text: 'echo one\necho two\necho three'
 
 const ALL_SNIPPETS = [gitStatus, gitLog, dockerUp, multiline];
 
+/**
+ * `buildSnippetsMenuItem` with the boring arguments filled in.
+ *
+ * Every required prop is defaulted here rather than at ~10 call sites, so adding one to
+ * the builder is a compile error in ONE place instead of a mechanical edit that is easy
+ * to do wrongly in nine of them. `viewMode` defaults to 'folders' because most of the
+ * cases below are about folder grouping; the flat cases pass it explicitly.
+ */
+const snippetsItem = (over: Partial<Parameters<typeof buildSnippetsMenuItem>[0]> = {}) =>
+  buildSnippetsMenuItem({
+    snippets: ALL_SNIPPETS,
+    viewMode: 'folders',
+    insert: jest.fn(),
+    onAddNew: jest.fn(),
+    onToggleViewMode: jest.fn(),
+    ...over,
+  });
+
 /* ── part 1: pure builder tests (no mounting) ────────────────────────────── */
 
 describe('buildSnippetsMenuItem — pure row shape', () => {
   it('groups by folder + unfiled when the query is empty', () => {
     const insert = jest.fn();
-    const item = buildSnippetsMenuItem({ snippets: ALL_SNIPPETS, insert, onAddNew: jest.fn() });
+    const item = snippetsItem({ insert });
     const rows = (item.submenu!.rows as (q: string) => ContextMenuItem[])('');
     // Two folder rows (Docker, Git — alphabetical, per snippetFolders) + one unfiled leaf.
     const folderLabels = rows.filter((r: any) => r.children).map((r: any) => r.label);
@@ -77,7 +95,7 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
 
   it('flattens across folders the instant the query is non-empty (§4.3)', () => {
     const insert = jest.fn();
-    const item = buildSnippetsMenuItem({ snippets: ALL_SNIPPETS, insert, onAddNew: jest.fn() });
+    const item = snippetsItem({ insert });
     const rowsFn = item.submenu!.rows as (q: string) => any[];
     const rows = rowsFn('git');
     expect(rows.some((r) => r.children)).toBe(false); // no folder rows at all
@@ -86,7 +104,7 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
 
   it('selecting a row inserts the snippet TEXT VERBATIM, including newlines, and closes the menu', () => {
     const insert = jest.fn();
-    const item = buildSnippetsMenuItem({ snippets: ALL_SNIPPETS, insert, onAddNew: jest.fn() });
+    const item = snippetsItem({ insert });
     const rows = (item.submenu!.rows as (q: string) => any[])('echo');
     expect(rows).toHaveLength(1);
     rows[0].onSelect();
@@ -106,11 +124,11 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
 
   it('empty states: no snippets at all vs. a query with no matches, Add New Snippet always enabled', () => {
     const onAddNew = jest.fn();
-    const empty = buildSnippetsMenuItem({ snippets: [], insert: jest.fn(), onAddNew });
+    const empty = snippetsItem({ snippets: [], onAddNew });
     const noneAtAll = (empty.submenu!.emptyRow as (q: string) => any)('');
     expect(noneAtAll).toMatchObject({ label: 'No snippets yet', disabled: true });
 
-    const withSome = buildSnippetsMenuItem({ snippets: ALL_SNIPPETS, insert: jest.fn(), onAddNew });
+    const withSome = snippetsItem({ onAddNew });
     const noMatches = (withSome.submenu!.emptyRow as (q: string) => any)('zzz-nope');
     expect(noMatches).toMatchObject({ label: "No snippets match 'zzz-nope'", disabled: true });
 
@@ -119,6 +137,63 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
     footer.onSelect!();
     expect(onAddNew).toHaveBeenCalled();
     expect(footer.closeMenuOnSelect).toBe(true);
+  });
+});
+
+describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => {
+  it('lists EVERY snippet as one row, in registry order, with no folder rows at all', () => {
+    const rows = (snippetsItem({ viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
+    expect(rows.map((r) => r.id)).toEqual([
+      'snippet-s1', 'snippet-s2', 'snippet-s3', 'snippet-s4',
+    ]);
+    expect(rows.some((r) => r.children)).toBe(false);
+  });
+
+  it('keeps each row\'s folder visible as a chip — the grouping becomes data, not structure', () => {
+    const rows = (snippetsItem({ viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    // The folder view can drop this, because the row SITS in its folder's panel. Flat has
+    // nowhere else to put it, so losing it here loses the information entirely.
+    expect(byId['snippet-s1'].detail).toContain('Git');
+    expect(byId['snippet-s3'].detail).toContain('Docker');
+    expect(byId['snippet-s2'].detail).toContain('#git');
+    expect(byId['snippet-s4'].detail).toBeUndefined(); // unfiled, untagged
+  });
+
+  it('searches identically in both modes — a query flattens either way', () => {
+    const ids = (mode: 'flat' | 'folders') =>
+      (snippetsItem({ viewMode: mode }).submenu!.rows as (q: string) => any[])('git')
+        .map((r) => r.id).sort();
+    expect(ids('flat')).toEqual(ids('folders'));
+    expect(ids('flat')).toEqual(['snippet-s1', 'snippet-s2']);
+  });
+
+  it('the header toggle reports the mode it is IN and hands the switch back to the caller', () => {
+    const onToggleViewMode = jest.fn();
+    const flat = snippetsItem({ viewMode: 'flat', onToggleViewMode }).submenu!.headerToggle!;
+    const folders = snippetsItem({ viewMode: 'folders', onToggleViewMode }).submenu!.headerToggle!;
+
+    expect(flat.pressed).toBe(true);
+    expect(folders.pressed).toBe(false);
+    // Distinguishable at a glance, and each title says what PRESSING it will do.
+    expect(flat.icon).not.toBe(folders.icon);
+    expect(flat.title).toMatch(/group .*by folder/i);
+    expect(folders.title).toMatch(/flat list/i);
+
+    // The builder never owns the setting — it cannot, it has no store.
+    flat.onToggle();
+    expect(onToggleViewMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives a row a SECOND tooltip that expands the truncated folder/tag chip', () => {
+    const rows = (snippetsItem({ viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
+    const tagged = rows.find((r) => r.id === 'snippet-s2')!;
+    // The row-wide `title` stays the snippet's own text: the chip needs its own, or the
+    // one place the text is truncated is the one place with no way to read it.
+    expect(tagged.title).toBe('git log --oneline -n 20');
+    expect(tagged.detailTitle).toBe('Folder: Git' + '\n' + 'Tags: git, log');
+    // Nothing to expand, nothing claimed.
+    expect(rows.find((r) => r.id === 'snippet-s4')!.detailTitle).toBeUndefined();
   });
 });
 
@@ -243,11 +318,10 @@ describe('mounted through ContextMenu', () => {
 
   it('Command History sits above Snippets (relative order, not mere presence)', async () => {
     const historyItem = buildCommandHistoryMenuItem({ cwd: '/repo', insert: jest.fn() });
-    const snippetsItem = buildSnippetsMenuItem({ snippets: ALL_SNIPPETS, insert: jest.fn(), onAddNew: jest.fn() });
     await render([
       { type: 'separator' },
       historyItem,
-      snippetsItem,
+      snippetsItem(),
       { type: 'separator' },
       { label: 'Clear', click: jest.fn() },
     ]);
@@ -266,12 +340,10 @@ describe('mounted through ContextMenu', () => {
     const insert = jest.fn();
     const onClose = jest.fn();
     const terminalId = 'term-42';
-    const snippetsItem = buildSnippetsMenuItem({
+    await render([snippetsItem({
       snippets: [multiline],
       insert: (text) => insert(terminalId, text),
-      onAddNew: jest.fn(),
-    });
-    await render([snippetsItem], onClose);
+    })], onClose);
     await openFlyout('Snippets');
     const row = flyoutRows().find((r) => r.textContent?.includes('echo one'))!;
     expect(row).toBeTruthy();
@@ -301,10 +373,99 @@ describe('mounted through ContextMenu', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('renders the toggle in the header beside the search box, and typing still works after pressing it', async () => {
+    const onToggleViewMode = jest.fn();
+    await render([snippetsItem({ viewMode: 'flat', onToggleViewMode })]);
+    await openFlyout('Snippets');
+
+    const header = document.querySelector('.context-menu-flyout-header')!;
+    const searchBox = header.querySelector('.context-menu-flyout-search')!;
+    const toggle = header.querySelector<HTMLButtonElement>('.context-menu-flyout-toggle')!;
+    expect(searchBox).toBeTruthy();
+    expect(toggle).toBeTruthy();
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+
+    // mousedown is where a button steals focus; the row handlers prevent it for the same
+    // reason, and a toggle that blurred the box would kill the keyboard mid-search.
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+    await act(async () => { toggle.dispatchEvent(down); });
+    expect(down.defaultPrevented).toBe(true);
+
+    await act(async () => { toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(onToggleViewMode).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(searchBox);
+  });
+
+  it('does not repeat the toggle inside a FOLDER panel', async () => {
+    await render([snippetsItem({ viewMode: 'folders' })]);
+    await openFlyout('Snippets');
+    const folderRow = flyoutRows().find((r) => r.textContent?.includes('Git'))!;
+    await act(async () => { folderRow.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    const nested = document.querySelector('.context-menu-flyout[data-flyout-depth="1"]')!;
+    expect(nested).toBeTruthy();
+    // Pressing it there would switch to flat, which deletes the panel it was pressed in.
+    expect(nested.querySelector('.context-menu-flyout-toggle')).toBeNull();
+    expect(document.querySelectorAll('.context-menu-flyout-toggle')).toHaveLength(1);
+  });
+
+  it('puts the folder/tag tooltip on the CHIP itself, so a row really does offer two', async () => {
+    // The builder test above pins the row OBJECT. This pins the rendering: dropping
+    // `title` from the detail span leaves that test green and the feature gone, because
+    // the truncated chip is the one place with no other way to read its own text.
+    await render([snippetsItem({ viewMode: 'flat', snippets: [gitLog] })]);
+    await openFlyout('Snippets');
+    const row = flyoutRows().find((r) => r.textContent?.includes('git log'))!;
+    const detail = row.querySelector('.context-menu-flyout-detail')!;
+    expect(row.getAttribute('title')).toBe('git log --oneline -n 20');
+    expect(detail.getAttribute('title')).toBe('Folder: Git\nTags: git, log');
+    // Two DIFFERENT tooltips - the point of the pair.
+    expect(detail.getAttribute('title')).not.toBe(row.getAttribute('title'));
+  });
+
+  it('narrows the ROOT panel in folder mode and leaves the folder panel wide', async () => {
+    await render([snippetsItem({ viewMode: 'folders' })]);
+    await openFlyout('Snippets');
+    const rootPanel = document.querySelector('.context-menu-flyout[data-flyout-depth="0"]')!;
+    expect(rootPanel.classList.contains('is-narrow')).toBe(true);
+
+    const folderRow = flyoutRows().find((r) => r.textContent?.includes('Git'))!;
+    await act(async () => { folderRow.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    // The panel the folder opens holds SNIPPETS, so it must not inherit a width picked
+    // for folder names — that inheritance is what the spread would have done for free.
+    const nested = document.querySelector('.context-menu-flyout[data-flyout-depth="1"]')!;
+    expect(nested.classList.contains('is-narrow')).toBe(false);
+  });
+
+  it('keeps the root panel full width in flat mode, where the rows are snippets', async () => {
+    await render([snippetsItem({ viewMode: 'flat' })]);
+    await openFlyout('Snippets');
+    const rootPanel = document.querySelector('.context-menu-flyout[data-flyout-depth="0"]')!;
+    expect(rootPanel.classList.contains('is-narrow')).toBe(false);
+  });
+
+  it('the narrow class is actually narrower — jsdom computes no layout, so read the CSS', () => {
+    // Without this the two tests above pass against a class that styles nothing.
+    const css = readSource(path.join(__dirname, '..', 'ContextMenu.css'));
+    const widths = (selector: string) => {
+      const start = css.indexOf(selector + ' {');
+      expect(start).toBeGreaterThan(-1);
+      const block = css.slice(start, css.indexOf('}', start));
+      return {
+        min: Number(/min-width:\s*(\d+)px/.exec(block)![1]),
+        max: Number(/max-width:\s*(\d+)px/.exec(block)![1]),
+      };
+    };
+    const base = widths('.context-menu-flyout');
+    const narrow = widths('.context-menu-flyout.is-narrow');
+    expect(narrow.min).toBeLessThan(base.min);
+    expect(narrow.max).toBeLessThan(base.max);
+  });
+
   it('empty states render and Add New Snippet stays clickable', async () => {
     const onAddNew = jest.fn();
-    const snippetsItem = buildSnippetsMenuItem({ snippets: [], insert: jest.fn(), onAddNew });
-    await render([snippetsItem]);
+    await render([snippetsItem({ snippets: [], onAddNew })]);
     await openFlyout('Snippets');
     const labels = flyoutRows().map((r) => r.textContent);
     expect(labels.some((l) => l?.includes('No snippets yet'))).toBe(true);
@@ -324,7 +485,11 @@ const DISPLAY = readSource(path.join(__dirname, '..', 'TerminalDisplay.tsx'));
 describe('TerminalDisplay wiring (source-derived — see file header for why)', () => {
   it('placement: existing separator, then Command History, then Snippets, then a NEW separator, then Clear', () => {
     const historyAt = DISPLAY.indexOf('buildCommandHistoryMenuItem(');
-    const snippetsAt = DISPLAY.indexOf('buildSnippetsMenuItem(');
+    // The ITEM in the menu array, not the builder call — the builder is now hoisted into
+    // its own helper (shared with the keyboard-opened menu) and sits ABOVE this array, so
+    // anchoring on `buildSnippetsMenuItem(` would compare a definition to a use and read
+    // the order backwards.
+    const snippetsAt = DISPLAY.indexOf('snippetsMenuItem(),');
     const clearAt = DISPLAY.indexOf("label: 'Clear',");
     expect(historyAt).toBeGreaterThan(-1);
     expect(snippetsAt).toBeGreaterThan(-1);
@@ -371,6 +536,62 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     // The call site must pass the bare `snippets` identifier — not an inline
     // literal — as the first thing inside the object literal.
     expect(DISPLAY).toMatch(/buildSnippetsMenuItem\(\{\s*\n\s*snippets,/);
+  });
+
+  it('reads the view mode from the store too, so the toggle survives closing the menu', () => {
+    // The flyout is rebuilt on every open. A view mode held in component state would look
+    // identical here and silently reset to the default each time the menu was dismissed.
+    expect(DISPLAY).toMatch(
+      /const snippetsViewMode = useSelector\(\(s: RootState\) => s\.settings\.snippetsViewMode\);/,
+    );
+    expect(DISPLAY).toMatch(/viewMode: snippetsViewMode,/);
+    expect(DISPLAY).toMatch(/onToggleViewMode: \(\) => dispatch\(/);
+    expect(DISPLAY).toMatch(/setSnippetsViewMode\(snippetsViewMode === 'flat' \? 'folders' : 'flat'\)/);
+  });
+
+  /**
+   * Closing any of these menus leaves DOM focus on `document.body` — the menu button or
+   * the flyout's search box held it, and both unmount — so the terminal goes deaf until
+   * the user clicks it. That is a property of the MENU, not of the snippet row that
+   * exposed it, which is why this asserts EVERY `onClose` rather than the one.
+   */
+  it('every menu returns the keyboard to the terminal when it closes', () => {
+    const code = stripComments(DISPLAY);
+    // Sliced to the helper's OWN body rather than matched with a lazy `[\s\S]*?`: this
+    // file calls `engineRef.current?.focus()` in several other places, so an unbounded
+    // pattern matches one of THOSE and stays green with the focus deleted from here
+    // (verified - that mutant survived until this was bounded).
+    const afterDecl = code.slice(code.indexOf('const refocusTerminal = useCallback('));
+    expect(afterDecl).not.toBe('');
+    const refocusBody = afterDecl.slice(0, afterDecl.indexOf('}, ['));
+    expect(refocusBody).toContain('engineRef.current?.focus();');
+
+    const onCloses = code.match(/onClose=\{[^}]*\}/g) ?? [];
+    expect(onCloses.length).toBeGreaterThanOrEqual(4);
+    // No `onClose={() => setX(null)}` survivors: an inline clear is exactly the shape
+    // that drops the refocus, and it is the shape all four of these used to have.
+    for (const handler of onCloses) {
+      expect(handler).toMatch(/^onClose=\{close[A-Za-z]+\}$/);
+    }
+    // …and each named handler really does refocus.
+    for (const name of ['closeContextMenu', 'closeSnippetsMenu', 'closePathPicker', 'closeSchemaPicker']) {
+      const re = new RegExp(`const ${name} = useCallback\\(\\(\\) => \\{[^}]*?refocusTerminal\\(\\);`, 's');
+      expect(code).toMatch(re);
+    }
+    // The dialog is the one deliberate exception, and it closes the loop itself.
+    expect(code).toMatch(/snippetDialogOpenRef\.current\) return;/);
+    expect(code).toMatch(/const closeSnippetDialog = useCallback\(\(\) => \{[\s\S]*?refocusTerminal\(\);/);
+  });
+
+  it('publishes the keyboard entry point and renders it with its flyout already open', () => {
+    // Link 9 for the shortcut: InputHandler holds no engine, so only the TRIGGER travels
+    // through surfaceChrome — and a published callback nothing renders is the classic
+    // "event with no dispatcher".
+    expect(DISPLAY).toMatch(/openSnippets: openSnippetsMenu,/);
+    expect(DISPLAY).toMatch(/const openSnippetsMenu = useCallback\(/);
+    expect(DISPLAY).toMatch(/standaloneSubmenu=\{0\}/);
+    // Same item as the right-click menu's, not a second copy that can drift from it.
+    expect(DISPLAY).toMatch(/items=\{\[snippetsMenuItem\(\)\]\}/);
   });
 
   it('renders SnippetDialog wired to addSnippet, never dispatching from inside the dialog itself', () => {
