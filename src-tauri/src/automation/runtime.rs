@@ -59,6 +59,13 @@ pub struct AutomationRuntime {
     /// **`pc_id`** -> this terminal printed something since the last evaluation. The one `pc-`keyed
     /// map here, because `ChannelPayload.id` is a process id.
     dirty: DashMap<String, ()>,
+    /// How often each pair has fired, and when it last did.
+    ///
+    /// `arm` cannot answer either question: its `at_ms` is overwritten on every crossing and gone
+    /// the moment the pair re-arms, while `RuntimePairState` shows a **count** and a last-fired
+    /// stamp that must survive a re-arm — *“fired 3 times, last 10 minutes ago”* on a row that is
+    /// currently armed. Keyed like `arm`, and purged by both teardowns for the same reason.
+    fires: DashMap<(String, String), (u32, i64)>,
     /// `rule_id` -> the leaves it watches. The targeting tick is its only writer.
     watched: DashMap<String, HashSet<String>>,
 }
@@ -87,6 +94,7 @@ impl AutomationRuntime {
     pub fn forget_rule(&self, rule_id: &str) {
         self.arm.retain(|(r, _), _| r != rule_id);
         self.last_eval_ms.retain(|(r, _), _| r != rule_id);
+        self.fires.retain(|(r, _), _| r != rule_id);
         self.watched.remove(rule_id);
     }
 
@@ -108,6 +116,7 @@ impl AutomationRuntime {
     pub fn forget_terminal(&self, tm: &str) {
         self.arm.retain(|(_, t), _| t != tm);
         self.last_eval_ms.retain(|(_, t), _| t != tm);
+        self.fires.retain(|(_, t), _| t != tm);
         self.echoes.remove(tm);
         self.send_locks.remove(tm);
     }
@@ -123,6 +132,15 @@ impl AutomationRuntime {
     /// The tap's ONLY write. Takes a `pc-` process id.
     pub fn mark_dirty(&self, pc: &str) {
         self.dirty.insert(pc.to_string(), ());
+    }
+
+    /// Spend a terminal's dirty flag.
+    ///
+    /// The evaluator clears a `pc` only once EVERY due pair on it has run this tick (see
+    /// `due::settled_processes`). Two rules can watch one terminal, and clearing after the first
+    /// would make the second miss that output — permanently, if the terminal then goes quiet.
+    pub fn clear_dirty(&self, pc: &str) {
+        self.dirty.remove(pc);
     }
 
     pub fn is_dirty(&self, pc: &str) -> bool {
@@ -160,6 +178,26 @@ impl AutomationRuntime {
     }
 
     // --- cadence -------------------------------------------------------------------------------
+
+    // --- fire history ---------------------------------------------------------------------------
+
+    /// Record a crossing that actually sent. Called once per `sent`, inside the send's critical
+    /// section, so the count cannot run ahead of the log.
+    pub fn record_fire(&self, rule_id: &str, tm: &str, at_ms: i64) {
+        let mut e = self
+            .fires
+            .entry((rule_id.to_string(), tm.to_string()))
+            .or_insert((0, at_ms));
+        e.0 += 1;
+        e.1 = at_ms;
+    }
+
+    /// `(count, last_at)`, or `None` for a pair that has never fired.
+    pub fn fire_record(&self, rule_id: &str, tm: &str) -> Option<(u32, i64)> {
+        self.fires
+            .get(&(rule_id.to_string(), tm.to_string()))
+            .map(|e| *e.value())
+    }
 
     pub fn last_eval(&self, rule_id: &str, tm: &str) -> Option<i64> {
         self.last_eval_ms
@@ -203,6 +241,7 @@ mod tests {
             for tm in ["tm-test-1", "tm-test-2"] {
                 rt.set_arm(rule, tm, ArmState::Fired { at_ms: 10 });
                 rt.set_last_eval(rule, tm, 99);
+                rt.record_fire(rule, tm, 10);
             }
             rt.set_watched(rule, ["tm-test-1".to_string(), "tm-test-2".to_string()].into());
         }
@@ -231,6 +270,7 @@ mod tests {
                 rule
             );
             assert_eq!(rt.last_eval(rule, "tm-test-1"), None, "{} kept a stale eval stamp", rule);
+            assert_eq!(rt.fire_record(rule, "tm-test-1"), None, "{} kept a stale fire count", rule);
         }
         assert!(rt.echoes_for("tm-test-1", 0).is_empty(), "echo needles survived");
 
@@ -238,6 +278,7 @@ mod tests {
         for rule in ["au-1", "au-2"] {
             assert_eq!(rt.arm_state(rule, "tm-test-2"), ArmState::Fired { at_ms: 10 });
             assert_eq!(rt.last_eval(rule, "tm-test-2"), Some(99));
+            assert_eq!(rt.fire_record(rule, "tm-test-2"), Some((1, 10)));
         }
         assert_eq!(rt.echoes_for("tm-test-2", 0), vec!["HANDOFF now".to_string()]);
 
@@ -257,6 +298,7 @@ mod tests {
         assert_eq!(rt.arm_state("au-1", "tm-test-1"), ArmState::Fired { at_ms: 10 });
         assert_eq!(rt.arm_state("au-1", "tm-test-2"), ArmState::Fired { at_ms: 10 });
         assert_eq!(rt.last_eval("au-2", "tm-test-1"), Some(99));
+        assert_eq!(rt.fire_record("au-1", "tm-test-1"), Some((1, 10)));
     }
 
     #[test]
@@ -275,8 +317,10 @@ mod tests {
         for tm in ["tm-test-1", "tm-test-2"] {
             assert_eq!(rt.arm_state("au-1", tm), ArmState::Unseen);
             assert_eq!(rt.last_eval("au-1", tm), None);
+            assert_eq!(rt.fire_record("au-1", tm), None, "every pair-keyed map, not just the two");
             assert_eq!(rt.arm_state("au-2", tm), ArmState::Fired { at_ms: 10 });
             assert_eq!(rt.last_eval("au-2", tm), Some(99));
+            assert_eq!(rt.fire_record("au-2", tm), Some((1, 10)));
         }
         assert!(rt.watched_for("au-1").is_empty());
         assert_eq!(rt.watched_for("au-2").len(), 2);
