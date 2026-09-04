@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
+import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
 import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -84,6 +84,10 @@ interface ElectronAPI {
   openPath: (path: string) => Promise<void>;
   openInEditor: (editor: string, path: string, line?: number, col?: number) => Promise<void>;
   pickExecutablePath: () => Promise<string | null>;
+  pickSnippetsExportPath: () => Promise<string | null>;
+  pickSnippetsImportPath: () => Promise<string | null>;
+  exportSnippetsFile: (path: string, json: string) => Promise<void>;
+  importSnippetsFile: (path: string) => Promise<string>;
   sendToPty: (processId: string, data: string) => Promise<void>;
   resizePty: (processId: string, cols: number, rows: number) => Promise<void>;
   onTerminalData: (callback: (id: string, data: string) => void) => void;
@@ -412,6 +416,40 @@ const tauriBridge: ElectronAPI = {
       ],
     });
     return typeof selection === 'string' ? selection : null;
+  },
+
+  // Snippets import/export (plan/029 §8). The dialog config lives here beside
+  // `pickExecutablePath` because this file is the only place the dialog plugin is
+  // imported; `services/snippetPorting.ts` owns the format and merge semantics.
+  // Both resolve to null when the user dismisses the dialog — a normal outcome.
+  pickSnippetsExportPath: async () => {
+    const selection = await saveFileDialog({
+      title: 'Export snippets',
+      defaultPath: 'termflow-snippets.json',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    return typeof selection === 'string' ? selection : null;
+  },
+
+  pickSnippetsImportPath: async () => {
+    const selection = await openFileDialog({
+      multiple: false,
+      directory: false,
+      title: 'Import snippets',
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    return typeof selection === 'string' ? selection : null;
+  },
+
+  // Narrow by design (decision D10): these two carry snippet JSON to and from a
+  // `.json` path the user picked in a native dialog, and are reachable ONLY over
+  // Tauri IPC — never from the embedded REST API or the MCP sidecar.
+  exportSnippetsFile: async (path, json) => {
+    await invoke('export_snippets_file', { path, json });
+  },
+
+  importSnippetsFile: async (path) => {
+    return invoke('import_snippets_file', { path });
   },
 
   // Aliases for PTY (same as above)

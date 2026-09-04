@@ -198,6 +198,15 @@ export interface ElectronAPI {
   // Resolves to the chosen path, or null if the user cancelled the dialog.
   pickExecutablePath?: () => Promise<string | null>;
 
+  // Snippets import/export (plan/029 §8). Two narrow, purpose-built commands rather
+  // than a general read/write pair — see the note on the Rust side (commands.rs).
+  // Both dialog wrappers resolve to null when the user dismisses the dialog, which
+  // callers must treat as a normal outcome, not a failure.
+  pickSnippetsExportPath?: () => Promise<string | null>;
+  pickSnippetsImportPath?: () => Promise<string | null>;
+  exportSnippetsFile?: (path: string, json: string) => Promise<void>;
+  importSnippetsFile?: (path: string) => Promise<string>;
+
   // PTY communication
   sendToPty: (processId: string, data: string) => void;
   resizePty: (processId: string, cols: number, rows: number) => void;

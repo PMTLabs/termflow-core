@@ -1505,6 +1505,10 @@ pub fn run() {
         commands::get_terminal_size,
         commands::get_shell_profiles,
         commands::read_legal_document,
+        // Snippets import/export (plan/029 §8.3). Tauri IPC only by design (D10) —
+        // see the note above the two functions in commands.rs before adding a route.
+        commands::export_snippets_file,
+        commands::import_snippets_file,
         commands::quit_app,
         commands::get_profile,
         commands::save_config,
