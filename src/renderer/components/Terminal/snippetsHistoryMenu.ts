@@ -108,9 +108,13 @@ export function buildSnippetsMenuItem(opts: {
   return {
     label: 'Snippets',
     icon: '✂️',
-    title: 'Insert a saved snippet of text into this terminal. Search by name, text, or #tag.',
+    // Kept honest against plan/030 §3: search now also matches a tag by plain word and
+    // the initials of the words in the name or body, and a capability nobody is told
+    // about is a capability nobody uses.
+    title:
+      'Insert a saved snippet of text into this terminal. Search by name, text, tag, or initials — "ch" finds "context handoff".',
     submenu: {
-      searchPlaceholder: 'Search snippets…  (#tag to filter by tag)',
+      searchPlaceholder: 'Search name, text, tag, or initials…  (#tag to filter)',
       // Folder mode's root panel lists folder NAMES, which are short; flat mode's lists
       // snippets with their chips, which are not. The folder panel this opens keeps the
       // full width — `narrow` is depth-0 only.

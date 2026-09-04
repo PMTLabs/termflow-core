@@ -197,6 +197,29 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     expect(filterSnippets([hyphen], 'ch').map((x) => x.id)).toEqual(['hy']);
   });
 
+  it('a combining mark does NOT split a word (decomposed text)', () => {
+    // 'naïve handoff' with the diaeresis as a separate combining codepoint, as it arrives
+    // from a macOS filesystem or some clipboards. Treating U+0308 as a separator would
+    // split 'naïve' into 'nai' + 've' and give initials 'nvh', so this snippet would
+    // answer to 'nv' and NOT to the 'nh' a reader would actually type.
+    // Written as explicit escapes: the two spellings are indistinguishable in an editor,
+    // so a literal would silently become whichever form the file is saved in and this
+    // test would stop testing decomposition without ever going red.
+    const nfd = s({ id: 'nfd', text: 'nai\u0308ve handoff', createdAt: 0 });
+    expect(nfd.text).toHaveLength('naive handoff'.length + 1); // the mark is its own codepoint
+    expect(filterSnippets([nfd], 'nh').map((x) => x.id)).toEqual(['nfd']);
+    expect(filterSnippets([nfd], 'nv')).toEqual([]);
+    // The precomposed spelling of the same phrase must behave identically.
+    const nfc = s({ id: 'nfc', text: 'na\u00efve handoff', createdAt: 0 });
+    expect(nfc.text).toHaveLength('naive handoff'.length);
+    expect(filterSnippets([nfc], 'nh').map((x) => x.id)).toEqual(['nfc']);
+  });
+
+  it('a text of only punctuation has no initials and matches nothing', () => {
+    const punct = s({ id: 'p', text: '--- ... ---', createdAt: 0 });
+    expect(filterSnippets([punct], 'ab')).toEqual([]);
+  });
+
   it('a bare word matches a tag, so an import source tag is findable by name', () => {
     const tagged = s({ id: 't', text: 'echo hello', tags: ['InkSpoke'], createdAt: 0 });
     const untagged = s({ id: 'u', text: 'echo hello there', createdAt: 0 });

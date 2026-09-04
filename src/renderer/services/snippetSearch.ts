@@ -47,13 +47,26 @@ const MIN_INITIALS_QUERY_LENGTH = 2;
 
 /**
  * First character of every word in `s`, joined: `'context handoff'` → `'ch'`, and
- * `'please do a context handoff now'` → `'pdachn'`. A "word" is a run of letters or
- * digits, so punctuation splits the way a reader would expect (`context-handoff` is two
- * words, not one). `codePointAt` rather than `[0]` so an astral first letter survives as
- * one character instead of half a surrogate pair.
+ * `'please do a context handoff now'` → `'pdachn'`. A "word" starts with a letter or a
+ * digit and continues through letters, digits and COMBINING MARKS, so punctuation splits
+ * the way a reader would expect (`context-handoff` is two words, not one).
+ *
+ * The `\p{M}` in the continuation class is load-bearing, not decoration. Without it a
+ * decomposed (NFD) string breaks mid-word: `'naïve handoff'` written as `n a i ◌̈ v e` has
+ * its combining diaeresis treated as a separator, splitting `naïve` into `nai` + `ve` and
+ * yielding `nvh` where the reader plainly means `nh`. Text arrives decomposed from macOS
+ * filesystems and from some clipboards, so this is a real input, not a hypothetical one.
+ * A mark can never START a word, which is why the first class excludes it.
+ *
+ * `codePointAt` rather than `[0]` so an astral first letter survives as one character
+ * instead of half a surrogate pair.
+ *
+ * Scripts written without spaces (Chinese, Japanese) yield one initial per run rather
+ * than per word, because nothing in the string marks where the words are. That is a known
+ * limit of the technique, not a defect: those snippets remain findable by substring.
  */
 function computeWordInitials(s: string): string {
-  const words = s.toLowerCase().match(/[\p{L}\p{N}]+/gu);
+  const words = s.toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu);
   if (!words) return '';
   return words.map((w) => String.fromCodePoint(w.codePointAt(0) as number)).join('');
 }
