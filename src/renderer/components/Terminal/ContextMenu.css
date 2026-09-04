@@ -10,6 +10,11 @@
   min-width: 200px;
   z-index: 1000;
   user-select: none;
+  /* The flyout submenu is a CHILD of this box rather than a portal (see
+     ContextMenu.tsx / design 029 §4.2), so the menu must never clip it. Stated
+     explicitly because `visible` being the initial value makes this easy to
+     "tidy away" later, which would leave every flyout invisible. */
+  overflow: visible;
 }
 
 .context-menu-item {
@@ -64,6 +69,163 @@
   height: 1px;
   background-color: var(--menu-separator, #454545);
   margin: 4px 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Flyout submenu (design 029 §4)
+
+   Everything below reuses the menu's own theme variables — a parallel palette
+   would drift from the menu it is attached to the first time either changes.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* The positioned parent of a flyout. Because it is only as tall as its row, the
+   flyout's `top: 0` lands level with that row without any offset arithmetic. */
+.context-menu-submenu-host {
+  position: relative;
+}
+
+/* The ▸ affordance, on both a menu item and a folder row. */
+.context-menu-submenu-arrow {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 11px;
+  color: var(--menu-accelerator-color, #969696);
+}
+
+/* Keep the parent item lit while its flyout is open, so the trail from the menu
+   to the flyout is visible when the pointer has moved off the row. */
+.context-menu-item.is-submenu-open:not(:disabled) {
+  background-color: var(--menu-hover-background, #094771);
+}
+
+/* `position: absolute` (not fixed, not portalled) is load-bearing twice over:
+   the flyout stays inside `menuRef` so a press on it cannot trip the menu's
+   outside-click close, and it stays out of the menu's flow so it contributes
+   nothing to the intrinsic width that `.context-menu-label`'s `nowrap` and the
+   edge-aware repositioning effect both depend on. */
+.context-menu-flyout {
+  position: absolute;
+  top: 0;
+  left: 100%;
+  margin-left: 2px;
+  display: flex;
+  flex-direction: column;
+  min-width: 240px;
+  max-width: 420px;
+  padding: 4px 0;
+  background-color: var(--menu-background, #252526);
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  /* Above the menu rows it overlaps; `.context-menu` already owns the z-index
+     that lifts the whole thing over the terminal. */
+  z-index: 1;
+}
+
+/* Applied when the viewport edge is nearer than the flyout is wide. */
+.context-menu-flyout.flip-left {
+  left: auto;
+  right: 100%;
+  margin-left: 0;
+  margin-right: 2px;
+}
+
+.context-menu-flyout-search {
+  margin: 2px 8px 6px;
+  padding: 4px 6px;
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 3px;
+  color: var(--menu-foreground, #cccccc);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  /* `.context-menu` sets `user-select: none`, which would inherit here and make
+     the box impossible to select text in with the mouse. */
+  user-select: text;
+}
+
+.context-menu-flyout-search:focus {
+  border-color: var(--menu-hover-background, #094771);
+}
+
+.context-menu-flyout-search::placeholder {
+  color: var(--menu-accelerator-color, #969696);
+}
+
+/* Vertical overflow scrolls the LIST, not the panel, so the search box stays put. */
+.context-menu-flyout-list {
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Positioned parent for a folder row's second-level flyout. */
+.context-menu-flyout-item {
+  position: relative;
+}
+
+.context-menu-flyout-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 5px 12px;
+  background: transparent;
+  border: none;
+  color: var(--menu-foreground, #cccccc);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* DOM focus never leaves the search box — the arrow keys move a *styled* row —
+   and ContextMenu.css carries no `:focus-visible` rule of any kind, so without
+   `.is-active` keyboard navigation would be literally invisible. */
+.context-menu-flyout-row.is-active,
+.context-menu-flyout-row:hover:not(:disabled) {
+  background-color: var(--menu-hover-background, #094771);
+}
+
+.context-menu-flyout-row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Empty-state message: a row in shape only. */
+.context-menu-flyout-row.is-empty {
+  font-style: italic;
+  color: var(--menu-accelerator-color, #969696);
+}
+
+.context-menu-flyout-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  margin-right: 6px;
+  font-size: 13px;
+  text-align: center;
+  line-height: 1;
+}
+
+/* Unlike `.context-menu-label`, this one truncates instead of growing: a snippet
+   row shows arbitrary user text, and the flyout is capped by `max-width`. */
+.context-menu-flyout-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-menu-flyout-detail {
+  flex: 0 0 auto;
+  max-width: 40%;
+  margin-left: 10px;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--menu-accelerator-color, #969696);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Theme Variables */
