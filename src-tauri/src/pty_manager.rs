@@ -1688,10 +1688,6 @@ mod cwd_tests {
         assert_eq!(label_only, with_exe.clone().map(|(a, _)| a));
     }
 
-    /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
-    /// against one shared `System::new_all()` instead of paying that scan per terminal.
-    /// That reuse is only safe if it is a faithful projection of the owned-scan
-
     /// `Command contains` matches against this, and it must be the COMMAND LINE rather than the
     /// process name: an npm-installed agent is `node.exe`, so matching the name selects every node
     /// process on the machine at once. Run against this test binary, whose own argv is known.
@@ -1716,6 +1712,9 @@ mod cwd_tests {
         );
     }
 
+    /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
+    /// against one shared `System::new_all()` instead of paying that scan per terminal.
+    /// That reuse is only safe if it is a faithful projection of the owned-scan
     /// version, which is what this pins.
     #[test]
     fn process_cwd_with_a_shared_system_matches_the_owned_scan() {

@@ -166,8 +166,19 @@ export function logCopyText(entries: AutomationLogEntry[]): string {
  * duplicates by id and holding the buffer at `limit`.
  *
  * The log subscribes **before** it fetches (§5.3), so the two streams overlap by design and the
- * merge has to be idempotent. Ids come from SQLite's rowid and are monotonic, which is what makes
- * ordering by id the same as ordering by time without trusting two clocks.
+ * merge has to be idempotent — hence the dedupe by id.
+ *
+ * **Ordering is by `id`, never by `at` (§3.1), and that is deliberate — not an assumption that the
+ * two agree.** They do not always: `at` is stamped when the decision is made while the row is
+ * appended afterwards, and the send path appends only once the send has been performed, so a `held`
+ * decided 262ms AFTER a `sent` can be inserted before it and take the lower id. Measured live, and
+ * visible on screen as `held` sitting above its own `sent`.
+ *
+ * `at` is still the wrong key despite that, for the reasons §3.1 gives: entries share a millisecond
+ * (verbose mode writes several terminals per tick) and the wall clock can move BACKWARDS after an
+ * NTP correction or a resume — `system:resume` is an event this app already handles. An id is
+ * monotonic under both. The store pins this in `the_log_is_ordered_by_id_and_never_by_at`; this
+ * module is the second surface that has to obey it, so the test below pins it here too.
  */
 export function mergeEntries(
     existing: AutomationLogEntry[],

@@ -448,7 +448,32 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         : null;
 
     return createPortal(
-        <div className="au-editor" role="dialog" aria-modal="true" aria-label="Automation editor" ref={containerRef}>
+        // `tabIndex={-1}` is what makes Escape reachable, and it is not decoration.
+        //
+        // `useDialogA11y` binds its keydown to THIS container in the bubble phase, deliberately, so
+        // that a `ConfirmDialog` opened inside the editor answers Escape itself instead of the
+        // editor stealing it. A bubble listener only ever runs for events whose target is inside the
+        // container — so the moment `document.activeElement` becomes `<body>`, Escape and the Tab
+        // trap both stop existing. A plain `<div>` is not focusable, so that is precisely what a
+        // click on any non-focusable area did: the canvas background (which is how you DESELECT a
+        // step, so it is the most common click in the editor) and the header's empty space both sent
+        // focus to the body, and Escape then closed nothing. Measured on a live build: click a node,
+        // click Save, press Escape three times — nothing; click into the name field first and the
+        // same key opens the unsaved-changes dialog.
+        //
+        // With `tabIndex={-1}` the browser focuses the nearest focusable ancestor on mousedown, which
+        // is now this container, so focus never reaches the body and the listener keeps firing. The
+        // hook already expects this — `resolveInitialFocus` falls back to `(target ?? container)
+        // .focus?.()`, a no-op on a div that cannot hold focus, and its Tab trap has an
+        // `active === container` branch for it.
+        //
+        // Fixed HERE and not in `useDialogA11y`, which this branch does not touch and which eleven
+        // other components share: the hook's contract is "trap focus inside the container", and a
+        // container that cannot hold focus does not satisfy it. The other ten dialogs are small and
+        // densely focusable, so they rarely lose focus to the body; this one is a full-screen surface
+        // whose largest region is a canvas. That the shared hook has no such guard is a real gap and
+        // is worth raising, but widening a GUI-pass fix across eleven dialogs is not this change.
+        <div className="au-editor" role="dialog" aria-modal="true" aria-label="Automation editor" tabIndex={-1} ref={containerRef}>
             <div className="au-scrim" aria-hidden="true" />
             <div className="au-modal">
                 <div className="au-mhead">

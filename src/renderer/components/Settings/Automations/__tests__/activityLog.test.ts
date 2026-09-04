@@ -141,6 +141,32 @@ describe('filters', () => {
 });
 
 describe('mergeEntries', () => {
+    /**
+     * §3.1: ordering is by `id`, **never** by `at` — and the two really do disagree, so this is a
+     * rule the merge has to hold rather than a distinction without a difference.
+     *
+     * `at` is stamped at the decision while the row is appended afterwards, and the send path
+     * appends only once the send has been performed. Measured on a live build: `sent` at ...26166
+     * took id 55 while a `held` decided 262ms LATER, at ...26428, took id 54. Sorting by `at` is
+     * still wrong — entries share a millisecond, and an NTP correction or a resume can move the wall
+     * clock backwards — so an inverted `at` must NOT reorder anything.
+     *
+     * The store pins this in `the_log_is_ordered_by_id_and_never_by_at`. The renderer merges a
+     * second time, over the fetch/subscription union, and had nothing pinning it here: swapping this
+     * sort to `at` left every other test in this file green, because they all leave `at` at 0.
+     *
+     * The numbers below are that measurement, with the ids in the order the store really assigned.
+     */
+    it('orders by id even when `at` disagrees, which it does after a send', () => {
+        const held = entry('held', 'tm-a', 'last value 5', 26_428); // id 1, decided LATER
+        const sent = entry('sent', 'tm-a', 'sent to PROBENAME', 26_166); // id 2, decided FIRST
+
+        // Oldest-first is the full log view: insertion order, so the older id leads.
+        expect(mergeEntries([], [sent, held], false, 200).map((e) => e.id)).toEqual([1, 2]);
+        // Newest-first is the drawer, and the same invariant read the other way round.
+        expect(mergeEntries([], [held, sent], true, 200).map((e) => e.id)).toEqual([2, 1]);
+    });
+
     it('drops duplicates by id, so an event and a fetch may overlap', () => {
         // The log subscribes BEFORE it fetches, so the two streams overlap by design.
         const a = entry('sent', 'tm-a');

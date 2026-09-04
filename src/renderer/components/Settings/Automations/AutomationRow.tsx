@@ -21,6 +21,29 @@ import {
     describeWatching,
 } from './automationState';
 
+/**
+ * The footer's fire history is the ENGINE'S LIVE STATE, and it is not the rule's lifetime.
+ *
+ * `fired` and `lastFired` are folded from the `automation:state` payload, which the engine holds in
+ * memory. `Runtime::forget_rule` purges `fires` along with the arm keys, and it runs whenever a rule
+ * is switched off, saved with a change, or completes — plus for every rule whose `updated_at` moved
+ * across a `reload` (Q11). A restart clears the lot, because the map starts empty in a new process.
+ *
+ * So the row wrote **Never fired** for a rule whose own activity log listed four `sent` lines from
+ * an hour earlier — seen live, on a rule that had fired four times before the app was relaunched.
+ * That is the mockup's own prohibition turned on the original: *"Copying history would make the copy
+ * lie about a terminal it has never seen"* (§01, beside `Never fired · no history`). Both branches
+ * were lifetime sentences written from run-scoped numbers, so both are scoped here rather than only
+ * the one that happened to be caught — the same class as the pill's false *Fired*, which
+ * `everFired` fixed at the other end.
+ *
+ * The activity log is the surface that does keep history, and the tooltip points at it.
+ */
+const HISTORY_SCOPE = 'since it started running';
+const RUNTIME_HISTORY_SCOPE = 'The engine counts this while the rule runs. It starts from nothing '
+    + 'again when TermFlow restarts, when the rule is switched off, and when it is saved with a '
+    + 'change — the activity log keeps the history that outlives all three.';
+
 export interface AutomationRowProps {
     rule: AutomationRule;
     pairs: Record<string, AutomationRuntimePairState> | undefined;
@@ -112,12 +135,12 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                         </span>
                     )}
                     <span className="au-k">↻ {describeCadence(rule)}</span>
-                    <span className="au-k au-hist">
+                    <span className="au-k au-hist" title={RUNTIME_HISTORY_SCOPE}>
                         {rule.completedAt
                             ? `✓ Completed ${new Date(rule.completedAt).toLocaleString()} — will not run again`
                             : lastFired !== null
-                                ? `⏱ Fired ${describeLastFired(lastFired, now)} · ${fired} ${fired === 1 ? 'time' : 'times'}`
-                                : '⏱ Never fired'}
+                                ? `⏱ Fired ${describeLastFired(lastFired, now)} · ${fired} ${fired === 1 ? 'time' : 'times'} ${HISTORY_SCOPE}`
+                                : `⏱ Not fired ${HISTORY_SCOPE}`}
                     </span>
                 </div>
 

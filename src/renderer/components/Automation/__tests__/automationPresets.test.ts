@@ -242,6 +242,41 @@ describe('sayPattern — the plain-words paraphrase', () => {
         }
     });
 
+    /**
+     * The invariant behind that guard, over the whole supported grammar rather than four patterns.
+     *
+     * A mutation sweep flagged `re.test(example)` as a survivor, and the obvious reading — "add the
+     * paired negative, a pattern whose example does NOT match" — turns out to be impossible: 36
+     * patterns were probed across counted quantifiers, anchors, alternation, lookarounds,
+     * backreferences, non-capturing and nested groups, and every construct that could make the
+     * concatenated sample miss makes `sayPattern` return null for the WHOLE saying first. So the
+     * guard is unreachable today and the mutant is EQUIVALENT, not surviving.
+     *
+     * It is still worth keeping, and worth pinning like this: it is the thing that would catch a
+     * later tokenizer that learns `{n}` or `|` and starts synthesising samples that do not satisfy
+     * their own pattern. This asserts the property rather than a mutant — whenever an example is
+     * offered, it matches — so extending the grammar without extending `sample` fails here.
+     */
+    it('never offers an example that its own pattern would not find, across the grammar', () => {
+        const grammar = [
+            'ctx:(\\d+)%', '(\\d+)%', '\\b([45]\\d\\d)\\b', 'FAILED \\d+ test',
+            '(\\d+)k tokens left', '(\\d+) (\\d+)', '\\d+x\\d+', '[45]\\d\\d error',
+            '\\w+@\\w+', '\\d+%', '\\bctx\\b', '((\\d+))', 'a.b', 'a.+b', '\\.\\d+',
+            '\\d+\\s+\\d+', '[45]', '[0-9]+', '(\\d+)\\)', '\\(\\d+\\)', '\\d+ \\d+ \\d+',
+            '\\w\\w\\w', '\\s\\d+',
+        ];
+        const offered: string[] = [];
+        for (const find of grammar) {
+            const said = sayPattern(find, 'brackets');
+            if (said === null || said.example === null) continue;
+            offered.push(find);
+            expect(new RegExp(find).test(said.example)).toBe(true);
+        }
+        // A vacuous pass is the failure mode here — if the grammar stopped producing examples this
+        // would still be "green" without having checked anything.
+        expect(offered.length).toBe(grammar.length);
+    });
+
     it('marks the pattern text as code, not as prose', () => {
         // The panel renders these as <code>. A flat string would have to be re-split by the
         // component, and whatever a component has to re-derive it will eventually re-derive

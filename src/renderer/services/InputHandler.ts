@@ -541,6 +541,12 @@ export class InputHandler {
     return () => {
       if (released) return;
       released = true;
+      // `Math.max` is belt-and-braces and is UNREACHABLE, which is worth writing down because a
+      // mutation sweep keeps flagging it as an untested guard. It cannot fire: `suspensions` is
+      // written in exactly two places — the `+= 1` above and this line — and every decrement is
+      // behind the one-shot `released` flag that follows its own increment, so the count never
+      // drops below the number of outstanding holders. Pinned by *"ignores a release called
+      // twice"*; removing the clamp is an EQUIVALENT mutant, not a surviving one.
       this.suspensions = Math.max(0, this.suspensions - 1);
     };
   }

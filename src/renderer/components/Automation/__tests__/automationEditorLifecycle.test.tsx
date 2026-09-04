@@ -180,6 +180,32 @@ describe('the editor, mounted', () => {
     });
 
     /**
+     * Escape closed nothing once focus reached the body, and a plain `<div>` is how it got there.
+     *
+     * `useDialogA11y` binds Escape and the Tab trap to the container in the BUBBLE phase — chosen so
+     * a nested `ConfirmDialog` answers its own Escape — which means neither exists for a keydown
+     * whose target sits outside the container. `.au-editor` carried no `tabIndex`, so it could not
+     * hold focus, so every click on a non-focusable area sent focus to `<body>`: the canvas
+     * background is how a step is DESELECTED, making it the most common click in the editor.
+     * Measured live at plan §11.16 — click a node, click Save, press Escape three times and nothing
+     * happens; click into the name field and the same key opens the unsaved-changes dialog.
+     *
+     * The attribute IS the mechanism, so the attribute is what this asserts: jsdom does not
+     * implement "focus the nearest focusable ancestor on mousedown", so the behaviour it buys cannot
+     * be driven here. Without `tabIndex` the hook's own fallback `(target ?? container).focus?.()`
+     * is a silent no-op and its `active === container` Tab branch is unreachable.
+     */
+    it('gives the dialog container a focus of its own, so Escape survives a click on the canvas', async () => {
+        await openEditorOn(rule());
+
+        const host = editor() as HTMLElement;
+        expect(host.tabIndex).toBe(-1);
+        // The hook's contract is "trap focus inside the container", and a container that cannot be
+        // focused cannot satisfy it — this is the element it was handed.
+        expect(host.getAttribute('role')).toBe('dialog');
+    });
+
+    /**
      * Header point 3. `save()` resolves `false` when the write did not happen, and the close dialog
      * reads that boolean — so a refused save must leave the editor open with the draft intact.
      */

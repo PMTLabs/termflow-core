@@ -16,6 +16,7 @@ import {
     defaultWires,
 } from '../automationSteps';
 import type { PortRef, StepKind } from '../automationSteps';
+import { AU_NODE_H, AU_NODE_W, portAnchor } from '../automationDraft';
 
 const key = (p: PortRef) => `${p.step}.${p.port}`;
 
@@ -182,5 +183,39 @@ describe('the port table', () => {
             const inputs = STEP_PORTS[step].filter((p) => p.dir === 'in');
             expect(inputs).toHaveLength(step === 'monitor' ? 0 : 1);
         }
+    });
+});
+
+/**
+ * Where the dots actually sit. `portAnchor` had no test of any kind, so a version that ignored
+ * `dir` — anchoring every port on the same edge — was invisible: the wires would all start and end
+ * in the same place and every other geometry assertion would still hold.
+ *
+ * The side is the whole meaning of the chain. `AuNode`'s header says the graph "always reads left to
+ * right", which is why Canvas Mode's four-compass `portPoint` is deliberately NOT reused here.
+ */
+describe('portAnchor', () => {
+    const pos = { x: 100, y: 40 };
+
+    it('puts inputs on the left edge and outputs on the right', () => {
+        expect(portAnchor('parse', 'in', pos).x).toBe(pos.x);
+        expect(portAnchor('parse', 'out', pos).x).toBe(pos.x + AU_NODE_W);
+        // Both of `cond`'s verdicts leave from the right, not one per side.
+        expect(portAnchor('cond', 'true', pos).x).toBe(pos.x + AU_NODE_W);
+        expect(portAnchor('cond', 'false', pos).x).toBe(pos.x + AU_NODE_W);
+        expect(portAnchor('cond', 'in', pos).x).toBe(pos.x);
+    });
+
+    it('spreads one side evenly, so yes and no are told apart by position', () => {
+        // A third and two thirds down the card — the split the header promises.
+        expect(portAnchor('cond', 'true', pos).y).toBe(pos.y + (AU_NODE_H * 1) / 3);
+        expect(portAnchor('cond', 'false', pos).y).toBe(pos.y + (AU_NODE_H * 2) / 3);
+        expect(portAnchor('cond', 'true', pos).y).not.toBe(portAnchor('cond', 'false', pos).y);
+        // A lone port on its side sits at the midpoint, not at the top.
+        expect(portAnchor('monitor', 'out', pos).y).toBe(pos.y + AU_NODE_H / 2);
+    });
+
+    it('falls back to the card origin for a port the step does not have', () => {
+        expect(portAnchor('monitor', 'in', pos)).toEqual(pos);
     });
 });

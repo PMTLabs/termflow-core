@@ -382,6 +382,57 @@ describe('AutomationsPanel', () => {
         }
     });
 
+    /**
+     * The footer counted a RUN and said it was a LIFETIME.
+     *
+     * `firedCount` and `lastFiredAt` come from the engine's in-memory map, which `forget_rule`
+     * empties on switch-off, on a save that changes the rule, and on completion — and which a
+     * restart discards outright. On a live build a rule with four `sent` rows in its own activity
+     * log rendered **⏱ Never fired** after a relaunch: the mockup's *"Never fired · no history"*
+     * printed over a rule with plenty of history.
+     *
+     * Both branches are pinned, because both were lifetime sentences over run-scoped numbers, and
+     * fixing only the one that was caught would leave the class half-fixed for the second time —
+     * `everFired` already fixed the pill's mirror of this.
+     */
+    it('does not call a run-scoped count a lifetime, in either branch', async () => {
+        const api = installApi([rule()]);
+        api.getAutomationRuntime.mockResolvedValue({
+            rules: {
+                'au-1': {
+                    'tm-a': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false },
+                },
+            },
+        });
+        await mount();
+
+        const hist = container.querySelector('.au-hist')?.textContent ?? '';
+        expect(hist).toBe('⏱ Not fired since it started running');
+        // The word the log can contradict. A rule that fired before the last restart still lands
+        // here, so an unqualified "Never" is a claim this component has no way to support.
+        expect(hist).not.toContain('Never');
+    });
+
+    it('scopes the fired count to the run as well, not only the empty case', async () => {
+        const api = installApi([rule()]);
+        api.getAutomationRuntime.mockResolvedValue({
+            rules: {
+                'au-1': {
+                    'tm-a': {
+                        state: 'fired',
+                        lastFiredAt: Date.now() - 4 * 60_000,
+                        firedCount: 2,
+                        missing: false,
+                    },
+                },
+            },
+        });
+        await mount();
+
+        expect(container.querySelector('.au-hist')?.textContent)
+            .toBe('⏱ Fired 4 min ago · 2 times since it started running');
+    });
+
     it('the template gallery shows the six templates plus a blank card', async () => {
         installApi([]);
         await mount();

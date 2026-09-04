@@ -120,6 +120,39 @@ describe('automationDerive — a fresh draft claims no runtime state', () => {
         expect(stateFor(rule, 'cond', ctx).tone).toBe('live');
     });
 
+    /**
+     * The gap the two tests above leave between them.
+     *
+     * *"never says fired or completed"* is asserted only for templates, which carry NO pairs — the
+     * branch that returns an empty foot before touching the runtime at all. So the assertion could
+     * not tell a correct runtime foot from one that says *"Fired"* for a pair that has never fired;
+     * only the paired positive exercised the runtime branch, and it hands it an already-`fired` pair.
+     *
+     * A pair the engine has merely REGISTERED is `unseen`, and it is the shape a rule sits in for
+     * the whole gap between being switched on and its first evaluation — which is exactly when a
+     * node claiming to have fired would be at its most wrong.
+     */
+    it('reports a registered-but-unseen pair without claiming it has fired', () => {
+        const rule = { ...draftFromTemplate(AUTOMATION_TEMPLATES[0]), id: 'au-1', enabled: true };
+        const ctx: DeriveContext = {
+            now: NOW,
+            problems: [],
+            pairs: { 'tm-a': { state: 'unseen', lastFiredAt: null, firedCount: 0, missing: false } },
+        };
+
+        const face = faceFor(rule, 'cond', ctx);
+        // It DOES speak — this is the runtime branch, not the empty one...
+        expect(stateFor(rule, 'cond', ctx).tone).toBe('live');
+        // ...and it says the RESTING state, by name.
+        //
+        // Asserted as the exact label rather than as `not /fired/`, which was the first attempt and
+        // was vacuous: mapping `unseen` to the re-arm state instead survived it, because `everFired`
+        // then relabels that pill *"Waiting to re-arm"* — a string containing neither "fired" nor
+        // "completed". A negative built from two words cannot see a wrong state that avoids them.
+        expect(face.foot).toBe('Armed · waiting');
+        expect(stateFor(rule, 'cond', ctx).title).toBe('Armed · waiting');
+    });
+
     it('and a blocking problem outranks the runtime state on the node it belongs to', () => {
         // A node cannot be green because it is running while being red because it cannot run: the
         // problem is the thing the user has to act on.
@@ -135,6 +168,53 @@ describe('automationDerive — a fresh draft claims no runtime state', () => {
         };
         expect(stateFor(broken, 'cond', ctx).tone).toBe('error');
         expect(faceFor(broken, 'cond', ctx).footTone).toBe('warn');
+    });
+});
+
+/**
+ * `STEP_FIELDS.monitor` is `['targets', 'monitor']` — one node owning TWO problem categories, which
+ * is the only entry in that table that is not the identity mapping.
+ *
+ * Nothing asserted the `targets` half. Dropping it leaves a rule that cannot run showing a green,
+ * configured Watch-output node with nothing on it to click: the missing pick is the single most
+ * common reason a rule will not enable, and it is reported by the node the user has to open to fix
+ * it. Both categories are checked here so neither half can be dropped silently.
+ */
+describe('automationDerive — the monitor node owns both of its problem categories', () => {
+    const pinnedWithNothingPicked = () => ({
+        ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+        id: 'au-1',
+        targetMode: 'pinned' as const,
+        targetIds: [],
+    });
+
+    it('shows a missing PICK on the monitor node, not on some other step', () => {
+        const rule = pinnedWithNothingPicked();
+        const ctx = ctxFor(rule);
+        // The problem really is the targets one, so a rename of the code cannot make this vacuous.
+        expect(ctx.problems.map((p) => p.code)).toContain('targets.empty');
+
+        expect(stateFor(rule, 'monitor', ctx).tone).toBe('error');
+        expect(faceFor(rule, 'monitor', ctx).footTone).toBe('warn');
+        // And it is not smeared across the other three nodes.
+        for (const step of ['parse', 'cond', 'action'] as const) {
+            expect(stateFor(rule, step, ctx).tone).not.toBe('error');
+        }
+    });
+
+    it('shows a too-fast TIMER on the same node', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule = {
+            ...base,
+            id: 'au-1',
+            graph: {
+                ...base.graph,
+                monitor: { ...base.graph.monitor, cadence: 'timer' as const, everyMs: 200 },
+            },
+        };
+        const ctx = ctxFor(rule);
+        expect(ctx.problems.map((p) => p.code)).toContain('monitor.interval');
+        expect(stateFor(rule, 'monitor', ctx).tone).toBe('error');
     });
 });
 
