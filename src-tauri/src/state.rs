@@ -2316,6 +2316,21 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
             .app_handle
             .emit(crate::automation::events::AUTOMATION_STATE, self.automations.runtime_payload());
     }
+
+    fn emit_changed(&self, rule_ids: Vec<String>) {
+        use tauri::Emitter as _;
+        // App-wide, like the other two and like the command layer's `announce`: every open window's
+        // Settings page wants it, and it only makes a window refetch — it never makes one act.
+        let _ = self.app_handle.emit(
+            crate::automation::events::AUTOMATION_CHANGED,
+            crate::automation::events::ChangedPayload {
+                rule_ids,
+                deleted: Vec::new(),
+                origin: crate::automation::events::ENGINE_ORIGIN.to_string(),
+                at: chrono::Utc::now().timestamp_millis(),
+            },
+        );
+    }
 }
 
 impl<R: tauri::Runtime> crate::automation_engine::eval::ScreenSource for AppState<R> {

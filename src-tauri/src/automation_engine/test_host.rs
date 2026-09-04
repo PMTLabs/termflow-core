@@ -36,6 +36,11 @@ pub(crate) struct FakeHost {
     pub(crate) write_err: Mutex<Option<String>>,
     pub(crate) activity: AtomicUsize,
     pub(crate) states: AtomicUsize,
+    /// Every `emit_changed`, by the ids it named — not a counter.
+    ///
+    /// A count answers "did the engine announce something", which is satisfied by announcing the
+    /// WRONG rule; the assertion that matters is which rule the windows were told to refetch.
+    pub(crate) changed: Mutex<Vec<Vec<String>>>,
     /// Run on every `process_for_leaf`, so a test can interleave the TAP with the evaluator's own
     /// bookkeeping loop.
     ///
@@ -58,6 +63,7 @@ impl FakeHost {
             write_err: Mutex::new(None),
             activity: AtomicUsize::new(0),
             states: AtomicUsize::new(0),
+            changed: Mutex::new(Vec::new()),
             on_leaf_lookup: Mutex::new(None),
         }
     }
@@ -110,6 +116,11 @@ impl FakeHost {
     pub(crate) fn written_to(&self) -> Vec<String> {
         self.writes.lock().unwrap().iter().map(|(pc, _)| pc.clone()).collect()
     }
+
+    /// Every rule id the engine told the windows to refetch, in order.
+    pub(crate) fn announced(&self) -> Vec<String> {
+        self.changed.lock().unwrap().iter().flatten().cloned().collect()
+    }
 }
 
 impl EngineHost for FakeHost {
@@ -159,6 +170,9 @@ impl EngineHost for FakeHost {
     }
     fn emit_state(&self) {
         self.states.fetch_add(1, Ordering::Relaxed);
+    }
+    fn emit_changed(&self, rule_ids: Vec<String>) {
+        self.changed.lock().unwrap().push(rule_ids);
     }
 }
 

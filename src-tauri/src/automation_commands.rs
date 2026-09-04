@@ -533,7 +533,14 @@ mod source_tests {
     #[test]
     fn every_command_that_changes_a_definition_reloads_the_engine() {
         // The store calls that change what a rule IS. `mark_completed` is not here: the engine raises
-        // completion itself and drops the rule from its live set in the same critical section (§7.8).
+        // completion itself and drops the rule from its live set in the same critical section (§7.8),
+        // so it owes no `reload`.
+        //
+        // **It still owes the announce**, and reading this exclusion as covering both is what let a
+        // completed rule go on rendering *Armed · waiting* in every open window. That obligation is
+        // `EngineHost::emit_changed`, called at the completion site in `loops.rs` and pinned by
+        // `completing_a_runs_once_rule_tells_every_window_to_refetch_it` — a definition write outside
+        // a command needs its own guard, because this test can only see this file.
         let mutators = [
             "save_rule(",
             // The renderer's own save path. A separate needle rather than a looser `save_rule`,

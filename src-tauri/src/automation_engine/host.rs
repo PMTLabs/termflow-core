@@ -60,6 +60,21 @@ pub trait EngineHost: Send + Sync {
 
     /// `automation:state` — an arm-state transition.
     fn emit_state(&self);
+
+    /// `automation:changed` — the engine changed what a rule **is**.
+    ///
+    /// `automation_commands::announce` covers every definition write a command makes, and that was
+    /// read for a long time as covering all of them. It does not: **completion is written by the
+    /// engine**, which is not a command. Without this, a `runs_once` rule that had just fired went on
+    /// rendering *Armed · waiting* and *Not fired since it started running* in every open window —
+    /// the two strings that mean the opposite of what had happened — with its toggle still live and
+    /// no Reset, until the page was remounted.
+    ///
+    /// **`emit_state` cannot stand in for it, in either direction.** `complete_rule` drops the rule
+    /// from the live set, so the very next state payload omits it entirely and the row falls back to
+    /// its no-runtime rendering; and `completed_at` lives on the rule, which only a refetch of the
+    /// rules brings. One is why the row is wrong, the other is the only thing that can make it right.
+    fn emit_changed(&self, rule_ids: Vec<String>);
 }
 
 /// Hands an `EngineHost` to the two ports that predate it.

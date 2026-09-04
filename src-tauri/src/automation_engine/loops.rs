@@ -453,6 +453,18 @@ pub async fn run_send(
             log::warn!("automations: could not mark {} completed: {}", rule.id, e);
         }
         engine.complete_rule(&rule.id);
+        // And TELL the windows, which nothing else does. `mark_state_dirty` below is not this: it
+        // announces arm transitions, and `complete_rule` has just removed this rule from the live
+        // set, so the next state payload omits it and every open row falls back to *Armed · waiting*
+        // and *Not fired since it started running*. Only a refetch of the RULES carries
+        // `completed_at`, and that is what makes the pill read *Completed*, the toggle go inert and
+        // Reset appear.
+        //
+        // Announced even when the store write above failed. The rule is out of the live set either
+        // way, so a window that refetches and finds no `completed_at` is looking at the truth on
+        // disk — which is the same reason the command layer never lets a failed reload skip its
+        // `announce`.
+        host.emit_changed(vec![rule.id.clone()]);
     }
     engine.mark_state_dirty();
 }
@@ -1327,6 +1339,46 @@ mod tests {
         evaluate_tick(&next, &host, 0, 7_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         assert_eq!(times_sent(&fake, "once only"), 1, "a completed rule ran after a reload");
+    }
+
+    /// **The completion nobody was told about.**
+    ///
+    /// `mark_completed` writes `completed_at` and `complete_rule` drops the rule from the live set —
+    /// and for a long time that was the whole of it. No window was told, so every open Settings list
+    /// went on drawing the row as *Armed · waiting* and *Not fired since it started running*, with a
+    /// live toggle and no Reset, until the page was remounted. Both strings mean the opposite of what
+    /// had just happened. Seen in the GUI on the running build, on a rule whose own activity log
+    /// showed the `sent` row two lines away.
+    ///
+    /// The test above arranged this exact state and asserted the store row and the live set — the two
+    /// things the ENGINE owns. Neither can see whether anyone was told, and that is the whole gap: a
+    /// completion is not finished when the engine knows about it.
+    ///
+    /// `au-many` is the control, and it is what makes the assertion mean anything. It takes the same
+    /// crossing and fires from it, so *"the engine announced au-once"* cannot pass by announcing
+    /// every fire — only by announcing the one that changed what a rule IS.
+    #[tokio::test(start_paused = true)]
+    async fn completing_a_runs_once_rule_tells_every_window_to_refetch_it() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        let (engine, fake, host) = wire(vec![once, ctx_rule_saying("au-many", "every time", 2)]);
+        for id in ["au-once", "au-many"] {
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+
+        fake.say("pc-1", "ctx:63%
+");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(times_sent(&fake, "once only"), 1, "the runs-once rule never fired");
+        assert_eq!(times_sent(&fake, "every time"), 1, "the control never fired");
+        assert_eq!(
+            fake.announced(),
+            vec!["au-once".to_string()],
+            "a completed rule must tell the windows to refetch it, and a repeatable fire must not"
+        );
     }
 
     // =============================================================================================

@@ -45,6 +45,16 @@ pub struct ChangedPayload {
     pub at: i64,
 }
 
+/// The `origin` of an [`AUTOMATION_CHANGED`] the **engine** raised rather than a window's Settings
+/// page.
+///
+/// Every other one carries the label of the window whose Settings page made the change, because the
+/// log line names it — *"saved from window `main`"*. Completion has no window behind it: it is raised
+/// by a send that finished, on the engine's own task. This is carried instead of borrowing some
+/// window's name for something no window did. It is not a window label, and nothing may resolve it as
+/// one.
+pub const ENGINE_ORIGIN: &str = "engine";
+
 /// Payload of [`AUTOMATION_ACTIVITY`]. Deliberately just the affected rule ids: the log view refetches
 /// or merges, so a coalesced event never has to carry the rows it stands for.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
