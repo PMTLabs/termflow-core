@@ -1,5 +1,4 @@
-//! The Watchdogs engine's per-terminal and per-rule state — the user-facing rules engine, not
-//! `spawn_pipeline_watchdog`.
+//! The Automations engine's per-terminal and per-rule state.
 //!
 //! **A standalone struct rather than fields on `AppState`, and that is a testability decision, not a
 //! tidiness one.** `AppState::new` takes an `AppHandle`, so anything reachable only through it can be

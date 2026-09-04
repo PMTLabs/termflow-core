@@ -1,10 +1,9 @@
-//! The three events the Watchdogs feature emits — the user-facing rules engine, not
-//! `spawn_pipeline_watchdog`.
+//! The three events the Automations feature emits.
 //!
 //! **These names are normative and nothing may spell one inline.** The boundary audit's sharpest
 //! finding was that they were already broken four ways before a line was written: the engine emitted
-//! `workflow:activity` / `workflow:state`, the store emitted `watchdogs:changed` /
-//! `watchdogs:activity`, the settings UI listened for `watchdog:changed` / `watchdog:activity`, and
+//! `workflow:activity` / `workflow:state`, the store emitted `automations:changed` /
+//! `automations:activity`, the settings UI listened for `automation:changed` / `automation:activity`, and
 //! the handoff proposed `workflow:changed`. **No emitter overlapped the only listener.** No window
 //! would ever have repainted, the live log would never have appended, and every area's unit tests
 //! would still have passed — because a string constant that nobody else imports cannot disagree with
@@ -17,23 +16,23 @@
 
 /// A rule definition changed: created, edited, enabled, disabled, duplicated, reset or deleted.
 /// Emitted by the command layer after every definition mutation. Not coalesced — a user edit is one
-/// event. Consumed by `useWatchdogs()`, which refetches the list.
-pub const WATCHDOG_CHANGED: &str = "watchdog:changed";
+/// event. Consumed by `useAutomations()`, which refetches the list.
+pub const AUTOMATION_CHANGED: &str = "automation:changed";
 
 /// A row was appended to the activity log. The **store** decides whether one is due (≤ 1/s, inside
 /// `append`, so the rate limit cannot be re-implemented per caller); the caller performs the emit,
 /// because the store holds no `AppHandle`. Plan §7.5, §7.10.
-pub const WATCHDOG_ACTIVITY: &str = "watchdog:activity";
+pub const AUTOMATION_ACTIVITY: &str = "automation:activity";
 
 /// An arm-state transition. Emitted by the engine, coalesced ≤ 1/s.
 ///
-/// This event did not exist in any area's design: `watchdogRowState(rule, runtime)` consumed a
+/// This event did not exist in any area's design: `automationRowState(rule, runtime)` consumed a
 /// `runtime` object **nobody produced**, so every row would have painted *Armed · waiting* and *Never
-/// fired* regardless of reality. Its companion `get_watchdog_runtime()` command supplies first paint —
+/// fired* regardless of reality. Its companion `get_automation_runtime()` command supplies first paint —
 /// an event-only design leaves a freshly opened Settings page blank until the next transition.
-pub const WATCHDOG_STATE: &str = "watchdog:state";
+pub const AUTOMATION_STATE: &str = "automation:state";
 
-/// Payload of [`WATCHDOG_CHANGED`].
+/// Payload of [`AUTOMATION_CHANGED`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedPayload {
@@ -46,7 +45,7 @@ pub struct ChangedPayload {
     pub at: i64,
 }
 
-/// Payload of [`WATCHDOG_ACTIVITY`]. Deliberately just the affected rule ids: the log view refetches
+/// Payload of [`AUTOMATION_ACTIVITY`]. Deliberately just the affected rule ids: the log view refetches
 /// or merges, so a coalesced event never has to carry the rows it stands for.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +68,7 @@ pub struct RuntimePairState {
     pub missing: bool,
 }
 
-/// Payload of [`WATCHDOG_STATE`]: `rules[ruleId][terminalId]`.
+/// Payload of [`AUTOMATION_STATE`]: `rules[ruleId][terminalId]`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatePayload {

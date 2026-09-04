@@ -12,12 +12,13 @@ pub mod net_ports;
 pub mod window_registry;
 mod history_store;
 pub mod canvas_store;
-// Terminal Watchdog Workflows (plan 028). ONE `watchdog*` prefix for the whole feature; each
-// module's doc line distinguishes it from `spawn_pipeline_watchdog` below.
-pub mod watchdog;
-pub mod watchdog_engine;
-pub mod watchdog_store;
-pub mod watchdog_validation;
+// Terminal Automations (plan 028). ONE `automation*` prefix for the whole feature, chosen so it
+// cannot be confused with `spawn_pipeline_watchdog` below — that one watches the output PIPELINE for
+// a stalled consumer and is unrelated.
+pub mod automation;
+pub mod automation_engine;
+pub mod automation_store;
+pub mod automation_validation;
 pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;

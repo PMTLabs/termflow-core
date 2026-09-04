@@ -1,9 +1,8 @@
-//! The Rust mirror of the editor's `watchdogValidation` — for the Watchdogs rules feature, not
-//! `spawn_pipeline_watchdog`.
+//! The Rust mirror of the editor's `automationValidation`.
 //!
 //! Two implementations of one rule set, sharing ONE case fixture so they cannot diverge silently. The
 //! backend owns "is this rule allowed to run" and must not be talked into enabling an invalid rule by
-//! a stale renderer: `set_watchdog_enabled` and any save with `enabled = true` re-check and refuse.
+//! a stale renderer: `set_automation_enabled` and any save with `enabled = true` re-check and refuse.
 //! The boundary audit found the enable path bypassed entirely — the editor gated its own toggle, the
 //! store validated nothing semantic, and the engine refused only an uncompilable pattern, so a rule
 //! with no terminals and an empty message went live straight from the list row. Plan §7.8, R10.

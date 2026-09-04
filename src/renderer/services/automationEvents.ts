@@ -1,44 +1,44 @@
 /**
- * The three events the Watchdogs feature emits, and the payloads they carry.
+ * The three events the Automations feature emits, and the payloads they carry.
  *
  * **These names are normative and nothing may spell one inline.** Before a line of this feature was
  * written they were already broken four ways: the engine was to emit `workflow:activity` /
- * `workflow:state`, the store `watchdogs:changed` / `watchdogs:activity`, the settings UI listened for
- * `watchdog:changed` / `watchdog:activity`, and the handoff proposed `watchdog:changed` again by
+ * `workflow:state`, the store `automations:changed` / `automations:activity`, the settings UI listened for
+ * `automation:changed` / `automation:activity`, and the handoff proposed `automation:changed` again by
  * another route. **No emitter overlapped the only listener.** No window would ever have repainted, the
  * live log would never have appended — and every area's unit tests would still have passed, because a
  * string literal that nobody else imports cannot disagree with anything. This module exists so that it
  * can. Plan 028 §7.2, M0.2.
  *
- * The Rust side of the same contract is `src-tauri/src/watchdog/events.rs`; the constants and the
+ * The Rust side of the same contract is `src-tauri/src/automation/events.rs`; the constants and the
  * field names must match it exactly.
  */
 
 /**
  * A rule definition changed: created, edited, enabled, disabled, duplicated, reset or deleted.
  * Emitted by the command layer after every definition mutation, uncoalesced — a user edit is one
- * event. `useWatchdogs()` refetches the list.
+ * event. `useAutomations()` refetches the list.
  */
-export const WATCHDOG_CHANGED = 'watchdog:changed';
+export const AUTOMATION_CHANGED = 'automation:changed';
 
 /**
  * A row was appended to the activity log. The store decides whether one is due (at most one per
  * second, inside `append`, so the rate limit cannot be re-implemented per caller) and its caller
  * performs the emit — the store holds no `AppHandle`.
  */
-export const WATCHDOG_ACTIVITY = 'watchdog:activity';
+export const AUTOMATION_ACTIVITY = 'automation:activity';
 
 /**
  * An arm-state transition, coalesced to at most one per second by the engine.
  *
- * This event existed in no area's design: `watchdogRowState(rule, runtime)` consumed a `runtime`
+ * This event existed in no area's design: `automationRowState(rule, runtime)` consumed a `runtime`
  * object **nobody produced**, so every row would have painted *Armed · waiting* and *Never fired*
- * regardless of reality. `get_watchdog_runtime()` supplies first paint — an event-only design leaves a
+ * regardless of reality. `get_automation_runtime()` supplies first paint — an event-only design leaves a
  * freshly opened Settings page blank until the next transition.
  */
-export const WATCHDOG_STATE = 'watchdog:state';
+export const AUTOMATION_STATE = 'automation:state';
 
-export interface WatchdogChangedPayload {
+export interface AutomationChangedPayload {
   ruleIds: string[];
   deleted: string[];
   /**
@@ -54,11 +54,11 @@ export interface WatchdogChangedPayload {
  * Deliberately just the affected rule ids: the log view refetches or merges by entry id, so a
  * coalesced event never has to carry the rows it stands for.
  */
-export interface WatchdogActivityPayload {
+export interface AutomationActivityPayload {
   ruleIds: string[];
 }
 
-export interface WatchdogRuntimePairState {
+export interface AutomationRuntimePairState {
   /** `'unseen' | 'armed' | 'fired'` — the arm machine's own three states, lowercased. */
   state: 'unseen' | 'armed' | 'fired';
   lastFiredAt: number | null;
@@ -73,6 +73,6 @@ export interface WatchdogRuntimePairState {
 }
 
 /** `rules[ruleId][terminalId]`. */
-export interface WatchdogStatePayload {
-  rules: Record<string, Record<string, WatchdogRuntimePairState>>;
+export interface AutomationStatePayload {
+  rules: Record<string, Record<string, AutomationRuntimePairState>>;
 }

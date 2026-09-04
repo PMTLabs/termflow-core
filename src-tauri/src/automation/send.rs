@@ -1,4 +1,4 @@
-//! Delivering a Watchdogs rule's message into a terminal — not `spawn_pipeline_watchdog`.
+//! Delivering an automation's message into a terminal.
 //!
 //! Two things live here, and they are separated for one reason: **the engine must be unit-testable
 //! without a Tauri `AppHandle`** (plan §7.10).

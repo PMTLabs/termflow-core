@@ -360,74 +360,74 @@ declare global {
   }
 }
 
-// --- Terminal Watchdog Workflows (Plan 028) ---
+// --- Terminal Automations (Plan 028) ---
 //
-// The mirror of `src-tauri/src/watchdog_store.rs`. THE STORE'S SERDE NAMES ARE THE AUTHORITY:
+// The mirror of `src-tauri/src/automation_store.rs`. THE STORE'S SERDE NAMES ARE THE AUTHORITY:
 // `draftFromRule`/`ruleFromDraft` in the editor is the only place these and the editor's draft meet,
 // and a round-trip test asserts draft -> wire -> row -> wire -> draft is identity for all six
 // templates. The boundary audit found a draft whose `runMode` was silently defaulted onto a column
 // called `runsOnce`, which would have saved successfully and produced a rule that does nothing.
 //
-// The event names and their payloads are in `services/watchdogEvents.ts`, not here: a `.d.ts` cannot
+// The event names and their payloads are in `services/automationEvents.ts`, not here: a `.d.ts` cannot
 // hold runtime values, and the whole point of those constants is that they are imported rather than
 // spelled inline.
 
-export type WatchdogCriterion =
+export type AutomationCriterion =
   | 'commandContains'
   | 'tabNameContains'
   | 'workingFolderUnder'
   | 'terminalIdIs'
   | 'allTerminals';
 
-export type WatchdogTargetMode = 'pinned' | 'rule';
+export type AutomationTargetMode = 'pinned' | 'rule';
 
 /** `newOutput` = the last 200 lines. `onScreen` = the visible rows only. */
-export type WatchdogReadMode = 'newOutput' | 'onScreen';
+export type AutomationReadMode = 'newOutput' | 'onScreen';
 
-export type WatchdogCadence = 'onOutput' | 'timer';
+export type AutomationCadence = 'onOutput' | 'timer';
 
-export type WatchdogParsePreset = 'percentage' | 'number' | 'errorCode' | 'exactWords' | 'custom';
+export type AutomationParsePreset = 'percentage' | 'number' | 'errorCode' | 'exactWords' | 'custom';
 
 /** `brackets` = capture group 1 (or a group named `value`). `whole` = group 0. */
-export type WatchdogKeep = 'brackets' | 'whole';
+export type AutomationKeep = 'brackets' | 'whole';
 
 /**
  * Stored, not inferred from whether `op` is set: it selects a different READ DEPTH for re-arming, and
  * that must not turn on a data-entry accident. These are the mockup's own two values.
  */
-export type WatchdogCondKind = 'number' | 'text';
+export type AutomationCondKind = 'number' | 'text';
 
-export type WatchdogCompareOp = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq';
+export type AutomationCompareOp = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq';
 
 /** Q2: a recipient's arm state does not change — re-arm belongs to the observation. */
-export type WatchdogSendTo = 'matched' | 'all';
+export type AutomationSendTo = 'matched' | 'all';
 
-export interface WatchdogMonitorStep {
-  read: WatchdogReadMode;
-  cadence: WatchdogCadence;
+export interface AutomationMonitorStep {
+  read: AutomationReadMode;
+  cadence: AutomationCadence;
   /** Only meaningful for `cadence: 'timer'`. */
   everyMs: number;
 }
 
-export interface WatchdogParseStep {
-  preset: WatchdogParsePreset;
+export interface AutomationParseStep {
+  preset: AutomationParsePreset;
   /** `exactWords` only: what the user typed, before regex-escaping into `find`. */
   literal?: string | null;
   find: string;
-  keep: WatchdogKeep;
+  keep: AutomationKeep;
 }
 
-export interface WatchdogCondStep {
-  kind: WatchdogCondKind;
+export interface AutomationCondStep {
+  kind: AutomationCondKind;
   /** Absent when `kind === 'text'`. */
-  op?: WatchdogCompareOp | null;
+  op?: AutomationCompareOp | null;
   /** Absent when `kind === 'text'`. */
   threshold?: number | null;
 }
 
-export interface WatchdogActionStep {
+export interface AutomationActionStep {
   message: string;
-  sendTo: WatchdogSendTo;
+  sendTo: AutomationSendTo;
   /**
    * The mockup's `action.enter`. `false` leaves the text in the composer unsubmitted — which the
    * *Answer a confirmation* template requires: it types `1` and must NOT press Enter.
@@ -437,23 +437,23 @@ export interface WatchdogActionStep {
   cliType: string;
 }
 
-/** The four steps, stored whole as JSON in `watchdog_rules.graph`. Targeting is columns, not blob. */
-export interface WatchdogGraph {
-  monitor: WatchdogMonitorStep;
-  parse: WatchdogParseStep;
-  cond: WatchdogCondStep;
-  action: WatchdogActionStep;
+/** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */
+export interface AutomationGraph {
+  monitor: AutomationMonitorStep;
+  parse: AutomationParseStep;
+  cond: AutomationCondStep;
+  action: AutomationActionStep;
 }
 
-export interface WatchdogRule {
+export interface AutomationRule {
   id: string;
   name: string;
   enabled: boolean;
   /** R6: a single-run rule that has fired never evaluates again, enforced in memory the moment it does. */
   runsOnce: boolean;
 
-  targetMode: WatchdogTargetMode;
-  criterion: WatchdogCriterion;
+  targetMode: AutomationTargetMode;
+  criterion: AutomationCriterion;
   criterionValue: string;
   /** `false` freezes the matched set, so a terminal the user excluded cannot join later. */
   followNew: boolean;
@@ -466,12 +466,12 @@ export interface WatchdogRule {
   sortOrder: number;
   schemaVersion: number;
 
-  graph: WatchdogGraph;
+  graph: AutomationGraph;
   createdAt: number;
   updatedAt: number;
 }
 
-export type WatchdogLogKind =
+export type AutomationLogKind =
   | 'sent'
   | 'held'
   | 'reArmed'
@@ -483,7 +483,7 @@ export type WatchdogLogKind =
   | 'testRun'
   | 'check';
 
-export interface WatchdogLogEntry {
+export interface AutomationLogEntry {
   id: number;
   ruleId: string;
   terminalId?: string | null;
@@ -493,7 +493,7 @@ export interface WatchdogLogEntry {
    * nothing for exactly the line the feature uses to prove itself — and a rename would rewrite history.
    */
   terminalName?: string | null;
-  kind: WatchdogLogKind;
+  kind: AutomationLogKind;
   detail: string;
   at: number;
 }

@@ -1,4 +1,4 @@
-//! One shared process snapshot for the Watchdogs feature — not `spawn_pipeline_watchdog`.
+//! One shared process snapshot for the Automations feature.
 //!
 //! A `System` behind a mutex with `taken_at` and a 2 s TTL, built inside `spawn_blocking` because
 //! `System::new_all()` is 50-200 ms of blocking work and `list_watchable_terminals` is an `async`

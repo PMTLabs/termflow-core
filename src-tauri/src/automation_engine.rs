@@ -1,6 +1,4 @@
-//! The Terminal Watchdog Workflows engine — the user-facing rules engine of plan `028`.
-//!
-//! NOT `spawn_pipeline_watchdog` (`lib.rs`), which watches the output pipeline for a stalled consumer.
+//! The Terminal Automations engine — plan `028`.
 //!
 //! One tap task, one evaluator task and one targeting tick for the whole engine — never one per rule.
 //!

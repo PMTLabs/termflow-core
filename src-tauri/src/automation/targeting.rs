@@ -1,4 +1,4 @@
-//! Resolving a Watchdogs rule's criterion to a set of `tm-` leaves — not `spawn_pipeline_watchdog`.
+//! Resolving an automation's criterion to a set of `tm-` leaves.
 //!
 //! Five criteria (plan §4.4). Two of them are where the bugs live:
 //!

@@ -1,5 +1,4 @@
-//! `label_at` — the ONE terminal-name resolver for the Watchdogs feature. Not
-//! `spawn_pipeline_watchdog`.
+//! `label_at` — the ONE terminal-name resolver for the Automations feature.
 //!
 //! One implementation, because the boundary audit found two and **the wrong one sat on the write
 //! path**: the engine's read `state.terminals[pc].name`, which is `Terminal-{shell}` for every

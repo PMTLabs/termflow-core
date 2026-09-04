@@ -2084,7 +2084,7 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
     id: &str,
     payload: &ExecutePromptReq,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    use crate::watchdog::send::{deliver, SubmitPattern, TerminalWriter};
+    use crate::automation::send::{deliver, SubmitPattern, TerminalWriter};
 
     // Does this id name a terminal at all? Host-owned terminals have no local writer and route their
     // writes to the sidecar instead. Asked with `contains_key` rather than `get`, because a `get`
@@ -2120,14 +2120,14 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
         // request does not flash (see design spec 029 §5).
         emit_external_activity(state, id);
 
-        // The paste / 500 ms gap / focus-in / submit core lives in `watchdog::send::deliver`, so the
-        // Watchdogs engine and this handler share ONE implementation of it (plan §7.10). What stays
+        // The paste / 500 ms gap / focus-in / submit core lives in `automation::send::deliver`, so the
+        // Automations engine and this handler share ONE implementation of it (plan §7.10). What stays
         // here is what is HTTP-specific: the 404 above, the pattern sources and their 400s, the tab
         // flash, the probe modes, and the response bodies.
         //
         // A probe asks `deliver` NOT to submit: that yields exactly the prefix the probe wants —
         // paste, the gap, focus-in — and the loop below then supplies each candidate submit sequence
-        // itself. It is the same `submit: false` the Watchdogs "answer a confirmation" rule uses to
+        // itself. It is the same `submit: false` the Automations "answer a confirmation" rule uses to
         // type a `1` without pressing Enter.
         let writer: &dyn TerminalWriter = state;
         let is_probe = payload.cli_type.ends_with("-probe");

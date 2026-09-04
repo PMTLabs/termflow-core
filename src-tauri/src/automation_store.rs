@@ -1,16 +1,14 @@
-//! Persistence for Terminal Watchdog Workflows — rules, their pinned terminals, and the activity log.
+//! Persistence for Terminal Automations — rules, their pinned terminals, and the activity log.
 //!
-//! Not to be confused with `spawn_pipeline_watchdog` in `lib.rs`, which watches the OUTPUT PIPELINE
-//! for a stalled consumer. This module is the user-facing "Watchdogs" feature: rules that watch what
-//! a terminal prints and type into it. Plan `028`.
+//! Plan `028`.
 //!
 //! Modelled line for line on `canvas_store.rs`: its **own** `rusqlite::Connection` to the same
 //! per-profile `history.db`, its own `CREATE TABLE IF NOT EXISTS`, degrade-to-inert on open failure,
-//! and `Result` on every method. Its own connection matters — watchdog writes then contend with
-//! watchdog writes, not with the 30 s scrollback flush that holds `HistoryStore`'s mutex while it
+//! and `Result` on every method. Its own connection matters — automation writes then contend with
+//! automation writes, not with the 30 s scrollback flush that holds `HistoryStore`'s mutex while it
 //! writes multi-MB blobs.
 //!
-//! It deliberately holds **no `AppHandle`**. `append` decides whether a `watchdog:activity` event is
+//! It deliberately holds **no `AppHandle`**. `append` decides whether a `automation:activity` event is
 //! due and says so in its return value; the caller — the engine or the command layer, both of which
 //! already have a handle — performs the emit. An `AppHandle<R>` field here would make the whole struct
 //! generic over the Tauri runtime and drag its unit tests behind `--features integration-tests`, which
@@ -162,7 +160,7 @@ pub enum SendTo {
 }
 
 /// Step 1 of the graph. The *targeting* half of the mockup's monitor step lives in columns, not here —
-/// see the module-level note on `WatchdogRule`.
+/// see the module-level note on `AutomationRule`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MonitorStep {
@@ -227,7 +225,7 @@ fn default_cli_type() -> String {
     "default".to_string()
 }
 
-/// The four steps, stored whole as a JSON blob in `watchdog_rules.graph`.
+/// The four steps, stored whole as a JSON blob in `automation_rules.graph`.
 ///
 /// Blob rather than normalised because it is never queried and never written at a different cadence
 /// from the rest of the rule: read and written whole by exactly two consumers (the editor and the
@@ -236,24 +234,24 @@ fn default_cli_type() -> String {
 /// machinery at all. Plan §3.1.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WatchdogGraph {
+pub struct AutomationGraph {
     pub monitor: MonitorStep,
     pub parse: ParseStep,
     pub cond: CondStep,
     pub action: ActionStep,
 }
 
-/// One rule, as it crosses the wire and as it sits in `watchdog_rules`.
+/// One rule, as it crosses the wire and as it sits in `automation_rules`.
 ///
 /// **Targeting is columns, not blob.** `target_mode`, `criterion`, `criterion_value` and `follow_new`
 /// are queried, and `touch_target` writes the targets table on a completely different cadence from
 /// user edits — in the blob, every label refresh would become a read-modify-write of the whole rule,
 /// and a touch landing between a window's load and its save would either clobber the user or be
-/// clobbered by them. `target_ids` is filled from `watchdog_targets` on read and replaced wholesale by
+/// clobbered by them. `target_ids` is filled from `automation_targets` on read and replaced wholesale by
 /// `save_rule`. Plan §3.1, §7.7.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WatchdogRule {
+pub struct AutomationRule {
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -288,7 +286,7 @@ pub struct WatchdogRule {
     /// See `SUPPORTED_SCHEMA_VERSION`.
     pub schema_version: i64,
 
-    pub graph: WatchdogGraph,
+    pub graph: AutomationGraph,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -320,7 +318,7 @@ pub enum LogKind {
 /// uses to prove itself, and a rename would rewrite the past.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WatchdogLogEntry {
+pub struct AutomationLogEntry {
     pub id: i64,
     pub rule_id: String,
     #[serde(default)]
@@ -335,17 +333,17 @@ pub struct WatchdogLogEntry {
 /// What `append` did, and what its caller must do next.
 ///
 /// The store has no `AppHandle` and cannot emit (see the module doc). It still owns the DECISION —
-/// one `watchdog:activity` per second at most — so the rate limit cannot be re-implemented per caller.
+/// one `automation:activity` per second at most — so the rate limit cannot be re-implemented per caller.
 /// Plan §7.5.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppendOutcome {
     pub entry_id: i64,
-    /// The caller emits `watchdog:activity` when this is true, and does nothing when it is false.
+    /// The caller emits `automation:activity` when this is true, and does nothing when it is false.
     pub emit: bool,
     pub rule_ids: Vec<String>,
 }
 
-/// Which rows `load_watchdog_log` returns and in what order.
+/// Which rows `load_automation_log` returns and in what order.
 ///
 /// Both callers pass explicitly: the drawer is a recent-activity peek (newest first) and the full log
 /// is a timeline you read forward (oldest first). Round 0's audit found the two surfaces disagreeing
@@ -367,7 +365,7 @@ pub enum LogOrder {
 /// render `Disabled` explicitly and differently from empty — an empty list where rules exist invites a
 /// user to recreate rules they already have. Plan §7.8.
 #[derive(Debug)]
-pub enum WatchdogStoreError {
+pub enum AutomationStoreError {
     /// The DB could not be opened at startup, so the store is inert.
     Disabled,
     Sqlite(rusqlite::Error),
@@ -375,19 +373,19 @@ pub enum WatchdogStoreError {
     Invalid(String),
 }
 
-impl std::fmt::Display for WatchdogStoreError {
+impl std::fmt::Display for AutomationStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Disabled => write!(f, "watchdog store is disabled"),
-            Self::Sqlite(e) => write!(f, "watchdog store sqlite error: {e}"),
-            Self::Invalid(m) => write!(f, "watchdog store rejected the value: {m}"),
+            Self::Disabled => write!(f, "automation store is disabled"),
+            Self::Sqlite(e) => write!(f, "automation store sqlite error: {e}"),
+            Self::Invalid(m) => write!(f, "automation store rejected the value: {m}"),
         }
     }
 }
 
-impl std::error::Error for WatchdogStoreError {}
+impl std::error::Error for AutomationStoreError {}
 
-impl From<rusqlite::Error> for WatchdogStoreError {
+impl From<rusqlite::Error> for AutomationStoreError {
     fn from(e: rusqlite::Error) -> Self {
         Self::Sqlite(e)
     }
@@ -396,18 +394,18 @@ impl From<rusqlite::Error> for WatchdogStoreError {
 /// Rules, their pinned terminals and the activity log, stored beside scrollback in `history.db`.
 ///
 /// **M1 fills this in.** M0 lands only the shape, so no area discovers it later.
-pub struct WatchdogStore {
+pub struct AutomationStore {
     #[allow(dead_code)] // M1 opens it; M0 only claims the field.
     conn: Mutex<Option<Connection>>,
 }
 
-impl Default for WatchdogStore {
+impl Default for AutomationStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl WatchdogStore {
+impl AutomationStore {
     /// A disabled store. `init` upgrades it in place, exactly as `CanvasStore::new` does.
     pub fn new() -> Self {
         Self {
