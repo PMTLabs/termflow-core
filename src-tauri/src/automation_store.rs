@@ -822,6 +822,7 @@ impl AutomationStore {
     /// name the wrong loser. Last-save-wins is the policy (§3.5); the log entry is the requirement, so
     /// it has to be true. `Ok(None)` means this rule is new.
     pub fn save_rule(&self, rule: &AutomationRule) -> Result<Option<i64>, AutomationStoreError> {
+
         let mut guard = self.conn.lock().unwrap();
         let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
         let tx = conn.transaction()?;
@@ -979,14 +980,7 @@ impl AutomationStore {
             let rule = self
                 .get_rule(rule_id)?
                 .ok_or_else(|| AutomationStoreError::Invalid(format!("no rule {}", rule_id)))?;
-            let blocking: Vec<String> = crate::automation_validation::problems(&rule)
-                .into_iter()
-                .filter(crate::automation_validation::Problem::blocks)
-                .map(|p| p.message)
-                .collect();
-            if !blocking.is_empty() {
-                return Err(AutomationStoreError::Invalid(blocking.join(" ")));
-            }
+            Self::refuse_if_invalid(&rule)?;
         }
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
@@ -1010,6 +1004,29 @@ impl AutomationStore {
             "UPDATE automation_rules SET completed_at = ?1 WHERE id = ?2",
             rusqlite::params![at, rule_id],
         )? > 0)
+    }
+
+    /// The enable gate. §7.8 asks for TWO call sites — *"`set_enabled_checked` **and any save with
+    /// `enabled = true`** return the problem list and refuse"* — and only one of them is wired.
+    ///
+    /// **The second is deliberately deferred, not forgotten** (M3 review round 1, H-1). Gating
+    /// `save_rule` is one line from here, and it breaks 31 existing tests — not because the tests are
+    /// sloppy, but because it makes a real scenario unreachable: `reload`'s "an uncompilable pattern
+    /// is reported once per load" path can only be entered by a rule that was STORED with a bad
+    /// pattern, and a store that refuses to write one turns the engine's own refusal into dead code.
+    /// A rule saved by an older build or arriving through a migration can still carry one, so the
+    /// path is real and must stay testable. The ruling that reconciles those two is a design decision,
+    /// and it is written up in the handoff rather than guessed at here.
+    fn refuse_if_invalid(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
+        let blocking: Vec<String> = crate::automation_validation::problems(rule)
+            .into_iter()
+            .filter(crate::automation_validation::Problem::blocks)
+            .map(|p| p.message)
+            .collect();
+        if blocking.is_empty() {
+            return Ok(());
+        }
+        Err(AutomationStoreError::Invalid(blocking.join(" ")))
     }
 
     /// Un-complete a runs-once rule, so it can run again. `Ok(false)` = no such rule.
@@ -1165,6 +1182,46 @@ impl AutomationStore {
 
     /// One rule's stored targets: `(terminal_id, source, label, folder, last_seen_at)`.
     #[allow(clippy::type_complexity)]
+    /// The newest snapshot for **every** terminal id, across all rules (plan §4.3).
+    ///
+    /// The picker's fallback when the caller has no rule to scope to — an unsaved draft, which is the
+    /// case a template is tested in. §4.3: *"scoped to `rule_id` when the caller passes one … else the
+    /// newest row for that id across rules. `rule_id: None` with an unknown id is the only case that
+    /// yields `label: None, cwd: None`."* Without it every closed terminal in a fresh draft's picker
+    /// renders as a bare id, which is the one row the snapshot exists for.
+    ///
+    /// "Newest" is `label_at`, not `last_seen_at`: the question is *when was this NAME true*, and a
+    /// row touched every 30 s by `touch_target`'s throttle carries a recent `last_seen_at` beside a
+    /// label from an hour ago.
+    ///
+    /// The `MAX()`-with-bare-columns form is SQLite's documented bare-column rule: in a query with a
+    /// single `min()`/`max()` aggregate, the non-aggregated columns come from the row that produced
+    /// it. That is the whole point here — a `GROUP BY` without it would return one rule's label beside
+    /// another rule's folder. With every `label_at` NULL the row chosen is arbitrary, which is correct:
+    /// there is nothing to prefer.
+    pub fn newest_snapshots(
+        &self,
+    ) -> Result<Vec<crate::automation::roster::TargetSnapshot>, AutomationStoreError> {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
+        let mut stmt = conn.prepare(
+            "SELECT terminal_id, label, folder, MAX(label_at) FROM automation_targets
+              GROUP BY terminal_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::automation::roster::TargetSnapshot {
+                terminal_id: r.get(0)?,
+                label: r.get(1)?,
+                folder: r.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     pub fn targets_for(
         &self,
         rule_id: &str,

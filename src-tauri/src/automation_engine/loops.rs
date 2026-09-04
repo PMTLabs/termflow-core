@@ -159,10 +159,19 @@ pub async fn evaluate_tick(
         );
     }
 
-    let mut sends = Vec::new();
+    let mut sends: Vec<PendingSend> = Vec::new();
     for i in &picked {
         if let Some(send) = evaluate_pair(engine, host, &due[*i], now_ms) {
-            sends.push(send);
+            // **R6 is per RULE, not per pair.** A `runs_once` rule watching three terminals crosses
+            // on all three in one tick, and the send lock is per LEAF — so three tasks take three
+            // different locks, three messages go out, and `complete_rule` runs three times on a rule
+            // the user asked to run once. The arm states are advanced either way; only the send is
+            // dropped, so the pairs that did not send stay `Fired` and never send later.
+            let already = send.pair.rule.rule.runs_once
+                && sends.iter().any(|s| s.pair.rule.rule.id == send.pair.rule.rule.id);
+            if !already {
+                sends.push(send);
+            }
         }
     }
 
@@ -179,6 +188,10 @@ pub async fn evaluate_tick(
         let engine = engine.clone();
         let host = host.clone();
         tokio::spawn(async move { run_send(engine, host, send).await });
+    }
+
+    if engine.take_state_emit(now_ms) {
+        host.emit_state();
     }
 
     next_cursor
@@ -211,8 +224,21 @@ pub fn evaluate_pair(
     // still in flight sees `Fired` and decides `held` rather than queueing a duplicate.
     engine.runtime.set_arm(&rule.id, &pair.tm, ev.next);
 
+    // §7.2: `automation:state` is an ARM TRANSITION event. It was emitted only from a successful
+    // send, so arming, re-arming and every rollback were silent and a row's pill sat on whatever it
+    // last painted. Coalesced inside the engine (§2.9), because a chatty terminal transitions four
+    // times a second per pair.
+    if ev.next != prev {
+        engine.mark_state_dirty();
+    }
+
+    let repeat = engine.runtime.last_decision(&rule.id, &pair.tm) == Some(ev.decision);
+    engine.runtime.set_last_decision(&rule.id, &pair.tm, ev.decision);
+
     if !ev.decision.sends() {
-        append(engine, host, &rule.id, Some(&pair.tm), kind_for(&ev), &ev.detail, now_ms);
+        // Live by construction: `evaluate_pair` only runs for a pair whose leaf just resolved.
+        let name = host.label_for(&pair.tm);
+        append(engine, host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
         return None;
     }
 
@@ -231,7 +257,22 @@ pub fn evaluate_pair(
 /// `NoMatch` is its own kind rather than a `Check` with different words, because §3.3's gate classes
 /// them together but the log view distinguishes them — and the store derives the class from the kind,
 /// so the caller cannot get the gating wrong by choosing a kind.
-fn kind_for(ev: &Evaluation) -> LogKind {
+fn kind_for(ev: &Evaluation, repeat: bool) -> LogKind {
+    // **The log records TRANSITIONS.** A decision identical to this pair's previous one is a repeat,
+    // and a repeat is a `Check` — which is the one class §3.3's gate can drop.
+    //
+    // Without this, `held` is the defect: it is a Decision-class kind, so it is never gated, and a
+    // rule that is working sits `Fired` with its condition true and writes a row every 250 ms tick.
+    // The 200-row per-rule cap then evicts that rule's own `sent` row inside a minute — the row
+    // §7.9's end-to-end story and GUI 9 check survives a relaunch — while writing four INSERTs a
+    // second into `history.db`. The plan's own §7.8 calls "logged `held` every tick" a symptom of a
+    // bug when describing a different one.
+    //
+    // The class stays derived from the kind inside `append` (§3.3): the caller still cannot label its
+    // own entry, it can only say which decision this was.
+    if repeat {
+        return LogKind::Check;
+    }
     match ev.decision {
         Decision::Sent => LogKind::Sent,
         Decision::Held => LogKind::Held,
@@ -278,10 +319,18 @@ pub async fn run_send(
         return fail(&engine, &host, &send, "the terminal closed before the message was sent");
     };
 
+    // And so can the RULE. The queue wait is up to ten seconds; a user who disables a rule, or a
+    // `runs_once` rule that completed on another terminal in this same tick, must not still be typing
+    // into a terminal afterwards. Checked in the same critical section as the terminal, because it is
+    // the same question: is this crossing still something the user wants sent?
+    if !engine.is_live(&rule.id) {
+        return fail(&engine, &host, &send, "the rule was turned off before the message was sent");
+    }
+
     // §2.1: checked before the FIRST write and never between the paste and the submit, so a quit
     // leaves the send either unstarted or complete — there is no half-typed line to reason about.
     if engine.stopping.load(Ordering::Relaxed) {
-        engine.runtime.set_arm(&rule.id, &tm, send.prev);
+        engine.runtime.restore_arm(&rule.id, &tm, send.prev);
         return;
     }
 
@@ -309,7 +358,8 @@ pub async fn run_send(
     engine.runtime.settle_until(&tm, at + ECHO_SETTLE_MS);
     engine.runtime.record_fire(&rule.id, &tm, at);
 
-    append(&engine, &host, &rule.id, Some(&tm), LogKind::Sent, &sent_detail(&send), at);
+    let name = send.label.clone();
+    append(&engine, &host, &rule.id, Some(&tm), name, LogKind::Sent, &sent_detail(&send), at);
 
     // §7.8 — completion is an in-memory event FIRST and a row second, in this same critical section.
     // `reload` runs from mutating store commands and this is the engine, which is not one: without
@@ -321,7 +371,7 @@ pub async fn run_send(
         }
         engine.complete_rule(&rule.id);
     }
-    host.emit_state();
+    engine.mark_state_dirty();
 }
 
 fn sent_detail(send: &PendingSend) -> String {
@@ -339,12 +389,16 @@ fn fail(
     reason: &str,
 ) {
     let rule_id = &send.pair.rule.rule.id;
-    engine.runtime.set_arm(rule_id, &send.pair.tm, send.prev);
+    engine.runtime.restore_arm(rule_id, &send.pair.tm, send.prev);
+    engine.mark_state_dirty();
     append(
         engine,
         host,
         rule_id,
         Some(&send.pair.tm),
+        // The label resolved at DECIDE time. This is the whole reason `PendingSend` carries one:
+        // `the terminal closed` is written when there is no name left to look up.
+        send.label.clone(),
         LogKind::Failed,
         reason,
         send.at_ms,
@@ -355,11 +409,19 @@ fn fail(
 ///
 /// The store owns the cap, the verbose gate and the ≤ 1/s decision — all three inside `append`, so a
 /// caller cannot re-implement any of them. This function only carries the emit the store cannot make.
+///
+/// **`name` is passed in, never resolved here.** §2.8 and R17 want the name the terminal had when the
+/// entry was DECIDED, and the entry this matters most for is `failed — the terminal closed`, which is
+/// written after the terminal is gone: a lookup at write time returns `None` for exactly the line the
+/// Name column exists to serve. Resolving inside this function put that lookup back at the one site
+/// that had already carried the right answer — `PendingSend.label` was resolved at decide time and then
+/// dropped on the floor.
 fn append(
     engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     rule_id: &str,
     tm: Option<&str>,
+    name: Option<String>,
     kind: LogKind,
     detail: &str,
     at: i64,
@@ -368,7 +430,7 @@ fn append(
         id: 0,
         rule_id: rule_id.to_string(),
         terminal_id: tm.map(str::to_string),
-        terminal_name: tm.and_then(|t| host.label_for(t)),
+        terminal_name: name,
         kind,
         detail: detail.to_string(),
         at,
@@ -392,7 +454,11 @@ fn append(
 /// a spawn path is added; the tick covers every path, every window and session restore by
 /// construction, and the mockup already promises "refreshed every few seconds".
 pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>) {
-    let mut last: HashMap<String, HashSet<String>> = HashMap::new();
+    // BOTH halves of what `state_payload` is built from. Diffing only `missing` meant opening a
+    // second terminal — adopted into `watched`, a new row in the payload — emitted nothing, so the
+    // Settings page showed the rule watching one terminal until something else happened to fire.
+    let mut last: (HashMap<String, HashSet<String>>, HashMap<String, HashSet<String>>) =
+        (HashMap::new(), HashMap::new());
     loop {
         if engine.stopping.load(Ordering::Relaxed) {
             return;
@@ -407,9 +473,17 @@ pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHo
         // Only when the answer CHANGED. A pill that says *not open* is state the UI shows, so a
         // change has to reach it — but emitting every 2 s regardless would repaint every open
         // Settings page for the life of the app to say nothing happened.
-        if missing != last {
-            last = missing;
-            host.emit_state();
+        let watched: HashMap<String, HashSet<String>> = engine
+            .snapshot_live()
+            .iter()
+            .map(|l| (l.rule.id.clone(), engine.runtime.watched_for(&l.rule.id)))
+            .collect();
+        let now = (watched, missing);
+        if now != last {
+            last = now;
+            // Marked, not emitted: one drain point means one rate limit, and the evaluator's 250 ms
+            // tick is always sooner than this loop's 2 s one.
+            engine.mark_state_dirty();
         }
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS)).await;
     }
@@ -444,6 +518,15 @@ pub fn targeting_tick(
         let previous: BTreeSet<String> = engine.runtime.watched_for(id).into_iter().collect();
         let next = watched_set(&live.rule, &rows, Some(&previous));
         engine.runtime.set_watched(id, next.iter().cloned().collect());
+
+        // §2.4: *"keys are cleared when … a terminal leaves the watch set"*. Three of that
+        // sentence's four events were implemented and this one was not. A `Command contains` rule
+        // whose terminal finishes its build drops out of the matched set holding `Fired`, and when the
+        // next build starts it rejoins with that stale key — so the rule never fires again until
+        // something drives its condition false first.
+        for gone in previous.difference(&next) {
+            engine.runtime.forget_pair(id, gone);
+        }
 
         if grace_over {
             let absent: HashSet<String> = next
@@ -617,7 +700,7 @@ mod tests {
         engine.runtime.set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 5 });
         engine.runtime.mark_dirty("pc-1");
         // Watched, but the leaf resolves to nothing: session restore has not re-registered it.
-        fake.leaves.lock().unwrap().clear();
+        fake.close("tm-1");
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
 
@@ -773,9 +856,7 @@ mod tests {
         let cases: Vec<(&str, fn(&FakeHost), &str, usize)> = vec![
             (
                 "the terminal closed between the decision and our turn at the queue",
-                |fake: &FakeHost| {
-                    fake.leaves.lock().unwrap().clear();
-                },
+                |fake: &FakeHost| fake.close("tm-1"),
                 "the terminal closed before the message was sent",
                 0,
             ),
@@ -791,8 +872,11 @@ mod tests {
 
         for (what, break_it, says, attempted) in cases {
             let (engine, fake, host) = wired();
-            break_it(&fake);
+            // The decision is made while the terminal is OPEN, and only then does the thing that
+            // breaks the send happen. Building the send after breaking it would resolve the label
+            // against an already-dead terminal, which is not the sequence §2.8 is about.
             let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+            break_it(&fake);
 
             run_send(engine.clone(), host.clone(), send).await;
             tokio::time::sleep(Duration::from_millis(1_500)).await;
@@ -809,6 +893,15 @@ mod tests {
             assert_eq!(rows.len(), 1, "{}: exactly one row, got {:?}", what, rows);
             assert_eq!(rows[0].0, "Failed", "{}: {:?}", what, rows);
             assert!(rows[0].1.contains(says), "{}: {:?}", what, rows);
+            // R17 / §2.8. The `terminal closed` row is written when there is no name left to look
+            // up, which is precisely why the decision carries one — and precisely the row the Name
+            // column exists to serve. An oracle reading only `(kind, detail)` let a NULL through here.
+            assert_eq!(
+                log_rows(&fake.store)[0].2.as_deref(),
+                Some("codex · core"),
+                "{}: the log lost the terminal's name",
+                what
+            );
             assert_eq!(engine.runtime.fire_record("au-1", "tm-1"), None, "{}", what);
             assert!(
                 engine.runtime.echoes_for("tm-1", 1_000).is_empty(),
@@ -1185,6 +1278,340 @@ mod tests {
             log_kinds(&fake.store)
         );
         assert!(!engine.is_live("au-a"), "the premise: A really did leave the live set");
+    }
+
+    // =============================================================================================
+    // The M3 review's round 1
+    // =============================================================================================
+
+    /// **R17 / §2.8, on the row it was written for.** A crossing decides, the user closes the tab, and
+    /// the send fails: the `failed` row must still carry the name the terminal had when the rule
+    /// decided. Resolving it at write time returns `None` for exactly this row.
+    #[tokio::test(start_paused = true)]
+    async fn a_log_row_carries_the_name_the_terminal_had_when_the_rule_decided() {
+        let (engine, fake, host) = wired();
+        let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+        // The decision has been made and carried; NOW the terminal goes away completely.
+        fake.close("tm-1");
+
+        run_send(engine.clone(), host.clone(), send).await;
+
+        let rows = log_rows(&fake.store);
+        assert_eq!(rows.len(), 1, "{:?}", rows);
+        assert_eq!(rows[0].2.as_deref(), Some("codex · core"), "{:?}", rows);
+        assert!(
+            host.label_for("tm-1").is_none(),
+            "the premise: there is genuinely no name left to look up"
+        );
+    }
+
+    /// The paired positive: a row written while the terminal is open carries its name too, so
+    /// "carries the decide-time label" is not satisfied by hard-coding one.
+    #[tokio::test(start_paused = true)]
+    async fn a_sent_row_carries_the_name_as_well() {
+        let (engine, fake, host) = wired();
+        let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+
+        run_send(engine.clone(), host.clone(), send).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        let rows = log_rows(&fake.store);
+        assert_eq!(rows.len(), 1, "{:?}", rows);
+        assert_eq!(rows[0].0, "Sent");
+        assert_eq!(rows[0].2.as_deref(), Some("codex · core"));
+    }
+
+    /// **§2.4: keys are cleared when a terminal leaves the watch set.** Three of that sentence's four
+    /// events were implemented; this was the fourth.
+    ///
+    /// The failure it prevents is silent and permanent: a `Command contains` rule watching a build
+    /// fires, the build ends, the terminal drops out of the matched set still holding `Fired` — and
+    /// when the next build starts it rejoins with that stale key, so the rule never fires again until
+    /// something drives its condition false first.
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_that_leaves_the_watch_set_loses_that_pairs_arm_state() {
+        let (engine, fake, host) = wire(vec![ctx_rule("au-1")]);
+        fake.roster.lock().unwrap().push(RosterRow {
+            terminal_id: Some("tm-2".into()),
+            process_id: "pc-2".into(),
+            name: "Terminal-powershell".into(),
+            shell: "powershell".into(),
+            pid: 102,
+            display_label: Some("second".into()),
+            cwd: None,
+            command_line: None,
+        });
+        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
+
+        // Both terminals match `All terminals`, and both have fired.
+        targeting_tick(&engine, &host, 1_000);
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-1", tm, ArmState::Fired { at_ms: 500 });
+            engine.runtime.set_last_eval("au-1", tm, 500);
+            engine.runtime.record_fire("au-1", tm, 500);
+        }
+
+        // tm-2 stops matching.
+        fake.close("tm-2");
+        targeting_tick(&engine, &host, 3_000);
+
+        assert_eq!(engine.runtime.arm_state("au-1", "tm-2"), ArmState::Unseen, "the stale key survived");
+        assert_eq!(engine.runtime.last_eval("au-1", "tm-2"), None);
+        assert_eq!(
+            engine.runtime.fire_record("au-1", "tm-2"),
+            Some((1, 500)),
+            "the FIRE HISTORY is not the arm state: a terminal that left the set has not un-fired"
+        );
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::Fired { at_ms: 500 },
+            "and the terminal that stayed is untouched"
+        );
+    }
+
+    /// **A rollback restores; it must never CREATE.** Both sites, as a table \u2014 the queue-timeout
+    /// path and the quit path both write `prev` back, and one of them being guarded is not the class
+    /// being fixed.
+    ///
+    /// A `tm-` leaf is REUSED: Ctrl+R restarts a terminal under the same id and session restore
+    /// re-registers it. A key resurrected after `cleanup_terminal_state` purged it means the next
+    /// terminal to carry that leaf starts `Armed` rather than `Unseen`, and settled decision 7 \u2014 a
+    /// terminal already above the threshold when it spawns must not fire without a crossing \u2014 is
+    /// broken on its first read.
+    #[tokio::test(start_paused = true)]
+    async fn a_rollback_never_resurrects_a_pair_the_teardown_already_purged() {
+        for quitting in [false, true] {
+            let (engine, fake, host) = wired();
+            let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+
+            // The terminal closes mid-flight, and teardown purges every `tm-`keyed entry for it.
+            fake.close("tm-1");
+            engine.runtime.forget_terminal("tm-1");
+            if quitting {
+                engine.stop();
+            }
+
+            run_send(engine.clone(), host.clone(), send).await;
+
+            assert_eq!(
+                engine.runtime.arm_state("au-1", "tm-1"),
+                ArmState::Unseen,
+                "quitting={}: a dead pair came back as Armed",
+                quitting
+            );
+        }
+    }
+
+    /// The paired positive, and it is what stops the fix above being "never roll back at all": a pair
+    /// the teardown did NOT purge is restored to exactly `prev`.
+    #[tokio::test(start_paused = true)]
+    async fn a_rollback_still_restores_a_pair_that_is_still_there() {
+        for quitting in [false, true] {
+            let (engine, fake, host) = wired();
+            let send = pending(&engine, &host, "au-1", ArmState::re_armed(), 1_000);
+            if quitting {
+                engine.stop();
+            } else {
+                *fake.write_err.lock().unwrap() = Some("no writer".into());
+            }
+
+            run_send(engine.clone(), host.clone(), send).await;
+
+            assert_eq!(
+                engine.runtime.arm_state("au-1", "tm-1"),
+                ArmState::re_armed(),
+                "quitting={}: the rollback lost seen_fire, or did not happen",
+                quitting
+            );
+        }
+    }
+
+    /// **B-1, source-derived: the engine's `spawn` must use Tauri's runtime, not tokio's directly.**
+    ///
+    /// `.setup()` runs on the main thread from the tao event-loop callback with no tokio runtime
+    /// entered, so a bare `tokio::spawn` panics and takes the app's startup with it. This cannot be a
+    /// runtime assertion — a test binary always has a runtime, which is exactly why 700 green tests
+    /// said nothing about it. Every other setup-time task in `lib.rs` uses the wrapper, including
+    /// `spawn_history_flush_task`, the function this call sits directly beneath.
+    #[test]
+    fn the_engine_is_spawned_on_tauris_runtime_because_setup_has_none() {
+        let source = include_str!("../automation_engine.rs").replace("\r\n", "\n");
+        let start = source.find("pub fn spawn<R: tauri::Runtime>").expect("spawn must exist");
+        let body = &source[start..start + 1_400];
+        let outer = body.find("spawn({").expect("it must spawn something");
+        assert!(
+            body[..outer].contains("tauri::async_runtime::"),
+            "the OUTER spawn runs from `.setup()`, where there is no entered runtime"
+        );
+
+        let lib = include_str!("../lib.rs").replace("\r\n", "\n");
+        let setup_start = lib.find("spawn_history_flush_task(state.clone());").expect("the setup site");
+        let setup = &lib[setup_start..setup_start + 400];
+        assert!(
+            !setup.contains("tokio::spawn"),
+            "a bare tokio::spawn beside the setup call is the same panic by another name"
+        );
+    }
+
+    /// **B-2: R6 is per RULE, not per pair.** A `runs_once` rule watching two terminals crosses on
+    /// both in one tick, and the send lock is per LEAF — so two tasks take two different locks and two
+    /// messages go out on a rule the user asked to run once.
+    ///
+    /// §10.14c could not see this: its fixture has one terminal. *A fixture that varies only the rule
+    /// dimension cannot test a rule that reads the terminal dimension too* — the standing lesson, now
+    /// at a fourth site.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_once_rule_sends_once_across_every_terminal_it_watches() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        let (engine, fake, host) = wire(vec![once]);
+        fake.roster.lock().unwrap().push(RosterRow {
+            terminal_id: Some("tm-2".into()),
+            process_id: "pc-2".into(),
+            name: "Terminal-powershell".into(),
+            shell: "powershell".into(),
+            pid: 102,
+            display_label: Some("second".into()),
+            cwd: None,
+            command_line: None,
+        });
+        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
+        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-once", tm, ArmState::armed());
+        }
+        fake.say("pc-1", "ctx:63%\n");
+        fake.say("pc-2", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        engine.runtime.mark_dirty("pc-2");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "a runs-once rule typed into every terminal it watches: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            log_rows(&fake.store).iter().filter(|(k, _, _)| k == "Sent").count(),
+            1,
+            "and it logged every one of them"
+        );
+        assert!(!engine.is_live("au-once"));
+    }
+
+    /// **B-3: the log records transitions.** A rule that is working sits `Fired` with its condition
+    /// true and decides `held` on every 250 ms tick. `Held` is a Decision-class kind, so it is never
+    /// gated — and the 200-row per-rule cap then evicts that rule's own `sent` row inside a minute,
+    /// which is the row §7.9's end-to-end story and GUI 9 check survives a relaunch.
+    #[tokio::test(start_paused = true)]
+    async fn a_rule_that_stays_true_logs_held_once_and_not_once_per_tick() {
+        let (engine, fake, host) = wire(vec![ctx_rule("au-1")]);
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        fake.say("pc-1", "ctx:63%\n");
+
+        // The crossing, then nine more ticks with the value still above the threshold.
+        for t in 1..=10 {
+            engine.runtime.mark_dirty("pc-1");
+            evaluate_tick(&engine, &host, 0, t * 3_000).await;
+            tokio::time::sleep(Duration::from_millis(2_000)).await;
+        }
+
+        let kinds: Vec<String> = log_rows(&fake.store).into_iter().map(|(k, _, _)| k).collect();
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "Sent").count(),
+            1,
+            "the premise: it fired once: {:?}",
+            kinds
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "Held").count(),
+            1,
+            "the first `held` is a transition and says something; the next nine are the same fact \
+             again, and they evict the `sent` row: {:?}",
+            kinds
+        );
+        assert_eq!(kinds.len(), 2, "and nothing else was written at all: {:?}", kinds);
+    }
+
+    /// **H-2: `automation:state` is an ARM TRANSITION event** (§7.2), and it fired only from a
+    /// successful send — so arming, re-arming and every rollback were silent and a row's pill sat on
+    /// whatever it last painted. Coalesced at ≤ 1/s, because a chatty terminal transitions four times
+    /// a second per pair.
+    #[tokio::test(start_paused = true)]
+    async fn an_arm_transition_emits_state_and_a_repeat_does_not() {
+        let (engine, fake, host) = wire(vec![ctx_rule("au-1")]);
+        fake.say("pc-1", "ctx:18%\n");
+
+        // Unseen -> Armed is a transition.
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert_eq!(fake.states.load(Ordering::Relaxed), 1, "arming was silent");
+
+        // Armed -> Fired IS a transition, but it lands 300 ms later and the coalescer holds it.
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_300).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert_eq!(fake.states.load(Ordering::Relaxed), 1, "≤ 1/s, per §7.2");
+
+        // Past the second, the held transition is announced — **deferred, not dropped**, which is the
+        // whole reason this is a flag the tick drains rather than a "may I emit now?" question. This
+        // tick evaluates nothing at all (the send's settle window still covers tm-1 until 2_800), and
+        // the emit still lands.
+        fake.say("pc-1", "ctx:18%\n");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 2_500).await;
+        assert_eq!(fake.states.load(Ordering::Relaxed), 2, "a refused emit was dropped, not deferred");
+
+        // Out of the settle window: Fired + false is a real transition, so it is announced.
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 9_000).await;
+        assert_eq!(engine.runtime.arm_state("au-1", "tm-1"), ArmState::re_armed());
+        assert_eq!(fake.states.load(Ordering::Relaxed), 3);
+
+        // And still 18%: no transition at all now, so nothing to say however long we wait.
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 20_000).await;
+        assert_eq!(fake.states.load(Ordering::Relaxed), 3, "a repeat is not a transition");
+    }
+
+    /// **H-6: the rule can go away during the queue wait too.** The wait is up to ten seconds; a user
+    /// who turns a rule off must not still be typed at afterwards. Checked in the same critical section
+    /// as the terminal, because it is the same question.
+    #[tokio::test(start_paused = true)]
+    async fn a_rule_turned_off_while_its_send_waits_never_types() {
+        let (engine, fake, host) = wired();
+        let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+        engine.complete_rule("au-1");
+
+        run_send(engine.clone(), host.clone(), send).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(fake.written().is_empty(), "{:?}", fake.written());
+        let rows = log_rows(&fake.store);
+        assert_eq!(rows.len(), 1, "{:?}", rows);
+        assert!(rows[0].1.contains("turned off"), "{:?}", rows);
+    }
+
+    /// **H-5: every write is addressed by `pc-`, never by `tm-`** (§7.4).
+    ///
+    /// The fixture's two ids are deliberately different strings, and the write log threw the id away —
+    /// so `deliver(.., &tm, ..)` instead of `&pc` passed every send test while addressing a map keyed
+    /// the other way. In production that is a send that silently goes nowhere.
+    #[tokio::test(start_paused = true)]
+    async fn every_write_is_addressed_by_the_process_id() {
+        let (engine, fake, host) = wired();
+        let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
+
+        run_send(engine.clone(), host.clone(), send).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        let ids = fake.written_to();
+        assert!(!ids.is_empty(), "the premise: something was written");
+        assert!(ids.iter().all(|id| id == "pc-1"), "a write was addressed by leaf id: {:?}", ids);
     }
 
 }

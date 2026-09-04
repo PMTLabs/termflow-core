@@ -67,6 +67,17 @@ impl FakeHost {
         self
     }
 
+    /// The terminal is CLOSED: its leaf no longer resolves **and it is out of the roster**.
+    ///
+    /// Clearing `leaves` alone is not a closed terminal, and that distinction hid a blocker: the
+    /// failure tests cleared only the leaf, so `label_for` still found the roster row and returned a
+    /// name — which is exactly what a real closed terminal cannot do. An implementation that resolved
+    /// the name at WRITE time therefore passed a test written to prove it resolves it at DECIDE time.
+    pub(crate) fn close(&self, tm: &str) {
+        self.leaves.lock().unwrap().remove(tm);
+        self.roster.lock().unwrap().retain(|r| r.terminal_id.as_deref() != Some(tm));
+    }
+
     pub(crate) fn say(&self, pc: &str, text: &str) {
         self.text.lock().unwrap().insert(pc.into(), text.into());
     }
@@ -78,6 +89,16 @@ impl FakeHost {
             .iter()
             .map(|(_, b)| String::from_utf8_lossy(b).to_string())
             .collect()
+    }
+
+    /// Every id the send path actually addressed.
+    ///
+    /// `written()` throws the id away, and `write` accepts any string — so `deliver(.., &tm, ..)`
+    /// instead of `&pc` passed every send test while addressing a map that is keyed the other way.
+    /// §7.4's whole point is that the two spaces are DELIBERATELY different strings here, and an
+    /// oracle that discards the id cannot see the one mistake the fixture was built to catch.
+    pub(crate) fn written_to(&self) -> Vec<String> {
+        self.writes.lock().unwrap().iter().map(|(pc, _)| pc.clone()).collect()
     }
 }
 
@@ -204,6 +225,20 @@ pub(crate) fn presence_rule(id: &str, find: &str, message: &str, sort_order: i64
     rule.graph.parse.keep = Keep::Whole;
     rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
     rule
+}
+
+/// Every log row as `(kind, detail, terminal_name)`.
+///
+/// The name is in the tuple deliberately: R17 and §2.8 are entirely about that column, and an oracle
+/// reading only `(kind, detail)` let a `terminal_name = NULL` on the one row the column exists for
+/// pass as correct.
+pub(crate) fn log_rows(store: &AutomationStore) -> Vec<(String, String, Option<String>)> {
+    store
+        .load_automation_log(&LogScope::All, LogOrder::Asc, 100)
+        .unwrap()
+        .into_iter()
+        .map(|e| (format!("{:?}", e.kind), e.detail, e.terminal_name))
+        .collect()
 }
 
 pub(crate) fn log_details(store: &AutomationStore) -> Vec<(String, String)> {

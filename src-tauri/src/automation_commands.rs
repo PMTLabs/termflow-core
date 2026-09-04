@@ -28,7 +28,8 @@ use crate::automation::roster::{TargetSnapshot, WatchableTerminal};
 use crate::automation_engine::dry::DryRunReport;
 use crate::automation_engine::host::EngineHost;
 use crate::automation_store::{
-    AutomationLogEntry, AutomationRule, AutomationStoreError, Criterion, LogOrder, LogScope,
+    AutomationLogEntry, AutomationRule, AutomationStoreError, Criterion, LogKind, LogOrder,
+    LogScope,
 };
 use crate::state::AppState;
 
@@ -40,6 +41,51 @@ fn now_ms() -> i64 {
 /// from *rejected* from *SQLite said no* — the three the panel renders differently.
 fn to_string_err(e: AutomationStoreError) -> String {
     e.to_string()
+}
+
+/// One rule-level log row — no terminal, so no name to carry.
+///
+/// **The three definition kinds had no writer at all.** `Saved` is required by §3.5 and checked by GUI
+/// step 19; `Enabled` and `Disabled` are in the vocabulary because the mockup's log shows them. A
+/// variant nothing writes is indistinguishable from one nobody wanted, so all three land together
+/// rather than leaving two more for the next round to find.
+///
+/// A failure to log is never a failure to save: the row is a record of something that already
+/// happened, and returning `Err` here would tell the user their edit was lost.
+fn note<R: tauri::Runtime>(state: &AppState<R>, rule_id: &str, kind: LogKind, detail: &str) {
+    let entry = AutomationLogEntry {
+        id: 0,
+        rule_id: rule_id.to_string(),
+        terminal_id: None,
+        terminal_name: None,
+        kind,
+        detail: detail.to_string(),
+        at: now_ms(),
+    };
+    match state.automation_store.append(&entry) {
+        Ok(Some(outcome)) if outcome.emit => EngineHost::emit_activity(state, outcome.rule_ids),
+        Ok(_) => {}
+        Err(e) => log::warn!("automations: could not log {:?} for {}: {}", kind, rule_id, e),
+    }
+}
+
+/// §3.5's own sentence: *"saved from window `main`, replacing the version saved from `main-2`"*.
+///
+/// The previous `updated_at` is a wall-clock ms from the row that was overwritten. It is rendered as a
+/// plain instant rather than a window label because the SCHEMA has no field for who saved last — the
+/// round-1 ruling that put this line in `detail` said so, and inventing a name here would be worse
+/// than naming the time.
+fn saved_detail(origin: &str, previous: Option<i64>) -> String {
+    match previous {
+        Some(at) => format!("saved from window {}, replacing the version saved at {}", origin, stamp(at)),
+        None => format!("created from window {}", origin),
+    }
+}
+
+fn stamp(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| t.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| ms.to_string())
 }
 
 /// One `automation:changed`, after the definition has actually changed.
@@ -129,6 +175,11 @@ pub async fn list_watchable_terminals(
         };
         let live = EngineHost::roster(&owned, &criteria);
 
+        // §4.3: scoped to the rule when the caller names one — the editor always knows which rule it
+        // is editing — else the NEWEST row for that id across rules. An empty list here made every
+        // closed terminal in a fresh draft's picker render as a bare id, which is the one row the
+        // snapshot exists for: the mockup draws it as `tm-e4d0a77e1 · node · ~/work/termflow-docs ·
+        // not open`.
         let snapshots: Vec<TargetSnapshot> = match rule_id.as_deref() {
             Some(id) => store
                 .targets_for(id)
@@ -140,7 +191,7 @@ pub async fn list_watchable_terminals(
                     folder,
                 })
                 .collect(),
-            None => Vec::new(),
+            None => store.newest_snapshots().map_err(to_string_err)?,
         };
         Ok(crate::automation::roster::build(
             &live,
@@ -182,8 +233,14 @@ pub async fn save_automation(
 ) -> Result<Option<i64>, String> {
     let owned = state.inner().clone();
     let id = rule.id.clone();
+    let origin_for_log = origin.clone();
     let previous = tokio::task::spawn_blocking(move || {
         let previous = owned.automation_store.save_rule(&rule).map_err(to_string_err)?;
+        // §3.5: the `saved` entry's detail carries the origin window, and `save_rule` returns the
+        // previous `updated_at` from INSIDE its own transaction so the line can name what it replaced.
+        // Two windows may hold one rule open and the later save wins whole; the log entry IS the
+        // requirement, not concurrency control. GUI step 19 checks this line.
+        note(&owned, &rule.id, LogKind::Saved, &saved_detail(&origin_for_log, previous));
         owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
         Ok::<_, String>(previous)
     })
@@ -242,8 +299,12 @@ pub async fn set_automation_enabled(
 ) -> Result<(), String> {
     let owned = state.inner().clone();
     let rule_id = id.clone();
+    let origin_for_log = origin.clone();
     tokio::task::spawn_blocking(move || {
         owned.automation_store.set_enabled_checked(&rule_id, enabled).map_err(to_string_err)?;
+        // Only after the check passed, so a refused enable never claims in the log to have happened.
+        let kind = if enabled { LogKind::Enabled } else { LogKind::Disabled };
+        note(&owned, &rule_id, kind, &format!("from window {}", origin_for_log));
         owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
         Ok::<_, String>(())
     })
@@ -302,10 +363,18 @@ pub async fn rearm_automation(
             None => runtime.watched_for(&rule_id).into_iter().collect(),
         };
         for tm in leaves {
-            // `re_armed`, not `armed()`: this pair HAS seen its condition true, and losing
-            // `seen_fire` would put a presence rule back on the deep window and make it re-fire on
-            // the very line it just let go (§2.2c).
-            runtime.set_arm(&rule_id, &tm, crate::automation_engine::eval::ArmState::re_armed());
+            // `seen_fire` is CARRIED, not asserted. It is a fact about this pair's history and it
+            // selects the read depth (§2.2c): claiming `true` on a pair that has never fired narrows a
+            // presence rule to the visible screen, so a match already sitting in scrollback is missed;
+            // claiming `false` on one that HAS fired widens it back to the window and it re-fires on
+            // the very line it just let go. The first version of this loop asserted `true` for every
+            // leaf, which is wrong in exactly the first way.
+            let seen_fire = runtime.arm_state(&rule_id, &tm).has_seen_fire();
+            runtime.set_arm(
+                &rule_id,
+                &tm,
+                crate::automation_engine::eval::ArmState::Armed { seen_fire },
+            );
         }
     })
     .await

@@ -57,7 +57,14 @@ pub fn spawn<R: tauri::Runtime>(state: crate::state::AppState<R>) {
     let rx = state.output_tx.subscribe();
     let host: Arc<dyn host::EngineHost> = Arc::new(state);
 
-    tokio::spawn({
+    // **`tauri::async_runtime::spawn`, never bare `tokio::spawn`.** `.setup()` runs on the main
+    // thread from the tao event-loop callback, with no tokio runtime entered — a bare `tokio::spawn`
+    // panics there and takes the whole app's startup with it. Tauri's own wrapper is
+    // `let _guard = runtime.enter(); tokio::spawn(task)`, and it enters precisely because the bare
+    // call would fail. Every other setup-time task in `lib.rs` uses it, including
+    // `spawn_history_flush_task` — the function this call sits directly beneath. The three inner
+    // spawns below are fine: by then we are inside an async task and a runtime IS entered.
+    tauri::async_runtime::spawn({
         let engine = engine.clone();
         let host = host.clone();
         async move {
@@ -93,6 +100,9 @@ pub fn spawn<R: tauri::Runtime>(state: crate::state::AppState<R>) {
         }
     });
 }
+
+/// How often `automation:state` may be emitted (§7.2's “≤ 1/s”).
+pub const STATE_EMIT_MIN_INTERVAL_MS: i64 = 1_000;
 
 /// One rule the engine is actually running: its definition, and its pattern compiled once at load.
 ///
@@ -164,6 +174,15 @@ pub struct AutomationEngine {
     ///
     /// One writer (`loops::targeting_tick`), two readers, exactly like `watched`.
     missing: RwLock<HashMap<String, HashSet<String>>>,
+    /// When `automation:state` was last emitted, for the ≤ 1/s coalescer (§2.9, §7.2).
+    ///
+    /// **Inside the thing that emits the event**, per §2.9's ruling that a coalescer belongs to its
+    /// emitter rather than to `AppState`. The engine decides arm transitions, so the engine owns the
+    /// rate at which it announces them: a chatty terminal produces four transitions a second per
+    /// pair, and an un-coalesced emit repaints every open Settings page at that rate.
+    last_state_emit_ms: std::sync::Mutex<Option<i64>>,
+    /// Something the payload shows has changed since the last emit.
+    state_dirty: AtomicBool,
 }
 
 impl AutomationEngine {
@@ -174,12 +193,50 @@ impl AutomationEngine {
             live: RwLock::new(HashMap::new()),
             started_at_ms,
             missing: RwLock::new(HashMap::new()),
+            last_state_emit_ms: std::sync::Mutex::new(None),
+            state_dirty: AtomicBool::new(false),
         }
+    }
+
+    /// Something the state payload shows has changed. **Records it; does not emit.**
+    ///
+    /// A coalescer that answers *"may I emit right now?"* DROPS what it refuses, and the refused
+    /// event is not re-offered: the next tick's decision is `held`, which is not a transition, so a
+    /// pill would sit stale until something else happened. A flag the tick drains defers instead —
+    /// no transition is lost and the rate is still bounded.
+    pub fn mark_state_dirty(&self) {
+        self.state_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Should the caller emit `automation:state` now? Spends the flag and the slot when it says yes.
+    ///
+    /// ≤ 1/s (§7.2), coalesced inside the engine (§2.9). A backwards wall clock resyncs rather than
+    /// parking the emit until real time catches up — the same correction `append`'s own limiter
+    /// carries, for the same reason: an NTP step or a resume would otherwise stop the panel repainting
+    /// for the length of the jump.
+    pub fn take_state_emit(&self, now_ms: i64) -> bool {
+        if !self.state_dirty.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut last = self.last_state_emit_ms.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = *last {
+            if now_ms >= at && now_ms - at < STATE_EMIT_MIN_INTERVAL_MS {
+                return false;
+            }
+        }
+        *last = Some(now_ms);
+        self.state_dirty.store(false, Ordering::Relaxed);
+        true
     }
 
     /// The targeting tick's only write to the missing map.
     pub fn set_missing(&self, missing: HashMap<String, HashSet<String>>) {
         *self.missing.write().unwrap_or_else(|e| e.into_inner()) = missing;
+    }
+
+    /// The missing map as the targeting tick last resolved it.
+    pub fn missing_snapshot(&self) -> HashMap<String, HashSet<String>> {
+        self.missing.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The runtime object every row's pill reads, with the missing map the targeting tick last

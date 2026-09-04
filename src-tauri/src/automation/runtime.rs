@@ -84,6 +84,13 @@ pub struct AutomationRuntime {
     settled_until: DashMap<String, i64>,
     /// `rule_id` -> the leaves it watches. The targeting tick is its only writer.
     watched: DashMap<String, HashSet<String>>,
+    /// `(rule_id, tm_id)` -> what this pair decided last time.
+    ///
+    /// The activity log records TRANSITIONS: a decision identical to the previous one is a repeat and
+    /// is written as a `Check`, which is the one class the verbose gate can drop. Without it a working
+    /// rule writes a `held` row four times a second and the 200-row per-rule cap evicts that rule's own
+    /// `sent` row inside a minute.
+    last_decision: DashMap<(String, String), crate::automation_engine::eval::Decision>,
 }
 
 impl AutomationRuntime {
@@ -105,11 +112,47 @@ impl AutomationRuntime {
         self.arm.insert((rule_id.to_string(), tm.to_string()), state);
     }
 
+    /// Roll one pair's arm state back — **and only if that pair still has one**.
+    ///
+    /// A rollback restores; it must never CREATE. Between a crossing being decided and its send
+    /// failing, the terminal can close, and `cleanup_terminal_state` purges every `tm-`keyed entry for
+    /// it. Writing `prev` back afterwards resurrects a key for a terminal that is gone — and a `tm-`
+    /// leaf is REUSED (Ctrl+R restarts a terminal under the same id, and session restore
+    /// re-registers it), so the next terminal to carry that leaf starts `Armed` instead of `Unseen`.
+    /// Settled decision 7 says a terminal already above the threshold when it spawns must not fire
+    /// without a genuine crossing; an inherited `Armed` fires on its first read.
+    ///
+    /// `Unseen` protection engages only when the key is ABSENT, which is exactly what
+    /// `forget_terminal`'s own doc says — so the guard is "is there something to roll back", not "is
+    /// the terminal still open". A terminal-liveness check would race the close it is trying to
+    /// notice; the presence of the key is the fact that was actually established.
+    pub fn restore_arm(&self, rule_id: &str, tm: &str, state: ArmState) {
+        let key = (rule_id.to_string(), tm.to_string());
+        if let Some(mut entry) = self.arm.get_mut(&key) {
+            *entry.value_mut() = state;
+        }
+    }
+
+    /// Drop one pair's arm state and evaluation stamp, for a terminal that has left a rule's watched
+    /// set (§2.4: *"keys are cleared when … a terminal leaves the watch set"*).
+    ///
+    /// **`fires` is deliberately kept.** §2.4's table is the ARM machine's, and the fire history is
+    /// what a row means by *"fired 3 times, last 10 minutes ago"*: a terminal that drops out of a
+    /// criterion's matched set for a minute and comes back has not un-fired. `forget_rule` and
+    /// `forget_terminal` do purge it, because there the pairing itself is over.
+    pub fn forget_pair(&self, rule_id: &str, tm: &str) {
+        let key = (rule_id.to_string(), tm.to_string());
+        self.arm.remove(&key);
+        self.last_eval_ms.remove(&key);
+        self.last_decision.remove(&key);
+    }
+
     /// Everything one rule owns: its arm keys, its evaluation stamps and its watched set. Called when
     /// a rule is disabled, saved with changes, or completes.
     pub fn forget_rule(&self, rule_id: &str) {
         self.arm.retain(|(r, _), _| r != rule_id);
         self.last_eval_ms.retain(|(r, _), _| r != rule_id);
+        self.last_decision.retain(|(r, _), _| r != rule_id);
         self.fires.retain(|(r, _), _| r != rule_id);
         self.watched.remove(rule_id);
     }
@@ -132,6 +175,7 @@ impl AutomationRuntime {
     pub fn forget_terminal(&self, tm: &str) {
         self.arm.retain(|(_, t), _| t != tm);
         self.last_eval_ms.retain(|(_, t), _| t != tm);
+        self.last_decision.retain(|(_, t), _| t != tm);
         self.fires.retain(|(_, t), _| t != tm);
         self.echoes.remove(tm);
         self.send_locks.remove(tm);
@@ -237,6 +281,21 @@ impl AutomationRuntime {
         self.fires
             .get(&(rule_id.to_string(), tm.to_string()))
             .map(|e| *e.value())
+    }
+
+    pub fn last_decision(&self, rule_id: &str, tm: &str) -> Option<crate::automation_engine::eval::Decision> {
+        self.last_decision
+            .get(&(rule_id.to_string(), tm.to_string()))
+            .map(|e| *e.value())
+    }
+
+    pub fn set_last_decision(
+        &self,
+        rule_id: &str,
+        tm: &str,
+        decision: crate::automation_engine::eval::Decision,
+    ) {
+        self.last_decision.insert((rule_id.to_string(), tm.to_string()), decision);
     }
 
     pub fn last_eval(&self, rule_id: &str, tm: &str) -> Option<i64> {
