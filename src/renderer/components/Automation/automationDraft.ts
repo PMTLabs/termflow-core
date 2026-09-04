@@ -62,22 +62,157 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
  * four-compass `portPoint` is not reused: its sides are *chosen* per pair by `pickSides`, which is
  * right for a free graph and wrong for a chain that always reads left to right.
  */
-export function portAnchor(step: StepKind, port: string, pos: NodePos): NodePos {
+/** Which vertical edge of its card a port's dot sits on. */
+export type PortSide = 'l' | 'r';
+
+/** The map key for one port. Exported so nobody builds this string a second, different way. */
+export const portKey = (step: StepKind, port: string): string => `${step}.${port}`;
+
+/** Where a port sits when nothing is wired to it: the reading order, inputs left and outputs right. */
+export function defaultPortSide(dir: 'in' | 'out'): PortSide {
+    return dir === 'in' ? 'l' : 'r';
+}
+
+/**
+ * Which edge each port sits on, given where the cards currently are.
+ *
+ * **The decision belongs to the CARD, not to the port.** A card is either the normal way round
+ * (inputs left, outputs right) or flipped, and every one of its ports follows — so a card can never
+ * end up with an input and an output on the same edge. Deciding per port instead, by facing each one
+ * at its own peer, is what put `Compare it`'s input and its `no` output both on its right-hand side.
+ *
+ * A card flips when its flow runs right to left: `pull` adds how far its targets sit to the right of
+ * it and how far its sources sit to the left, so a card dragged past both scores negatively twice,
+ * and a card with a source on one side and a target on the other is decided by whichever is further.
+ * There is no arrangement of a chain in which every card gets what it wants, so this picks one
+ * coherent answer per card rather than a locally optimal one per port.
+ *
+ * Averaged over peers rather than taken from the first wire: a port can carry several, and picking
+ * one arbitrarily would let the dots jump when an unrelated card moved.
+ *
+ * **"To one side of me" needs a DEADBAND, not an exact tie.** Cards stacked vertically are never
+ * quite aligned, and the first version of this fell back to the reading order only when the centres
+ * were exactly EQUAL — so a ten-pixel drift between two cards sitting one above the other read as
+ * "my peer is to the left", threw both ports to the far edges, and looped the wire around the
+ * outside of both cards. Reported from a live build at a 10px offset. A peer must now be clear of
+ * the card by `AU_NODE_W` — less than that and the two overlap in x, where neither "left" nor
+ * "right" describes the arrangement. That also makes the layout STABLE: nudging a card a few pixels
+ * can no longer make the wires jump.
+ *
+ * Returned as a plain map so `AuNode` (which draws the dot) and `AuWires` (which anchors the line to
+ * it) read ONE value. Two private copies of this rule is how the dot and the line end up on
+ * different edges of the same card.
+ */
+export function portSides(
+    wires: Wire[],
+    layout: Record<StepKind, NodePos>,
+): Record<string, PortSide> {
+    const centre = (step: StepKind): number | null => {
+        const pos = layout[step];
+        return pos ? pos.x + AU_NODE_W / 2 : null;
+    };
+
+    type Pull = { own: number; outSum: number; outN: number; inSum: number; inN: number };
+    const acc = new Map<StepKind, Pull>();
+    const at = (step: StepKind): Pull | null => {
+        const own = centre(step);
+        if (own === null) return null;
+        const cur = acc.get(step) ?? { own, outSum: 0, outN: 0, inSum: 0, inN: 0 };
+        acc.set(step, cur);
+        return cur;
+    };
+
+    for (const wire of wires) {
+        const fromC = centre(wire.from.step);
+        const toC = centre(wire.to.step);
+        if (fromC === null || toC === null) continue;
+        const source = at(wire.from.step);
+        const target = at(wire.to.step);
+        if (source) {
+            source.outSum += toC;
+            source.outN += 1;
+        }
+        if (target) {
+            target.inSum += fromC;
+            target.inN += 1;
+        }
+    }
+
+    const out: Record<string, PortSide> = {};
+    for (const [step, v] of acc) {
+        // How strongly this card's flow runs LEFT to RIGHT. Both halves are signed the same way, so
+        // a card whose source is on its left and whose target is on its right scores positively
+        // twice, and one that has been dragged past both scores negatively twice.
+        let pull = 0;
+        if (v.outN > 0) pull += v.outSum / v.outN - v.own;
+        if (v.inN > 0) pull += v.own - v.inSum / v.inN;
+
+        const flipped = pull <= -AU_NODE_W;
+        for (const spec of STEP_PORTS[step] ?? []) {
+            const normal = defaultPortSide(spec.dir);
+            out[portKey(step, spec.id)] = flipped ? (normal === 'l' ? 'r' : 'l') : normal;
+        }
+    }
+    return out;
+}
+
+/** The side this port is on, or its default when nothing is wired to it. */
+export function sideOf(
+    sides: Record<string, PortSide>,
+    step: StepKind,
+    port: string,
+): PortSide {
+    const chosen = sides[portKey(step, port)];
+    if (chosen) return chosen;
+    const dir = STEP_PORTS[step]?.find((p) => p.id === port)?.dir ?? 'out';
+    return defaultPortSide(dir);
+}
+
+/**
+ * Where a port's dot sits on its card, in world units relative to the card's top-left.
+ *
+ * `side` is passed in rather than derived from the port's direction, because which edge a port uses
+ * now depends on where the cards ARE (see `portSides`). It is a required argument on purpose: a
+ * default here would let a caller that forgot it silently anchor wires to the old fixed edge while
+ * the dot the user sees moved — the exact split this function's own comment warns about below.
+ */
+export function portAnchor(
+    step: StepKind,
+    port: string,
+    pos: NodePos,
+    side: PortSide,
+): NodePos {
     const ports = STEP_PORTS[step];
     const spec = ports.find((p) => p.id === port);
     if (!spec) return { x: pos.x, y: pos.y };
-    const side = ports.filter((p) => p.dir === spec.dir);
-    const index = side.indexOf(spec);
+    const column = ports.filter((p) => p.dir === spec.dir);
+    const index = column.indexOf(spec);
     return {
-        x: spec.dir === 'in' ? pos.x : pos.x + AU_NODE_W,
-        y: pos.y + (AU_NODE_H * (index + 1)) / (side.length + 1),
+        x: side === 'l' ? pos.x : pos.x + AU_NODE_W,
+        y: pos.y + (AU_NODE_H * (index + 1)) / (column.length + 1),
     };
 }
 
-/** A left-to-right cubic between two anchors. The horizontal handles are what make it read as flow. */
-export function auWirePath(from: NodePos, to: NodePos): string {
+/**
+ * A cubic between two anchors. The horizontal handles are what make it read as flow.
+ *
+ * Each handle points OUT of the edge its anchor sits on, so a wire always leaves and arrives
+ * perpendicular to the card. With both sides fixed this was `from.x + reach` and `to.x - reach`,
+ * which is the same thing while every wire runs left to right and a kink the moment one does not.
+ */
+export function auWirePath(
+    from: NodePos,
+    to: NodePos,
+    // Required, for the same reason `portAnchor`'s `side` is: defaulting these to the old
+    // left-to-right pair would let a caller that forgot them draw a correct-LOOKING curve out of the
+    // wrong edge, with nothing failing to say so.
+    fromSide: PortSide,
+    toSide: PortSide,
+): string {
     const reach = Math.max(46, Math.abs(to.x - from.x) / 2);
-    return `M ${from.x} ${from.y} C ${from.x + reach} ${from.y}, ${to.x - reach} ${to.y}, ${to.x} ${to.y}`;
+    const c1 = from.x + (fromSide === 'r' ? reach : -reach);
+    const c2 = to.x + (toSide === 'r' ? reach : -reach);
+    return `M ${from.x} ${from.y} C ${c1} ${from.y}, ${c2} ${to.y}, ${to.x} ${to.y}`;
 }
 
 export interface AutomationDraft {

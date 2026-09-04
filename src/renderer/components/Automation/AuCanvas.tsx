@@ -18,7 +18,7 @@ import { Z_MIN, clampZoom, panBy, screenToWorld, zoomAt } from '../Canvas/canvas
 import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from '../Canvas/canvasGestures';
 import { boundsOf, fitViewport, gridStyle, rasterStyle, worldStyle } from '../Canvas/viewportStyles';
 import type { AutomationDraft, NodePos } from './automationDraft';
-import { AU_NODE_H, AU_NODE_W } from './automationDraft';
+import { AU_NODE_H, AU_NODE_W, portSides } from './automationDraft';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { PortRef, StepKind, Wire } from './automationSteps';
 import { AuNode } from './AuNode';
@@ -231,6 +231,13 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
         };
     }, []);
 
+    // ONE computation of which edge each port uses, handed to both the cards and the wires. Two
+    // callers deriving it separately is how the dot and the line end up on opposite edges.
+    const sides = useMemo(
+        () => portSides(draft.wires, draft.layout),
+        [draft.wires, draft.layout],
+    );
+
     const dropPorts = useMemo(() => {
         const byStep: Partial<Record<StepKind, Set<string>>> = {};
         for (const entry of wireDrag.legal) {
@@ -267,6 +274,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                     layout={draft.layout}
                     chips={chips}
                     dragging={wireDrag.line}
+                    sides={sides}
                     onRemove={onDisconnect}
                 />
                 {draft.present.map((step) => (
@@ -279,6 +287,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                         state={states[step]}
                         selected={draft.selected === step}
                         dropPorts={dropPorts[step]}
+                        sides={sides}
                         onSelect={() => onSelect(step)}
                         // Space-pan wins over a node drag. React's bubble handler on the node runs
                         // BEFORE the canvas's own, so without this a space+drag that happened to

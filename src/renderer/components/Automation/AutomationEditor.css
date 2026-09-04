@@ -599,11 +599,14 @@
     cursor: crosshair;
 }
 
-.au-editor .au-port.in {
+/* Which EDGE, chosen by `portSides` from where the cards are — not by the port's direction, which
+   is what `.in`/`.out` used to decide. Those two classes stay on the element for the aria label and
+   for anything selecting on direction; only the position moved. */
+.au-editor .au-port.side-l {
     left: 0;
 }
 
-.au-editor .au-port.out {
+.au-editor .au-port.side-r {
     left: 100%;
 }
 

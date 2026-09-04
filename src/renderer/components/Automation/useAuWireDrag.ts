@@ -16,7 +16,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AutomationDraft, NodePos } from './automationDraft';
-import { portAnchor } from './automationDraft';
+import { portAnchor, portSides, sideOf } from './automationDraft';
+import type { PortSide } from './automationDraft';
 import type { PortRef, Wire } from './automationSteps';
 import { STEP_PORTS, canConnect, portSpec } from './automationSteps';
 
@@ -29,7 +30,7 @@ export interface AuWireDragOptions {
 
 export interface AuWireDrag {
     /** The anchor the wire is being pulled from, and the pointer, both in world units. */
-    line: { from: NodePos; to: NodePos } | null;
+    line: { from: NodePos; to: NodePos; fromSide: PortSide } | null;
     /** `${step}.${port}` for every port this drag could legally land on, for the drop highlight. */
     legal: ReadonlySet<string>;
     begin: (port: PortRef, e: { clientX: number; clientY: number }) => void;
@@ -126,8 +127,18 @@ export function useAuWireDrag({ toWorld, draft, onConnect, onRefuse }: AuWireDra
         }
     }
 
+    // The side the drag LEAVES from is the same one the card is drawing its dot on, so the preview
+    // starts exactly at the dot rather than at the card's other edge.
+    const sides = portSides(draft.wires, draft.layout);
     const line = from && pointer
-        ? { from: portAnchor(from.step, from.port, draft.layout[from.step]), to: pointer }
+        ? {
+              from: portAnchor(
+                  from.step, from.port, draft.layout[from.step],
+                  sideOf(sides, from.step, from.port),
+              ),
+              to: pointer,
+              fromSide: sideOf(sides, from.step, from.port),
+          }
         : null;
 
     return { line, legal, begin, drop };

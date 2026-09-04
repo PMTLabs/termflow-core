@@ -12,7 +12,8 @@
 import React from 'react';
 import type { Wire } from './automationSteps';
 import type { NodePos } from './automationDraft';
-import { auWirePath, portAnchor } from './automationDraft';
+import { auWirePath, portAnchor, sideOf } from './automationDraft';
+import type { PortSide } from './automationDraft';
 
 export interface AuWiresProps {
     wires: Wire[];
@@ -20,13 +21,18 @@ export interface AuWiresProps {
     /** What each wire is carrying, keyed `${fromStep}.${fromPort}`. Missing = no chip. */
     chips: Record<string, string>;
     /** The wire being dragged right now, from an anchor to the pointer. */
-    dragging: { from: NodePos; to: NodePos } | null;
+    dragging: { from: NodePos; to: NodePos; fromSide: PortSide } | null;
+    /**
+     * Which edge each port sits on, from `portSides`. Passed in rather than computed here so that
+     * this component and `AuNode` anchor to the same edge — the dot and the line are one decision.
+     */
+    sides: Record<string, PortSide>;
     onRemove: (wire: Wire) => void;
 }
 
 const key = (w: Wire) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`;
 
-export const AuWires: React.FC<AuWiresProps> = ({ wires, layout, chips, dragging, onRemove }) => (
+export const AuWires: React.FC<AuWiresProps> = ({ wires, layout, chips, dragging, sides, onRemove }) => (
     <>
         <svg className="au-wires" width="100%" height="100%" aria-hidden="true">
             <defs>
@@ -43,25 +49,44 @@ export const AuWires: React.FC<AuWiresProps> = ({ wires, layout, chips, dragging
                 </marker>
             </defs>
             {wires.map((wire) => {
-                const from = portAnchor(wire.from.step, wire.from.port, layout[wire.from.step]);
-                const to = portAnchor(wire.to.step, wire.to.port, layout[wire.to.step]);
+                const fromSide = sideOf(sides, wire.from.step, wire.from.port);
+                const toSide = sideOf(sides, wire.to.step, wire.to.port);
+                const from = portAnchor(wire.from.step, wire.from.port, layout[wire.from.step], fromSide);
+                const to = portAnchor(wire.to.step, wire.to.port, layout[wire.to.step], toSide);
                 return (
                     <path
                         key={key(wire)}
                         className="au-wire"
-                        d={auWirePath(from, to)}
+                        d={auWirePath(from, to, fromSide, toSide)}
                         markerEnd="url(#au-arrow)"
                     />
                 );
             })}
             {dragging && (
-                <path className="au-wire dragging" d={auWirePath(dragging.from, dragging.to)} />
+                // A wire being dragged has a real source side and no target yet, so it enters the
+                // pointer from whichever side the pointer is on. Without that the preview kinks
+                // backwards the moment you drag left of the card you started from.
+                <path
+                    className="au-wire dragging"
+                    d={auWirePath(
+                        dragging.from,
+                        dragging.to,
+                        dragging.fromSide,
+                        dragging.to.x >= dragging.from.x ? 'l' : 'r',
+                    )}
+                />
             )}
         </svg>
 
         {wires.map((wire) => {
-            const from = portAnchor(wire.from.step, wire.from.port, layout[wire.from.step]);
-            const to = portAnchor(wire.to.step, wire.to.port, layout[wire.to.step]);
+            const from = portAnchor(
+                wire.from.step, wire.from.port, layout[wire.from.step],
+                sideOf(sides, wire.from.step, wire.from.port),
+            );
+            const to = portAnchor(
+                wire.to.step, wire.to.port, layout[wire.to.step],
+                sideOf(sides, wire.to.step, wire.to.port),
+            );
             const chip = chips[`${wire.from.step}.${wire.from.port}`];
             return (
                 <button

@@ -13,7 +13,8 @@ import React from 'react';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { PortRef, StepKind } from './automationSteps';
 import { STEP_PORTS } from './automationSteps';
-import { AU_NODE_H, AU_NODE_W } from './automationDraft';
+import { AU_NODE_H, AU_NODE_W, sideOf } from './automationDraft';
+import type { PortSide } from './automationDraft';
 
 /** The four accents, from the mockup's own palette. */
 export const STEP_GLYPHS: Record<StepKind, string> = {
@@ -32,6 +33,11 @@ export interface AuNodeProps {
     selected: boolean;
     /** Which of this node's ports is a legal target for the wire currently being dragged. */
     dropPorts?: ReadonlySet<string>;
+    /**
+     * Which edge each port sits on, from `portSides` — the SAME map `AuWires` anchors to, so the
+     * dot drawn here and the line drawn there cannot pick different edges of this card.
+     */
+    sides: Record<string, PortSide>;
     onSelect: () => void;
     onPointerDown: (e: React.PointerEvent) => void;
     onPortPointerDown: (port: PortRef, e: React.PointerEvent) => void;
@@ -39,6 +45,7 @@ export interface AuNodeProps {
 }
 
 export const AuNode: React.FC<AuNodeProps> = ({
+    sides,
     step,
     x,
     y,
@@ -94,7 +101,7 @@ export const AuNode: React.FC<AuNodeProps> = ({
                 <button
                     type="button"
                     key={port.id}
-                    className={`au-port ${port.dir}${droppable ? ' droppable' : ''}`}
+                    className={`au-port ${port.dir} side-${sideOf(sides, step, port.id)}${droppable ? ' droppable' : ''}`}
                     style={{ top: offset }}
                     // The dots are the drag handles for wires; a pointerdown here must not also
                     // start a node drag, and a pointerup here is a drop rather than a click.
