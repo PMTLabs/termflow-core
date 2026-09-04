@@ -503,18 +503,19 @@ export function sayPattern(find: string, keep: AutomationKeep): PatternSaying | 
     }
 
     const example = flat.map((t) => t.sample).join('');
-    // Both halves of this guard are currently UNREACHABLE, and that is worth writing down because a
-    // mutation sweep keeps reporting `re.test(example)` as a survivor. Every construct that could
-    // make the concatenated sample miss its own pattern — a counted quantifier, an anchor,
-    // alternation, a lookaround, a backreference — makes the tokenizer bail and this function return
-    // null well before here; and a pattern with no tokens returns null at `parts.length === 0`
-    // above. Probed over 36 patterns. So removing either half is an EQUIVALENT mutant, not a gap.
+    // **`re.test(example)` is REACHABLE, and an earlier version of this comment claimed it was not.**
+    // That claim was that every construct able to make the concatenated sample miss its own pattern
+    // also makes the tokenizer bail — probed over 36 patterns — so both halves were an
+    // equivalent mutant. The list it reasoned from (a counted quantifier, an anchor, alternation, a
+    // lookaround, a backreference) leaves out a trailing `\b`, which `tokenize` silently DROPS
+    // rather than bailing on: `\d+\s\b` yields the sample `'63 '`, and `/\d+\s\b/.test('63 ')` is
+    // false in Node. The guard then returns `null` and shows no example, which is the right answer
+    // — arrived at by running, not by being unreachable.
     //
-    // It stays because it is the invariant, not the implementation: a tokenizer that later learns
-    // `{n}` or `|` without teaching `sample` to satisfy them would start offering examples the rule
-    // can never find, and an example that does not match is worse than none. Pinned as a property
-    // over the whole supported grammar by *"never offers an example that its own pattern would not
-    // find"*.
+    // It stays for the reason it always should have had: an example that does not match is worse
+    // than none, and a tokenizer that later learns `{n}` or `|` without teaching `sample` to satisfy
+    // them would start offering examples the rule can never find. The 23-entry property grammar
+    // never pairs a trailing `\b` with `\s`, so it would not have caught this on its own.
     return { words, example: example.length > 0 && re.test(example) ? example : null };
 }
 

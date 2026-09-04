@@ -131,7 +131,15 @@ export function collapseRuns(entries: AutomationLogEntry[]): LogRow[] {
 export function rowTime(row: LogRow): string {
     const from = clockTime(row.first.at);
     if (!row.collapsed) return from;
-    return `${from.slice(0, 5)}–${clockTime(row.last.at).slice(0, 5)}`;
+    // `first` and `last` are POSITIONAL: `collapseRuns` folds whatever order it was handed, and
+    // `ActivityLogView` genuinely supports both directions — its header text and its
+    // `aria-label` both flip on `newestFirst`. Reading them as earliest-then-latest therefore renders
+    // a BACKWARDS range (`09:14–09:11`) the moment a caller passes newest-first. Only
+    // `AutomationsPanel.showLog` calls this today and it hardcodes oldest-first, so the defect is
+    // latent rather than live — but the prop it is latent behind is public.
+    const earliest = Math.min(row.first.at, row.last.at);
+    const latest = Math.max(row.first.at, row.last.at);
+    return `${clockTime(earliest).slice(0, 5)}–${clockTime(latest).slice(0, 5)}`;
 }
 
 export function clockTime(at: number): string {

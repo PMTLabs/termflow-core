@@ -125,7 +125,7 @@ export function automationRowState(
     const id = winningState(rule, pairs, now);
     const qualifier = qualifierFor(id, pairs, now);
     const noun = QUALIFIER_NOUN[id];
-    const label = id === 'rearm' && !everFired(pairs) ? 'Waiting to re-arm' : LABELS[id];
+    const label = id === 'rearm' && !everFired(pairs, now) ? 'Waiting to re-arm' : LABELS[id];
     return {
         id,
         label,
@@ -151,9 +151,23 @@ export function automationRowState(
  *
  * The state itself is right — the rule really will not fire until the text stops matching — so this
  * drops only the word that is false, rather than inventing a state id the mockup does not teach.
+ *
+ * **Asked of the pairs that WON, not of the rule.** The label describes one bucket, so evidence from
+ * outside that bucket cannot answer for it: a rule watching `tm-1` (fired for real five minutes ago,
+ * now resting) and `tm-2` (held, never fired) wins `rearm` on `tm-2` alone, and a rule-wide scan then
+ * finds `tm-1`'s timestamp and restores the very word `tm-2` makes false. That is this same defect
+ * one level up from where it was first fixed.
  */
-function everFired(pairs: Record<string, AutomationRuntimePairState> | undefined): boolean {
-    return !!pairs && Object.values(pairs).some((p) => p.lastFiredAt !== null);
+function everFired(
+    pairs: Record<string, AutomationRuntimePairState> | undefined,
+    now: number,
+): boolean {
+    return (
+        !!pairs
+        && Object.values(pairs)
+            .filter((p) => pairState(p, now) === 'rearm')
+            .some((p) => p.lastFiredAt !== null)
+    );
 }
 
 function winningState(

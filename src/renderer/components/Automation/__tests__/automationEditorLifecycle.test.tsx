@@ -199,7 +199,10 @@ describe('the editor, mounted', () => {
         await openEditorOn(rule());
 
         const host = editor() as HTMLElement;
-        expect(host.tabIndex).toBe(-1);
+        // `getAttribute`, NOT `.tabIndex`. The IDL accessor returns -1 for a div with no `tabindex`
+        // attribute at all, identically to one that sets `tabIndex={-1}` — so the obvious
+        // assertion passes with the fix reverted, which is the whole defect this test exists for.
+        expect(host.getAttribute('tabindex')).toBe('-1');
         // The hook's contract is "trap focus inside the container", and a container that cannot be
         // focused cannot satisfy it — this is the element it was handed.
         expect(host.getAttribute('role')).toBe('dialog');

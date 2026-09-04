@@ -467,12 +467,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // .focus?.()`, a no-op on a div that cannot hold focus, and its Tab trap has an
         // `active === container` branch for it.
         //
-        // Fixed HERE and not in `useDialogA11y`, which this branch does not touch and which eleven
+        // Fixed HERE and not in `useDialogA11y`, which this branch does not touch and which NINE
         // other components share: the hook's contract is "trap focus inside the container", and a
-        // container that cannot hold focus does not satisfy it. The other ten dialogs are small and
-        // densely focusable, so they rarely lose focus to the body; this one is a full-screen surface
-        // whose largest region is a canvas. That the shared hook has no such guard is a real gap and
-        // is worth raising, but widening a GUI-pass fix across eleven dialogs is not this change.
+        // container that cannot hold focus does not satisfy it.
+        //
+        // Those nine already carry `tabIndex={-1}` on their own containers — every one of them,
+        // counted. An earlier version of this comment said they were "small and densely focusable",
+        // which implied they relied on density instead and is simply not what the files do. What the
+        // hook lacks is any way to REQUIRE it, so a tenth dialog can still be written without it;
+        // that gap is real and worth raising, but widening a GUI-pass fix into the shared hook is
+        // not this change.
         <div className="au-editor" role="dialog" aria-modal="true" aria-label="Automation editor" tabIndex={-1} ref={containerRef}>
             <div className="au-scrim" aria-hidden="true" />
             <div className="au-modal">

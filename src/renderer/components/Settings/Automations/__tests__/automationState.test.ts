@@ -126,6 +126,48 @@ describe('automationRowState — the state table', () => {
     });
 
     /**
+     * **A pair that really fired must not lend its receipt to the pair that won.**
+     *
+     * `everFired` scanned every pair in the rule while the label it guards describes ONE bucket. So a
+     * rule watching a terminal that fired for real five minutes ago and a second that is merely held
+     * painted the held pair's `rearm` bucket *Fired · waiting to re-arm* — attributing the first
+     * terminal's fire to one that has never fired at all. That is the same "held pair painted as
+     * Fired" defect the softened label was introduced to fix, reproduced one level up.
+     *
+     * The two cases differ only in the non-winning pair's `state`, which is the field that decides
+     * whether its fire is inside the bucket or outside it.
+     */
+    it('does not borrow a fire from a pair outside the winning state', () => {
+        const held = pair({ state: 'fired', lastFiredAt: null, firedCount: 0 });
+
+        const borrowed = automationRowState(
+            rule(),
+            {
+                // Resting, and it genuinely fired a while ago — so it lands in `waiting`, not in the
+                // `rearm` bucket the label is about.
+                'tm-1': pair({ state: 'armed', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+                'tm-2': held,
+            },
+            NOW,
+        );
+        expect(borrowed.id).toBe('rearm');
+        expect(borrowed.label).toBe('Waiting to re-arm');
+
+        // Paired positive: the same fire, moved INSIDE the winning bucket, still earns the word —
+        // without which "never says Fired" would pass just as well.
+        const earned = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+                'tm-2': held,
+            },
+            NOW,
+        );
+        expect(earned.id).toBe('rearm');
+        expect(earned.label).toBe('Fired · waiting to re-arm');
+    });
+
+    /**
      * A pair may sit in `fired` having never fired.
      *
      * A presence rule switched on while its text is ALREADY on screen is held, not fired: the engine

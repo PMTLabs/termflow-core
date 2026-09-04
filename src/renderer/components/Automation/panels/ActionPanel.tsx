@@ -5,15 +5,13 @@
  * must NOT press Enter — a send path that always submits breaks that one template while every other
  * still passes, which is exactly the shape a test suite misses.
  */
-import React, { useRef } from 'react';
+import React from 'react';
 import type { AutomationSendTo } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
-import { AuField, AuHelp, AuRadio } from './AuFields';
+import { AuField, AuRadio } from './AuFields';
 
-/** The placeholders the engine substitutes at send time. Shown as buttons, inserted at the caret. */
-const TOKENS = ['{value}', '{match}', '{terminal}', '{time}'];
 
 export interface ActionPanelProps {
     draft: AutomationDraft;
@@ -23,46 +21,17 @@ export interface ActionPanelProps {
 
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch }) => {
     const { action } = draft.rule.graph;
-    const inputRef = useRef<HTMLInputElement | null>(null);
-
-    const insert = (token: string) => {
-        const el = inputRef.current;
-        // At the caret when there is one, at the end when there is not — never replacing the
-        // message, which is what a naive `value + token` does the moment the field is focused
-        // mid-word.
-        const at = el && el.selectionStart !== null ? el.selectionStart : action.message.length;
-        const next = action.message.slice(0, at) + token + action.message.slice(at);
-        dispatch({ type: 'action', patch: { message: next } });
-        window.requestAnimationFrame(() => {
-            el?.focus();
-            el?.setSelectionRange(at + token.length, at + token.length);
-        });
-    };
 
     return (
         <>
             <AuField label="Message">
                 <input
-                    ref={inputRef}
                     className={`au-finput${model.values.message.missing ? ' err' : ''}`}
                     aria-label="Message to send"
                     placeholder="e.g. prepare to do context-hand-off"
                     value={action.message}
                     onChange={(e) => dispatch({ type: 'action', patch: { message: e.target.value } })}
                 />
-                <AuHelp>Click to insert a value from an earlier step:</AuHelp>
-                <div className="au-tokens">
-                    {TOKENS.map((token) => (
-                        <button
-                            type="button"
-                            key={token}
-                            className="au-token"
-                            onClick={() => insert(token)}
-                        >
-                            {token}
-                        </button>
-                    ))}
-                </div>
             </AuField>
 
             <AuField label="How to send it">

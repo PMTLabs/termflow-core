@@ -61,6 +61,13 @@ export function collectLeafLabels(
       // no change to anything Automations shows: not the picker's Name column, not the activity
       // log's stored name, not `Tab name contains`. Measured on a live build: three renames across
       // two windows moved the tab strip and the window title and moved nothing else.
+      // **A session persisted before `nameIsCustom` existed carries `undefined`, and that is read as
+      // `false` on purpose.** `sanitizeLayoutData` does not backfill the flag, so a legacy pane
+      // cannot say whether its name was chosen or defaulted. Reading `undefined` as "custom" would
+      // restore the pre-flag formula for EVERY legacy pane and with it the whole R17 defect above,
+      // for up to the 24h a restore blob lives; reading it as "not custom" costs only the panes a
+      // user actually renamed, which the tab strip still shows correctly and which one more rename
+      // repairs for good. The cheaper mistake, deliberately chosen.
       const paneName = node.nameIsCustom ? node.name?.trim() : undefined;
       labels.set(node.terminalId, paneName || titleByTabId.get(tabId)?.trim() || '');
     }

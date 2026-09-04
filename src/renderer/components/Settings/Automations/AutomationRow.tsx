@@ -84,6 +84,10 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
     const forgettable = rule.targetMode === 'pinned'
         ? missing.filter((tm) => rule.targetIds.includes(tm))
         : [];
+    // The banner's noun, for the same reason `forgettable` exists just above: a criterion rule's
+    // watched set is a frozen MATCH list, not a set of pins, so calling its terminals "pinned"
+    // describes a relationship the rule does not have. Both modes reach the banner.
+    const goneNoun = rule.targetMode === 'pinned' ? 'pinned' : 'watched';
     const watched = Object.keys(pairs ?? {});
     const fired = Object.values(pairs ?? {}).reduce((n, p) => n + p.firedCount, 0);
     const lastFired = Object.values(pairs ?? {}).reduce<number | null>(
@@ -151,8 +155,8 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                             <span>
                                 <b>
                                     {missing.length === 1
-                                        ? 'One pinned terminal is gone.'
-                                        : `${missing.length} pinned terminals are gone.`}
+                                        ? `One ${goneNoun} terminal is gone.`
+                                        : `${missing.length} ${goneNoun} terminals are gone.`}
                                 </b>{' '}
                                 <code>{missing.join(', ')}</code> {missing.length === 1 ? 'has' : 'have'}{' '}
                                 not been seen since the tab was closed. The others are still watched,

@@ -18,6 +18,11 @@
  * A rule definition changed: created, edited, enabled, disabled, duplicated, reset or deleted.
  * Emitted by the command layer after every definition mutation, uncoalesced — a user edit is one
  * event. `useAutomations()` refetches the list.
+ *
+ * **The command layer is no longer the only emitter.** The engine raises this too, on exactly one
+ * occasion: a `runs_once` rule completing. Nothing else can carry `completedAt` to an open window —
+ * `automation:state` drops the rule from its payload at that very moment, because completing removes
+ * it from the live set — so without this event every open list goes on drawing the row as armed.
  */
 export const AUTOMATION_CHANGED = 'automation:changed';
 
@@ -45,6 +50,11 @@ export interface AutomationChangedPayload {
    * Which window's Settings page made the change, so the log can read *"saved from window `main`,
    * replacing the version saved from `main-2`"*. Two windows may hold one rule open and the later save
    * wins whole — the log entry is the requirement, not concurrency control.
+   *
+   * **Not always a window.** An engine-raised change carries `"engine"`, whose definition of record
+   * is `ENGINE_ORIGIN` in `src-tauri/src/automation/events.rs` — deliberately not mirrored as a
+   * constant here, because no consumer branches on this field: `useAutomations` refetches on the
+   * event and ignores the payload entirely. Mirror it when something branches, and not before.
    */
   origin: string;
   at: number;
