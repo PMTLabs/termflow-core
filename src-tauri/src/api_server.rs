@@ -997,7 +997,7 @@ struct WriteReq {
 
 /// Write raw bytes to a single terminal's PTY. Shared by the single-id
 /// `/input` handler and the batch `/batch/input` handler.
-fn write_data_to_terminal(
+pub(crate) fn write_data_to_terminal(
     state: &AppState,
     id: &str,
     data: &str,
@@ -1348,7 +1348,7 @@ async fn get_terminal(
 }
 
 // CLI prompt patterns for AI integration
-fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
+pub(crate) fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
     // OS-aware line endings for raw PTY input
     let shell_enter = if cfg!(target_os = "windows") { "\r\n" } else { "\r" };
     
@@ -2084,16 +2084,16 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
     id: &str,
     payload: &ExecutePromptReq,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    use std::io::Write;
+    use crate::watchdog::send::{deliver, SubmitPattern, TerminalWriter};
 
-    // Clone the writer Arc, dropping the DashMap shard guard before the
-    // send/probe sleeps below (up to ~48 s total). Holding the shard guard
-    // across those `.await`s blocked a concurrent create/close of any terminal
-    // whose id hashes to the same shard for the full sleep duration.
-    // Optional local writer: host-owned terminals have no local writer and route
-    // their writes to the sidecar instead (see the write sites below).
-    let writer_mutex = state.shell_writer_channels.get(id).map(|r| r.clone());
-    if writer_mutex.is_none() && !state.is_host_owned(id) {
+    // Does this id name a terminal at all? Host-owned terminals have no local writer and route their
+    // writes to the sidecar instead. Asked with `contains_key` rather than `get`, because a `get`
+    // guard used in an `if` condition lives to the end of the whole `if`/`else` — i.e. across the
+    // `.await`s below. Holding a DashMap shard guard across those blocked a concurrent create/close
+    // of every terminal hashing to the same shard for the full sleep duration (up to ~48 s in probe
+    // mode), which is a stall this function was fixed for once already. Each individual write now
+    // takes and releases the guard synchronously inside the `TerminalWriter` impl.
+    if !state.shell_writer_channels.contains_key(id) && !state.is_host_owned(id) {
         return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
     {
@@ -2120,56 +2120,30 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
         // request does not flash (see design spec 029 §5).
         emit_external_activity(state, id);
 
-        // An EMPTY prompt is a deliberate "bare submit": skip the paste and write
-        // only the submit sequence below. It presses Enter on a composer that
-        // already holds text — the recovery when a TUI swallowed the first Enter
-        // (see the same-read-chunk race note below). Callers that want a literal
-        // blank line still get one, since the submit sequence is written either way.
-        if !payload.prompt.is_empty() {
-            // Send the prompt as a bracketed paste (CSI 200~ … 201~) so any newlines
-            // embedded in the prompt are inserted as literal multi-line input rather
-            // than being treated as Enter and submitting each line as a separate
-            // command. The single submit is the end_indicator written after this.
-            let inner = payload.prompt.replace("\r\n", "\r").replace('\n', "\r");
-            let normalized_prompt = format!("\x1b[200~{}\x1b[201~", inner);
-
-            // Write prompt - in scope to drop lock. Host-owned → sidecar.
-            if let Some(wm) = &writer_mutex {
-                let mut writer = wm
-                    .lock()
-                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-                writer
-                    .write_all(normalized_prompt.as_bytes())
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let _ = writer.flush();
-            } else {
-                state.host_write(id, normalized_prompt.as_bytes());
-            }
-
-            // Brief delay to allow the CLI tool to process the prompt text BEFORE the
-            // submit sequence lands. This gap is load-bearing, not cosmetic: TUIs that
-            // implement paste-burst handling (Codex, verified against codex-cli 0.146.0)
-            // absorb a CR that arrives in the SAME read chunk as the bracketed-paste
-            // terminator, leaving the text sitting unsubmitted in the composer. A busy
-            // CLI that stops draining its input pipe can still coalesce the two reads
-            // despite this delay — that is why an empty prompt (bare submit) exists as
-            // the recovery path.
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-        // Send Focus In sequence just in case the CLI tool uses Focus Tracking (\x1b[?1004h)
-        // and is ignoring input because it thinks it's blurred.
-        if let Some(wm) = &writer_mutex {
-            let mut writer = wm
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-            let _ = writer.write_all(b"\x1b[I");
-            let _ = writer.flush();
-        } else {
-            state.host_write(id, b"\x1b[I");
-        }
+        // The paste / 500 ms gap / focus-in / submit core lives in `watchdog::send::deliver`, so the
+        // Watchdogs engine and this handler share ONE implementation of it (plan §7.10). What stays
+        // here is what is HTTP-specific: the 404 above, the pattern sources and their 400s, the tab
+        // flash, the probe modes, and the response bodies.
+        //
+        // A probe asks `deliver` NOT to submit: that yields exactly the prefix the probe wants —
+        // paste, the gap, focus-in — and the loop below then supplies each candidate submit sequence
+        // itself. It is the same `submit: false` the Watchdogs "answer a confirmation" rule uses to
+        // type a `1` without pressing Enter.
+        let writer: &dyn TerminalWriter = state;
+        let is_probe = payload.cli_type.ends_with("-probe");
+        deliver(
+            writer,
+            id,
+            &payload.cli_type,
+            SubmitPattern { separator, end_indicator },
+            &payload.prompt,
+            !is_probe,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
         // Handle Probing if requested (any cli_type ending in -probe)
-        if payload.cli_type.ends_with("-probe") {
+        if is_probe {
             log::debug!("Starting submission probe for CLI type: {} on terminal {}", payload.cli_type, id);
             let sequences = [
                 ("\x1b[I\r", "Focus In + CR (\\x1b[I\\r)"),
@@ -2192,21 +2166,9 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
 
             for (seq, desc) in sequences {
                 log::debug!("  Attempting submission: {} (bytes: {:?})", desc, seq.as_bytes());
-                if let Some(wm) = &writer_mutex {
-                    let mut writer = match wm.lock() {
-                        Ok(w) => w,
-                        Err(_) => {
-                            log::warn!("send_prompt_to_terminal probe: writer mutex poisoned, aborting probe");
-                            break;
-                        }
-                    };
-                    if let Err(e) = writer.write_all(seq.as_bytes()) {
-                        log::warn!("    Failed to write sequence: {}", e);
-                        break;
-                    }
-                    let _ = writer.flush();
-                } else {
-                    state.host_write(id, seq.as_bytes());
+                if let Err(e) = writer.write(id, seq.as_bytes()) {
+                    log::warn!("    Failed to write sequence: {}", e);
+                    break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
@@ -2217,48 +2179,6 @@ async fn send_prompt_to_terminal<R: tauri::Runtime>(
                 "terminalId": id,
                 "cliType": payload.cli_type
             }));
-        }
-
-        // Handle specific CLI logic if needed
-        if payload.cli_type == "gemini" || payload.cli_type == "claude" || payload.cli_type == "copilot" {
-            // Write end indicator immediately. Host-owned → sidecar.
-            if let Some(wm) = &writer_mutex {
-                let mut writer = wm
-                    .lock()
-                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-                writer
-                    .write_all(end_indicator.as_bytes())
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let _ = writer.flush();
-            } else {
-                state.host_write(id, end_indicator.as_bytes());
-            }
-
-            return Ok(json!({
-                "success": true,
-                "prompt": payload.prompt,
-                "cliType": payload.cli_type
-            }));
-        }
-
-        // Standard execution for other CLI types. Host-owned → sidecar.
-        if let Some(wm) = &writer_mutex {
-            let mut writer = wm
-                .lock()
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-            if !separator.is_empty() {
-                let _ = writer.write_all(separator.as_bytes());
-            }
-            // Write end indicator
-            writer
-                .write_all(end_indicator.as_bytes())
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let _ = writer.flush();
-        } else {
-            if !separator.is_empty() {
-                state.host_write(id, separator.as_bytes());
-            }
-            state.host_write(id, end_indicator.as_bytes());
         }
 
         Ok(json!({
