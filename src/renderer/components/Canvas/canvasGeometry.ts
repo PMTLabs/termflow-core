@@ -315,6 +315,65 @@ export function canvasMetrics(vw: number, vh: number): CanvasMetrics {
  */
 export const DEFAULT_METRICS = canvasMetrics(1920, 1040);
 
+/**
+ * Ceiling on `worldRaster` — a guard against a degenerate zoom, NOT a working limit, which is
+ * why it is derived rather than picked.
+ *
+ * `canvasMetrics` sizes `zMax` from the display, and it is bigger than it looks: 4.75 on an
+ * ordinary 1080p panel and 6.35 on anything wide enough to hit `MAX_HOST_W`. A round number
+ * chosen by eye (4 was the first attempt, and `viewportStyles.test.ts` caught it) clamps inside
+ * the range the user can actually reach, which puts the blur back at exactly the zoom where
+ * they are reading a terminal. So this asks the function that owns `zMax` for the largest
+ * value it can ever return, with a viewport too big for any display: change `MAX_HOST_W` or
+ * `NODE_W` and this follows, with no second copy of the 0.9.
+ *
+ * Raising it costs nothing at the top end. The world's backing store covers the VISIBLE area in
+ * the layer's own coordinates, which is `viewport * R / z` per axis, and `R = ceil(z)` keeps
+ * that ratio under 2 — worst case just above an integer, where it is 4x the viewport's pixels
+ * and then falls back towards 1x as z catches R up. The bound is the same whether this is 4
+ * or 7; deep zoom simply shows less world.
+ */
+export const MAX_WORLD_R = Math.ceil(canvasMetrics(1e5, 1e5).zMax);
+
+/**
+ * How many layout pixels the world draws per world unit — the canvas's supersampling factor.
+ *
+ * **Why this exists.** `.canvas-world` scales its whole subtree with `transform: scale(z)`, and
+ * macOS WebKit rasterises that subtree at its LAYOUT resolution and then magnifies the raster
+ * by `z` at composite time. It does not re-rasterise at the scaled size: measured in Safari at
+ * DPR 1, identical content laid out at 8.1px inside `scale(1.35)` is visibly blurrier than the
+ * same content laid out at 11px, and no CSS spelling changes it — `scale()`, `scale3d()`, the
+ * `scale` property, `preserve-3d`, `contain`, promoting the child with `will-change` or
+ * `translateZ(0)`, and removing `will-change` from the world itself all render identically.
+ * Only scaling at LAYOUT level (`zoom`) is crisp.
+ *
+ * That hits canvas CHROME hardest, and by design: every piece of it is counter-scaled by
+ * `1 / z` (`chromeScale`, `headScale`, `labelScale`) so it holds a constant on-screen size, so
+ * a 3px outline is laid out at 2.2px and an 11px group label at 8.1px before the world magnifies
+ * them back. Terminal text escapes it because a `<canvas>` is composited from its own bitmap
+ * rather than rasterised into the world's layer — which is exactly what the bug looked like:
+ * sharp terminal, soft border, soft group title.
+ *
+ * **The fix.** Lay the world out R times larger and scale it by `z / R` instead of `z`. The
+ * product is unchanged, so nothing moves and no other number in this file changes; the
+ * magnification is now `z / R <= 1`, so the raster is never blown up. `R = ceil(z)` is the
+ * smallest factor with that property, and it changes only when the zoom crosses an integer,
+ * which is what keeps a pan or a zoom a single composited transform rather than a relayout.
+ *
+ * **The criterion, stated exactly.** The backing store holds `R * dpr` device pixels per world
+ * unit and the screen shows `z` CSS pixels of it, so R is chosen to satisfy `R * dpr >= z`:
+ * never fewer backing pixels than the CSS pixels being painted. At DPR 1 that is `R = ceil(z)`
+ * and the raster is never stretched at all, which is the reported case. At DPR 2 the device
+ * scale already supplies half of it, so the same guarantee costs a quarter of the memory —
+ * which is the whole reason `dpr` is divided out rather than assumed to be 1. Note that it does
+ * NOT cancel: the stretch is `z / R`, so leaving `dpr` out would buy a Retina panel a sharper
+ * raster than its own display can resolve, at four times the backing store.
+ */
+export function worldRaster(z: number, dpr: number): number {
+  const scaled = z / Math.max(dpr, Number.EPSILON);
+  return Math.min(MAX_WORLD_R, Math.max(1, Math.ceil(scaled)));
+}
+
 /* Tier thresholds, in real screen pixels of node width. Raised from 190/105/64/26 after the
    first manual run: the chip tier in particular was small enough to be unreadable. */
 export const T_GPU = 240;

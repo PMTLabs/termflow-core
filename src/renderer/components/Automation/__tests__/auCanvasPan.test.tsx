@@ -88,6 +88,30 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
         container.remove();
     });
 
+    /**
+     * **The world and its raster are a PAIR, and a world without a raster is not a milder bug.**
+     *
+     * `worldStyle` divides the transform by `worldRaster(z, dpr)` and `rasterStyle` multiplies it
+     * back on the element inside, so the product is exactly `z`. Rendering `.au-world` without
+     * `.au-raster` therefore does not merely lose supersampling — it shrinks the whole canvas by
+     * that factor. Nothing pinned the pair, which is how this canvas went on calling the
+     * one-argument `worldStyle` after develop split it in two; the arity was caught by `tsc`, and
+     * only because CI type-checks the MERGE rather than the branch.
+     *
+     * Asserted as the containment relation, not on the numbers — `viewportStyles.test.ts` owns
+     * the arithmetic, and the single-child assertion is what stops a future child being added
+     * beside the raster instead of inside it.
+     */
+    it('renders the world and its raster as a pair, with everything inside the raster', () => {
+        const world = container.querySelector('.au-world') as HTMLElement | null;
+        expect(world).not.toBeNull();
+
+        const raster = world!.firstElementChild as HTMLElement | null;
+        expect(raster?.className).toContain('au-raster');
+        expect(raster!.childElementCount).toBeGreaterThan(0);
+        expect(world!.childElementCount).toBe(1);
+    });
+
     /** jsdom ships no `PointerEvent`; a `MouseEvent` under the pointer type name reaches both
      *  React's delegated listener and the component's own `window` listeners. */
     const pointer = (type: string, over: MouseEventInit = {}) =>

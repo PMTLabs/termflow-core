@@ -372,6 +372,8 @@
     pointer-events: none;
 }
 
+.au-editor .au-raster { position: absolute; top: 0; left: 0; }
+
 .au-editor .au-world {
     position: absolute;
     top: 0;

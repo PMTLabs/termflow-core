@@ -39,6 +39,19 @@
 .canvas-viewport.panning { cursor: grabbing; }
 .canvas-grid { position: absolute; inset: 0; pointer-events: none; }
 .canvas-world { position: absolute; top: 0; left: 0; will-change: transform; }
+/* The supersample layer (`worldRaster`). Everything world-space is a child of THIS, not of
+   `.canvas-world`: the world carries `translate(pan) scale(z / R)` and this carries `zoom: R`,
+   so the product is the same `z` the pointer maths uses while the content is laid out — and so
+   rasterised — R times larger. macOS WebKit magnifies a `transform: scale()` raster instead of
+   redrawing it at the scaled size, which is what made the node outline, the group frame and the
+   group title soft as soon as the zoom passed 1.
+
+   `position: absolute; top: 0; left: 0` mirrors `.canvas-world` exactly, and for the same
+   reason: it makes this the containing block for the nodes, at the same origin and with the
+   same zero size, so no world coordinate changes and nothing is clipped. Give it a size and
+   every node's `left`/`top` would still resolve here — but percentages elsewhere would start
+   resolving against a box that exists, which is a different layout. */
+.canvas-raster { position: absolute; top: 0; left: 0; }
 .canvas-empty {
   position: absolute;
   inset: 0;

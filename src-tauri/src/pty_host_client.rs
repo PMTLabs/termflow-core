@@ -76,14 +76,22 @@ pub(crate) fn route_inbound(
 
 /// True when the PTY-host sidecar path is active.
 ///
-/// **Windows: default-on** in dev and release so shells are host-owned (and
-/// survive an app update / offload) out of the box; `TERMFLOW_PTY_HOST=0` is the
-/// kill-switch, `=1` also forces on.
+/// **Default-on** on every supported OS, in dev and release, so shells are
+/// host-owned (and survive an app update / offload) out of the box.
+/// `TERMFLOW_PTY_HOST=0` is the kill-switch, `=1` also forces on.
 ///
-/// **Unix: opt-in** with `TERMFLOW_PTY_HOST=1`. The sidecar is ported and
-/// triple-OS tested, but shipping it on-by-default waits on the installed,
-/// signed, failure-injection smoke (plan 003 RP-8) and the packaged Unix
-/// sidecar binary. Until then it is off unless explicitly enabled for testing.
+/// Unix used to be opt-in (`=1`) pending the packaged sidecar binary and plan
+/// 003 RP-8 (installed, signed, failure-injection smoke). The binary half is
+/// done — `tauri.pro.conf.json` bundles `binaries/termflow-pty-host` and
+/// `publish-macos.sh` fails the build if it is missing from the `.app` — and
+/// the exact configuration this flip makes default (Unix, sidecar on) already
+/// passed an end-to-end hot-swap on real macOS. RP-8 itself has never run on
+/// ANY OS, so leaving Unix off did not buy coverage Windows had; it only meant
+/// Settings → Offload/Update refused with "pty-host not connected" on macOS
+/// while Windows worked. Flipped on the maintainer's explicit instruction —
+/// the same call already recorded for Windows in review 060 row 5, where the
+/// in-process fallback is what contains the blast radius. RP-8 remains open and
+/// still gates nothing else.
 ///
 /// The automatic in-process fallback still covers a missing/failed sidecar, so
 /// enabling it without a built sidecar just falls back.
@@ -93,14 +101,11 @@ pub fn enabled() -> bool {
 }
 
 /// Pure decision core for [`enabled`], split out so the matrix is testable.
-/// Windows is default-on (opt-out with `=0`); Unix is opt-in (`=1`); any other
-/// target is always off.
+/// Every supported OS is default-on (opt-out with `=0`); an unsupported target
+/// is always off, whatever the env says.
 fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
-    if is_windows {
+    if is_windows || is_unix {
         return env != Some("0"); // default on; =0 kills, =1 forces on
-    }
-    if is_unix {
-        return env == Some("1"); // opt-in until RP-8 ships it on by default
     }
     false
 }
@@ -109,28 +114,47 @@ fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
 mod enabled_tests {
     use super::host_enabled;
 
+    /// `(is_windows, is_unix)` for every OS shape `enabled()` can pass in.
+    /// Asserted as a TABLE, not per-OS: Unix diverging from Windows here is
+    /// exactly the bug this flip fixed (macOS refused Offload/Update while
+    /// Windows worked), so every supported OS must answer identically.
+    const SUPPORTED: [(bool, bool); 2] = [(true, false), (false, true)];
+
     #[test]
-    fn default_on_in_dev_and_release_on_windows() {
-        assert!(host_enabled(true, false, None), "no override → on by default");
-        assert!(host_enabled(true, false, Some("1")), "=1 forces on");
+    fn every_supported_os_is_default_on() {
+        for (win, unix) in SUPPORTED {
+            assert!(host_enabled(win, unix, None), "({win},{unix}) no override → on by default");
+            assert!(host_enabled(win, unix, Some("1")), "({win},{unix}) =1 forces on");
+        }
     }
 
     #[test]
-    fn zero_is_the_kill_switch_on_windows() {
-        assert!(!host_enabled(true, false, Some("0")), "=0 opts out");
+    fn zero_is_the_kill_switch_on_every_supported_os() {
+        for (win, unix) in SUPPORTED {
+            assert!(!host_enabled(win, unix, Some("0")), "({win},{unix}) =0 opts out");
+        }
     }
 
+    /// An unrecognised value is NOT the kill-switch — only the exact `"0"` is.
+    /// Guards the `!=` from being loosened into "anything but 1 is off", which
+    /// would silently re-disable the sidecar for a stray/misspelled value.
     #[test]
-    fn unix_is_opt_in() {
-        assert!(host_enabled(false, true, Some("1")), "unix on with =1");
-        assert!(!host_enabled(false, true, None), "unix off by default");
-        assert!(!host_enabled(false, true, Some("0")), "unix off with =0");
+    fn only_the_exact_zero_disables() {
+        for (win, unix) in SUPPORTED {
+            for env in ["", "00", "false", "no", "2"] {
+                assert!(
+                    host_enabled(win, unix, Some(env)),
+                    "({win},{unix}) {env:?} is not the kill-switch — only \"0\" is"
+                );
+            }
+        }
     }
 
     #[test]
     fn unsupported_target_is_always_off() {
         assert!(!host_enabled(false, false, Some("1")));
         assert!(!host_enabled(false, false, None));
+        assert!(!host_enabled(false, false, Some("0")));
     }
 }
 

@@ -146,8 +146,13 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     if (movePending) return;
     movePending = true;
     rafId = window.requestAnimationFrame(() => {
-      movePending = false;
-      void api?.moveDragPreview?.(lastClientX, lastClientY);
+      // The gate reopens when the call COMPLETES, not when it is dispatched.
+      // Each nudge crosses into the backend and waits on the main thread, so
+      // clearing the flag first queues one more every frame however far behind
+      // the main thread has fallen — unbounded work with no backpressure. With
+      // one in flight at a time the preview lags instead of the queue growing.
+      void Promise.resolve(api?.moveDragPreview?.(lastClientX, lastClientY))
+        .finally(() => { movePending = false; });
     });
   };
 

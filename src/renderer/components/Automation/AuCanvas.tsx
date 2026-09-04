@@ -16,7 +16,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Viewport } from '../Canvas/canvasGeometry';
 import { Z_MIN, clampZoom, panBy, screenToWorld, zoomAt } from '../Canvas/canvasGeometry';
 import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from '../Canvas/canvasGestures';
-import { boundsOf, fitViewport, gridStyle, worldStyle } from '../Canvas/viewportStyles';
+import { boundsOf, fitViewport, gridStyle, rasterStyle, worldStyle } from '../Canvas/viewportStyles';
 import type { AutomationDraft, NodePos } from './automationDraft';
 import { AU_NODE_H, AU_NODE_W } from './automationDraft';
 import type { NodeFace, NodeState } from './automationDerive';
@@ -58,6 +58,9 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
     children,
 }) => {
     const hostRef = useRef<HTMLDivElement | null>(null);
+    // Read the same way `CanvasViewport` reads it: the world transform and the raster zoom are two
+    // halves of one scale and must come from one number.
+    const dpr = typeof window === 'undefined' ? 1 : (window.devicePixelRatio || 1);
     const [vp, setVp] = useState<Viewport>({ x: 0, y: 0, z: 1 });
     const [spacePan, setSpacePan] = useState(false);
     const panning = useRef<{ x: number; y: number } | null>(null);
@@ -239,7 +242,14 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             onPointerDown={onPointerDown}
         >
             <div className="au-grid" aria-hidden="true" style={gridStyle(vp)} />
-            <div className="au-world" style={worldStyle(vp)}>
+            {/* TWO elements, not one, since develop's `0104ebf`: `.au-world` pans and zooms while
+                `.au-raster` supersamples, and `worldStyle` divides by exactly the factor
+                `rasterStyle` multiplies back. Splitting them is not optional — `worldStyle` alone
+                renders the whole canvas `worldRaster(z, dpr)` times too small. The PRODUCT is `z`, so
+                `screenToWorld` and every `getBoundingClientRect` here are untouched: this component
+                measures the outer host, never `.au-world`. */}
+            <div className="au-world" style={worldStyle(vp, dpr)}>
+                <div className="au-raster" style={rasterStyle(vp, dpr)}>
                 <AuWires
                     wires={draft.wires}
                     layout={draft.layout}
@@ -269,6 +279,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                         onPortPointerUp={(port: PortRef) => wireDrag.drop(port)}
                     />
                 ))}
+                </div>
             </div>
 
             {draft.present.length === 0 && (
