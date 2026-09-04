@@ -416,10 +416,11 @@ mod tests {
         engine.reload(&store, 1_000).unwrap();
         assert_eq!(log_rows(&store).len(), 1);
 
-        // A thousand evaluator ticks pass. The rule is not live, so nothing evaluates it and nothing
-        // else can write a row: the live set is the only thing the tick walks.
+        // The rule is not live, and the live set is the only thing a tick walks — so nothing can
+        // evaluate it and nothing else can write a row. `loops.rs` makes the same claim by running
+        // eight REAL ticks over it, which is the half this test cannot reach from here.
         assert!(engine.snapshot_live().is_empty());
-        assert_eq!(log_rows(&store).len(), 1, "still one row after the ticks that never ran it");
+        assert_eq!(log_rows(&store).len(), 1, "still one row, and no tick can add another");
 
         // A second LOAD does report it again — that is a new load, and the user asked for one.
         engine.reload(&store, 2_000).unwrap();
