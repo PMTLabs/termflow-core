@@ -1033,24 +1033,27 @@ impl AutomationStore {
     /// A rule saved by an older build or arriving through a migration can still carry one, so the
     /// path is real and must stay testable. The ruling that reconciles those two is a design decision,
     /// and it is written up in the handoff rather than guessed at here.
-    /// The one blocking problem the ENGINE refuses on its own, at every load.
-    ///
-    /// §2.7: an uncompilable pattern is reported once per load and never per tick, from
-    /// `AutomationEngine::reload`. That path is excluded from the SAVE gate and only from the save
-    /// gate — see `save_rule` for why it has to stay reachable.
-    const RECHECKED_BY_THE_ENGINE: &'static str = "parse";
-
     /// The ENABLE gate (§7.8): every blocking problem, because after this the rule RUNS.
     fn refuse_if_invalid(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
         Self::refuse(crate::automation_validation::problems(rule))
     }
 
-    /// The SAVE gate (§7.8): everything the engine does not independently re-check.
+    /// The SAVE gate (§7.8): everything the engine does not independently refuse.
+    ///
+    /// **The exemption is derived, not named.** It used to be `p.field != "parse"` — a whole FIELD,
+    /// on the reasoning that the engine re-checks the pattern. The engine re-checked whether the
+    /// pattern COMPILED, and `parse` also carries an empty pattern, which compiles into an expression
+    /// matching every position of every string: a presence rule saved enabled with `find = ""` went
+    /// live and typed into the first terminal that printed anything. `pattern_refused_at_load` is now
+    /// the single answer to *"will the engine refuse this?"*, asked here and by `reload`, so the two
+    /// cannot drift apart again.
     fn refuse_if_it_would_run_wrong(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
+        let engine_will_refuse =
+            crate::automation_validation::pattern_refused_at_load(&rule.graph.parse.find).is_some();
         Self::refuse(
             crate::automation_validation::problems(rule)
                 .into_iter()
-                .filter(|p| p.field != Self::RECHECKED_BY_THE_ENGINE)
+                .filter(|p| !(engine_will_refuse && p.field == "parse"))
                 .collect(),
         )
     }
@@ -2510,6 +2513,33 @@ mod tests {
         bad_pattern.graph.parse.find = "ctx:(\\d+".into();
         store.save_rule(&bad_pattern).unwrap();
         assert!(enabled_flag(&store, "au-2"), "the engine refuses this one, at load, once");
+
+        // **An EMPTY pattern is exempted too — because the ENGINE now refuses it.** That is the whole
+        // shape of this gate: it lets through exactly the set `pattern_refused_at_load` names, and not
+        // a field. The first version exempted the whole `parse` field on the reasoning that the engine
+        // re-checks the pattern, and the engine re-checked only whether it COMPILED — an empty regex
+        // compiles into an expression matching every position of every string, so the rule went live
+        // and a presence rule fired on the first byte any terminal printed. Both halves moved: the
+        // engine refuses an unusable pattern, and the exemption is derived from that same answer.
+        let mut empty_pattern = enableable("au-3");
+        empty_pattern.enabled = true;
+        empty_pattern.graph.parse.find = "   ".into();
+        store.save_rule(&empty_pattern).unwrap();
+        assert!(
+            crate::automation_validation::pattern_refused_at_load("   ").is_some(),
+            "stored enabled, and the engine must be the thing that refuses to run it"
+        );
+
+        // The mirror is the claim, so assert it as one: every pattern this gate lets through is a
+        // pattern the engine refuses, and every pattern it blocks is one the engine would have run.
+        for find in ["", "   ", "ctx:(\\d+"] {
+            assert!(
+                crate::automation_validation::pattern_refused_at_load(find).is_some(),
+                "`{}` is exempted by the save gate and would then RUN",
+                find
+            );
+        }
+        assert!(crate::automation_validation::pattern_refused_at_load("ctx:(\\d+)%").is_none());
 
         // And the ENABLE gate still refuses it, so the exemption widens nothing: the only way an
         // uncompilable pattern is stored enabled is by being saved that way.

@@ -209,9 +209,9 @@ mod tests {
     /// quiet, which is the normal end of a build.*
     ///
     /// **A table over both reasons a pair can want the output and not have run**, because the first
-    /// version of this function covered only the cap. `owed` is the other one, and it carries two
-    /// cases the cap cannot express — a pair the 250 ms floor held off, and a pair skipped because
-    /// its terminal is settling — neither of which appears in `due_pcs` at all.
+    /// version of this function covered only the cap. `owed` is the other one: a pair the 250 ms floor
+    /// held off, which does not appear in `due_pcs` at all. *(A settling terminal is not a third
+    /// reason — see the note on `settled_processes`.)*
     #[test]
     fn a_terminal_is_only_settled_once_every_rule_watching_it_has_run() {
         let pcs = vec!["pc-a".to_string(), "pc-a".to_string(), "pc-b".to_string()];
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(
             settled_processes(&pcs, &[0, 1, 2], &owed),
             vec!["pc-b"],
-            "a pair held off by the floor, or skipped for settling, still wants this output"
+            "a pair held off by the floor still wants this output"
         );
         // And being owed is not contagious: pc-b is cleared in exactly the same call.
         assert_eq!(

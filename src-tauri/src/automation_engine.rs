@@ -340,6 +340,13 @@ impl AutomationEngine {
                     .push((rule.id.clone(), "this rule needs a newer version of TermFlow".into()));
                 continue;
             }
+            // §2.7, and it is the SAME predicate the store's save gate exempts — see
+            // `pattern_refused_at_load`. An empty pattern compiles and matches everything, so
+            // "did it compile" was never the question this needed to ask.
+            if let Some(why) = crate::automation_validation::pattern_refused_at_load(&rule.graph.parse.find) {
+                report.skipped.push((rule.id.clone(), why));
+                continue;
+            }
             match crate::automation_validation::compile(&rule.graph.parse.find) {
                 Ok(re) => {
                     next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re }));
@@ -579,6 +586,21 @@ mod tests {
         // eight REAL ticks over it, which is the half this test cannot reach from here.
         assert!(engine.snapshot_live().is_empty());
         assert_eq!(log_rows(&store).len(), 1, "still one row, and no tick can add another");
+
+        // **An EMPTY pattern is refused here too, and that is not a widening — it is the defect.**
+        // `compile("")` SUCCEEDS: an empty regex matches every position of every string. So a rule
+        // stored with one used to be admitted, and a presence rule fired on the first byte any
+        // terminal printed. "Uncompilable" was never the same set as "unusable"; the store's save gate
+        // exempts exactly what this refuses, so the two cannot drift apart again.
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-empty", "   ")).unwrap();
+        let engine = AutomationEngine::new(0);
+
+        let report = engine.reload(&store, 1_000).unwrap();
+
+        assert!(engine.snapshot_live().is_empty(), "an empty pattern matches EVERYTHING and it ran");
+        assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+        assert!(report.skipped[0].1.contains("nothing to look for"), "{:?}", report.skipped);
 
         // A second LOAD does report it again — that is a new load, and the user asked for one.
         engine.reload(&store, 2_000).unwrap();

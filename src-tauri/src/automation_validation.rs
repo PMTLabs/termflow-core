@@ -58,6 +58,31 @@ impl Problem {
 /// the 250 ms evaluation loop — a guarantee the renderer's `RegExp` preview cannot make, which is why
 /// compilation is mandatory here rather than merely convenient: JS regex syntax is a superset, so a
 /// pattern that previews fine can fail to build.
+/// Why the ENGINE refuses this pattern at load, or `None` if it will run it (§2.7).
+///
+/// **One function, two callers, and that is the point.** `AutomationEngine::reload` asks it before
+/// admitting a rule, and `AutomationStore`'s save gate asks it to decide which pattern problem it may
+/// let through — the save gate's whole justification is *"the engine re-checks this one"*, so the two
+/// have to be the same question or the exemption is a hole.
+///
+/// It was a hole. The gate exempted every problem whose field is `parse`, and one of those is an
+/// EMPTY pattern — which the regex crate compiles happily into an expression that matches every
+/// position of every string. A presence rule saved enabled with `find = ""` was therefore admitted by
+/// `reload`, matched the first byte any terminal printed, and typed into it. "Uncompilable" is not
+/// the same set as "unusable", and only the first half was ever implemented.
+pub fn pattern_refused_at_load(find: &str) -> Option<String> {
+    if find.trim().is_empty() {
+        return Some("this rule has nothing to look for".to_string());
+    }
+    match compile(find) {
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "that pattern could not be understood: {}",
+            e.lines().next().unwrap_or(&e).trim()
+        )),
+    }
+}
+
 pub fn compile(find: &str) -> Result<Regex, String> {
     RegexBuilder::new(find)
         .size_limit(1 << 20)

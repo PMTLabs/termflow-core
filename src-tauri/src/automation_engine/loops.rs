@@ -149,8 +149,8 @@ pub async fn evaluate_tick(
             }
             // §2.6 layer 2: this terminal is still settling after a send, so nothing reads it. It does
             // not join `owed`: settling is keyed by the LEAF and a leaf has exactly one process, so
-            // every pair on a settling terminal skips together and the process reaches `due_pcs` at
-            // all. There is nothing for a sibling to spend on its behalf.
+            // every pair on a settling terminal skips together and the process never reaches
+            // `due_pcs` at all. There is nothing for a sibling to spend on its behalf.
             if engine.runtime.is_settling(&tm, now_ms) {
                 continue;
             }
@@ -328,6 +328,12 @@ pub async fn run_send(
 ) {
     let rule = &send.pair.rule.rule;
     let tm = send.pair.tm.clone();
+    // **Before the queue.** §2.6 layer 2 runs for `ECHO_SETTLE_MS` after the WRITE, and the wait for
+    // this terminal's lock is up to `SEND_QUEUE_TIMEOUT_MS` of the distance between the decision and
+    // that write. Started after the lock, this measured only `deliver` — so the second and later
+    // sends of a queue set a window that had already been running for the whole of their wait, which
+    // is the same defect the round-1 fix was for, one step further back.
+    let began = tokio::time::Instant::now();
     let lock = engine.runtime.send_lock(&tm);
 
     let _guard = match tokio::time::timeout(
@@ -365,14 +371,6 @@ pub async fn run_send(
     let action = &rule.graph.action;
     let (separator, end_indicator) =
         crate::api_server::get_cli_pattern(&action.cli_type).unwrap_or(("", "\r"));
-    // §2.6 layer 2 is *"after a send to terminal T, no rule evaluates T for ECHO_SETTLE_MS"* — after
-    // the SEND, and the send has not happened yet. Measured from `send.at_ms`, the window opened at
-    // the decision and closed 500 ms of paste-to-submit later than it should; behind a queue of
-    // sibling rules on one terminal (Duplicate makes that the expected case) the fourth message lands
-    // after its own window has already shut, and the very next tick reads its echo as organic output.
-    // Virtual under `start_paused`, real otherwise, and it is the elapsed time that matters either
-    // way — not a second clock.
-    let began = tokio::time::Instant::now();
     let outcome = crate::automation::send::deliver(
         &HostPort(host.as_ref()),
         &pc,
@@ -388,9 +386,10 @@ pub async fn run_send(
     }
 
     let at = send.at_ms;
-    // The moment the last byte went out. `at` stays the DECISION's stamp and keeps the log row, the
-    // fire history and `mark_completed` — those record when the crossing happened, which is not when
-    // the typing finished.
+    // The moment the last byte went out: the decision's stamp plus everything that has happened
+    // since this task started — the wait for the terminal's queue AND the paste-to-submit gap. `at`
+    // stays the DECISION's stamp and keeps the log row, the fire history and `mark_completed`, which
+    // record when the crossing happened and not when the typing finished.
     let landed = at + began.elapsed().as_millis() as i64;
     // §2.6 layer 1, then layer 2: the needle first, so a tick that slips through the settle window
     // still strips it.
@@ -1215,7 +1214,13 @@ mod tests {
 
         // Below the threshold and back above it, with no reload at all — the drive that re-arms a rule
         // and fires it again.
-        for (t, screen) in [(3_000i64, "ctx:18%\n"), (5_000, "ctx:63%\n")] {
+        //
+        // **Past the settle window, and that is now further out than it looks.** Two rules crossed on
+        // this terminal in one tick, so the second one queued: its write landed a queue wait plus a
+        // paste-to-submit gap after the decision, and §2.6 layer 2 runs for `ECHO_SETTLE_MS` from
+        // THERE. A tick inside that window evaluates nothing at all, so driving the value down at
+        // 3_000 left the control rule never re-armed and the assertion below asserting nothing.
+        for (t, screen) in [(6_000i64, "ctx:18%\n"), (8_000, "ctx:63%\n")] {
             fake.say("pc-1", screen);
             engine.runtime.mark_dirty("pc-1");
             evaluate_tick(&engine, &host, 0, t).await;
@@ -1533,6 +1538,13 @@ mod tests {
             !setup.contains("tokio::spawn"),
             "a bare tokio::spawn beside the setup call is the same panic by another name"
         );
+        // And that the engine is STARTED at all. Everything above is a claim about how `spawn` is
+        // written; deleting the call to it from `.setup()` satisfied every one of them, and the whole
+        // feature would simply not run while 723 tests stayed green.
+        assert!(
+            setup.contains("automation_engine::spawn(state.clone());"),
+            "nothing starts the automation engine: the loops never run"
+        );
     }
 
     /// **B-2: R6 is per RULE, not per pair.** A `runs_once` rule watching two terminals crosses on
@@ -1636,6 +1648,22 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
         assert!(targeting.is_finished());
+
+        // **And a pass with nothing to say says nothing.** Without this half, a loop that simply
+        // called `mark_state_dirty()` every two seconds — no diff at all — passes both assertions
+        // above and repaints every open Settings page for the life of the app.
+        let (engine, _fake, host) = wired();
+        let quiet = tokio::spawn(run_targeting(engine.clone(), host.clone()));
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS / 2)).await;
+        assert!(engine.take_state_emit(1_000), "the premise: the first pass adopted tm-1");
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 3)).await;
+        engine.stop();
+        assert!(
+            !engine.take_state_emit(20_000),
+            "three passes with an unchanged roster still announced something"
+        );
+        tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
+        assert!(quiet.is_finished());
     }
 
     /// **M-1: the 250 ms floor is a second way to lose a terminal's output**, and `settled_processes`
@@ -1851,6 +1879,43 @@ mod tests {
             !engine.runtime.is_dirty("pc-1"),
             "a timer pair does not read `dirty`, so it is never owed this terminal's output"
         );
+    }
+
+    /// **The settle window spans the QUEUE, not just the write.** Two rules crossing on one terminal
+    /// in one tick serialise on its lock, so the second send's message lands a queue wait later than
+    /// the first's — and §2.6 layer 2 runs for `ECHO_SETTLE_MS` from each write, not from the tick.
+    ///
+    /// Round 1 moved the window from decide time to `deliver`'s own duration, which is the same defect
+    /// one step further back: the wait for the lock still fell outside it, so the second message's
+    /// window had already been running for the whole of its wait by the time it was typed.
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_send_gets_its_full_settle_window_from_its_own_write() {
+        let (engine, fake, host) = wire(vec![
+            ctx_rule_saying("au-a", "first message", 1),
+            ctx_rule_saying("au-b", "second message", 2),
+        ]);
+        for id in ["au-a", "au-b"] {
+            engine.runtime.set_watched(id, ["tm-1".to_string()].into());
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+
+        assert_eq!(times_sent(&fake, "first message"), 1, "the premise: both sent");
+        assert_eq!(times_sent(&fake, "second message"), 1);
+
+        // The first send lands one paste-to-submit gap after the decision; the second waits for the
+        // lock through all of that and then takes another gap of its own.
+        let gap = crate::automation::send::PASTE_SUBMIT_GAP_MS as i64;
+        let second_landed = 1_000 + gap * 2;
+        assert!(
+            engine.runtime.is_settling("tm-1", second_landed + ECHO_SETTLE_MS - 1),
+            "the queued send's window had already been running for the length of its wait"
+        );
+        assert!(!engine.runtime.is_settling("tm-1", second_landed + ECHO_SETTLE_MS + 1));
     }
 
     /// A second live terminal, with ids that share no substring with the first (§7.4).
