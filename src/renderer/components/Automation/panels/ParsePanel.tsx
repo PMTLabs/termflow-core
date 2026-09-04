@@ -92,6 +92,11 @@ export const ParsePanel: React.FC<ParsePanelProps> = ({ draft, model, report, di
                                         // eslint-disable-next-line react/no-array-index-key
                                         <React.Fragment key={i}>{seg.text}</React.Fragment>
                                     ))}
+                                {/* `sayPattern` never terminates `words` — it builds a clause, not a
+                                    sentence — so the full stop belongs here, before the example's
+                                    own sentence. Without it the panel read "…and keep the number
+                                    Matches lines like `ctx:63%`." */}
+                                {'.'}
                                 {saying.example && (
                                     <>
                                         {' '}

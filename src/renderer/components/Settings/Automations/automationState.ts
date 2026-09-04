@@ -125,17 +125,35 @@ export function automationRowState(
     const id = winningState(rule, pairs, now);
     const qualifier = qualifierFor(id, pairs, now);
     const noun = QUALIFIER_NOUN[id];
+    const label = id === 'rearm' && !everFired(pairs) ? 'Waiting to re-arm' : LABELS[id];
     return {
         id,
-        label: LABELS[id],
+        label,
         qualifier,
         pillText: qualifier
-            ? `${LABELS[id]} · ${qualifier}${noun ? ` ${noun}` : ''}`
-            : LABELS[id],
+            ? `${label} · ${qualifier}${noun ? ` ${noun}` : ''}`
+            : label,
         // Completed is a success, not a problem, and not an off switch: the toggle stays on and
         // stops responding, and Reset is what makes the rule eligible again.
         toggleDisabled: id === 'completed',
     };
+}
+
+/**
+ * Has any watched terminal ACTUALLY fired?
+ *
+ * A presence rule switched on while its text is already on screen is **held**, not fired: the
+ * engine logs `held — "…is still on screen"`, sends nothing (correctly — it must not fire on output
+ * that was there before it was switched on), and leaves the pair at `state: 'fired'` with
+ * `lastFiredAt: null`. `pairState` folds that to `rearm`, whose label begins *"Fired · "* — so the
+ * row painted **Fired · waiting to re-arm** directly beside its own footer **Never fired**, with the
+ * activity log agreeing with the footer. One row, two answers.
+ *
+ * The state itself is right — the rule really will not fire until the text stops matching — so this
+ * drops only the word that is false, rather than inventing a state id the mockup does not teach.
+ */
+function everFired(pairs: Record<string, AutomationRuntimePairState> | undefined): boolean {
+    return !!pairs && Object.values(pairs).some((p) => p.lastFiredAt !== null);
 }
 
 function winningState(

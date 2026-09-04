@@ -17,9 +17,11 @@
  * path, so it never re-binds and no spawn hook fires for it.
  *
  * WHAT A LEAF'S LABEL IS
- * The pane's own name when it has one, else the title of the tab that owns it — which is exactly
- * what the user sees on the tab strip, and exactly what they will look for in the Automations
- * picker and in the activity log's Name column.
+ * The pane's own name when a PERSON typed one (`nameIsCustom`), else the title of the tab that owns
+ * it — which is exactly what the user sees on the tab strip, and exactly what they will look for in
+ * the Automations picker and in the activity log's Name column. Keying on `name` alone does not
+ * work: every create path defaults it, so the default shadowed the tab title and a tab rename was
+ * invisible to this whole feature.
  *
  * Plan 028 §4.2.
  */
@@ -53,7 +55,13 @@ export function collectLeafLabels(
   const walk = (node: PaneNode | null | undefined, tabId: string): void => {
     if (!node) return;
     if (node.type === 'terminal' && node.terminalId) {
-      const paneName = node.name?.trim();
+      // `nameIsCustom`, not just `name`. Every create path defaults `name` to something non-empty
+      // ('Terminal', 'Terminal Right', the tab's unique title), so keying on `name` alone meant the
+      // pane's DEFAULT outranked the tab title — and renaming a tab produced no diff, no push, and
+      // no change to anything Automations shows: not the picker's Name column, not the activity
+      // log's stored name, not `Tab name contains`. Measured on a live build: three renames across
+      // two windows moved the tab strip and the window title and moved nothing else.
+      const paneName = node.nameIsCustom ? node.name?.trim() : undefined;
       labels.set(node.terminalId, paneName || titleByTabId.get(tabId)?.trim() || '');
     }
     node.children?.forEach((child) => walk(child, tabId));

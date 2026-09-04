@@ -300,4 +300,36 @@ describe('the editor, mounted', () => {
         await settle();
         expect((api.saveAutomation.mock.calls[0][0] as AutomationRule).enabled).toBe(true);
     });
+
+    /**
+     * The roster is re-read on a timer, not once at mount.
+     *
+     * With a one-shot fetch the picker listed whatever was open when the editor mounted: a terminal
+     * opened while the editor is up never appeared and there is no refresh control — measured on a
+     * live build, still absent after eight seconds while `/api/terminals` listed it. The same array
+     * feeds `MonitorPanel`'s *"Open right now N · refreshed every few seconds"*, which nothing kept.
+     *
+     * The registered callback is invoked directly rather than through fake timers, because this
+     * suite flushes promises on the real clock; what is asserted is the FETCH COUNT it produces,
+     * not that a timer was installed.
+     */
+    it('re-reads the terminal roster while the editor is open', async () => {
+        const spy = jest.spyOn(window, 'setInterval');
+        try {
+            const api = await openEditorOn(rule({}));
+            const atMount = api.listWatchableTerminals.mock.calls.length;
+            expect(atMount).toBeGreaterThan(0);
+
+            const ticks = spy.mock.calls
+                .filter(([, ms]) => typeof ms === 'number' && ms > 0)
+                .map(([fn]) => fn as () => void);
+            expect(ticks.length).toBeGreaterThan(0);
+            await act(async () => { ticks.forEach((tick) => tick()); });
+            await settle();
+
+            expect(api.listWatchableTerminals.mock.calls.length).toBeGreaterThan(atMount);
+        } finally {
+            spy.mockRestore();
+        }
+    });
 });

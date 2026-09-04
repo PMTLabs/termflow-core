@@ -298,4 +298,37 @@ describe('the inspector panels — rendered, per template', () => {
         expect(text).toContain('more than plain words can describe');
         expect(text).toContain('^ctx:(\\d+)%$');
     });
+
+    /**
+     * The paraphrase and its worked example are two SENTENCES, and nothing asserted the join.
+     *
+     * `sayPattern` builds a clause and never terminates it, and the panel appended
+     * `Matches lines like …` after a bare space, so the GUI read *"…and keep the number Matches
+     * lines like `ctx:63%`."* — a run-on no unit test could see, because no test read `.au-plainsay`
+     * at all. Asserted on the rendered node, not on `sayingText`, since the defect is in the markup.
+     */
+    it('ends the paraphrase before the worked example', async () => {
+        await show(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'parse');
+        const said = container.querySelector('.au-plainsay')?.textContent ?? '';
+        expect(said).toContain('keep the number. Matches lines like');
+        expect(said).not.toContain('keep the number Matches');
+    });
+
+    /**
+     * *Right now* has an empty pair map for two different reasons and must not describe them alike.
+     *
+     * `AuInspector` passes no `pairs` here, which is exactly the shape a SAVED, ENABLED rule has for
+     * the moment after a save: the save moves `updated_at`, `reload` drops the arm keys (Q11), and
+     * the map is empty until the next check. The panel asserted "This rule is not running … switch
+     * it on" beside a green toggle on a rule that had already fired twice.
+     */
+    it.each([
+        [true, 'This rule is running', 'is not running'],
+        [false, 'is not running', 'This rule is running'],
+    ])('the Right-now empty state matches enabled=%s', async (enabled, says, doesNotSay) => {
+        const rule = { ...draftFromTemplate(AUTOMATION_TEMPLATES[0]), enabled };
+        const text = await show(rule, 'cond');
+        expect(text).toContain(says);
+        expect(text).not.toContain(doesNotSay);
+    });
 });

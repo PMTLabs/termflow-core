@@ -125,6 +125,39 @@ describe('automationRowState — the state table', () => {
         expect(settled.label).toBe('Fired · waiting to re-arm');
     });
 
+    /**
+     * A pair may sit in `fired` having never fired.
+     *
+     * A presence rule switched on while its text is ALREADY on screen is held, not fired: the engine
+     * logs `held — "…is still on screen"` and sends nothing, which is right — it must not fire on
+     * output that predates being switched on — but it leaves `state: 'fired'` with
+     * `lastFiredAt: null`. The row then read **Fired · waiting to re-arm** beside its own footer
+     * **Never fired**. Seen on a live build; the state is right and only the word "Fired" is false.
+     */
+    it('does not say Fired for a pair that never has', () => {
+        const held = automationRowState(
+            rule(),
+            { 'tm-1': pair({ state: 'fired', lastFiredAt: null, firedCount: 0 }) },
+            NOW,
+        );
+        expect(held.id).toBe('rearm');
+        expect(held.label).toBe('Waiting to re-arm');
+        expect(held.pillText).not.toContain('Fired');
+    });
+
+    /** One terminal really fired, another is merely held — the rule HAS fired, so the word stands. */
+    it('still says Fired when any watched terminal actually fired', () => {
+        const mixed = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({ state: 'fired', lastFiredAt: null, firedCount: 0 }),
+                'tm-2': pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
+            },
+            NOW,
+        );
+        expect(mixed.label).toBe('Fired · waiting to re-arm');
+    });
+
     it('reports armed and waiting for both unseen and armed pairs', () => {
         expect(automationRowState(rule(), { 'tm-1': pair({ state: 'unseen' }) }, NOW).id)
             .toBe('waiting');

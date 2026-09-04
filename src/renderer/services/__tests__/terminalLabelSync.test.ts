@@ -20,11 +20,27 @@ import tabsReducer, { addTab, updateTabTitle } from '../../store/slices/tabsSlic
 import { attachTerminalLabelSync, collectLeafLabels, reassertLabelAfterSpawn } from '../terminalLabelSync';
 import { diffLeafValues } from '../leafValueDiff';
 
+/** A pane whose name — when given — is one a PERSON typed. */
 const leaf = (id: string, terminalId: string, name?: string): PaneNode => ({
   id,
   type: 'terminal',
   terminalId,
-  ...(name ? { name } : {}),
+  ...(name ? { name, nameIsCustom: true } : {}),
+});
+
+/**
+ * The shape production actually has, and the one this suite did not.
+ *
+ * Every create path fills `name` in — `'Terminal'`, `'Terminal Right'`, the tab's unique title, a
+ * surviving leaf's fallback — so a NAMELESS leaf is the one shape a real pane never is. Every test
+ * below used to build nameless leaves, which meant the tab-title branch was the only branch they
+ * exercised: the rename assertion passed while a live build pushed nothing at all on a tab rename.
+ */
+const defaultNamedLeaf = (id: string, terminalId: string, defaulted: string): PaneNode => ({
+  id,
+  type: 'terminal',
+  terminalId,
+  name: defaulted,
 });
 
 const split = (id: string, children: PaneNode[]): PaneNode => ({
@@ -78,17 +94,39 @@ describe('attachTerminalLabelSync', () => {
     expect(setTerminalDisplayLabel).not.toHaveBeenCalled();
   });
 
+  /**
+   * **On panes carrying the DEFAULT name every create path gives them**, which is what made this
+   * assertion vacuous before: with nameless leaves it only ever read the tab title, while a real
+   * pane's default shadowed it and a tab rename pushed nothing. Three renames on a live build moved
+   * the tab strip and the window title and changed nothing the Automations picker, the activity
+   * log's Name column or `Tab name contains` could see.
+   */
   it('pushes once more when the tab is renamed, and only for that tab', () => {
     store.dispatch(tab('tb-a', 'core'));
     store.dispatch(tab('tb-b', 'docs'));
-    store.dispatch(addTabTree({ tabId: 'tb-a', tree: leaf('pn-a', 'tm-a') }));
-    store.dispatch(addTabTree({ tabId: 'tb-b', tree: leaf('pn-b', 'tm-b') }));
+    store.dispatch(addTabTree({ tabId: 'tb-a', tree: defaultNamedLeaf('pn-a', 'tm-a', 'Terminal') }));
+    store.dispatch(addTabTree({ tabId: 'tb-b', tree: defaultNamedLeaf('pn-b', 'tm-b', 'Terminal') }));
     setTerminalDisplayLabel.mockClear();
 
     store.dispatch(updateTabTitle({ id: 'tb-a', title: 'core · rebuilt' }));
 
     expect(setTerminalDisplayLabel).toHaveBeenCalledTimes(1);
     expect(setTerminalDisplayLabel).toHaveBeenCalledWith('tm-a', 'core · rebuilt');
+  });
+
+  /**
+   * The same pane, renamed BY A PERSON, keeps its own name through a tab rename — the precedence
+   * the module means to have, pinned from the same starting shape so the pair reads as one rule.
+   */
+  it('keeps a pane name the user typed when the tab is renamed', () => {
+    store.dispatch(tab('tb-a', 'core'));
+    store.dispatch(addTabTree({ tabId: 'tb-a', tree: defaultNamedLeaf('pn-a', 'tm-a', 'Terminal') }));
+    store.dispatch(renamePanes({ paneId: 'pn-a', name: 'codex', tabId: 'tb-a' }));
+    setTerminalDisplayLabel.mockClear();
+
+    store.dispatch(updateTabTitle({ id: 'tb-a', title: 'core · rebuilt' }));
+
+    expect(setTerminalDisplayLabel).not.toHaveBeenCalled();
   });
 
   /** A pane's own name outranks its tab's title — it is the more specific thing the user typed. */
@@ -249,6 +287,15 @@ describe('collectLeafLabels', () => {
       { id: 'tb-1', title: 'core' },
     ]);
     expect(labels.get('tm-a')).toBe('core');
+  });
+
+  /** The distinction the whole fix turns on, asserted as a pair so neither half can drift. */
+  it('lets the tab title through a DEFAULT pane name, and not through a typed one', () => {
+    const tabs = [{ id: 'tb-1', title: 'core' }];
+    expect(
+      collectLeafLabels({ 'tb-1': defaultNamedLeaf('a', 'tm-a', 'Terminal') }, tabs).get('tm-a'),
+    ).toBe('core');
+    expect(collectLeafLabels({ 'tb-1': leaf('a', 'tm-a', 'codex') }, tabs).get('tm-a')).toBe('codex');
   });
 });
 

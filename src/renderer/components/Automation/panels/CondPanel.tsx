@@ -166,10 +166,23 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                 </AuField>
             )}
 
+            {/*
+              * An empty pair map has TWO causes and they need different sentences. The rule may
+              * never have been saved or switched on — the case this help text was written for. Or
+              * it may be running and simply have no pair state yet, which is what a save does on
+              * purpose: a save moves `updated_at`, `reload` drops the rule's arm keys (Q11), and the
+              * map is empty until the next check. Telling a user with a green toggle that their rule
+              * "is not running" and to "switch it on" is wrong twice, and invites them to toggle a
+              * rule that is already working.
+              */}
             {!live && (
                 <AuHelp>
-                    This rule is not running, so there is no armed-or-fired state to show yet. Save
-                    it and switch it on, and this is where it reports what it is waiting for.
+                    {draft.rule.enabled
+                        ? 'This rule is running and has not reported on any terminal yet — a save '
+                          + 'clears its armed-or-fired state, so this fills in at the next check.'
+                        : 'This rule is not running, so there is no armed-or-fired state to show '
+                          + 'yet. Save it and switch it on, and this is where it reports what it is '
+                          + 'waiting for.'}
                 </AuHelp>
             )}
         </>

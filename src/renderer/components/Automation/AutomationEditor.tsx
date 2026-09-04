@@ -70,6 +70,15 @@ import './AutomationEditor.css';
 /** How many recent lines the drawer's Activity peek holds. The full log lives in Settings. */
 const DRAWER_LOG_LIMIT = 40;
 
+/**
+ * How often the terminal roster is re-read while the editor is open.
+ *
+ * "A few seconds" is a promise the UI makes out loud — `MonitorPanel` renders
+ * *"Open right now N · refreshed every few seconds"* — so this is what makes that sentence true.
+ * The engine's own targeting tick runs at 2 s, so nothing here is the bottleneck.
+ */
+const ROSTER_POLL_MS = 3000;
+
 export interface AutomationEditorProps {
     /** The rule or draft to edit. `id: ''` means it has never been saved. */
     rule: AutomationRule;
@@ -170,8 +179,21 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [api, draft.rule.id, draft.rule.targetIds.join(',')]);
 
+    /**
+     * The roster is POLLED, not fetched once.
+     *
+     * Without the interval the picker listed whatever was open when the editor mounted: a terminal
+     * opened while the editor is up never appeared, there is no refresh control, and the only way to
+     * see it was to close the editor and reopen it. The same array feeds `MonitorPanel`'s
+     * *"Open right now N · refreshed every few seconds"* — a promise nothing kept.
+     *
+     * `loadTerminals` is re-created when the rule id or the pick set changes, which restarts the
+     * timer; that is harmless and keeps the newly-ticked-id refresh those deps exist for.
+     */
     useEffect(() => {
         void loadTerminals();
+        const timer = setInterval(() => { void loadTerminals(); }, ROSTER_POLL_MS);
+        return () => clearInterval(timer);
     }, [loadTerminals]);
 
     const loadLog = useCallback(async () => {

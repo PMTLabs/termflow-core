@@ -192,7 +192,15 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                 return;
             }
             panning.current = { x: e.clientX, y: e.clientY };
-            setVp((v) => panBy(v, e.clientX - start.x, e.clientY - start.y));
+            // NEGATED, and that is the whole point. `panBy` takes the WHEEL/ARROW-KEY convention —
+            // "scroll down" means the view moves down, so the world translates the other way, and
+            // `panBy` owns that inversion (`canvasGestures.ts`: *"the world therefore translates the
+            // other way; `panBy` owns that inversion"*). A DRAG is the opposite gesture: the hand
+            // holds the world, so the world must move WITH the pointer. Canvas Mode's own drag does
+            // exactly this by a different route (`CanvasViewport`: `x: e.clientX - pan.current.x`).
+            // Passing the raw delta made this canvas pan BACKWARDS from every other one in the app —
+            // a 600px drag to the right moved the world 600px to the LEFT.
+            setVp((v) => panBy(v, start.x - e.clientX, start.y - e.clientY));
         };
         const up = () => {
             panning.current = null;
