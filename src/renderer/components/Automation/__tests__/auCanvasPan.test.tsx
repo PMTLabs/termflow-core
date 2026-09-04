@@ -156,4 +156,44 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
         expect(after!.x - before!.x).toBeCloseTo(-DRAG * perPixel, 6);
         expect(after!.y - before!.y).toBeCloseTo(0, 6);
     });
+
+    /** The same drag, with NO Space held, started on whatever element is passed. */
+    async function bareDragRight(target: HTMLElement): Promise<void> {
+        await act(async () => {
+            target.dispatchEvent(pointer('pointerdown', { clientX: 500, clientY: 400 }));
+        });
+        await act(async () => {
+            window.dispatchEvent(pointer('pointermove', { clientX: 500 + DRAG, clientY: 400 }));
+        });
+        await act(async () => {
+            window.dispatchEvent(pointer('pointerup', { buttons: 0 }));
+        });
+    }
+
+    /**
+     * **Dragging the empty canvas pans it, and dragging a NODE still does not.**
+     *
+     * The pan is armed on the same branch that deselects — `e.target === e.currentTarget` — so the
+     * two assertions here are one claim: that branch runs for the background and for nothing else.
+     * The node case is not padding. Arming the pan one line higher, outside the `if`, would pass the
+     * first assertion and drag the world out from under every node drag in the editor; only the
+     * second one fails on that mutant, and I ran it to check it does.
+     */
+    it('pans on a background drag, but not on a drag that starts on a node', async () => {
+        expect(toWorld).not.toBeNull();
+        const perPixel = (toWorld!(600, 400)!.x - toWorld!(500, 400)!.x) / 100;
+
+        const host = container.querySelector('.au-canvas') as HTMLElement;
+        const before = toWorld!(500, 400);
+        await bareDragRight(host);
+        const afterBackground = toWorld!(500, 400);
+        expect(afterBackground!.x - before!.x).toBeCloseTo(-DRAG * perPixel, 6);
+
+        // A node is inside `.au-raster`, so it is never `e.currentTarget` on the canvas handler.
+        const node = container.querySelector('.au-node') as HTMLElement | null;
+        expect(node).not.toBeNull();
+        const beforeNode = toWorld!(500, 400);
+        await bareDragRight(node!);
+        expect(toWorld!(500, 400)!.x).toBeCloseTo(beforeNode!.x, 6);
+    });
 });

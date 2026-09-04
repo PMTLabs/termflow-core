@@ -30,9 +30,15 @@ export interface NodePos {
 }
 
 /** A finished rule is four cards on a ~900×260 world (§6.5) — hence no minimap. */
-export const AU_NODE_W = 206;
-export const AU_NODE_H = 132;
-const AU_GAP_X = 232;
+export const AU_NODE_W = 244;
+export const AU_NODE_H = 160;
+// Node PITCH, not the space between nodes: the gap is `AU_GAP_X - AU_NODE_W`, and at the old
+// 232/206 that gap was 26px. A port label is centred on its port, and a port sits ON the node's
+// edge — so an output label and the next node's input label were each half-overhanging into the
+// same 26px and printed on top of each other (`lines lines`, `value value`). 116px is measured
+// from that: two half-labels plus air. Safe to change freely because the layout is NOT persisted
+// (see the note at the top of this file) — every editor open re-derives it from DEFAULT_LAYOUT.
+const AU_GAP_X = 360;
 
 export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     monitor: { x: 0, y: 0 },

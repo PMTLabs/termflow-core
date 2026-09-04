@@ -26,21 +26,23 @@
     align-items: center;
     justify-content: center;
     color: #cccccc;
-    font-size: 13px;
-}
-
-.au-editor .au-scrim {
-    position: absolute;
-    inset: 0;
-    background: rgba(8, 9, 11, 0.68);
+    font-size: 1rem;
+    /* The editor is NON-MODAL. This layer still spans the window so the box below can centre in it,
+       but it must not take a single click: everything outside `.au-modal` belongs to the app behind
+       it. `.au-modal` opts back in. */
+    pointer-events: none;
 }
 
 .au-editor .au-modal {
     position: relative;
     display: flex;
     flex-direction: column;
-    width: min(1560px, calc(100vw - 40px));
-    height: min(940px, calc(100vh - 40px));
+    pointer-events: auto;
+    /* 80% of the window, and `vw`/`vh` are what make that track a resize with no listener and no
+       re-render — the box simply re-lays-out. The `max` floors stop it collapsing to unusable on a
+       small window, and are themselves viewport-relative so they can never exceed it. */
+    width: max(80vw, min(660px, calc(100vw - 24px)));
+    height: max(80vh, min(460px, calc(100vh - 24px)));
     background: #17181c;
     border: 1px solid #33353c;
     border-radius: 12px;
@@ -83,7 +85,7 @@
     flex: 0 1 320px;
     min-width: 180px;
     padding: 6px 9px;
-    font-size: 13.5px;
+    font-size: 1rem;
     font-weight: 600;
     color: #fff;
     background: #101115;
@@ -93,7 +95,7 @@
 
 .au-editor .au-unsaved {
     padding: 2px 7px;
-    font-size: 10.5px;
+    font-size: 0.8rem;
     letter-spacing: 0.04em;
     text-transform: uppercase;
     color: #eccb77;
@@ -111,7 +113,7 @@
 
 .au-editor .au-seg button {
     padding: 5px 11px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #9a9aa0;
     background: #101115;
     border: 0;
@@ -131,7 +133,7 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #9a9aa0;
 }
 
@@ -139,46 +141,9 @@
     color: #ffaea8;
 }
 
-.au-editor .au-tog {
-    position: relative;
-    width: 34px;
-    height: 18px;
-    border: 1px solid #3a3c44;
-    border-radius: 999px;
-    background: #26282f;
-    cursor: pointer;
-}
-
-.au-editor .au-tog::after {
-    content: '';
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: #7d818c;
-    transition: transform 0.14s ease, background 0.14s ease;
-}
-
-.au-editor .au-tog[aria-checked='true'] {
-    background: rgba(63, 185, 80, 0.22);
-    border-color: #2f6b39;
-}
-
-.au-editor .au-tog[aria-checked='true']::after {
-    transform: translateX(16px);
-    background: #3fb950;
-}
-
-.au-editor .au-tog:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
 .au-editor .au-btn {
     padding: 5px 11px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #cccccc;
     background: #23252b;
     border: 1px solid #3a3c44;
@@ -198,7 +163,7 @@
 
 .au-editor .au-btn.sm {
     padding: 3px 8px;
-    font-size: 11px;
+    font-size: 0.85rem;
 }
 
 .au-editor .au-btn.primary {
@@ -241,14 +206,14 @@
 }
 
 .au-editor .au-palhead {
-    font-size: 10.5px;
+    font-size: 0.8rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: #7d818c;
 }
 
 .au-editor .au-palhint {
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.5;
     color: #82868f;
     margin-bottom: 5px;
@@ -293,7 +258,7 @@
     display: grid;
     place-items: center;
     border-radius: 6px;
-    font-size: 12px;
+    font-size: 0.95rem;
 }
 
 .au-editor .au-palitem.monitor .au-palico,
@@ -331,12 +296,12 @@
 }
 
 .au-editor .au-paltitle {
-    font-size: 12px;
+    font-size: 0.95rem;
     color: #e6e6e8;
 }
 
 .au-editor .au-palsub {
-    font-size: 10.6px;
+    font-size: 0.8rem;
     color: #7d818c;
 }
 
@@ -344,7 +309,7 @@
     position: fixed;
     z-index: 100000;
     padding: 5px 10px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #fff;
     background: #2c2f37;
     border: 1px solid #5a5d68;
@@ -385,6 +350,18 @@
     position: absolute;
     top: 0;
     left: 0;
+    /* **1px, and it must not be 0.** The svg carries `width="100%" height="100%"`, and every
+       ancestor up to `.au-canvas` is an absolutely-positioned box with `width: auto` whose children
+       are themselves all absolutely positioned — so nothing contributes to shrink-to-fit and the
+       percentage resolved against 0. A replaced element with a zero-width viewport paints nothing,
+       which is why the wire CHIPS were visible (they are HTML siblings of the svg, laid out at their
+       own coordinates) while not one wire PATH ever was. `overflow: visible` then does the rest:
+       the paths sit at world coordinates far outside this 1px viewport and are painted anyway.
+       Sizing an ANCESTOR instead would have worked too, and would have been wrong — `onPointerDown`
+       deselects on `e.target === e.currentTarget`, so giving `.au-world` a real box would put a new
+       hit target over the whole canvas and silently kill click-to-deselect. */
+    width: 1px;
+    height: 1px;
     overflow: visible;
     pointer-events: none;
 }
@@ -405,7 +382,7 @@
     transform: translate(-50%, -50%);
     padding: 2px 7px;
     font-family: var(--font-mono, monospace);
-    font-size: 10.5px;
+    font-size: 0.8rem;
     color: #a9adb6;
     background: #1c1d22;
     border: 1px solid #34363e;
@@ -473,12 +450,12 @@
     display: grid;
     place-items: center;
     border-radius: 5px;
-    font-size: 11px;
+    font-size: 0.85rem;
 }
 
 .au-editor .au-ntitle {
     flex: 1;
-    font-size: 11.8px;
+    font-size: 0.9rem;
     font-weight: 600;
     color: #e6e6e8;
 }
@@ -518,7 +495,7 @@
 .au-editor .au-nrow {
     display: flex;
     gap: 7px;
-    font-size: 11px;
+    font-size: 0.85rem;
     min-width: 0;
 }
 
@@ -547,7 +524,7 @@
 .au-editor .au-nbadge {
     display: inline-block;
     padding: 2px 7px;
-    font-size: 10.4px;
+    font-size: 0.8rem;
     border-radius: 999px;
     border: 1px solid #3a3c44;
     color: #a9adb6;
@@ -592,10 +569,12 @@
 
 .au-editor .au-portlabel {
     position: absolute;
-    top: -14px;
+    /* Clears the taller line box the font ladder gives this label; it hangs ABOVE its port, and a
+       port sits on the node's edge, so too small an offset puts it back inside the card. */
+    top: -17px;
     left: 50%;
     transform: translateX(-50%);
-    font-size: 9.5px;
+    font-size: 0.75rem;
     color: #7d818c;
     white-space: nowrap;
     pointer-events: none;
@@ -615,7 +594,7 @@
     transform: translate(-50%, -50%);
     max-width: 380px;
     text-align: center;
-    font-size: 11.8px;
+    font-size: 0.9rem;
     line-height: 1.6;
     color: #82868f;
 }
@@ -623,14 +602,14 @@
 .au-editor .au-emptyhint b {
     display: block;
     margin-bottom: 6px;
-    font-size: 13px;
+    font-size: 1rem;
     color: #e6e6e8;
 }
 
 .au-editor .au-canvashint {
     left: 12px;
     bottom: 10px;
-    font-size: 10.6px;
+    font-size: 0.8rem;
     color: #6a6e77;
 }
 
@@ -671,7 +650,7 @@
 .au-editor .au-zl {
     min-width: 38px;
     text-align: center;
-    font-size: 10.6px;
+    font-size: 0.8rem;
     color: #82868f;
 }
 
@@ -694,7 +673,7 @@
     right: 12px;
     bottom: 42px;
     padding: 4px 10px;
-    font-size: 11px;
+    font-size: 0.85rem;
     color: #a9adb6;
     background: #1c1d22;
     border: 1px solid #33353c;
@@ -717,7 +696,7 @@
 
 .au-editor .au-dtabs button {
     padding: 4px 10px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #82868f;
     background: transparent;
     border: 0;
@@ -747,12 +726,12 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     color: #82868f;
 }
 
 .au-editor .au-dsrc {
-    font-size: 11px;
+    font-size: 0.85rem;
     color: #82868f;
     margin-bottom: 7px;
 }
@@ -768,7 +747,7 @@
     align-items: baseline;
     gap: 9px;
     padding: 6px 9px;
-    font-size: 11.5px;
+    font-size: 0.9rem;
     background: #1c1d22;
     border: 1px solid #2b2d33;
     border-radius: 7px;
@@ -806,7 +785,7 @@
     gap: 8px;
     margin-top: 10px;
     padding: 8px 10px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.55;
     color: #82868f;
     background: #1a1b20;
@@ -831,7 +810,7 @@
 
 .au-editor .au-inspect-none {
     padding: 16px 14px;
-    font-size: 11.8px;
+    font-size: 0.9rem;
     line-height: 1.6;
     color: #82868f;
 }
@@ -856,18 +835,18 @@
     display: grid;
     place-items: center;
     border-radius: 7px;
-    font-size: 13px;
+    font-size: 1rem;
 }
 
 .au-editor .au-ihead h3 {
     margin: 0;
-    font-size: 13px;
+    font-size: 1rem;
     font-weight: 600;
     color: #fff;
 }
 
 .au-editor .au-ihead .au-sub {
-    font-size: 10.8px;
+    font-size: 0.85rem;
     color: #7d818c;
 }
 
@@ -887,7 +866,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: 0.85rem;
     color: #ffaea8;
     margin-bottom: 6px;
 }
@@ -901,7 +880,7 @@
 }
 
 .au-editor .au-problems li {
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.5;
     color: #a9adb6;
 }
@@ -933,7 +912,7 @@
 .au-editor .au-flabel {
     display: block;
     margin-bottom: 6px;
-    font-size: 10.5px;
+    font-size: 0.8rem;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: #7d818c;
@@ -942,7 +921,7 @@
 .au-editor .au-finput {
     width: 100%;
     padding: 6px 9px;
-    font-size: 12px;
+    font-size: 0.95rem;
     color: #e6e6e8;
     background: #101115;
     border: 1px solid #34363e;
@@ -965,7 +944,7 @@
     gap: 8px;
     padding: 7px 9px;
     margin-bottom: 5px;
-    font-size: 11.8px;
+    font-size: 0.9rem;
     line-height: 1.45;
     color: #cfd2d8;
     background: #1c1d22;
@@ -1012,7 +991,7 @@
 
 .au-editor .au-rsub {
     display: block;
-    font-size: 10.8px;
+    font-size: 0.85rem;
     color: #7d818c;
 }
 
@@ -1027,7 +1006,7 @@
     display: grid;
     place-items: center;
     margin-top: 1px;
-    font-size: 9px;
+    font-size: 0.75rem;
     color: transparent;
     border: 1.5px solid #59606b;
     border-radius: 4px;
@@ -1042,7 +1021,7 @@
 
 .au-editor .au-fhelp {
     margin-top: 6px;
-    font-size: 10.9px;
+    font-size: 0.85rem;
     line-height: 1.55;
     color: #7d818c;
 }
@@ -1065,7 +1044,7 @@
 
 .au-editor .au-token {
     padding: 4px 9px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     color: #a9adb6;
     background: #1c1d22;
     border: 1px solid #2b2d33;
@@ -1082,7 +1061,7 @@
 .au-editor .au-plainsay {
     margin-top: 7px;
     padding: 7px 9px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.6;
     color: #a9adb6;
     background: #1a1b20;
@@ -1093,7 +1072,7 @@
 .au-editor .au-preview {
     padding: 8px 10px;
     font-family: var(--font-mono, monospace);
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.6;
     color: #cfd2d8;
     background: #0d0e11;
@@ -1123,7 +1102,7 @@
     margin-bottom: 16px;
     padding: 8px 10px;
     font-family: var(--font-mono, monospace);
-    font-size: 10.8px;
+    font-size: 0.85rem;
     line-height: 1.7;
     background: #0d0e11;
     border: 1px solid #2b2d33;
@@ -1150,7 +1129,7 @@
 }
 
 .au-editor .au-termcount {
-    font-size: 11.2px;
+    font-size: 0.85rem;
     color: #a9adb6;
 }
 
@@ -1166,7 +1145,7 @@
 .au-editor .au-rearmnote {
     margin-bottom: 16px;
     padding: 9px 10px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.6;
     color: #a9adb6;
     background: rgba(236, 203, 119, 0.06);
@@ -1188,7 +1167,7 @@
 
 .au-editor .au-rightnow {
     margin-top: 7px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     color: #7d818c;
 }
 
@@ -1216,7 +1195,7 @@
 }
 
 .au-editor .au-tpickhead {
-    font-size: 10.2px;
+    font-size: 0.8rem;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: #6a6e77;
@@ -1224,7 +1203,7 @@
 }
 
 .au-editor .au-tpickrow {
-    font-size: 11.2px;
+    font-size: 0.85rem;
     color: #cfd2d8;
     background: transparent;
     border: 0;
@@ -1242,7 +1221,7 @@
 
 .au-editor .au-idchip {
     font-family: var(--font-mono, monospace);
-    font-size: 10.6px;
+    font-size: 0.8rem;
     color: #9fd8f7;
     white-space: nowrap;
     overflow: hidden;
@@ -1267,7 +1246,7 @@
 }
 
 .au-editor .au-cw {
-    font-size: 10.4px;
+    font-size: 0.8rem;
     color: #7d818c;
     white-space: nowrap;
     overflow: hidden;
@@ -1278,7 +1257,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 10.8px;
+    font-size: 0.85rem;
     color: #82868f;
 }
 
@@ -1298,7 +1277,7 @@
     align-items: center;
     gap: 7px;
     margin-top: 7px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     color: #a9adb6;
 }
 
@@ -1314,7 +1293,7 @@
 .au-editor .au-pickempty,
 .au-editor .au-pickfail {
     padding: 11px 10px;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     line-height: 1.55;
     color: #82868f;
 }
@@ -1330,7 +1309,7 @@
     align-items: center;
     gap: 6px;
     padding: 3px 9px;
-    font-size: 11px;
+    font-size: 0.85rem;
     color: #a9adb6;
     background: #1c1d22;
     border: 1px solid #33353c;
@@ -1380,7 +1359,7 @@
     gap: 9px;
     align-items: baseline;
     padding: 5px 0;
-    font-size: 11.2px;
+    font-size: 0.85rem;
     border-bottom: 1px solid #1f2126;
 }
 
@@ -1397,7 +1376,7 @@
 
 .au-editor .au-li {
     font-family: var(--font-mono, monospace);
-    font-size: 10.4px;
+    font-size: 0.8rem;
     color: #6a7c88;
 }
 
@@ -1429,7 +1408,7 @@
 
 .au-editor .au-logempty {
     padding: 18px 10px;
-    font-size: 11.8px;
+    font-size: 0.9rem;
     line-height: 1.6;
     color: #82868f;
 }
@@ -1443,6 +1422,6 @@
     align-items: center;
     gap: 9px;
     padding-top: 9px;
-    font-size: 10.8px;
+    font-size: 0.85rem;
     color: #6a6e77;
 }

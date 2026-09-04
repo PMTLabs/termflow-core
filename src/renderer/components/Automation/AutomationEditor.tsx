@@ -65,6 +65,7 @@ import { AuInspector } from './AuInspector';
 import { AuDrawer } from './AuDrawer';
 import type { DrawerTab } from './AuDrawer';
 import { useAuPaletteDrag } from './useAuPaletteDrag';
+import './auToggle.css';
 import './AutomationEditor.css';
 
 /** How many recent lines the drawer's Activity peek holds. The full log lives in Settings. */
@@ -292,7 +293,15 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         else onClose();
     }, [onClose]);
 
-    useDialogA11y(containerRef, { isOpen: true, onCancel: requestClose, initialFocus: 'first' });
+    // `trapFocus: false` because this editor is non-modal: Tab must be able to walk out of it
+    // into the window behind, the same way a click already can. Escape still closes it, since
+    // the hook binds that to the container and it therefore only fires while focus is inside.
+    useDialogA11y(containerRef, {
+        isOpen: true,
+        onCancel: requestClose,
+        initialFocus: 'first',
+        trapFocus: false,
+    });
 
     // Ctrl+S ONLY. Escape belongs to `useDialogA11y`, on the container, in the bubble phase — so a
     // ConfirmDialog opened inside this editor gets its own Escape and this one does not steal it.
@@ -477,8 +486,12 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // hook lacks is any way to REQUIRE it, so a tenth dialog can still be written without it;
         // that gap is real and worth raising, but widening a GUI-pass fix into the shared hook is
         // not this change.
-        <div className="au-editor" role="dialog" aria-modal="true" aria-label="Automation editor" tabIndex={-1} ref={containerRef}>
-            <div className="au-scrim" aria-hidden="true" />
+        //
+        // **Non-modal**, so the window behind it stays usable: no scrim, `aria-modal="false"`, no
+        // focus trap, and `.au-editor` is `pointer-events: none` so only `.au-modal` itself takes
+        // clicks. Switching tabs, dragging the window by its title bar (this app draws its own —
+        // there is no OS one) and typing in a terminal all keep working with the editor open.
+        <div className="au-editor" role="dialog" aria-modal="false" aria-label="Automation editor" tabIndex={-1} ref={containerRef}>
             <div className="au-modal">
                 <div className="au-mhead">
                     <button type="button" className="au-x" aria-label="Close editor" onClick={requestClose}>

@@ -18,6 +18,7 @@ import { ActivityLogView } from './ActivityLogView';
 import { AutomationEditor } from '../../Automation/AutomationEditor';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
+import '../../Automation/auToggle.css';
 import './AutomationsPanel.css';
 
 /** Q6: the mockup draws the chips and defines nothing. Completed is a success, not a problem. */

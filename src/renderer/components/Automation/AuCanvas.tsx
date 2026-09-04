@@ -177,7 +177,19 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             panning.current = { x: e.clientX, y: e.clientY };
             return;
         }
-        if (e.target === e.currentTarget) onSelect(null);
+        if (e.target === e.currentTarget) {
+            onSelect(null);
+            // Dragging the BACKGROUND pans, alongside Space+drag and the middle button. The three
+            // arm the same `panning` ref, so they share one move/up path and cannot drift apart.
+            //
+            // It is armed on the same branch that deselects rather than above it, and that is the
+            // whole of the correctness argument: `e.target === e.currentTarget` is true only for the
+            // canvas host itself, so a press that begins on a node, a port, a wire chip or any
+            // control still reaches its own handler untouched. A press with no movement deselects
+            // exactly as before — `panning` is armed but every move handler is a no-op until the
+            // pointer actually moves, and `up` clears it.
+            panning.current = { x: e.clientX, y: e.clientY };
+        }
     };
 
     useEffect(() => {
