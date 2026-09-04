@@ -26,6 +26,8 @@ import {
     AutomationArmedForTerminals,
 } from '../AutomationArmedBadge';
 import { AutomationMenuSection, automationMenuItems } from '../AutomationMenuSection';
+import { ContextMenu } from '../../Terminal/ContextMenu';
+import type { ContextMenuFlyoutRow, ContextMenuItem } from '../../Terminal/ContextMenu';
 import {
     __resetAutomationArmedForTest,
     __seedAutomationArmedForTest,
@@ -71,6 +73,12 @@ function rule(id: string, name: string, sortOrder = 0): AutomationRule {
 const PAIR: AutomationRuntimePairState = {
     state: 'armed', lastFiredAt: null, firedCount: 0, missing: false,
 };
+
+/** The submenu's rows, in the shape the flyout would ask for them with an empty query. */
+function flyoutRows(item: ContextMenuItem): ContextMenuFlyoutRow[] {
+    const rows = item.submenu!.rows;
+    return typeof rows === 'function' ? rows('') : rows;
+}
 
 describe('the shared indicator and menu section', () => {
     let container: HTMLDivElement;
@@ -186,18 +194,77 @@ describe('the shared indicator and menu section', () => {
         });
         const inSection = [...container.querySelectorAll('.au-menu-rule-name')]
             .map((n) => n.textContent);
+        // The header's own words, with the icon and the ▾ arrow — which are SPANS — left out, so
+        // this can be compared for equality rather than containment. `toContain` would pass a
+        // flyout parent hard-coded to "Automations" against a header reading "Automations (2)",
+        // which is exactly the drift `armedMenuLabel` was extracted to prevent.
+        const accordionLabel = [...container.querySelector('.context-menu-item')!.childNodes]
+            .filter((n) => n.nodeType === Node.TEXT_NODE)
+            .map((n) => n.textContent)
+            .join('');
 
+        // ONE item that opens a list, not a row per rule — the two menus now have the same shape
+        // as well as the same contents.
         const items = automationMenuItems('tm-1');
-        expect(items.map((i) => i.label))
-            .toEqual(inSection.map((name) => `Automation: ${name}`));
-        expect(items[0].title).toContain('Armed · waiting');
+        expect(items).toHaveLength(1);
+        const rows = flyoutRows(items[0]);
+        expect(rows.map((r) => r.label)).toEqual(inSection);
+        expect(rows[0].detail).toBe('Armed · waiting');
+
+        // …and the row that OPENS the list is worded the same in both, which is the half a
+        // "same rules" assertion cannot see: `armedMenuLabel` is why one cannot be renamed alone.
+        expect(items[0].label).toBe(accordionLabel);
 
         // And it does something: the row opens ITS rule, not the first one.
-        items[1].click();
+        rows[1].onSelect!();
         expect(getOpenAutomationRuleId()).toBe('r2');
     });
 
-    it('offers the terminal-area menu nothing for a terminal with no rules', async () => {
+    it('opens on HOVER, and a row opens that rule and dismisses the menu', async () => {
+        // Tam: *"we need to do the same submenu on hover on the automations item"*. Hover-opening
+        // is `ContextMenu`'s own contract, but it only reaches this feature if the item handed to
+        // it is really a submenu PARENT — a plain `click` item renders identically right up until
+        // the pointer rests on it, which is the whole of what changed here.
+        seedTwoRules();
+        const onClose = jest.fn();
+        await render(
+            <ContextMenu x={10} y={10} items={automationMenuItems('tm-1')} onClose={onClose} />,
+        );
+
+        // Portalled to <body>, so the menu is never looked for inside `container`. The row itself
+        // is what opens the panel (`onMouseEnter` on the ITEM, not on the host around it), and it
+        // is drawn inside a `.context-menu-submenu-host` only because a <button> may not contain
+        // the flyout's search input.
+        expect(document.querySelector('.context-menu-submenu-host')).not.toBeNull();
+        const parentRow = document.querySelector('.context-menu-item')!;
+        expect(parentRow.querySelector('.context-menu-label')!.textContent).toBe('Automations (2)');
+        expect(document.querySelector('.context-menu-flyout')).toBeNull();
+
+        // `relatedTarget: null` reads as "the pointer arrived from outside the document", which is
+        // what makes React synthesize mouseenter on the row. A `mouseover` carrying an in-tree
+        // relatedTarget is a silent no-op that looks exactly like a missing handler.
+        await act(async () => {
+            parentRow.dispatchEvent(
+                new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }),
+            );
+        });
+
+        const rendered = [...document.querySelectorAll('.context-menu-flyout-row')];
+        expect(rendered.map((r) => r.querySelector('.context-menu-flyout-label')!.textContent))
+            .toEqual(['Watch the build', 'Answer the prompt']);
+        expect(rendered[0].querySelector('.context-menu-flyout-detail')!.textContent)
+            .toBe('Armed · waiting');
+
+        await act(async () => (rendered[1] as HTMLButtonElement).click());
+
+        expect(getOpenAutomationRuleId()).toBe('r2');
+        // `closeMenuOnSelect` — the editor must not open behind a menu that stayed up.
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the terminal-area menu untouched when nothing is armed', async () => {
+        // A parent row over an empty panel is the item that looks live and does nothing. The
+        // spread at the call site is what turns this empty array into no row at all.
         seedTwoRules();
         expect(automationMenuItems('tm-other')).toEqual([]);
         expect(automationMenuItems(null)).toEqual([]);

@@ -902,9 +902,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         },
       ] : []),
       // The automations armed on THIS terminal (Tam, follow-up to `plan/028` item D: the terminal
-      // area's menu must offer the same thing the pane title's does). One flat row per rule,
-      // built by `automationMenuItems` — the same `armedEntryViews` the pane and canvas menus
-      // list from, so the three cannot name or order the rules differently.
+      // area's menu must offer the same thing the pane title's does). ONE item that opens a
+      // hover flyout of the rules — the Snippets/Command History shape, asked for by name once
+      // that machinery existed — built by `automationMenuItems` from the same `armedEntryViews`
+      // the pane and canvas menus list from, so the three cannot name or order the rules
+      // differently. Nothing at all when nothing is armed, which is why it is still a spread.
       //
       // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute below is: the
       // rules are pinned to the terminal, so they are right wherever its surface is drawn.
