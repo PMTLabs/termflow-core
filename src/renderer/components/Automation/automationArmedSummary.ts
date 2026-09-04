@@ -43,6 +43,22 @@ export function armedEntryViews(armed: readonly ArmedAutomation[], now: number):
 }
 
 /**
+ * What the row that OPENS the list is called.
+ *
+ * Two menus carry that row now — the accordion header `AutomationMenuSection` renders into
+ * `PaneContextMenu` and `CanvasNodeMenu`, and the flyout parent `automationMenuItems` builds for
+ * the terminal's own menu — and a user who right-clicks a pane title and then the terminal an inch
+ * below it must not be told two different things. The wording started as a literal inside the
+ * accordion; it was lifted here rather than copied when the flyout needed the same row.
+ *
+ * Singular and uncounted for one rule: `Automations (1)` is a count that exists only to say there
+ * is nothing to count.
+ */
+export function armedMenuLabel(count: number): string {
+    return count === 1 ? 'Automation' : `Automations (${count})`;
+}
+
+/**
  * The badge's `+N` — how many armed rules are NOT the one whose name is shown.
  *
  * `null` for one rule, because a `+0` is a control that appears only to say nothing. Tam asked for
