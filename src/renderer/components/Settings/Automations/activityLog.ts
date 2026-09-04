@@ -179,7 +179,13 @@ export function mergeEntries(
     for (const e of existing) byId.set(e.id, e);
     for (const e of incoming) byId.set(e.id, e);
     const all = [...byId.values()].sort((a, b) => (newestFirst ? b.id - a.id : a.id - b.id));
-    // Keep the FRONT of the requested order: newest-first keeps the newest, oldest-first keeps the
-    // start of the timeline the user is reading forward.
-    return all.slice(0, limit);
+    // ALWAYS keep the NEWEST `limit`, whichever way round they are being displayed.
+    //
+    // This used to `slice(0, limit)` unconditionally — "keep the front of the requested order" —
+    // and the full log view is always oldest-first, so once the buffer reached 200 the front was
+    // the 200 OLDEST ids and every newly arrived row was dropped by the merge that was supposed to
+    // add it. The log froze at the moment it filled, which on a chatty rule is a minute or two, and
+    // it then held rows the store itself had already pruned. Reading direction is a display
+    // decision; which rows are worth keeping is not, and the answer is the same for both.
+    return newestFirst ? all.slice(0, limit) : all.slice(-limit);
 }

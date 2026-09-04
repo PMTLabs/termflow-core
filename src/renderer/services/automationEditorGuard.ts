@@ -21,9 +21,20 @@
 export interface AutomationEditorGuard {
     /** Is there an unsaved draft right now? */
     isDirty(): boolean;
-    /** Persist the draft. The navigation the user asked for follows. */
-    save(): void;
-    /** Throw the draft away. The navigation follows. */
+    /**
+     * Persist the draft. Resolves `true` when it is safely stored, `false` when it is not — and the
+     * navigation only proceeds on `true`.
+     *
+     * **It returns a promise, and it can refuse, because the save it performs can do both.** The
+     * first version was `save(): void`: the caller could neither await it nor hear it decline, so a
+     * `save_automation` that was rejected by the enable-path validation, refused by a disabled
+     * store, or lost to a busy SQLite would still have let the category change, unmounted the
+     * editor, and destroyed the draft — reintroducing the exact blocker this guard exists to
+     * prevent, through its own remedy. Compare `settingsNavGuard.ts`, the shape this file copies:
+     * it returns a boolean precisely so it CAN decline.
+     */
+    save(): Promise<boolean>;
+    /** Throw the draft away. The navigation follows; discarding cannot fail. */
     discard(): void;
 }
 
@@ -41,8 +52,14 @@ export function isAutomationEditorDirty(): boolean {
     return guard?.isDirty() ?? false;
 }
 
-export function saveAutomationEditorDraft(): void {
-    guard?.save();
+/**
+ * Ask the editor to save. `true` means the navigation may proceed.
+ *
+ * With no guard registered there is no draft, so there is nothing to lose and nothing to refuse:
+ * `true` is the honest answer, not a default.
+ */
+export function saveAutomationEditorDraft(): Promise<boolean> {
+    return guard ? guard.save() : Promise.resolve(true);
 }
 
 export function discardAutomationEditorDraft(): void {

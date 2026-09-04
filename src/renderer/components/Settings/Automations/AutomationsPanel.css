@@ -660,6 +660,26 @@
     line-height: 1.6;
 }
 
+/* A store that refused to answer, drawn so it cannot be mistaken for an empty log. */
+.au-logempty.au-logfailed {
+    color: #ffaea8;
+    background: rgba(248, 81, 73, 0.08);
+    border-bottom: 1px solid #6e2b28;
+}
+
+/* "Log every check" — a deadline, not a switch, so it says when it turns itself off. */
+.au-verbose {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    color: #9a9aa0;
+}
+
+.au-verbose-until {
+    color: #eccb77;
+}
+
 .au-logfoot {
     display: flex;
     align-items: center;

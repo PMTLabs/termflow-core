@@ -405,11 +405,21 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
         if (unsavedOwner === 'automations') {
-            saveAutomationEditorDraft();
-        } else {
-            // Changes already persisted live; just clear dirty for the current category.
-            setBaseline(isTracked(activeCategory) ? snapshotCategory(activeCategory, settings) : null);
+            // The navigation is CONDITIONAL on the save succeeding. A refused save that still
+            // navigated would unmount the editor and take the draft with it — the loss this whole
+            // guard exists to prevent, arrived at by way of its own Save button. The prompt is
+            // re-raised so the user is not left believing the work was stored.
+            void saveAutomationEditorDraft().then((saved) => {
+                if (!saved) {
+                    setShowUnsaved(true);
+                    return;
+                }
+                const act = pendingAction; setPendingAction(null); act?.();
+            });
+            return;
         }
+        // Changes already persisted live; just clear dirty for the current category.
+        setBaseline(isTracked(activeCategory) ? snapshotCategory(activeCategory, settings) : null);
         const act = pendingAction; setPendingAction(null); act?.();
     }, [activeCategory, settings, pendingAction, unsavedOwner]);
 

@@ -148,10 +148,32 @@ describe('mergeEntries', () => {
         expect(merged.map((e) => e.id)).toEqual([1, 2]);
     });
 
-    it('holds the buffer at the limit, keeping the front of the requested order', () => {
+    it('holds the buffer at the limit, keeping the NEWEST rows either way round', () => {
         const many = Array.from({ length: 250 }, () => entry('held', 'tm-a'));
-        expect(mergeEntries([], many, false, 200)).toHaveLength(200);
-        expect(mergeEntries([], many, false, 200)[0].id).toBe(1);
-        expect(mergeEntries([], many, true, 200)[0].id).toBe(250);
+        // Oldest-first still DISPLAYS ascending — it just starts at 51, not at 1.
+        const asc = mergeEntries([], many, false, 200);
+        expect(asc).toHaveLength(200);
+        expect([asc[0].id, asc[199].id]).toEqual([51, 250]);
+
+        const desc = mergeEntries([], many, true, 200);
+        expect(desc).toHaveLength(200);
+        expect([desc[0].id, desc[199].id]).toEqual([250, 51]);
+    });
+
+    it('still takes new rows once the buffer is ALREADY full', () => {
+        // The case a single-shot fill can never reach, and the one that mattered: the log view is
+        // always oldest-first, so a buffer holding the oldest 200 forever meant every `sent`,
+        // `failed` and `re-armed` row after the buffer filled was discarded by the merge that
+        // existed to add it. The view froze silently, holding rows the store had already pruned.
+        const first = mergeEntries([], Array.from({ length: 200 }, () => entry('held', 'tm-a')), false, 200);
+        expect(first[199].id).toBe(200);
+
+        const arrival = entry('sent', 'tm-a', 'read 27 — 27 > 25');
+        const after = mergeEntries(first, [arrival], false, 200);
+        expect(after).toHaveLength(200);
+        expect(after[199].id).toBe(arrival.id);
+        expect(after.some((e) => e.kind === 'sent')).toBe(true);
+        // And the oldest is the one that gave way, which is what the store does too.
+        expect(after[0].id).toBe(2);
     });
 });

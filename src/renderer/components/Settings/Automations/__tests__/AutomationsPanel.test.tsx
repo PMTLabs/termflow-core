@@ -22,6 +22,8 @@ jest.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: '
 // eslint-disable-next-line import/first
 import { AutomationsPanel } from '../AutomationsPanel';
 // eslint-disable-next-line import/first
+import { JUST_FIRED_MS } from '../automationState';
+// eslint-disable-next-line import/first
 import type { AutomationRule } from '../../../../types/electron';
 
 function rule(over: Partial<AutomationRule> = {}): AutomationRule {
@@ -210,6 +212,174 @@ describe('AutomationsPanel', () => {
         const empty = container.querySelector('.au-empty');
         expect(empty?.textContent).toContain('No automations match this filter');
         expect(empty?.textContent).not.toContain('No automations yet');
+    });
+
+    it('a store that REFUSES is not drawn as a store with nothing in it', async () => {
+        // §7.8 assigns this explicitly: `Err(Disabled)` rendered as an empty list is
+        // indistinguishable from "you have no rules", and invites a user to recreate rules that
+        // already exist. The first version guarded the empty state on `rules.length === 0` alone,
+        // so a failed read drew an alert line AND the full "No automations yet" invitation under it.
+        const api = installApi([]);
+        api.listAutomations.mockRejectedValue(new Error('the rule store is disabled'));
+        await mount();
+
+        expect(container.querySelector('[role="alert"]')?.textContent).toContain('disabled');
+        // Over the WHOLE panel, not the first `.au-empty`. The defect being pinned is that the
+        // invitation renders BELOW the error, and `querySelector` returns the first match — so an
+        // oracle reading one element passed while both were on screen, which is the bug. Mutation
+        // found that: reverting the guard left this test green.
+        const panel = container.textContent ?? '';
+        expect(panel).toContain('could not be read');
+        expect(panel).toContain('have not been deleted');
+        expect(panel).not.toContain('No automations yet');
+        expect(container.querySelectorAll('.au-empty')).toHaveLength(1);
+    });
+
+    it('the log view says a read FAILED rather than that nothing has happened', async () => {
+        const api = installApi([rule()]);
+        api.loadAutomationLog.mockRejectedValue(new Error('the rule store is disabled'));
+        await mount();
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Activity log for Context handoff reminder"]')!
+                .click();
+        });
+        await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        const rows = container.querySelector('.au-logrows');
+        expect(rows?.textContent).toContain('could not be read');
+        // The confident copy must not also be on screen — the log view REPLACES the list, so this
+        // is the only thing the user can see.
+        expect(rows?.textContent).not.toContain('Nothing logged yet');
+    });
+
+    it('the log bar can turn the verbose gate on, which nothing else in the app could', async () => {
+        // Without this control `verbose_until` had no writer anywhere, so the store dropped every
+        // `Check`-class entry forever and two of the five row kinds §06 draws could never appear.
+        const api = installApi([rule()]);
+        await mount();
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Activity log for Context handoff reminder"]')!
+                .click();
+        });
+
+        const toggle = container.querySelector<HTMLButtonElement>(
+            '[aria-label="Log every check for Context handoff reminder"]',
+        );
+        expect(toggle).not.toBeNull();
+        expect(toggle!.getAttribute('aria-checked')).toBe('false');
+
+        await act(async () => toggle!.click());
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        const [saved] = api.saveAutomation.mock.calls[0];
+        // A DEADLINE, not a flag: the store's gate compares each entry's timestamp against it, and
+        // an always-on verbose log evicts everything worth keeping from a 200-entry buffer.
+        expect(saved.verboseUntil).toBeGreaterThan(Date.now());
+        expect(saved.id).toBe('au-1');
+    });
+
+    it('reads an EXPIRED verbose window as off, not as on', async () => {
+        // `verbose_until` is a deadline, so the control has to compare it with the clock. Reading it
+        // as "is it set" leaves the toggle showing on for a window that closed hours ago — and the
+        // backend NULLs stale deadlines at startup, so the two would then disagree as well.
+        const past = rule({ verboseUntil: Date.now() - 60_000 });
+        installApi([past]);
+        await mount();
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Activity log for Context handoff reminder"]')!
+                .click();
+        });
+        expect(
+            container
+                .querySelector('[aria-label="Log every check for Context handoff reminder"]')
+                ?.getAttribute('aria-checked'),
+        ).toBe('false');
+
+    });
+
+    it('reads a LIVE verbose window as on', async () => {
+        // The positive half of the pair, in its own mount: the negative above is only meaningful if
+        // the control is capable of reading `true` at all.
+        installApi([rule({ verboseUntil: Date.now() + 60_000 })]);
+        await mount();
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Activity log for Context handoff reminder"]')!
+                .click();
+        });
+        expect(
+            container
+                .querySelector('[aria-label="Log every check for Context handoff reminder"]')
+                ?.getAttribute('aria-checked'),
+        ).toBe('true');
+    });
+
+    it('offers Forget it only when there is something it could forget', async () => {
+        // `missing` is `watched_set \\ live`, and for a criterion rule with `followNew: false` the
+        // watched set is a frozen match list with no relationship to `targetIds` — which is empty
+        // for such a rule. The button filtered nothing, saved an unchanged rule, wrote a `saved`
+        // log line claiming to have replaced a version, and left the row identical. Forever.
+        const frozen = rule({ id: 'au-frozen', targetMode: 'rule', followNew: false, targetIds: [] });
+        const pinned = rule({ id: 'au-pinned', targetMode: 'pinned', targetIds: ['tm-gone'] });
+        const api = installApi([frozen, pinned]);
+        api.getAutomationRuntime.mockResolvedValue({
+            rules: {
+                'au-frozen': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
+                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
+            },
+        });
+        await mount();
+
+        const forgets = [...container.querySelectorAll('button')].filter(
+            (b) => b.textContent === 'Forget it',
+        );
+        expect(forgets).toHaveLength(1);
+
+        await act(async () => forgets[0].click());
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        expect(api.saveAutomation.mock.calls[0][0].id).toBe('au-pinned');
+        expect(api.saveAutomation.mock.calls[0][0].targetIds).toEqual([]);
+    });
+
+    it('lets Just fired expire on its own, with no further events', async () => {
+        // The one row state that ends by itself. `automation:state` is emitted on TRANSITIONS, so a
+        // rule that fires on a terminal which then goes quiet produces exactly one — and nothing
+        // would re-render the panel to let the receipt settle. It stayed "Just fired" indefinitely.
+        jest.useFakeTimers();
+        try {
+            const api = installApi([rule()]);
+            api.getAutomationRuntime.mockResolvedValue({
+                rules: {
+                    'au-1': {
+                        'tm-a': {
+                            state: 'fired',
+                            lastFiredAt: Date.now() - 1000,
+                            firedCount: 1,
+                            missing: false,
+                        },
+                    },
+                },
+            });
+            await act(async () => {
+                root.render(<AutomationsPanel />);
+            });
+            await act(async () => {
+                await Promise.resolve();
+            });
+            expect(container.querySelector('.au-pill')?.textContent).toContain('Just fired');
+
+            await act(async () => {
+                jest.advanceTimersByTime(JUST_FIRED_MS);
+            });
+            expect(container.querySelector('.au-pill')?.textContent)
+                .toContain('waiting to re-arm');
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     it('the template gallery shows the six templates plus a blank card', async () => {

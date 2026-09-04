@@ -88,7 +88,7 @@ describe('the unsaved automation draft guard', () => {
         container = document.createElement('div');
         document.body.appendChild(container);
         root = createRoot(container);
-        save = jest.fn();
+        save = jest.fn().mockResolvedValue(true);
         discard = jest.fn();
     });
 
@@ -166,11 +166,36 @@ describe('the unsaved automation draft guard', () => {
         await act(async () => {
             promptButton('Save')!.click();
         });
+        await act(async () => {
+            await Promise.resolve();
+        });
         // Saving a dirty automation draft must persist the DRAFT. Routing both owners through one
         // handler would have saved the settings and then thrown the draft away.
         expect(save).toHaveBeenCalledTimes(1);
         expect(discard).not.toHaveBeenCalled();
         expect(activeCategoryLabel(container)).toContain('Appearance');
+    });
+
+    it('does NOT navigate when the editor refuses the save', async () => {
+        // The remedy could reintroduce the very loss it exists to prevent: `save(): void` could
+        // neither be awaited nor decline, so a save rejected by validation, refused by a disabled
+        // store, or lost to a busy SQLite still let the category change, unmounted the editor and
+        // destroyed the draft. The prompt comes back so the user is not told it was stored.
+        save.mockResolvedValue(false);
+        await mountOnAutomations(true);
+        await act(async () => {
+            clickCategory(container, 'Appearance').click();
+        });
+        await act(async () => {
+            promptButton('Save')!.click();
+        });
+        await act(async () => {
+            await Promise.resolve();
+        });
+
+        expect(save).toHaveBeenCalledTimes(1);
+        expect(activeCategoryLabel(container)).toContain('Automations');
+        expect(prompt()).not.toBeNull();
     });
 
     it('routes Discard to the editor and then lets the navigation through', async () => {

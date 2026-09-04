@@ -23,12 +23,27 @@ import {
     rowTime,
 } from './activityLog';
 
+/**
+ * How long *Log every check* stays on before it turns itself off again.
+ *
+ * At a 10-second interval the verbose classes write 8,640 entries a day per terminal, and on the
+ * *every time new output arrives* cadence they are unbounded — a chatty build writes faster than
+ * anyone can read, and either way it evicts everything worth keeping from a 200-entry log. So it is
+ * a deadline, not a switch: the store's own gate compares each entry's timestamp against it.
+ */
+export const VERBOSE_WINDOW_MS = 3600_000;
+
 export interface ActivityLogViewProps {
     /** The rule this log is scoped to, or null for *All automations*. */
     rule: AutomationRule | null;
     entries: AutomationLogEntry[];
     newestFirst: boolean;
+    /** The log could not be READ. Distinct from the log being empty (§7.8). */
+    error: string | null;
+    now: number;
     onScopeChange: (ruleId: string | null) => void;
+    /** Writes `verboseUntil` through `saveAutomation`; `null` turns it off. */
+    onSetVerbose: (rule: AutomationRule, until: number | null) => void;
     onBack: () => void;
 }
 
@@ -36,11 +51,18 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
     rule,
     entries,
     newestFirst,
+    error,
+    now,
     onScopeChange,
+    onSetVerbose,
     onBack,
 }) => {
     const [filter, setFilter] = useState<LogFilter>('all');
     const [expanded, setExpanded] = useState<Set<string>>(new Set());
+    // Derived, never stored: a deadline that has passed is off, and the backend NULLs stale ones at
+    // startup anyway. Reading the flag as "is it set" would leave the toggle on after it expired.
+    const isVerbose =
+        rule?.verboseUntil !== null && rule?.verboseUntil !== undefined && rule.verboseUntil > now;
 
     const rows = useMemo(
         () => collapseRuns(entries.filter((e) => passesFilter(e, filter))),
@@ -86,6 +108,39 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                         All automations
                     </button>
                 </div>
+                {/*
+                  * THE VERBOSE GATE'S ONLY WRITER (mockup §06's *Log every check*).
+                  *
+                  * Without it `verbose_until` was NULL for every rule that had ever existed, and the
+                  * store drops every `Check`-class entry when it is — so `checked` and `no match`,
+                  * two of the five row kinds §06 draws, could never appear at all. That made the
+                  * section's own thesis false: a rule that does nothing looks exactly like a rule
+                  * that is working perfectly and has correctly stayed quiet, and the rows that tell
+                  * those apart were the two being gated off. Nothing in §12 assigned this to any
+                  * milestone; it belongs with the log view, which is here.
+                  *
+                  * It needs no new command: `save_rule` already persists whatever `verbose_until`
+                  * the rule carries, so this is an ordinary definition mutation and reloads like one.
+                  */}
+                {rule && (
+                    <span className="au-verbose">
+                        Log every check
+                        <button
+                            type="button"
+                            className="au-tog"
+                            role="switch"
+                            aria-checked={isVerbose}
+                            aria-label={`Log every check for ${rule.name}`}
+                            onClick={() =>
+                                onSetVerbose(rule, isVerbose ? null : now + VERBOSE_WINDOW_MS)}
+                        />
+                        {isVerbose && (
+                            <span className="au-verbose-until">
+                                · off again at {clockTime(rule.verboseUntil ?? now).slice(0, 5)}
+                            </span>
+                        )}
+                    </span>
+                )}
                 <div className="au-chips" role="group" aria-label="Log filter">
                     {(['all', 'sent', 'problems'] as LogFilter[]).map((f) => (
                         <button
@@ -114,10 +169,27 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                     <span>Why</span>
                 </div>
 
-                {rows.length === 0 && (
+                {error !== null && (
+                    // The log view REPLACES the list, so the list's own error line is not on screen
+                    // while this is showing — which is why §7.8 assigns the `Disabled` state to this
+                    // view separately. It used to render the confident "Nothing logged yet" copy
+                    // below over a store that was refusing to answer.
+                    <div className="au-logempty au-logfailed" role="alert">
+                        <b>The activity log could not be read.</b> This is not an empty log — the
+                        store did not answer. {error}
+                    </div>
+                )}
+
+                {error === null && rows.length === 0 && (
                     <div className="au-logempty">
                         Nothing logged yet. Entries appear as soon as the rule makes a decision —
                         including the decisions where it deliberately stayed quiet.
+                        {!isVerbose && rule && (
+                            <>
+                                {' '}Ordinary checks are not recorded unless <b>Log every check</b> is
+                                on.
+                            </>
+                        )}
                     </div>
                 )}
 

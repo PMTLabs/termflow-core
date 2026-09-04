@@ -12,7 +12,9 @@ import {
     automationRowState,
     describeCadence,
     describeCriterion,
+    describeLastFired,
     describeRule,
+    describeWatching,
     JUST_FIRED_MS,
 } from '../automationState';
 
@@ -269,6 +271,42 @@ describe('the row reads as a sentence', () => {
         expect(s.lead).toBe('when output starts matching');
         expect(s.subject).toBe('Do you want to proceed?');
         expect(s.verb).toBeNull();
+    });
+
+    it('describes a PINNED rule by its picked terminals, not by its stale criterion', () => {
+        // A pinned rule still carries a criterion — the columns are non-optional and keep whatever
+        // they last held — and `watched_set` ignores it entirely for that mode. Switching on the
+        // criterion alone made a rule watching two hand-picked terminals read "all terminals",
+        // which is the one thing this module promises cannot happen.
+        const pinned = rule({
+            targetMode: 'pinned',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            targetIds: ['tm-1', 'tm-2'],
+        });
+        expect(describeCriterion(pinned)).toBe('2 picked terminals');
+        expect(describeWatching(pinned, { 'tm-1': pair(), 'tm-2': pair({ missing: true }) }))
+            .toBe('2 picked terminals · 1 open');
+
+        const one = rule({ targetMode: 'pinned', targetIds: ['tm-1'] });
+        expect(describeCriterion(one)).toBe('1 picked terminal');
+    });
+
+    it('describes a criterion rule by its criterion, and counts in "now"', () => {
+        const r = rule();
+        expect(describeWatching(r, { 'tm-1': pair(), 'tm-2': pair() }))
+            .toBe('command contains "claude" · 2 now');
+        // No pairs reported yet: the subject alone, never "· 0 now", which would read as a finding.
+        expect(describeWatching(r, undefined)).toBe('command contains "claude"');
+        expect(describeWatching(r, {})).toBe('command contains "claude"');
+    });
+
+    it('says how long ago it fired, the way the mockup words it', () => {
+        const now = 1_700_000_000_000;
+        expect(describeLastFired(now - 5_000, now)).toBe('just now');
+        expect(describeLastFired(now - 4 * 60_000, now)).toBe('4 min ago');
+        expect(describeLastFired(now - 2 * 3_600_000, now)).toBe('2 hours ago');
+        expect(describeLastFired(now - 3_600_000, now)).toBe('1 hour ago');
     });
 
     it('describes the criterion and the cadence in the picker′s own words', () => {

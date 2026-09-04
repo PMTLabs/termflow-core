@@ -243,8 +243,22 @@ export function describeRule(rule: AutomationRule): RuleSentence {
 // The rest of the row's meta line
 // =================================================================================================
 
-/** *Watching command contains "claude"* — the criterion in the words the picker uses. */
+/**
+ * *Watching command contains "claude"* — the criterion in the words the picker uses.
+ *
+ * **Reads `targetMode` first, because a rule has two ways of choosing terminals and only one of
+ * them is the criterion.** A `pinned` rule watches the ids the user picked and `watched_set`
+ * ignores its criterion entirely — but the criterion columns are non-optional and keep whatever
+ * they last held, so switching on `rule.criterion` alone made a rule watching two hand-picked
+ * terminals read *"Watching all terminals"*. Both reviewers found that independently, and it is
+ * the one thing this module promises cannot happen: a row describing a rule the engine is not
+ * running.
+ */
 export function describeCriterion(rule: AutomationRule): string {
+    if (rule.targetMode === 'pinned') {
+        const n = rule.targetIds.length;
+        return `${n} picked terminal${n === 1 ? '' : 's'}`;
+    }
     switch (rule.criterion) {
         case 'allTerminals':
             return 'all terminals';
@@ -279,4 +293,35 @@ export function openCount(
 ): number | null {
     if (!pairs) return null;
     return Object.values(pairs).filter((p) => !p.missing).length;
+}
+
+/**
+ * The whole *"Watching ... · N now"* line, assembled here rather than in the row.
+ *
+ * The mockup uses different words for the two targeting modes — a pinned rule reads
+ * *"2 picked terminals · 1 open"* and a criterion rule reads *"command contains \"claude\" · 2 now"*
+ * — and a component that joined a noun to a count would have to know which mode it was in. That is
+ * the same reason `describeRule` returns its pieces instead of a string: whatever a component has
+ * to re-derive, it will eventually re-derive differently.
+ */
+export function describeWatching(
+    rule: AutomationRule,
+    pairs: Record<string, AutomationRuntimePairState> | undefined,
+): string {
+    const subject = describeCriterion(rule);
+    const open = openCount(pairs);
+    const watched = pairs ? Object.keys(pairs).length : 0;
+    if (open === null || watched === 0) return subject;
+    return rule.targetMode === 'pinned' ? `${subject} · ${open} open` : `${subject} · ${open} now`;
+}
+
+/** *Fired 4 min ago* — the mockup's own relative phrasing, not a wall-clock stamp. */
+export function describeLastFired(at: number, now: number): string {
+    const secs = Math.max(0, Math.round((now - at) / 1000));
+    if (secs < 60) return 'just now';
+    const mins = Math.round(secs / 60);
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+    return new Date(at).toLocaleString();
 }

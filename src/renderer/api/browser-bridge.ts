@@ -1,5 +1,4 @@
-import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, WatchableTerminal, DryRunReport } from '../types/electron';
-import type { AutomationStatePayload } from '../services/automationEvents';
+import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 
@@ -549,61 +548,16 @@ class BrowserBridge implements ElectronAPI {
 
     // --- Terminal Automations (Plan 028) ---
     //
-    // The rule store is SQLite inside the desktop process and the engine runs there too,
-    // so there is nothing to proxy. These throw rather than returning an empty list: an
-    // empty list is indistinguishable from "you have no automations yet" and would draw
-    // the panel's empty state over a feature that is simply not present here. The panel
-    // guards with `?.` and renders an explicit unavailable card.
-    async listAutomations(): Promise<AutomationRule[]> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async getAutomationRuntime(): Promise<AutomationStatePayload> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async loadAutomationLog(
-        _ruleId: string | null,
-        _newestFirst: boolean,
-        _limit: number,
-    ): Promise<AutomationLogEntry[]> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async listWatchableTerminals(
-        _ruleId: string | null,
-        _includeIds: string[] | null,
-    ): Promise<WatchableTerminal[]> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async dryRunAutomation(_rule: AutomationRule, _terminalId: string): Promise<DryRunReport> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async saveAutomation(_rule: AutomationRule, _origin: string): Promise<number | null> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async deleteAutomation(_id: string, _origin: string): Promise<boolean> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async duplicateAutomation(_id: string, _origin: string): Promise<AutomationRule> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async setAutomationEnabled(_id: string, _enabled: boolean, _origin: string): Promise<void> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async resetAutomation(_id: string, _origin: string): Promise<void> {
-        throw new Error('automations are only available in the desktop app');
-    }
-
-    async rearmAutomation(_ruleId: string, _terminalId: string | null): Promise<void> {
-        throw new Error('automations are only available in the desktop app');
-    }
+    // DELIBERATELY NOT IMPLEMENTED, and the absence is the interface. The rule store is SQLite
+    // inside the desktop process and the engine runs there too, so there is nothing to proxy.
+    // `ElectronAPI` declares all eleven as optional, so this class still satisfies it.
+    //
+    // The first version defined eleven throwing stubs, with a comment saying the panel would
+    // "render an explicit unavailable card". It would not have: the panel detects absence with
+    // `!api?.listAutomations`, and a stub that throws is still a truthy property. So the browser
+    // host reached the list surface, the throw was caught as an ordinary fetch error, and the user
+    // was shown "No automations yet" over a feature that is simply not present. Not defining them
+    // is what makes the detection true.
 
     // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
     async canvasApiRequest(path: string, init?: { method?: string; body?: unknown }): Promise<unknown> {

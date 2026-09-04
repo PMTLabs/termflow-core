@@ -16,8 +16,9 @@ import {
     automationRowState,
     describeCadence,
     describeCriterion,
+    describeLastFired,
     describeRule,
-    openCount,
+    describeWatching,
 } from './automationState';
 
 export interface AutomationRowProps {
@@ -51,7 +52,15 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
     const missing = Object.entries(pairs ?? {})
         .filter(([, p]) => p.missing)
         .map(([tm]) => tm);
-    const open = openCount(pairs);
+    // **Forgettable is narrower than missing, and the difference is a button that does nothing.**
+    // `missing` is computed backend-side as `watched_set \ live`, and for a criterion rule with
+    // `followNew: false` the watched set is a FROZEN match list that has no relationship to
+    // `targetIds` — which is empty for such a rule. *Forget it* filtered `targetIds`, removed
+    // nothing, saved an unchanged rule, wrote a `saved` log line claiming to have replaced a
+    // version, and left the row exactly as it was. Clickable forever, with a log entry each time.
+    const forgettable = rule.targetMode === 'pinned'
+        ? missing.filter((tm) => rule.targetIds.includes(tm))
+        : [];
     const watched = Object.keys(pairs ?? {});
     const fired = Object.values(pairs ?? {}).reduce((n, p) => n + p.firedCount, 0);
     const lastFired = Object.values(pairs ?? {}).reduce<number | null>(
@@ -87,8 +96,7 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
 
                 <div className="au-meta">
                     <span className="au-k">
-                        ◉ Watching <span className="au-term">{describeCriterion(rule)}</span>
-                        {open !== null && watched.length > 0 && ` · ${open} now`}
+                        ◉ Watching <span className="au-term">{describeWatching(rule, pairs)}</span>
                     </span>
                     {watched.length > 0 && (
                         <span className="au-k">
@@ -108,7 +116,7 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                         {rule.completedAt
                             ? `✓ Completed ${new Date(rule.completedAt).toLocaleString()} — will not run again`
                             : lastFired !== null
-                                ? `⏱ Fired ${fired} ${fired === 1 ? 'time' : 'times'} · last ${new Date(lastFired).toLocaleTimeString()}`
+                                ? `⏱ Fired ${describeLastFired(lastFired, now)} · ${fired} ${fired === 1 ? 'time' : 'times'}`
                                 : '⏱ Never fired'}
                     </span>
                 </div>
@@ -163,11 +171,11 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                             Reset
                         </button>
                     )}
-                    {missing.length > 0 && (
+                    {forgettable.length > 0 && (
                         <button
                             type="button"
                             className="au-btn sm"
-                            onClick={() => onForget(rule, missing)}
+                            onClick={() => onForget(rule, forgettable)}
                         >
                             Forget it
                         </button>

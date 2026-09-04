@@ -9,13 +9,13 @@
  * renders under a bare `createRoot` with no Provider, which is what makes §10.28 a cheap test
  * rather than a fixture exercise.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import type { AutomationRule } from '../../../types/electron';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { AutomationRow } from './AutomationRow';
 import { TemplateGallery } from './TemplateGallery';
 import { ActivityLogView } from './ActivityLogView';
-import { automationRowState } from './automationState';
+import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
 import './AutomationsPanel.css';
 
@@ -36,6 +36,7 @@ export const AutomationsPanel: React.FC = () => {
         logScope,
         loading,
         error,
+        logError,
         unavailable,
         origin,
         setLogScope,
@@ -48,7 +49,15 @@ export const AutomationsPanel: React.FC = () => {
     const [actionError, setActionError] = useState<string | null>(null);
 
     // A single clock for the whole render, so two rows cannot disagree about whether a fire was
-    // "just now". Re-read on every render, which a state event already triggers.
+    // "just now".
+    //
+    // `tick` exists because *Just fired* is the one row state that expires on its own. Every other
+    // transition arrives as an `automation:state` event, but a rule that fires on a terminal which
+    // then goes quiet produces exactly ONE transition — and nothing would re-render the panel six
+    // seconds later to let the receipt settle into *Fired · waiting to re-arm*. The row stayed on
+    // "Just fired" for minutes, or until an unrelated click, in a state the module's own doc calls
+    // "the receipt, not a state you get stuck in".
+    const [tick, setTick] = useState(0);
     const now = Date.now();
 
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
@@ -63,16 +72,15 @@ export const AutomationsPanel: React.FC = () => {
         }
     };
 
-    const visible = useMemo(
-        () =>
-            rules.filter((rule) => {
-                if (filter === 'all') return true;
-                const state = automationRowState(rule, runtime.rules[rule.id], now);
-                if (filter === 'active') return rule.enabled && state.id !== 'completed';
-                return state.id === 'error';
-            }),
-        [rules, runtime, filter, now],
-    );
+    // Deliberately NOT memoised. `now` changes every render by construction, so a `useMemo` keyed
+    // on it can never hit — it would read as caching while doing strictly more work than the plain
+    // filter it wraps.
+    const visible = rules.filter((rule) => {
+        if (filter === 'all') return true;
+        const state = automationRowState(rule, runtime.rules[rule.id], now);
+        if (filter === 'active') return rule.enabled && state.id !== 'completed';
+        return state.id === 'error';
+    });
 
     const counts = useMemo(() => {
         let on = 0;
@@ -85,6 +93,28 @@ export const AutomationsPanel: React.FC = () => {
         }
         return { on, completed, off };
     }, [rules]);
+
+    // One timer for the whole list, at the EARLIEST expiry, rather than one per row: the rows
+    // share a clock, so they share a deadline. Re-armed on every render, which is what makes a
+    // newly-arrived fire reset it.
+    const nextExpiry = useMemo(() => {
+        let soonest = Infinity;
+        for (const rule of rules) {
+            for (const pair of Object.values(runtime.rules[rule.id] ?? {})) {
+                if (pair.lastFiredAt === null) continue;
+                const left = pair.lastFiredAt + JUST_FIRED_MS - now;
+                if (left > 0 && left < soonest) soonest = left;
+            }
+        }
+        return soonest;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rules, runtime, tick]);
+
+    useEffect(() => {
+        if (!Number.isFinite(nextExpiry)) return undefined;
+        const id = setTimeout(() => setTick((n) => n + 1), nextExpiry + 50);
+        return () => clearTimeout(id);
+    }, [nextExpiry]);
 
     const openEditor = (draft: AutomationRule) => setView({ kind: 'editor', draft });
 
@@ -130,7 +160,12 @@ export const AutomationsPanel: React.FC = () => {
                 rule={rules.find((r) => r.id === view.ruleId) ?? null}
                 entries={log}
                 newestFirst={logScope?.newestFirst ?? false}
+                error={logError}
+                now={now}
                 onScopeChange={(ruleId) => showLog(ruleId)}
+                onSetVerbose={(r, until) =>
+                    void run('Changing the log detail', () =>
+                        api!.saveAutomation!({ ...r, verboseUntil: until }, origin))}
                 onBack={backToList}
             />
         );
@@ -209,7 +244,26 @@ export const AutomationsPanel: React.FC = () => {
             <div className="au-rows">
                 {loading && <div className="au-empty">Loading…</div>}
 
-                {!loading && rules.length === 0 && (
+                {!loading && error !== null && (
+                    // §7.8 assigns this state explicitly: a store returning `Err(Disabled)` used to
+                    // render as an empty list, indistinguishable from "you have no rules" — which
+                    // invites a user to recreate rules that already exist. The alert line above says
+                    // what went wrong; this says what it does NOT mean.
+                    <div className="au-empty">
+                        <h4>Your automations could not be read</h4>
+                        <p>
+                            The rule store did not answer, so this list is showing nothing rather
+                            than nothing being there. <b>Your rules have not been deleted.</b> Any
+                            enabled rule is still running in the background — the engine reads the
+                            store directly and does not go through this page.
+                        </p>
+                        <button type="button" className="au-btn" onClick={() => void refresh()}>
+                            Try again
+                        </button>
+                    </div>
+                )}
+
+                {!loading && error === null && rules.length === 0 && (
                     // The EMPTY state — nothing has been created. Deliberately not the same shape as
                     // a rule that is switched off: one is an invitation, the other is a rule you
                     // already decided about, and drawing them alike is how a paused rule reads as a
@@ -231,7 +285,7 @@ export const AutomationsPanel: React.FC = () => {
                     </div>
                 )}
 
-                {!loading && rules.length > 0 && visible.length === 0 && (
+                {!loading && error === null && rules.length > 0 && visible.length === 0 && (
                     <div className="au-empty">
                         <p>
                             No automations match this filter. {rules.length}{' '}

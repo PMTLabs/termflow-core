@@ -18,12 +18,25 @@ import { createRoot, Root } from 'react-dom/client';
 const calls: string[] = [];
 /** The handlers the hook registered, so a test can actually deliver an event to one. */
 const handlers = new Map<string, (event: { payload: unknown }) => void>();
+/**
+ * The unlisten function returned for each subscription — SPIES, not stubs.
+ *
+ * They used to be anonymous no-ops, which meant nothing could observe whether they were ever
+ * called: emptying the hook's entire cleanup left all six tests green. A mock's return value is
+ * part of its oracle, and an untracked one silently exempts everything downstream of it.
+ */
+const unlistens: jest.Mock[] = [];
+/** Set to make a named subscription fail, so the partial-registration path can be driven. */
+let failListenFor: string | null = null;
 
 jest.mock('@tauri-apps/api/event', () => ({
     listen: jest.fn((name: string, handler: (event: { payload: unknown }) => void) => {
         calls.push(`listen:${name}`);
+        if (failListenFor === name) return Promise.reject(new Error(`refused ${name}`));
         handlers.set(name, handler);
-        return Promise.resolve(() => {});
+        const un = jest.fn();
+        unlistens.push(un);
+        return Promise.resolve(un);
     }),
 }));
 
@@ -73,6 +86,8 @@ describe('useAutomations', () => {
     beforeEach(() => {
         calls.length = 0;
         handlers.clear();
+        unlistens.length = 0;
+        failListenFor = null;
         latest = null;
         (window as unknown as { electronAPI: unknown }).electronAPI = {
             listAutomations: jest.fn(() => {
@@ -174,10 +189,58 @@ describe('useAutomations', () => {
         expect(calls.filter((c) => c === 'fetch:log').length).toBe(before + 1);
     });
 
+    it('unregisters every listener on unmount', async () => {
+        await mount();
+        expect(unlistens).toHaveLength(3);
+        expect(unlistens.every((un) => un.mock.calls.length === 0)).toBe(true);
+
+        await act(async () => root.unmount());
+        expect(unlistens.every((un) => un.mock.calls.length === 1)).toBe(true);
+
+        // Re-created so afterEach's unmount has a root to act on.
+        root = createRoot(container);
+    });
+
+    it('does not strand the subscriptions that succeeded when one of them fails', async () => {
+        // `Promise.all` rejects on the first failure and abandons the other results, so the two
+        // that DID register used to be unreachable: their unlisten handles were never bound to
+        // anything and the subscriptions outlived the component.
+        failListenFor = 'automation:activity';
+        await mount();
+        expect(unlistens.length).toBeGreaterThan(0);
+
+        await act(async () => root.unmount());
+        expect(unlistens.every((un) => un.mock.calls.length === 1)).toBe(true);
+        root = createRoot(container);
+    });
+
+    it('reports a log read failure instead of swallowing it', async () => {
+        // The log view REPLACES the list, so the list's error line is not on screen while the log
+        // is showing — a swallowed failure rendered "Nothing logged yet" over a refusing store.
+        const api = window.electronAPI as unknown as { loadAutomationLog: jest.Mock };
+        api.loadAutomationLog.mockRejectedValueOnce(new Error('the rule store is disabled'));
+        await mount();
+        await act(async () => {
+            latest?.setLogScope({ ruleId: 'au-1', newestFirst: false });
+        });
+        await flush();
+        expect(latest?.logError).toContain('disabled');
+        expect(latest?.log).toEqual([]);
+    });
+
     it('reports unavailable rather than empty when the bridge has no automation surface', async () => {
         // An empty list is indistinguishable from "you have no automations yet" and would draw the
         // panel's empty state over a feature that is simply not present in this host.
-        (window as unknown as { electronAPI: unknown }).electronAPI = {};
+        //
+        // The shape below is what `browser-bridge.ts` actually produces: it does NOT define the
+        // eleven automation methods. It used to define them as throwing stubs, which are truthy
+        // properties — so this detection never fired in the one host it exists for, and this test
+        // passed anyway because `{}` is a shape no host in the repo makes. An oracle has to name a
+        // real host, not a convenient one.
+        (window as unknown as { electronAPI: unknown }).electronAPI = {
+            getTerminalOutput: jest.fn(),
+            createTerminal: jest.fn(),
+        };
         await mount();
         expect(latest?.unavailable).toBe(true);
         expect(latest?.loading).toBe(false);

@@ -43,7 +43,10 @@ export interface UseAutomations {
     log: AutomationLogEntry[];
     logScope: LogScope | null;
     loading: boolean;
+    /** The rule list could not be read. Distinct from "there are no rules". */
     error: string | null;
+    /** The log could not be read. Separate from `error`: the log view replaces the list. */
+    logError: string | null;
     /** The desktop bridge is absent — the browser host has no rule store to talk to. */
     unavailable: boolean;
     /** This window's label, passed to every mutating command so the log can name it. */
@@ -61,6 +64,7 @@ export function useAutomations(): UseAutomations {
     const [logScope, setLogScope] = useState<LogScope | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [logError, setLogError] = useState<string | null>(null);
     const [unavailable, setUnavailable] = useState(false);
     const [origin, setOrigin] = useState('main');
 
@@ -68,9 +72,20 @@ export function useAutomations(): UseAutomations {
     // scope must not land in the new one's buffer.
     const scopeRef = useRef<LogScope | null>(null);
     scopeRef.current = logScope;
-    const aliveRef = useRef(true);
+
+    // A MONOTONIC GENERATION, not an `alive` boolean, and the difference is not cosmetic.
+    //
+    // A shared `aliveRef` cannot tell effect instances apart. React double-invokes effects under
+    // StrictMode, and any remount does the same thing more slowly: instance 1 sets it false on
+    // cleanup, instance 2 immediately sets it true, and instance 1's in-flight response then finds
+    // a `true` flag that was set for somebody else and commits itself over the top. A counter
+    // cannot be confused that way, because the value each caller captured is unique to it. This is
+    // the guard `SettingsPage.tsx` already uses for its launch-at-login and file-manager readbacks,
+    // for exactly this reason.
+    const genRef = useRef(0);
 
     const fetchRules = useCallback(async () => {
+        const gen = genRef.current;
         const api = window.electronAPI;
         if (!api?.listAutomations || !api.getAutomationRuntime) {
             setUnavailable(true);
@@ -82,19 +97,20 @@ export function useAutomations(): UseAutomations {
                 api.listAutomations(),
                 api.getAutomationRuntime(),
             ]);
-            if (!aliveRef.current) return;
+            if (genRef.current !== gen) return;
             setRules(list);
             setRuntime(state);
             setError(null);
         } catch (e) {
-            if (!aliveRef.current) return;
+            if (genRef.current !== gen) return;
             setError(e instanceof Error ? e.message : String(e));
         } finally {
-            if (aliveRef.current) setLoading(false);
+            if (genRef.current === gen) setLoading(false);
         }
     }, []);
 
     const fetchLog = useCallback(async () => {
+        const gen = genRef.current;
         const scope = scopeRef.current;
         const api = window.electronAPI;
         if (!scope || !api?.loadAutomationLog) return;
@@ -104,58 +120,92 @@ export function useAutomations(): UseAutomations {
                 scope.newestFirst,
                 LOG_BUFFER_MAX,
             );
-            if (!aliveRef.current || scopeRef.current !== scope) return;
+            if (genRef.current !== gen || scopeRef.current !== scope) return;
             // Merged rather than replaced: an `automation:activity` event can arrive while this
             // request is in flight, and the entry it stands for must not be dropped by a response
             // that was assembled before it existed.
             setLog((prev) => mergeEntries(prev, rows, scope.newestFirst, LOG_BUFFER_MAX));
-        } catch {
-            /* the list already reports the connection; a log failure is not worth a second banner */
+            setLogError(null);
+        } catch (e) {
+            if (genRef.current !== gen || scopeRef.current !== scope) return;
+            // This used to be swallowed, on the reasoning that "the list already reports the
+            // connection". It does not: the log is a FULL-WIDTH REPLACEMENT of the list, so the
+            // list's error line is not on screen at all while the log is showing — and the log then
+            // rendered "Nothing logged yet. Entries appear as soon as the rule makes a decision",
+            // which is a confident, specific lie about a store that is refusing to answer. §7.8
+            // assigns the `Disabled` state to the panel AND the log view, separately, for this
+            // reason.
+            setLogError(e instanceof Error ? e.message : String(e));
         }
     }, []);
 
     // --- Subscriptions, then the first fetch. In that order, always. ---
     useEffect(() => {
-        aliveRef.current = true;
-        let unlisteners: Array<() => void> = [];
-        let cancelled = false;
+        const gen = ++genRef.current;
+        const isCurrent = () => genRef.current === gen;
+        // Collected AS THEY ARRIVE rather than assigned once at the end. `Promise.all` rejects on
+        // the first failure and abandons the other results, so one `listen` that failed used to
+        // strand the one or two that had already succeeded: their unlisten functions were never
+        // bound to anything, and those subscriptions outlived the component with nothing able to
+        // reach them.
+        const unlisteners: Array<() => void> = [];
+
+        const track = async (
+            listen: (
+                name: string,
+                handler: (event: { payload: unknown }) => void,
+            ) => Promise<() => void>,
+            name: string,
+            handler: (event: { payload: unknown }) => void,
+        ) => {
+            const un = await listen(name, (event) => {
+                // A listener belonging to a superseded instance must not act, even in the window
+                // between this instance being retired and its unlisten landing.
+                if (isCurrent()) handler(event);
+            });
+            unlisteners.push(un);
+        };
 
         void (async () => {
             try {
                 const { listen } = await import('@tauri-apps/api/event');
                 const { getCurrentWindow } = await import('@tauri-apps/api/window');
-                if (!cancelled) setOrigin(getCurrentWindow().label);
-                const subs = await Promise.all([
-                    listen(AUTOMATION_CHANGED, () => {
+                // The dynamic import is the one long suspension point where this instance can be
+                // replaced, and nothing below is worth doing for an instance that already has been.
+                if (!isCurrent()) return;
+                setOrigin(getCurrentWindow().label);
+
+                await Promise.all([
+                    track(listen, AUTOMATION_CHANGED, () => {
                         void fetchRules();
                         void fetchLog();
                     }),
-                    listen(AUTOMATION_STATE, (event: { payload: unknown }) => {
+                    track(listen, AUTOMATION_STATE, (event) => {
                         const payload = event.payload as AutomationStatePayload | undefined;
                         if (payload && typeof payload === 'object' && 'rules' in payload) {
                             setRuntime(payload);
                         }
                     }),
-                    listen(AUTOMATION_ACTIVITY, () => {
+                    track(listen, AUTOMATION_ACTIVITY, () => {
                         void fetchLog();
                     }),
                 ]);
-                if (cancelled) {
-                    subs.forEach((un) => un());
+                if (!isCurrent()) {
+                    unlisteners.splice(0).forEach((un) => un());
                     return;
                 }
-                unlisteners = subs;
             } catch {
                 // Not running under Tauri (the browser host, or a unit test with no event API).
-                // The panel still fetches once and renders whatever the bridge gives it.
+                // Whatever did register is already in `unlisteners`, so cleanup still drops it.
             }
-            if (!cancelled) await fetchRules();
+            if (isCurrent()) await fetchRules();
         })();
 
         return () => {
-            cancelled = true;
-            aliveRef.current = false;
-            unlisteners.forEach((un) => un());
+            // Bumping the generation is what retires this instance: every guard above compares
+            // against the value it captured, so nothing from here on can commit.
+            genRef.current += 1;
+            unlisteners.splice(0).forEach((un) => un());
         };
     }, [fetchRules, fetchLog]);
 
@@ -165,9 +215,11 @@ export function useAutomations(): UseAutomations {
     useEffect(() => {
         if (!logScope) {
             setLog([]);
+            setLogError(null);
             return;
         }
         setLog([]);
+        setLogError(null);
         void fetchLog();
     }, [logScope, fetchLog]);
 
@@ -178,6 +230,7 @@ export function useAutomations(): UseAutomations {
         logScope,
         loading,
         error,
+        logError,
         unavailable,
         origin,
         setLogScope,
