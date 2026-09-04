@@ -23,8 +23,11 @@ pub const TARGETING_TICK_MS: u64 = 2_000;
 
 /// Is this `(rule, terminal)` pair due for evaluation on this tick?
 ///
-/// **A pair that has never been evaluated is always due**, which is what makes a rule start working
-/// the moment it is enabled rather than one interval later.
+/// **A pair that has never been evaluated is never held back BY ITS INTERVAL**, which is what makes a
+/// rule start working the moment it is enabled rather than one interval later. That is the whole of
+/// the claim: a `Timer` pair with no `last` is due outright, and an `OnOutput` pair with no `last`
+/// still waits for its terminal to print — `dirty` gates it, and gates it first. *(This used to read
+/// "always due", which is true of one cadence out of two.)*
 ///
 /// **A NEGATIVE age counts as due, and that is not a rounding decision.** `now - last` goes negative
 /// when the wall clock moves backwards — an NTP correction, or a resume, both of which this app
@@ -84,14 +87,18 @@ pub fn select_due(due_len: usize, cursor: usize, cap: usize) -> (Vec<usize>, usi
 /// the second miss that output — and permanently, if the terminal then goes quiet, because `dirty`
 /// is the only thing that would have brought it back.
 ///
-/// **There are two ways a pair can want this output and not have run**, and the first version of this
-/// function covered one of them — which is what "fixed at some sites but not all" looks like inside a
-/// single function. `MAX_EVALS_PER_TICK` holds a due pair over to the next tick: that is `picked`. A
-/// pair can also be **held off by the 250 ms floor** while a sibling rule on the same terminal is due,
-/// and that pair is not in `due_pcs` at all, so no amount of reasoning about `picked` can see it — the
-/// caller passes those as `owed`. Neither is the same statement as "clear what you evaluated".
+/// **The invariant, rather than a list of the ways it can be broken:** a `pc` is cleared only when
+/// every pair on it either ran AND read, or was never going to want this output. The first version of
+/// this function said "clear what you evaluated", the second enumerated two doors, and there were
+/// three — so the count is gone deliberately. `picked` and `owed` are how the caller expresses the
+/// invariant, and the caller is where the enumeration belongs, because it is the loop that knows.
 ///
-/// *(A terminal that is SETTLING is not a third door. Settling is keyed by the leaf and a leaf has one
+/// - `picked` are the indices that ran. `MAX_EVALS_PER_TICK` holds the rest over to the next tick.
+/// - `owed` is every process some pair still wants and cannot be seen through `picked`: a pair held
+///   off by the 250 ms floor never reaches `due_pcs` at all, and a pair whose terminal had no
+///   readable screen reaches it and reads nothing.
+///
+/// *(A terminal that is SETTLING is not one of them. Settling is keyed by the leaf and a leaf has one
 /// process, so every pair on it skips together and the process never reaches `due_pcs`.)*
 pub fn settled_processes(
     due_pcs: &[String],

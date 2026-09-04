@@ -90,18 +90,7 @@ impl<T> Default for ProcSnapshot<T> {
     }
 }
 
-/// Does anything actually need a process scan this tick?
-///
-/// The idle gate, mirroring `AgentSchemeTracker.tick()`. Only two criteria can want one, and only one
-/// of them always does:
-///
-/// - `Command contains` reads the foreground descendant's command line, which exists only in a scan.
-/// - `Working folder is under` prefers the OSC cwd and falls back to the process cwd, so it wants a
-///   scan **only** when some rostered terminal has not reported one.
-///
-/// The other three are answered from `state.terminals` alone. A profile whose only enabled rule is
-/// `Terminal ID is` must never enumerate the machine's processes.
-/// The same question, asked of the roster the caller already holds.
+/// The same question as `scan_needed`, asked of the roster the caller already holds.
 ///
 /// `scan_needed` is pure and well tested; the PREDICATE that fed it was a `rows.iter().any(..)` inside
 /// `AppState`'s `EngineHost` impl, which §7.10 says is the one place a gate cannot be reached by a
@@ -115,6 +104,17 @@ pub fn scan_needed_for(
     scan_needed(criteria, rows.iter().any(|r| r.cwd.is_none()))
 }
 
+/// Does anything actually need a process scan this tick?
+///
+/// The idle gate, mirroring `AgentSchemeTracker.tick()`. Only two criteria can want one, and only one
+/// of them always does:
+///
+/// - `Command contains` reads the foreground descendant's command line, which exists only in a scan.
+/// - `Working folder is under` prefers the OSC cwd and falls back to the process cwd, so it wants a
+///   scan **only** when some rostered terminal has not reported one.
+///
+/// The other three are answered from `state.terminals` alone. A profile whose only enabled rule is
+/// `Terminal ID is` must never enumerate the machine's processes.
 pub fn scan_needed(criteria: impl IntoIterator<Item = Criterion>, any_missing_cwd: bool) -> bool {
     criteria.into_iter().any(|c| match c {
         Criterion::CommandContains => true,

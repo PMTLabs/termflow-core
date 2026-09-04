@@ -122,9 +122,12 @@ pub struct LiveRule {
 /// says is the one place a decision cannot be tested on Windows. `if report.emit` written as
 /// `if false` changed nothing any test could see, in either copy.
 ///
-/// `emit` is the STORE's answer, not the engine's: the verbose gate decides whether a row was
-/// actually written, and announcing a row that was dropped would make every open Settings page
-/// re-query the log for nothing.
+/// **`emit` means a refusal row reached the log.** It is the store's answer rather than the engine's
+/// — but not because the verbose gate might have swallowed it: that gate runs only for a `Check`-class
+/// row (`class_of`), and the only kind `reload` writes is `LogKind::Failed`, which is `Decision`-class
+/// and never gated. In `reload` the flag is set inside the loop that fills `skipped`, so `emit` is
+/// true exactly when at least one refusal was written. Announcing when nothing was would make every
+/// open Settings page re-query the log for nothing.
 pub fn refusals_to_announce(report: &ReloadReport) -> Option<Vec<String>> {
     if !report.emit {
         return None;
@@ -626,6 +629,10 @@ mod tests {
             engine.runtime.set_arm(id, "tm-1", ArmState::Fired { at_ms: 500 });
             engine.runtime.set_last_eval(id, "tm-1", 500);
             engine.runtime.record_fire(id, "tm-1", 500);
+            // All FOUR pair-keyed maps, arranged so the assertions below are not absence assertions
+            // over keys that were never set. `last_decision` was added by a later round and purged at
+            // all three sites without being asserted at any of them.
+            engine.runtime.set_last_decision(id, "tm-1", crate::automation_engine::eval::Decision::Held);
         }
 
         // The user flips A off. B is untouched in the store.
@@ -643,14 +650,25 @@ mod tests {
         assert_eq!(engine.runtime.last_eval("au-b", "tm-1"), Some(500));
         assert_eq!(engine.runtime.fire_record("au-b", "tm-1"), Some((1, 500)));
         assert_eq!(
+            engine.runtime.last_decision("au-b", "tm-1"),
+            Some(crate::automation_engine::eval::Decision::Held)
+        );
+        assert_eq!(
             engine.runtime.arm_state("au-a", "tm-1"),
             ArmState::Unseen,
             "and the rule that left the set does lose its keys"
         );
+        assert_eq!(engine.runtime.last_eval("au-a", "tm-1"), None);
         assert_eq!(
             engine.runtime.fire_record("au-a", "tm-1"),
             None,
-            "EVERY pair-keyed map, not just the two the assertion above happens to name"
+            "EVERY pair-keyed map, not just the one the assertion above happens to name"
+        );
+        assert_eq!(
+            engine.runtime.last_decision("au-a", "tm-1"),
+            None,
+            "a stale decision makes the row that says the rule woke up read as a repeat, so the \
+             verbose gate drops it"
         );
 
         // Q11: an EDIT to B resets B, and only B.

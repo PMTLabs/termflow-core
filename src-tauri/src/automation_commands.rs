@@ -525,6 +525,21 @@ mod source_tests {
                 "`{}` lets a failed reload swallow the announce for a write that already happened",
                 name
             );
+            // And the ORDER, which is the actual requirement. The negative above pins one spelling of
+            // one wrong implementation; the cheapest wrong implementation is not a spelling at all —
+            // it is moving `reloaded?;` one line up, above the `announce(…)`, which contains no `?` on
+            // the helper and passed.
+            let announced = body.find("announce(").unwrap_or_else(|| {
+                panic!("`{}` changes a definition and tells no other window", name)
+            });
+            let propagated = body
+                .find("reloaded?")
+                .unwrap_or_else(|| panic!("`{}` never propagates the reload's error", name));
+            assert!(
+                announced < propagated,
+                "`{}` propagates the reload before announcing a write that already committed",
+                name
+            );
         }
         assert_eq!(checked, 5, "the mutating commands moved; this test was checking nothing");
 
@@ -543,22 +558,31 @@ mod source_tests {
 
     /// **These tests read one file, and §9 does not oblige anyone to put the next command in it.**
     ///
-    /// `command_bodies` scans `automation_commands.rs`. An automation command added to `commands.rs`
-    /// — which is where this crate's Tauri commands live by default, and where every one of them
-    /// lived before this feature — would pass `every_automation_command_runs_its_work_off_the_async_executor`
-    /// and `every_command_that_changes_a_definition_reloads_the_engine` while being covered by
-    /// neither. So the assumption those two rest on is pinned here rather than assumed: automation
-    /// commands live in the automation module.
+    /// `command_bodies` scans `automation_commands.rs`. An automation command added anywhere else
+    /// would pass `every_automation_command_runs_its_work_off_the_async_executor` and
+    /// `every_command_that_changes_a_definition_reloads_the_engine` while being covered by neither.
+    /// So the assumption those two rest on is pinned here rather than assumed: automation commands
+    /// live in the automation module.
+    ///
+    /// **Every file in this crate that declares a `#[tauri::command]`**, which the first version was
+    /// not: it read `commands.rs` and `lib.rs`, and `lib.rs` declares **none** — that half could not
+    /// produce a hit under any implementation — while five files that do declare commands were never
+    /// scanned. The floor below is the same check applied to this test itself: an instrument whose
+    /// clean result has never been shown to be capable of being dirty is not a census.
     #[test]
     fn no_automation_command_lives_outside_this_module() {
+        let mut scanned = 0;
         for (path, source) in [
             ("commands.rs", include_str!("commands.rs")),
-            ("lib.rs", include_str!("lib.rs")),
+            ("peer_commands.rs", include_str!("peer_commands.rs")),
+            ("network_commands.rs", include_str!("network_commands.rs")),
+            ("open_commands.rs", include_str!("open_commands.rs")),
+            ("shell_integration.rs", include_str!("shell_integration.rs")),
+            ("native_notify.rs", include_str!("native_notify.rs")),
         ] {
             let code = crate::automation_engine::test_host::strip_comments(source);
-            for chunk in code.split("#[tauri::command]").skip(1) {
-                // Up to the next command; a command's own body is all that can reach the store.
-                let body = chunk.split("#[tauri::command]").next().unwrap_or_default();
+            for body in code.split("#[tauri::command]").skip(1) {
+                scanned += 1;
                 let name = body.split("fn ").nth(1).and_then(|s| s.split('(').next()).unwrap_or("?");
                 assert!(
                     !body.contains("automation_store") && !body.contains("automations."),
@@ -569,6 +593,12 @@ mod source_tests {
                 );
             }
         }
+        assert!(
+            scanned >= 80,
+            "this scan reached {} command bodies: the files it names have moved and it is now \
+             asserting a `never` over almost nothing",
+            scanned
+        );
     }
 
     /// Every command in this module is REGISTERED, and the count the other tests assert is that list.
@@ -624,12 +654,7 @@ mod source_tests {
             ("automation_engine/host.rs", include_str!("automation_engine/host.rs")),
             ("automation_commands.rs", include_str!("automation_commands.rs")),
         ] {
-            let body: String = source
-                .replace("\r\n", "\n")
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = crate::automation_engine::test_host::strip_comments(source);
             // The needle is ASSEMBLED, and that is not decoration: this file is one of the files
             // scanned, so a literal `"resolve_ref("` in the assertion is itself a match and the test
             // fails against its own source. Slicing the test module off instead would not work here —
@@ -644,6 +669,63 @@ mod source_tests {
         }
     }
 
+    /// **§3.5's own sentence, and both arms of it.** *"saved from window `main`, replacing the
+    /// version saved from `main-2`"* — GUI step 19 reads this line.
+    ///
+    /// `saved_detail` is a free function in this module and `leaves_to_rearm` is unit-tested three
+    /// blocks above, so §7.10 was never the reason this had none: it simply was not written. Flipping
+    /// the `match` arms is invisible without it.
+    #[test]
+    fn a_saved_row_says_which_window_saved_it_and_what_it_replaced() {
+        assert_eq!(super::saved_detail("main", None), "created from window main");
+
+        let replacing = super::saved_detail("main", Some(3_600_000));
+        assert!(
+            replacing.starts_with("saved from window main, replacing the version saved at "),
+            "{}",
+            replacing
+        );
+        // A wall-clock instant, not the raw ms: the SCHEMA has no field for who saved last, and the
+        // round-1 ruling that put this line in `detail` said naming the time is better than inventing
+        // a window name.
+        assert!(!replacing.contains("3600000"), "{}", replacing);
+        assert_ne!(replacing, super::saved_detail("main-2", Some(3_600_000)));
+    }
+
+    /// **The three round-1 fixes that landed inside `AppState` commands**, where §7.10 says no
+    /// Windows test can reach them — so they are pinned in source instead of not at all.
+    ///
+    /// Each one is a whole round-1 finding whose deletion passes the suite: `newest_snapshots()`
+    /// reverted to an empty list is the picker's bare-id row (external Finding 5), and a missing
+    /// `note(…)` is the `Saved` / `Enabled` / `Disabled` log row (external Finding 4, §3.5).
+    #[test]
+    fn the_commands_that_own_a_decision_still_make_it() {
+        let bodies = command_bodies();
+        let body = |name: &str| {
+            bodies
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("`{}` is gone", name))
+                .1
+                .clone()
+        };
+
+        assert!(
+            body("list_watchable_terminals").contains("newest_snapshots()"),
+            "§4.3's fallback: with no rule to scope to, every closed terminal draws as a bare id"
+        );
+        assert!(
+            body("save_automation").contains("note(") && body("save_automation").contains("Saved"),
+            "§3.5: a save writes no row saying it happened"
+        );
+        let enabled = body("set_automation_enabled");
+        assert!(enabled.contains("note("), "§3.5: a toggle writes no row saying it happened");
+        assert!(
+            enabled.contains("LogKind::Enabled") && enabled.contains("LogKind::Disabled"),
+            "both arms, or the log says the same thing whichever way the toggle went"
+        );
+    }
+
     /// §10.18d's local half — the event and first paint are **one function**, in source.
     ///
     /// `automation_engine.rs` already asserts the two payloads are equal at runtime. This asserts they
@@ -652,9 +734,15 @@ mod source_tests {
     #[test]
     fn first_paint_and_the_state_event_call_the_same_builder() {
         // Stripped: both needles are POSITIVE `contains`, which a comment mentioning either call
-        // would satisfy on its own.
-        let commands =
+        // would satisfy on its own. **And sliced**: this test lives in `automation_commands.rs` and
+        // reads it, so the needle on the assertion's own line is itself a match — deleting
+        // `engine.runtime_payload()` from `get_automation_runtime` left this half green. The sibling
+        // test two blocks down assembles its needle for the same reason; this one takes the
+        // production half, which is what `command_bodies` and the reload count already do.
+        let module =
             crate::automation_engine::test_host::strip_comments(include_str!("automation_commands.rs"));
+        let commands =
+            &module[..module.find("#[cfg(test)]").expect("the tests must follow the code")];
         let state = crate::automation_engine::test_host::strip_comments(include_str!("state.rs"));
         assert!(
             commands.contains("engine.runtime_payload()"),

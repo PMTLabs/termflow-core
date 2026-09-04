@@ -187,16 +187,31 @@ pub async fn evaluate_tick(
 
     let mut sends: Vec<PendingSend> = Vec::new();
     for i in &picked {
-        if let Some(send) = evaluate_pair(engine, host, &due[*i], now_ms) {
-            // **R6 is per RULE, not per pair.** A `runs_once` rule watching three terminals crosses
-            // on all three in one tick, and the send lock is per LEAF — so three tasks take three
-            // different locks, three messages go out, and `complete_rule` runs three times on a rule
-            // the user asked to run once. The arm states are advanced either way; only the send is
-            // dropped, so the pairs that did not send stay `Fired` and never send later.
-            let already = send.pair.rule.rule.runs_once
-                && sends.iter().any(|s| s.pair.rule.rule.id == send.pair.rule.rule.id);
-            if !already {
-                sends.push(send);
+        match evaluate_pair(engine, host, &due[*i], now_ms) {
+            // **R6 is per RULE — not per pair, and not per TICK.** A `runs_once` rule watching three
+            // terminals crosses on all three, and the send lock is per LEAF, so three tasks take
+            // three different locks and three messages go out on a rule the user asked to run once.
+            //
+            // The claim is taken HERE, where the crossing is decided. The first version of this
+            // scanned the current tick's `sends` vector, which covers the three-in-one-tick case and
+            // nothing else: two terminals crossing on consecutive ticks are two separate vectors, and
+            // the only cross-tick guard was `is_live`, which does not go false until `complete_rule`
+            // runs — after `deliver` returns, two ticks later. The arm states advance either way;
+            // only the send is dropped, so a pair that did not send stays `Fired` and never sends.
+            Evaluated::Read(Some(send)) => {
+                let rule_id = &send.pair.rule.rule.id;
+                if !send.pair.rule.rule.runs_once || engine.runtime.claim_once(rule_id) {
+                    sends.push(send);
+                }
+            }
+            // Read, decided, nothing to send: this pair has consumed the output and may spend it.
+            Evaluated::Read(None) => {}
+            // **The third door.** `settled_processes`'s enumeration named two and this was neither:
+            // the pair was due, it was picked, it is not in `owed` — and it read nothing at all, so
+            // clearing its process throws away output no pair has seen. It reaches `due_pcs` like any
+            // other pair, which is exactly why no reasoning about `picked` can see it.
+            Evaluated::Unread => {
+                owed.insert(due[*i].pc.clone());
             }
         }
     }
@@ -225,19 +240,32 @@ pub async fn evaluate_tick(
     next_cursor
 }
 
-/// Evaluate one pair and record what it decided. Returns the send, if this was a crossing.
+/// What one pair's evaluation leaves for the tick to do.
+///
+/// The two arms answer **different questions**, and collapsing them into `Option<PendingSend>` is
+/// what hid H-6: `None` meant both *"read the output and decided not to send"* and *"there was no
+/// output to read"*, and only the first of those has consumed the terminal's dirty signal.
+pub enum Evaluated {
+    /// This pair read the terminal's output. A send, if the read was a crossing.
+    Read(Option<PendingSend>),
+    /// §4.5's dormant terminal: no screen, so no evaluation, no log row and no arm change. Nothing
+    /// was read, so nothing may be spent on this pair's behalf.
+    Unread,
+}
+
+/// Evaluate one pair and record what it decided.
 pub fn evaluate_pair(
     engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     pair: &Pair,
     now_ms: i64,
-) -> Option<PendingSend> {
+) -> Evaluated {
     let rule = &pair.rule.rule;
     let prev = engine.runtime.arm_state(&rule.id, &pair.tm);
     let echoes = engine.runtime.echoes_for(&pair.tm, now_ms);
     let port = HostPort(host.as_ref());
 
-    let ev: Evaluation = eval::evaluate(
+    let Some(ev): Option<Evaluation> = eval::evaluate(
         &rule.graph,
         &pair.rule.re,
         &echoes,
@@ -245,7 +273,12 @@ pub fn evaluate_pair(
         &port,
         &pair.pc,
         now_ms,
-    )?;
+    ) else {
+        // `host.tail` found no parser for this process — it closed between this tick's leaf
+        // resolution and the read. §4.5: no evaluation, no row, arm state untouched. `set_last_eval`
+        // is deliberately not reached either, so the pair is due again immediately.
+        return Evaluated::Unread;
+    };
 
     engine.runtime.set_last_eval(&rule.id, &pair.tm, now_ms);
     // Advanced BEFORE the send is dispatched, so a second tick arriving while the first write is
@@ -267,17 +300,17 @@ pub fn evaluate_pair(
         // Live by construction: `evaluate_pair` only runs for a pair whose leaf just resolved.
         let name = host.label_for(&pair.tm);
         append(host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
-        return None;
+        return Evaluated::Read(None);
     }
 
-    Some(PendingSend {
+    Evaluated::Read(Some(PendingSend {
         pair: pair.clone(),
         prev,
         // Resolved at DECIDE time and carried, per §2.8: the `failed — the terminal closed` entry is
         // written after the terminal is gone, when there is no name left to look up.
         label: host.label_for(&pair.tm),
         at_ms: now_ms,
-    })
+    }))
 }
 
 /// Which log kind one evaluation is.
@@ -353,10 +386,14 @@ pub async fn run_send(
         return fail(&engine, &host, &send, "the terminal closed before the message was sent");
     };
 
-    // And so can the RULE. The queue wait is up to ten seconds; a user who disables a rule, or a
-    // `runs_once` rule that completed on another terminal in this same tick, must not still be typing
-    // into a terminal afterwards. Checked in the same critical section as the terminal, because it is
-    // the same question: is this crossing still something the user wants sent?
+    // And so can the RULE. The queue wait is up to ten seconds, and a user who disables a rule inside
+    // it must not still be typed into afterwards. Checked in the same critical section as the
+    // terminal, because it is the same question: is this crossing still something the user wants?
+    //
+    // It no longer stands in for R6 — the single-run claim is taken where the crossing is decided —
+    // and that is what makes the refusal's own words true. It used to be reached by a `runs_once` rule
+    // that completed on another terminal, and told the user their rule had been turned off when
+    // nobody had touched it.
     if !engine.is_live(&rule.id) {
         return fail(&engine, &host, &send, "the rule was turned off before the message was sent");
     }
@@ -364,7 +401,14 @@ pub async fn run_send(
     // §2.1: checked before the FIRST write and never between the paste and the submit, so a quit
     // leaves the send either unstarted or complete — there is no half-typed line to reason about.
     if engine.stopping.load(Ordering::Relaxed) {
+        // The same rollback as `fail`, minus the row — the app is going down and the store is
+        // closing. It was the one rollback of three that announced nothing, so a pill caught
+        // mid-transition stayed on whatever it had last painted.
         engine.runtime.restore_arm(&rule.id, &tm, send.prev);
+        if rule.runs_once {
+            engine.runtime.release_once(&rule.id);
+        }
+        engine.mark_state_dirty();
         return;
     }
 
@@ -429,6 +473,12 @@ fn fail(
 ) {
     let rule_id = &send.pair.rule.rule.id;
     engine.runtime.restore_arm(rule_id, &send.pair.tm, send.prev);
+    // A rollback restores; it never creates. The claim was taken when this crossing was DECIDED, so a
+    // crossing that produced no message must give it back — otherwise one queue timeout retires a
+    // single-run rule that has never sent anything.
+    if send.pair.rule.rule.runs_once {
+        engine.runtime.release_once(rule_id);
+    }
     engine.mark_state_dirty();
     append(
         host,
@@ -503,18 +553,27 @@ pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHo
         // `new_all()` is 50-200 ms, and `ProcSnapshot`'s own doc says this call belongs off a
         // tokio worker.
         let (e, h) = (engine.clone(), host.clone());
-        let missing = tokio::task::spawn_blocking(move || targeting_tick(&e, &h, now_ms()))
-            .await
-            .unwrap_or_default();
+        let pass = match tokio::task::spawn_blocking(move || targeting_tick(&e, &h, now_ms())).await {
+            Ok(pass) => pass,
+            Err(e) => {
+                // `unwrap_or_default()` here turned a panicked roster pass into an EMPTY one, which
+                // is not the same thing: it reset the diff's `missing` to nothing while the engine's
+                // parked copy stayed stale, so the next real pass announced a change that had not
+                // happened — and said nothing about the panic. A pass that did not run produces no
+                // diff at all.
+                log::warn!("automations: the targeting pass panicked: {}", e);
+                tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS)).await;
+                continue;
+            }
+        };
         // Only when the answer CHANGED. A pill that says *not open* is state the UI shows, so a
         // change has to reach it — but emitting every 2 s regardless would repaint every open
         // Settings page for the life of the app to say nothing happened.
-        let watched: HashMap<String, HashSet<String>> = engine
-            .snapshot_live()
-            .iter()
-            .map(|l| (l.rule.id.clone(), engine.runtime.watched_for(&l.rule.id)))
-            .collect();
-        let now = (watched, missing);
+        //
+        // Both halves come from the SAME pass. Re-deriving `watched` from a second `snapshot_live()`
+        // let a `reload` land between them, so the rule list the diff was keyed on and the roster it
+        // was computed from could disagree for one pass.
+        let now = (pass.watched, pass.missing);
         if now != last {
             last = now;
             // Marked, not emitted: one drain point means one rate limit, and the evaluator's 250 ms
@@ -525,27 +584,46 @@ pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHo
     }
 }
 
-/// One pass of the targeting tick. Returns which pinned ids are reportably missing, by rule, **and
-/// parks the same answer on the engine** for the two consumers that have no roster of their own.
+/// What one pass of the targeting tick resolved.
+///
+/// Both fields come from one `snapshot_live()`, which is the point: the caller diffs them against the
+/// previous pass, and deriving either half from a second snapshot lets a `reload` in between make the
+/// two disagree for a tick.
+pub struct TargetingPass {
+    /// Pinned ids that are reportably missing, by rule.
+    pub missing: HashMap<String, HashSet<String>>,
+    /// What each live rule watches, as this pass resolved it.
+    pub watched: HashMap<String, HashSet<String>>,
+}
+
+/// One pass of the targeting tick. Returns what it resolved, **and parks `missing` on the engine**
+/// for the two consumers that have no roster of their own.
 pub fn targeting_tick(
     engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     now_ms: i64,
-) -> HashMap<String, HashSet<String>> {
+) -> TargetingPass {
+    // ONE snapshot for the whole pass. Taken twice, the criteria list and the rule list could come
+    // from different `reload`s.
+    let rules = engine.snapshot_live();
     // §10.13: only the criteria live RULE-mode rules actually resolve. A pinned rule answers from
     // its own id list, so it must not be the reason the machine's process table is enumerated.
-    let criteria: Vec<Criterion> = engine
-        .snapshot_live()
+    let criteria: Vec<Criterion> = rules
         .iter()
         .filter(|l| l.rule.target_mode == TargetMode::Rule)
         .map(|l| l.rule.criterion)
         .collect();
     let rows = host.roster(&criteria);
+    // Indexed once, outside the rule loop: the snapshot walk below wants the row for a terminal it
+    // already knows it watches, and scanning the whole roster per rule made that `rules × roster`.
+    let by_id: HashMap<&str, &crate::automation::roster::RosterRow> =
+        rows.iter().filter_map(|r| r.terminal_id.as_deref().map(|t| (t, r))).collect();
     let live_leaves: HashSet<&str> = rows.iter().filter_map(|r| r.terminal_id.as_deref()).collect();
     let grace_over = crate::automation::roster::grace_elapsed(now_ms, engine.started_at_ms());
     let mut missing = HashMap::new();
+    let mut watched: HashMap<String, HashSet<String>> = HashMap::new();
 
-    for live in engine.snapshot_live() {
+    for live in &rules {
         let id = &live.rule.id;
         // `watched_for` cannot say "never resolved", and does not need to: `watched_set` re-resolves
         // an EMPTY frozen set rather than treating it as a decision, so an empty previous and no
@@ -570,8 +648,8 @@ pub fn targeting_tick(
         // *not open* row for a criterion-matched terminal drawing neither the label nor the folder it
         // exists to draw (§4.3, R14). The tick is the owner: it already holds the roster and already
         // runs every 2 s, and the throttle lives in the store, so there is no decision here.
-        for row in rows.iter() {
-            let Some(tm) = row.terminal_id.as_deref().filter(|t| next.contains(*t)) else {
+        for tm in next.iter() {
+            let Some(row) = by_id.get(tm.as_str()) else {
                 continue;
             };
             let label = crate::automation::labels::label_at(&crate::automation::labels::LabelInputs {
@@ -598,9 +676,11 @@ pub fn targeting_tick(
                 missing.insert(id.clone(), absent);
             }
         }
+
+        watched.insert(id.clone(), next.into_iter().collect());
     }
     engine.set_missing(missing.clone());
-    missing
+    TargetingPass { missing, watched }
 }
 
 
@@ -1400,6 +1480,28 @@ mod tests {
         assert_eq!(rows[0].2.as_deref(), Some("codex · core"));
     }
 
+    /// And so does a row that sent NOTHING, which is most of the rows a working rule writes.
+    ///
+    /// `log_rows(..).2` is read at three places and every one of them is a `Sent` or `Failed` row, so
+    /// hard-coding `None` for every `held` / `re-armed` / `no-match` row passed the whole suite while
+    /// the Name column R17 specifies went blank for the ordinary case.
+    #[tokio::test(start_paused = true)]
+    async fn a_row_that_sent_nothing_carries_the_name_as_well() {
+        let (engine, fake, host) = wired();
+        // Fired and still true: `held`, which is a Decision-class row and so not verbose-gated.
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 500 });
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        let rows = log_rows(&fake.store);
+        assert_eq!(rows.len(), 1, "{:?}", rows);
+        assert_ne!(rows[0].0, "Sent", "the premise: nothing was sent — {:?}", rows);
+        assert_eq!(rows[0].2.as_deref(), Some("codex · core"), "{:?}", rows);
+        assert!(fake.written().is_empty());
+    }
+
     /// **§2.4: keys are cleared when a terminal leaves the watch set.** Three of that sentence's four
     /// events were implemented; this was the fourth.
     ///
@@ -1533,7 +1635,11 @@ mod tests {
         let lib = strip_comments(include_str!("../lib.rs"));
         let setup_start =
             lib.find("spawn_history_flush_task(state.clone());").expect("the setup site");
-        let setup = &lib[setup_start..setup_start + 400];
+        // Windowed by LINES rather than bytes: `strip_comments` drops comment-only lines and leaves
+        // trailing ones, so a multi-byte character landing inside a fixed byte window panics with a
+        // slice error instead of failing with this test's own message.
+        let setup = lib[setup_start..].lines().take(12).collect::<Vec<_>>().join("\n");
+        let setup = setup.as_str();
         assert!(
             !setup.contains("tokio::spawn"),
             "a bare tokio::spawn beside the setup call is the same panic by another name"
@@ -1584,6 +1690,134 @@ mod tests {
             "and it logged every one of them"
         );
         assert!(!engine.is_live("au-once"));
+    }
+
+    /// **The same rule, one tick later** — and the half that shipped open.
+    ///
+    /// The test above varies the TERMINAL dimension and holds the tick at one, which is the standing
+    /// lesson (*a fixture that varies only one dimension cannot test a key with two*) applied to the
+    /// wrong axis. The in-tick dedupe it pinned scans the current tick's `sends` vector, so two
+    /// terminals crossing on consecutive ticks are two separate vectors and it sees neither; the only
+    /// cross-tick guard was `is_live`, which does not go false until `complete_rule` runs — after
+    /// `deliver` returns, one `PASTE_SUBMIT_GAP_MS` and two evaluator ticks later, plus any queue
+    /// wait. Two terminals printing 250 ms apart is not an edge case, it is what `AllTerminals` and
+    /// `follow_new` are for.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_once_rule_does_not_send_again_on_the_next_tick() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        let (engine, fake, host) = wire(vec![once]);
+        open_second_terminal(&fake);
+        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-once", tm, ArmState::armed());
+        }
+
+        // Only tm-1 crosses this tick: pc-2 is clean, so its pair is not due at all and the in-tick
+        // dedupe never has two entries to compare.
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        // 250 ms — one tick, and half the paste-to-submit gap. The first message has NOT landed, so
+        // `complete_rule` has not run and `is_live` is still true.
+        fake.say("pc-2", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-2");
+        evaluate_tick(&engine, &host, 0, 1_250).await;
+
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "a runs-once rule sent again on the next tick: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            log_rows(&fake.store).iter().filter(|(k, _, _)| k == "Sent").count(),
+            1,
+            "and logged both of them"
+        );
+        assert!(!engine.is_live("au-once"));
+    }
+
+    /// **A rollback returns the claim** — the survivor a mutation pass found, not the review.
+    ///
+    /// The claim is taken where the crossing is DECIDED, so every path that produces no message has
+    /// to give it back: `fail`'s three (queue timeout, terminal closed, write refused) and the quit.
+    /// Without that, one failed write retires a single-run rule that has never sent anything —
+    /// silently, for the rest of the session, with the rule still showing as live.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_once_rule_whose_send_failed_can_still_send() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        let (engine, fake, host) = wire(vec![once]);
+        engine.runtime.set_watched("au-once", ["tm-1".to_string()].into());
+        engine.runtime.set_arm("au-once", "tm-1", ArmState::armed());
+        *fake.write_err.lock().unwrap() = Some("no writer".into());
+
+        fake.say("pc-1", "ctx:63%\n");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        // Counted in the LOG, not in the write log: the fake records a write before it refuses it,
+        // so `written()` shows the attempt either way. A `Sent` row is only written after `deliver`
+        // returns `Ok`.
+        let sent_rows = |f: &FakeHost| {
+            log_rows(&f.store).iter().filter(|(k, _, _)| k == "Sent").count()
+        };
+        assert_eq!(sent_rows(&fake), 0, "the premise: the write was refused");
+        assert!(engine.is_live("au-once"), "a failed send must not complete the rule");
+        assert_eq!(
+            engine.runtime.arm_state("au-once", "tm-1"),
+            ArmState::armed(),
+            "the premise: the rollback restored the arm state, so a next crossing is possible"
+        );
+
+        // The next crossing. Everything is as it was, and the only thing that could stop it is a
+        // claim nobody gave back.
+        *fake.write_err.lock().unwrap() = None;
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 4_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_rows(&fake),
+            1,
+            "the failed send kept the claim: this rule can never send again — {:?}",
+            log_rows(&fake.store)
+        );
+    }
+
+    /// **A pair that read NOTHING has not spent its terminal's output** — the other mutation survivor.
+    ///
+    /// §4.5's dormant terminal: the leaf resolves, the process is dirty, and `tail` finds no parser
+    /// because it closed between this tick's leaf resolution and the read. That pair WAS due and WAS
+    /// picked, and it is not in `owed`, so `settled_processes` named its process and the tick cleared
+    /// a signal nobody had read — permanently, if that was the last thing the terminal printed, which
+    /// is the normal end of a build. It is the door `settled_processes`'s own enumeration said did not
+    /// exist.
+    #[tokio::test(start_paused = true)]
+    async fn a_tick_that_could_not_read_a_terminal_leaves_it_dirty() {
+        let (engine, fake, host) = wired();
+        // Dirty, and no screen at all: nothing has ever `say`ed anything on pc-1.
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::Unseen,
+            "the premise: nothing was evaluated, so no arm state moved"
+        );
+        assert!(log_rows(&fake.store).is_empty(), "§4.5: no read, no row");
+        assert!(engine.runtime.is_dirty("pc-1"), "the tick spent a signal no pair could read");
+
+        // The paired positive, so this is not satisfied by never clearing anything.
+        fake.say("pc-1", "ctx:18%\n");
+        evaluate_tick(&engine, &host, 0, 2_000).await;
+        assert!(!engine.runtime.is_dirty("pc-1"), "an ordinary read must still spend the signal");
     }
 
     /// The other half of B-2's fix, and it had no oracle: **only a `runs_once` rule is deduped.**
@@ -1741,7 +1975,8 @@ mod tests {
     fn the_exit_arm_stops_the_engine_before_anything_slow() {
         let lib = strip_comments(include_str!("../lib.rs"));
         let start = lib.find("if let RunEvent::Exit = event {").expect("the Exit arm");
-        let arm = &lib[start..start + 900];
+        let arm = lib[start..].lines().take(25).collect::<Vec<_>>().join("\n");
+        let arm = arm.as_str();
         let stop = arm.find("automations.stop()").expect("Exit must stop the engine");
         for slow in ["flush_all_history(", "shutdown_mcp_server(", "shutdown_fabric("] {
             let at = arm.find(slow).unwrap_or_else(|| panic!("{} left the Exit arm", slow));
@@ -1833,11 +2068,16 @@ mod tests {
             Some(vec!["au-1".to_string(), "au-2".to_string()])
         );
 
-        // The same refusals, with the store's gate saying no row was written.
+        // The same refusals with `emit` false. **`reload` cannot produce this pair** — it sets `emit`
+        // inside the very loop that fills `skipped` — so this row pins THIS FUNCTION's contract, that
+        // `emit` is the gate and the list is not consulted when it is closed, rather than a state the
+        // engine reaches.
         assert_eq!(refusals_to_announce(&ReloadReport { emit: false, ..refused }), None);
 
-        // Nothing refused, and a row written by something else in the same load: an empty list, not
-        // `None` — the caller still has a reason to emit, it just has no rule ids to name.
+        // An empty `skipped` with `emit` set: also unreachable from `reload`, and also this function's
+        // contract — an empty list is not `None`, because a caller with a reason to emit and no ids to
+        // name still emits. *(This comment used to justify the row with "a row written by something
+        // else in the same load"; `reload` has no such mechanism.)*
         assert_eq!(
             refusals_to_announce(&ReloadReport { live: 3, skipped: vec![], emit: true }),
             Some(vec![])
@@ -1990,7 +2230,8 @@ mod tests {
 
         // Past the second, the held transition is announced — **deferred, not dropped**, which is the
         // whole reason this is a flag the tick drains rather than a "may I emit now?" question. This
-        // tick evaluates nothing at all (the send's settle window still covers tm-1 until 2_800), and
+        // tick evaluates nothing at all (the settle window runs from the LANDING, so it covers tm-1
+        // until 3_300), and
         // the emit still lands.
         fake.say("pc-1", "ctx:18%\n");
         engine.runtime.mark_dirty("pc-1");

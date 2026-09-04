@@ -603,15 +603,13 @@ mod tests {
     /// rewrote it.
     #[test]
     fn the_dry_run_module_contains_no_write_path() {
-        let source = include_str!("dry.rs").replace("\r\n", "\n");
-        let end = source.find("#[cfg(test)]").expect("the test module must follow the code");
         // Comments stripped first: the module doc NAMES the mutations it does not perform, and a scan
-        // that reads prose as code is a test of the writing rather than of the module.
-        let body: String = source[..end]
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // that reads prose as code is a test of the writing rather than of the module. Through the
+        // shared helper, which also normalises CRLF — `core.autocrlf` is on with no `.gitattributes`,
+        // so the file git checks out is not the file a worktree rewrote.
+        let source = crate::automation_engine::test_host::strip_comments(include_str!("dry.rs"));
+        let end = source.find("#[cfg(test)]").expect("the test module must follow the code");
+        let body = &source[..end];
         for forbidden in ["deliver(", "TerminalWriter", ".write(", "set_arm", "set_last_eval", "record_fire"] {
             assert!(
                 !body.contains(forbidden),

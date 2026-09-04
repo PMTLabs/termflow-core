@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 use crate::automation_engine::eval::ArmState;
 
@@ -74,6 +74,16 @@ pub struct AutomationRuntime {
     /// `remove`, and if that was the last line the terminal printed, thrown away permanently. The
     /// evaluator carries the generation it read at and the clear only removes what it has not moved.
     dirty: DashMap<String, u64>,
+    /// `rule_id` -> a crossing of that single-run rule is already on its way out.
+    ///
+    /// **R6 is claimed where the crossing is DECIDED, not where it is sent.** The first version
+    /// deduped inside one tick's `sends` vector and left the rest to `is_live` — but `is_live` goes
+    /// false only when `complete_rule` runs, and that is after `deliver` returns: one
+    /// `PASTE_SUBMIT_GAP_MS`, two evaluator ticks, plus any queue wait after the crossing was
+    /// decided. Two terminals crossing 250 ms apart is not an edge case, it is what `AllTerminals`
+    /// and `follow_new` are for, and both of them sent. Released by `forget_rule` — which is the
+    /// path both completion and *Reset* go through — and by a send that did not happen.
+    claimed_once: DashSet<String>,
     /// How often each pair has fired, and when it last did.
     ///
     /// `arm` cannot answer either question: its `at_ms` is overwritten on every crossing and gone
@@ -160,6 +170,30 @@ impl AutomationRuntime {
         self.last_decision.retain(|(r, _), _| r != rule_id);
         self.fires.retain(|(r, _), _| r != rule_id);
         self.watched.remove(rule_id);
+        // Completion and *Reset* both arrive here, and they want opposite things from the claim —
+        // completion no longer needs it (the rule has left the live set), and a reset must not
+        // inherit it or the rule the user just put back on the board can never send again.
+        self.claimed_once.remove(rule_id);
+    }
+
+    // --- the single-run claim (R6) ---------------------------------------------------------------
+
+    /// Claim this single-run rule's one send: `true` for the first caller, `false` for every other.
+    ///
+    /// Asked at decide time, so a second terminal crossing on a *later* tick is refused before a task
+    /// is spawned for it — which the in-tick dedupe it replaced could not see and `is_live` was 500 ms
+    /// too late to.
+    pub fn claim_once(&self, rule_id: &str) -> bool {
+        self.claimed_once.insert(rule_id.to_string())
+    }
+
+    /// Give the claim back, because the send did not happen. A rollback restores; it never creates.
+    pub fn release_once(&self, rule_id: &str) {
+        self.claimed_once.remove(rule_id);
+    }
+
+    pub fn is_claimed_once(&self, rule_id: &str) -> bool {
+        self.claimed_once.contains(rule_id)
     }
 
     // --- per-terminal teardown -----------------------------------------------------------------
@@ -243,6 +277,14 @@ impl AutomationRuntime {
     /// The cap is not decoration: this map is only ever pruned by expiry, and a rule on a 10 s timer
     /// that fires all day would otherwise grow an unbounded `Vec` that every evaluation of that
     /// terminal walks. The OLDEST needle is dropped, because the newest is the one still on screen.
+    /// Record a needle this engine typed into `tm`, expiring `ECHO_TTL_MS` after `now_ms`.
+    ///
+    /// **`now_ms` is when the write LANDED, not a deadline.** It used to be the deadline itself; the
+    /// type did not change with the meaning, so four existing call sites were silently reinterpreted
+    /// rather than flagged by the compiler. All four were audited afterwards and all four are correct
+    /// under the new reading — they pass a moment, not an expiry — but the audit is the only thing
+    /// that established that, which is the argument for a newtype the next time a parameter's
+    /// meaning moves underneath its type.
     pub fn push_echo(&self, tm: &str, text: &str, now_ms: i64) {
         let mut entry = self.echoes.entry(tm.to_string()).or_default();
         // The expiry `echoes_for` used to do. It belongs on the write side: a reader that prunes is a
@@ -369,6 +411,14 @@ mod tests {
         for tm in ["tm-test-1", "tm-test-2"] {
             rt.push_echo(tm, "HANDOFF now", 60_000);
             let _ = rt.send_lock(tm);
+            rt.settle_until(tm, 10_000);
+        }
+        // Every PAIR-keyed map, so a purge that misses one is visible. `last_decision` was added by
+        // the round-1 response, purged at all three sites and asserted at none of them.
+        for rule in ["au-1", "au-2"] {
+            for tm in ["tm-test-1", "tm-test-2"] {
+                rt.set_last_decision(rule, tm, crate::automation_engine::eval::Decision::Held);
+            }
         }
         // `dirty` is PROCESS-keyed; the two ids are deliberately different strings.
         rt.mark_dirty("pc-test-1");
@@ -380,7 +430,20 @@ mod tests {
     #[test]
     fn forget_terminal_purges_one_leaf_across_every_rule_and_nothing_else() {
         let rt = populated();
+        // Taken BEFORE the purge, because the oracle for `send_locks` is identity: `send_lock` mints
+        // one on demand, so "is there a lock?" is always yes and only "is it the SAME lock?" can tell
+        // a purge from a no-op. Deleting `send_locks.remove(tm)` left a restarted terminal
+        // serialising against the dead PTY's queue.
+        let lock = rt.send_lock("tm-test-1");
+        let sibling_lock = rt.send_lock("tm-test-2");
+        assert!(rt.is_settling("tm-test-1", 0), "the premise: it was settling");
+
         rt.forget_terminal("tm-test-1");
+
+        assert!(!rt.is_settling("tm-test-1", 0), "a restarted leaf inherited the dead one's settle window");
+        assert!(!Arc::ptr_eq(&lock, &rt.send_lock("tm-test-1")), "the send lock survived the restart");
+        assert!(Arc::ptr_eq(&sibling_lock, &rt.send_lock("tm-test-2")), "the sibling's lock was re-minted");
+        assert!(rt.is_settling("tm-test-2", 0), "the sibling's settle window was cleared");
 
         // Purged, for BOTH rules.
         for rule in ["au-1", "au-2"] {
@@ -392,6 +455,13 @@ mod tests {
             );
             assert_eq!(rt.last_eval(rule, "tm-test-1"), None, "{} kept a stale eval stamp", rule);
             assert_eq!(rt.fire_record(rule, "tm-test-1"), None, "{} kept a stale fire count", rule);
+            assert_eq!(
+                rt.last_decision(rule, "tm-test-1"),
+                None,
+                "{} kept a stale decision: the row saying the rule woke up is downgraded to a gated \
+                 Check and dropped",
+                rule
+            );
         }
         assert!(rt.echoes_for("tm-test-1", 0).is_empty(), "echo needles survived");
 
@@ -400,6 +470,10 @@ mod tests {
             assert_eq!(rt.arm_state(rule, "tm-test-2"), ArmState::Fired { at_ms: 10 });
             assert_eq!(rt.last_eval(rule, "tm-test-2"), Some(99));
             assert_eq!(rt.fire_record(rule, "tm-test-2"), Some((1, 10)));
+            assert_eq!(
+                rt.last_decision(rule, "tm-test-2"),
+                Some(crate::automation_engine::eval::Decision::Held)
+            );
         }
         assert_eq!(rt.echoes_for("tm-test-2", 0), vec!["HANDOFF now".to_string()]);
 
@@ -460,13 +534,45 @@ mod tests {
         for tm in ["tm-test-1", "tm-test-2"] {
             assert_eq!(rt.arm_state("au-1", tm), ArmState::Unseen);
             assert_eq!(rt.last_eval("au-1", tm), None);
-            assert_eq!(rt.fire_record("au-1", tm), None, "every pair-keyed map, not just the two");
+            assert_eq!(rt.fire_record("au-1", tm), None, "all FOUR pair-keyed maps");
+            assert_eq!(rt.last_decision("au-1", tm), None);
             assert_eq!(rt.arm_state("au-2", tm), ArmState::Fired { at_ms: 10 });
             assert_eq!(rt.last_eval("au-2", tm), Some(99));
             assert_eq!(rt.fire_record("au-2", tm), Some((1, 10)));
+            assert_eq!(
+                rt.last_decision("au-2", tm),
+                Some(crate::automation_engine::eval::Decision::Held)
+            );
         }
         assert!(rt.watched_for("au-1").is_empty());
         assert_eq!(rt.watched_for("au-2").len(), 2);
+    }
+
+    /// **The single-run claim is taken once, and given back only by a purge.**
+    ///
+    /// The engine-level half is in `loops.rs`; this is the property that half rests on. `claim_once`
+    /// returning `true` unconditionally is the bug B-1 named, and it is invisible from any fixture
+    /// that drives one tick.
+    #[test]
+    fn a_single_run_claim_is_taken_once_and_returned_by_the_purge() {
+        let rt = AutomationRuntime::new();
+        assert!(rt.claim_once("au-once"), "the first crossing must be allowed to send");
+        assert!(!rt.claim_once("au-once"), "a second crossing claimed the same rule's one send");
+        assert!(!rt.claim_once("au-once"), "and a third");
+        assert!(rt.claim_once("au-other"), "one rule's claim must not block another's");
+
+        // A send that did not happen gives it back — the same rule can cross again.
+        rt.release_once("au-once");
+        assert!(!rt.is_claimed_once("au-once"));
+        assert!(rt.claim_once("au-once"));
+
+        // And so does the purge, which is the path both completion and *Reset* take. Without it a
+        // rule the user has just Reset holds a claim from the session that completed it and can
+        // never send again.
+        rt.forget_rule("au-once");
+        assert!(!rt.is_claimed_once("au-once"));
+        assert!(rt.claim_once("au-once"));
+        assert!(!rt.claim_once("au-other"), "the purge released a rule it was not given");
     }
 
     /// A pair with no entry is `Unseen` — the property that makes launch safe.

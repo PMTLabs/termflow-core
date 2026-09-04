@@ -389,21 +389,47 @@ pub fn read_detail(
 /// against the TERMINAL rather than the rule, so overlapping rules recognise each other's injections
 /// — which is why this takes a flat slice and not a rule id.
 ///
-/// M3 owns the map that produces this slice (cap 4, TTL 10 min, `normalise`d on record). What lands
-/// here is the step the pipeline in this module's header has always claimed happens before
-/// extraction — as a parameter of both entry points, so that claim is now structurally true rather
-/// than a convention a new caller can forget.
+/// **Whitespace-insensitive, and it has to be on BOTH sides.** The needle is recorded through
+/// `send::normalise`, which collapses every run of whitespace to one space; this used to search the
+/// RAW window text for that collapsed string with `rfind`. A single space never matches a newline, so
+/// normalising only the needle could not make a match that a raw comparison would have missed — it
+/// could only lose one, and it lost every multi-line message, which for an agent prompt is an
+/// ordinary shape. The needle's non-space tokens are matched in order, separated by any run of
+/// whitespace, which is a strict superset of what the raw comparison found.
+///
+/// It is still an approximation, and the direction is worth stating: it is sound when it *matches*
+/// (those bytes really were this engine's message) and incomplete when it does not. A composer that
+/// redraws the message behind a gutter — `│ `, a line number, a prompt — puts NON-whitespace between
+/// the tokens, and no amount of whitespace tolerance sees through that. §2.6 layer 2's settle window
+/// is the primary guard and *Re-arm now* is the manual backstop; this is the one that survives a tick
+/// slipping through the window.
 pub fn strip_echoes(text: &str, echoes: &[String]) -> String {
     let mut out = text.to_string();
     for needle in echoes {
-        if needle.is_empty() {
+        let Some(re) = echo_pattern(needle) else {
             continue;
-        }
-        if let Some(at) = out.rfind(needle.as_str()) {
-            out.replace_range(at..at + needle.len(), "");
-        }
+        };
+        let Some(at) = re.find_iter(out.as_str()).last().map(|m| m.range()) else {
+            continue;
+        };
+        out.replace_range(at, "");
     }
     out
+}
+
+/// One needle as a pattern: its tokens, escaped, joined by "any whitespace".
+///
+/// `None` for a needle with no tokens at all, which is the empty needle the raw version skipped.
+/// Every token goes through `regex::escape`, so a message containing regex metacharacters — which is
+/// most messages, `?` and `.` alone — is matched literally.
+fn echo_pattern(needle: &str) -> Option<Regex> {
+    let mut tokens = needle.split_whitespace();
+    let mut pattern = regex::escape(tokens.next()?);
+    for token in tokens {
+        pattern.push_str(r"\s+");
+        pattern.push_str(&regex::escape(token));
+    }
+    Regex::new(&pattern).ok()
 }
 
 /// Everything one evaluation of one `(rule, terminal)` pair decided.
@@ -1107,6 +1133,52 @@ mod tests {
             strip_echoes("keep me", &["".to_string()]),
             "keep me",
             "an empty needle must not match everywhere"
+        );
+    }
+
+    /// **The needle and the haystack, as a PAIR.** This is the property `normalise`'s own docstring
+    /// claims and the one no test drove: it asserted the collapsing in isolation, over six inputs, in
+    /// the one region where collapsing is the identity.
+    ///
+    /// `run_send` records the needle through `send::normalise`, which turns every run of whitespace
+    /// into one space. Searched for with a raw `rfind`, that string cannot match a message the
+    /// terminal echoed across two rows — a single space is not a newline — so normalising the needle
+    /// could only ever LOSE a match, never make one, and it silently disabled layer 1 for every
+    /// multi-line message. An agent prompt is routinely multi-line.
+    #[test]
+    fn a_needle_matches_its_echo_however_the_terminal_broke_the_whitespace() {
+        let needle = [crate::automation::send::normalise("prepare to do context-hand-off")];
+
+        // Echoed verbatim: the case that already worked, and must keep working.
+        assert_eq!(strip_echoes("a prepare to do context-hand-off b", &needle), "a  b");
+        // Echoed across two rows. `deliver` writes an embedded newline as a carriage return and the
+        // composer draws the rest on the next line, which `render_tail_lines` hands over joined by a
+        // newline — the shape the raw comparison could never match.
+        assert_eq!(strip_echoes("a prepare to do\ncontext-hand-off b", &needle), "a  b");
+        // Re-indented, and re-spaced.
+        assert_eq!(strip_echoes("a prepare  to\n   do context-hand-off b", &needle), "a  b");
+        // Still the LAST occurrence only, with the tolerant match.
+        assert_eq!(
+            strip_echoes("prepare to do context-hand-off | prepare to\ndo context-hand-off", &needle),
+            "prepare to do context-hand-off | "
+        );
+        // And it is not a wildcard: different words do not match.
+        assert_eq!(
+            strip_echoes("prepare to do something else", &needle),
+            "prepare to do something else"
+        );
+
+        // A message whose text is regex metacharacters is matched LITERALLY.
+        let meta = [crate::automation::send::normalise("did it work? (y/n)")];
+        assert_eq!(strip_echoes("x did it work?\n(y/n) y", &meta), "x  y");
+        assert_eq!(strip_echoes("x did it workZ (yZn) y", &meta), "x did it workZ (yZn) y");
+
+        // The residual, stated so it is not mistaken for a guarantee: a composer that redraws the
+        // message behind a NON-whitespace gutter is not seen through by any amount of whitespace
+        // tolerance. §2.6 layer 2 and *Re-arm now* are what cover that.
+        assert_eq!(
+            strip_echoes("a prepare to do\n| context-hand-off b", &needle),
+            "a prepare to do\n| context-hand-off b"
         );
     }
 

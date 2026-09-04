@@ -130,6 +130,13 @@ impl EngineHost for FakeHost {
         self.text.lock().unwrap().get(pc).cloned()
     }
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
+        // **The fake refuses an id it does not know.** §7.4's one conversion is `process_for_leaf`,
+        // and a `tm-` id reaching a `pc-`keyed writer is silent in production — it was silent here
+        // too, because the write was recorded and read straight back as if it had landed. One
+        // assertion in one test protects one write path; this protects the ones not written yet.
+        if !self.leaves.lock().unwrap().values().any(|known| known == pc) {
+            return Err(format!("no terminal has process id {}", pc));
+        }
         self.writes.lock().unwrap().push((pc.to_string(), bytes.to_vec()));
         match self.write_err.lock().unwrap().clone() {
             Some(e) => Err(e),
@@ -269,7 +276,9 @@ pub(crate) fn times_sent(fake: &FakeHost, message: &str) -> usize {
 }
 
 /// A Rust source file with its line comments removed and its line endings normalised. **Every
-/// source-derived test in this feature reads through this.**
+/// source-derived test in this feature reads through this** — including `dry.rs`'s "this module
+/// cannot send" scan and `automation_commands.rs`'s lenient-resolver scan, which each carried a
+/// hand-rolled copy of exactly this filter until the claim was checked.
 ///
 /// Two reasons. `core.autocrlf` is on with no `.gitattributes`, so the file git checks out is not
 /// the file a worktree rewrote — a needle

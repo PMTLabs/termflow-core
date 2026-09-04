@@ -66,9 +66,19 @@ pub struct SubmitPattern<'a> {
 /// The form an echo needle is recorded in (plan §2.6).
 ///
 /// Runs of whitespace collapse to one space and the ends are trimmed — `split_whitespace`, so
-/// Unicode whitespace and not only ASCII. A terminal re-wraps and re-indents what it echoes, so
-/// comparing the raw message against the raw window would miss on any message long enough to wrap,
-/// which is most of them; the canonical one is a sentence.
+/// Unicode whitespace and not only ASCII.
+///
+/// **This is half of a pair, and it is inert without the other half.** `eval::strip_echoes` matches
+/// the needle's tokens separated by any run of whitespace, so what this does is put the needle in the
+/// canonical form that matcher tokenises; normalising here and comparing raw there could only ever
+/// LOSE matches, which is what it did until round 2 of the M3 review.
+///
+/// The wrap half of the original rationale was wrong and is worth recording, because it is the half
+/// that sounds obviously true: `state.rs::render_tail_lines` already rejoins soft-wrapped rows before
+/// the engine sees them (*"a `ctx:63%` straddling column 120 otherwise never matches"*), so a long
+/// single-line message comes back as one line. The differences this actually spans are a message with
+/// a REAL newline — `deliver` writes those as `\r`, and the composer echoes them as separate rows —
+/// and runs of spaces. A re-indent the terminal draws with non-whitespace is beyond both halves.
 pub fn normalise(message: &str) -> String {
     message.split_whitespace().collect::<Vec<_>>().join(" ")
 }

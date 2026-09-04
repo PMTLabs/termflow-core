@@ -51,13 +51,6 @@ impl Problem {
     }
 }
 
-/// Compile a user pattern, once, at rule load.
-///
-/// `size_limit(1 << 20)` bounds the compiled program rather than the input. Rust's `regex` has no
-/// backtracking and guarantees linear-time matching, so a pattern typed into the editor cannot hang
-/// the 250 ms evaluation loop — a guarantee the renderer's `RegExp` preview cannot make, which is why
-/// compilation is mandatory here rather than merely convenient: JS regex syntax is a superset, so a
-/// pattern that previews fine can fail to build.
 /// Why the ENGINE refuses this pattern at load, or `None` if it will run it (§2.7).
 ///
 /// **One function, two callers, and that is the point.** `AutomationEngine::reload` asks it before
@@ -83,6 +76,18 @@ pub fn pattern_refused_at_load(find: &str) -> Option<String> {
     }
 }
 
+/// Compile a user pattern, once, at rule load.
+///
+/// `size_limit(1 << 20)` bounds the compiled program rather than the input. Rust's `regex` has no
+/// backtracking and guarantees linear-time matching, so a pattern typed into the editor cannot hang
+/// the 250 ms evaluation loop — a guarantee the renderer's `RegExp` preview cannot make, which is why
+/// compilation is mandatory here rather than merely convenient: JS regex syntax is a superset, so a
+/// pattern that previews fine can fail to build.
+///
+/// **Compiles the pattern AS TYPED.** Leading and trailing whitespace is part of a regex — `"ctx: "`
+/// and `"ctx:"` match different text — so trimming here would validate one expression and run
+/// another. Emptiness is the one question asked of the trimmed text, because a pattern of nothing but
+/// spaces is not a pattern the user meant to write.
 pub fn compile(find: &str) -> Result<Regex, String> {
     RegexBuilder::new(find)
         .size_limit(1 << 20)
@@ -94,14 +99,18 @@ pub fn compile(find: &str) -> Result<Regex, String> {
 /// one that matters.
 pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let mut out = Vec::new();
-    let find = graph.parse.find.trim();
 
-    if find.is_empty() {
+    if graph.parse.find.trim().is_empty() {
         out.push(Problem::new(Severity::Blocks, "parse", "Enter something to look for."));
         return out;
     }
 
-    let compiled = match compile(find) {
+    // The pattern AS TYPED, which is the one `reload` compiles and the engine runs. This used to
+    // validate `find.trim()` and derive `captures_len` from it, so a pattern with edge whitespace was
+    // checked as one expression and executed as another — three treatments of one field, across
+    // `pattern_problems`, `reload` and `pattern_refused_at_load`. Now there is one: trimmed for the
+    // emptiness question, verbatim for every other.
+    let compiled = match compile(&graph.parse.find) {
         Ok(re) => re,
         Err(e) => {
             out.push(Problem::new(

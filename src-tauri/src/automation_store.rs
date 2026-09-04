@@ -575,6 +575,14 @@ pub struct AutomationStore {
     /// second, contending with the same 30 s multi-MB flush `busy_timeout` exists because of.
     /// Written through by `save_rule` and the sweep, dropped by `delete_rule`.
     verbose_cache: DashMap<String, Option<i64>>,
+    /// `(rule_id, terminal_id)` → the `(label, folder, last_seen_at)` this process last stored.
+    ///
+    /// The targeting tick asks `touch_target` about every terminal every live rule watches, every
+    /// 2 s, and the answer is almost always *nothing changed* — which cost a `SELECT` per question on
+    /// the same mutex `append` needs, and §3.4 says `SQLITE_BUSY` on this file is routine. Five rules
+    /// and ten terminals is 25 statements a second of pure polling. The cache answers the "nothing
+    /// changed" case with no lock at all; every other case still goes to the row.
+    target_cache: DashMap<(String, String), (Option<String>, Option<String>, i64)>,
     emit: Mutex<EmitState>,
 }
 
@@ -592,6 +600,7 @@ impl AutomationStore {
             log_counts: DashMap::new(),
             last_verbose: DashMap::new(),
             verbose_cache: DashMap::new(),
+            target_cache: DashMap::new(),
             emit: Mutex::new(EmitState::default()),
         }
     }
@@ -971,6 +980,7 @@ impl AutomationStore {
         self.log_counts.remove(id);
         self.last_verbose.retain(|(rule_id, _), _| rule_id != id);
         self.verbose_cache.remove(id);
+        self.target_cache.retain(|(rule_id, _), _| rule_id != id);
         Ok(n > 0)
     }
 
@@ -1022,18 +1032,11 @@ impl AutomationStore {
         )? > 0)
     }
 
-    /// The enable gate. §7.8 asks for TWO call sites — *"`set_enabled_checked` **and any save with
-    /// `enabled = true`** return the problem list and refuse"* — and only one of them is wired.
-    ///
-    /// **The second is deliberately deferred, not forgotten** (M3 review round 1, H-1). Gating
-    /// `save_rule` is one line from here, and it breaks 31 existing tests — not because the tests are
-    /// sloppy, but because it makes a real scenario unreachable: `reload`'s "an uncompilable pattern
-    /// is reported once per load" path can only be entered by a rule that was STORED with a bad
-    /// pattern, and a store that refuses to write one turns the engine's own refusal into dead code.
-    /// A rule saved by an older build or arriving through a migration can still carry one, so the
-    /// path is real and must stay testable. The ruling that reconciles those two is a design decision,
-    /// and it is written up in the handoff rather than guessed at here.
     /// The ENABLE gate (§7.8): every blocking problem, because after this the rule RUNS.
+    ///
+    /// §7.8's second call site — *"any save with `enabled = true`"* — is `refuse_if_it_would_run_wrong`
+    /// below, wired since round 1's H-1. *(This paragraph used to say that gate was deferred, and it
+    /// stood for three commits after the gate was written, one of which was about this very gate.)*
     fn refuse_if_invalid(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
         Self::refuse(crate::automation_validation::problems(rule))
     }
@@ -1179,6 +1182,18 @@ impl AutomationStore {
         folder: Option<&str>,
         at: i64,
     ) -> Result<(), AutomationStoreError> {
+        let key = (rule_id.to_string(), terminal_id.to_string());
+        // The whole question, answered without the lock: this row already says what we were about to
+        // write, and its `last_seen_at` is inside the throttle. `None` means "no new value for this",
+        // never "clear it", so a `None` argument agrees with whatever is stored.
+        if let Some(cached) = self.target_cache.get(&key) {
+            let (l, f, seen) = cached.value();
+            let same = label.is_none_or(|new| Some(new) == l.as_deref())
+                && folder.is_none_or(|new| Some(new) == f.as_deref());
+            if same && at - seen < LAST_SEEN_THROTTLE_MS {
+                return Ok(());
+            }
+        }
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
         let existing: Option<(Option<String>, Option<String>, Option<i64>)> =
@@ -1196,6 +1211,10 @@ impl AutomationStore {
                  VALUES (?1, ?2, 'matched', ?3, ?4, ?5, ?5, ?5)",
                 rusqlite::params![rule_id, terminal_id, label, folder, at],
             )?;
+            self.target_cache.insert(
+                key,
+                (label.map(str::to_string), folder.map(str::to_string), at),
+            );
             return Ok(());
         };
 
@@ -1206,6 +1225,10 @@ impl AutomationStore {
         let label = label.or(old_label.as_deref());
         let folder = folder.or(old_folder.as_deref());
 
+        // `last_seen_at` as the ROW now holds it, which is not always `at`: the throttle branch
+        // deliberately does not write, and a cache that recorded `at` anyway would extend the throttle
+        // by one full period every time it was asked.
+        let mut seen_now = last_seen.unwrap_or(0);
         if old_label.as_deref() != label || old_folder.as_deref() != folder {
             conn.execute(
                 "UPDATE automation_targets
@@ -1213,18 +1236,22 @@ impl AutomationStore {
                   WHERE rule_id = ?1 AND terminal_id = ?2",
                 rusqlite::params![rule_id, terminal_id, label, folder, at],
             )?;
-        } else if at - last_seen.unwrap_or(0) >= LAST_SEEN_THROTTLE_MS {
+            seen_now = at;
+        } else if at - seen_now >= LAST_SEEN_THROTTLE_MS {
             conn.execute(
                 "UPDATE automation_targets SET last_seen_at = ?3
                   WHERE rule_id = ?1 AND terminal_id = ?2",
                 rusqlite::params![rule_id, terminal_id, at],
             )?;
+            seen_now = at;
         }
+        self.target_cache.insert(
+            key,
+            (label.map(str::to_string), folder.map(str::to_string), seen_now),
+        );
         Ok(())
     }
 
-    /// One rule's stored targets: `(terminal_id, source, label, folder, last_seen_at)`.
-    #[allow(clippy::type_complexity)]
     /// The newest snapshot for **every** terminal id, across all rules (plan §4.3).
     ///
     /// The picker's fallback when the caller has no rule to scope to — an unsaved draft, which is the
@@ -1265,6 +1292,8 @@ impl AutomationStore {
         Ok(out)
     }
 
+    /// One rule's stored targets: `(terminal_id, source, label, folder, last_seen_at)`.
+    #[allow(clippy::type_complexity)]
     pub fn targets_for(
         &self,
         rule_id: &str,
@@ -2530,8 +2559,26 @@ mod tests {
             "stored enabled, and the engine must be the thing that refuses to run it"
         );
 
-        // The mirror is the claim, so assert it as one: every pattern this gate lets through is a
-        // pattern the engine refuses, and every pattern it blocks is one the engine would have run.
+        // **The case that separates a DERIVED exemption from a FIELD one**, and the only one: `parse`
+        // carries three blocking problems, and `pattern_refused_at_load` answers `Some` for two of
+        // them. A numeric rule keeping the bracketed value, with no brackets, compiles fine — so the
+        // engine admits it, `extract` degrades to `Read::Unparsed`, and the rule runs forever without
+        // firing. Under `p.field != "parse"` this rule stored ENABLED and the whole suite passed.
+        let mut no_group = enableable("au-4");
+        no_group.enabled = true;
+        no_group.graph.parse.find = r"ctx:\d+%".into();
+        assert!(
+            crate::automation_validation::pattern_refused_at_load(&no_group.graph.parse.find)
+                .is_none(),
+            "the premise: the engine will happily run this pattern"
+        );
+        let refused = store.save_rule(&no_group);
+        assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
+        assert!(store.get_rule("au-4").unwrap().is_none());
+
+        // The claim, narrowed to what is asserted: every pattern this gate lets through is one the
+        // engine refuses at load. The converse is NOT claimed — `au-4` above is blocked here and the
+        // engine would have run it, which is the entire reason this gate exists.
         for find in ["", "   ", "ctx:(\\d+"] {
             assert!(
                 crate::automation_validation::pattern_refused_at_load(find).is_some(),
@@ -2546,6 +2593,73 @@ mod tests {
         store.set_enabled_checked("au-2", false).unwrap();
         let refused = store.set_enabled_checked("au-2", true);
         assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
+    }
+
+    /// **§4.3's fallback, which had no test at all.** `list_watchable_terminals` answers an unsaved
+    /// draft's picker from this, and reverting it to `Ok(Vec::new())` — the exact round-1 defect,
+    /// where every closed terminal drew as a bare id — passed the whole suite.
+    ///
+    /// The property under test is *newest by `label_at`, not by `last_seen_at`*: `touch_target`'s
+    /// throttle refreshes `last_seen_at` on a row whose label is an hour old, so a query ordered the
+    /// other way returns the stale name. Two rules holding different labels for one terminal is what
+    /// makes the two orderings disagree; one rule cannot.
+    #[test]
+    fn the_newest_snapshot_across_rules_is_the_newest_label_not_the_newest_sighting() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        store.save_rule(&rule("au-2")).unwrap();
+
+        // au-1 saw it first, under its old name.
+        store.touch_target("au-1", "tm-shared", Some("bash"), Some("D:/old"), 1_000).unwrap();
+        // au-2 saw it later, renamed. This is the row a `label_at` ordering must return.
+        store.touch_target("au-2", "tm-shared", Some("claude"), Some("D:/new"), 5_000).unwrap();
+        // …and then au-1's row is touched again, which moves only `last_seen_at`. A query ordered by
+        // sighting returns "bash" from here on.
+        store
+            .touch_target("au-1", "tm-shared", None, None, 5_000 + LAST_SEEN_THROTTLE_MS)
+            .unwrap();
+
+        let snaps = store.newest_snapshots().unwrap();
+        let shared = snaps
+            .iter()
+            .find(|s| s.terminal_id == "tm-shared")
+            .expect("the fallback returned nothing for a terminal two rules have seen");
+        assert_eq!(shared.label.as_deref(), Some("claude"), "the stale label won");
+        assert_eq!(shared.folder.as_deref(), Some("D:/new"));
+        assert_eq!(snaps.iter().filter(|s| s.terminal_id == "tm-shared").count(), 1, "one row per id");
+    }
+
+    /// **The cache is not allowed to become the answer.** A changed label must reach the row even
+    /// when the cache has an entry, and a repeat inside the throttle must not.
+    #[test]
+    fn touch_target_skips_the_row_only_while_nothing_has_changed() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        store.touch_target("au-1", "tm-1", Some("bash"), Some("D:/a"), 1_000).unwrap();
+
+        // The instrument, made dirty on purpose: change the row behind the cache's back. A second
+        // identical touch inside the throttle must not read or write it, so the change survives.
+        {
+            let guard = store.conn.lock().unwrap();
+            guard
+                .as_ref()
+                .unwrap()
+                .execute(
+                    "UPDATE automation_targets SET label = 'tampered' WHERE rule_id = 'au-1'",
+                    [],
+                )
+                .unwrap();
+        }
+        store.touch_target("au-1", "tm-1", Some("bash"), Some("D:/a"), 2_000).unwrap();
+        assert_eq!(
+            store.targets_for("au-1").unwrap()[0].2.as_deref(),
+            Some("tampered"),
+            "the skip did not happen: this touch went to the row"
+        );
+
+        // A CHANGED label is never skipped, cache or no cache.
+        store.touch_target("au-1", "tm-1", Some("claude"), Some("D:/a"), 3_000).unwrap();
+        assert_eq!(store.targets_for("au-1").unwrap()[0].2.as_deref(), Some("claude"));
     }
 
     /// A rule that is not there is an error, not a silent no-op: the command's caller shows the
