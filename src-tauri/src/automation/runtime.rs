@@ -66,9 +66,14 @@ pub struct AutomationRuntime {
     send_locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
     /// `(rule_id, tm_id)` -> when that pair last evaluated, for both cadences.
     last_eval_ms: DashMap<(String, String), i64>,
-    /// **`pc_id`** -> this terminal printed something since the last evaluation. The one `pc-`keyed
-    /// map here, because `ChannelPayload.id` is a process id.
-    dirty: DashMap<String, ()>,
+    /// **`pc_id`** -> how many times this terminal has printed. The one `pc-`keyed map here, because
+    /// `ChannelPayload.id` is a process id.
+    ///
+    /// **A generation, not a flag.** The tap runs on another worker while the evaluator is reading:
+    /// output that arrives after `host.tail()` and before the clear would be thrown away by a blind
+    /// `remove`, and if that was the last line the terminal printed, thrown away permanently. The
+    /// evaluator carries the generation it read at and the clear only removes what it has not moved.
+    dirty: DashMap<String, u64>,
     /// How often each pair has fired, and when it last did.
     ///
     /// `arm` cannot answer either question: its `at_ms` is overwritten on every crossing and gone
@@ -192,20 +197,31 @@ impl AutomationRuntime {
 
     /// The tap's ONLY write. Takes a `pc-` process id.
     pub fn mark_dirty(&self, pc: &str) {
-        self.dirty.insert(pc.to_string(), ());
+        *self.dirty.entry(pc.to_string()).or_insert(0) += 1;
     }
 
-    /// Spend a terminal's dirty flag.
+    /// Spend a terminal's dirty signal, **unless it has moved since `seen`**.
     ///
-    /// The evaluator clears a `pc` only once EVERY due pair on it has run this tick (see
-    /// `due::settled_processes`). Two rules can watch one terminal, and clearing after the first
-    /// would make the second miss that output — permanently, if the terminal then goes quiet.
-    pub fn clear_dirty(&self, pc: &str) {
-        self.dirty.remove(pc);
+    /// Two guards, and they are guarding the same thing from two sides. The evaluator clears a `pc`
+    /// only once every pair that wanted this output has run (see `due::settled_processes`) — two
+    /// rules watch one terminal and clearing after the first would make the second miss it. And the
+    /// tap writes concurrently, so output arriving between the read and the clear is output no pair
+    /// has seen at all; `seen` is the generation the tick read at, and a clear that does not match
+    /// it is a clear of somebody else's signal. Both losses are permanent if the terminal then goes
+    /// quiet, which is the normal end of a build.
+    pub fn clear_dirty(&self, pc: &str, seen: u64) {
+        self.dirty.remove_if(pc, |_, at| *at == seen);
     }
 
     pub fn is_dirty(&self, pc: &str) -> bool {
         self.dirty.contains_key(pc)
+    }
+
+    /// How many times this terminal has printed, or `None` if it has not since its last clear.
+    ///
+    /// `Some` is the dirty signal; the number is only ever compared with itself.
+    pub fn dirty_seq(&self, pc: &str) -> Option<u64> {
+        self.dirty.get(pc).map(|e| *e.value())
     }
 
     // --- send serialisation --------------------------------------------------------------------
@@ -227,9 +243,12 @@ impl AutomationRuntime {
     /// The cap is not decoration: this map is only ever pruned by expiry, and a rule on a 10 s timer
     /// that fires all day would otherwise grow an unbounded `Vec` that every evaluation of that
     /// terminal walks. The OLDEST needle is dropped, because the newest is the one still on screen.
-    pub fn push_echo(&self, tm: &str, text: &str, until_ms: i64) {
+    pub fn push_echo(&self, tm: &str, text: &str, now_ms: i64) {
         let mut entry = self.echoes.entry(tm.to_string()).or_default();
-        entry.push(EchoNeedle { text: text.to_string(), until_ms });
+        // The expiry `echoes_for` used to do. It belongs on the write side: a reader that prunes is a
+        // reader that mutates, and the dry run's whole contract is that it does not.
+        entry.retain(|n| n.until_ms > now_ms);
+        entry.push(EchoNeedle { text: text.to_string(), until_ms: now_ms + ECHO_TTL_MS });
         let overflow = entry.len().saturating_sub(ECHO_CAP);
         if overflow > 0 {
             entry.drain(0..overflow);
@@ -253,12 +272,15 @@ impl AutomationRuntime {
     }
 
     /// The live needles for one terminal, dropping any that have expired.
+    /// **A read, and only a read.** It used to `get_mut` and `retain` the expired needles away, which
+    /// is benign — and made `dry.rs`'s claim to write nothing anywhere false, in a way its own
+    /// before/after oracle structurally could not see, because that oracle reads through this same
+    /// accessor. Expiry moved to `push_echo`, which is a write already.
     pub fn echoes_for(&self, tm: &str, now_ms: i64) -> Vec<String> {
-        let Some(mut entry) = self.echoes.get_mut(tm) else {
+        let Some(entry) = self.echoes.get(tm) else {
             return Vec::new();
         };
-        entry.retain(|n| n.until_ms > now_ms);
-        entry.iter().map(|n| n.text.clone()).collect()
+        entry.iter().filter(|n| n.until_ms > now_ms).map(|n| n.text.clone()).collect()
     }
 
     // --- cadence -------------------------------------------------------------------------------
@@ -400,6 +422,28 @@ mod tests {
         assert_eq!(rt.fire_record("au-1", "tm-test-1"), Some((1, 10)));
     }
 
+    /// The tap runs on another worker while the evaluator reads. Output arriving between
+    /// `host.tail()` and the clear belongs to nobody: no pair has seen it, and a blind `remove` throws
+    /// it away — permanently, if that was the last line the terminal printed, which is the normal end
+    /// of a build.
+    #[test]
+    fn a_clear_that_the_tap_overtook_leaves_the_terminal_dirty() {
+        let rt = AutomationRuntime::new();
+        rt.mark_dirty("pc-1");
+        let seen = rt.dirty_seq("pc-1").expect("the premise: it is dirty");
+
+        // The tap, between the evaluator's read and its clear.
+        rt.mark_dirty("pc-1");
+
+        rt.clear_dirty("pc-1", seen);
+        assert!(rt.is_dirty("pc-1"), "the tick spent a signal it had never read");
+
+        // And the ordinary case still clears: this is not "never clear".
+        let seen = rt.dirty_seq("pc-1").unwrap();
+        rt.clear_dirty("pc-1", seen);
+        assert!(!rt.is_dirty("pc-1"));
+    }
+
     #[test]
     fn forget_process_clears_only_the_dirty_flag_for_that_process() {
         let rt = populated();
@@ -448,10 +492,33 @@ mod tests {
     #[test]
     fn echo_needles_expire() {
         let rt = AutomationRuntime::new();
-        rt.push_echo("tm-1", "HANDOFF now", 5_000);
-        rt.push_echo("tm-1", "later", 9_000);
-        assert_eq!(rt.echoes_for("tm-1", 4_999).len(), 2);
-        assert_eq!(rt.echoes_for("tm-1", 5_000), vec!["later".to_string()]);
-        assert!(rt.echoes_for("tm-1", 9_000).is_empty());
+        // `push_echo` takes the moment the write LANDED and owns the TTL, so no caller can compute a
+        // deadline differently from any other caller.
+        rt.push_echo("tm-1", "HANDOFF now", 1_000);
+        rt.push_echo("tm-1", "later", 5_000);
+        assert_eq!(rt.echoes_for("tm-1", 1_000 + ECHO_TTL_MS - 1).len(), 2);
+        assert_eq!(rt.echoes_for("tm-1", 1_000 + ECHO_TTL_MS), vec!["later".to_string()]);
+        assert!(rt.echoes_for("tm-1", 5_000 + ECHO_TTL_MS).is_empty());
+    }
+
+    /// **`echoes_for` is a read.** It used to `retain` the expired needles away, which made the dry
+    /// run's "writes nothing anywhere" false — and invisibly, because the before/after oracle that
+    /// checks that claim reads through this very accessor, so the mutation was inside its own
+    /// instrument. Expiry belongs to `push_echo`, which is a write already.
+    #[test]
+    fn reading_the_needles_never_prunes_them_and_pushing_does() {
+        let rt = AutomationRuntime::new();
+        rt.push_echo("tm-1", "stale", 1_000);
+        let long_after = 1_000 + ECHO_TTL_MS + 1;
+
+        // Read far past its deadline, twice: the needle is filtered out of the ANSWER both times …
+        assert!(rt.echoes_for("tm-1", long_after).is_empty());
+        assert!(rt.echoes_for("tm-1", long_after).is_empty());
+        // … and is still in the map, because a read did not touch it.
+        assert_eq!(rt.echoes_for("tm-1", 1_500), vec!["stale".to_string()]);
+
+        // A push at that later moment is what actually drops it.
+        rt.push_echo("tm-1", "fresh", long_after);
+        assert_eq!(rt.echoes_for("tm-1", 1_500), vec!["fresh".to_string()]);
     }
 }

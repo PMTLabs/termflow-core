@@ -2254,8 +2254,7 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
         // §10.13. The process table is enumerated ONLY when a live rule actually asks a question that
         // needs it — `Command contains` always, `Working folder is under` only when some terminal has
         // not reported a cwd. A profile whose only rule is `Terminal ID is` never scans.
-        let any_missing_cwd = rows.iter().any(|r| r.cwd.is_none());
-        if crate::automation::proc_snapshot::scan_needed(criteria.iter().copied(), any_missing_cwd) {
+        if crate::automation::proc_snapshot::scan_needed_for(criteria.iter().copied(), &rows) {
             let now = chrono::Utc::now().timestamp_millis();
             self.proc_snapshot.with(now, sysinfo::System::new_all, |sys| {
                 for row in rows.iter_mut() {

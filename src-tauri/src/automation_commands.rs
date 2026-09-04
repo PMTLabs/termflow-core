@@ -11,7 +11,7 @@
 //! it. `State<'_, AppState>` is not `Send` into that closure, so each command clones the owned
 //! `AppState` first — every field is an `Arc` or an `AppHandle`, so the clone is cheap.
 //!
-//! **Every command that changes a rule DEFINITION calls `automations.reload(`**, and §10.18c derives
+//! **Every command that changes a rule DEFINITION calls `reload_after_commit`**, and §10.18c derives
 //! that requirement from the source rather than listing the commands: `reload` is what carries an edit
 //! into the running engine, and a command added later without it leaves the engine running yesterday's
 //! rules with nothing to say so. It also preserves the arm state of rules that did not change, which
@@ -203,6 +203,41 @@ pub async fn list_watchable_terminals(
     .map_err(|e| e.to_string())?
 }
 
+/// Which pairs `Re-arm now` touches: one named leaf, or every leaf the rule watches.
+///
+/// **A named leaf is filtered through the watch set too.** It arrives from a renderer that may be
+/// holding a row this build has already stopped watching, and an unfiltered `vec![tm]` mints an arm
+/// key for a pair nothing evaluates, nothing renders, and only `forget_terminal` ever reclaims.
+///
+/// Out here rather than inside the command because the command takes an `AppState` (§7.10), and a
+/// branch inside one of those is a branch no test on Windows can reach — `vec![tm]` survived the whole
+/// suite.
+fn leaves_to_rearm(watched: &std::collections::HashSet<String>, named: Option<String>) -> Vec<String> {
+    match named {
+        Some(tm) => watched.contains(&tm).then_some(tm).into_iter().collect(),
+        None => watched.iter().cloned().collect(),
+    }
+}
+
+/// The reload that follows a store write which has **already committed**.
+///
+/// Never `?`-ed inside the blocking closure. `save_rule` and its four siblings commit before this
+/// runs, so a `reload` that fails — `Disabled`, or a `SQLITE_BUSY` on `list_rules` while the 30 s
+/// scrollback flush holds the file, which §3.4 calls routine — must not be allowed to skip
+/// `announce`. The rule IS changed on disk; every other window would go on showing the old definition
+/// until it was remounted, with nothing in the log to say why. The error still reaches the caller,
+/// after the windows have been told.
+/// It also **says what the reload refused**, which `spawn` does at launch and no command did. That
+/// matters more since §7.8's save gate stopped judging the pattern: a rule saved enabled with one the
+/// engine cannot compile is skipped right here, and without this the user is told nothing at all.
+fn reload_after_commit(owned: &AppState, at: i64) -> Result<(), String> {
+    let report = owned.automations.reload(&owned.automation_store, at).map_err(to_string_err)?;
+    if let Some(ids) = crate::automation_engine::refusals_to_announce(&report) {
+        EngineHost::emit_activity(owned, ids);
+    }
+    Ok(())
+}
+
 /// The Test button (decision 9). Takes the **unsaved draft**, not an id — which is what lets a
 /// template be tested before it exists on disk, and what makes it physically impossible for this path
 /// to load and touch a live rule's arm state.
@@ -234,19 +269,20 @@ pub async fn save_automation(
     let owned = state.inner().clone();
     let id = rule.id.clone();
     let origin_for_log = origin.clone();
-    let previous = tokio::task::spawn_blocking(move || {
+    let (previous, reloaded) = tokio::task::spawn_blocking(move || {
         let previous = owned.automation_store.save_rule(&rule).map_err(to_string_err)?;
         // §3.5: the `saved` entry's detail carries the origin window, and `save_rule` returns the
         // previous `updated_at` from INSIDE its own transaction so the line can name what it replaced.
         // Two windows may hold one rule open and the later save wins whole; the log entry IS the
         // requirement, not concurrency control. GUI step 19 checks this line.
         note(&owned, &rule.id, LogKind::Saved, &saved_detail(&origin_for_log, previous));
-        owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
-        Ok::<_, String>(previous)
+        let reloaded = reload_after_commit(&owned, now_ms());
+        Ok::<_, String>((previous, reloaded))
     })
     .await
     .map_err(|e| e.to_string())??;
     announce(&state, vec![id], vec![], origin);
+    reloaded?;
     Ok(previous)
 }
 
@@ -258,14 +294,15 @@ pub async fn delete_automation(
 ) -> Result<bool, String> {
     let owned = state.inner().clone();
     let rule_id = id.clone();
-    let removed = tokio::task::spawn_blocking(move || {
+    let (removed, reloaded) = tokio::task::spawn_blocking(move || {
         let removed = owned.automation_store.delete_rule(&rule_id).map_err(to_string_err)?;
-        owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
-        Ok::<_, String>(removed)
+        let reloaded = reload_after_commit(&owned, now_ms());
+        Ok::<_, String>((removed, reloaded))
     })
     .await
     .map_err(|e| e.to_string())??;
     announce(&state, vec![], vec![id], origin);
+    reloaded?;
     Ok(removed)
 }
 
@@ -276,15 +313,16 @@ pub async fn duplicate_automation(
     origin: String,
 ) -> Result<AutomationRule, String> {
     let owned = state.inner().clone();
-    let copy = tokio::task::spawn_blocking(move || {
+    let (copy, reloaded) = tokio::task::spawn_blocking(move || {
         let copy =
             owned.automation_store.duplicate_automation(&id, now_ms()).map_err(to_string_err)?;
-        owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
-        Ok::<_, String>(copy)
+        let reloaded = reload_after_commit(&owned, now_ms());
+        Ok::<_, String>((copy, reloaded))
     })
     .await
     .map_err(|e| e.to_string())??;
     announce(&state, vec![copy.id.clone()], vec![], origin);
+    reloaded?;
     Ok(copy)
 }
 
@@ -300,17 +338,17 @@ pub async fn set_automation_enabled(
     let owned = state.inner().clone();
     let rule_id = id.clone();
     let origin_for_log = origin.clone();
-    tokio::task::spawn_blocking(move || {
+    let reloaded = tokio::task::spawn_blocking(move || {
         owned.automation_store.set_enabled_checked(&rule_id, enabled).map_err(to_string_err)?;
         // Only after the check passed, so a refused enable never claims in the log to have happened.
         let kind = if enabled { LogKind::Enabled } else { LogKind::Disabled };
         note(&owned, &rule_id, kind, &format!("from window {}", origin_for_log));
-        owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
-        Ok::<_, String>(())
+        Ok::<_, String>(reload_after_commit(&owned, now_ms()))
     })
     .await
     .map_err(|e| e.to_string())??;
     announce(&state, vec![id], vec![], origin);
+    reloaded?;
     Ok(())
 }
 
@@ -328,16 +366,16 @@ pub async fn reset_automation(
 ) -> Result<(), String> {
     let owned = state.inner().clone();
     let rule_id = id.clone();
-    tokio::task::spawn_blocking(move || {
+    let reloaded = tokio::task::spawn_blocking(move || {
         owned.automation_store.clear_completed(&rule_id).map_err(to_string_err)?;
         owned.automations.runtime.forget_rule(&rule_id);
-        owned.automations.reload(&owned.automation_store, now_ms()).map_err(to_string_err)?;
-        Ok::<_, String>(())
+        Ok::<_, String>(reload_after_commit(&owned, now_ms()))
     })
     .await
     .map_err(|e| e.to_string())??;
     announce(&state, vec![id], vec![], origin);
     EngineHost::emit_state(state.inner());
+    reloaded?;
     Ok(())
 }
 
@@ -358,10 +396,7 @@ pub async fn rearm_automation(
     let owned = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let runtime = &owned.automations.runtime;
-        let leaves: Vec<String> = match terminal_id {
-            Some(tm) => vec![tm],
-            None => runtime.watched_for(&rule_id).into_iter().collect(),
-        };
+        let leaves = leaves_to_rearm(&runtime.watched_for(&rule_id), terminal_id);
         for tm in leaves {
             // `seen_fire` is CARRIED, not asserted. It is a fact about this pair's history and it
             // selects the read depth (§2.2c): claiming `true` on a pair that has never fired narrows a
@@ -385,6 +420,31 @@ pub async fn rearm_automation(
 
 #[cfg(test)]
 mod source_tests {
+    use super::leaves_to_rearm;
+
+    /// `Re-arm now` reaches only pairs the rule actually watches.
+    ///
+    /// `vec![tm]` for the named case survived the whole suite, because the branch lived inside a
+    /// command that takes an `AppState`. A stale renderer naming a leaf the rule has stopped watching
+    /// would mint an arm key nothing evaluates and nothing renders, reclaimed only when that terminal
+    /// closes.
+    #[test]
+    fn re_arm_reaches_only_the_pairs_the_rule_watches() {
+        let watched: std::collections::HashSet<String> =
+            ["tm-1".to_string(), "tm-2".to_string()].into_iter().collect();
+
+        assert_eq!(leaves_to_rearm(&watched, Some("tm-1".into())), vec!["tm-1".to_string()]);
+        assert!(
+            leaves_to_rearm(&watched, Some("tm-9".into())).is_empty(),
+            "a leaf this rule does not watch is not a pair to re-arm"
+        );
+
+        let mut every = leaves_to_rearm(&watched, None);
+        every.sort();
+        assert_eq!(every, vec!["tm-1".to_string(), "tm-2".to_string()]);
+        assert!(leaves_to_rearm(&std::collections::HashSet::new(), None).is_empty());
+    }
+
     /// Every `#[tauri::command]` body in this module, as `(name, body)`.
     ///
     /// Source-derived because these are claims about code that must be true of commands **not yet
@@ -393,7 +453,8 @@ mod source_tests {
     /// `core.autocrlf` is on and there is no `.gitattributes`, so the file git checks out is not the
     /// file in a worktree that rewrote it.
     fn command_bodies() -> Vec<(String, String)> {
-        let source = include_str!("automation_commands.rs").replace("\r\n", "\n");
+        let source =
+            crate::automation_engine::test_host::strip_comments(include_str!("automation_commands.rs"));
         let code = &source[..source.find("#[cfg(test)]").expect("the tests must follow the code")];
         let mut out = Vec::new();
         for chunk in code.split("#[tauri::command]").skip(1) {
@@ -452,12 +513,81 @@ mod source_tests {
             }
             checked += 1;
             assert!(
-                body.contains("automations.reload("),
+                body.contains("reload_after_commit("),
                 "`{}` changes a rule definition and never tells the engine",
+                name
+            );
+            // And it must not `?` the reload inside the closure. The store write has already
+            // COMMITTED by then, so propagating there skips `announce` and leaves every other window
+            // showing a definition that is no longer on disk, with nothing in the log to say why.
+            assert!(
+                !body.contains("reload_after_commit(&owned, now_ms())?"),
+                "`{}` lets a failed reload swallow the announce for a write that already happened",
                 name
             );
         }
         assert_eq!(checked, 5, "the mutating commands moved; this test was checking nothing");
+
+        // ONE call site, so the announce cannot be skipped by not using the helper. Counted over the
+        // PRODUCTION half only — this assertion's own needle lives in the test half, and a source
+        // test that matches itself is the trap this feature has now walked into three times.
+        let module =
+            crate::automation_engine::test_host::strip_comments(include_str!("automation_commands.rs"));
+        let code = &module[..module.find("#[cfg(test)]").expect("the tests must follow the code")];
+        assert_eq!(
+            code.matches("automations.reload(").count(),
+            1,
+            "`reload` is called somewhere other than `reload_after_commit`"
+        );
+    }
+
+    /// **These tests read one file, and §9 does not oblige anyone to put the next command in it.**
+    ///
+    /// `command_bodies` scans `automation_commands.rs`. An automation command added to `commands.rs`
+    /// — which is where this crate's Tauri commands live by default, and where every one of them
+    /// lived before this feature — would pass `every_automation_command_runs_its_work_off_the_async_executor`
+    /// and `every_command_that_changes_a_definition_reloads_the_engine` while being covered by
+    /// neither. So the assumption those two rest on is pinned here rather than assumed: automation
+    /// commands live in the automation module.
+    #[test]
+    fn no_automation_command_lives_outside_this_module() {
+        for (path, source) in [
+            ("commands.rs", include_str!("commands.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+        ] {
+            let code = crate::automation_engine::test_host::strip_comments(source);
+            for chunk in code.split("#[tauri::command]").skip(1) {
+                // Up to the next command; a command's own body is all that can reach the store.
+                let body = chunk.split("#[tauri::command]").next().unwrap_or_default();
+                let name = body.split("fn ").nth(1).and_then(|s| s.split('(').next()).unwrap_or("?");
+                assert!(
+                    !body.contains("automation_store") && !body.contains("automations."),
+                    "{}'s `{}` is an automation command living where this feature's source tests \
+                     cannot see it: move it to automation_commands.rs",
+                    path,
+                    name.trim()
+                );
+            }
+        }
+    }
+
+    /// Every command in this module is REGISTERED, and the count the other tests assert is that list.
+    ///
+    /// `bodies.len() >= 11` is only a floor over whatever happens to be in the file; an unregistered
+    /// command satisfies it while being unreachable from the UI, and a registered one that was
+    /// deleted satisfies it while breaking the app at startup.
+    #[test]
+    fn every_command_in_this_module_is_registered_in_lib() {
+        let lib = crate::automation_engine::test_host::strip_comments(include_str!("lib.rs"));
+        let names: Vec<String> = command_bodies().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names.len(), 11, "the command list changed: {:?}", names);
+        for name in &names {
+            assert!(
+                lib.contains(&format!("automation_commands::{},", name)),
+                "`{}` is a command nothing can invoke",
+                name
+            );
+        }
     }
 
     /// §7.8 — *Reset* is **one** command doing the store write **and** the engine purge.
@@ -521,8 +651,11 @@ mod source_tests {
     /// only one builder and both call it.
     #[test]
     fn first_paint_and_the_state_event_call_the_same_builder() {
-        let commands = include_str!("automation_commands.rs").replace("\r\n", "\n");
-        let state = include_str!("state.rs").replace("\r\n", "\n");
+        // Stripped: both needles are POSITIVE `contains`, which a comment mentioning either call
+        // would satisfy on its own.
+        let commands =
+            crate::automation_engine::test_host::strip_comments(include_str!("automation_commands.rs"));
+        let state = crate::automation_engine::test_host::strip_comments(include_str!("state.rs"));
         assert!(
             commands.contains("engine.runtime_payload()"),
             "get_automation_runtime must return the same object the event carries"

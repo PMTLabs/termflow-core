@@ -45,10 +45,12 @@ use crate::automation_store::{
 /// **Called once, from `.setup()`, immediately after `spawn_history_flush_task`** — the same place
 /// and the same shape as every other long-lived task in this crate.
 ///
-/// `reload` is attempted once and, on `Err(Disabled)`, once more after a short delay. `init` runs a
-/// few lines earlier in the same closure, so the store is normally ready; `Disabled` here means the
-/// history DB path was unavailable, and the retry costs one wake-up against a feature that would
-/// otherwise stay silently off for the whole session with nothing in the log to say why.
+/// `reload` is attempted once and, on **any** error, once more after a short delay. `init` runs a few
+/// lines earlier in the same closure, so the store is normally ready; the error worth retrying is
+/// `Disabled` — the history DB path was unavailable — but a `SQLITE_BUSY` on `list_rules` deserves the
+/// same second chance and telling them apart would buy nothing. The retry costs one wake-up against a
+/// feature that would otherwise stay silently off for the whole session with nothing in the log to say
+/// why.
 ///
 /// Takes the concrete `AppState<R>` and hands the loops an `Arc<dyn EngineHost>`: everything with a
 /// decision in it is on the far side of that port and is tested against a fake (§7.10).
@@ -76,10 +78,8 @@ pub fn spawn<R: tauri::Runtime>(state: crate::state::AppState<R>) {
                             report.live,
                             report.skipped.len()
                         );
-                        if report.emit {
-                            host.emit_activity(
-                                report.skipped.iter().map(|(id, _)| id.clone()).collect(),
-                            );
+                        if let Some(ids) = refusals_to_announce(&report) {
+                            host.emit_activity(ids);
                         }
                         break;
                     }
@@ -115,6 +115,23 @@ pub struct LiveRule {
     pub re: Regex,
 }
 
+/// The rule ids a `reload` should announce, or `None` if it wrote nothing worth announcing.
+///
+/// Extracted because it was written twice — once in `spawn`, once in `automation_commands`'
+/// `reload_after_commit` — and both copies sat inside a function that takes an `AppState`, which §7.10
+/// says is the one place a decision cannot be tested on Windows. `if report.emit` written as
+/// `if false` changed nothing any test could see, in either copy.
+///
+/// `emit` is the STORE's answer, not the engine's: the verbose gate decides whether a row was
+/// actually written, and announcing a row that was dropped would make every open Settings page
+/// re-query the log for nothing.
+pub fn refusals_to_announce(report: &ReloadReport) -> Option<Vec<String>> {
+    if !report.emit {
+        return None;
+    }
+    Some(report.skipped.iter().map(|(id, _)| id.clone()).collect())
+}
+
 /// What one `reload` did, for the caller that owns the emit.
 #[derive(Debug, Default, PartialEq)]
 pub struct ReloadReport {
@@ -132,7 +149,7 @@ pub struct ReloadReport {
 ///
 /// Constructed inert (the `CanvasStore::new()` precedent) and held on `AppState` so
 /// `cleanup_terminal_state` can purge a closing terminal's state and, from M3, so `RunEvent::Exit`
-/// can set `stopping` before the synchronous log flush.
+/// can set `stopping` before the runtime is torn down.
 pub struct AutomationEngine {
     /// Standalone and `Arc`-shared, so every unit test targets it directly without an `AppHandle`
     /// (plan §7.10). `AppState` reaches it through this struct rather than holding a second `Arc`,
@@ -142,8 +159,10 @@ pub struct AutomationEngine {
     /// only reader is the `.swap()` inside `flush_then_exit`, making it a re-entrancy guard for one
     /// function rather than a general "shutting down" flag.
     ///
-    /// Its **only writer is `lib.rs`'s `RunEvent::Exit`** (M3), which sets it and then performs the
-    /// synchronous log flush. The three loops check it at the top of every iteration, and a send
+    /// Its **only writer is `lib.rs`'s `RunEvent::Exit`** (M3), which sets it first, before the
+    /// scrollback flush and the two sidecar shutdowns that follow — the loops must stop deciding
+    /// before the runtime they run on goes away. The three loops check it at the top of every
+    /// iteration, and a send
     /// checks it before its first write and never between the paste and the submit — so a send has
     /// either not started or runs to completion, and the whole in-flight problem disappears.
     ///

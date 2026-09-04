@@ -36,6 +36,15 @@ pub(crate) struct FakeHost {
     pub(crate) write_err: Mutex<Option<String>>,
     pub(crate) activity: AtomicUsize,
     pub(crate) states: AtomicUsize,
+    /// Run on every `process_for_leaf`, so a test can interleave the TAP with the evaluator's own
+    /// bookkeeping loop.
+    ///
+    /// The evaluator resolves each pair's leaf and reads that process's dirty generation in the same
+    /// pass; the tap runs on another worker and can move it between two pairs of the same tick. That
+    /// is the whole reason the tick keeps the EARLIEST generation it saw, and without a seam here no
+    /// test can tell earliest from latest — which is how the choice shipped unpinned.
+    #[allow(clippy::type_complexity)]
+    pub(crate) on_leaf_lookup: Mutex<Option<Arc<dyn Fn(&str) + Send + Sync>>>,
 }
 
 impl FakeHost {
@@ -49,6 +58,7 @@ impl FakeHost {
             write_err: Mutex::new(None),
             activity: AtomicUsize::new(0),
             states: AtomicUsize::new(0),
+            on_leaf_lookup: Mutex::new(None),
         }
     }
 
@@ -104,6 +114,10 @@ impl FakeHost {
 
 impl EngineHost for FakeHost {
     fn process_for_leaf(&self, tm: &str) -> Option<String> {
+        let hook = self.on_leaf_lookup.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(tm);
+        }
         self.leaves.lock().unwrap().get(tm).cloned()
     }
     fn roster(&self, _criteria: &[Criterion]) -> Vec<RosterRow> {

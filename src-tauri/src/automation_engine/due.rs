@@ -65,7 +65,10 @@ pub fn due_now(
 /// and any scheme that tried for the latter would have to key on pair identity and outlive the list.
 pub fn select_due(due_len: usize, cursor: usize, cap: usize) -> (Vec<usize>, usize) {
     if due_len == 0 || cap == 0 {
-        return (Vec::new(), 0);
+        // The cursor is CARRIED, not reset. Returning 0 restarts the round-robin on every idle tick,
+        // and under an alternating idle/loaded pattern with more than `cap` due pairs the tail is
+        // never reached at all — the rules at the end of the sorted list simply do not run.
+        return (Vec::new(), cursor);
     }
     let start = cursor % due_len;
     let take = cap.min(due_len);
@@ -79,9 +82,22 @@ pub fn select_due(due_len: usize, cursor: usize, cap: usize) -> (Vec<usize>, usi
 /// A `pc` may be cleared **only when every due pair on it ran**. Two rules can watch one terminal
 /// (Duplicate makes that the expected case, not an edge one), so clearing after the first would make
 /// the second miss that output — and permanently, if the terminal then goes quiet, because `dirty`
-/// is the only thing that would have brought it back. `MAX_EVALS_PER_TICK` is what makes a partly-run
-/// terminal reachable, so this is not the same statement as "clear what you evaluated".
-pub fn settled_processes(due_pcs: &[String], picked: &[usize]) -> Vec<String> {
+/// is the only thing that would have brought it back.
+///
+/// **There are two ways a pair can want this output and not have run**, and the first version of this
+/// function covered one of them — which is what "fixed at some sites but not all" looks like inside a
+/// single function. `MAX_EVALS_PER_TICK` holds a due pair over to the next tick: that is `picked`. A
+/// pair can also be **held off by the 250 ms floor** while a sibling rule on the same terminal is due,
+/// and that pair is not in `due_pcs` at all, so no amount of reasoning about `picked` can see it — the
+/// caller passes those as `owed`. Neither is the same statement as "clear what you evaluated".
+///
+/// *(A terminal that is SETTLING is not a third door. Settling is keyed by the leaf and a leaf has one
+/// process, so every pair on it skips together and the process never reaches `due_pcs`.)*
+pub fn settled_processes(
+    due_pcs: &[String],
+    picked: &[usize],
+    owed: &std::collections::HashSet<String>,
+) -> Vec<String> {
     let ran: std::collections::HashSet<usize> = picked.iter().copied().collect();
     let unfinished: std::collections::HashSet<&str> = due_pcs
         .iter()
@@ -92,7 +108,9 @@ pub fn settled_processes(due_pcs: &[String], picked: &[usize]) -> Vec<String> {
     let mut out: Vec<String> = due_pcs
         .iter()
         .enumerate()
-        .filter(|(i, pc)| ran.contains(i) && !unfinished.contains(pc.as_str()))
+        .filter(|(i, pc)| {
+            ran.contains(i) && !unfinished.contains(pc.as_str()) && !owed.contains(pc.as_str())
+        })
         .map(|(_, pc)| pc.clone())
         .collect();
     out.sort();
@@ -103,6 +121,7 @@ pub fn settled_processes(due_pcs: &[String], picked: &[usize]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     /// §10.6's cadence table, as a table. The three rows that matter are the two cadences and the
     /// never-evaluated pair, and each is asserted in both directions.
@@ -185,27 +204,48 @@ mod tests {
 
     /// Spending one terminal's dirty flag must not silence a second rule watching it.
     ///
-    /// *This is the case the cap makes reachable: pair 1 ran, pair 2 was held over, and the terminal
-    /// then goes quiet. Clear the flag and rule B never sees that output at all — no log line, no
-    /// state change, and nothing on screen to show it.*
+    /// *Clear the flag while a rule still wants that output and the rule never sees it at all — no
+    /// log line, no state change, nothing on screen — and permanently, if the terminal then goes
+    /// quiet, which is the normal end of a build.*
+    ///
+    /// **A table over both reasons a pair can want the output and not have run**, because the first
+    /// version of this function covered only the cap. `owed` is the other one, and it carries two
+    /// cases the cap cannot express — a pair the 250 ms floor held off, and a pair skipped because
+    /// its terminal is settling — neither of which appears in `due_pcs` at all.
     #[test]
     fn a_terminal_is_only_settled_once_every_rule_watching_it_has_run() {
         let pcs = vec!["pc-a".to_string(), "pc-a".to_string(), "pc-b".to_string()];
+        let none = HashSet::new();
 
         // Both of pc-a's pairs ran, and so did pc-b's.
-        assert_eq!(settled_processes(&pcs, &[0, 1, 2]), vec!["pc-a", "pc-b"]);
+        assert_eq!(settled_processes(&pcs, &[0, 1, 2], &none), vec!["pc-a", "pc-b"]);
 
         // Only the FIRST of pc-a's two pairs ran: pc-a keeps its flag, pc-b does not.
         assert_eq!(
-            settled_processes(&pcs, &[0, 2]),
+            settled_processes(&pcs, &[0, 2], &none),
             vec!["pc-b"],
             "clearing pc-a here is how the second rule watching it goes silent"
         );
 
         // Nothing ran at all.
-        assert!(settled_processes(&pcs, &[]).is_empty());
+        assert!(settled_processes(&pcs, &[], &none).is_empty());
         // And a terminal is named once however many of its pairs ran.
-        assert_eq!(settled_processes(&pcs, &[0, 1]), vec!["pc-a"]);
+        assert_eq!(settled_processes(&pcs, &[0, 1], &none), vec!["pc-a"]);
+
+        // Every pair that IS due ran, and pc-a is still owed — by a pair that never reached the due
+        // list. Nothing about `picked` can see that, which is the whole reason for the argument.
+        let owed: HashSet<String> = ["pc-a".to_string()].into_iter().collect();
+        assert_eq!(
+            settled_processes(&pcs, &[0, 1, 2], &owed),
+            vec!["pc-b"],
+            "a pair held off by the floor, or skipped for settling, still wants this output"
+        );
+        // And being owed is not contagious: pc-b is cleared in exactly the same call.
+        assert_eq!(
+            settled_processes(&pcs, &[2], &owed),
+            vec!["pc-b"],
+            "only the terminal that is owed keeps its flag"
+        );
     }
 
     /// The ordinary case is not a rotation at all, and the edges do not panic.
@@ -215,7 +255,10 @@ mod tests {
         assert_eq!(picked, vec![0, 1, 2, 3, 4]);
         assert_eq!(next, 0, "wrapping a fully-consumed list leaves the cursor at the start");
 
-        assert_eq!(select_due(0, 7, MAX_EVALS_PER_TICK), (Vec::new(), 0));
+        // The cursor SURVIVES an idle tick. Returning 0 here starved the tail of any list longer
+        // than the cap under an alternating idle/loaded pattern: every idle tick sent the next loaded
+        // one back to index 0, so the pairs past `cap` were never reached at all.
+        assert_eq!(select_due(0, 7, MAX_EVALS_PER_TICK), (Vec::new(), 7));
         assert_eq!(select_due(3, 0, 0), (Vec::new(), 0));
         // A cursor left over from a longer list must not index out of a shorter one.
         let (picked, _) = select_due(3, 400, MAX_EVALS_PER_TICK);

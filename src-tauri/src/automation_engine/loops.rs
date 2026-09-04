@@ -12,12 +12,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::automation::runtime::{ECHO_SETTLE_MS, ECHO_TTL_MS};
+use crate::automation::runtime::ECHO_SETTLE_MS;
 use crate::automation::targeting::watched_set;
 use crate::automation_engine::due::{
     due_now, select_due, settled_processes, BASE_TICK_MS, MAX_EVALS_PER_TICK, TARGETING_TICK_MS,
@@ -25,7 +27,7 @@ use crate::automation_engine::due::{
 use crate::automation_engine::eval::{self, ArmState, Decision, Evaluation, Outcome, Read};
 use crate::automation_engine::host::{EngineHost, HostPort};
 use crate::automation_engine::{AutomationEngine, LiveRule};
-use crate::automation_store::{AutomationLogEntry, Criterion, LogKind, TargetMode};
+use crate::automation_store::{AutomationLogEntry, Cadence, Criterion, LogKind, TargetMode};
 use crate::state::ChannelPayload;
 
 /// How long a send waits for the terminal's queue before giving up and rolling back (§2.5).
@@ -122,29 +124,53 @@ pub async fn evaluate_tick(
     now_ms: i64,
 ) -> usize {
     let mut due: Vec<Pair> = Vec::new();
+    // The generation each `pc` was read at, and the processes that still owe output to a pair which
+    // will not run this tick. `due_pcs` cannot express the second: a pair held off by the 250 ms floor
+    // never enters `due` at all, so a SIBLING rule on the same terminal that is due would spend the
+    // flag on its behalf — and the held-off pair never reads that output, ever, if the terminal then
+    // goes quiet.
+    let mut seen_seq: HashMap<String, u64> = HashMap::new();
+    let mut owed: HashSet<String> = HashSet::new();
     for live in engine.snapshot_live() {
         // Sorted, so which pairs the cap holds over is a property of the rule and not of hash order.
         let mut leaves: Vec<String> = engine.runtime.watched_for(&live.rule.id).into_iter().collect();
         leaves.sort();
         for tm in leaves {
-            // §2.6 layer 2: this terminal is still settling after a send, so nothing reads it.
-            if engine.runtime.is_settling(&tm, now_ms) {
-                continue;
-            }
             // The ONE tm -> pc conversion. `None` is dormant (§4.5), not dead: no evaluation, no log
-            // line, arm state untouched.
+            // line, arm state untouched. Resolved BEFORE the settle check, because a pair skipped for
+            // settling is a pair that still wants this terminal's output.
             let Some(pc) = host.process_for_leaf(&tm) else {
                 continue;
             };
+            let seq = engine.runtime.dirty_seq(&pc);
+            // The EARLIEST read wins: anything the tap adds later must survive this tick's clear.
+            if let Some(seq) = seq {
+                seen_seq.entry(pc.clone()).or_insert(seq);
+            }
+            // §2.6 layer 2: this terminal is still settling after a send, so nothing reads it. It does
+            // not join `owed`: settling is keyed by the LEAF and a leaf has exactly one process, so
+            // every pair on a settling terminal skips together and the process reaches `due_pcs` at
+            // all. There is nothing for a sibling to spend on its behalf.
+            if engine.runtime.is_settling(&tm, now_ms) {
+                continue;
+            }
             let monitor = &live.rule.graph.monitor;
             if due_now(
                 monitor.cadence,
                 monitor.every_ms,
-                engine.runtime.is_dirty(&pc),
+                seq.is_some(),
                 engine.runtime.last_eval(&live.rule.id, &tm),
                 now_ms,
             ) {
                 due.push(Pair { rule: live.clone(), tm, pc });
+            } else if monitor.cadence == Cadence::OnOutput {
+                // No `seq.is_some()` here, deliberately: a CLEAN process contributes no due pair, so
+                // it never reaches `due_pcs` and `settled_processes` can never name it — the extra
+                // condition cannot change an outcome, which is exactly why no test could hold it.
+                // The cadence check CAN: without it a timer rule waiting out its interval would keep
+                // its terminal permanently dirty, and every on-output rule on it would re-read the
+                // same text every tick.
+                owed.insert(pc.clone());
             }
         }
     }
@@ -175,9 +201,11 @@ pub async fn evaluate_tick(
         }
     }
 
-    // Only now, and only for terminals whose every due pair ran.
-    for pc in settled_processes(&due_pcs, &picked) {
-        engine.runtime.clear_dirty(&pc);
+    // Only now, only for terminals no pair is still owed, and only if the tap has not moved since.
+    for pc in settled_processes(&due_pcs, &picked, &owed) {
+        if let Some(seq) = seen_seq.get(&pc) {
+            engine.runtime.clear_dirty(&pc, *seq);
+        }
     }
 
     // §2.5: a crossing dispatches its write OFF the tick. Route A's send holds a load-bearing 500 ms
@@ -238,7 +266,7 @@ pub fn evaluate_pair(
     if !ev.decision.sends() {
         // Live by construction: `evaluate_pair` only runs for a pair whose leaf just resolved.
         let name = host.label_for(&pair.tm);
-        append(engine, host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
+        append(host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
         return None;
     }
 
@@ -337,6 +365,14 @@ pub async fn run_send(
     let action = &rule.graph.action;
     let (separator, end_indicator) =
         crate::api_server::get_cli_pattern(&action.cli_type).unwrap_or(("", "\r"));
+    // §2.6 layer 2 is *"after a send to terminal T, no rule evaluates T for ECHO_SETTLE_MS"* — after
+    // the SEND, and the send has not happened yet. Measured from `send.at_ms`, the window opened at
+    // the decision and closed 500 ms of paste-to-submit later than it should; behind a queue of
+    // sibling rules on one terminal (Duplicate makes that the expected case) the fourth message lands
+    // after its own window has already shut, and the very next tick reads its echo as organic output.
+    // Virtual under `start_paused`, real otherwise, and it is the elapsed time that matters either
+    // way — not a second clock.
+    let began = tokio::time::Instant::now();
     let outcome = crate::automation::send::deliver(
         &HostPort(host.as_ref()),
         &pc,
@@ -352,14 +388,18 @@ pub async fn run_send(
     }
 
     let at = send.at_ms;
+    // The moment the last byte went out. `at` stays the DECISION's stamp and keeps the log row, the
+    // fire history and `mark_completed` — those record when the crossing happened, which is not when
+    // the typing finished.
+    let landed = at + began.elapsed().as_millis() as i64;
     // §2.6 layer 1, then layer 2: the needle first, so a tick that slips through the settle window
     // still strips it.
-    engine.runtime.push_echo(&tm, &crate::automation::send::normalise(&action.message), at + ECHO_TTL_MS);
-    engine.runtime.settle_until(&tm, at + ECHO_SETTLE_MS);
+    engine.runtime.push_echo(&tm, &crate::automation::send::normalise(&action.message), landed);
+    engine.runtime.settle_until(&tm, landed + ECHO_SETTLE_MS);
     engine.runtime.record_fire(&rule.id, &tm, at);
 
     let name = send.label.clone();
-    append(&engine, &host, &rule.id, Some(&tm), name, LogKind::Sent, &sent_detail(&send), at);
+    append(&host, &rule.id, Some(&tm), name, LogKind::Sent, &sent_detail(&send), at);
 
     // §7.8 — completion is an in-memory event FIRST and a row second, in this same critical section.
     // `reload` runs from mutating store commands and this is the engine, which is not one: without
@@ -392,7 +432,6 @@ fn fail(
     engine.runtime.restore_arm(rule_id, &send.pair.tm, send.prev);
     engine.mark_state_dirty();
     append(
-        engine,
         host,
         rule_id,
         Some(&send.pair.tm),
@@ -417,7 +456,6 @@ fn fail(
 /// that had already carried the right answer — `PendingSend.label` was resolved at decide time and then
 /// dropped on the floor.
 fn append(
-    engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     rule_id: &str,
     tm: Option<&str>,
@@ -435,7 +473,6 @@ fn append(
         detail: detail.to_string(),
         at,
     };
-    let _ = engine;
     match host.store().append(&entry) {
         Ok(Some(outcome)) if outcome.emit => host.emit_activity(outcome.rule_ids),
         Ok(_) => {}
@@ -526,6 +563,30 @@ pub fn targeting_tick(
         // something drives its condition false first.
         for gone in previous.difference(&next) {
             engine.runtime.forget_pair(id, gone);
+        }
+
+        // §7.6: the rule's own snapshot of what each watched terminal was called and where it was.
+        // `touch_target` had no production caller, so `automation_targets` held rows only for PINNED
+        // ids — which left `label_at`'s third step dead code in production, and left the picker's
+        // *not open* row for a criterion-matched terminal drawing neither the label nor the folder it
+        // exists to draw (§4.3, R14). The tick is the owner: it already holds the roster and already
+        // runs every 2 s, and the throttle lives in the store, so there is no decision here.
+        for row in rows.iter() {
+            let Some(tm) = row.terminal_id.as_deref().filter(|t| next.contains(*t)) else {
+                continue;
+            };
+            let label = crate::automation::labels::label_at(&crate::automation::labels::LabelInputs {
+                display_label: row.display_label.as_deref(),
+                name: Some(row.name.as_str()),
+                shell: Some(row.shell.as_str()),
+                // Writing the snapshot, so the snapshot is not an input to it.
+                snapshot: None,
+            });
+            if let Err(e) =
+                host.store().touch_target(id, tm, label.as_deref(), row.cwd.as_deref(), now_ms)
+            {
+                log::warn!("automations: could not record {}'s view of {}: {}", id, tm, e);
+            }
         }
 
         if grace_over {
@@ -688,7 +749,16 @@ mod tests {
             vec!["prepare to do context-hand-off".to_string()]
         );
         assert!(engine.runtime.is_settling("tm-1", 2_100));
-        assert!(!engine.runtime.is_settling("tm-1", 2_000 + ECHO_SETTLE_MS + 1));
+        // §2.6 layer 2 runs for `ECHO_SETTLE_MS` after the SEND, and the send finishes a
+        // paste-to-submit gap after the decision. Measured from `send.at_ms` the window shut early by
+        // exactly that gap, and behind a queue of sibling rules on one terminal it shut before the
+        // message had even been typed — so the next tick read the rule's own echo as organic output.
+        let gap = crate::automation::send::PASTE_SUBMIT_GAP_MS as i64;
+        assert!(
+            engine.runtime.is_settling("tm-1", 2_000 + ECHO_SETTLE_MS + 1),
+            "the window closed a paste-to-submit gap too early"
+        );
+        assert!(!engine.runtime.is_settling("tm-1", 2_000 + gap + ECHO_SETTLE_MS + 1));
     }
 
     /// A terminal that is not live is DORMANT, not dead: no evaluation, no log line, no state change.
@@ -962,8 +1032,12 @@ mod tests {
                 ArmState::armed(),
                 "and the crossing must still be able to fire next launch"
             );
-            // No `failed` row, deliberately: `RunEvent::Exit` sets this flag and then performs the
-            // SYNCHRONOUS log flush, so a row appended here is a row nobody ever reads.
+            // No `failed` row, deliberately — and the reason used to be that `RunEvent::Exit` flushed
+            // the log after setting this flag, so nobody would read it. `append` is write-through, so
+            // that was never true and the row WOULD survive. The real reason is that nothing failed:
+            // the arm state is restored, the crossing is still armed, and it fires on the next launch.
+            // A row here would be the only trace of a non-event, in a 200-row log §3.3 reserves for
+            // decisions a user can act on.
             assert!(log_kinds(&fake.store).is_empty(), "{:?}", log_details(&fake.store));
         }
 
@@ -1562,6 +1636,221 @@ mod tests {
         );
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
         assert!(targeting.is_finished());
+    }
+
+    /// **M-1: the 250 ms floor is a second way to lose a terminal's output**, and `settled_processes`
+    /// covered only the first.
+    ///
+    /// Two rules watch one terminal. A evaluated 300 ms ago and is due; B evaluated 100 ms ago and the
+    /// floor holds it off, so B never enters `due` at all — which is why no amount of reasoning about
+    /// `picked` can see it. A runs, the flag is spent on B's behalf, the terminal goes quiet, and B
+    /// never reads that output: no log line, no state change, nothing on screen.
+    #[tokio::test(start_paused = true)]
+    async fn a_pair_held_off_by_the_floor_keeps_its_terminals_output() {
+        let (engine, fake, host) = wire(vec![
+            ctx_rule_saying("au-a", "from A", 1),
+            ctx_rule_saying("au-b", "from B", 2),
+        ]);
+        for id in ["au-a", "au-b"] {
+            engine.runtime.set_watched(id, ["tm-1".to_string()].into());
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+        // A last ran 300 ms ago (due); B ran 100 ms ago (held off by the floor).
+        engine.runtime.set_last_eval("au-a", "tm-1", 700);
+        engine.runtime.set_last_eval("au-b", "tm-1", 900);
+        fake.say("pc-1", "ctx:18%\n");
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        assert_eq!(
+            engine.runtime.last_eval("au-a", "tm-1"),
+            Some(1_000),
+            "the premise: A was due and ran"
+        );
+        assert_eq!(engine.runtime.last_eval("au-b", "tm-1"), Some(900), "and B did not");
+        assert!(
+            engine.runtime.is_dirty("pc-1"),
+            "A spent the flag on B's behalf, and B never sees this output again"
+        );
+
+        // A tick where BOTH are past the floor: B reads that same output, and only now — with nobody
+        // left owed — is the flag spent. (The guard is symmetric, so a tick at 1_200 would hold it
+        // for A instead; that is the rule working, not a second bug.)
+        evaluate_tick(&engine, &host, 0, 1_300).await;
+        assert_eq!(engine.runtime.last_eval("au-b", "tm-1"), Some(1_300));
+        assert!(!engine.runtime.is_dirty("pc-1"), "and now the flag is genuinely spent");
+    }
+
+    /// **M-5: `touch_target` had no production caller**, so `automation_targets` held rows only for
+    /// PINNED ids.
+    ///
+    /// Two things were dead because of it: `label_at`'s third step (the rule's own snapshot) in
+    /// production, and the picker's *not open* row for a criterion-matched terminal, which draws a
+    /// label and a folder it had no source for (§4.3, R14). §10.12b asked for the final-persist
+    /// behaviour and no test could reach it, because nothing called the function.
+    #[test]
+    fn the_targeting_tick_records_what_each_rule_resolved() {
+        let (engine, fake, host) = wired();
+        fake.roster.lock().unwrap()[0].display_label = Some("codex · core".into());
+        fake.roster.lock().unwrap()[0].cwd = Some("D:/sources/work".into());
+
+        targeting_tick(&engine, &host, 1_000);
+
+        let rows = fake.store.targets_for("au-1").unwrap();
+        let row = rows.iter().find(|r| r.0 == "tm-1").unwrap_or_else(|| panic!("{:?}", rows));
+        assert_eq!(row.1, "matched", "a criterion match is never pinned, so nothing else writes it");
+        assert_eq!(row.2.as_deref(), Some("codex · core"));
+        assert_eq!(row.3.as_deref(), Some("D:/sources/work"));
+    }
+
+    /// **L-6: the engine is stopped FIRST.** Below `flush_all_history` — up to 30 s of scrollback —
+    /// and two sidecar shutdowns, the loops went on evaluating and could START a send through the
+    /// whole of them, which is the opposite of §2.1's "unstarted or complete".
+    ///
+    /// Source-derived because the `Exit` arm is a closure inside `.run()`: there is no seam.
+    #[test]
+    fn the_exit_arm_stops_the_engine_before_anything_slow() {
+        let lib = strip_comments(include_str!("../lib.rs"));
+        let start = lib.find("if let RunEvent::Exit = event {").expect("the Exit arm");
+        let arm = &lib[start..start + 900];
+        let stop = arm.find("automations.stop()").expect("Exit must stop the engine");
+        for slow in ["flush_all_history(", "shutdown_mcp_server(", "shutdown_fabric("] {
+            let at = arm.find(slow).unwrap_or_else(|| panic!("{} left the Exit arm", slow));
+            assert!(stop < at, "the loops keep deciding across {}", slow);
+        }
+    }
+
+    /// **The tick keeps the EARLIEST dirty generation it read**, and nothing could tell that from
+    /// keeping the latest, because the difference needs the TAP to move between two pairs of one tick.
+    ///
+    /// Round 1's clearest lesson was that the fake could not reach the seams; this is the same lesson
+    /// one layer in. `on_leaf_lookup` fires between the first pair's read and the second's, exactly
+    /// where the real tap runs — on another worker, while the evaluator walks its pairs.
+    #[tokio::test(start_paused = true)]
+    async fn output_arriving_mid_tick_survives_that_ticks_clear() {
+        let (engine, fake, host) = wire(vec![
+            ctx_rule_saying("au-a", "from A", 1),
+            ctx_rule_saying("au-b", "from B", 2),
+        ]);
+        for id in ["au-a", "au-b"] {
+            engine.runtime.set_watched(id, ["tm-1".to_string()].into());
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+        fake.say("pc-1", "ctx:18%\n");
+        engine.runtime.mark_dirty("pc-1");
+
+        // The tap, firing once AFTER the first pair read the generation and before the second did.
+        let rt = engine.runtime.clone();
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let seen = lookups.clone();
+        *fake.on_leaf_lookup.lock().unwrap() = Some(Arc::new(move |_tm: &str| {
+            if seen.fetch_add(1, Ordering::Relaxed) == 1 {
+                rt.mark_dirty("pc-1");
+            }
+        }));
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        assert!(lookups.load(Ordering::Relaxed) >= 2, "the premise: both pairs resolved their leaf");
+        assert!(
+            engine.runtime.is_dirty("pc-1"),
+            "the tick cleared a signal that arrived after it had finished reading"
+        );
+    }
+
+    /// A rule's snapshot rows are its OWN. Writing every roster row under every rule puts terminals
+    /// the rule does not watch into `targets_for`, which is what the picker draws as this rule's
+    /// targets — and `wired()`'s single always-matching terminal cannot see the difference.
+    #[test]
+    fn the_snapshot_is_written_only_for_terminals_the_rule_watches() {
+        let mut only_one = ctx_rule("au-1");
+        only_one.criterion = Criterion::TerminalIdIs;
+        only_one.criterion_value = "tm-1".into();
+        let (engine, fake, host) = wire(vec![only_one]);
+        open_second_terminal(&fake);
+
+        targeting_tick(&engine, &host, 1_000);
+
+        let ids: Vec<String> =
+            fake.store.targets_for("au-1").unwrap().into_iter().map(|r| r.0).collect();
+        assert_eq!(
+            ids,
+            vec!["tm-1".to_string()],
+            "a rule was given a snapshot row for a terminal it does not watch"
+        );
+    }
+
+    /// **`if report.emit` written as `if false` changed nothing any test could see**, in either of
+    /// the two places it was written. The decision now has one implementation, out where a test can
+    /// reach it.
+    ///
+    /// `emit` is the STORE's answer — its verbose gate decides whether a row was actually written —
+    /// so a reload that refused a rule but wrote no row must announce nothing, or every open Settings
+    /// page re-queries the log for something that is not there.
+    #[test]
+    fn a_reload_announces_the_rules_it_refused_and_only_when_a_row_was_written() {
+        use crate::automation_engine::{refusals_to_announce, ReloadReport};
+
+        let refused = ReloadReport {
+            live: 2,
+            skipped: vec![
+                ("au-1".into(), "that pattern could not be understood".into()),
+                ("au-2".into(), "that pattern could not be understood".into()),
+            ],
+            emit: true,
+        };
+        assert_eq!(
+            refusals_to_announce(&refused),
+            Some(vec!["au-1".to_string(), "au-2".to_string()])
+        );
+
+        // The same refusals, with the store's gate saying no row was written.
+        assert_eq!(refusals_to_announce(&ReloadReport { emit: false, ..refused }), None);
+
+        // Nothing refused, and a row written by something else in the same load: an empty list, not
+        // `None` — the caller still has a reason to emit, it just has no rule ids to name.
+        assert_eq!(
+            refusals_to_announce(&ReloadReport { live: 3, skipped: vec![], emit: true }),
+            Some(vec![])
+        );
+    }
+
+    /// The other half of `owed`, and the half my comment claimed without a test: **a TIMER rule
+    /// waiting out its interval is not owed this output**, because a timer pair does not read `dirty`
+    /// at all. Without the cadence check it would pin its terminal dirty for the whole interval, and
+    /// every on-output rule on that terminal would re-read the same text every 250 ms tick.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_rule_waiting_out_its_interval_does_not_pin_the_terminal_dirty() {
+        let mut timer = ctx_rule_saying("au-timer", "on the minute", 2);
+        timer.graph.monitor.cadence = Cadence::Timer;
+        timer.graph.monitor.every_ms = 60_000;
+        let (engine, fake, host) = wire(vec![ctx_rule_saying("au-out", "on output", 1), timer]);
+        for id in ["au-out", "au-timer"] {
+            engine.runtime.set_watched(id, ["tm-1".to_string()].into());
+            engine.runtime.set_arm(id, "tm-1", ArmState::armed());
+        }
+        engine.runtime.set_last_eval("au-timer", "tm-1", 900);
+        fake.say("pc-1", "ctx:18%
+");
+        engine.runtime.mark_dirty("pc-1");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+
+        assert_eq!(
+            engine.runtime.last_eval("au-out", "tm-1"),
+            Some(1_000),
+            "the premise: the on-output rule was due and ran"
+        );
+        assert_eq!(
+            engine.runtime.last_eval("au-timer", "tm-1"),
+            Some(900),
+            "and the timer rule has 59 seconds still to wait"
+        );
+        assert!(
+            !engine.runtime.is_dirty("pc-1"),
+            "a timer pair does not read `dirty`, so it is never owed this terminal's output"
+        );
     }
 
     /// A second live terminal, with ids that share no substring with the first (§7.4).

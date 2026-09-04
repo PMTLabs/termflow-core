@@ -63,6 +63,44 @@ pub struct SubmitPattern<'a> {
     pub end_indicator: &'a str,
 }
 
+/// The form an echo needle is recorded in (plan §2.6).
+///
+/// Runs of whitespace collapse to one space and the ends are trimmed — `split_whitespace`, so
+/// Unicode whitespace and not only ASCII. A terminal re-wraps and re-indents what it echoes, so
+/// comparing the raw message against the raw window would miss on any message long enough to wrap,
+/// which is most of them; the canonical one is a sentence.
+pub fn normalise(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod normalise_tests {
+    use super::normalise;
+
+    /// §2.6 layer 1 is *"remove the last occurrence of each live needle from the window text"*, and
+    /// the needle is only findable if it is recorded in the same shape the terminal echoed it. An
+    /// identity `normalise` survived the whole suite: nothing asserted the collapsing at all, and the
+    /// echo tests all used single-line messages a terminal would not re-wrap.
+    #[test]
+    fn a_needle_is_recorded_in_the_shape_a_terminal_echoes_it() {
+        // A wrapped, re-indented echo of one sentence — the canonical message, and the reason this
+        // function exists.
+        assert_eq!(
+            normalise("prepare to do\n    context-hand-off"),
+            "prepare to do context-hand-off"
+        );
+        assert_eq!(normalise("  leading and trailing  "), "leading and trailing");
+        assert_eq!(normalise("tabs\tand\r\nnewlines"), "tabs and newlines");
+        // Unicode whitespace, because `split_whitespace` splits on the Unicode White_Space property
+        // and not on ASCII. A line separator and a NON-BREAKING space are both separators here — the
+        // second one surprised me, and asserting it is how "collapses ASCII whitespace" stops being
+        // written a third time.
+        assert_eq!(normalise("a\u{2028}b"), "a b");
+        assert_eq!(normalise("a\u{00a0}b"), "a b");
+        assert_eq!(normalise(""), "");
+    }
+}
+
 /// Type `message` into `pc` and, if `submit`, press its CLI's Enter.
 ///
 /// The sequence, in order:
@@ -75,15 +113,6 @@ pub struct SubmitPattern<'a> {
 ///    input because it believes it is blurred. Best-effort: its failure is not the send's failure,
 ///    which is what `send_prompt_to_terminal` did before the extraction.
 /// 4. the **submit**, when `submit` is true.
-/// The form an echo needle is recorded in (plan §2.6).
-///
-/// Runs of ASCII whitespace collapse to one space and the ends are trimmed. A terminal re-wraps and
-/// re-indents what it echoes, so comparing the raw message against the raw window would miss on any
-/// message long enough to wrap — which is most of them, the canonical one being a sentence.
-pub fn normalise(message: &str) -> String {
-    message.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 pub async fn deliver(
     writer: &dyn TerminalWriter,
     pc: &str,

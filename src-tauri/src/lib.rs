@@ -1767,15 +1767,12 @@ pub fn run() {
     .run(|app_handle, event| {
         if let RunEvent::Exit = event {
             if let Some(state) = app_handle.try_state::<AppState>() {
-                // Persist every terminal's scrollback before the process dies.
-                flush_all_history(&state);
-                // Gracefully shutdown MCP server on app exit
-                shutdown_mcp_server(&state);
-                // Gracefully shutdown the peering fabric sidecar on app exit.
-                crate::fabric_manager::shutdown_fabric(&state);
-                // Plan 028 §2.1: the ONLY writer of the automation engine's stop flag. The three
-                // loops check it at the top of every iteration and a send checks it before its first
-                // write, so a quit leaves every send either unstarted or complete.
+                // Plan 028 §2.1: the ONLY writer of the automation engine's stop flag, and it runs
+                // FIRST. The three loops check it at the top of every iteration and a send checks it
+                // before its first write, so a quit leaves every send either unstarted or complete —
+                // but only for the sends that had not started when the flag was set. Below
+                // `flush_all_history` (30 s of scrollback) and two sidecar shutdowns, the engine went
+                // on evaluating and could START a send through the whole of them.
                 //
                 // There is no log flush to perform here. Plan §7.5's table planned an internal batch
                 // buffer flushed every 2 s and synchronously on Exit; M1 shipped
@@ -1783,9 +1780,14 @@ pub fn run() {
                 // and did not record the change. Write-through is the better end state (a row that
                 // exists is already committed, and there is no 2 s window a crash can lose) and it
                 // makes §7.5's actual requirement — each entry keeping its own decision timestamp
-                // rather than a flush-time `now` — trivially true. Corrected in the plan. What Exit
-                // owes this feature is stopping the loops before the runtime is torn down.
+                // rather than a flush-time `now` — trivially true. Corrected in the plan.
                 state.automations.stop();
+                // Persist every terminal's scrollback before the process dies.
+                flush_all_history(&state);
+                // Gracefully shutdown MCP server on app exit
+                shutdown_mcp_server(&state);
+                // Gracefully shutdown the peering fabric sidecar on app exit.
+                crate::fabric_manager::shutdown_fabric(&state);
             }
             // Stop advertising this instance. A crash leaves the record behind,
             // which is why readers treat a dead pid as stale rather than trusting

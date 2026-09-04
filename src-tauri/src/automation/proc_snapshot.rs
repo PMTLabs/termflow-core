@@ -5,9 +5,12 @@
 //! command. Taken only when at least one enabled rule needs it, mirroring `AgentSchemeTracker.tick()`.
 //!
 //! It exists because the alternative was three full process enumerations every ~2 s: this feature's
-//! own tick plus one `AgentSchemeTracker` per open window. `get_active_processes` is threaded through
-//! it too, so the tracker's poll, the targeting tick and the picker all draw from one snapshot per TTL
-//! window. Plan §4.4.
+//! own tick plus one `AgentSchemeTracker` per open window. **Only the Automations feature draws from
+//! it today** — the targeting tick and the picker — and that is half of plan §4.4's settled ruling
+//! (decision 11, ONE shared poll). `get_active_processes` in `api_server.rs` and `AgentSchemeTracker`
+//! still enumerate independently, so the situation the ruling exists to prevent is not yet gone; what
+//! this module guarantees is that Automations did not make it a fourth. Threading the other two
+//! through is M2 residue, tracked as its own item rather than smuggled into a feature commit.
 //!
 //! **Generic over the payload so the TTL can be tested without enumerating the machine's processes.**
 //! A test that had to take a real snapshot to prove the cache works would be measuring the OS, not the
@@ -98,12 +101,68 @@ impl<T> Default for ProcSnapshot<T> {
 ///
 /// The other three are answered from `state.terminals` alone. A profile whose only enabled rule is
 /// `Terminal ID is` must never enumerate the machine's processes.
+/// The same question, asked of the roster the caller already holds.
+///
+/// `scan_needed` is pure and well tested; the PREDICATE that fed it was a `rows.iter().any(..)` inside
+/// `AppState`'s `EngineHost` impl, which §7.10 says is the one place a gate cannot be reached by a
+/// test on Windows. Writing `.all()` there left all eight of `scan_needed`'s assertions passing while
+/// `Working folder is under` silently stopped matching every terminal with no OSC cwd — which is the
+/// exact fallback that criterion exists for. The adapter now has no predicate of its own.
+pub fn scan_needed_for(
+    criteria: impl IntoIterator<Item = Criterion>,
+    rows: &[crate::automation::roster::RosterRow],
+) -> bool {
+    scan_needed(criteria, rows.iter().any(|r| r.cwd.is_none()))
+}
+
 pub fn scan_needed(criteria: impl IntoIterator<Item = Criterion>, any_missing_cwd: bool) -> bool {
     criteria.into_iter().any(|c| match c {
         Criterion::CommandContains => true,
         Criterion::WorkingFolderUnder => any_missing_cwd,
         Criterion::TabNameContains | Criterion::TerminalIdIs | Criterion::AllTerminals => false,
     })
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+    use crate::automation::roster::RosterRow;
+
+    fn row(cwd: Option<&str>) -> RosterRow {
+        RosterRow {
+            terminal_id: Some("tm-1".into()),
+            process_id: "pc-1".into(),
+            name: "Terminal-powershell".into(),
+            shell: "powershell".into(),
+            pid: 1,
+            display_label: None,
+            cwd: cwd.map(str::to_string),
+            command_line: None,
+        }
+    }
+
+    /// §10.13's predicate, which used to live inside `AppState` where no Windows test can reach it.
+    ///
+    /// `.any()` written as `.all()` leaves every one of `scan_needed`'s own assertions passing while
+    /// `Working folder is under` stops matching every terminal with no OSC cwd — which is the exact
+    /// fallback that criterion exists for. Both directions are here, because "one terminal is missing
+    /// its cwd" and "every terminal is" have to give different answers for the bug to be visible.
+    #[test]
+    fn the_cwd_fallback_is_needed_when_any_terminal_lacks_one() {
+        let some_missing = [row(Some("D:/a")), row(None)];
+        let none_missing = [row(Some("D:/a")), row(Some("D:/b"))];
+
+        assert!(
+            scan_needed_for([Criterion::WorkingFolderUnder], &some_missing),
+            "one terminal with no cwd is the whole reason for the scan"
+        );
+        assert!(!scan_needed_for([Criterion::WorkingFolderUnder], &none_missing));
+
+        // The rows never matter for the criteria that do not read a cwd.
+        assert!(scan_needed_for([Criterion::CommandContains], &none_missing));
+        assert!(!scan_needed_for([Criterion::TabNameContains], &some_missing));
+        assert!(!scan_needed_for([], &some_missing));
+    }
 }
 
 #[cfg(test)]
