@@ -109,7 +109,8 @@ pub fn scan_needed_for(
 /// The idle gate, mirroring `AgentSchemeTracker.tick()`. Only two criteria can want one, and only one
 /// of them always does:
 ///
-/// - `Command contains` reads the foreground descendant's command line, which exists only in a scan.
+/// - `Command contains` reads the command line of every process on the terminal's foreground chain,
+///   which exists only in a scan.
 /// - `Working folder is under` prefers the OSC cwd and falls back to the process cwd, so it wants a
 ///   scan **only** when some rostered terminal has not reported one.
 ///
@@ -137,7 +138,7 @@ mod predicate_tests {
             pid: 1,
             display_label: None,
             cwd: cwd.map(str::to_string),
-            command_line: None,
+            command_lines: Vec::new(),
         }
     }
 

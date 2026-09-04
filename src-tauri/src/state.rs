@@ -2246,7 +2246,7 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
                     pid: t.pid,
                     display_label: t.display_label.clone(),
                     cwd: self.terminal_cwds.get(&t.id).map(|c| c.value().clone()),
-                    command_line: None,
+                    command_lines: Vec::new(),
                 }
             })
             .collect();
@@ -2258,7 +2258,7 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
             let now = chrono::Utc::now().timestamp_millis();
             self.proc_snapshot.with(now, sysinfo::System::new_all, |sys| {
                 for row in rows.iter_mut() {
-                    row.command_line = crate::pty_manager::foreground_command_line(row.pid, sys);
+                    row.command_lines = crate::pty_manager::foreground_command_lines(row.pid, sys);
                 }
             });
         }

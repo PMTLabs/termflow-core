@@ -1548,7 +1548,7 @@ mod tests {
             pid: 101,
             display_label: None,
             cwd: None,
-            command_line: None,
+            command_lines: Vec::new(),
         });
         targeting_tick(&engine, &host, 130_000);
         assert!(!is_missing(&engine, "au-1", "tm-gone"), "dormant, never dead — it came back");
@@ -1703,7 +1703,7 @@ mod tests {
             pid: 102,
             display_label: Some("second".into()),
             cwd: None,
-            command_line: None,
+            command_lines: Vec::new(),
         });
         fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
 
@@ -2351,7 +2351,7 @@ mod tests {
             pid: 102,
             display_label: Some("second".into()),
             cwd: None,
-            command_line: None,
+            command_lines: Vec::new(),
         });
         fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
     }

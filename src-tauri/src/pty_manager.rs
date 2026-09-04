@@ -1058,6 +1058,69 @@ fn kill_process_tree_blocking(pid: u32) {
     }
 }
 
+/// How deep the foreground descent may go before it gives up.
+///
+/// The walk reads a process table from a live OS, and a parent/child cycle — however it arises, a
+/// pid reused between the enumeration of one level and the next included — would spin forever
+/// inside the mutex `ProcSnapshot` holds while targeting resolves. The chain is also allocated now
+/// rather than collapsed to its last element, so the bound caps an allocation as well as a loop.
+/// Real chains are three or four deep: `pwsh -> claude.exe -> bun.exe -> conhost.exe`.
+const MAX_FOREGROUND_DEPTH: usize = 32;
+
+/// The chain of process ids from `start_pid` down to its deepest foreground descendant, taking the
+/// newest child at each level.
+///
+/// Pure core of the descent, split out for exactly the reason [`has_live_children`] below is: the
+/// walk IS the behaviour, and a live process table cannot be arranged into the shape a test needs.
+/// `procs` yields `(pid, parent_pid)` for every process on the machine.
+///
+/// **It returns every level, not just the last, and that is the whole point.** The deepest
+/// descendant answers "what was most recently spawned under this terminal", which is not the
+/// question `Command contains` asks. Measured on a real machine: a terminal running the Claude CLI
+/// is `pwsh -> claude.exe -> bun.exe -> conhost.exe`, so reading only the deepest level tested
+/// `conhost.exe`'s command line and a rule matching `claude` selected nothing, on every tick,
+/// forever. The agent is on the chain — just never at the end of it, because agents spawn helpers.
+/// [`get_foreground_agent_with_exe`] never had this bug because it tests every level as it
+/// descends, which is why per-agent colour schemes could name Claude while targeting could not.
+fn foreground_chain_from(
+    start_pid: u32,
+    procs: impl Iterator<Item = (u32, Option<u32>)>,
+) -> Vec<u32> {
+    // Indexed once rather than re-scanning the whole table per level, which is what this descent
+    // used to do. The chain is short; the process table is not.
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, parent) in procs {
+        if let Some(ppid) = parent {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+
+    let mut chain = vec![start_pid];
+    let mut current = start_pid;
+    while chain.len() < MAX_FOREGROUND_DEPTH {
+        // Highest pid is "newest" — the same heuristic this descent has always used.
+        let Some(&newest) = children.get(&current).and_then(|kids| kids.iter().max()) else {
+            break;
+        };
+        if chain.contains(&newest) {
+            break;
+        }
+        chain.push(newest);
+        current = newest;
+    }
+    chain
+}
+
+/// [`foreground_chain_from`] against a live process table.
+fn foreground_chain(start_pid: u32, sys: &System) -> Vec<u32> {
+    foreground_chain_from(
+        start_pid,
+        sys.processes()
+            .values()
+            .map(|p| (p.pid().as_u32(), p.parent().map(|ppid| ppid.as_u32()))),
+    )
+}
+
 pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) -> (u32, String) {
     let local_sys;
     let sys = if let Some(s) = sys_opt {
@@ -1067,65 +1130,93 @@ pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) ->
         &local_sys
     };
 
-    let mut current_pid = parent_pid;
-    let mut current_name = "unknown".to_string();
-
-    // Initialize with parent info
-    if let Some(p) = sys.process(Pid::from(parent_pid as usize)) {
-        current_name = p.name().to_string_lossy().to_string();
-    }
-
-    // Recursively find the "youngest" child (heuristic for foreground process)
-    loop {
-        let mut children: Vec<_> = sys.processes()
-            .values()
-            .filter(|p| {
-                if let Some(ppid) = p.parent() {
-                    ppid.as_u32() == current_pid
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        if children.is_empty() {
-            break;
-        }
-
-        // Sort by PID descending to get the newest child
-        children.sort_by(|a, b| b.pid().as_u32().cmp(&a.pid().as_u32()));
-        
-        let newest_child = children[0];
-        current_pid = newest_child.pid().as_u32();
-        current_name = newest_child.name().to_string_lossy().to_string();
-    }
-
-    (current_pid, current_name)
+    // The deepest descendant, which is the same answer this has always given: "which process is in
+    // front". Callers that need to recognise a program ANYWHERE under the shell take
+    // `foreground_command_lines` instead.
+    let pid = *foreground_chain(parent_pid, sys).last().unwrap_or(&parent_pid);
+    let current_name = sys
+        .process(Pid::from(pid as usize))
+        .map(|p| p.name().to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    (pid, current_name)
 }
 
-/// The full COMMAND LINE of the deepest foreground descendant of `parent_pid`.
+/// The command line of EVERY process on the foreground chain under `parent_pid`, shell first.
 ///
-/// `Command contains` reads this rather than the process NAME because an npm-installed agent is
-/// `node.exe` — which is exactly why `detect_agent` reads the cmdline to disambiguate. Matching the
-/// name would select every node process on the machine at once.
+/// `Command contains` matches when any of these contains the needle, which is the only reading of
+/// "this terminal is running claude" that survives contact with a real agent — see
+/// [`foreground_chain_from`] for the measurement that forced it.
 ///
-/// It projects off `get_foreground_process_info`'s returned pid so the youngest-child descent is not
-/// implemented a third time. `None` when sysinfo cannot report the process (a protected or cross-arch
-/// process on Windows) — and `None` must read as "no match", never as "matches everything". Falls back
-/// to the executable name when argv is empty, which is what sysinfo returns for some system
-/// processes. Plan 028 §4.4.
-pub fn foreground_command_line(parent_pid: u32, sys: &System) -> Option<String> {
-    let (pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
-    let process = sys.process(Pid::from(pid as usize))?;
-    let argv: Vec<String> = process
-        .cmd()
-        .iter()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect();
-    if argv.is_empty() {
-        return Some(process.name().to_string_lossy().to_string());
+/// It reads command lines rather than process NAMES because an npm-installed agent is `node.exe`,
+/// the same reason `detect_agent` reads argv to disambiguate. Matching names would select every
+/// node process on the machine at once.
+///
+/// A process sysinfo cannot report (protected, or cross-arch on Windows) is **skipped rather than
+/// ending the chain**: it must read as "no match", never as "matches everything", and never as a
+/// reason to stop looking at the levels below it. Falls back to the executable name when argv is
+/// empty, which is what sysinfo returns for some system processes. An EMPTY vector means no scan
+/// was taken this window, or nothing on the chain was readable — both are "no match". Plan 028 §4.4.
+pub fn foreground_command_lines(parent_pid: u32, sys: &System) -> Vec<String> {
+    foreground_chain(parent_pid, sys)
+        .into_iter()
+        .filter_map(|pid| {
+            let process = sys.process(Pid::from(pid as usize))?;
+            let argv: Vec<String> = process
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().to_string())
+                .collect();
+            Some(command_line_for(&argv, &process.name().to_string_lossy()))
+        })
+        .collect()
+}
+
+/// One process's command line, from its argv and its executable name.
+///
+/// Pure, because the two decisions in it cannot be reached by arranging a live process table: the
+/// empty-argv fallback, and — the one that matters — dropping the prompt-integration arguments
+/// **TermFlow itself injected** into the user's shell.
+///
+/// **Why the injected script must not be a haystack.** Both spawn paths (`spawn_terminal` and
+/// `build_spawn_spec`) append `-NoExit -Command <PS_CWD_INTEGRATION>` to every interactive
+/// PowerShell, and that script is ~300 characters of app-authored text containing `CurrentDirectory`,
+/// `FileSystem`, `[Environment]`, `[Console]::Write`, `Provider.Name`, `ProviderPath`, `prompt`,
+/// `try`, `catch`, `function`… Once `Command contains` began reading the SHELL link of the chain
+/// (which it must, or an idle `pwsh` stops matching `pwsh`), every one of those words would select
+/// EVERY PowerShell terminal in the app. A rule reading `command contains "dir"` with a send action
+/// would then type into all of them on its first tick — and the user neither wrote that text nor can
+/// see it. Matching on it is matching on an implementation detail of OSC 9;9 cwd reporting.
+///
+/// **Only the exact injected sequence is removed, never a user's own flags.** The script is compared
+/// against the constant itself, and `-Command` / `-NoExit` are dropped only as the tokens
+/// immediately preceding that exact match — so a profile that legitimately passes `-NoExit` keeps it.
+pub fn command_line_for(argv: &[String], name: &str) -> String {
+    let mut dropped = vec![false; argv.len()];
+    for (i, arg) in argv.iter().enumerate() {
+        if arg != PS_CWD_INTEGRATION {
+            continue;
+        }
+        dropped[i] = true;
+        if i >= 1 && argv[i - 1] == "-Command" {
+            dropped[i - 1] = true;
+            if i >= 2 && argv[i - 2] == "-NoExit" {
+                dropped[i - 2] = true;
+            }
+        }
     }
-    Some(argv.join(" "))
+    let kept: Vec<&str> = argv
+        .iter()
+        .zip(dropped)
+        .filter_map(|(a, d)| (!d).then_some(a.as_str()))
+        .collect();
+    // Falls back to the executable name when argv is empty, which is what sysinfo returns for some
+    // system processes — and when stripping consumed everything, which cannot happen for a real
+    // spawn (argv[0] is the shell) but must not yield an empty string that `contains` treats as a
+    // match for nothing.
+    if kept.is_empty() {
+        return name.to_string();
+    }
+    kept.join(" ")
 }
 
 /// Derive a friendly label for the foreground program in a pane, from a
@@ -1227,36 +1318,22 @@ pub fn get_foreground_agent_with_exe(
     parent_pid: u32,
     sys: &System,
 ) -> Option<(String, Option<String>)> {
-    let mut current_pid = parent_pid;
-    loop {
-        if let Some(p) = sys.process(Pid::from(current_pid as usize)) {
-            let name = p.name().to_string_lossy().to_string();
-            let cmd: Vec<String> = p
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy().to_string())
-                .collect();
-            if let Some(agent) = detect_agent(&name, &cmd) {
-                let exe = p.exe().map(|e| e.to_string_lossy().to_string());
-                return Some((agent, exe));
-            }
-        }
-        // Descend to the newest child, mirroring get_foreground_process_info.
-        let mut children: Vec<_> = sys
-            .processes()
-            .values()
-            .filter(|p| {
-                p.parent()
-                    .map(|ppid| ppid.as_u32() == current_pid)
-                    .unwrap_or(false)
-            })
+    // The SAME descent as everything else here, stopping at the first level `detect_agent` names.
+    // It had its own copy of the walk until the chain was extracted, and that copy was the one
+    // WITHOUT the depth cap and the cycle guard — on a path that also runs behind `/api/processes`
+    // and `AgentSchemeTracker`, where a pid reused between two level enumerations would have spun
+    // forever. The difference between this and `foreground_command_lines` was only ever where it
+    // stops READING, never how it descends, so there was nothing here to keep.
+    foreground_chain(parent_pid, sys).into_iter().find_map(|pid| {
+        let p = sys.process(Pid::from(pid as usize))?;
+        let name = p.name().to_string_lossy().to_string();
+        let cmd: Vec<String> = p
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
             .collect();
-        if children.is_empty() {
-            return None;
-        }
-        children.sort_by(|a, b| b.pid().as_u32().cmp(&a.pid().as_u32()));
-        current_pid = children[0].pid().as_u32();
-    }
+        detect_agent(&name, &cmd).map(|agent| (agent, p.exe().map(|e| e.to_string_lossy().to_string())))
+    })
 }
 
 /// True iff any process in `procs` names `pid` as its parent. Pure core of
@@ -1688,27 +1765,187 @@ mod cwd_tests {
         assert_eq!(label_only, with_exe.clone().map(|(a, _)| a));
     }
 
-    /// `Command contains` matches against this, and it must be the COMMAND LINE rather than the
-    /// process name: an npm-installed agent is `node.exe`, so matching the name selects every node
-    /// process on the machine at once. Run against this test binary, whose own argv is known.
+    /// The chain starts at the pid it was ASKED about, never at some descendant.
+    ///
+    /// Named for the one property it can actually fail on: a walk that dropped its own start would
+    /// still return something plausible here. The argv-rather-than-process-name claim this test
+    /// used to carry in its name was never pinned by it — `"app.exe".contains("app")` is true of
+    /// the exe name too — and now lives in `command_line_for`'s own table below, where a fixture
+    /// can state it.
     #[test]
-    fn foreground_command_line_returns_argv_not_just_the_exe_name() {
+    fn foreground_command_lines_start_at_the_pid_they_were_asked_about() {
         let sys = System::new_all();
         let me = std::process::id();
-        let line = super::foreground_command_line(me, &sys)
-            .expect("this process is in its own snapshot");
-        assert!(!line.is_empty());
-        // The exe name appears, and so does at least one thing that is NOT the exe name — which is
-        // what separates a cmdline from `p.name()`.
+        let lines = super::foreground_command_lines(me, &sys);
+        assert!(!lines.is_empty(), "this process is in its own snapshot");
+        // The FIRST line is this process itself — the chain starts at the pid it was asked about,
+        // never at some descendant. A walk that dropped its own start would still return something
+        // plausible here, which is why this asserts the head and not merely "somewhere in there".
         let exe_stem = std::env::current_exe()
             .ok()
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_default();
         assert!(
-            line.to_lowercase().contains(&exe_stem.to_lowercase()),
+            lines[0].to_lowercase().contains(&exe_stem.to_lowercase()),
             "expected {:?} to name this executable ({:?})",
-            line,
+            lines[0],
             exe_stem
+        );
+    }
+
+    /// **The defect this walk was rewritten for, in the shape it was measured in.**
+    ///
+    /// A terminal running the Claude CLI on Windows is `pwsh -> claude.exe -> bun.exe ->
+    /// conhost.exe` — read off a live process table, not invented. The descent's LAST element is
+    /// `conhost.exe`, so a matcher reading only the deepest descendant tested conhost's command
+    /// line and `Command contains "claude"` selected nothing, on every tick, forever.
+    ///
+    /// The chain is asserted as an ordered LIST rather than by "does it contain the agent",
+    /// because the ORDER carries two separate claims — that the walk starts at the terminal's own
+    /// shell, and that it takes the newest child at each level — and a containment check states
+    /// neither. `has_live_children`'s pure-core shape is the precedent for testing a process walk
+    /// without a live process table.
+    #[test]
+    fn the_foreground_chain_keeps_every_level_not_only_the_deepest() {
+        // (pid, parent). The agent sits in the middle, with a helper below it and an older
+        // sibling beside it.
+        let procs: [(u32, Option<u32>); 6] = [
+            (100, None),      // pwsh — the terminal's own process
+            (200, Some(100)), // claude.exe
+            (150, Some(100)), // an OLDER sibling of the agent: never chosen over pid 200
+            (300, Some(200)), // bun.exe, spawned by the agent
+            (400, Some(300)), // conhost.exe
+            (999, Some(555)), // an unrelated tree, which must not be walked into
+        ];
+        assert_eq!(
+            super::foreground_chain_from(100, procs.into_iter()),
+            vec![100, 200, 300, 400],
+            "shell -> agent -> helper -> conhost, in order"
+        );
+        // (The point that the LAST level is precisely the one not naming the agent is asserted
+        // where it bites, over `resolve` itself, in `automation/targeting.rs` — restating it here
+        // as `.last() == Some(&400)` could not fail once the equality above has passed.)
+    }
+
+    /// **The prompt script TermFlow injects is not a haystack** — the regression this guard exists
+    /// for, and the cost of matching the shell link of the chain.
+    ///
+    /// Both spawn paths append `-NoExit -Command <PS_CWD_INTEGRATION>` to every interactive
+    /// PowerShell. That is ~300 characters of app-authored text the user never wrote and cannot
+    /// see. Left in, roughly thirty ordinary needles would select EVERY PowerShell terminal at
+    /// once — and an automation rule with a send action would then type into all of them on its
+    /// first tick.
+    ///
+    /// Asserted as a LIST, because "it does not over-match" is a claim about a SET and one sample
+    /// cannot state it. The un-stripped line is asserted FIRST to contain every needle: without
+    /// that half the list could quietly stop naming anything real and the test would pass by
+    /// describing nothing.
+    #[test]
+    fn the_injected_prompt_script_is_not_matchable() {
+        let argv: Vec<String> = vec![
+            r"C:\Program Files\PowerShell\7\pwsh.exe".into(),
+            "-NoExit".into(),
+            "-Command".into(),
+            PS_CWD_INTEGRATION.into(),
+        ];
+        // Only words the INJECTION contributes. A real `pwsh.exe` path legitimately carries
+        // "Files" and "System32", and a rule matching those is matching something the command line
+        // genuinely says — not this defect.
+        // The last two are the injected FLAGS rather than the script body, and they earn their
+        // place: stripping the script while leaving `-Command`/`-NoExit` behind is the partial fix
+        // this list has to be able to fail on.
+        const INJECTED_ONLY: &[&str] = &[
+            "prompt", "console", "provider", "environment", "currentdirectory", "providerpath",
+            "filesystem", "function", "catch", "atorig", "pwd", "command", "noexit",
+        ];
+
+        let unstripped = argv.join(" ").to_lowercase();
+        for needle in INJECTED_ONLY {
+            assert!(
+                unstripped.contains(needle),
+                "fixture no longer contains {:?} — this list is describing nothing",
+                needle
+            );
+        }
+
+        let line = super::command_line_for(&argv, "pwsh.exe");
+        let lowered = line.to_lowercase();
+        for needle in INJECTED_ONLY {
+            assert!(
+                !lowered.contains(needle),
+                "{:?} would select every PowerShell terminal in the app: {:?}",
+                needle,
+                line
+            );
+        }
+        // ...and the shell is still matchable, which is the entire reason its link is on the chain.
+        assert!(lowered.contains("pwsh"), "the shell must stay matchable: {:?}", line);
+    }
+
+    /// The stripping is exact: a profile's OWN `-NoExit -Command` survives untouched.
+    ///
+    /// The tokens are dropped only as the ones immediately preceding a literal match on the
+    /// constant, so a user driving their shell with a real `-Command` keeps every word of it —
+    /// which is command line they wrote and expect to be able to match on.
+    #[test]
+    fn command_line_for_strips_only_the_injected_sequence() {
+        let user: Vec<String> = vec![
+            "pwsh.exe".into(),
+            "-NoExit".into(),
+            "-Command".into(),
+            "Write-Host hi".into(),
+        ];
+        assert_eq!(
+            super::command_line_for(&user, "pwsh.exe"),
+            "pwsh.exe -NoExit -Command Write-Host hi"
+        );
+
+        // Empty argv is what sysinfo returns for some system processes: the name stands in.
+        assert_eq!(super::command_line_for(&[], "conhost.exe"), "conhost.exe");
+
+        // An ordinary agent command line is untouched, which is the common case.
+        let agent: Vec<String> = vec!["node".into(), "C:/n/claude.js".into(), "--resume".into()];
+        assert_eq!(
+            super::command_line_for(&agent, "node.exe"),
+            "node C:/n/claude.js --resume"
+        );
+    }
+
+    /// A childless pid is its own chain, and so is one absent from the table.
+    ///
+    /// The absent case matters because the roster asks about a terminal's shell pid, and a shell
+    /// that exited between the snapshot and the walk must yield "no match", never a panic and
+    /// never someone else's chain.
+    #[test]
+    fn a_childless_or_unknown_start_is_a_one_element_chain() {
+        let procs: [(u32, Option<u32>); 2] = [(100, None), (200, Some(100))];
+        assert_eq!(super::foreground_chain_from(200, procs.into_iter()), vec![200]);
+        assert_eq!(super::foreground_chain_from(7, procs.into_iter()), vec![7]);
+    }
+
+    /// A parent/child cycle must not hang the walk.
+    ///
+    /// Targeting runs this inside the mutex `ProcSnapshot` holds, so a spin here stops every
+    /// automation in the app rather than just this one rule. Pid reuse between the enumeration of
+    /// one level and the next is enough to produce one.
+    #[test]
+    fn a_parent_child_cycle_terminates() {
+        let procs: [(u32, Option<u32>); 2] = [(1, Some(2)), (2, Some(1))];
+        let chain = super::foreground_chain_from(1, procs.into_iter());
+        // The equality is the whole guard: without the `contains` check the chain would run to the
+        // depth cap as [1, 2, 1, 2, ...]. A `len() <= MAX_FOREGROUND_DEPTH` assertion would be
+        // vacuous here — the loop condition guarantees it for every input, defect or not.
+        assert_eq!(chain, vec![1, 2], "a pid already on the chain ends the walk");
+    }
+
+    /// The depth cap is real, and bounds a chain that never repeats a pid.
+    #[test]
+    fn a_very_deep_chain_stops_at_the_cap() {
+        let procs: Vec<(u32, Option<u32>)> =
+            (1..=200u32).map(|pid| (pid, if pid == 1 { None } else { Some(pid - 1) })).collect();
+        assert_eq!(
+            super::foreground_chain_from(1, procs.into_iter()).len(),
+            super::MAX_FOREGROUND_DEPTH
         );
     }
 

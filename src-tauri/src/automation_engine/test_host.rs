@@ -78,7 +78,7 @@ impl FakeHost {
             pid: 100,
             display_label: Some(label.into()),
             cwd: None,
-            command_line: None,
+            command_lines: Vec::new(),
         });
         self
     }
