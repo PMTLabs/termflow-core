@@ -110,10 +110,31 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
      * one of them without this having to know which ancestor is the scroller, which is the part
      * that made a listener look expensive enough to skip.
      *
+     * **Not coalesced into a `requestAnimationFrame`, and that is a decision rather than an
+     * oversight.** Both events are already frame-rate bounded at the source: the browser queues
+     * them and fires them from the "update the rendering" step, at most once per frame per
+     * scroller, and a wheel moves one scroller. So the frame an rAF would be de-duplicating almost
+     * always holds a single event, and the callback it defers is one `getBoundingClientRect` plus a
+     * `setState` that returns `cur` unchanged unless the row actually moved — no React render at
+     * all on the scrolls that do not concern this row. Against that, an rAF costs a pending handle
+     * to cancel on every path out of this effect, and a frame of lag on a card whose entire
+     * complaint is that it lags behind its row.
+     *
      * Keyed on the ELEMENT rather than on `hovered`, so it is attached once per hovered row instead
-     * of being torn down and rebuilt by every anchor update it causes. `cur.el !== el` is what stops
-     * a late event from a row the pointer has already left writing over the current card's anchor,
-     * and `sameAnchor` keeps a scroll that did not move THIS row from re-rendering anything.
+     * of being torn down and rebuilt by every anchor update it causes.
+     *
+     * **`cur.el !== hoveredEl` is not belt-and-braces, and the window it closes is the ordinary
+     * case rather than a rare one.** The cleanup below does remove this listener when the pointer
+     * moves on — but not immediately. `mouseover` carries CONTINUOUS priority in React, so the move
+     * to the next row is queued, not flushed: for the rest of that frame the previous row's
+     * listener is still attached while the state it writes into already names the next row. And a
+     * scroll is exactly what changes which row is under a still pointer, so the two arrive in that
+     * order by nature. Without the check, row A's box lands on row B's card and the card names one
+     * row while pointing at another.
+     *
+     * `sameAnchor` is the cheaper half: a scroll of some other element on the page still fires here
+     * (that is the price of the capture phase), and returning `cur` unchanged is what makes React
+     * bail out of the render rather than re-committing the card at the coordinates it already has.
      */
     useEffect(() => {
         if (hoveredEl === null) return undefined;
@@ -132,6 +153,32 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
             window.removeEventListener('resize', reread);
         };
     }, [hoveredEl]);
+
+    /**
+     * A hover ends when its ROW does, and not only when the pointer says so.
+     *
+     * Every other way out of a hover is a pointer gesture — `mouseleave`, or a `mouseover` on the
+     * next row — and there is one way out that is not: the roster poll drops the row. A terminal
+     * that closes while unpicked leaves `list_watchable_terminals` outright, and no `mouseleave`
+     * is coming for an element React has just unmounted.
+     *
+     * Three things went wrong while `hovered` survived its row, and they are the same three the
+     * scroll listener's own cleanup exists to prevent — which is why this belongs here rather than
+     * being written off as tidiness. The listener stayed armed against a DETACHED node, reading a
+     * rect of zeroes on every scroll for the life of the picker. `evictPreviewsOutside` is gated on
+     * `hovered === null`, so the preview cache stopped being evicted for as long as the phantom
+     * hover stood. And `hovered.id` is resolved against the CURRENT roster on every render, so a
+     * terminal that came back under the same id — which is exactly what session restore does —
+     * re-opened its card, at an anchor captured before it left, under a pointer that had long since
+     * moved somewhere else.
+     *
+     * The JSX guard below is still load-bearing and is not made redundant by this: state settles
+     * after the commit, so the render in which the row disappears is one this effect has not run
+     * for yet.
+     */
+    useEffect(() => {
+        if (hovered !== null && hoveredRow === null) setHovered(null);
+    }, [hovered, hoveredRow]);
 
     /**
      * Bound the hover card's snapshot cache to the roster, on the way OUT of a hover.
@@ -206,8 +253,8 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                             // **The cheap half of "identify this terminal", and it must stay.**
                             // The hover card is a portal, a fetch and a layout clamp; this is an
                             // attribute. It is what a keyboard user, a screen reader and a viewer
-                            // whose snapshot never resolves still get, and it carries the three
-                            // fields the row itself clips.
+                            // whose screen fetch never resolves still get, and it carries the
+                            // three fields the row itself clips.
                             title={[
                                 row.terminalId,
                                 row.label ?? 'unnamed',
@@ -278,9 +325,9 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
             </div>
 
             {/* ONE card, for the row the pointer is actually on — never one per row.
-                Rendering a card (and therefore a `/snapshot` poll) per row would fetch the whole
-                roster every second for a question the user asked about exactly one terminal, and
-                the picker is the surface a user opens WHILE agents are running. */}
+                Rendering a card (and therefore a `/screen` poll) per row would fetch the whole
+                roster every couple of seconds for a question the user asked about exactly one
+                terminal, and the picker is the surface a user opens WHILE agents are running. */}
             {hoveredRow !== null && hovered !== null && (
                 <AuTerminalHoverCard row={hoveredRow} anchor={hovered.anchor} />
             )}

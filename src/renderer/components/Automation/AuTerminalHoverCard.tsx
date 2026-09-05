@@ -34,8 +34,8 @@
  * `tabIndex`, no `focus()`, no listeners of its own: the pointer can travel straight through it, so
  * moving down the list cannot get stuck behind the panel describing the row above. The full id,
  * name and folder are ALSO on the row's own `title`, so a keyboard user and a screen reader get the
- * identifying half of this without a pointer, and so does a viewer for whom the snapshot fetch
- * never resolves.
+ * identifying half of this without a pointer, and so does a viewer for whom the screen fetch never
+ * resolves.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -101,8 +101,14 @@ export const AU_PREVIEW_POLL_MS = 700;
  * being a cache, and "quietly stops working when an unrelated tab is open" is not a thing to leave
  * in the tree on purpose.
  *
- * Keyed by **process** id, since that is the key `/snapshot` itself uses and the one the row hands
- * us; the singleton is keyed by renderer id, so even shared the two would not have collided.
+ * Keyed by **process** id, which is what the row hands us and what this card addresses `/screen`
+ * with. Not because the route demands it — `/screen` calls `resolve_ref` and answers to a `tm-`
+ * leaf just as well — but because ONE id space per cache is the whole of its correctness: mixing
+ * the two would file one terminal under two keys, so a hover served from a fresh entry under one
+ * spelling would refetch anyway under the other, and `evictAllBut` — handed a list in a single
+ * space — would sweep away the half it did not recognise. Both are cache misses, which look
+ * exactly like a working cache. The singleton is keyed by renderer id, so even shared the two would
+ * not have collided.
  *
  * Being module-level, it lives as long as the window — so it needs an owner for the other half of a
  * cache, which is `evictPreviewsOutside` below.
@@ -406,10 +412,11 @@ export const AuTerminalHoverCard: React.FC<AuTerminalHoverCardProps> = ({ row, a
             {/*
               * Three outcomes, and the closed one is NOT an empty preview box.
               *
-              * A dead row has no process to read — `processId` is null by definition — so fetching
-              * would ask `/snapshot` about `null` and get its silent 200 back. An empty frame under
-              * a heading is indistinguishable from a fetch that failed, and this is the row the
-              * picker deliberately keeps around and greys out, so it is the one a user is most
+              * A dead row has no process to read — `processId` is null by definition — so a
+              * preview mounted here would address `/screen` with `null`, take the 404 it deserves,
+              * and render *"Its screen could not be read just now"* over a terminal whose screen is
+              * not unreadable but GONE. An error where an explanation belongs, on the row the
+              * picker deliberately keeps around and greys out, which is the row a user is most
               * likely to be hovering when they are trying to work out what happened.
               *
               * `alive` with no `processId` is the third: open, but not attached to a run this

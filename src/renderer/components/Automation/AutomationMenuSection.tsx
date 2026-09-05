@@ -95,9 +95,10 @@ function addableRules(terminalId: string, rules: readonly AutomationRule[]): Aut
  *
  * So it does. `add_automation_target` evaluates *does this rule still exist* and appends the target
  * in one SQLite transaction, and sends back the answer: `false` = the rule is gone and **nothing
- * was written** — no rule row, no orphan target row. Both failure modes go with it, because only
- * the one column this path authors (`updated_at`) is ever written; no captured copy of the rule
- * crosses the wire at all, so there is nothing left to clobber a concurrent edit with.
+ * was written** — no rule row, no orphan target row. Both failure modes go with it. The row the
+ * store writes back is the one it READ inside that same transaction, with the appended target and
+ * `updated_at` the only two things this path changes on it; no captured copy of the rule crosses
+ * the wire at all, so there is nothing left to clobber a concurrent edit with.
  *
  * `true` also covers an id the rule already watches — the rule watches this terminal, which is what
  * the click asked for — so the pre-flight `targetIds.includes` check this function used to make is
@@ -111,8 +112,15 @@ function addableRules(terminalId: string, rules: readonly AutomationRule[]): Aut
  * this same write emits, for the reason `GlobalAutomationEditor`'s `onChanged` prop already is: the
  * menu that triggered this has just closed, so there is nobody left to notice a live event land a
  * moment later, and the pane's own armed badge should update as promptly as a save from inside the
- * editor does. It runs on the `false` branch too — that branch means this window is holding a rule
- * list with a rule in it that no longer exists, which is precisely a list worth re-reading.
+ * editor does. It runs on the WRITTEN path only, and the two branches that skip it are not the same
+ * kind of skip. A rejection wrote nothing and announced nothing, so there is no new state to read
+ * and no event coming either — re-indexing there would only tell the pane badge that something
+ * happened, which is the false report the toast beside it exists to avoid. A `false` also wrote
+ * nothing, but `add_automation_target` announces `automation:changed` UNCONDITIONALLY — outside its
+ * `if added`, deliberately, because that branch is exactly the one where the calling window is
+ * holding a rule that no longer exists — and `automationArmed`'s app-lifetime listener answers that
+ * event with this very refetch. So the stale list is repaired on that branch regardless; a call here
+ * would be a second copy of a refetch already on its way.
  *
  * **No in-flight guard, and none is needed.** Both call sites are `void addTerminalToRule(…)`, so a
  * row clicked twice would run this twice — except that neither row survives the first click. The
@@ -152,9 +160,15 @@ async function addTerminalToRule(
         // Deleted between the moment this menu was built and this write — the race the store-side
         // check exists to lose safely. Silence here would be the worst of the three outcomes: the
         // user clicks a named rule, nothing is written, and nothing says why.
+        //
+        // Returns rather than falling through to the re-index: `false` means nothing was committed,
+        // so there is nothing new to read back, and the command announces `automation:changed` on
+        // this branch anyway — which refetches the list that still holds the ghost rule. See the
+        // header for why that is the whole repair rather than half of one.
         void toastAutomationNotice(
             `Could not add this terminal to “${ruleName}” — that automation no longer exists.`,
         );
+        return;
     }
     void refreshAutomationArmed();
 }

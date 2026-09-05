@@ -116,11 +116,16 @@ function rows(): { live: WatchableTerminal; other: WatchableTerminal; dead: Watc
     };
 }
 
+/**
+ * What `/api/terminals/:id/screen` serves: the parser's grid, rendered as plain text.
+ *
+ * Line 3 is a two-column row, and the run of spaces between `NAME` and `STATUS` is the whole
+ * fixture. It is what `SNAPSHOT_BLOB` below spells as cursor motion, so it is the one piece of
+ * this screen that tells the two sources apart.
+ */
 const SCREEN = [
     'PS D:\\sources> bun run dev',
     '  ready in 812 ms',
-    // A two-column row: the shape `/snapshot`'s replay blob encodes as cursor motion, so the gap
-    // vanishes the moment anything strips escapes out of that blob instead of reading the grid.
     'NAME                STATUS',
     '',
     'PS D:\\sources> ',
@@ -128,18 +133,45 @@ const SCREEN = [
     '',
 ].join('\r\n');
 
+/**
+ * The SAME screen as `/api/terminals/:id/snapshot` serves it, and the reason this constant exists
+ * at all.
+ *
+ * Shaped like `vt100::Screen::contents_formatted()`: a REPLAY STREAM meant to be written into an
+ * xterm, so it opens by homing and clearing, carries its colour as SGR runs, and — the part that
+ * matters — spells the gap between the two columns as `ESC[3;21H`, a cursor jump to row 3 column
+ * 21, rather than as sixteen spaces. Run `stripAnsi` over this and `NAME` and `STATUS` butt
+ * together: `NAMESTATUS`. That is not a cosmetic loss, it is the column layout of every TUI and
+ * status bar a user would hover this card to recognise, and it is exactly what the card did in its
+ * first draft.
+ *
+ * It is armed on the mock so that the alignment case below DISCRIMINATES. Left off, a card that
+ * went back to reading `/snapshot` would find no such method, fail its fetch, and render "could
+ * not be read" — which fails the test for the wrong reason and stops saying anything about
+ * layout. With the blob here, the mutant gets a perfectly good answer from `/snapshot` and still
+ * has to produce `NAME                STATUS` from it, which it cannot.
+ */
+const SNAPSHOT_BLOB = [
+    `${ESC}[?25h${ESC}[m${ESC}[H${ESC}[J`,
+    'PS D:\\sources> bun run dev\r\n',
+    '  ready in 812 ms\r\n',
+    `${ESC}[1mNAME${ESC}[3;21HSTATUS${ESC}[m\r\n`,
+    `${ESC}[5;1HPS D:\\sources> `,
+].join('');
+
 interface Api {
     getTerminalScreenText: jest.Mock;
+    getTerminalSnapshot: jest.Mock;
 }
 
 /**
- * `/screen`, not `/snapshot` — and the fixture is PLAIN text with no escapes in it, because that
- * is what the route serves.
+ * `/screen`, not `/snapshot` — and this fixture is PLAIN text with no escapes in it, because that
+ * is what the route serves: `AppState::screen_text` renders the grid the parser has ALREADY
+ * applied every cursor op to.
  *
- * The card read `/snapshot` first and stripped the escapes out of the blob in the client, which
- * collapses column layout: that blob encodes runs of blanks as cursor motion rather than as
- * spaces. This mock returning plain text is what makes the alignment case below assert anything at
- * all — handed a mock that fabricated its own aligned blob, the test would pass over the bug.
+ * The card read `/snapshot` first and stripped the escapes out of the blob in the client. Handed a
+ * mock that fabricated its own aligned blob, a test would pass straight over that bug, so the two
+ * bodies here differ the way the two routes differ and nowhere else.
  */
 function screenBody(id: string, screen: string = SCREEN) {
     return { terminalId: id, screen, rows: 24, cols: 80 };
@@ -148,6 +180,9 @@ function screenBody(id: string, screen: string = SCREEN) {
 function installApi(): Api {
     const api: Api = {
         getTerminalScreenText: jest.fn((id: string) => Promise.resolve(screenBody(id))),
+        // Present, working, and asserted to be untouched. See `SNAPSHOT_BLOB`.
+        getTerminalSnapshot: jest.fn(() =>
+            Promise.resolve({ snapshot: SNAPSHOT_BLOB, rows: 24, cols: 80 })),
     };
     (window as unknown as { electronAPI: Api }).electronAPI = api;
     return api;
@@ -392,6 +427,51 @@ describe('the terminal picker', () => {
     });
 
     /**
+     * **A scroll belonging to the row the pointer has just left is ignored, not applied.**
+     *
+     * This looks impossible — the effect's cleanup removes the old row's listener — and it is not,
+     * because the removal is not immediate. `mouseover` is a CONTINUOUS-priority event in React, so
+     * the move to the next row is queued rather than flushed: for the rest of that frame the
+     * previous row's listener is still attached while the state it would write into already belongs
+     * to the next row. A scroll landing in that window — and a scroll is precisely what changes
+     * which row is under a still pointer, so the two arrive together by nature rather than by
+     * coincidence — takes row A's box and stamps it on row B's card. The card then names B while
+     * pointing at where A used to be, which is the one failure this whole component exists to
+     * prevent, reached from the other side.
+     *
+     * Both events go inside ONE `act` for that reason. Split into two, React commits the hover
+     * change between them, the stale listener is gone, and the test proves nothing.
+     *
+     * The move is spelled as a `mouseout` on the row being LEFT, which is not interchangeable with
+     * the `mouseover` the `hover` helper dispatches: React's enter/leave plugin returns early from
+     * a `mouseover` whose `relatedTarget` is inside its own tree, on the grounds that the matching
+     * `mouseout` will produce the pair. Written the other way round this test hovers nothing, and
+     * fails against the correct component.
+     */
+    it('ignores a scroll that belongs to the row the pointer has just left', async () => {
+        const r = rows();
+        await show([r.live, r.other]);
+        const a = rowFor(r.live.terminalId);
+        const b = rowFor(r.other.terminalId);
+        a.getBoundingClientRect = () => boxAt(120);
+        b.getBoundingClientRect = () => boxAt(200);
+
+        await hover(a);
+        expect((card() as HTMLElement).style.top).toBe('120px');
+
+        await act(async () => {
+            // "The pointer went from row A to row B", as one event: React derives A's
+            // `onMouseLeave` and B's `onMouseEnter` from this single `mouseout`.
+            a.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: b }));
+            a.getBoundingClientRect = () => boxAt(48);
+            (container.querySelector('.au-tpick') ?? container).dispatchEvent(new Event('scroll'));
+        });
+
+        expect(card()!.textContent).toContain(r.other.terminalId);
+        expect((card() as HTMLElement).style.top).toBe('200px');
+    });
+
+    /**
      * **And the listeners go when the pointer does.** A card that re-anchors correctly and leaves a
      * pair of window listeners behind per row hovered is the same leak in a different place — and
      * one that would keep calling `getBoundingClientRect` on rows that have been unmounted.
@@ -415,6 +495,47 @@ describe('the terminal picker', () => {
             (container.querySelector('.au-tpick') ?? container).dispatchEvent(new Event('scroll'));
         });
         expect(reads).toBe(0);
+    });
+
+    /**
+     * **And the row can end the hover, not only the pointer.**
+     *
+     * Every other exit from a hover is a pointer gesture. This one is not: the roster is re-fetched
+     * every few seconds while the editor is open, and a terminal that closes while unpicked leaves
+     * `list_watchable_terminals` outright — React unmounts its row and no `mouseleave` follows,
+     * because there is nothing left for the pointer to leave.
+     *
+     * Held only by the pointer, the hover survived its row and took three things with it, all
+     * asserted here. The listeners above stayed armed against a DETACHED node. The preview cache
+     * stopped being evicted, because that effect is gated on there being no hover. And the id was
+     * still resolved against each new roster, so the same terminal coming back — session restore,
+     * or a `Terminal ID is` rule the user re-opens — re-opened its card at an anchor from before it
+     * left, with the pointer somewhere else entirely.
+     */
+    it('ends the hover when the row leaves the roster, not just the card', async () => {
+        const r = rows();
+        await show([r.live, r.other]);
+        const row = rowFor(r.live.terminalId);
+        row.getBoundingClientRect = () => boxAt(120);
+        await hover(row);
+        expect(card()!.textContent).toContain(r.live.terminalId);
+
+        // The terminal closes. It is not picked, so it does not stay as a greyed row — it goes.
+        await show([r.other]);
+        expect(card()).toBeNull();
+
+        let reads = 0;
+        row.getBoundingClientRect = () => { reads += 1; return boxAt(48); };
+        await act(async () => {
+            window.dispatchEvent(new Event('resize'));
+            (container.querySelector('.au-tpick') ?? container).dispatchEvent(new Event('scroll'));
+        });
+        expect(reads).toBe(0);
+
+        // …and when it comes back, it comes back unhovered. A card appearing under a pointer that
+        // is not on any row is worse than no card: it names a terminal the user is not pointing at.
+        await show([r.live, r.other]);
+        expect(card()).toBeNull();
     });
 
     // --- 3. the live preview ----------------------------------------------------------------------
@@ -452,6 +573,13 @@ describe('the terminal picker', () => {
      * stripped the escapes itself — is satisfied by a preview that has run every column together,
      * because the words survive and only the SPACES between them are lost. The gap is the thing
      * under test, so the gap is what is asserted, by exact string.
+     *
+     * Both routes are mocked and both would answer, so this is a fair fight rather than a method
+     * that happens to be missing: `getTerminalSnapshot` returns `SNAPSHOT_BLOB`, the same screen
+     * with its column gap spelled as `ESC[3;21H`. A card reading that and stripping it renders
+     * `NAMESTATUS`, and every assertion below is written to catch precisely that — the gap, the
+     * absence of the collapsed form, no escapes reaching the `<pre>`, and the replay route never
+     * asked in the first place.
      */
     it('paints the last lines of that screen, with its columns still apart', async () => {
         const r = rows();
@@ -465,6 +593,9 @@ describe('the terminal picker', () => {
         expect(pre!.textContent).toContain('NAME                STATUS');
         expect(pre!.textContent).not.toContain('NAMESTATUS');
         expect(pre!.textContent).not.toContain(ESC);
+        // The replay stream is not read at all — not read and then repaired, not read as a
+        // fallback. There is nothing in the client that can undo what it encodes.
+        expect(api.getTerminalSnapshot).not.toHaveBeenCalled();
     });
 
     it('says a closed terminal is closed, instead of showing an empty preview', async () => {
@@ -800,20 +931,31 @@ describe('previewFor', () => {
             expect(previewLines('red   \r\nplain\r\n')).toEqual(['red', 'plain']);
         });
 
-        /**
-         * **It does not strip escapes, and that is the point rather than an omission.**
-         *
-         * It used to run `stripAnsi`, back when the card read `/snapshot`. Against `/screen`'s
-         * plain grid text that call is a no-op — and a no-op that invites the next reader to point
-         * the fetch back at the replay blob, where stripping is not a no-op but a silent loss of
-         * every column gap. Pinned so that reintroducing the strip fails here rather than passing
-         * quietly.
-         */
         it('leaves interior spacing alone — the column gaps ARE the content', () => {
             expect(previewLines('NAME     STATUS\nbuild    ok')).toEqual([
                 'NAME     STATUS',
                 'build    ok',
             ]);
+        });
+
+        /**
+         * **It does not strip escapes, and that is the point rather than an omission.**
+         *
+         * It used to run `stripAnsi`, back when the card read `/snapshot`. Against `/screen`'s
+         * plain grid text that call is a NO-OP — which is why the case above cannot catch it
+         * coming back, and why the comment that used to sit there claiming it could was wrong: a
+         * fixture made of ordinary text is identical either side of the strip. So the mutant is
+         * hunted with the one input that separates them, a line of replay stream whose column gap
+         * is cursor motion.
+         *
+         * Asserting that the escape SURVIVES is deliberate, and it is not indifference to what the
+         * `<pre>` would then look like. If the fetch is ever pointed back at the replay blob, this
+         * function renders visible garbage — which is an alarm. Stripping renders `NAMESTATUS`,
+         * which is a plausible-looking screen that is quietly wrong about the only thing the card
+         * is for. Loud beats silent, and neither is reachable while the fetch reads `/screen`.
+         */
+        it('does not strip escapes — a replay blob comes through loud, not silently re-flowed', () => {
+            expect(previewLines(`NAME${ESC}[3;21HSTATUS`)).toEqual([`NAME${ESC}[3;21HSTATUS`]);
         });
     });
 });

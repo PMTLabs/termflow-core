@@ -132,6 +132,12 @@ describe('the shared indicator and menu section', () => {
         __resetAutomationEditorHostForTest();
         clearAutomationEditorGuard();
         delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+        // A net under the per-test `mockRestore()` calls below, not a replacement for them. Every
+        // namespace spy here is installed on a module the WHOLE file shares, and a test that fails
+        // before its own restore line leaves that spy installed for everything after it — which
+        // turns one broken assertion into a page of unrelated failures pointing at the wrong code.
+        // Found the hard way while mutation-checking the ordering test: one real kill, two cascades.
+        jest.restoreAllMocks();
     });
 
     const render = async (node: React.ReactNode) => {
@@ -225,20 +231,37 @@ describe('the shared indicator and menu section', () => {
     });
 
     /**
-     * **"…first" is an ORDER, and the two counters this used to keep could not see one.**
+     * **"…first" is an ORDER, and neither counter this used to keep could see one.**
      *
-     * `dismissed === 1` plus `getOpenAutomationRuleId() === 'r2'` is satisfied by either sequence,
-     * so the title's claim was the only thing asserting it. The order is load-bearing: the editor
-     * is a modal, and opening it under a menu that is still mounted leaves the menu's own outside
-     * -click and Escape handlers live above it. What makes the order observable is that `onDismiss`
-     * runs synchronously inside the click, so it can look at whether the editor has opened YET.
+     * `dismissed === 1` plus `getOpenAutomationRuleId() === 'r2'` is satisfied by EITHER sequence,
+     * so the title's claim — and the `onDismiss` prop doc's "called before the editor opens rather
+     * than after" — were the only things asserting it. The order is load-bearing: neither host menu
+     * closes itself when a portalled dialog appears on top of it, so an editor opened first is a
+     * modal mounted underneath a menu that is still up, with that menu's outside-click and Escape
+     * handlers live above it.
+     *
+     * So BOTH callbacks push into one array and the assertion is the SEQUENCE, which no reordering
+     * satisfies. Recording the open call directly, rather than probing `getOpenAutomationRuleId()`
+     * from inside `onDismiss`, is what keeps this honest in the case that matters most: an editor
+     * host that REFUSES to open (a dirty-guard already registered, `automationEditorGuard`) leaves
+     * that id `null` either way, so a probe would report the good order for a run in which the open
+     * genuinely came first. The id rides in the recorded event too, so "the SECOND row's rule, not
+     * the first and not whichever the section rendered last" — the bug a handler closing over the
+     * loop variable by reference produces, which looks right — is pinned by the same equality.
+     *
+     * Spied through the NAMESPACE, which only intercepts while the transform emits `ns.fn(...)` at
+     * the menu's call site. Per the note at this file's imports that failure is loud here rather
+     * than silent: an un-intercepted call records nothing and the array comes back `['dismiss']`.
      */
     it('opens the editor for the rule that was clicked, and closes the menu first', async () => {
         seedTwoRules();
         const order: string[] = [];
-        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {
-            order.push(getOpenAutomationRuleId() === null ? 'dismiss' : 'dismiss-after-open');
-        }} />);
+        const open = jest
+            .spyOn(automationEditorHostModule, 'openAutomationEditorFor')
+            .mockImplementation((ruleId: string) => { order.push(`open:${ruleId}`); });
+        await render(
+            <AutomationMenuSection terminalId="tm-1" onDismiss={() => { order.push('dismiss'); }} />,
+        );
 
         // Collapsed until asked — the section is one row in a menu that already has a dozen.
         expect(container.querySelectorAll('.au-menu-rule')).toHaveLength(0);
@@ -253,11 +276,10 @@ describe('the shared indicator and menu section', () => {
 
         await act(async () => (rows[1] as HTMLButtonElement).click());
 
-        // The SECOND row's id, not the first and not the rule the section happened to render last:
-        // a handler built over the loop variable by reference gets this wrong and looks right.
-        expect(getOpenAutomationRuleId()).toBe('r2');
-        // Exactly one dismiss, and it happened while no editor was open.
-        expect(order).toEqual(['dismiss']);
+        // Dismiss, THEN the second row's rule — exactly once each, in that order.
+        expect(order).toEqual(['dismiss', 'open:r2']);
+
+        open.mockRestore();
     });
 
     it('offers the SAME rules, in the same order, to the terminal-area menu', async () => {
@@ -433,9 +455,12 @@ describe('the shared indicator and menu section', () => {
      *
      * So the check moved into the transaction that writes (`AutomationStore::add_target_to_rule`,
      * whose own tests pin that a gone rule is not re-INSERTED), and what is left to assert HERE is
-     * the renderer's half: a `false` is surfaced rather than swallowed. The cache is deliberately
-     * left holding the deleted rule, because a renderer that only behaves when its cache is fresh
-     * is the exact thing that was wrong.
+     * the renderer's half: a `false` is surfaced rather than swallowed. **The cache is deliberately
+     * left holding the deleted rule** — the renderer is told about the delete only by the answer to
+     * its own write, which is the whole race. An arrangement that empties the cache first tests a
+     * renderer whose cache is already right, i.e. the one case the store-side check was not built
+     * for; this one keeps the two disagreeing, which is the state a real delete in another window
+     * leaves this window in until its `automation:changed` refetch lands.
      */
     it('says so when the store reports the rule was already deleted', async () => {
         __seedAutomationArmedForTest(
@@ -444,11 +469,15 @@ describe('the shared indicator and menu section', () => {
         );
         const { add, save } = installAddApi(false);
         // Spying through the NAMESPACE only works while the transform emits `ns.fn(...)` at the
-        // menu's call site — see the note at this file's imports for how that goes green rather
-        // than red if it ever stops.
+        // menu's call site — see the note at this file's imports. The two assertions below fail in
+        // opposite directions if it ever stops: the `toast` one goes red, the `refresh` one goes
+        // vacuously green.
         const toast = jest
             .spyOn(automationEditorHostModule, 'toastAutomationNotice')
             .mockResolvedValue(undefined);
+        const refresh = jest
+            .spyOn(automationArmedModule, 'refreshAutomationArmed')
+            .mockImplementation(() => {});
 
         const items = automationMenuItems('tm-9');
         const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
@@ -461,13 +490,19 @@ describe('the shared indicator and menu section', () => {
         // The write was still ATTEMPTED — a renderer that pre-filtered on its own stale cache would
         // skip the call and be right only by luck, and wrong the moment its cache is the stale one.
         expect(add).toHaveBeenCalledTimes(1);
+        // Nothing resurrection-shaped went anywhere near the store: the whole-rule upsert this row
+        // used to take is the ONE call that could re-INSERT the deleted rule, and it did not run.
         expect(save).not.toHaveBeenCalled();
         expect(toast).toHaveBeenCalledTimes(1);
         expect(toast.mock.calls[0][0]).toMatch(/no longer exists/i);
         // Named, so the notice is about the thing the user just clicked.
         expect(toast.mock.calls[0][0]).toContain('Pinned rule');
+        // And no re-index, because nothing was committed for one to read — the header's reasoning
+        // for keeping the refetch on the written path only, asserted rather than merely written.
+        expect(refresh).not.toHaveBeenCalled();
 
         toast.mockRestore();
+        refresh.mockRestore();
     });
 
     /**
