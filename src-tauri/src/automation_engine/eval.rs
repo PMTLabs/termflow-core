@@ -272,6 +272,54 @@ pub fn coerce(raw: &str) -> Option<f64> {
     raw.trim().parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// Every group of one match, as text.
+///
+/// **Text, not `f64`.** `Read` is the numeric reduction and stays exactly as it was; this is the
+/// raw material both §4 (message substitution) and §5 (clause comparison) need, and each coerces
+/// for itself. Coercing here would throw away `$2 = "automationSteps.test.ts"`.
+///
+/// `groups[0]` is the whole match. `None` means the group did not participate — an optional group
+/// that did not match. That is DIFFERENT from an empty string, and the two consumers treat it
+/// differently on purpose (§4.4 substitutes `""`, §5.5 makes a numeric clause `Unknown`), so the
+/// distinction is preserved here rather than flattened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captures {
+    pub groups: Vec<Option<String>>,
+    pub named: std::collections::BTreeMap<String, String>,
+}
+
+impl Captures {
+    pub fn group(&self, n: usize) -> Option<&str> {
+        self.groups.get(n).and_then(|g| g.as_deref())
+    }
+    pub fn name(&self, k: &str) -> Option<&str> {
+        self.named.get(k).map(|s| s.as_str())
+    }
+    /// Capture groups excluding group 0, which is the whole match and always present.
+    pub fn count(&self) -> usize {
+        self.groups.len().saturating_sub(1)
+    }
+}
+
+/// One `regex::Captures` as a `Captures`.
+///
+/// Both branches of `evaluate_text` build this, so it is one function rather than two copies: two
+/// implementations of the same thing drift, and the half that drifts here is the half a `$1` reads.
+/// `named` holds only the groups that PARTICIPATED, which is why a name absent from the map and a
+/// group whose slot is `None` say the same thing.
+fn bag_from(re: &Regex, c: &regex::Captures<'_>) -> Captures {
+    Captures {
+        groups: (0..c.len())
+            .map(|i| c.get(i).map(|m| m.as_str().to_string()))
+            .collect(),
+        named: re
+            .capture_names()
+            .flatten()
+            .filter_map(|n| c.name(n).map(|m| (n.to_string(), m.as_str().to_string())))
+            .collect(),
+    }
+}
+
 /// The value a numeric rule compares, from the LAST occurrence in the window.
 ///
 /// **`captures_iter(..).last()`, never `captures()`.** `captures()` returns the FIRST match, so over a
@@ -284,9 +332,14 @@ pub fn coerce(raw: &str) -> Option<f64> {
 /// validation before it can run — never a silent fall-back to the whole match — and if one reaches
 /// here anyway it reports `Unparsed` carrying the whole match rather than quietly comparing the wrong
 /// span.
-pub fn extract(re: &Regex, keep: Keep, text: &str) -> Read {
+///
+/// The second return value is EVERY group of that same last match, for the consumers that need more
+/// than the one span `keep` names. It is `None` only when nothing matched, so it always describes the
+/// same occurrence the `Read` does — a `$1` disagreeing with the compared value would be describing a
+/// different line.
+pub fn extract(re: &Regex, keep: Keep, text: &str) -> (Read, Option<Captures>) {
     let Some(caps) = re.captures_iter(text).last() else {
-        return Read::NoMatch;
+        return (Read::NoMatch, None);
     };
     let whole = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
     let raw = match keep {
@@ -296,13 +349,15 @@ pub fn extract(re: &Regex, keep: Keep, text: &str) -> Read {
             .or_else(|| caps.get(1))
             .map(|m| m.as_str()),
     };
-    match raw {
+    let bag = bag_from(re, &caps);
+    let read = match raw {
         None => Read::Unparsed(whole.to_string()),
         Some(s) => match coerce(s) {
             Some(v) => Read::Value(v),
             None => Read::Unparsed(s.to_string()),
         },
-    }
+    };
+    (read, Some(bag))
 }
 
 /// The six comparators the mockup's drop-down draws.
@@ -441,6 +496,10 @@ pub struct Evaluation {
     pub next: ArmState,
     pub decision: Decision,
     pub detail: String,
+    /// Every group of the match this evaluation read, on BOTH kinds of rule. `None` means nothing
+    /// matched — never "this kind of rule does not collect groups", which is what the text branch's
+    /// `is_match` used to mean and why every `$1` in a word rule resolved to nothing.
+    pub captures: Option<Captures>,
 }
 
 /// Read, extract, compare, advance the arm state. The whole pure pipeline, in order.
@@ -477,13 +536,19 @@ pub fn evaluate_text(
     let depth = depth_for(graph.cond.kind, graph.monitor.read, prev);
     let text = strip_echoes(&read(depth)?, echoes);
 
-    let (outcome, condition) = match graph.cond.kind {
+    let (outcome, condition, captures) = match graph.cond.kind {
         CondKind::Text => {
-            let hit = re.is_match(&text);
-            (Outcome::Presence(hit), Truth::from_compare(hit))
+            // `captures_iter(..).last()`, NOT `is_match` and NOT `.next()`. `is_match` is what made
+            // a word rule produce no captures at all — not even group 1 — so every `$1` in spec
+            // 032's own scenarios resolved to nothing. `.last()` for the same reason the numeric
+            // branch gives: over a 200-line window the first match is the oldest.
+            let caps = re.captures_iter(&text).last();
+            let hit = caps.is_some();
+            let bag = caps.map(|c| bag_from(re, &c));
+            (Outcome::Presence(hit), Truth::from_compare(hit), bag)
         }
         CondKind::Number => {
-            let value = extract(re, graph.parse.keep, &text);
+            let (value, caps) = extract(re, graph.parse.keep, &text);
             let now = match (&value, graph.cond.op, graph.cond.threshold) {
                 (Read::Value(v), Some(op), Some(t)) => Truth::from_compare(compare(op, *v, t)),
                 // No value read, or a match whose span is not a number: nothing was learned, and
@@ -493,7 +558,7 @@ pub fn evaluate_text(
                 // reading that neither fires nor spuriously re-arms if it is ever reached.
                 _ => Truth::Unknown,
             };
-            (Outcome::Numeric(value), now)
+            (Outcome::Numeric(value), now, caps)
         }
     };
 
@@ -505,6 +570,7 @@ pub fn evaluate_text(
         condition,
         next,
         decision,
+        captures,
     })
 }
 
@@ -705,11 +771,11 @@ mod tests {
     fn extraction_takes_the_last_match_not_the_first_and_not_the_largest() {
         let r = re(r"ctx:(\d+)%");
         let ascending = "ctx:18%\nnoise\nctx:41%\nnoise\nctx:63%\n";
-        assert_eq!(extract(&r, Keep::Brackets, ascending), Read::Value(63.0));
+        assert_eq!(extract(&r, Keep::Brackets, ascending).0, Read::Value(63.0));
 
         let descending = "ctx:63%\nnoise\nctx:41%\nnoise\nctx:18%\n";
         assert_eq!(
-            extract(&r, Keep::Brackets, descending),
+            extract(&r, Keep::Brackets, descending).0,
             Read::Value(18.0),
             "`last` must mean the newest occurrence, never the largest"
         );
@@ -719,20 +785,20 @@ mod tests {
     #[test]
     fn keep_selects_the_group_and_a_named_value_group_wins() {
         let plain = re(r"ctx:(\d+)%");
-        assert_eq!(extract(&plain, Keep::Brackets, "ctx:63%"), Read::Value(63.0));
+        assert_eq!(extract(&plain, Keep::Brackets, "ctx:63%").0, Read::Value(63.0));
         assert_eq!(
-            extract(&plain, Keep::Whole, "ctx:63%"),
+            extract(&plain, Keep::Whole, "ctx:63%").0,
             Read::Unparsed("ctx:63%".to_string()),
             "`whole` takes group 0, which here is not a number"
         );
-        assert_eq!(extract(&re(r"(\d+)"), Keep::Whole, "63"), Read::Value(63.0));
+        assert_eq!(extract(&re(r"(\d+)"), Keep::Whole, "63").0, Read::Value(63.0));
 
         let named = re(r"(?<first>c)tx:(?<value>\d+)%");
-        assert_eq!(
-            extract(&named, Keep::Brackets, "ctx:63%"),
-            Read::Value(63.0),
-            "a group named `value` must win over group 1"
-        );
+        let (read, caps) = extract(&named, Keep::Brackets, "ctx:63%");
+        assert_eq!(read, Read::Value(63.0), "a group named `value` must win over group 1");
+        // `keep` chooses which span is the VALUE; it never decides which groups are collected, so
+        // the group `value` outranked is still reachable.
+        assert_eq!(caps.expect("a match").group(1), Some("c"));
     }
 
     /// A group-less pattern with `keep: brackets` must NOT silently fall back to the whole match.
@@ -740,11 +806,16 @@ mod tests {
     #[test]
     fn brackets_on_a_group_less_pattern_never_falls_back_to_the_whole_match() {
         let r = re(r"\d+");
+        let (read, caps) = extract(&r, Keep::Brackets, "ctx:63%");
         assert_eq!(
-            extract(&r, Keep::Brackets, "ctx:63%"),
+            read,
             Read::Unparsed("63".to_string()),
             "no capture group means no value — never the whole match"
         );
+        // It still MATCHED, so there is still a bag — with group 0 and nothing else.
+        let c = caps.expect("a match with no groups still produces captures");
+        assert_eq!(c.group(0), Some("63"));
+        assert_eq!(c.count(), 0);
         // And the blocking half, so the two halves of the rule cannot drift apart.
         let mut g = ctx_rule();
         g.parse.find = r"\d+".to_string();
@@ -754,6 +825,142 @@ mod tests {
             "keep: brackets with no capture group must BLOCK enabling, got {:?}",
             problems
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §4.1 — every group, not only the kept one
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn extract_keeps_every_group_not_only_the_kept_one() {
+        let re = Regex::new(r"FAILED (\d+) tests in (\S+)").unwrap();
+        let (read, caps) = extract(&re, Keep::Brackets, "FAILED 17 tests in automationSteps.test.ts");
+        assert_eq!(read, Read::Value(17.0), "the existing reduction is unchanged");
+        let c = caps.expect("a match must produce captures");
+        assert_eq!(c.group(0), Some("FAILED 17 tests in automationSteps.test.ts"));
+        assert_eq!(c.group(1), Some("17"));
+        assert_eq!(c.group(2), Some("automationSteps.test.ts"));
+        assert_eq!(c.group(3), None, "out of range is None, never a panic");
+        assert_eq!(c.count(), 2);
+    }
+
+    #[test]
+    fn a_group_that_did_not_participate_is_none_not_empty() {
+        // The difference matters: §4.4 substitutes a non-participating group to "" but
+        // §5.5 makes a NUMBER clause on it Unknown. Collapsing them here removes the
+        // information both rules need.
+        let re = Regex::new(r"code (\d+)(?: retry (\d+))?").unwrap();
+        let (_, caps) = extract(&re, Keep::Brackets, "code 529");
+        let c = caps.unwrap();
+        assert_eq!(c.group(1), Some("529"));
+        assert_eq!(c.group(2), None, "an optional group that did not match is None");
+
+        // The other half of the same distinction, without which the assertion above also passes for
+        // an implementation that collapses BOTH cases to `None`: a group that did participate and
+        // matched no characters is `Some("")`.
+        let empty = Regex::new(r"code (\d+)(\s*)").unwrap();
+        let (_, caps) = extract(&empty, Keep::Brackets, "code 529");
+        assert_eq!(
+            caps.unwrap().group(2),
+            Some(""),
+            "an empty match is not a missing one"
+        );
+    }
+
+    #[test]
+    fn named_groups_are_reachable_by_name() {
+        let re = Regex::new(r"ctx:(?P<value>\d+)%").unwrap();
+        let (read, caps) = extract(&re, Keep::Brackets, "ctx:63%");
+        assert_eq!(read, Read::Value(63.0));
+        let c = caps.unwrap();
+        assert_eq!(c.name("value"), Some("63"));
+        assert_eq!(c.name("nope"), None, "a name the pattern does not declare is None");
+
+        // The same non-participation distinction as `group`, at the by-name surface: a declared
+        // name that did not match reads `None`, so `${name}` cannot silently resolve to the wrong
+        // thing.
+        let optional = Regex::new(r"code (?P<value>\d+)(?: retry (?P<retry>\d+))?").unwrap();
+        let (_, caps) = extract(&optional, Keep::Brackets, "code 529");
+        let c = caps.unwrap();
+        assert_eq!(c.name("value"), Some("529"));
+        assert_eq!(c.name("retry"), None, "a named group that did not participate is None");
+    }
+
+    #[test]
+    fn no_match_produces_no_captures() {
+        let re = Regex::new(r"ctx:(\d+)%").unwrap();
+        let (read, caps) = extract(&re, Keep::Brackets, "nothing here");
+        assert_eq!(read, Read::NoMatch);
+        assert!(caps.is_none());
+    }
+
+    #[test]
+    fn captures_come_from_the_last_match_in_the_window_not_the_first() {
+        // Same reason extract's own header gives for captures_iter().last(): over a
+        // 200-line window the FIRST match is the OLDEST, so the value never rises.
+        // The captures must agree with the Read, or $1 and the comparison describe
+        // different lines.
+        let re = Regex::new(r"ctx:(\d+)%").unwrap();
+        let (read, caps) = extract(&re, Keep::Brackets, "ctx:11%\nctx:63%");
+        assert_eq!(read, Read::Value(63.0));
+        assert_eq!(caps.unwrap().group(1), Some("63"));
+    }
+
+    /// Before this task the text branch ran `is_match`, so this returned `None` and every `$1` in a
+    /// word rule resolved to nothing. It is the single most load-bearing test in M1: spec 032's own
+    /// two scenarios are both word rules.
+    #[test]
+    fn a_word_rule_captures_its_groups() {
+        let g = graph(r"API error (\d+)", CondKind::Text, None, None);
+        let ev = evaluate_text(
+            &g,
+            &re(&g.parse.find),
+            NO_ECHOES,
+            ArmState::armed(),
+            &|_| Some("API error 529".into()),
+            0,
+        )
+        .expect("a live read");
+        assert_eq!(ev.condition, Truth::True);
+        assert_eq!(
+            ev.captures.as_ref().and_then(|c| c.group(1)),
+            Some("529"),
+            "a word rule must collect groups, not just answer yes/no"
+        );
+    }
+
+    /// The text branch's captures must come from the same occurrence its answer does, and a word
+    /// rule that does NOT match must produce no bag — `None` means "nothing matched", never "this
+    /// kind of rule does not collect".
+    #[test]
+    fn a_word_rules_captures_track_its_answer() {
+        let g = graph(r"API error (\d+)", CondKind::Text, None, None);
+        let seen = evaluate_text(
+            &g,
+            &re(&g.parse.find),
+            NO_ECHOES,
+            ArmState::armed(),
+            &|_| Some("API error 429\nAPI error 529".into()),
+            0,
+        )
+        .expect("a live read");
+        assert_eq!(
+            seen.captures.as_ref().and_then(|c| c.group(1)),
+            Some("529"),
+            "the newest occurrence, for the same reason the numeric branch takes the last"
+        );
+
+        let unseen = evaluate_text(
+            &g,
+            &re(&g.parse.find),
+            NO_ECHOES,
+            ArmState::armed(),
+            &|_| Some("all quiet".into()),
+            0,
+        )
+        .expect("a live read");
+        assert_eq!(unseen.condition, Truth::False, "absence of the words IS the observation");
+        assert!(unseen.captures.is_none(), "no match, no bag");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -775,7 +982,7 @@ mod tests {
             ("nothing here", Read::NoMatch),
         ];
         for (text, want) in cases {
-            assert_eq!(&extract(&r, Keep::Brackets, text), want, "coercing {:?}", text);
+            assert_eq!(&extract(&r, Keep::Brackets, text).0, want, "coercing {:?}", text);
         }
 
         // Both failures are `Truth::Unknown` — NOT false — and read DISTINCTLY.
