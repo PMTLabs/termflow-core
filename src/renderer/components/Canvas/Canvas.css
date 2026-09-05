@@ -273,8 +273,25 @@
      so it has to apply AFTER the scale: in `transform` the rightmost function is applied first,
      which makes `translateY` here a move in the parent's coordinate space. Swap the two and the
      lift is silently multiplied by the scale. Zero whenever the surface already fits. */
-  transform: translateY(var(--node-surface-shift, 0px))
-             scale(var(--node-surface-scale, var(--canvas-surface-scale)));
+  /* UNDO the world's supersample for this subtree, and only this subtree.
+     `.canvas-raster` carries `zoom: R` so canvas CHROME is laid out R times larger and stays
+     crisp (macOS WebKit magnifies a `transform: scale()` raster instead of redrawing it). A
+     terminal must not inherit that: measured in Edge 152, xterm's WebGL renderer paints its
+     glyphs at 1/R under an ancestor `zoom` — the element box scales, the bitmap does not — so
+     the terminal rendered at half size at R=2 and blank at R=3, with its DOM background
+     scaling correctly around it.
+
+     Effective zoom here is therefore `R * (1/R) = 1`: byte-identical to the pre-supersample
+     layout, which is why `plan/017`'s fit-is-a-no-op argument carries over untouched. The
+     factor is handed back through the transform below, so the SCREEN geometry is unchanged:
+     `hostW * (surfaceScale * R) * (z / R) == hostW * surfaceScale * z`.
+
+     The shift is multiplied for the same reason and it is NOT optional: `zoom` scales an
+     element's own transform lengths too, so a translate left un-multiplied moves the surface
+     by a fraction R of what it should. */
+  zoom: var(--canvas-raster-inv, 1);
+  transform: translateY(calc(var(--node-surface-shift, 0px) * var(--canvas-raster-r, 1)))
+             scale(calc(var(--node-surface-scale, var(--canvas-surface-scale)) * var(--canvas-raster-r, 1)));
   transform-origin: 0 0;
   overflow: hidden;
 }
