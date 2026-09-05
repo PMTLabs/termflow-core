@@ -137,14 +137,20 @@ export async function exportSnippets(snippets: Snippet[]): Promise<SnippetExport
  * fresh id for each survivor.
  *
  * The version gate is scoped to TermFlow deliberately, and saying so matters: neither
- * foreign format is version-gated at all. InkSpoke's own reader only warns on a newer
- * `SchemaVersion` and Rephlo's never branches on `version`, so refusing an unseen bump
- * would be stricter than the producers themselves — detection type-checks those fields
- * and nothing more.
+ * foreign format is version-gated at all. The justification -- that InkSpoke's own reader
+ * only warns on a newer `SchemaVersion` and Rephlo's never branches on `version`, so
+ * refusing an unseen bump would be stricter than the producers themselves -- is ASSUMED
+ * from reading those exporters, not verified here; the canonical statement of that
+ * assumption is on `detectSnippetImportFormat`. Detection type-checks those fields and
+ * nothing more.
  *
- * `imported + skippedDuplicates + rejected + skippedUnsupported` always equals the number
- * of records in the file — every record is accounted for in exactly one bucket. The
- * fourth term is always 0 for TermFlow, whose records are snippets by construction.
+ * `imported + skippedDuplicates + rejected + skippedUnsupported` equals the number of
+ * records in the file -- every record accounted for in exactly one bucket. Pinned in two
+ * halves, and it is worth saying which: the CONVERTER half
+ * (`drafts + rejected + skippedUnsupported`) is asserted by `expectFullyAccounted` on every
+ * conversion fixture, and the MERGE half -- where drafts split into `imported` and
+ * `skippedDuplicates` -- is asserted here over all three formats. The fourth term is 0 on
+ * the TermFlow path, which returns the literal.
  */
 export async function importSnippets(existing: Snippet[]): Promise<SnippetImportResult> {
   const api = window.electronAPI;

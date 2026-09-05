@@ -91,9 +91,13 @@ const nonBlankString = (candidate: unknown): string | undefined =>
  * The final clause catches a TermFlow envelope with no records array at all — a bare
  * `{ version }` — so that too gets the version message rather than "unsupported format".
  *
- * Both foreign checks are tolerant of a version they have never seen: InkSpoke's own
- * reader only warns on a newer `SchemaVersion`, and Rephlo's never branches on `version`
- * at all. Refusing a future minor bump would be stricter than the producers themselves.
+ * Both foreign checks are tolerant of a version they have never seen. The stated reason --
+ * that InkSpoke's own reader only warns on a newer `SchemaVersion` and Rephlo's never
+ * branches on `version` at all -- is ASSUMED, read off those products' exporters and not
+ * re-verified here, so nothing in this repo can falsify it. Flagged rather than dropped
+ * because round 3's worst defect came from implementing to an unchecked claim about a
+ * foreign library; the tolerance itself is safe either way, since a misread foreign file
+ * yields honestly-counted rejects rather than bad snippets. Refusing a future minor bump would be stricter than the producers themselves.
  *
  * Every discriminator is read as an OWN property. JSON members always are, but this
  * function is exported and testable, and an inherited `commands`/`version` answering for a
@@ -165,13 +169,24 @@ export function convertTermFlowEntries(entries: unknown[]): ConversionResult {
  * reader saw `false` — i.e. it disagreed with the producer about whether a payload was
  * encrypted, in the direction that imports ciphertext.
  *
- * `Object.keys` is own-enumerable only, so an inherited or prototype-borne key can never
- * answer for a field the payload does not carry. Unlike the same choice in
- * `detectSnippetImportFormat` — which is exported and genuinely reachable with a
- * prototyped object — this one is unobservable: `params` is always `JSON.parse` output,
+ * `Object.keys` is own-enumerable only, so an inherited or prototype-borne key cannot
+ * answer for a field the payload does not carry.
+ *
+ * Swapping it for `for..in` currently survives mutation, and the honest statement of why
+ * is an ARGUMENT about THIS FUNCTION'S CALLERS, not a property of this function: today the
+ * only caller is `parseActionParams`, which hands over `JSON.parse` output with no reviver,
  * and `for..in` differs from `Object.keys` on such an object only if somebody has added an
- * ENUMERABLE property to `Object.prototype`. Mutation confirms the swap survives. It is
- * kept for intent, not for a defect it currently prevents, so do not write a test for it.
+ * ENUMERABLE property to `Object.prototype`. That clearance is tied to the call site and
+ * expires the moment a caller passes an object literal, a spread, or anything built by
+ * hand — and `paramFields` also feeds `holdsEncryptedPayload`, so the direction it expires
+ * in is "imports ciphertext".
+ *
+ * An earlier version of this paragraph called the difference "unobservable" and told the
+ * reader not to write a test for it. That sentence has been removed rather than rewritten,
+ * because its twin on `MIN_INITIALS_QUERY_LENGTH` in `snippetSearch.ts` was doing exactly
+ * this — asserting unobservability, citing a surviving mutant as proof, then forbidding
+ * the test — and it was false and hid a live defect. A surviving mutant is a QUESTION
+ * about what else supplies the property, never a licence to stop asking.
  */
 function paramFields(params: Record<string, unknown>, name: string): unknown[] {
   const wanted = name.toLowerCase();
@@ -229,13 +244,35 @@ function inkSpokeGroupNames(groups: unknown): Map<string, string> {
  * Windows), never in the export. There is nothing to decrypt with, so importing would
  * create a snippet that types ciphertext into a terminal.
  *
- * Asked of EVERY payload, not just `SendKeys`. Only `SendKeysParams` declares these two
- * fields today, so on a file InkSpoke itself wrote the extra check can never fire — but
+ * Asked of EVERY payload, not just `SendKeys`. Only `SendKeysParams` is BELIEVED to declare
+ * these two fields -- an assumption about InkSpoke's C# model that nothing here can check,
+ * so treat "it cannot fire elsewhere" as unverified -- but
  * the class here is "a payload that says it is encrypted", not "a SendKeys payload", and
  * a guard that has to be re-derived at each new call site is the guard that gets left off
  * the next one. Gating it on the action type also made the plainly-stated rule "encrypted
  * payloads are never imported" quietly untrue for a hand-edited file.
  */
+/**
+ * Does this `Nonce` value announce a nonce?
+ *
+ * Deliberately NOT `trimmedOrUndefined`. That helper's own doc says it is for DISPLAY
+ * fields, and it answers `undefined` for everything that is not a string — so a nonce
+ * serialised as a byte array, a number or an object read as "no nonce here" and its
+ * ciphertext was imported and typed into a terminal. Measured: of `'q0s8Zg=='`,
+ * `[12,34,56]`, `123456`, `{b:'x'}` and `true`, only the first was refused.
+ *
+ * That made the two halves of one guard disagree about their own question: `IsSecret`
+ * fired on ANY truthy value while `Nonce` fired only on a non-blank STRING, so the
+ * narrower half was deciding the safety case. Only a string can be *blank*; anything else
+ * that is present at all is a nonce, whatever the producer encoded it as. This is the same
+ * shape as the round-3 defect one line above — a tolerance chosen per call site, with the
+ * site that mattered least getting it and the site that mattered most going without.
+ */
+const saysNonce = (n: unknown): boolean => {
+  if (n === null || n === undefined) return false;
+  return typeof n === 'string' ? n.trim().length > 0 : true;
+};
+
 function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
   // ANY occurrence, not the one the producer would have kept — the deliberate asymmetry
   // with `paramField`, and the reason `paramFields` is exposed at all.
@@ -247,10 +284,7 @@ function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
   // costs one honestly-counted `skippedUnsupported` on a file nobody can produce anyway.
   // When a payload contradicts itself about whether it is a secret, believe the half that
   // says it is.
-  return (
-    paramFields(params, 'IsSecret').some(Boolean) ||
-    paramFields(params, 'Nonce').some((n) => trimmedOrUndefined(n) !== undefined)
-  );
+  return paramFields(params, 'IsSecret').some(Boolean) || paramFields(params, 'Nonce').some(saysNonce);
 }
 
 /**

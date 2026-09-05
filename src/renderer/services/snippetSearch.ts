@@ -79,8 +79,10 @@ const INITIALS_SCAN_LIMIT = 2000;
 /**
  * Reduce a query word to the alphabet the initials are actually written in.
  *
- * Initials are mark-free by construction: each is `codePointAt(0)` of a token that must
- * start with `\p{L}` or `\p{N}`, so a combining mark can never be one. The needle has to
+ * Initials are mark-free by construction -- each is `codePointAt(0)` of a token that must
+ * start with `\p{L}` or `\p{N}`. That construction covers the HAYSTACK only; the needle is
+ * whatever the user typed and has no such guarantee, which is why folding it can leave
+ * nothing at all. The needle has to
  * be reduced the same way or the two sides are not comparable, and NFC alone does not do
  * it — some lowercase mappings EXPAND. `İ` (U+0130) lower-cases to `i` + combining dot
  * above, which NFC cannot recompose, so `İH` became a three-code-point needle that could
@@ -110,7 +112,10 @@ const foldForInitialsMatch = (s: string): string => s.normalize('NFC').replace(/
  *     where the reader means `q…`. (NFC alone would rescue `naïve`, which does compose;
  *     it cannot rescue `q̈uick`, which does not.)
  *
- * A mark can never START a word, which is why the first class excludes it.
+ * A mark can never start a TOKEN, because the first class excludes it -- which is a fact
+ * about what this function produces, not about what a caller may pass. A *string* can
+ * certainly begin with a mark, and a query that is nothing but marks is exactly the input
+ * that once folded to the empty needle. See {@link MIN_INITIALS_QUERY_LENGTH}.
  *
  * `codePointAt` rather than `[0]` so an astral first letter survives as one character
  * instead of half a surrogate pair.
@@ -186,7 +191,9 @@ function matchesInitials(s: Snippet, w: string): boolean {
  *   5  no match
  *
  * `rankSnippet` and `matchesAllWords` are both defined in terms of this, so the set of
- * things that COUNT as a match and the order they sort in cannot drift apart — widening
+ * things that COUNT as a match and the order they sort in do not drift apart. That holds
+ * because those are today's only two callers, not because anything forbids a third --
+ * a convention worth keeping, not a construction — widening
  * one without the other is what makes a new rung either unreachable or unsorted.
  *
  * `label`/`text` are passed in already lower-cased because the caller looks at every word

@@ -565,6 +565,87 @@ describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
     expect(result.format).toBe('termflow');
     expect(result.added.map((s) => s.text)).toEqual(['mine']);
   });
+  it('every record lands in exactly one bucket, on all three formats', async () => {
+    // The four-term identity `importSnippets` promises in its own doc comment, asserted as
+    // a PROPERTY rather than as per-file counts. `expectFullyAccounted` pins the converter
+    // half (drafts + rejected + skippedUnsupported) on every conversion fixture; this covers
+    // the MERGE half, where drafts split into imported and skippedDuplicates.
+    //
+    // HONESTY NOTE, so nobody reads more into this than it earns: it is REDUNDANT against
+    // today's suite. Three mutants were tried — a duplicate dropped without being counted,
+    // a duplicate counted twice, and `imported` computed as `added.length +
+    // skippedDuplicates` — and each was already killed by the existing per-file count
+    // assertions with this test skipped. No mutant was found that only this test kills.
+    //
+    // It is kept anyway, for the case those fixtures cannot cover: a FOURTH format, a new
+    // bucket, or a new `continue` on a path whose specific counts nobody has written down
+    // yet. Those fixtures assert numbers for files that exist; this asserts the shape for
+    // files that do not. Each envelope exercises all four buckets, and the non-zero checks
+    // below exist so the identity cannot hold vacuously by every term being 0.
+    const existing = [snip({ id: 'old', text: 'already here' })];
+
+    const cases: Array<[string, unknown, number]> = [
+      [
+        'termflow',
+        {
+          version: 1,
+          exportedAt: 1,
+          snippets: [
+            { id: 'a', text: 'fresh one', createdAt: 1 },
+            { id: 'b', text: 'already here', createdAt: 1 }, // duplicate of `existing`
+            { id: 'c', text: 'fresh one', createdAt: 1 }, // duplicate WITHIN the file
+            { id: 'd', createdAt: 1 }, // no text -> rejected
+          ],
+        },
+        4,
+      ],
+      [
+        'inkspoke',
+        {
+          SchemaVersion: 2,
+          ExportedAt: 'x',
+          Groups: [],
+          Mappings: [
+            inkSpokeMapping({ Id: '1' }, { Text: 'ink fresh' }),
+            inkSpokeMapping({ Id: '2' }, { Text: 'already here' }), // duplicate
+            inkSpokeMapping({ Id: '3', ActionType: 'OpenApp' }), // unsupported action
+            inkSpokeMapping({ Id: '4' }, { Text: 'Y2lwaGVy', IsSecret: true }), // encrypted
+            inkSpokeMapping({ Id: '5' }, 'not json at all'), // rejected
+          ],
+        },
+        5,
+      ],
+      [
+        'rephlo',
+        {
+          version: '1.3',
+          commands: [
+            { id: 'r1', name: 'one', instruction: 'rephlo fresh' },
+            { id: 'r2', name: 'two', instruction: 'already here' }, // duplicate
+            { id: 'r3', name: 'three', instruction: 'archived', isArchived: true },
+            { id: 'r4', name: 'four', instruction: '   ' }, // blank -> rejected
+          ],
+        },
+        4,
+      ],
+    ];
+
+    for (const [format, envelope, records] of cases) {
+      givenFile(envelope);
+      const r = await importSnippets(existing);
+      if (r.ok !== true) throw new Error(`expected ok for ${format}, got ${JSON.stringify(r)}`);
+      expect(r.format).toBe(format);
+      expect(r.imported + r.skippedDuplicates + r.rejected + r.skippedUnsupported).toBe(records);
+      // `added` is what actually gets written, so it must agree with the count that is
+      // reported to the user -- a bucket that drifts from the payload is the same defect.
+      expect(r.added).toHaveLength(r.imported);
+      // Every bucket genuinely reached, or the identity above could hold vacuously.
+      expect(r.imported).toBeGreaterThan(0);
+      expect(r.skippedDuplicates).toBeGreaterThan(0);
+      expect(r.rejected).toBeGreaterThan(0);
+      if (format !== 'termflow') expect(r.skippedUnsupported).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('describeImport (plan/030 §4.3)', () => {

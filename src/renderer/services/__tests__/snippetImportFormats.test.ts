@@ -210,6 +210,47 @@ describe('convertInkSpokeExport', () => {
     expectFullyAccounted(r, 5);
   });
 
+  it('refuses a Nonce however it is ENCODED, not only as a base64 string', () => {
+    // Round-4 finding, and it is the round-3 defect one field over. The two halves of the
+    // guard disagreed about their own question: `IsSecret` fired on any truthy value, while
+    // `Nonce` went through `trimmedOrUndefined` — a helper whose own doc says it is for
+    // DISPLAY fields, and which answers `undefined` for everything that is not a string. So
+    // a nonce serialised as a byte array, a number, an object or a bare `true` read as "no
+    // nonce here" and the ciphertext beside it was imported and typed into a terminal.
+    //
+    // Measured before the fix: of the five rows below only the base64 one was refused.
+    // Only a STRING can be blank; anything else that is present at all is a nonce.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'b64' }, { Text: 'Y2lwaGVy', Nonce: 'q0s8Zg==' }),
+        mapping({ Id: 'bytes' }, { Text: 'Y2lwaGVy', Nonce: [12, 34, 56] }),
+        mapping({ Id: 'number' }, { Text: 'Y2lwaGVy', Nonce: 123456 }),
+        mapping({ Id: 'object' }, { Text: 'Y2lwaGVy', Nonce: { b: 'q0s8Zg==' } }),
+        mapping({ Id: 'true' }, { Text: 'Y2lwaGVy', Nonce: true }),
+      ]),
+    );
+    expect(r.drafts).toEqual([]);
+    expect(r.skippedUnsupported).toBe(5);
+    expectFullyAccounted(r, 5);
+  });
+
+  it('a Nonce that is absent, null or blank is NOT a tell', () => {
+    // The other side of the pair, and the reason the fix is not simply "any key present".
+    // Without this, widening the tell to every non-undefined value would refuse ordinary
+    // rows and the suite would not notice. Asserts presence, not just absence: all three
+    // bodies must actually arrive.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'absent' }, { Text: 'plain one' }),
+        mapping({ Id: 'null' }, { Text: 'plain two', Nonce: null }),
+        mapping({ Id: 'blank' }, { Text: 'plain three', Nonce: '   ' }),
+      ]),
+    );
+    expect(r.drafts.map((d) => d.text)).toEqual(['plain one', 'plain two', 'plain three']);
+    expect(r.skippedUnsupported).toBe(0);
+    expectFullyAccounted(r, 3);
+  });
+
   it('refuses an encrypted payload spelled in ANY case, not just PascalCase', () => {
     // The defect this test exists for shipped once. The body reader was case-tolerant
     // (`Text` or `text`) while the guard read only `IsSecret`/`Nonce`, so a payload
@@ -285,10 +326,14 @@ describe('convertInkSpokeExport', () => {
     // still converts normally and neither key reads as an encryption tell.
     //
     // `paramFields` iterates `Object.keys`, which is own-enumerable only, so a prototype
-    // member cannot answer for a field the payload never carried. That is structural now
-    // rather than a guard — the earlier `hasOwnProperty` check was defence whose swap for
-    // `in` provably survived mutation, because none of the four names looked up collides
-    // with `Object.prototype`.
+    // member cannot answer for a field the payload never carried.
+    //
+    // This comment used to add that the swap for `in` "provably survived mutation, because
+    // none of the four names looked up collides with `Object.prototype`". Two problems, both
+    // corrected here: a count of today's lookups goes stale the moment a fifth is added and
+    // nothing goes red, and a surviving mutant is not a proof of anything — see the note on
+    // `paramFields` itself. The names are enumerated rather than counted, and the reason
+    // this test exists is the payload-shaped case below, not the prototype argument.
     // Raw JSON, not an object literal: `__proto__:` in a literal is the prototype setter,
     // so it would never survive JSON.stringify and the key would silently not be tested.
     // Parsed from text it is an ordinary own property, which is the case that matters.
