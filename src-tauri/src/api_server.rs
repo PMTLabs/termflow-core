@@ -198,6 +198,7 @@ pub async fn start_api_server(
         .route("/api/terminals/:id/input", post(write_terminal))
         .route("/api/terminals/:id/output", get(get_terminal_output))
         .route("/api/terminals/:id/snapshot", get(get_terminal_snapshot))
+        .route("/api/terminals/:id/screen", get(get_terminal_screen))
         .route("/api/terminals/:id/full-scrollback", get(get_terminal_full_scrollback))
         .route("/api/terminals/:id/reset", post(reset_terminal))
         // Profile management routes
@@ -1204,6 +1205,73 @@ async fn get_terminal_snapshot(
             Json(json!({ "snapshot": "", "rows": 0, "cols": 0 }))
         }
     }
+}
+
+/// The `GET /api/terminals/:id/screen` response body, extracted so a unit test can pin
+/// the contract (exact key names, the caller's own id echoed back) without an
+/// `AppState`: the handler takes `AppState<Wry>`, `tauri::test::mock_app` only yields
+/// `AppState<MockRuntime>`, and the `integration-tests` feature it needs breaks the
+/// Windows test binary at loader time. Same reason `health_body` and
+/// `terminal_identity_json` are free functions.
+///
+/// `terminal_id` is echoed back EXACTLY as the caller wrote it, never the resolved
+/// `pc-` map key. Every terminal response reports the DURABLE `tm-` leaf as
+/// `terminalId` (design 014 A3), and `fleet_screen` echoes its request's id for the
+/// same reason: `pc-` ids are minted per run, so handing one back would give the caller
+/// an identifier that silently stops resolving after the next restart.
+fn screen_body(terminal_id: &str, screen: &str, rows: u16, cols: u16) -> serde_json::Value {
+    json!({ "terminalId": terminal_id, "screen": screen, "rows": rows, "cols": cols })
+}
+
+/// Returns the terminal's current visible screen as PLAIN GRID TEXT, for callers that
+/// READ it - a human, an agent, the automation rule editor's target-preview hover card -
+/// rather than replay it into a terminal.
+///
+/// Neither neighbouring read can be post-processed into this, which is the whole reason
+/// the route exists:
+///
+/// * `/snapshot` serves `contents_formatted()`, a REPLAY STREAM. Written into a fresh
+///   xterm of the same size it reproduces the screen exactly, which is what hydration
+///   needs - but it is not text. Runs of blanks are encoded as cursor motion (`CUF`,
+///   absolute `CUP`) rather than as spaces, so stripping the escapes out of it in the
+///   client COLLAPSES the column layout: `line 1 ESC[3;1H line 3` becomes
+///   `line 1line 3`, not two rows, and a two-column status bar butts its columns
+///   together. `AppState::screen_text` renders from the grid the parser has ALREADY
+///   applied those cursor ops to, so the alignment survives - see its doc comment, and
+///   `the_screen_route_body_keeps_columns_the_snapshot_blob_encodes_as_cursor_ops`.
+/// * `/output` replays a lossy ring of raw PTY chunks through a FRESH parser
+///   (`render_terminal_history`), so it can only show what is still in that ring; this
+///   endpoint reads the authoritative parser that has consumed every byte of the
+///   session.
+///
+/// `rows`/`cols` are read from the `Terminal` record rather than by taking a second lock
+/// on the parser the PTY output consumer is already contending for. Every portable-pty
+/// resize path writes the record and calls `resize_screen` in the same breath
+/// (`resize_terminal`, the two non-tmux branches of the reflow endpoint,
+/// `commands::resize_terminal`), so for those the record's size IS the parser's. The tmux
+/// reflow branch is the one exception - it updates only the record, because tmux reflows
+/// the content itself and hands the client a fresh capture - so on a tmux-backed terminal
+/// read these as the pane's dimensions.
+async fn get_terminal_screen(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Normalise the caller-supplied reference to this run's map key. The API
+    // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
+    // are keyed by the per-run pc- id (design 014 A3). Without this, the
+    // documented round trip - read `terminalId`, then address it - 404s.
+    // Bound to a NEW name instead of shadowing `id` as the neighbours do, because
+    // the response echoes the caller's own reference back to them.
+    let resolved = state.resolve_ref(&id);
+    if !state.terminals.contains_key(&resolved) {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+    }
+    // A registered terminal whose screen parser does not exist yet is an EMPTY screen,
+    // not a 404 - the terminal is addressable and the caller's next poll will have
+    // content. `/snapshot` and `fleet_screen` close the same gap the same way.
+    let screen = state.screen_text(&resolved).unwrap_or_default();
+    let (rows, cols) = terminal_size_for_output(&state, &resolved);
+    (StatusCode::OK, Json(screen_body(&id, &screen, rows, cols))).into_response()
 }
 
 /// Returns the FULL rendered scrollback (not just the current visible screen)
@@ -4485,6 +4553,102 @@ mod tests {
         assert!(
             !formatted.contains("NAME                                   STATUS"),
             "formatted blob is expected to encode the gap as cursor motion, not spaces"
+        );
+    }
+
+    /// The body `GET /api/terminals/:id/screen` actually serves, on the fixture that makes the
+    /// difference visible: two columns placed by absolute cursor positioning - the shape a status
+    /// bar or a sidebar produces.
+    ///
+    /// `plain_screen_text_keeps_alignment_that_escape_stripping_destroys` above pins the property
+    /// of the vt100 primitive; this pins that THIS ROUTE'S PAYLOAD carries it, under the exact
+    /// wire keys the rule editor's preview card reads. The second half spells out the alternative
+    /// the route replaces - fetch `/snapshot`, strip the escapes in the client - and watches it
+    /// lose the gap outright, so the two are visibly not interchangeable rather than merely
+    /// asserted to be.
+    #[test]
+    fn the_screen_route_body_keeps_columns_the_snapshot_blob_encodes_as_cursor_ops() {
+        let mut p = vt100::Parser::new(24, 80, 0);
+        p.process(b"\x1b[1;1HNAME\x1b[1;40HSTATUS\r\n\x1b[2;1Hbuild\x1b[2;40Hok");
+
+        // Exactly what the handler passes in: `AppState::screen_text`'s render of the grid.
+        let body = screen_body("tm-9f2c1a4b7", &p.screen().contents(), 24, 80);
+
+        // The wire contract, by exact key name.
+        assert_eq!(
+            body["terminalId"],
+            json!("tm-9f2c1a4b7"),
+            "the caller's own reference is echoed back, not the resolved pc- map key"
+        );
+        assert_eq!(body["rows"], json!(24));
+        assert_eq!(body["cols"], json!(80));
+
+        let screen = body["screen"].as_str().expect("`screen` must serialise as a string");
+        let first = screen.lines().next().expect("a first row");
+        assert!(first.starts_with("NAME"), "got {first:?}");
+        assert_eq!(first.find("STATUS"), Some(39), "STATUS must stay in column 40");
+        let second = screen.lines().nth(1).expect("a second row");
+        assert_eq!(
+            second.find("ok"),
+            Some(39),
+            "the second row must line up under the first, not just survive on its own"
+        );
+
+        // The alternative: take `/snapshot`'s replay blob and strip its escapes, as the rule
+        // editor's preview card was doing. The blob encodes the gap as cursor motion, so there
+        // are no spaces left to hold the columns apart and the two headings butt together.
+        let blob = String::from_utf8_lossy(&p.screen().contents_formatted()).into_owned();
+        let stripped = regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]")
+            .expect("a valid CSI pattern")
+            .replace_all(&blob, "")
+            .into_owned();
+        assert!(
+            stripped.contains("NAMESTATUS"),
+            "escape-stripping the replay blob is expected to collapse the gap, got {stripped:?}"
+        );
+    }
+
+    /// The body of `async fn get_terminal_screen`, from its signature to the first closing brace
+    /// in column 0 - every free function in this file ends that way.
+    ///
+    /// The source is cut at the first `#[cfg(test)]` so the needle finds the HANDLER and not this
+    /// module's own mention of it, and read through `strip_comments` because the prose directly
+    /// above the handler explains the very distinction the needles look for: `contains` cannot
+    /// tell a comment from code, so an unstripped scan would pass on the explanation alone.
+    fn get_terminal_screen_body() -> String {
+        let source =
+            crate::automation_engine::test_host::strip_comments(include_str!("api_server.rs"));
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests must follow the code")];
+        let start = code.find("async fn get_terminal_screen(").expect(
+            "`get_terminal_screen` not found - this guard must fail loudly, not pass vacuously",
+        );
+        let rest = &code[start..];
+        let end = rest.find("\n}\n").expect("the handler must close at column 0");
+        rest[..end].to_string()
+    }
+
+    /// `GET /api/terminals/:id/screen` must read the GRID (`screen_text`), never the replay blob
+    /// (`screen_snapshot`) - the alignment the test above pins is the whole point of the route,
+    /// and sourcing it from the formatted blob would hand back cursor-op noise that no client can
+    /// straighten out again.
+    ///
+    /// Source-derived because nothing in this process can call the handler: it takes
+    /// `AppState<Wry>`, `tauri::test::mock_app` yields `AppState<MockRuntime>`, and the
+    /// `integration-tests` feature that would bridge the gap breaks the Windows test binary at
+    /// loader time (see `test_send_prompt_does_not_block_concurrent_removal`). So the wiring is
+    /// asserted from the source text instead - which is what kills the "point it at
+    /// `screen_snapshot`" mutant that a payload test, handed its text already rendered, cannot
+    /// see.
+    #[test]
+    fn the_screen_route_reads_the_grid_not_the_replay_blob() {
+        let body = get_terminal_screen_body();
+        assert!(
+            body.contains("state.screen_text("),
+            "the handler must render from the parser's grid via screen_text, body was:\n{body}"
+        );
+        assert!(
+            !body.contains("screen_snapshot"),
+            "the handler must NOT serve the escape-sequence replay blob, body was:\n{body}"
         );
     }
 

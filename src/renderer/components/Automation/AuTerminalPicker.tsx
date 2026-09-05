@@ -63,8 +63,14 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
      * — or changed folder — while being hovered would keep describing itself as it was. The id is
      * what survives a refetch, so the card is looked up from the CURRENT `shown` on every render
      * and stays live.
+     *
+     * `el` is the row's own DOM node, and it is here so that something OTHER than a pointer gesture
+     * can re-read the anchor — see the scroll/resize effect below. It is the node rather than a ref
+     * because there is one card and N rows: a ref would have to be re-pointed at whichever row the
+     * pointer is on, which is this state's job already.
      */
-    const [hovered, setHovered] = useState<{ id: string; anchor: DOMRect } | null>(null);
+    const [hovered, setHovered] =
+        useState<{ id: string; anchor: DOMRect; el: HTMLElement } | null>(null);
 
     const shown = useMemo(() => {
         const needle = filter.trim().toLowerCase();
@@ -83,6 +89,49 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
     const hoveredRow = hovered === null
         ? null
         : shown.find((r) => r.terminalId === hovered.id) ?? null;
+
+    // Pulled out as its own value so the effect below can depend on the ELEMENT and not on
+    // `hovered`, which that effect writes to.
+    const hoveredEl = hovered?.el ?? null;
+
+    /**
+     * Keep the card on its row when the row moves and the POINTER does not.
+     *
+     * `.au-tpick` is a 260px scroller and the inspector column it sits in scrolls too, so a wheel
+     * can slide this row up or down under a pointer that never moves — and a window resize can
+     * reflow the whole column. Neither fires a pointer event: `mouseover` fires only when the
+     * element under the cursor CHANGES, and the row under a stationary pointer very often does not.
+     * With the anchor captured once at `mouseenter`, the card stayed at the old client-y and
+     * drifted off the row it was naming, on a card whose only job is saying WHICH row this is.
+     *
+     * **`capture: true`, and on `window`.** A `scroll` event does not bubble, so a bubble-phase
+     * listener on `window` hears the document scrolling and nothing else — not `.au-tpick`, not the
+     * inspector column, which are the two that actually move this row. The capture phase sees every
+     * one of them without this having to know which ancestor is the scroller, which is the part
+     * that made a listener look expensive enough to skip.
+     *
+     * Keyed on the ELEMENT rather than on `hovered`, so it is attached once per hovered row instead
+     * of being torn down and rebuilt by every anchor update it causes. `cur.el !== el` is what stops
+     * a late event from a row the pointer has already left writing over the current card's anchor,
+     * and `sameAnchor` keeps a scroll that did not move THIS row from re-rendering anything.
+     */
+    useEffect(() => {
+        if (hoveredEl === null) return undefined;
+        const reread = () => {
+            const box = hoveredEl.getBoundingClientRect();
+            setHovered((cur) => (
+                cur === null || cur.el !== hoveredEl || sameAnchor(cur.anchor, box)
+                    ? cur
+                    : { ...cur, anchor: box }
+            ));
+        };
+        window.addEventListener('scroll', reread, true);
+        window.addEventListener('resize', reread);
+        return () => {
+            window.removeEventListener('scroll', reread, true);
+            window.removeEventListener('resize', reread);
+        };
+    }, [hoveredEl]);
 
     /**
      * Bound the hover card's snapshot cache to the roster, on the way OUT of a hover.
@@ -173,21 +222,21 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                             onMouseEnter={(e) => setHovered({
                                 id: row.terminalId,
                                 anchor: e.currentTarget.getBoundingClientRect(),
+                                el: e.currentTarget,
                             })}
-                            // **The row moves under a pointer that does not.** `.au-tpick` is a
-                            // 260px scroller and the inspector column scrolls too, so a wheel can
-                            // slide this row up or down while the pointer rests on it — and no new
-                            // `mouseover` fires for an element that never stopped being under the
-                            // cursor. Captured once at `mouseenter`, the card stayed at the old
-                            // client-y and drifted off the row it is naming, on a card whose only
-                            // job is saying WHICH row this is.
+                            // **The row moves under a pointer that does not.** Re-read on the
+                            // gesture the pointer is already making, so a move within a row that
+                            // has shifted for a reason nothing fires an event for — the roster poll
+                            // replacing the rows above this one, say — still finds the card.
+                            // Unchanged rects return the same state object, so React bails out and
+                            // a move across a row that has not shifted costs no render at all.
                             //
-                            // Re-read here rather than from a `scroll`/`resize` listener: that
-                            // would mean a listener to attach, tear down and keep pointed at
-                            // whichever ancestor actually scrolled, where this is one rect read on
-                            // a gesture the pointer is already making. Unchanged rects return the
-                            // same state object, so React bails out and a move across a row that
-                            // has not shifted costs no render at all.
+                            // This is NOT the whole of that fix, and the comment that used to sit
+                            // here said it was: it argued a `scroll`/`resize` listener was needless
+                            // because this rect read covers the case. It cannot. A wheel over a
+                            // stationary pointer fires no `mousemove`, and neither does a window
+                            // resize, so both of the two ways this row moves on its own were the
+                            // ones left uncovered. The effect above handles those.
                             onMouseMove={(e) => {
                                 const box = e.currentTarget.getBoundingClientRect();
                                 setHovered((cur) => (
@@ -195,7 +244,7 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                                     || cur.id !== row.terminalId
                                     || sameAnchor(cur.anchor, box)
                                         ? cur
-                                        : { id: cur.id, anchor: box }
+                                        : { ...cur, anchor: box }
                                 ));
                             }}
                             // Cleared only if the card still belongs to THIS row. A leave that

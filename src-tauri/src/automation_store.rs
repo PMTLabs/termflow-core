@@ -890,6 +890,90 @@ impl AutomationStore {
         Ok(previous)
     }
 
+    /// Append one terminal to a rule's pick set — **only if that rule is still there.**
+    ///
+    /// The terminal context menu's *Add to an existing automation* row cannot be built out of
+    /// `save_automation`, and the attempt is what this method exists to replace. That row re-resolves
+    /// the rule id against the renderer's cached rule list at click time and sends the whole rule
+    /// object back through the save path — and `save_rule_as_of` is an UNCONDITIONAL upsert whose
+    /// `None` arm INSERTs. So a rule another window had already deleted came back:
+    ///
+    ///  1. window B deletes rule R, and its transaction commits;
+    ///  2. window A receives `automation:changed` and starts a refresh it does not await;
+    ///  3. the user clicks the still-open *Add to R* row;
+    ///  4. window A finds R in its stale cache and saves it;
+    ///  5. no row matches the id, so the upsert INSERTs — R is back, as the cache remembered it.
+    ///
+    /// Re-reading that cache immediately before the click narrows the window; it cannot close it,
+    /// because the delete may commit between the re-read and the write. Only a store-side conditional
+    /// closes it, and the condition has to be evaluated inside the transaction that writes — which is
+    /// exactly what `read_rule_on` exists for.
+    ///
+    /// `Ok(false)` means the rule is gone and **nothing was written**: no rule row, and no target row
+    /// either. It is not an `Err`, because a rule deleted in another window while this menu was open
+    /// is an ordinary race rather than a failure; the caller re-fetches and says so.
+    ///
+    /// `Ok(true)` also covers an id the rule ALREADY watches. That is a success from the caller's side
+    /// — R watches this terminal, which is what the click asked for — and reporting it as `Ok(false)`
+    /// would tell the user their automation had been deleted. That branch writes nothing at all,
+    /// deliberately: `reload` drops a rule's arm keys whenever `updated_at` MOVES (Q11), so
+    /// re-stamping the row for a click that changed nothing would silently re-arm a fired rule.
+    ///
+    /// **`sort_order` and `created_at` need no rescue here.** `save_rule_as_of` rescues them because
+    /// its rule arrives from an editor that cannot know either; this one came back out of the very row
+    /// it is about to overwrite, so it already carries that row's values. `updated_at` is the one
+    /// column this write authors.
+    ///
+    /// **The write goes through `write_rule`, never hand-rolled target SQL.** That function owns the
+    /// `automation_targets` rows, and it is what turns an existing `matched` row for this terminal into
+    /// a `pinned` one **keeping its label and folder snapshot** — the snapshot the picker's "not open"
+    /// row is drawn from.
+    pub fn add_target_to_rule(
+        &self,
+        rule_id: &str,
+        terminal_id: &str,
+        at: i64,
+    ) -> Result<bool, AutomationStoreError> {
+        let mut guard = self.conn.lock().unwrap();
+        let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
+        let tx = conn.transaction()?;
+
+        // The existence check and the write, on ONE transaction. Every early return below drops `tx`
+        // uncommitted, which rolls back — so "the rule is gone" and "the gate refused" both leave the
+        // file exactly as they found it.
+        let Some(mut rule) = Self::read_rule_on(&tx, rule_id)? else {
+            return Ok(false);
+        };
+        if rule.target_ids.iter().any(|id| id.as_str() == terminal_id) {
+            return Ok(true);
+        }
+
+        rule.target_ids.push(terminal_id.to_string());
+        rule.updated_at = at;
+
+        // The same gate the save path applies, on the row this is about to WRITE rather than the row
+        // it read. Judging the pre-append value would refuse the one edit that repairs a pinned rule
+        // stored enabled with an empty pick set: `targets.empty` is the only problem an append can
+        // change, and it can only CLEAR it.
+        //
+        // Which makes this gate very nearly unreachable from here — and it is still not skipped. What
+        // it catches is a row that was ALREADY enabled and already invalid for some other reason (an
+        // empty message, a sub-minimum timer interval), written by a build older than §7.8's save gate
+        // or arriving through a migration. Refusing and naming the problem is the honest answer there;
+        // silently re-stamping a rule the editor itself could not save is not. The PATTERN is not one
+        // of those reasons: this is `refuse_if_it_would_run_wrong`, which leaves the pattern to
+        // `reload` for §2.7's reason.
+        if rule.enabled {
+            Self::refuse_if_it_would_run_wrong(&rule)?;
+        }
+
+        Self::write_rule(&tx, &rule)?;
+        tx.commit()?;
+        // No `verbose_cache` write-through: `verbose_until` is written back exactly as it was read, so
+        // the cached value is still the row's value. Only a path that CHANGES it owes the cache a write.
+        Ok(true)
+    }
+
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
@@ -2882,6 +2966,129 @@ mod tests {
         assert!(!store.clear_completed("au-ghost").unwrap());
     }
 
+    // =============================================================================================
+    // The atomic target add — the context menu's *Add to an existing automation* row
+    // =============================================================================================
+
+    /// **A deleted rule is not resurrected.** The whole reason `add_target_to_rule` exists.
+    ///
+    /// The path it replaces re-resolved the rule id against the renderer's cached list and sent the
+    /// whole rule back through `save_rule_as_of`, whose `None` arm INSERTs: window B's delete commits,
+    /// window A's cache still holds R, the click saves it, and R is back. A re-read of that cache just
+    /// before the click only narrows the window — the delete can commit between the re-read and the
+    /// write — so the oracle here is the one no client-side check can satisfy: with the row already
+    /// gone, the call writes NOTHING.
+    #[test]
+    fn adding_a_target_to_a_deleted_rule_writes_nothing_and_says_so() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-1")).unwrap();
+        // Another window's delete, already committed.
+        assert!(store.delete_rule("au-1").unwrap());
+
+        let added = store.add_target_to_rule("au-1", "tm-9", 9_000).unwrap();
+
+        assert!(!added, "a rule that is gone cannot take a target");
+        // `Ok(false)` on its own is satisfied by an implementation that writes the row and then
+        // reports failure, which is exactly the resurrection this exists to stop — so the table is
+        // asserted too, through both readers, because they read it through different predicates.
+        assert!(store.get_rule("au-1").unwrap().is_none(), "the deleted rule came back");
+        assert!(store.list_rules().unwrap().is_empty(), "…under the list's own reading of the table");
+        assert_eq!(
+            store.targets_for("au-1").unwrap(),
+            vec![],
+            "and no orphan target row keyed to a rule that does not exist"
+        );
+    }
+
+    /// The append itself: the id lands, and **every other column is left where it was.**
+    ///
+    /// A whole-struct equality rather than a handful of named fields, because the failure worth
+    /// catching is the one nobody thinks to assert: `sort_order` reset to 0. That is the column
+    /// `save_rule_as_of` has to rescue from a renderer, and `write_rule`'s `ON CONFLICT DO UPDATE`
+    /// overwrites it happily — `rule.sort_order = 0` before the write kills this test.
+    ///
+    /// `created_at` rides along in the same equality and **cannot fail today**: that same SET list
+    /// names every column except `created_at`, so the update path leaves a rule's birthday alone
+    /// whatever this method puts in the struct, and `rule.created_at = at` is a mutant this test
+    /// survives. It is still asserted rather than assumed, because what makes it safe is a SQL
+    /// statement two functions away: the day that SET list gains the column, this is what notices.
+    ///
+    /// `AutomationRule` is `PartialEq`, so the cheapest oracle available is also the widest.
+    #[test]
+    fn appending_a_target_adds_the_id_and_touches_nothing_else() {
+        let store = AutomationStore::new_in_memory();
+        let mut seed = rule("au-1");
+        seed.target_ids = vec!["tm-1".into()];
+        // Deliberately not the defaults: a write that re-derived either would otherwise land on the
+        // value it was supposed to preserve and pass.
+        seed.sort_order = 7;
+        seed.created_at = 4_000;
+        store.save_rule(&seed).unwrap();
+        let before = store.get_rule("au-1").unwrap().unwrap();
+
+        assert!(store.add_target_to_rule("au-1", "tm-2", 12_345).unwrap());
+
+        let mut expected = before.clone();
+        expected.target_ids.push("tm-2".into());
+        // The one column this write authors. `reload` drops a rule's arm keys only when `updated_at`
+        // MOVES (Q11), and the set of terminals this rule watches just changed — so it must move.
+        expected.updated_at = 12_345;
+        assert_eq!(store.get_rule("au-1").unwrap().unwrap(), expected);
+
+        // And the new row is PINNED. `list_rules` reads only pinned rows, so a `matched` one would be
+        // dropped from `target_ids` on the next load and the terminal would silently stop being
+        // watched — with the rule still showing it in the window that added it.
+        assert_eq!(
+            store
+                .targets_for("au-1")
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.0, r.1))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tm-1".to_string(), "pinned".to_string()),
+                ("tm-2".to_string(), "pinned".to_string())
+            ]
+        );
+    }
+
+    /// An id the rule already watches is a no-op — and specifically one that does not move
+    /// `updated_at`.
+    ///
+    /// Both halves matter, and only the first is obvious. `INSERT OR IGNORE` already stops the target
+    /// row being duplicated; nothing stops the RULE being re-stamped. `reload` drops a rule's arm keys
+    /// whenever `updated_at` moves (Q11), so a version of this method that appended and wrote
+    /// unconditionally would silently re-arm a fired rule every time a user picked a menu row that
+    /// changed nothing.
+    ///
+    /// It still answers `Ok(true)`: the rule is there and it watches that terminal, which is what the
+    /// click asked for. `Ok(false)` is reserved for *the rule is gone*, and the caller renders it as
+    /// exactly that.
+    #[test]
+    fn adding_a_target_the_rule_already_has_changes_nothing() {
+        let store = AutomationStore::new_in_memory();
+        let mut seed = rule("au-1");
+        seed.target_ids = vec!["tm-1".into(), "tm-2".into()];
+        store.save_rule(&seed).unwrap();
+        let before = store.get_rule("au-1").unwrap().unwrap();
+
+        assert!(
+            store.add_target_to_rule("au-1", "tm-2", 99_000).unwrap(),
+            "the rule is still there, and it watches that terminal"
+        );
+
+        assert_eq!(
+            store.get_rule("au-1").unwrap().unwrap(),
+            before,
+            "nothing about the rule moved, `updated_at` least of all"
+        );
+        assert_eq!(
+            store.targets_for("au-1").unwrap().iter().filter(|r| r.0 == "tm-2").count(),
+            1,
+            "and the terminal was not added a second time"
+        );
+    }
+
     /// **The row a gate validates must be the row that gate writes.**
     ///
     /// `save_rule_as_of` names this race in its own doc and folds its read into its transaction - and
@@ -2898,6 +3105,9 @@ mod tests {
     /// apart, and a threaded one would pin one schedule rather than the property. What is pinned here
     /// is the structural claim the fix actually makes. Both halves are needed: deleting the read
     /// altogether would satisfy the negative on its own.
+    ///
+    /// `add_target_to_rule` joins the list in the same commit that introduces it rather than waiting
+    /// to be swept in later, which is the entire lesson of the two that had to be.
     #[test]
     fn every_read_that_decides_a_write_happens_on_that_write_s_own_transaction() {
         let module = crate::automation_engine::test_host::strip_comments(include_str!(
@@ -2911,7 +3121,10 @@ mod tests {
             .expect("the test module must follow the code")];
 
         let mut checked = 0;
-        for name in ["set_enabled_checked", "duplicate_automation"] {
+        // Every method that reads a rule in order to decide what to write about it. `add_target_to_rule`
+        // is the newest member and the one whose whole point IS the conditional: its `Ok(false)` arm is
+        // only a promise that nothing was written while the read and the write share a transaction.
+        for name in ["set_enabled_checked", "duplicate_automation", "add_target_to_rule"] {
             let start = code
                 .find(&format!("fn {}(", name))
                 .unwrap_or_else(|| panic!("`{}` moved; this test was checking nothing", name));
@@ -2931,7 +3144,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 2, "both call sites of the class must be checked");
+        assert_eq!(checked, 3, "every call site of the class must be checked");
     }
 
 }

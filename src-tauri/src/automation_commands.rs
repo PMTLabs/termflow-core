@@ -321,6 +321,65 @@ pub async fn save_automation(
     Ok(AutomationSaveResult { id, previous_updated_at: previous })
 }
 
+/// *Add this terminal to an existing automation* — the terminal context menu's row.
+///
+/// **The store decides whether the rule is still there, not the renderer.** The menu re-resolves the
+/// rule id against its cached rule list at click time, and that cache can be one commit out of date
+/// however carefully it is refreshed: `automation:changed` starts an async refetch, and the delete it
+/// announces may commit between that refetch's read and this write. Sending the whole rule object back
+/// through `save_automation` — which is what this row first did — therefore re-INSERTED rules another
+/// window had deleted, because `save_rule_as_of` is an unconditional upsert. `add_target_to_rule` makes
+/// the existence check and the append one transaction, and its `Ok(false)` is *the rule is gone, and
+/// nothing was written*.
+///
+/// **The reload and the announce are unconditional, including on that branch.** `automation:changed`
+/// is a refetch instruction rather than a claim that something changed, and the branch where nothing
+/// was written is exactly the branch where the calling window is holding a rule that no longer exists.
+#[tauri::command]
+pub async fn add_automation_target(
+    state: State<'_, AppState>,
+    rule_id: String,
+    terminal_id: String,
+    origin: String,
+) -> Result<bool, String> {
+    let owned = state.inner().clone();
+    let id = rule_id.clone();
+    let origin_for_log = origin.clone();
+    let at = now_ms();
+    let (added, reloaded) = tokio::task::spawn_blocking(move || {
+        let added = owned
+            .automation_store
+            .add_target_to_rule(&id, &terminal_id, at)
+            .map_err(to_string_err)?;
+        // Only while the rule is still there. `delete_rule` has already swept that rule's log rows, so
+        // a row written now would be one nothing will ever collect, drawn in the log view under a rule
+        // nobody can open.
+        //
+        // The wording is a STATE rather than an event, because the store's `bool` deliberately cannot
+        // tell an append from an id the rule already held: both leave the rule watching that terminal,
+        // and both are what the user asked for. `Saved` is the kind because what changed is the
+        // DEFINITION — the same reason the editor's own save writes one (§3.5).
+        if added {
+            note(
+                &owned,
+                &id,
+                LogKind::Saved,
+                &format!(
+                    "{} is now watched by this rule, from window {}",
+                    terminal_id, origin_for_log
+                ),
+            );
+        }
+        let reloaded = reload_after_commit(&owned, at);
+        Ok::<_, String>((added, reloaded))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    announce(&state, vec![rule_id], vec![], origin);
+    reloaded?;
+    Ok(added)
+}
+
 #[tauri::command]
 pub async fn delete_automation(
     state: State<'_, AppState>,
@@ -550,6 +609,10 @@ mod source_tests {
             "duplicate_automation(",
             "set_enabled_checked(",
             "clear_completed(",
+            // The context menu's atomic target add. A rule's pick set IS part of its definition — it
+            // decides which terminals the engine watches — so a window that adds one and never reloads
+            // leaves the engine watching the old set until something else happens to reload it.
+            "add_target_to_rule(",
         ];
         let mut checked = 0;
         for (name, body) in command_bodies() {
@@ -586,7 +649,7 @@ mod source_tests {
                 name
             );
         }
-        assert_eq!(checked, 5, "the mutating commands moved; this test was checking nothing");
+        assert_eq!(checked, 6, "the mutating commands moved; this test was checking nothing");
 
         // ONE call site, so the announce cannot be skipped by not using the helper. Counted over the
         // PRODUCTION half only — this assertion's own needle lives in the test half, and a source
@@ -655,7 +718,7 @@ mod source_tests {
     fn every_command_in_this_module_is_registered_in_lib() {
         let lib = crate::automation_engine::test_host::strip_comments(include_str!("lib.rs"));
         let names: Vec<String> = command_bodies().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names.len(), 11, "the command list changed: {:?}", names);
+        assert_eq!(names.len(), 12, "the command list changed: {:?}", names);
         for name in &names {
             assert!(
                 lib.contains(&format!("automation_commands::{},", name)),

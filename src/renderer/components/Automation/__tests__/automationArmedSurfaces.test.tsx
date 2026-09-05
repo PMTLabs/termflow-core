@@ -93,11 +93,22 @@ function flyoutRows(item: ContextMenuItem): ContextMenuFlyoutRow[] {
     return typeof rows === 'function' ? rows('') : rows;
 }
 
-/** Installs a `saveAutomation` mock on `window.electronAPI`, for "Add to an existing automation". */
-function installSaveApi(): jest.Mock {
-    const saveAutomation = jest.fn(() => Promise.resolve({ id: 'r1', previousUpdatedAt: null }));
-    (window as unknown as { electronAPI: unknown }).electronAPI = { saveAutomation };
-    return saveAutomation;
+/**
+ * Installs the API "Add to an existing automation" actually calls.
+ *
+ * `saveAutomation` is installed alongside it and is never expected to fire: it is the path this row
+ * used to take, and asserting its ABSENCE is what pins that the whole-rule upsert — with the
+ * clobber and the resurrection that come with it — is genuinely out of this write path rather than
+ * merely unused by the happy case.
+ */
+function installAddApi(added: boolean = true): { add: jest.Mock; save: jest.Mock } {
+    const add = jest.fn(() => Promise.resolve(added));
+    const save = jest.fn(() => Promise.resolve({ id: 'r1', previousUpdatedAt: null }));
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+        addAutomationTarget: add,
+        saveAutomation: save,
+    };
+    return { add, save };
 }
 
 describe('the shared indicator and menu section', () => {
@@ -213,10 +224,21 @@ describe('the shared indicator and menu section', () => {
         expect(unarmedActionLabels.some((t) => t?.includes('Add to an existing automation'))).toBe(true);
     });
 
+    /**
+     * **"…first" is an ORDER, and the two counters this used to keep could not see one.**
+     *
+     * `dismissed === 1` plus `getOpenAutomationRuleId() === 'r2'` is satisfied by either sequence,
+     * so the title's claim was the only thing asserting it. The order is load-bearing: the editor
+     * is a modal, and opening it under a menu that is still mounted leaves the menu's own outside
+     * -click and Escape handlers live above it. What makes the order observable is that `onDismiss`
+     * runs synchronously inside the click, so it can look at whether the editor has opened YET.
+     */
     it('opens the editor for the rule that was clicked, and closes the menu first', async () => {
         seedTwoRules();
-        let dismissed = 0;
-        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => { dismissed += 1; }} />);
+        const order: string[] = [];
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {
+            order.push(getOpenAutomationRuleId() === null ? 'dismiss' : 'dismiss-after-open');
+        }} />);
 
         // Collapsed until asked — the section is one row in a menu that already has a dozen.
         expect(container.querySelectorAll('.au-menu-rule')).toHaveLength(0);
@@ -234,7 +256,8 @@ describe('the shared indicator and menu section', () => {
         // The SECOND row's id, not the first and not the rule the section happened to render last:
         // a handler built over the loop variable by reference gets this wrong and looks right.
         expect(getOpenAutomationRuleId()).toBe('r2');
-        expect(dismissed).toBe(1);
+        // Exactly one dismiss, and it happened while no editor was open.
+        expect(order).toEqual(['dismiss']);
     });
 
     it('offers the SAME rules, in the same order, to the terminal-area menu', async () => {
@@ -379,7 +402,7 @@ describe('the shared indicator and menu section', () => {
             [pinned, { ...rule('r2', 'Criterion rule'), targetMode: 'rule', targetIds: [] }],
             { rules: {} },
         );
-        installSaveApi();
+        const { add, save } = installAddApi();
 
         const items = automationMenuItems('tm-9');
         const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
@@ -390,32 +413,36 @@ describe('the shared indicator and menu section', () => {
         await Promise.resolve();
         await Promise.resolve();
 
-        const api = (window as unknown as { electronAPI: { saveAutomation: jest.Mock } }).electronAPI;
-        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
-        const [savedRule] = api.saveAutomation.mock.calls[0];
-        // The WHOLE payload, against the fixture with only `targetIds` moved. "Every other field
-        // rides through untouched, via the spread" is the write's own claim, and three sampled
-        // fields cannot hold it: a mutant that dropped `graph`, flipped `enabled`, or rebuilt the
-        // object from a handful of keys satisfies `targetIds` + `name` + `targetMode` and then
-        // upserts a rule that no longer does anything.
-        expect(savedRule).toEqual({ ...pinned, targetIds: ['tm-9'] });
+        // The WHOLE argument list. Only ids and an origin go on the wire — no copy of the rule —
+        // which is the structural half of the fix: a payload that carries no rule fields has
+        // nothing to overwrite a concurrent edit WITH, so the clobber this row used to be capable
+        // of is gone by construction rather than by a narrowed race window.
+        expect(add.mock.calls).toEqual([[pinned.id, 'tm-9', expect.any(String)]]);
+        expect(save).not.toHaveBeenCalled();
     });
 
     /**
-     * **The row's rule is re-resolved at CLICK time, so a deleted rule cannot be resurrected.**
+     * **The STORE decides whether the rule is still there, and this row reports what it answers.**
      *
      * `save_automation` is an unconditional upsert with no version token — deliberately, per
      * `automation_commands.rs` — so writing the copy a menu captured when it opened INSERTS a rule
-     * another window has since deleted. Two halves, asserted separately because they fail apart: no
-     * write at all, and a notice saying why, since a menu row that silently does nothing is the
-     * failure this whole feature's docs keep refusing.
+     * another window has since deleted. The first fix for that re-resolved the rule id against the
+     * renderer's own cached list at click time, and claimed in a comment that this closed
+     * resurrection outright. It did not: `automation:changed` starts a refresh nobody awaits, and
+     * even a perfectly fresh cache leaves the delete free to commit between the read and the write.
+     *
+     * So the check moved into the transaction that writes (`AutomationStore::add_target_to_rule`,
+     * whose own tests pin that a gone rule is not re-INSERTED), and what is left to assert HERE is
+     * the renderer's half: a `false` is surfaced rather than swallowed. The cache is deliberately
+     * left holding the deleted rule, because a renderer that only behaves when its cache is fresh
+     * is the exact thing that was wrong.
      */
-    it('writes nothing, and says so, when the rule was deleted while the menu was open', async () => {
+    it('says so when the store reports the rule was already deleted', async () => {
         __seedAutomationArmedForTest(
             [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
             { rules: {} },
         );
-        const saveAutomation = installSaveApi();
+        const { add, save } = installAddApi(false);
         // Spying through the NAMESPACE only works while the transform emits `ns.fn(...)` at the
         // menu's call site — see the note at this file's imports for how that goes green rather
         // than red if it ever stops.
@@ -423,38 +450,43 @@ describe('the shared indicator and menu section', () => {
             .spyOn(automationEditorHostModule, 'toastAutomationNotice')
             .mockResolvedValue(undefined);
 
-        // Assembled while the rule existed…
         const items = automationMenuItems('tm-9');
         const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
         expect(addRow.children!.map((c) => c.label)).toEqual(['Pinned rule']);
-        // …deleted in another window before the row was clicked.
-        __seedAutomationArmedForTest([], { rules: {} });
 
         addRow.children![0].onSelect!();
         await Promise.resolve();
         await Promise.resolve();
 
-        expect(saveAutomation).not.toHaveBeenCalled();
+        // The write was still ATTEMPTED — a renderer that pre-filtered on its own stale cache would
+        // skip the call and be right only by luck, and wrong the moment its cache is the stale one.
+        expect(add).toHaveBeenCalledTimes(1);
+        expect(save).not.toHaveBeenCalled();
         expect(toast).toHaveBeenCalledTimes(1);
         expect(toast.mock.calls[0][0]).toMatch(/no longer exists/i);
+        // Named, so the notice is about the thing the user just clicked.
+        expect(toast.mock.calls[0][0]).toContain('Pinned rule');
 
         toast.mockRestore();
     });
 
     /**
-     * …and the same re-resolution is what keeps the write from CLOBBERING an edit made elsewhere.
+     * …and an edit made elsewhere cannot be CLOBBERED, because nothing stale is sent.
      *
-     * The upsert takes whatever object it is handed, so a stale copy silently reverts every field
-     * another window changed while the menu sat open. Asserted as exact equality against the LIVE
-     * rule, because that is the only form that catches "some fields are fresh and some are stale" —
-     * a spread of the captured rule with a re-resolved `name` patched in would pass a name check.
+     * This used to assert that the rule was re-resolved from the cache and saved whole, so that a
+     * rename in another window rode through instead of being reverted. That was the best a
+     * whole-rule upsert allowed, and it was still only a narrower window: whatever the menu resolved
+     * could go stale before the write landed. The command carries ids, so the payload does not
+     * describe the rule at all and there is nothing in it that CAN be stale — which is a stronger
+     * property than "resolved late", and asserted as such: the arguments are identical whether the
+     * rule was edited or not.
      */
-    it('saves the rule as it is NOW, not as the menu captured it', async () => {
+    it('sends nothing that could revert an edit made in another window', async () => {
         __seedAutomationArmedForTest(
             [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
             { rules: {} },
         );
-        const saveAutomation = installSaveApi();
+        const { add, save } = installAddApi();
 
         const items = automationMenuItems('tm-9');
         const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
@@ -477,8 +509,13 @@ describe('the shared indicator and menu section', () => {
         await Promise.resolve();
         await Promise.resolve();
 
-        expect(saveAutomation).toHaveBeenCalledTimes(1);
-        expect(saveAutomation.mock.calls[0][0]).toEqual({ ...edited, targetIds: ['tm-9'] });
+        expect(add.mock.calls).toEqual([['r1', 'tm-9', expect.any(String)]]);
+        // Not one field of the rule crossed the wire, under any spelling — so `enabled`, `graph`
+        // and `name` are exactly as the other window left them.
+        const wire = JSON.stringify(add.mock.calls[0]);
+        expect(wire).not.toContain('Pinned rule');
+        expect(wire).not.toContain('edited elsewhere');
+        expect(save).not.toHaveBeenCalled();
     });
 
     /**
@@ -521,20 +558,22 @@ describe('the shared indicator and menu section', () => {
     /**
      * **A refused write must be heard.** Both call sites invoke `addTerminalToRule` as
      * `void addTerminalToRule(…)` from a row that dismisses its own menu, so before this guard a
-     * rejected `saveAutomation` had nowhere at all to land: the user clicked "Add to <rule>", the
-     * menu closed, and the terminal was simply never watched. `save_automation` genuinely refuses —
-     * the store's own docs call a `SQLITE_BUSY` against the 30 s scrollback flush routine.
+     * rejected write had nowhere at all to land: the user clicked "Add to <rule>", the menu closed,
+     * and the terminal was simply never watched. The command genuinely refuses — the store's own
+     * docs call a `SQLITE_BUSY` against the 30 s scrollback flush routine, and
+     * `add_target_to_rule` re-applies the save gate to an already-enabled rule.
      *
-     * Both halves are asserted, because they fail apart: a toast with a stale re-index still tells
-     * the pane badge a write happened that did not.
+     * Distinct from the `false` case above, and they fail apart: `false` is an ordinary race with
+     * a settled outcome, a rejection is a failure with none. Both halves are asserted, because a
+     * toast with a stale re-index still tells the pane badge a write happened that did not.
      */
-    it('says so when the save is refused, and does not report the write as done', async () => {
+    it('says so when the write is refused, and does not report it as done', async () => {
         __seedAutomationArmedForTest(
             [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
             { rules: {} },
         );
-        const saveAutomation = jest.fn(() => Promise.reject(new Error('database is locked')));
-        (window as unknown as { electronAPI: unknown }).electronAPI = { saveAutomation };
+        const addAutomationTarget = jest.fn(() => Promise.reject(new Error('database is locked')));
+        (window as unknown as { electronAPI: unknown }).electronAPI = { addAutomationTarget };
         const toast = jest
             .spyOn(automationEditorHostModule, 'toastAutomationNotice')
             .mockResolvedValue(undefined);
@@ -561,12 +600,12 @@ describe('the shared indicator and menu section', () => {
     });
 
     /** ...and the success path stays silent, so the toast means something when it appears. */
-    it('says nothing when the save succeeds, and re-indexes once', async () => {
+    it('says nothing when the write succeeds, and re-indexes once', async () => {
         __seedAutomationArmedForTest(
             [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
             { rules: {} },
         );
-        installSaveApi();
+        installAddApi();
         const toast = jest
             .spyOn(automationEditorHostModule, 'toastAutomationNotice')
             .mockResolvedValue(undefined);

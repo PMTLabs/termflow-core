@@ -18,11 +18,17 @@
  * `getBoundingClientRect()` is the only placement that escapes them, and `hoverCardPosition` below
  * is what keeps it on screen once it has.
  *
- * **2. `/snapshot`, never `/output`.** `Canvas/snapshotCache.ts`'s own header says why: `/output`
- * replays a lossy ring buffer through a FRESH parser, so it is not what the user is looking at,
- * which is the only question this card is answering. Its `isUsableSnapshot` is what turns the
- * endpoint's silent failure — HTTP **200** with an empty blob when handed the wrong id space — into
- * a failure instead of a cached blank frame.
+ * **2. `/screen`, and neither of the other two reads.** `/output` replays a lossy ring of raw PTY
+ * chunks through a FRESH parser, so it is not what the user is looking at — which is the only
+ * question this card is answering. `/snapshot` *is* the live screen, but it serves
+ * `contents_formatted()`, a REPLAY STREAM meant to be written into an xterm: runs of blanks are
+ * encoded as cursor motion rather than as spaces, so stripping the escapes back out of it in the
+ * client COLLAPSES the column layout, and a two-column status bar butts its columns together. This
+ * card spent its first draft doing exactly that — with the counter-example already in the tree, as
+ * a passing test, one file away. `/api/terminals/:id/screen` renders from the grid the parser has
+ * ALREADY applied those cursor ops to (`AppState::screen_text`), so the alignment survives and
+ * there is nothing left to strip. See `api_server.rs`'s
+ * `the_screen_route_body_keeps_columns_the_snapshot_blob_encodes_as_cursor_ops`.
  *
  * **3. It is a hover affordance and nothing more.** `pointer-events: none` on the card, no
  * `tabIndex`, no `focus()`, no listeners of its own: the pointer can travel straight through it, so
@@ -34,7 +40,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { WatchableTerminal } from '../../types/electron';
-import { SnapshotCache, isUsableSnapshot, stripAnsi } from '../Canvas/snapshotCache';
+import { SnapshotCache } from '../Canvas/snapshotCache';
 
 /** The card's own box. Both are needed as NUMBERS, not just as CSS — see `hoverCardPosition`. */
 export const AU_HOVER_W = 330;
@@ -81,6 +87,13 @@ export const AU_PREVIEW_POLL_MS = 700;
 /**
  * A cache of this card's OWN, deliberately not the `snapshotCache` singleton.
  *
+ * `SnapshotCache` is reused here for its BOOKKEEPING — the TTL, the failure backoff, the eviction —
+ * and not for its payload: what this instance stores under `SnapshotEntry.ansi` is the plain grid
+ * text `/screen` returns, with no escape sequences in it at all. That field is named for Canvas
+ * Mode, the other consumer, which does hold a replay blob. Nothing here reads it as ANSI, so the
+ * mismatch is a name and not a bug — said out loud because a reader is otherwise entitled to assume
+ * the payload matches the field, and would reach for `stripAnsi` on the way past.
+ *
  * The class is exported precisely so a second consumer can have one, and sharing the singleton
  * would have coupled two unrelated surfaces: `CanvasMode` calls `snapshotCache.evictAllBut(…)` with
  * the ids currently on ITS screen, which would evict this card's entries every frame Canvas Mode is
@@ -100,15 +113,15 @@ const previewCache = new SnapshotCache();
  * Drop every cached preview whose terminal is not in `roster`.
  *
  * A cache with no eviction is a leak with a nice name. Every distinct process id the pointer crossed
- * left a full styled ANSI screen here — plus a `failedAt` stamp — for the life of the window, and
+ * left a full screen of text here — plus a `failedAt` stamp — for the life of the window, and
  * process ids CHURN: a terminal that is closed and reopened is a new one, so the key space was
  * bounded by *terminals ever hovered*, never by *terminals that exist*. Canvas Mode's own cache has
  * had `evictAllBut` from the start for exactly this reason; this one simply never called it.
  *
  * Takes ROWS rather than a list of ids on purpose. The cache is keyed by process id and the picker
  * is otherwise full of terminal ids, and handed the wrong id space `evictAllBut` would keep nothing
- * and quietly turn the cache off — the same silent-nothing failure `isUsableSnapshot` exists to
- * catch one layer down.
+ * and quietly turn the cache off — the same silent-nothing failure `snapshotCache.ts`'s own
+ * `isUsableSnapshot` guards its other consumer against.
  *
  * `AuTerminalPicker` owns the calls: it is the only thing that knows both when a hover has ended
  * and what the roster currently holds.
@@ -157,11 +170,16 @@ export function hoverCardPosition(
  * The last few lines of a screen, as text.
  *
  * A vt100 screen is a fixed grid, so its tail is almost always blank padding — taking the last six
- * ROWS of an 80x24 snapshot shows six empty lines under a prompt that is still on screen. The
+ * ROWS of an 80x24 screen shows six empty lines under a prompt that is still on screen. The
  * trailing blanks go first, and only then does it take the tail.
+ *
+ * **Takes PLAIN text, and strips nothing.** `/screen` renders from the parser's own grid, so there
+ * are no escapes here to remove; running `stripAnsi` over it anyway — which this did while it was
+ * reading `/snapshot` — would be a no-op that quietly invites the next reader to point the fetch
+ * back at the replay blob, where stripping is not a no-op but a loss of the alignment.
  */
-export function previewLines(ansi: string, limit: number = AU_PREVIEW_LINES): string[] {
-    const lines = stripAnsi(ansi)
+export function previewLines(screen: string, limit: number = AU_PREVIEW_LINES): string[] {
+    const lines = screen
         .split('\n')
         // Trailing whitespace, which also disposes of the CR of a CRLF pair.
         .map((line) => line.replace(/\s+$/, ''));
@@ -185,17 +203,79 @@ const Field: React.FC<{ label: string; value: string | null; mono?: boolean }> =
 );
 
 /**
+ * The screen the card is showing, and the terminal it was read FROM, as one value.
+ *
+ * They are one value because they were two, and the split is what let terminal A's screen paint
+ * under terminal B's name. See `AuTerminalPreview`.
+ */
+export interface Preview {
+    processId: string;
+    /** `null` = nothing has been read for this terminal yet, so the card shows its waiting line. */
+    screen: string | null;
+    failed: boolean;
+}
+
+/**
+ * What to show for `processId` before anything has been fetched for it.
+ *
+ * Seeded from the cache so re-hovering a row inside the TTL paints its screen immediately instead
+ * of flashing the waiting line — which is what running the pointer down a list of rows does.
+ */
+const seedFor = (processId: string): Preview => ({
+    processId,
+    screen: previewCache.get(processId)?.ansi ?? null,
+    failed: false,
+});
+
+/**
+ * What to paint for `processId`, given whatever the component last committed.
+ *
+ * **The whole of the fix for "terminal A's screen under terminal B's name", and pure so that it can
+ * be pinned.** State that belongs to another terminal is not merely out of date, it is wrong, so it
+ * is discarded here rather than corrected later: a `Preview` carrying a different `processId` is
+ * replaced by that terminal's own seed before anything renders.
+ *
+ * Exported because this invariant is not observable from the outside. The mis-attribution it
+ * prevents lasts exactly one commit — the identity block repaints from props in the same render,
+ * and an effect's correction lands on the next tick — and jsdom offers no way to read that frame: a
+ * `MutationObserver` callback is a microtask and is served the already-corrected DOM, and
+ * `flushSync` does not force a continuous-priority update like the one a `mouseover` schedules.
+ * Both were tried, and both passed against the broken component. So the property is asserted here,
+ * where it is a function of its arguments and nothing else.
+ */
+export function previewFor(shown: Preview, processId: string): Preview {
+    return shown.processId === processId ? shown : seedFor(processId);
+}
+
+/**
  * The live half of the card.
  *
  * A separate component so that the identity block is already on screen while this is still
  * fetching: the fields come from the row we were handed and need no round trip, and a card that
  * waits for the network to show a folder it already knows is a card that feels broken.
+ *
+ * **The screen and the terminal it came from are ONE piece of state, and that is the fix for the
+ * bug this component was written to prevent.** It used to hold a bare `ansi` string, with a
+ * `setAnsi(previewCache.get(processId) ?? null)` at the top of the effect below and a comment
+ * saying that reset was what stopped the card showing the previous terminal's screen under the new
+ * terminal's name. It stopped it one frame LATE. `processId` changes during render and effects run
+ * after the commit, so React painted terminal B's identity block over terminal A's screen and only
+ * then corrected it — a visible frame of exactly the mis-attribution the whole card exists to
+ * prevent, on the one gesture (running the pointer down the list) that produces it every time.
+ *
+ * Pairing the text with its own id makes a stale value unusable rather than merely short-lived: the
+ * comparison happens in render, and a screen that does not belong to the terminal being drawn is
+ * never drawn at all. A `key={row.processId}` at the call site would also have worked, by
+ * remounting — but that puts the guarantee in the CALLER, where a second call site can opt out of
+ * it by forgetting the key and get a bug whose symptom appears here.
  */
 const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
-    // Seeded from the cache so re-hovering a row inside the TTL paints its screen immediately
-    // instead of flashing the waiting line — which is what running the pointer down the list does.
-    const [ansi, setAnsi] = useState<string | null>(() => previewCache.get(processId)?.ansi ?? null);
-    const [failed, setFailed] = useState(false);
+    const [shown, setShown] = useState<Preview>(() => seedFor(processId));
+    // Whatever React last committed belongs to the terminal it was fetched FOR. On the render where
+    // `processId` changes, that is the previous one — so this render re-seeds from the cache rather
+    // than trusting an effect that has not run yet.
+    const current = previewFor(shown, processId);
+
     const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
@@ -204,16 +284,22 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
         // that is already gone.
         let cancelled = false;
 
-        // The initialiser above does not re-run when `processId` changes, so without this the card
-        // would keep showing the PREVIOUS terminal's screen under the new terminal's name — the one
-        // mistake this whole card exists to prevent.
-        setAnsi(previewCache.get(processId)?.ansi ?? null);
-        setFailed(false);
-
         const schedule = () => {
             if (cancelled) return;
             timer.current = setTimeout(() => { void tick(); }, AU_PREVIEW_POLL_MS);
         };
+
+        // Every `setShown` in here stamps the id it fetched for — including the failure paths, which
+        // is what stops a failure recorded against the row the pointer just left from rendering as
+        // "could not be read" over the row it has just arrived at.
+        const failWith = (failed: boolean = true): Preview => ({
+            processId,
+            // `markFailed` deliberately does not discard the entry, so this is the last good frame
+            // if there is one. A screen a second old is a better answer than an empty box, and the
+            // empty box is the one that reads as broken.
+            screen: previewCache.get(processId)?.ansi ?? null,
+            failed,
+        });
 
         const tick = async () => {
             if (cancelled) return;
@@ -221,34 +307,34 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
 
             // Optional on the API surface and guarded the way every other caller guards it: the
             // browser bridge and older hosts do not provide it.
-            const getSnapshot = window.electronAPI?.getTerminalSnapshot;
-            if (!getSnapshot) {
+            const readScreen = window.electronAPI?.getTerminalScreenText;
+            if (!readScreen) {
                 previewCache.markFailed(processId, Date.now());
-                setFailed(true);
+                setShown(failWith());
                 return schedule();
             }
 
             try {
-                const snap = await getSnapshot(processId);
+                const body = await readScreen(processId);
                 if (cancelled) return;
-                // HTTP 200 with an empty blob is how `/snapshot` says no. Cached, it would be a
-                // permanently blank preview with nothing anywhere reporting an error.
-                if (!isUsableSnapshot(snap)) {
-                    previewCache.markFailed(processId, Date.now());
-                    setFailed(true);
+                const screen = typeof body?.screen === 'string' ? body.screen : '';
+                if (screen.length === 0) {
+                    // Not a failure, and so not backed off: `/screen` 404s for an id it cannot
+                    // resolve (the bridge turns that into a rejection, caught below), which leaves
+                    // an empty body meaning only "this terminal is registered but its parser has
+                    // nothing yet" — a state the next poll normally clears. Nothing is cached, so
+                    // the next tick retries at the poll interval rather than after the TTL, and any
+                    // frame already cached for this terminal keeps being shown.
                     return schedule();
                 }
                 previewCache.put(processId, {
-                    ansi: snap.snapshot, rows: snap.rows, cols: snap.cols, fetchedAt: Date.now(),
+                    ansi: screen, rows: body.rows, cols: body.cols, fetchedAt: Date.now(),
                 });
-                setAnsi(snap.snapshot);
-                setFailed(false);
+                setShown({ processId, screen, failed: false });
             } catch {
                 if (cancelled) return;
-                // The last good frame is kept: a screen a second old is a better answer than an
-                // empty box, and the empty box is the one that reads as broken.
                 previewCache.markFailed(processId, Date.now());
-                setFailed(true);
+                setShown(failWith());
             }
             schedule();
         };
@@ -261,13 +347,16 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
         };
     }, [processId]);
 
-    const lines = useMemo(() => (ansi === null ? null : previewLines(ansi)), [ansi]);
+    const lines = useMemo(
+        () => (current.screen === null ? null : previewLines(current.screen)),
+        [current.screen],
+    );
 
     if (lines === null) {
         return (
             <div className="au-hovprev">
                 <span className="au-hovwait">
-                    {failed ? 'Its screen could not be read just now.' : 'Reading its screen…'}
+                    {current.failed ? 'Its screen could not be read just now.' : 'Reading its screen…'}
                 </span>
             </div>
         );
@@ -278,6 +367,7 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
         </div>
     );
 };
+
 
 export interface AuTerminalHoverCardProps {
     row: WatchableTerminal;

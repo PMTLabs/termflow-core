@@ -46,6 +46,11 @@ interface ElectronAPI {
   }>;
   getTerminalSnapshot: (terminalId: string, cols?: number, rows?: number) => Promise<TerminalSnapshot>;
   getTerminalFullScrollback: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
+  /// PLAIN text of the current visible screen, from the backend's vt100 parser.
+  /// Distinct from `getTerminalSnapshot`, which returns a STYLED blob meant to be
+  /// replayed into an xterm instance; this one is text a caller can match against
+  /// directly. `screen` is the whole viewport in one string, not a row array.
+  getTerminalScreenText: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
   createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
@@ -221,6 +226,7 @@ interface ElectronAPI {
   setAutomationEnabled: (id: string, enabled: boolean, origin: string) => Promise<void>;
   resetAutomation: (id: string, origin: string) => Promise<void>;
   rearmAutomation: (ruleId: string, terminalId: string | null) => Promise<void>;
+  addAutomationTarget: (ruleId: string, terminalId: string, origin: string) => Promise<boolean>;
 }
 
 // Every listen() returns Promise<UnlistenFn>; discarding it makes the
@@ -314,6 +320,32 @@ const tauriBridge: ElectronAPI = {
 
     if (!response.ok) {
       throw new Error(`Failed to fetch terminal full scrollback: ${response.status} ${response.statusText}`);
+    }
+
+    return response.json();
+  },
+
+  // GET /api/terminals/:id/screen — the visible screen as PLAIN text.
+  //
+  // Same host, port and bearer-token handling as the two calls above, deliberately:
+  // `apiBase()` resolves the port this instance actually BOUND (never the configured
+  // one — see apiBase.ts), so a second instance reads its own terminal rather than a
+  // sibling's. No CSP change is needed for this route: `connect-src` in index.html is
+  // origin-scoped (`http://localhost:*`), not path-scoped, so the entry that already
+  // admits /snapshot admits /screen on the same origin.
+  //
+  // The body also echoes `terminalId`, which the return type omits — it only repeats
+  // the id the caller passed in, so nothing downstream can learn from it. Passing the
+  // parsed body straight through (as the neighbours do) leaves that extra field
+  // present but untyped rather than paying for a copy to drop it.
+  getTerminalScreenText: async (terminalId) => {
+    const response = await fetch(
+      `${await apiBase()}/terminals/${terminalId}/screen`,
+      { headers: { ...buildAuthHeaders() } }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch terminal screen text: ${response.status} ${response.statusText}`);
     }
 
     return response.json();
@@ -844,11 +876,13 @@ const tauriBridge: ElectronAPI = {
 
   // --- Terminal Automations (Plan 028) ---
   //
-  // Thin `invoke` wrappers over `automation_commands.rs`, one per command and in that
-  // file's own order. Every argument name here is the camelCase form Tauri derives from
-  // the Rust parameter — `rule_id` on the Rust side is `ruleId` on the wire, and a
-  // mismatch is a silent 422 rather than a type error (`mcp-split-pane-422`), which is
-  // why these live in one place instead of at each call site.
+  // Thin `invoke` wrappers over `automation_commands.rs`, one per command. The first
+  // eleven follow that file's declaration order; `addAutomationTarget` is appended last
+  // here as the newest of them, wherever it sits in the Rust module. Every argument name
+  // here is the camelCase form Tauri derives from the Rust parameter — `rule_id` on the
+  // Rust side is `ruleId` on the wire, and a mismatch is a silent 422 rather than a type
+  // error (`mcp-split-pane-422`), which is why these live in one place instead of at each
+  // call site.
   listAutomations: async () => invoke<AutomationRule[]>('list_automations'),
   getAutomationRuntime: async () => invoke<AutomationStatePayload>('get_automation_runtime'),
   loadAutomationLog: async (ruleId, newestFirst, limit) =>
@@ -871,6 +905,20 @@ const tauriBridge: ElectronAPI = {
   rearmAutomation: async (ruleId, terminalId) => {
     await invoke('rearm_automation', { ruleId, terminalId });
   },
+  // Pin one more terminal onto an existing rule's target list.
+  //
+  // The boolean is a RESULT, not a success flag: `false` means the rule id no longer
+  // names a rule (deleted from another window between the moment the caller read the
+  // list and this write), so nothing was written. That is an ordinary outcome of a
+  // multi-window app, which is why it comes back as a value the caller must handle
+  // rather than as a rejection — a rejection here is a genuine IPC/store failure.
+  //
+  // Only `{ ruleId, terminalId, origin }` goes on the wire — never a second, snake_case
+  // spelling of the same argument. Tauri deserialises the args object into the command's
+  // parameters, so sending both forms is a serde duplicate-key error at the boundary
+  // (422), which surfaces as "the button did nothing" rather than as a type error here.
+  addAutomationTarget: async (ruleId, terminalId, origin) =>
+    invoke<boolean>('add_automation_target', { ruleId, terminalId, origin }),
 };
 
 // Global event listeners to bridge Tauri events to DOM events

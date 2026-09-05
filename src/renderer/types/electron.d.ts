@@ -136,6 +136,17 @@ export interface ElectronAPI {
   // a client-side ED3 scrollback wipe (e.g. codex on a resize).
   getTerminalFullScrollback?: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
 
+  // The current visible screen as PLAIN text (GET /api/terminals/:id/screen), rendered
+  // from the same backend vt100 parser the two calls above use. `getTerminalSnapshot`
+  // returns a STYLED blob built to be replayed into an xterm instance; stripping escapes
+  // back out of it is not the same thing (the formatted form encodes runs of blanks as
+  // cursor ops, so stripping collapses column alignment — see api_server.rs's
+  // `plain_screen_text_keeps_alignment_that_escape_stripping_destroys`). Callers that want
+  // text to read or match against want this one. `screen` is the whole viewport in one
+  // string; `rows`/`cols` are the size it was rendered at. Optional like its neighbours
+  // above: callers guard with `?.` instead of assuming the host implements it.
+  getTerminalScreenText?: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
+
   // Lightweight PTY-size fetch for dimension auto-heal (no snapshot render).
   getTerminalSize?: (id: string) => Promise<{ cols: number; rows: number }>;
 
@@ -373,8 +384,9 @@ export interface ElectronAPI {
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
 
-  // Terminal Automations (Plan 028) — the eleven commands of `automation_commands.rs`,
-  // in the order that file declares them. All optional and all Tauri-only: the store is
+  // Terminal Automations (Plan 028) — the twelve commands of `automation_commands.rs`.
+  // The first eleven are in the order that file declares them; `addAutomationTarget` is
+  // listed last here as the newest of them. All optional and all Tauri-only: the store is
   // SQLite in the desktop process, so the browser host throws rather than pretending.
   // `origin` is the window label, carried so a `saved` log line can name which window
   // made the change (§3.5, GUI 19) — never for concurrency control.
@@ -397,6 +409,18 @@ export interface ElectronAPI {
   resetAutomation?: (id: string, origin: string) => Promise<void>;
   /** `terminalId: null` re-arms every pair this rule watches. */
   rearmAutomation?: (ruleId: string, terminalId: string | null) => Promise<void>;
+  /**
+   * Pin one more terminal onto an existing rule's target list, without going through a
+   * full `saveAutomation` of the whole rule — so a caller holding only an id (a menu on a
+   * pane, say) never has to read, mutate and write back a rule it does not otherwise own.
+   *
+   * The boolean is the OUTCOME, not a success flag. `true` = the target was written.
+   * `false` = the rule id no longer names a rule — deleted from another window between
+   * the moment the caller learned the id and this write — so nothing was written and
+   * nothing is broken. Callers must branch on it (typically: drop the stale entry from
+   * whatever list they were showing); a rejection means a real IPC or store failure.
+   */
+  addAutomationTarget?: (ruleId: string, terminalId: string, origin: string) => Promise<boolean>;
 }
 
 declare global {

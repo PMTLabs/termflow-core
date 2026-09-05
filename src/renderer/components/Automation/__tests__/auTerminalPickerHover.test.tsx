@@ -48,8 +48,10 @@ import {
     AU_HOVER_W,
     AU_PREVIEW_POLL_MS,
     hoverCardPosition,
+    previewFor,
     previewLines,
 } from '../AuTerminalHoverCard';
+import type { Preview } from '../AuTerminalHoverCard';
 import { SNAPSHOT_TTL_MS } from '../../Canvas/snapshotCache';
 import type { WatchableTerminal } from '../../../types/electron';
 
@@ -117,6 +119,9 @@ function rows(): { live: WatchableTerminal; other: WatchableTerminal; dead: Watc
 const SCREEN = [
     'PS D:\\sources> bun run dev',
     '  ready in 812 ms',
+    // A two-column row: the shape `/snapshot`'s replay blob encodes as cursor motion, so the gap
+    // vanishes the moment anything strips escapes out of that blob instead of reading the grid.
+    'NAME                STATUS',
     '',
     'PS D:\\sources> ',
     '',
@@ -124,13 +129,25 @@ const SCREEN = [
 ].join('\r\n');
 
 interface Api {
-    getTerminalSnapshot: jest.Mock;
+    getTerminalScreenText: jest.Mock;
+}
+
+/**
+ * `/screen`, not `/snapshot` — and the fixture is PLAIN text with no escapes in it, because that
+ * is what the route serves.
+ *
+ * The card read `/snapshot` first and stripped the escapes out of the blob in the client, which
+ * collapses column layout: that blob encodes runs of blanks as cursor motion rather than as
+ * spaces. This mock returning plain text is what makes the alignment case below assert anything at
+ * all — handed a mock that fabricated its own aligned blob, the test would pass over the bug.
+ */
+function screenBody(id: string, screen: string = SCREEN) {
+    return { terminalId: id, screen, rows: 24, cols: 80 };
 }
 
 function installApi(): Api {
     const api: Api = {
-        getTerminalSnapshot: jest.fn(() =>
-            Promise.resolve({ snapshot: `${ESC}[32m${SCREEN}${ESC}[0m`, rows: 24, cols: 80 })),
+        getTerminalScreenText: jest.fn((id: string) => Promise.resolve(screenBody(id))),
     };
     (window as unknown as { electronAPI: Api }).electronAPI = api;
     return api;
@@ -326,6 +343,80 @@ describe('the terminal picker', () => {
         expect((card() as HTMLElement).style.top).toBe('60px');
     });
 
+    /**
+     * **The row moves and the POINTER does not** — a wheel over a stationary cursor, or a window
+     * resize.
+     *
+     * Neither fires a pointer event of any kind: `mouseover` fires when the element under the
+     * cursor CHANGES, and a row scrolling beneath a resting pointer is the case where it does not.
+     * `.au-tpick` is a 260px scroller and the inspector column it sits in scrolls too, so both are
+     * ordinary gestures rather than exotic ones. Held only by the `mousemove` re-read — which is
+     * what the comment here used to claim was sufficient — the card keeps its original client-y and
+     * slides off the row it is naming.
+     *
+     * The scroll is dispatched at the SCROLLER, not at `window`, because that is the difference the
+     * fix turns on: `scroll` does not bubble, so a bubble-phase listener on `window` would hear
+     * nothing at all from here and this test would be the thing that says so.
+     */
+    it('re-anchors when the row scrolls under a still pointer', async () => {
+        const r = rows();
+        await show([r.live]);
+        const row = rowFor(r.live.terminalId);
+
+        row.getBoundingClientRect = () => boxAt(120);
+        await hover(row);
+        expect((card() as HTMLElement).style.top).toBe('120px');
+
+        const scroller = container.querySelector('.au-tpick') ?? container;
+        row.getBoundingClientRect = () => boxAt(48);
+        await act(async () => {
+            scroller.dispatchEvent(new Event('scroll'));
+        });
+        expect((card() as HTMLElement).style.top).toBe('48px');
+    });
+
+    it('re-anchors when the window resizes under a still pointer', async () => {
+        const r = rows();
+        await show([r.live]);
+        const row = rowFor(r.live.terminalId);
+
+        row.getBoundingClientRect = () => boxAt(120);
+        await hover(row);
+        expect((card() as HTMLElement).style.top).toBe('120px');
+
+        row.getBoundingClientRect = () => boxAt(200);
+        await act(async () => {
+            window.dispatchEvent(new Event('resize'));
+        });
+        expect((card() as HTMLElement).style.top).toBe('200px');
+    });
+
+    /**
+     * **And the listeners go when the pointer does.** A card that re-anchors correctly and leaves a
+     * pair of window listeners behind per row hovered is the same leak in a different place — and
+     * one that would keep calling `getBoundingClientRect` on rows that have been unmounted.
+     */
+    it('stops listening once the pointer leaves the row', async () => {
+        const r = rows();
+        await show([r.live]);
+        const row = rowFor(r.live.terminalId);
+        row.getBoundingClientRect = () => boxAt(120);
+        await hover(row);
+
+        await unhover(row);
+        expect(card()).toBeNull();
+
+        // Counted rather than inspected: `removeEventListener` is the only observable, and a scroll
+        // arriving after the card has gone must reach nothing that would try to re-render it.
+        let reads = 0;
+        row.getBoundingClientRect = () => { reads += 1; return boxAt(48); };
+        await act(async () => {
+            window.dispatchEvent(new Event('resize'));
+            (container.querySelector('.au-tpick') ?? container).dispatchEvent(new Event('scroll'));
+        });
+        expect(reads).toBe(0);
+    });
+
     // --- 3. the live preview ----------------------------------------------------------------------
 
     it('reads the hovered row‘s screen, and no other row‘s', async () => {
@@ -334,25 +425,35 @@ describe('the terminal picker', () => {
         await hover(rowFor(r.live.terminalId));
         await settle();
 
-        const asked = api.getTerminalSnapshot.mock.calls.map((c) => c[0]);
+        const asked = api.getTerminalScreenText.mock.calls.map((c) => c[0]);
         expect(asked.length).toBeGreaterThan(0);
         // The WHOLE call list. `toHaveBeenCalledWith` would pass for a prefetch of every row.
         expect(Array.from(new Set(asked))).toEqual([r.live.processId]);
     });
 
-    it('asks by PROCESS id, which is the id the snapshot endpoint is keyed by', async () => {
+    it('asks by PROCESS id, which is the id the screen endpoint is keyed by', async () => {
         const r = rows();
         await show([r.live]);
         await hover(rowFor(r.live.terminalId));
         await settle();
 
-        expect(api.getTerminalSnapshot).toHaveBeenCalledWith(r.live.processId);
-        // Handed the renderer id, `/snapshot` does not 404 — it returns HTTP 200 with an empty
-        // blob, so this mistake is invisible at runtime and has to be pinned here.
-        expect(api.getTerminalSnapshot).not.toHaveBeenCalledWith(r.live.terminalId);
+        expect(api.getTerminalScreenText).toHaveBeenCalledWith(r.live.processId);
+        // `/screen` resolves `tm-` leaves too, so the renderer id would not 404 here the way it
+        // does on some neighbouring routes — it would answer about the right terminal by a longer
+        // path. Still pinned: the cache this card keeps is keyed by process id, so mixing the two
+        // id spaces would give one terminal two entries and halve the cache's hit rate silently.
+        expect(api.getTerminalScreenText).not.toHaveBeenCalledWith(r.live.terminalId);
     });
 
-    it('paints the last lines of that screen, ANSI stripped', async () => {
+    /**
+     * **The preview paints the screen's own column layout, not a re-flowed version of it.**
+     *
+     * `toContain('bun run dev')` — which is all this asserted while the card read `/snapshot` and
+     * stripped the escapes itself — is satisfied by a preview that has run every column together,
+     * because the words survive and only the SPACES between them are lost. The gap is the thing
+     * under test, so the gap is what is asserted, by exact string.
+     */
+    it('paints the last lines of that screen, with its columns still apart', async () => {
         const r = rows();
         await show([r.live]);
         await hover(rowFor(r.live.terminalId));
@@ -361,6 +462,8 @@ describe('the terminal picker', () => {
         const pre = card()!.querySelector('.au-hovprev pre');
         expect(pre).not.toBeNull();
         expect(pre!.textContent).toContain('bun run dev');
+        expect(pre!.textContent).toContain('NAME                STATUS');
+        expect(pre!.textContent).not.toContain('NAMESTATUS');
         expect(pre!.textContent).not.toContain(ESC);
     });
 
@@ -377,12 +480,12 @@ describe('the terminal picker', () => {
         // The box itself must be absent, not empty: an empty one reads as a fetch that failed.
         expect(card()!.querySelector('.au-hovprev')).toBeNull();
         // And nothing was asked of the API, because there is no process to ask about.
-        expect(api.getTerminalSnapshot).not.toHaveBeenCalled();
+        expect(api.getTerminalScreenText).not.toHaveBeenCalled();
     });
 
     it('survives a fetch that fails, and says so instead of showing an empty box', async () => {
         const r = rows();
-        api.getTerminalSnapshot.mockRejectedValueOnce(new Error('the API said no'));
+        api.getTerminalScreenText.mockRejectedValueOnce(new Error('the API said no'));
         await show([r.live]);
 
         await hover(rowFor(r.live.terminalId));
@@ -405,12 +508,12 @@ describe('the terminal picker', () => {
      */
     it('does not paint a slow row‘s screen under the next row‘s name', async () => {
         const r = rows();
-        api.getTerminalSnapshot.mockImplementation((id: string) =>
-            Promise.resolve({ snapshot: `on screen: ${id}`, rows: 24, cols: 80 }));
+        api.getTerminalScreenText.mockImplementation((id: string) =>
+            Promise.resolve(screenBody(id, `on screen: ${id}`)));
         let release: (v: unknown) => void = () => {};
         // The FIRST call — the hovered row's — hangs. `mockImplementationOnce` is consumed in call
         // order, and the first call is `live`'s, because that is the row hovered first.
-        api.getTerminalSnapshot.mockImplementationOnce(
+        api.getTerminalScreenText.mockImplementationOnce(
             () => new Promise((resolve) => { release = resolve; }),
         );
         await show([r.live, r.other]);
@@ -423,7 +526,7 @@ describe('the terminal picker', () => {
         expect(card()!.textContent).toContain(`on screen: ${r.other.processId}`);
 
         await act(async () => {
-            release({ snapshot: `on screen: ${r.live.processId}`, rows: 24, cols: 80 });
+            release(screenBody(r.live.processId, `on screen: ${r.live.processId}`));
         });
         await settle();
 
@@ -450,7 +553,7 @@ describe('the terminal picker', () => {
 
         await hover(rowFor(r.live.terminalId));
         await advance(0);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
         // Counted straight after an `advance(0)`, both times. `act` and the fake-timer
         // helper leave 0ms timers of their own behind, so an absolute count is only
         // readable at a point where those have just been drained — and the poll, at 700ms,
@@ -473,18 +576,18 @@ describe('the terminal picker', () => {
         jest.useFakeTimers();
         const r = rows();
         let release: (v: unknown) => void = () => {};
-        api.getTerminalSnapshot.mockImplementationOnce(
+        api.getTerminalScreenText.mockImplementationOnce(
             () => new Promise((resolve) => { release = resolve; }),
         );
         await show([r.live]);
 
         await hover(rowFor(r.live.terminalId));
         await advance(0);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
 
         await unhover(rowFor(r.live.terminalId));
         await act(async () => {
-            release({ snapshot: SCREEN, rows: 24, cols: 80 });
+            release(screenBody(r.live.processId));
         });
         await advance(0);
 
@@ -492,7 +595,7 @@ describe('the terminal picker', () => {
         expect(jest.getTimerCount()).toBe(0);
         // And nothing wakes up later either, however long the window stays open.
         await advance(AU_PREVIEW_POLL_MS * 6 + SNAPSHOT_TTL_MS);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
     });
 
     /**
@@ -511,7 +614,7 @@ describe('the terminal picker', () => {
         await show([r.live]);
         await hover(rowFor(r.live.terminalId));
         await advance(0);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
 
         // The cadence is the first wakeup at or past the TTL: `ceil(2000 / 700) * 700` = 2100ms.
         const cadence = Math.ceil(SNAPSHOT_TTL_MS / AU_PREVIEW_POLL_MS) * AU_PREVIEW_POLL_MS;
@@ -520,10 +623,10 @@ describe('the terminal picker', () => {
         // fetched on its own schedule — the cadence this constant used to claim — is two extra
         // round trips by here.
         await advance(cadence - AU_PREVIEW_POLL_MS);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
 
         await advance(AU_PREVIEW_POLL_MS);
-        expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(2);
+        expect(api.getTerminalScreenText).toHaveBeenCalledTimes(2);
     });
 
     /**
@@ -545,13 +648,13 @@ describe('the terminal picker', () => {
             await show([r.live, r.other]);
             await hover(rowFor(r.live.terminalId));
             await settle();
-            expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+            expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
 
             // Control: re-hovering inside the TTL is served from the cache and asks nothing.
             await unhover(rowFor(r.live.terminalId));
             await hover(rowFor(r.live.terminalId));
             await settle();
-            expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(1);
+            expect(api.getTerminalScreenText).toHaveBeenCalledTimes(1);
 
             // The terminal closes and drops off the roster…
             await unhover(rowFor(r.live.terminalId));
@@ -560,7 +663,7 @@ describe('the terminal picker', () => {
             await show([r.live, r.other]);
             await hover(rowFor(r.live.terminalId));
             await settle();
-            expect(api.getTerminalSnapshot).toHaveBeenCalledTimes(2);
+            expect(api.getTerminalScreenText).toHaveBeenCalledTimes(2);
         } finally {
             clock.mockRestore();
         }
@@ -637,7 +740,52 @@ describe('the terminal picker', () => {
 
     // --- 6. what "a few lines of the screen" means -------------------------------------------------
 
-    describe('previewLines', () => {
+describe('previewFor', () => {
+        /**
+         * **A screen that belongs to another terminal is never painted, not even for one frame.**
+         *
+         * Moving the pointer from row A to row B changes the card's props, and the identity block
+         * repaints from those props IN THAT RENDER. Anything the preview held in its own state was
+         * still A's until something updated it — so a preview keeping a bare screen string and
+         * resetting it from an effect painted B's id, name and folder over A's screen and corrected
+         * itself on the next tick. One frame, no error, no warning, and precisely the wrong answer
+         * to the only question this card exists to answer.
+         *
+         * **Asserted here rather than through the DOM, and that is not for want of trying.** The
+         * bad frame is a commit, not a settled state: by the time `act` returns, the effect has put
+         * it right, so every end-state assertion is identical for both implementations. A
+         * `MutationObserver` is served the corrected DOM (its callback is a microtask), and
+         * `flushSync` does not force the continuous-priority update a `mouseover` schedules. Both
+         * were written, and both passed against the broken component — which is why the invariant
+         * now lives in a function that takes its inputs as arguments.
+         */
+        const of = (processId: string, screen: string | null): Preview =>
+            ({ processId, screen, failed: false });
+
+        it('discards a screen belonging to a different terminal', () => {
+            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b').screen).toBeNull();
+            // The id travels with it: a `Preview` that kept A's id would fail the same comparison
+            // on the very next render and re-seed for ever.
+            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b').processId).toBe('pc-b');
+        });
+
+        it('keeps the screen that does belong to this terminal', () => {
+            const mine = of('pc-a', 'A is on screen');
+            // By identity: re-seeding a value that was already correct would drop a fetched screen
+            // on every render and leave the card fetching for ever.
+            expect(previewFor(mine, 'pc-a')).toBe(mine);
+        });
+
+        it('clears a failure recorded against a different terminal', () => {
+            const failed: Preview = { processId: 'pc-a', screen: null, failed: true };
+            // Otherwise the row the pointer has just arrived at inherits "could not be read" from
+            // the row it left — the same mis-attribution wearing the error message instead of the
+            // screen.
+            expect(previewFor(failed, 'pc-b').failed).toBe(false);
+        });
+    });
+
+        describe('previewLines', () => {
         it('drops the blank tail of the grid before taking the last lines', () => {
             // A vt100 screen is a fixed grid, so its tail is padding. Taking the last six ROWS of an
             // 80x24 snapshot shows six blank lines under a prompt that is still on screen.
@@ -648,8 +796,24 @@ describe('the terminal picker', () => {
             expect(previewLines('1\n2\n3\n4', 2)).toEqual(['3', '4']);
         });
 
-        it('strips ANSI and the CR of a CRLF pair', () => {
-            expect(previewLines(`${ESC}[31mred${ESC}[0m\r\nplain\r\n`)).toEqual(['red', 'plain']);
+        it('drops the CR of a CRLF pair, and every other trailing blank', () => {
+            expect(previewLines('red   \r\nplain\r\n')).toEqual(['red', 'plain']);
+        });
+
+        /**
+         * **It does not strip escapes, and that is the point rather than an omission.**
+         *
+         * It used to run `stripAnsi`, back when the card read `/snapshot`. Against `/screen`'s
+         * plain grid text that call is a no-op — and a no-op that invites the next reader to point
+         * the fetch back at the replay blob, where stripping is not a no-op but a silent loss of
+         * every column gap. Pinned so that reintroducing the strip fails here rather than passing
+         * quietly.
+         */
+        it('leaves interior spacing alone — the column gaps ARE the content', () => {
+            expect(previewLines('NAME     STATUS\nbuild    ok')).toEqual([
+                'NAME     STATUS',
+                'build    ok',
+            ]);
         });
     });
 });

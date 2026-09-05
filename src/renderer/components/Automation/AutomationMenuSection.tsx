@@ -74,30 +74,45 @@ function addableRules(terminalId: string, rules: readonly AutomationRule[]): Aut
 }
 
 /**
- * Add `terminalId` to the watched targets of the rule with `ruleId`, and save — "Add to an existing
+ * Add `terminalId` to the watched targets of the rule with `ruleId` — "Add to an existing
  * automation", picked.
  *
- * **Takes an ID and re-resolves the rule HERE, at click time; it is never handed the row's copy.**
- * Both hosts build their rows when the menu opens, so a rule object captured there is a snapshot of
- * menu-assembly time — and `save_automation` is an unconditional upsert with no version token
- * (`automation_commands.rs` says that is deliberate: the log entry, not concurrency control, is what
- * that path was built for). Writing the captured copy back therefore had two reachable failure
- * modes. *Clobber:* another window edits this rule's message, and the whole stale object goes back
- * over it, silently reverting the edit. *Resurrection:* a rule DELETED in another window is
- * re-INSERTED by the upsert the moment a stale row is clicked. `openAutomationEditorFor` was built
- * to resolve an id out of the live list for exactly this reason — see `automationEditorHost.ts`'s
- * header — so the one write path in this module resolves too rather than doing the opposite of its
- * neighbour. Resurrection is closed outright: a missing id saves nothing and says so. The clobber
- * window narrows from "however long the menu stayed open" to the one tick between this lookup and
- * the save, which is as far as it can be taken without a version token — a protocol decision that
- * belongs with the store, not with a context menu.
+ * **The existence check belongs to the STORE, and this is the whole reason the row does not go
+ * through `saveAutomation`.** Both hosts build their rows when the menu opens, so a rule object
+ * captured there is a snapshot of menu-assembly time, and `save_automation` is an unconditional
+ * upsert with no version token (`automation_commands.rs` says that is deliberate: the log entry,
+ * not concurrency control, is what that path was built for). Writing a captured rule back therefore
+ * had two reachable failure modes. *Clobber:* another window edits this rule's message, and the
+ * whole stale object goes back over it, silently reverting the edit. *Resurrection:* a rule DELETED
+ * in another window is re-INSERTED by the upsert the moment a stale row is clicked.
  *
- * Appends and saves ONLY `targetIds`; every other field of the LIVE rule rides through untouched,
- * via the spread. `refreshAutomationArmed()` is called explicitly rather than left to the
- * `automation:changed` event this same save will emit, for the reason `GlobalAutomationEditor`'s
- * `onChanged` prop already is: the menu that triggered this has just closed, so there is nobody
- * left to notice a live event land a moment later, and the pane's own armed badge should update as
- * promptly as a save from inside the editor does.
+ * Re-resolving the id against the renderer's own cached list before writing — which this function
+ * used to do, under a comment claiming that closed resurrection outright — closes neither. It
+ * cannot: `automation:changed` starts a refresh nobody awaits, so the cache may still be a commit
+ * behind at click time, and even a perfectly fresh cache leaves the delete free to commit in the
+ * gap between the read and the write. A read that DECIDES a write has to happen on that write's own
+ * transaction, which is a thing only the store can do.
+ *
+ * So it does. `add_automation_target` evaluates *does this rule still exist* and appends the target
+ * in one SQLite transaction, and sends back the answer: `false` = the rule is gone and **nothing
+ * was written** — no rule row, no orphan target row. Both failure modes go with it, because only
+ * the one column this path authors (`updated_at`) is ever written; no captured copy of the rule
+ * crosses the wire at all, so there is nothing left to clobber a concurrent edit with.
+ *
+ * `true` also covers an id the rule already watches — the rule watches this terminal, which is what
+ * the click asked for — so the pre-flight `targetIds.includes` check this function used to make is
+ * gone too, rather than being kept as a second, staler copy of a decision the store now owns.
+ *
+ * `ruleName` is passed in from the row rather than resolved here, and it is used for ONE thing: the
+ * text of a failure toast. The row is where the name the user actually clicked is known, and after
+ * the change above there is no local lookup left to take it from anyway.
+ *
+ * `refreshAutomationArmed()` is called explicitly rather than left to the `automation:changed` event
+ * this same write emits, for the reason `GlobalAutomationEditor`'s `onChanged` prop already is: the
+ * menu that triggered this has just closed, so there is nobody left to notice a live event land a
+ * moment later, and the pane's own armed badge should update as promptly as a save from inside the
+ * editor does. It runs on the `false` branch too — that branch means this window is holding a rule
+ * list with a rule in it that no longer exists, which is precisely a list worth re-reading.
  *
  * **No in-flight guard, and none is needed.** Both call sites are `void addTerminalToRule(…)`, so a
  * row clicked twice would run this twice — except that neither row survives the first click. The
@@ -105,41 +120,41 @@ function addableRules(terminalId: string, rules: readonly AutomationRule[]): Aut
  * `closeMenuOnSelect`, which `ContextMenu` honours in the same handler on the line after
  * `onSelect?.()`. Both are synchronous React state updates inside one discrete event, so the row is
  * unmounted before the browser can dispatch a second click at it. Even a hypothetical second call
- * would append the same id to the same resolved `targetIds` and upsert an identical payload. A
- * guard here would be a mechanism with no input.
+ * would be the no-op the store already answers `true` to.
  */
-async function addTerminalToRule(ruleId: string, terminalId: string): Promise<void> {
-    const rule = getAutomationRules().find((candidate) => candidate.id === ruleId);
-    if (!rule) {
-        // Deleted while the menu was open. Silence here would be the worst of the three outcomes:
-        // the user clicks a named rule, nothing is written, and nothing says why.
-        void toastAutomationNotice(
-            'Could not add this terminal — that automation no longer exists.',
-        );
-        return;
-    }
-    if (rule.targetIds.includes(terminalId)) return;
+async function addTerminalToRule(
+    ruleId: string,
+    terminalId: string,
+    ruleName: string,
+): Promise<void> {
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
-    if (!api?.saveAutomation) return;
+    if (!api?.addAutomationTarget) return;
+    let added: boolean;
     try {
-        await api.saveAutomation(
-            { ...rule, targetIds: [...rule.targetIds, terminalId] },
-            getAutomationOrigin(),
-        );
+        added = await api.addAutomationTarget(ruleId, terminalId, getAutomationOrigin());
     } catch (err) {
         // **A refused write must be heard.** Both call sites invoke this as `void addTerminalToRule(…)`
         // from a menu row that dismisses itself, so a rejection here has nowhere to surface: the user
         // clicks "Add to <rule>", the menu closes, and the terminal is simply not watched — a control
-        // that reports success it did not have. `save_automation` genuinely can refuse (a `SQLITE_BUSY`
-        // against the 30 s scrollback flush is called routine by the store's own docs, and the backend
-        // re-validates an ENABLED rule on every save), so this is not a theoretical path.
+        // that reports success it did not have. The command genuinely can refuse (a `SQLITE_BUSY`
+        // against the 30 s scrollback flush is called routine by the store's own docs, and
+        // `add_target_to_rule` re-applies the save gate to an already-ENABLED rule), so this is not a
+        // theoretical path.
         //
         // A toast rather than a rethrow: the caller is a fire-and-forget click handler, and an
         // unhandled rejection is exactly the silence this is fixing.
         void toastAutomationNotice(
-            `Could not add this terminal to “${rule.name}” — ${err instanceof Error ? err.message : String(err)}`,
+            `Could not add this terminal to “${ruleName}” — ${err instanceof Error ? err.message : String(err)}`,
         );
         return;
+    }
+    if (!added) {
+        // Deleted between the moment this menu was built and this write — the race the store-side
+        // check exists to lose safely. Silence here would be the worst of the three outcomes: the
+        // user clicks a named rule, nothing is written, and nothing says why.
+        void toastAutomationNotice(
+            `Could not add this terminal to “${ruleName}” — that automation no longer exists.`,
+        );
     }
     void refreshAutomationArmed();
 }
@@ -289,7 +304,7 @@ export const AutomationMenuSection: React.FC<{
                                     className="context-menu-item au-menu-rule"
                                     onClick={() => {
                                         onDismiss();
-                                        void addTerminalToRule(rule.id, terminalId);
+                                        void addTerminalToRule(rule.id, terminalId, rule.name);
                                     }}
                                     title={`Add this terminal to “${rule.name}”`}
                                 >
@@ -355,7 +370,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
             id: `add-to-${rule.id}`,
             label: rule.name,
             title: `Add this terminal to “${rule.name}” and save.`,
-            onSelect: () => { void addTerminalToRule(rule.id, terminalId); },
+            onSelect: () => { void addTerminalToRule(rule.id, terminalId, rule.name); },
             closeMenuOnSelect: true,
         }))
         : [{ id: 'no-pinned-rules', label: NO_PINNED_RULES_MESSAGE, disabled: true }];

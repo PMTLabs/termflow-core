@@ -1500,6 +1500,7 @@ pub fn run() {
         automation_commands::list_watchable_terminals,
         automation_commands::dry_run_automation,
         automation_commands::save_automation,
+        automation_commands::add_automation_target,
         automation_commands::delete_automation,
         automation_commands::duplicate_automation,
         automation_commands::set_automation_enabled,
