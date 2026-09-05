@@ -31,7 +31,7 @@ import { readSource } from '../../../utils/readSource';
 jest.mock('../ContextMenu.css', () => ({}));
 
 // eslint-disable-next-line import/first
-import { ContextMenu, ContextMenuItem, ContextMenuFlyoutRow } from '../ContextMenu';
+import { ContextMenu, ContextMenuItem, ContextMenuFlyoutRow, TOOLTIP_DWELL_MS } from '../ContextMenu';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -333,14 +333,513 @@ describe('hovering away', () => {
         expect(search().placeholder).toBe('snippets');
     });
 
-    it('a timer armed before the menu unmounts does not outlive it', () => {
+    it('a timer armed before the menu unmounts is torn down with it', () => {
+        // This used to watch `console.error` for React's set-state-on-an-unmounted-component
+        // warning. React 18 removed that warning, so the assertion held whether or not anything
+        // was cleaned up — mutation testing while the tooltip dwell was added found it green with
+        // the cleanup deleted.
+        //
+        // Counting timers needs the CLOSE timer to be the only one pending, and hovering the plain
+        // item that arms it also arms a tooltip dwell. Leaving the menu afterwards clears the
+        // dwell (its `onMouseLeave`) and leaves the close armed, which nothing cancels — so by the
+        // time the count is taken, the one timer left is this test's own subject.
         renderSync(menuWith({ rows: [row('a', 'x')] }));
         hoverSync(menuItem('Snippets'));
         hoverSync(menuItem('Copy'), menuItem('Snippets'));
-        const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const offMenu = document.createElement('div');
+        document.body.appendChild(offMenu);
+        hoverSync(offMenu, menuItem('Copy'));
+        expect(jest.getTimerCount()).toBe(1);
+
         act(() => root.unmount());
-        tick(400);
-        expect(error).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+        offMenu.remove();
+        // Re-created so the shared afterEach still has something to unmount.
+        root = createRoot(container);
+    });
+});
+
+/* -- tooltips: the three-second dwell -------------------------------------- */
+
+/**
+ * Tam: *"on hover on the item in the right-context menu, delay 3 seconds to show the tooltip, so
+ * it does not annoy user to just open it and quickly navigate to item they want"*.
+ *
+ * **What is asserted here is the ATTRIBUTE, not a tooltip.** A native tooltip is drawn by the
+ * browser and is invisible to jsdom, so nothing in a unit test can watch one appear. The
+ * mechanism is what makes the delay real and it is exactly what a test can hold: an element with
+ * no `title` has no tooltip to show, so withholding the attribute until the pointer has rested
+ * moves the browser's own timer without a second tooltip surface being invented. Every assertion
+ * below is therefore about when the attribute exists — which is the whole of what this feature
+ * decides — with what the browser then does with it left to a real window.
+ */
+describe('tooltip dwell', () => {
+    beforeEach(() => {
+        jest.useFakeTimers();
+    });
+    afterEach(() => {
+        // Runs BEFORE the outer afterEach (inner hooks first), so the unmount there
+        // happens on real timers.
+        jest.useRealTimers();
+    });
+
+    const renderSync = (items: ContextMenuItem[]) => {
+        act(() => {
+            root.render(<ContextMenu x={10} y={10} items={items} onClose={onClose} />);
+        });
+    };
+    const tick = (ms: number) => {
+        act(() => {
+            jest.advanceTimersByTime(ms);
+        });
+    };
+    const titleOf = (el: Element) => el.getAttribute('title');
+    /** `type`'s synchronous twin — an async `act` flushes through the replaced timer APIs. */
+    const typeSync = (input: HTMLInputElement, value: string) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+        act(() => {
+            setter.call(input, value);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    };
+
+    const twoItems = (): ContextMenuItem[] => [
+        { label: 'Copy', title: 'Copy the selected terminal text.', click: () => {} },
+        { label: 'Paste', title: 'Paste the clipboard into the terminal.', click: () => {} },
+    ];
+
+    it('is three seconds', () => {
+        // Every test below ticks `TOOLTIP_DWELL_MS` rather than a literal, which is what keeps them
+        // readable — and also what makes them all pass if the constant is quietly halved. The
+        // number Tam asked for is pinned once, here, where changing it is a decision rather than a
+        // side effect.
+        expect(TOOLTIP_DWELL_MS).toBe(3000);
+    });
+
+    it('withholds a menu item\u2019s tooltip until the pointer has rested the full dwell', () => {
+        renderSync(twoItems());
+        const item = menuItem('Copy');
+        expect(titleOf(item)).toBeNull();
+
+        hoverSync(item);
+        // One millisecond short. Asserted at the boundary rather than at some comfortable
+        // fraction of it, because an off-by-a-frame delay and no delay at all look identical
+        // anywhere else on the curve.
+        tick(TOOLTIP_DWELL_MS - 1);
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+
+        tick(1);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+    });
+
+    it('a sweep past an item cancels its dwell rather than queueing it', () => {
+        // The case the delay exists for: the menu is opened and the pointer travels down it to
+        // the row it was always aiming at. Nothing may pop on the way, and — the half a naive
+        // implementation gets wrong — nothing may pop *afterwards* either, from a timer armed
+        // by an item the pointer has long since left.
+        renderSync(twoItems());
+        hoverSync(menuItem('Copy'));
+        tick(TOOLTIP_DWELL_MS - 100);
+
+        hoverSync(menuItem('Paste'), menuItem('Copy'));
+        tick(100);
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+        expect(titleOf(menuItem('Paste'))).toBeNull();
+
+        // The row arrived at starts its own three seconds from the MOVE, not from the open.
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(menuItem('Paste'))).toBe('Paste the clipboard into the terminal.');
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
+    it('takes the tooltip away again the moment the pointer leaves', () => {
+        renderSync(twoItems());
+        hoverSync(menuItem('Copy'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        // Not "when the next row earns its own": a tooltip dragged along behind the pointer for
+        // three seconds is the annoyance this feature removes, merely delayed.
+        hoverSync(menuItem('Paste'), menuItem('Copy'));
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
+    /**
+     * **`onMouseLeave` clears, and this is the case where nothing else can.**
+     *
+     * Moving from one row to the next is covered twice over — the row left clears, and the row
+     * arrived at clears as it arms — so a test that sweeps between rows passes with either half
+     * removed and pins neither. Leaving the MENU is the path with no arrival on the other end.
+     * It matters because the attribute would otherwise still be sitting on the row: coming back
+     * to it later would show its tooltip instantly, which is the delay not applying to the second
+     * visit.
+     */
+    it('leaving the menu entirely takes the tooltip away, with no row arrived at', () => {
+        renderSync(twoItems());
+        hoverSync(menuItem('Copy'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        const offMenu = document.createElement('div');
+        document.body.appendChild(offMenu);
+        hoverSync(offMenu, menuItem('Copy'));
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+        offMenu.remove();
+    });
+
+    /**
+     * **`onMouseEnter` clears too, and this is the case where nothing else can.**
+     *
+     * A row can leave the DOM under a stationary pointer — type into the search box and the list
+     * re-filters around it — and React fires no `mouseleave` for an unmount. The dwelt id is then
+     * stale, and a row that comes back carrying it would arrive with its tooltip already armed:
+     * the delay skipped on a row the user never rested on this time round. Clearing as the next
+     * dwell is armed is what makes that unreachable.
+     */
+    it('a row that vanished under the pointer and came back must earn its tooltip again', () => {
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'the snippet text' })],
+            emptyRow: row('none', 'No snippets match', { disabled: true }),
+        }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('the snippet text');
+
+        // Filtered away and back, with no pointer event in between — the row unmounts and
+        // remounts under a pointer that never moved.
+        typeSync(search(), 'zzz');
+        expect(labels()).toEqual(['No snippets match']);
+        typeSync(search(), '');
+        expect(labels()).toEqual(['one']);
+
+        // **Asserted here, before any pointer event.** The first version of this test hovered the
+        // row and only then looked at the title — which asserts that a FRESH dwell must be earned,
+        // something the sweep tests above already cover, and says nothing about the state the doc
+        // above calls unreachable. It was reachable: review re-ran it with this line and the row
+        // came back carrying 'the snippet text'.
+        expect(titleOf(rows()[0])).toBeNull();
+
+        hoverSync(rows()[0], search());
+        expect(titleOf(rows()[0])).toBeNull();
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('the snippet text');
+    });
+
+    /**
+     * The same hole from the other side, in the shape the real Command History has.
+     *
+     * `buildCommandHistoryMenuItem` passes the FUNCTION form of `rows` and used to mint
+     * `history-${i}` — a POSITION — from a list it re-derives on every keystroke. So resting on the
+     * top row armed `history-0`, and after one keystroke a different command occupied that id and
+     * inherited the armed tooltip with no delay at all: the trail the dwell removes, triggered by
+     * typing instead of by sweeping, on a surface whose search box is focused the moment it opens.
+     *
+     * Two things closed it and this test needs both. The ids are content-derived now, so a
+     * different command cannot land on a dwelt key; and the panel resets the dwell when its row set
+     * changes, so a row that SURVIVES the filter does not keep an armed title either. The array
+     * form would not exercise this — `filterRows` preserves each row's own id — so the fixture uses
+     * the function form, as the real builder does.
+     */
+    it('a re-filter clears the dwell, even when a row keeps its slot', () => {
+        const cmds = ['git status', 'npm run build', 'cargo test'];
+        renderSync(menuWith({
+            searchPlaceholder: 'Search command history…',
+            rows: (q: string) => cmds
+                .filter((c) => c.includes(q.trim()))
+                .map((c) => ({ id: `history-${c.replace(/\W+/g, '')}`, label: c, title: c })),
+            emptyRow: row('none', 'No command history yet', { disabled: true }),
+        }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('git status');
+
+        // One keystroke, no pointer event. A different command now occupies position 0.
+        typeSync(search(), 'cargo');
+        expect(labels()).toEqual(['cargo test']);
+        expect(titleOf(rows()[0])).toBeNull();
+
+        // And the row that KEEPS its identity across a re-filter loses its armed title too.
+        typeSync(search(), '');
+        hoverSync(rows()[0], search());
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('git status');
+        typeSync(search(), 'git');
+        expect(labels()).toEqual(['git status']);
+        expect(titleOf(rows()[0])).toBeNull();
+    });
+
+    it('follows the item it was earned on when the items list shifts underneath it', () => {
+        // The owner rebuilds `items` on every render of ITS own — `TerminalDisplay` re-renders
+        // while this menu is open whenever agent detection settles, which inserts an item ABOVE
+        // Copy and moves every index below it. Keyed on position, the tooltip earned by resting
+        // on Copy would be handed to whatever slid into Copy's old slot: the wrong sentence on a
+        // right-looking row. Keyed on the label, it stays where it was earned.
+        renderSync(twoItems());
+        hoverSync(menuItem('Copy'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        renderSync([
+            { label: 'Color scheme for "claude"', title: 'Pick a scheme for this agent.', click: () => {} },
+            ...twoItems(),
+        ]);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+        expect(titleOf(menuItem('Color scheme'))).toBeNull();
+        expect(titleOf(menuItem('Paste'))).toBeNull();
+    });
+
+    it('a DISABLED item keeps its tooltip, because it can never dwell', () => {
+        // Two reasons, and either alone would be enough: a disabled <button> dispatches no mouse
+        // events, so a delayed title would never arrive at all; and it is the row whose tooltip
+        // carries the most, being the only thing that says why the row is dimmed.
+        renderSync([{ label: 'Copy', title: 'Nothing is selected', enabled: false, click: () => {} }]);
+        expect(titleOf(menuItem('Copy'))).toBe('Nothing is selected');
+    });
+
+    it('a DISABLED row keeps its tooltip too, for the same reason', () => {
+        // The row half of the rule above. Empty-state rows carry no title today, so nothing else
+        // in this file exercises it — and a `tipFor` that had dropped the `row.disabled` arm would
+        // have looked entirely correct.
+        renderSync(menuWith({
+            rows: [row('a', 'unavailable', { disabled: true, title: 'Nothing to run here yet' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        expect(titleOf(rows()[0])).toBe('Nothing to run here yet');
+    });
+
+    it('flyout rows dwell too, and the detail tooltip goes with the row', () => {
+        renderSync(menuWith({
+            rows: [
+                row('a', 'one', { detail: 'a very long folder and tag line', title: 'the snippet text' }),
+                row('b', 'two', { detail: 'chip', detailTitle: 'Folder: Ops' }),
+            ],
+        }));
+        hoverSync(menuItem('Snippets'));
+        const detail = (i: number) => rows()[i].querySelector('.context-menu-flyout-detail')!;
+        expect(titleOf(rows()[0])).toBeNull();
+        expect(titleOf(detail(0))).toBeNull();
+
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('the snippet text');
+        // No `detailTitle`: the chip still gets one, showing what the ellipsis hid.
+        expect(titleOf(detail(0))).toBe('a very long folder and tag line');
+        // Per ROW, not per panel — the neighbour the pointer never touched stays quiet.
+        expect(titleOf(rows()[1])).toBeNull();
+        expect(titleOf(detail(1))).toBeNull();
+
+        // With a `detailTitle`: it wins, so a caller can expand the chip into something readable.
+        hoverSync(rows()[1], rows()[0]);
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(detail(1))).toBe('Folder: Ops');
+        expect(titleOf(detail(0))).toBeNull();
+    });
+
+    /**
+     * **A keyboard user never hovers, so without an exemption they never get a description.**
+     *
+     * Flyout rows are `tabIndex={-1}` with focus held in the search box and the current row named
+     * by `aria-activedescendant`, so arrow-key navigation fires no mouse event at all — and for a
+     * snippet or a history command the `title` is the only copy of the full, untruncated text that
+     * the label ellipses. A keyboard user also cannot produce the trail the dwell exists to
+     * suppress, so gating them costs the feature nothing and costs them the description.
+     */
+    it('the row a KEYBOARD user arrows to keeps its title, with no dwell', () => {
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        expect(titleOf(rows()[0])).toBeNull();
+
+        act(() => {
+            search().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        });
+        // Row 0 was already active on open; one ArrowDown moves to row 1 and marks the mode.
+        expect(titleOf(rows()[1])).toBe('the other one');
+        expect(titleOf(rows()[0])).toBeNull();
+    });
+
+    it('and hovering afterwards puts the dwell back — the active row is not enough on its own', () => {
+        // `onMouseEnter` also sets `activeIdx`, so "is the active row" cannot stand in for "was
+        // arrowed to": read that way, the hovered row would hand out its title instantly and the
+        // feature would be gone. This is the paired negative for that.
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        act(() => {
+            search().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        });
+        expect(titleOf(rows()[1])).toBe('the other one');
+
+        hoverSync(rows()[1], search());
+        expect(titleOf(rows()[1])).toBeNull();
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[1])).toBe('the other one');
+    });
+
+    it('a host item that has keyboard FOCUS keeps its title too', () => {
+        renderSync(twoItems());
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
+    /**
+     * **The clear inside `onEnter`, isolated — nothing else reaches this path.**
+     *
+     * Every sweep test above leaves one row before entering the next, and on that path
+     * `onMouseLeave` has already cleared the dwell, so removing `onEnter`'s own clear leaves them
+     * all green. `reset()` covers the list-driven half — but only when the change is driven by the
+     * QUERY, since that is the only thing its effect watches; rows can also change because the
+     * DATA under them changed, with no keystroke involved.
+     *
+     * What is left is a dwelt key that no `mouseleave` ever cleared, because React fires none for
+     * a row that leaves the DOM under a stationary pointer. The event shape below is exactly that:
+     * the pointer arrives at a second row with no leave on the first. Without the clear, the first
+     * row keeps its armed tooltip while the pointer is demonstrably somewhere else.
+     */
+    it('entering a row clears a dwell that no `mouseleave` ever cleared', () => {
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'first' }), row('b', 'two', { title: 'second' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('first');
+
+        // Arrive at the second row WITHOUT leaving the first — a null `relatedTarget` is how the
+        // browser reports a pointer that came from outside the tree, and how an unmount leaves it.
+        hoverSync(rows()[1], null);
+        expect(titleOf(rows()[0])).toBeNull();
+        // …and the new row has to earn its own, as always.
+        expect(titleOf(rows()[1])).toBeNull();
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[1])).toBe('second');
+    });
+
+    /**
+     * **`instantTitles` means the whole menu, panels included.**
+     *
+     * Three mutants survived here before this test: the ROW gate ignoring the flag, and the flag
+     * not being threaded into the depth-0 panel or into a nested one. Nothing in production would
+     * have caught any of them — the path picker that motivated the prop is a flat list of items
+     * with no submenu — so this is the test that makes the prop's own sentence true rather than
+     * aspirational, for the first picker that grows a folder.
+     */
+    it('`instantTitles` reaches the flyout ROWS, and a panel nested under them', () => {
+        act(() => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    instantTitles
+                    items={[{
+                        label: 'Snippets',
+                        submenu: {
+                            rows: [
+                                row('a', 'one', { title: 'the whole snippet' }),
+                                row('f', 'a folder', {
+                                    children: [row('c', 'three', { title: 'the nested one' })],
+                                }),
+                            ],
+                        },
+                    }]}
+                    onClose={onClose}
+                />,
+            );
+        });
+        hoverSync(menuItem('Snippets'));
+        // No dwell served and no keyboard used — the flag alone has to be doing this.
+        expect(titleOf(rows()[0])).toBe('the whole snippet');
+
+        // Clicking a folder opens it; ArrowRight would too, but that also sets `keyboardNav`,
+        // which is a different exemption and would mask the one under test.
+        act(() => {
+            rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+        expect(panels()).toHaveLength(2);
+        expect(titleOf(rows(1)[0])).toBe('the nested one');
+    });
+
+    it('a FOCUSED item keeps its title when the pointer sweeps over it and away', () => {
+        // The pointer and the keyboard are two independent claims on the same tooltip, and only
+        // the one that made a claim may drop it. Sharing one clear between `onMouseLeave` and the
+        // re-filter `reset()` is fine; extending that clear to FOCUS is not — it would take the
+        // description away from a keyboard user who never touched the mouse, at the moment some
+        // unrelated pointer left the item. That mutant passes every other test in this file.
+        renderSync(twoItems());
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        hoverSync(menuItem('Copy'));
+        hoverSync(menuItem('Paste'), menuItem('Copy'));
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        // Only blur takes it away.
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
+    it('`instantTitles` exempts a whole menu — for a picker whose titles ARE its content', () => {
+        // `TerminalDisplay`'s path picker: the labels deliberately strip the shared base directory,
+        // so the full path in `title` is the only thing telling three same-named files apart.
+        // Delaying it three seconds per candidate delays the one answer the menu exists to give.
+        act(() => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    instantTitles
+                    items={[{ label: 'file.cs', title: 'D:/a/b/file.cs', click: () => {} }]}
+                    onClose={onClose}
+                />,
+            );
+        });
+        expect(titleOf(menuItem('file.cs'))).toBe('D:/a/b/file.cs');
+    });
+
+    it('the flyout header toggle keeps its title unconditionally', () => {
+        // A glyph-only button, aimed at on purpose rather than swept past, whose `title` is the
+        // only text anywhere saying what pressing it does. There is no annoyance here to delay.
+        renderSync(menuWith({
+            rows: [row('a', 'x')],
+            headerToggle: { icon: '📁', title: 'Group by folder', pressed: false, onToggle: () => {} },
+        }));
+        hoverSync(menuItem('Snippets'));
+        const toggle = panel()!.querySelector('.context-menu-flyout-toggle')!;
+        expect(titleOf(toggle)).toBe('Group by folder');
+    });
+
+    it('a dwell armed before the menu unmounts is torn down with it', () => {
+        // **Asserted on the timer, not on a console warning** — React 18 removed the
+        // set-state-after-unmount warning, so that version passed with the cleanup deleted.
+        //
+        // **And on a DELTA of exactly one, over a fixture where nothing else can arm.** Counting
+        // `getTimerCount() > 0` was the second vacuous oracle here: hovering a PLAIN item also
+        // arms `scheduleCloseSubmenu`'s 260ms timer, so the count was satisfied by that alone and
+        // the test stayed green against a `useTooltipDwell` with no timer in it at all. A submenu
+        // parent takes the `openSubmenuAt` branch instead, which cancels rather than arms — so the
+        // one timer that appears here is the dwell, and this test can only be about the dwell.
+        renderSync([{ label: 'Snippets', title: 'Browse snippets.', submenu: { rows: [row('a', 'x')] } }]);
+        const before = jest.getTimerCount();
+        hoverSync(menuItem('Snippets'));
+        expect(jest.getTimerCount()).toBe(before + 1);
+
+        act(() => root.unmount());
+        expect(jest.getTimerCount()).toBe(0);
         // Re-created so the shared afterEach still has something to unmount.
         root = createRoot(container);
     });
@@ -487,8 +986,29 @@ describe('activating a row', () => {
         expect(onClose).not.toHaveBeenCalled();
     });
 
-    it('closes the whole menu for a row that asks to (Add New Snippet)', async () => {
-        const add = jest.fn();
+    /**
+     * **"Both fired" is the assertion that let this host be reordered on a false premise.**
+     *
+     * `add` once plus `onClose` once is satisfied by either sequence, so for as long as that was
+     * all this said, the order here was free. It was briefly changed to dismiss-then-act, on the
+     * argument that a `closeMenuOnSelect` row opens a surface and this menu holds a document-level
+     * `mousedown` trap and Escape listener until it is asked to go — so acting first would mount a
+     * modal under a live menu. Measured against the real component, that argument is wrong:
+     * `onCloseMenu()` is a queued `setState` that React does not flush until the end of the
+     * discrete event, so the menu is still mounted with both handlers installed when the row opens
+     * its surface EITHER WAY ROUND. Nothing was bought, and the reorder cost something real — see
+     * `ContextMenu.tsx`'s `closeMenuOnSelect` doc for the spurious terminal focus it caused.
+     *
+     * So the sequence is pinned, and pinned to the ACTION FIRST: the row states its intent, then
+     * the host acts on the dismissal, which is the order a close callback doing synchronous DOM
+     * work needs. This is the generic host's ordering oracle — every future `closeMenuOnSelect`
+     * caller inherits the rule from here — and the guarantee that matters for the row's sake is
+     * the separate one below: the dismissal happens even when the action throws.
+     */
+    it('runs a row that asks to dismiss, THEN dismisses (Add New Snippet)', async () => {
+        const order: string[] = [];
+        onClose.mockImplementation(() => { order.push('close'); });
+        const add = jest.fn(() => { order.push('select'); });
         await render(
             menuWith({
                 rows: [row('a', 'alpha')],
@@ -500,6 +1020,66 @@ describe('activating a row', () => {
 
         expect(add).toHaveBeenCalledTimes(1);
         expect(onClose).toHaveBeenCalledTimes(1);
+        expect(order).toEqual(['select', 'close']);
+    });
+
+    /**
+     * …and the dismissal survives a row whose action THROWS — which, for a caller of this generic
+     * host, is where the two orders stop settling to the same DOM.
+     *
+     * With nothing throwing they do settle the same: React batches the dismissal and whatever
+     * `onSelect` schedules into one commit, so "close first" and "close second" are told apart
+     * only by a recorded sequence (the test above). A throw splits them. `AutomationMenuSection`'s
+     * rows call `openAutomationEditorFor`, which mutates the host's `openRuleId` and THEN notifies
+     * its subscribers synchronously — so a subscriber that raises used to take the dismissal down
+     * with it, leaving the editor open under a menu that never closed and still owned Escape.
+     *
+     * The oracle here is settled state rather than a counter: a host that really unmounts on
+     * `onClose`, and `.context-menu` gone from the document afterwards. Reordering `activate`
+     * fails this on that DOM query, not on a mock — with the dismissal after `onSelect` the throw
+     * skips it, and the whole menu is still rendered.
+     */
+    it('still dismisses when the action of the row throws', async () => {
+        let thrown = 0;
+        const Host: React.FC = () => {
+            const [open, setOpen] = React.useState(true);
+            return open
+                ? (
+                    <ContextMenu
+                        x={10}
+                        y={10}
+                        items={menuWith({
+                            rows: [row('boom', 'Explodes', {
+                                onSelect: () => { thrown += 1; throw new Error('subscriber raised'); },
+                                closeMenuOnSelect: true,
+                            })],
+                        })}
+                        onClose={() => setOpen(false)}
+                    />
+                )
+                : null;
+        };
+        await act(async () => { root.render(<Host />); });
+        await click(menuItem('Snippets'));
+        expect(rows()).toHaveLength(1);
+
+        // React reports a handler's exception through the global error path rather than
+        // rethrowing it at the dispatch site, and jest-environment-jsdom turns that report into
+        // an uncaught exception that fails whichever test is running. `preventDefault()` in the
+        // capture phase marks the ErrorEvent handled, which is what jsdom checks before
+        // escalating. It suppresses the REPORT only — the throw has already happened, and the
+        // assertion below is a DOM query, so nothing about this rig can make the test pass for
+        // the wrong reason.
+        const swallow = (e: Event) => e.preventDefault();
+        window.addEventListener('error', swallow, true);
+        try {
+            await click(rows()[0]);
+        } finally {
+            window.removeEventListener('error', swallow, true);
+        }
+        expect(thrown).toBe(1);
+
+        expect(document.querySelector('.context-menu')).toBeNull();
     });
 
     it('does nothing for a disabled row', async () => {
@@ -988,23 +1568,10 @@ describe('row rendering', () => {
         expect(r.querySelector('.context-menu-flyout-icon')!.textContent).toBe('🚀');
         expect(r.querySelector('.context-menu-flyout-label')!.textContent).toBe('deploy');
         expect(r.querySelector('.context-menu-flyout-detail')!.textContent).toBe('infra');
-        expect(r.title).toBe('full snippet text');
-    });
-
-    it('gives the detail its own tooltip, defaulting to the text it truncates', async () => {
-        await render(menuWith({
-            rows: [
-                row('a', 'one', { detail: 'a very long folder and tag line', title: 'the snippet text' }),
-                row('b', 'two', { detail: 'chip', detailTitle: 'Folder: Ops' }),
-            ],
-        }));
-        await click(menuItem('Snippets'));
-        const detail = (i: number) => rows()[i].querySelector('.context-menu-flyout-detail')!;
-        // No `detailTitle`: the chip still gets one, showing what the ellipsis hid.
-        expect(detail(0).getAttribute('title')).toBe('a very long folder and tag line');
-        expect(rows()[0].getAttribute('title')).toBe('the snippet text');
-        // With one: it wins, so a caller can expand the chip into something readable.
-        expect(detail(1).getAttribute('title')).toBe('Folder: Ops');
+        // The tooltip is WITHHELD until the pointer rests — a row nobody is pointing at carries
+        // no `title` at all now. What it shows once it has been dwelt on is pinned under
+        // `tooltip dwell` below, where there is a clock to assert it against.
+        expect(r.hasAttribute('title')).toBe(false);
     });
 
     it('points aria-activedescendant at the active row', async () => {

@@ -18,6 +18,7 @@ import {
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
 import { DEFAULT_LAYOUT, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
+import { problems } from '../automationValidation';
 import { STEP_ORDER, defaultWires } from '../automationSteps';
 import type { AutomationRule } from '../../../types/electron';
 
@@ -103,7 +104,7 @@ describe('draft ⇄ row', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         // A FRESH canvas, so `present` can be varied without a remove — which no longer exists,
         // and cannot: see `automationSteps.ts`.
-        const draft = draftFromRule(rule, true);
+        const draft = draftFromRule(rule, 'blank');
         const moved = draftReducer(draft, { type: 'moveStep', step: 'monitor', pos: { x: 999, y: 999 } });
         const grown = draftReducer(moved, { type: 'addStep', step: 'monitor' });
 
@@ -118,6 +119,16 @@ describe('draft ⇄ row', () => {
 });
 
 describe('draftFromRule', () => {
+    /**
+     * What `AutomationMenuSection`'s `newDraftFor` hands the host for "New automation for this
+     * terminal": `blankDraft()` with the targeting overwritten and nothing else touched.
+     */
+    const seededRule = () => ({
+        ...blankDraft(),
+        targetMode: 'pinned' as const,
+        targetIds: ['tm-9'],
+    });
+
     it('draws all four steps for a template or an existing rule', () => {
         const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
         expect(draft.present).toEqual([...STEP_ORDER]);
@@ -130,16 +141,170 @@ describe('draftFromRule', () => {
         // Mockup §03's third state: an empty canvas and the "Start with Watch output" hint, so
         // building one from nothing is a thing the palette teaches rather than a thing that has
         // already happened.
-        const draft = draftFromRule(blankDraft(), true);
+        const draft = draftFromRule(blankDraft(), 'blank');
         expect(draft.present).toEqual([]);
         expect(draft.wires).toEqual([]);
         expect(draft.selected).toBeNull();
     });
 
-    it('opens clean, whatever it opened on', () => {
+    /**
+     * **The third opening — "New automation for this terminal" — and the two things it does that
+     * neither of the two above does.**
+     *
+     * The menu hands over a rule that already pins the terminal the user right-clicked, and this
+     * used to open on `'blank'`: an empty canvas, nothing selected, and a draft whose baseline was
+     * itself. Both halves of that were wrong in the same direction — the one decision that HAD been
+     * made was the one thing nothing on screen said. The canvas showed the "Start with Watch
+     * output" hint for a step that was already configured, and Escape threw the pinned terminal
+     * away without a prompt, because a draft compared against itself reads clean.
+     *
+     * Asserted as a pair with the `'blank'` case above rather than on its own: the two differ in
+     * exactly these fields, and a `draftFromRule` that ignored its second argument would satisfy
+     * either test alone.
+     */
+    it('draws the one step a SEEDED rule already has, and selects it', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        expect(draft.present).toEqual(['monitor']);
+        // One step wires to nothing — the palette is still how the other three arrive.
+        expect(draft.wires).toEqual([]);
+        // The whole point: the inspector opens on *Watch output* with the terminal already ticked,
+        // rather than one palette drag away from being noticed.
+        expect(draft.selected).toBe('monitor');
+        /**
+         * **And the RULE itself, absolutely — every other assertion in this describe is about the
+         * canvas.** `present`/`wires`/`selected` say what is drawn; none of them says the rule
+         * being drawn is still the one the menu handed over. A `draftFromRule` that rewrote
+         * `targetMode` to `'rule'` on the seeded path satisfied all of them, and all 369 automation
+         * tests, while reproducing the exact defect this opening exists to fix: MonitorPanel then
+         * renders the criterion UI, and the terminal the user right-clicked is nowhere on screen.
+         *
+         * Spelled out from `seededRule()` rather than compared against `draft.rule`'s own fields,
+         * so the oracle cannot move with the implementation. The layout is the one licensed
+         * difference: `draftFromRule` resolves it for a rule that predates the field.
+         */
+        expect(draft.rule).toEqual({
+            ...seededRule(),
+            graph: { ...seededRule().graph, layout: DEFAULT_LAYOUT },
+        });
+    });
+
+    it('opens a SEEDED rule dirty, against a baseline that differs only in the seeded pick', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        expect(isDirty(draft)).toBe(true);
+        /**
+         * Not merely "new rules are always dirty": the baseline names WHAT is unsaved, which is
+         * what makes *"Saving keeps them; leaving throws them away"* a true sentence here.
+         *
+         * **Stated from the UNSEEDED starting point, not as `{ ...draft.rule, targetIds: [] }`.**
+         * That form restates the implementation's own formula, so the promise this comment used to
+         * make — that a future seeding contributing a second field would fail here — was one it
+         * could not keep: both sides would move together and the test would stay green while the
+         * dirty check silently stopped reporting the new field. Anchored to `blankDraft()`, a
+         * second seeded field has to be written down here or the equality breaks.
+         */
+        expect(draft.saved).toEqual({
+            ...blankDraft(),
+            targetMode: 'pinned',
+            targetIds: [],
+            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+        });
+    });
+
+    it('a SEEDED draft goes clean when the save lands', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const stored = { ...ruleFromDraft(draft), id: 'r-minted' };
+        expect(isDirty(draftReducer(draft, { type: 'saved', rule: stored }))).toBe(false);
+    });
+
+    it('a SEEDED draft goes clean if the seeded terminal is unticked', () => {
+        // The paired negative for the baseline, and the honest consequence of it: the prompt is
+        // about the PICK, not about the rule being new. Untick the terminal the menu added and
+        // change nothing else and there is nothing UNSAVED left to warn about — not something to
+        // hold a *Leave without saving?* dialog over.
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const off = draftReducer(draft, { type: 'toggleTarget', id: 'tm-9' });
+        expect(off.rule.targetIds).toEqual([]);
+        expect(isDirty(off)).toBe(false);
+    });
+
+    it('…but that is not the same as being back at a blank rule, and the editor still says so', () => {
+        /**
+         * The sentence this pins used to read *"you are looking at an untouched blank rule"*, in
+         * both the test above and `draftFromRule`'s own doc. It is false, and the difference is
+         * visible to the user: `newDraftFor` contributes `targetMode: 'pinned'` as well as the
+         * pick, and the baseline drops only the pick — so what is on screen after the untick is a
+         * PINNED rule watching nothing, which `problems()` blocks the save on, while `blankDraft()`
+         * is `'rule'`/`allTerminals` and has no problem at all.
+         *
+         * "Nothing unsaved" and "ready to save" are two different questions. The dirty check
+         * answers only the first, and this is the test that stops the comment claiming otherwise.
+         */
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const off = draftReducer(draft, { type: 'toggleTarget', id: 'tm-9' });
+
+        expect(off.rule.targetMode).toBe('pinned');
+        expect(blankDraft().targetMode).toBe('rule');
+        expect(problems(off.rule).some((p) => p.code === 'targets.empty')).toBe(true);
+        expect(problems(blankDraft()).some((p) => p.code === 'targets.empty')).toBe(false);
+    });
+
+    /**
+     * **The fourth opening — a template picked from the gallery.**
+     *
+     * Tam: *"click New automation -> select predefined template -> it should become Unsaved, when
+     * user close it should show confirmation"*. The gallery handed a picked template to the editor
+     * on `'saved'`, whose baseline is the rule itself, so it read CLEAN and Escape threw the chosen
+     * template away without a word. That is the `'seeded'` defect again, one card to the left: a
+     * choice had been made, and nothing on the way out said so.
+     *
+     * The baseline is the blank rule the gallery was showing BEFORE the click, which makes the whole
+     * template the unsaved work — because that is what it is.
+     */
+    it('opens a picked TEMPLATE dirty, against the blank rule the gallery started from', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'template');
+        expect(isDirty(draft)).toBe(true);
+        expect(draft.saved).toEqual({
+            ...blankDraft(),
+            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+        });
+    });
+
+    it('every template opens dirty, not just the first', () => {
+        // A one-template check is satisfied by a baseline that happens to differ from THAT rule;
+        // the claim is about the opening, so it is asserted over the whole gallery.
+        for (const template of AUTOMATION_TEMPLATES) {
+            expect(isDirty(draftFromRule(draftFromTemplate(template), 'template'))).toBe(true);
+        }
+    });
+
+    it('a TEMPLATE draws all four steps, like the complete rule it is', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const draft = draftFromRule(rule, 'template');
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.selected).toBe('monitor');
+        // The RULE, absolutely — for the reason the seeded oracle is absolute: `present`/`wires`/
+        // `selected` are all about the canvas, and none of them would notice this opening quietly
+        // rewriting a field of the template on its way through.
+        expect(draft.rule).toEqual({ ...rule, graph: { ...rule.graph, layout: DEFAULT_LAYOUT } });
+    });
+
+    it('a TEMPLATE goes clean when the save lands', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'template');
+        const stored = { ...ruleFromDraft(draft), id: 'r-minted' };
+        expect(isDirty(draftReducer(draft, { type: 'saved', rule: stored }))).toBe(false);
+    });
+
+    it("the 'saved' opening is clean, whatever rule it opened on", () => {
+        // Templates used here as fixtures for "a complete rule" — this is the path an EXISTING rule
+        // takes out of the Settings list, NOT the path the gallery takes. A picked template goes
+        // through `'template'` and opens dirty; see above. The name of this test said "whatever it
+        // opened ON", which was read as "whatever opening", and that reading is now false.
         for (const [, rule] of AUTOMATION_TEMPLATES.map((t) => ['', draftFromTemplate(t)] as const)) {
             expect(isDirty(draftFromRule(rule))).toBe(false);
         }
+        // …and the blank card, the other opening that must not nag.
+        expect(isDirty(draftFromRule(blankDraft(), 'blank'))).toBe(false);
     });
 });
 
@@ -244,7 +409,7 @@ describe('isDirty', () => {
 });
 
 describe('the reducer', () => {
-    const draft = () => draftFromRule(blankDraft(), true);
+    const draft = () => draftFromRule(blankDraft(), 'blank');
 
     it('keeps steps in canonical order whatever order they were dropped in', () => {
         let d = draft();
@@ -260,7 +425,7 @@ describe('the reducer', () => {
         // Built in the order the palette enforces — `canAddStep` gates the gesture, and the
         // reducer trusts it, so arranging an order the palette refuses would be testing a state the
         // editor cannot reach.
-        const fresh = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), true);
+        const fresh = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'blank');
         const one = draftReducer(fresh, { type: 'addStep', step: 'monitor' });
         expect(one.wires).toEqual([]);
         const two = draftReducer(one, { type: 'addStep', step: 'parse' });

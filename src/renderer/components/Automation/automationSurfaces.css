@@ -75,10 +75,60 @@
     white-space: nowrap;
 }
 
+/* The icon and the name, on ONE line.
+ *
+ * `.au-menu-rule` above is a column — a rule is a name over its current state — so the row icon
+ * cannot simply be a third child of it: it would stack ON TOP of the name rather than sit before
+ * it. This is the line the two share. */
+.au-menu-rule-head {
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+/* A flex item defaults to `min-width: auto`, which along the MAIN axis means "refuse to shrink
+   below your own content" — so without this the name's `text-overflow: ellipsis` never engages and
+   the name pushes its row wider instead of being cut.
+
+   Only the NAME needs it, and this declaration used to be on the head as well, doing nothing:
+   `.au-menu-rule-head` is a flex item too, but of `.au-menu-rule`, which is a COLUMN — so its width
+   is the cross axis, where `auto` already computes to 0, and `width: 100%` above pins it anyway.
+
+   And what it buys is the ellipsis once the menu has a width to obey. It does not CAP the menu: a
+   long rule name in a menu free to grow still grows it, which is the accordion overflow recorded in
+   `termflow-fabric/docs/progress/047`. */
+.au-menu-rule-head .au-menu-rule-name {
+    min-width: 0;
+}
+
+/* The state lines up under the NAME, not under the icon. 28px is `.menu-icon`'s 20px box plus its
+   8px right margin, from `PaneContextMenu.css` — both hosts of this accordion load it. The icon
+   marks the row as a whole, and a second line starting beneath it would read as an item of its
+   own rather than as this one's current state. */
+.au-menu-rule .au-menu-rule-state {
+    padding-left: 28px;
+}
+
 /* The state, in the same words the Settings list uses for it. Dimmer, because the name is what is
    being chosen and this is what it is doing. */
 .au-menu-rule-state {
     display: block;
     font-size: 11px;
+    color: var(--text-tertiary, #969696);
+}
+
+/* "New automation for this terminal" / "Add to an existing automation" — the two actions that
+   keep the accordion useful when nothing is armed. Plain `.context-menu-item` rows otherwise;
+   this only marks them as the always-available tier under the (possibly empty) rule list, the
+   way `.au-menu-rule` marks a rule row. */
+.au-menu-action {
+    color: var(--text-secondary, #b0b0b0);
+}
+
+/* "No automation is armed…" / "No automations can be added to…" — an inert line, not a button,
+   so it never claims to be clickable. Same left inset as a rule row so the panel doesn't jump. */
+.au-menu-empty {
+    padding: 6px 10px;
+    font-size: 12px;
     color: var(--text-tertiary, #969696);
 }

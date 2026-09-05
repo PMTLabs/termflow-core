@@ -82,6 +82,22 @@ fn saved_detail(origin: &str, previous: Option<i64>) -> String {
     }
 }
 
+/// The `Log every check` switch's own log line, in the log it switches on.
+///
+/// It is written into the very surface it affects, and that is the point: without it a reader opening
+/// the activity log finds a sudden wall of `checked` and `no match` rows with nothing to say where
+/// they came from or when they will stop. Naming the deadline is the whole line — verbose logging is
+/// a window, not a mode, and the store's gate compares each entry's own instant against it.
+///
+/// A free function beside `saved_detail` for §7.10's reason: the wording is the thing worth testing,
+/// and inside a command that takes an `AppState` no test on Windows can reach it.
+fn verbose_detail(origin: &str, until: Option<i64>) -> String {
+    match until {
+        Some(at) => format!("logging every check until {}, from window {}", stamp(at), origin),
+        None => format!("stopped logging every check, from window {}", origin),
+    }
+}
+
 fn stamp(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|t| t.format("%H:%M:%S").to_string())
@@ -321,6 +337,133 @@ pub async fn save_automation(
     Ok(AutomationSaveResult { id, previous_updated_at: previous })
 }
 
+/// *Add this terminal to an existing automation* — the terminal context menu's row.
+///
+/// **The store decides whether the rule is still there, not the renderer.** The menu re-resolves the
+/// rule id against its cached rule list at click time, and that cache can be one commit out of date
+/// however carefully it is refreshed: `automation:changed` starts an async refetch, and the delete it
+/// announces may commit between that refetch's read and this write. Sending the whole rule object back
+/// through `save_automation` — which is what this row first did — therefore re-INSERTED rules another
+/// window had deleted, because `save_rule_as_of` is an unconditional upsert. `add_target_to_rule` makes
+/// the existence check and the append one transaction, and its `Ok(false)` is *the rule is gone, and
+/// nothing was written*.
+///
+/// **The reload and the announce are unconditional, including on that branch.** `automation:changed`
+/// is a refetch instruction rather than a claim that something changed, and the branch where nothing
+/// was written is exactly the branch where the calling window is holding a rule that no longer exists.
+#[tauri::command]
+pub async fn add_automation_target(
+    state: State<'_, AppState>,
+    rule_id: String,
+    terminal_id: String,
+    origin: String,
+) -> Result<bool, String> {
+    let owned = state.inner().clone();
+    let id = rule_id.clone();
+    let origin_for_log = origin.clone();
+    let at = now_ms();
+    let (added, reloaded) = tokio::task::spawn_blocking(move || {
+        let added = owned
+            .automation_store
+            .add_target_to_rule(&id, &terminal_id, at)
+            .map_err(to_string_err)?;
+        // Only while the rule is still there. `delete_rule` has already swept that rule's log rows, so
+        // a row written now would be one nothing will ever collect, drawn in the log view under a rule
+        // nobody can open.
+        //
+        // The wording is a STATE rather than an event, because the store's `bool` deliberately cannot
+        // tell an append from an id the rule already held: both leave the rule watching that terminal,
+        // and both are what the user asked for. `Saved` is the kind because what changed is the
+        // DEFINITION — the same reason the editor's own save writes one (§3.5).
+        if added {
+            note(
+                &owned,
+                &id,
+                LogKind::Saved,
+                &format!(
+                    "{} is now watched by this rule, from window {}",
+                    terminal_id, origin_for_log
+                ),
+            );
+        }
+        let reloaded = reload_after_commit(&owned, at);
+        Ok::<_, String>((added, reloaded))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    announce(&state, vec![rule_id], vec![], origin);
+    reloaded?;
+    Ok(added)
+}
+
+/// *Forget it* — the Settings list's button for a pinned terminal that has not come back.
+///
+/// **The mirror of `add_automation_target`, and closed the same way, because the class survived
+/// here.** That row was fixed and this one was not: the panel read a rule out of `useAutomations()`'s
+/// cached list, filtered `targetIds` in the renderer and sent the whole object back through
+/// `save_automation` — the unconditional upsert whose `None` arm INSERTs. So a rule deleted in
+/// another window was re-INSERTED by a click on *Forget it*, exactly as it was by a click on *Add to
+/// this automation*, and a concurrent edit to any other column of that rule was reverted by the
+/// stale copy riding along beside the one field the gesture meant to change.
+///
+/// Only ids cross the wire now. `remove_target_from_rule` makes the existence check and the removal
+/// one transaction, and its `Ok(false)` is *the rule is gone, and nothing was written*.
+///
+/// **`terminal_ids` is a list, not one id**, because the button is: the row hands over every pinned
+/// terminal the runtime currently calls missing, and forgetting them one call at a time would make a
+/// partial failure leave the rule in a state no window asked for.
+///
+/// **The reload and the announce are unconditional, including on the `false` branch**, for
+/// `add_automation_target`'s reason: `automation:changed` is a refetch instruction rather than a
+/// claim that something changed, and that branch is exactly the one where the calling window is
+/// holding a rule that no longer exists.
+#[tauri::command]
+pub async fn remove_automation_target(
+    state: State<'_, AppState>,
+    rule_id: String,
+    terminal_ids: Vec<String>,
+    origin: String,
+) -> Result<bool, String> {
+    let owned = state.inner().clone();
+    let id = rule_id.clone();
+    let origin_for_log = origin.clone();
+    let at = now_ms();
+    let (removed, reloaded) = tokio::task::spawn_blocking(move || {
+        let removed = owned
+            .automation_store
+            .remove_target_from_rule(&id, &terminal_ids, at)
+            .map_err(to_string_err)?;
+        // Only while the rule is still there, for the reason the append gives: `delete_rule` has
+        // already swept that rule's log rows, so a row written now is one nothing will ever collect,
+        // drawn under a rule nobody can open.
+        //
+        // A STATE rather than an event, again because the store's `bool` deliberately cannot tell a
+        // removal from an id the rule was not watching — a renderer one commit behind can name one
+        // another window already forgot, and both outcomes leave the rule not watching it. `Saved` is
+        // the kind because what changed is the DEFINITION: the pick set decides which terminals the
+        // engine watches.
+        if removed {
+            note(
+                &owned,
+                &id,
+                LogKind::Saved,
+                &format!(
+                    "{} — not watched by this rule, from window {}",
+                    terminal_ids.join(", "),
+                    origin_for_log
+                ),
+            );
+        }
+        let reloaded = reload_after_commit(&owned, at);
+        Ok::<_, String>((removed, reloaded))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    announce(&state, vec![rule_id], vec![], origin);
+    reloaded?;
+    Ok(removed)
+}
+
 #[tauri::command]
 pub async fn delete_automation(
     state: State<'_, AppState>,
@@ -418,6 +561,58 @@ pub async fn reset_automation(
 // Runtime-only mutations — no definition changed, so no reload
 // =================================================================================================
 
+/// *Log every check* — the activity log's verbose switch (§3.3, mockup §06).
+///
+/// **The third site of the class `add_automation_target` closed**, and the one nobody would have
+/// looked for: this switch also read its rule from the panel's cached list, set `verboseUntil` on
+/// that captured object and sent the whole rule back through `save_automation`. Same unconditional
+/// upsert, so the same two failures — a rule deleted in another window re-INSERTED by flicking a
+/// logging switch, and a concurrent edit to the message, the name or the pick set silently reverted
+/// by the fifteen columns that rode along beside the one this gesture meant to change.
+/// `set_verbose_until` writes only that column, and only if the rule is still there.
+///
+/// **In THIS section, and it is not a filing convenience.** `verbose_until` sits under the rule
+/// struct's own `runtime flags that outlive a process` heading beside `completed_at`, and the engine
+/// never reads it: the gate is `check_passes_gate`, in the store, off a cache `set_verbose_until`
+/// writes through. So there is no definition for `reload` to carry into the engine, and a reload here
+/// would be a `list_rules()` and a full rebuild of the live map that provably changes nothing —
+/// `every_command_that_changes_a_definition_reloads_the_engine` asserts that absence rather than
+/// leaving it to be read off this comment.
+///
+/// **It still announces.** `automation:changed` is a refetch instruction, and the switch's own
+/// rendered state — on, and *off again at 11:17* — is read straight off `rule.verboseUntil` in every
+/// window that has this rule's log open. Without the announce the other window's toggle stays where
+/// it was while the store's gate has already changed under it.
+#[tauri::command]
+pub async fn set_automation_verbose(
+    state: State<'_, AppState>,
+    rule_id: String,
+    verbose_until: Option<i64>,
+    origin: String,
+) -> Result<bool, String> {
+    let owned = state.inner().clone();
+    let id = rule_id.clone();
+    let origin_for_log = origin.clone();
+    let changed = tokio::task::spawn_blocking(move || {
+        let changed = owned
+            .automation_store
+            .set_verbose_until(&id, verbose_until)
+            .map_err(to_string_err)?;
+        // Only while the rule is still there — `delete_rule` has already swept its log rows, so a row
+        // written now would be one nothing will ever collect. `Saved` is the kind by elimination and
+        // not by preference: `Enabled`/`Disabled` are the enabled toggle's pair and would make the
+        // log say the rule itself had been switched on.
+        if changed {
+            note(&owned, &id, LogKind::Saved, &verbose_detail(&origin_for_log, verbose_until));
+        }
+        Ok::<_, String>(changed)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    announce(&state, vec![rule_id], vec![], origin);
+    Ok(changed)
+}
+
 /// *Re-arm now* — the manual backstop §2.6 admits the echo guard cannot fully replace.
 ///
 /// `terminal_id: None` means every pair this rule watches. Deliberately NOT a `reload`: no definition
@@ -514,7 +709,7 @@ mod source_tests {
     #[test]
     fn every_automation_command_runs_its_work_off_the_async_executor() {
         let bodies = command_bodies();
-        assert!(bodies.len() >= 11, "the commands moved: only found {:?}", bodies);
+        assert!(bodies.len() >= 13, "the commands moved: only found {:?}", bodies);
         for (name, body) in &bodies {
             assert!(
                 body.contains("spawn_blocking"),
@@ -550,6 +745,16 @@ mod source_tests {
             "duplicate_automation(",
             "set_enabled_checked(",
             "clear_completed(",
+            // The context menu's atomic target add. A rule's pick set IS part of its definition — it
+            // decides which terminals the engine watches — so a window that adds one and never reloads
+            // leaves the engine watching the old set until something else happens to reload it.
+            "add_target_to_rule(",
+            // …and its mirror, the list's *Forget it*. The removal owes the reload MORE than the
+            // append does: the targeting tick prunes a pair's arm keys by comparing the watch set it
+            // computes from the ENGINE's copy of the rule against the previous one, so until that copy
+            // is reloaded the forgotten terminal stays in the computed set, is never pruned, and goes
+            // on rendering as a watched-but-missing chip on the row whose button just forgot it.
+            "remove_target_from_rule(",
         ];
         let mut checked = 0;
         for (name, body) in command_bodies() {
@@ -586,7 +791,37 @@ mod source_tests {
                 name
             );
         }
-        assert_eq!(checked, 5, "the mutating commands moved; this test was checking nothing");
+        assert_eq!(checked, 7, "the mutating commands moved; this test was checking nothing");
+
+        // **The deliberate NON-mutator, asserted rather than merely left off the list above.**
+        //
+        // `set_verbose_until` writes a column on the rule row, so leaving it silently out of
+        // `mutators` would be indistinguishable from forgetting it — the exact shape this test exists
+        // to refuse. It is out because `verbose_until` is filed under the rule struct's own `runtime
+        // flags that outlive a process` heading and no file in this crate outside `automation_store.rs`
+        // reads it: the engine's `LiveRule` carries the column and never consults it, because the gate
+        // is `check_passes_gate`, off a store-side cache the setter writes through. There is nothing
+        // for `reload` to carry, and it would also be the one caller able to move a rule's arm state
+        // for a gesture that changes no evaluation — turning the log's detail up would re-arm the rule
+        // you turned it up to watch.
+        let verbose: Vec<(String, String)> = command_bodies()
+            .into_iter()
+            .filter(|(_, body)| body.contains("set_verbose_until("))
+            .collect();
+        assert_eq!(verbose.len(), 1, "the verbose switch must be exactly one command: {:?}", verbose);
+        assert!(
+            !verbose[0].1.contains("reload_after_commit("),
+            "`{}` reloads the engine for a column the engine does not read; if that changed, the \
+             argument above has to change with it",
+            verbose[0].0
+        );
+        // It is still a WRITE that other windows render, so the refetch instruction is not optional.
+        assert!(
+            verbose[0].1.contains("announce("),
+            "`{}` changes what every other window's verbose switch should be showing and tells none \
+             of them",
+            verbose[0].0
+        );
 
         // ONE call site, so the announce cannot be skipped by not using the helper. Counted over the
         // PRODUCTION half only — this assertion's own needle lives in the test half, and a source
@@ -655,7 +890,7 @@ mod source_tests {
     fn every_command_in_this_module_is_registered_in_lib() {
         let lib = crate::automation_engine::test_host::strip_comments(include_str!("lib.rs"));
         let names: Vec<String> = command_bodies().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names.len(), 11, "the command list changed: {:?}", names);
+        assert_eq!(names.len(), 14, "the command list changed: {:?}", names);
         for name in &names {
             assert!(
                 lib.contains(&format!("automation_commands::{},", name)),
@@ -737,6 +972,32 @@ mod source_tests {
         assert_ne!(replacing, super::saved_detail("main-2", Some(3_600_000)));
     }
 
+    /// **The verbose switch's line, in the log it switches on**, and both arms of it.
+    ///
+    /// The path this replaces wrote §3.5's *"saved from window main, replacing the version saved at
+    /// 20:14:07"* here, because flicking the switch went through `save_automation` — a sentence about
+    /// a definition save, for a gesture that saved no definition, in front of the wall of `checked`
+    /// rows it had just turned on. The line has to name the DEADLINE: verbose logging is a window,
+    /// not a mode, and a reader who cannot see when it closes cannot tell a rule that went quiet from
+    /// a log that stopped being written.
+    ///
+    /// A wall-clock instant rather than the raw ms, for `saved_detail`'s reason — it is read by a
+    /// person, beside rows that are already timestamped that way.
+    #[test]
+    fn the_verbose_line_names_the_deadline_it_set_and_the_window_that_set_it() {
+        let on = super::verbose_detail("main", Some(3_600_000));
+        assert!(on.starts_with("logging every check until "), "{}", on);
+        assert!(on.ends_with(", from window main"), "{}", on);
+        assert!(!on.contains("3600000"), "{}", on);
+
+        let off = super::verbose_detail("main-2", None);
+        assert_eq!(off, "stopped logging every check, from window main-2");
+        // The two arms must not read alike: an implementation that returned one sentence for both
+        // would leave the log unable to say which way the switch went — the same failure
+        // `set_automation_enabled`'s `Enabled`/`Disabled` pair is asserted against two blocks down.
+        assert_ne!(on, super::verbose_detail("main", None));
+    }
+
     /// **The three round-1 fixes that landed inside `AppState` commands**, where §7.10 says no
     /// Windows test can reach them — so they are pinned in source instead of not at all.
     ///
@@ -781,6 +1042,17 @@ mod source_tests {
             body("save_automation").contains("note(") && body("save_automation").contains("Saved"),
             "§3.5: a save writes no row saying it happened"
         );
+        // The two commands this round added. Each replaces a `save_automation` call that wrote a
+        // `saved` row on its way through, so dropping the `note(` would silently take a log line the
+        // user already had — and the log is the only surface that remembers either gesture at all.
+        // Guarded here for §7.10's reason: both `note(` calls live inside an `AppState` command.
+        for name in ["remove_automation_target", "set_automation_verbose"] {
+            assert!(
+                body(name).contains("note("),
+                "`{}` changes a rule and writes no row saying it happened",
+                name
+            );
+        }
         let enabled = body("set_automation_enabled");
         assert!(enabled.contains("note("), "§3.5: a toggle writes no row saying it happened");
         assert!(

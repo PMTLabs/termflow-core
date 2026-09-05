@@ -14,6 +14,7 @@ import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { usePaneMuteState } from './usePaneMuteState';
 import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
+import { useTooltipDwell } from '../../hooks/useTooltipDwell';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -57,6 +58,10 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // Whether this pane's terminal can be searched RIGHT NOW — see the Find item below for why
   // this is a live subscription and why it is a boolean.
   const searchable = useSurfaceChromeAvailable(terminalId ?? null);
+  // The three-second tooltip dwell, for the one ENABLED item in this menu that carries a title —
+  // see Mute, below. The accordion between them owns its own; a section that renders its own rows
+  // owns their tooltips.
+  const tip = useTooltipDwell();
   const [schemaExpanded, setSchemaExpanded] = useState(false);
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
@@ -274,15 +279,26 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🔍</span>
         Find…
       </button>
-      {/* The automations armed on THIS terminal, and the way into each one's editor
-          (`plan/028` item D). Grouped with Find and Mute rather than given a section of its own:
-          all three act on this pane's terminal, unlike the tab/window/split items above them.
+      {/* This terminal's automations: the rules armed on it and the way into each one's editor
+          (`plan/028` item D), plus — whether or not anything is armed — creating a new rule for it
+          or adding it to an existing rule's targets. Grouped with Find and Mute rather than given
+          a section of its own: all three act on this pane's terminal, unlike the tab/window/split
+          items above them. Renders nothing only for a pane with no terminal.
           The component is shared verbatim with `CanvasNodeMenu` — see its header. */}
       <AutomationMenuSection terminalId={terminalId ?? null} onDismiss={onClose} />
+      {/* Mute is the only ENABLED item here with a title, so it is the only one the dwell
+          applies to. The two disabled items above keep theirs unconditionally and deliberately: a
+          disabled button dispatches no mouse events, so a dwell over one could never be measured,
+          and for those two the tooltip is the only thing saying why they are dimmed. See
+          `useTooltipDwell`. */}
       <button
         className="context-menu-item"
         onClick={() => runAndClose(toggleMute)}
-        title={tabMuted ? 'This pane is also muted by its tab' : undefined}
+        title={tip.titleFor('mute', tabMuted ? 'This pane is also muted by its tab' : undefined)}
+        onMouseEnter={() => tip.onEnter('mute')}
+        onMouseLeave={tip.onLeave}
+        onFocus={() => tip.onFocus('mute')}
+        onBlur={() => tip.onBlur('mute')}
       >
         <span className="menu-icon"><BellIcon muted={tabMuted || paneMuted} /></span>
         {paneMuted ? 'Unmute Pane Notifications' : 'Mute Pane Notifications'}

@@ -8,6 +8,7 @@ import {
 } from '../../services/automationArmed';
 import {
     closeAutomationEditor,
+    getOpenAutomationDraft,
     getOpenAutomationRuleId,
     requestAutomationLog,
     subscribeAutomationEditorHost,
@@ -29,12 +30,24 @@ import { AutomationEditor } from './AutomationEditor';
  *
  * `openAutomationEditorFor` refuses while any editor is mounted, so this and the Settings one can
  * never both hold the single dirty-guard slot — see `automationEditorHost.ts`.
+ *
+ * **A second request shape, since "Automation is always available" added one.** `openRuleId` names
+ * an existing rule to resolve out of the live list, exactly as before. `openDraft` carries a whole
+ * unsaved `AutomationRule` (from `blankDraft()`, seeded with this terminal) for "New automation for
+ * this terminal" — there is no id yet for a lookup to resolve. The two are mutually exclusive at
+ * the host (`automationEditorHost.ts`), so reading both here and letting the draft win when present
+ * cannot pick the wrong one.
  */
 export const GlobalAutomationEditor: React.FC = () => {
     const ruleId = useSyncExternalStore(
         subscribeAutomationEditorHost,
         getOpenAutomationRuleId,
         getOpenAutomationRuleId,
+    );
+    const draft = useSyncExternalStore(
+        subscribeAutomationEditorHost,
+        getOpenAutomationDraft,
+        getOpenAutomationDraft,
     );
     const rules = useAutomationRules();
     const runtime = useAutomationRuntimeState();
@@ -43,7 +56,7 @@ export const GlobalAutomationEditor: React.FC = () => {
     // rule that fires and then goes quiet would sit on the receipt forever. This is the narrow half
     // of `AutomationsPanel`'s `tick`: one timer, for THIS rule's most recent fire.
     const [, setTick] = useState(0);
-    const rule = ruleId === null ? null : rules.find((r) => r.id === ruleId) ?? null;
+    const rule = draft ?? (ruleId === null ? null : rules.find((r) => r.id === ruleId) ?? null);
     const pairs = rule ? runtime.rules[rule.id] : undefined;
     const lastFiredAt = pairs
         ? Object.values(pairs).reduce<number | null>(
@@ -64,7 +77,9 @@ export const GlobalAutomationEditor: React.FC = () => {
     // The request outlived its rule — deleted in another window, or from the Settings list while
     // the menu that named it was open. Closing is the honest response; rendering the editor with a
     // blank draft would silently offer to create a NEW rule under the name of one the user asked to
-    // edit.
+    // edit. Guarded on `ruleId !== null` alone, which a draft request never sets, so this never
+    // fires for "New automation for this terminal" — a draft's id (`''`) is never in `rules` by
+    // definition, and that must not read as "outlived".
     useEffect(() => {
         if (ruleId !== null && rule === null && rules.length > 0) closeAutomationEditor();
     }, [ruleId, rule, rules.length]);
@@ -74,7 +89,14 @@ export const GlobalAutomationEditor: React.FC = () => {
     return (
         <AutomationEditor
             rule={rule}
-            freshCanvas={false}
+            // **`'seeded'`, not the gallery's `'blank'`** — the two used to be the same call, and
+            // that is what made "New automation for this terminal" open on an empty canvas with the
+            // terminal it had just pinned nowhere on screen, and let Escape throw that pick away
+            // without a prompt. `draft !== null` is exactly "this open request came from
+            // `openAutomationEditorForDraft`, not from resolving an existing id", and every such
+            // request is seeded: `newDraftFor` is its only producer and it always pins a terminal.
+            // See `CanvasOpening`.
+            opening={draft !== null ? 'seeded' : 'saved'}
             runtime={runtime}
             now={Date.now()}
             origin={getAutomationOrigin()}

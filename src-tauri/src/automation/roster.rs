@@ -35,9 +35,14 @@ pub struct RosterRow {
     pub display_label: Option<String>,
     /// OSC cwd, else the snapshot's process cwd — resolved by the caller, which owns both sources.
     pub cwd: Option<String>,
-    /// The deepest foreground descendant's full command line, from the shared process snapshot. `None`
-    /// when no scan was taken this TTL window.
-    pub command_line: Option<String>,
+    /// The command line of every process on the terminal's foreground chain — the shell, then each
+    /// descendant down to the deepest — from the shared process snapshot.
+    ///
+    /// A LIST, because the program a rule names is rarely the last link: a terminal running the
+    /// Claude CLI is `pwsh -> claude.exe -> bun.exe -> conhost.exe`, and reading only the deepest
+    /// descendant made `Command contains "claude"` select nothing, on every tick. Empty when no scan
+    /// was taken this TTL window, which reads as "no match" and never as "matches everything".
+    pub command_lines: Vec<String>,
 }
 
 /// What `automation_targets` remembered about a terminal, for the rows that are no longer live.
@@ -169,7 +174,7 @@ mod tests {
             pid: 4242,
             display_label: label.map(str::to_string),
             cwd: cwd.map(str::to_string),
-            command_line: None,
+            command_lines: Vec::new(),
         }
     }
 

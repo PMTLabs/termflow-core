@@ -57,7 +57,7 @@ import { faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
-import type { NodePos } from './automationDraft';
+import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
@@ -80,11 +80,36 @@ const DRAWER_LOG_LIMIT = 40;
  */
 const ROSTER_POLL_MS = 3000;
 
+/**
+ * How long the *Enabled* switch draws attention to itself after a clean save.
+ *
+ * **The thing this is a cue for is deliberate, and is not being changed.** A rule taken from a
+ * template lands `enabled: false` — `automationTemplates.ts` calls that its safety property — and
+ * `save` below can only ever turn `enabled` OFF (it disarms a rule that would be refused). So the
+ * whole picking-a-template path ends with a save that visibly does nothing: the rule is stored, and
+ * it will never run, and the screen says neither. Tam's ruling was *"let's keep it disabled for
+ * safe, however let's flash the enable toggle to attract user to enable it"*, so what changes is
+ * what the user is TOLD, not what is stored.
+ *
+ * Long enough for three pulses of the 0.6s keyframe in `auToggle.css` and no longer: this stops on
+ * its own, because a control that keeps blinking until it is clicked is a control that has started
+ * nagging.
+ */
+export const ENABLE_FLASH_MS = 1800;
+
 export interface AutomationEditorProps {
     /** The rule or draft to edit. `id: ''` means it has never been saved. */
     rule: AutomationRule;
-    /** A brand-new rule opens on an empty canvas; a template or an existing rule does not. */
-    freshCanvas: boolean;
+    /**
+     * What this open is: an existing rule or a template (`'saved'`), the gallery's blank card
+     * (`'blank'`), or a rule the menu already pointed at a terminal (`'seeded'`).
+     *
+     * A string rather than the boolean `freshCanvas` it replaced, because there are three openings
+     * and a boolean can only name two of them. See `CanvasOpening` for what each one decides — it
+     * settles both the canvas and the dirty baseline, which is why it is one value and not two
+     * props that could be handed down disagreeing with each other.
+     */
+    opening: CanvasOpening;
     /**
         * The WHOLE runtime payload, indexed here by the draft's own id rather than by the caller.
         *
@@ -115,7 +140,7 @@ const toast = (message: string, type: 'success' | 'error' | 'info' = 'info') => 
 
 export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     rule,
-    freshCanvas,
+    opening,
     runtime,
     now,
     origin,
@@ -123,8 +148,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     onOpenFullLog,
     onChanged,
 }) => {
-    const [draft, dispatch] = useReducer(draftReducer, { rule, freshCanvas }, (init) =>
-        draftFromRule(init.rule, init.freshCanvas));
+    const [draft, dispatch] = useReducer(draftReducer, { rule, opening }, (init) =>
+        draftFromRule(init.rule, init.opening));
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     const [terminals, setTerminals] = useState<WatchableTerminal[]>([]);
@@ -143,6 +168,9 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const [pendingDelete, setPendingDelete] = useState(false);
     const [pendingClose, setPendingClose] = useState(false);
     const [saving, setSaving] = useState(false);
+    /** See `ENABLE_FLASH_MS`. Set by a clean save of a rule that is off and could be on. */
+    const [enableFlash, setEnableFlash] = useState(false);
+    const enableFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
     const pairs = draft.rule.id.length > 0 ? runtime.rules[draft.rule.id] : undefined;
@@ -154,6 +182,13 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // The cleanup IS the release. Whatever route the editor is left by — Save, Escape, the X, an
     // unmount because Settings closed — the counter comes back down.
     useEffect(() => suspendGlobalShortcuts(), []);
+
+    // The flash ends by itself after `ENABLE_FLASH_MS`; this is for the editor being closed inside
+    // that window, where the timeout would otherwise fire into an unmounted component.
+    useEffect(() => () => {
+        if (enableFlashTimer.current) clearTimeout(enableFlashTimer.current);
+        enableFlashTimer.current = null;
+    }, []);
 
     // --- the data the editor needs ----------------------------------------------------------------
     const loadTerminals = useCallback(async () => {
@@ -261,6 +296,26 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 );
             } else {
                 toast(`Saved “${outgoing.name || 'Untitled automation'}”.`, 'success');
+            }
+
+            // **Point at the switch, but only when the switch would say yes.**
+            //
+            // `blockingNow` is `blockingProblems(problems(rule))` — the same predicate the toggle's
+            // own `disabled` uses, taken from the rule that was just WRITTEN rather than from the
+            // render-time draft, which is the only version the cue may speak about. A second,
+            // privately-worded "is this rule fine" test here is how a cue ends up pointing at a
+            // control that refuses. Three cases, and only one of them flashes:
+            // a rule saved ON is already running and needs no prompt; a rule saved OFF *because* it
+            // is blocked would be pointed at a switch that is dimmed and will refuse, which is
+            // worse than saying nothing; a rule saved OFF with nothing wrong with it is one click
+            // from working, and that click is the step nothing on this screen was asking for.
+            if (!outgoing.enabled && blockingNow.length === 0) {
+                if (enableFlashTimer.current) clearTimeout(enableFlashTimer.current);
+                setEnableFlash(true);
+                enableFlashTimer.current = setTimeout(() => {
+                    setEnableFlash(false);
+                    enableFlashTimer.current = null;
+                }, ENABLE_FLASH_MS);
             }
             return true;
         } catch (e) {
@@ -556,7 +611,10 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         Enabled
                         <button
                             type="button"
-                            className="au-tog"
+                            // `flash` is additive and temporary — `.au-tog` stays, so every
+                            // selector and every test that reaches this control by its class keeps
+                            // reaching it while the cue is playing.
+                            className={`au-tog${enableFlash ? ' flash' : ''}`}
                             role="switch"
                             aria-checked={draft.rule.enabled}
                             // A disabled control that explains itself: the switch is dimmed AND the

@@ -1,7 +1,9 @@
 /**
  * @jest-environment jsdom
  *
- * The pane-title menu's **Find…** item — `plan/027` R2.
+ * The pane-title menu's item-level behaviour. **Find…** (`plan/027` R2) is the original subject
+ * and most of this file; the tooltip-dwell describe at the end shares its harness rather than
+ * standing up a second copy of the two module mocks below.
  *
  * `PaneContextMenu` reaches nothing per-terminal on its own: every other action in it is Redux,
  * a store + tree walk, a service function or a poller singleton. Find is the first, and it goes
@@ -20,10 +22,11 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
-import tabsReducer from '../../../store/slices/tabsSlice';
-import panesReducer from '../../../store/slices/panesSlice';
+import tabsReducer, { addTab, setTabMuted } from '../../../store/slices/tabsSlice';
+import panesReducer, { addTabTree } from '../../../store/slices/panesSlice';
 import settingsReducer from '../../../store/slices/settingsSlice';
 import { PaneContextMenu } from '../PaneContextMenu';
+import { TOOLTIP_DWELL_MS } from '../../../hooks/useTooltipDwell';
 import {
   setSurfaceChrome, clearSurfaceChrome, __resetSurfaceChromeForTest,
 } from '../../../services/surfaceChrome';
@@ -220,5 +223,92 @@ describe('PaneContextMenu — Find…', () => {
     expect(findItem().disabled).toBe(false);
     act(() => { clearSurfaceChrome('tm-mine', owner); });
     expect(findItem().disabled).toBe(true);
+  });
+});
+
+/**
+ * **The three-second tooltip dwell, at this menu's one ENABLED titled item.**
+ *
+ * The dwell shipped on `Terminal/ContextMenu`, which this menu is not — it has its own
+ * implementation and its own plain `<button>` rows. Mute is the only item here that is both
+ * enabled and carrying a title, so it is the whole of the class at this host, and it went one
+ * round without the delay while the terminal menu an inch below it had it.
+ *
+ * The disabled items are deliberately NOT in the class and are covered by
+ * *"gives each disabled reason its own tooltip"* above, which reads their titles with no pointer
+ * event at all: a disabled `<button>` dispatches no mouse events, so a dwell over one could never
+ * be measured, and that test fails if anyone ever wraps them.
+ */
+describe('PaneContextMenu — the tooltip dwell', () => {
+  /** Mute's title exists only while the owning TAB is muted, so the tab has to be muted. */
+  const renderWithMutedTab = () => {
+    const store = makeStore();
+    store.dispatch(addTab({ id: 'tb-1', title: 'Tab', shellType: 'default' }));
+    store.dispatch(setTabMuted({ id: 'tb-1', muted: true }));
+    store.dispatch(addTabTree({
+      tabId: 'tb-1',
+      tree: { id: 'pn-1', type: 'terminal', terminalId: 'tm-mine' },
+    }));
+    act(() => {
+      root.render(
+        <Provider store={store}>
+          <PaneContextMenu
+            x={10}
+            y={20}
+            paneId="pn-1"
+            paneName="Pane 1"
+            terminalId="tm-mine"
+            onClose={onClose}
+          />
+        </Provider>,
+      );
+    });
+  };
+
+  const muteItem = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('.pane-context-menu .context-menu-item')]
+      .find((b) => b.textContent?.includes('Mute Pane Notifications'))!;
+
+  it('withholds the Mute tooltip until the pointer has rested for three seconds', () => {
+    renderWithMutedTab();
+    const item = muteItem();
+    // The fixture is only meaningful if this item HAS a title to withhold.
+    expect(item.textContent).toContain('Mute Pane Notifications');
+    expect(item.getAttribute('title')).toBeNull();
+
+    jest.useFakeTimers();
+    try {
+      act(() => {
+        item.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }));
+      });
+      expect(item.getAttribute('title')).toBeNull();
+      act(() => { jest.advanceTimersByTime(TOOLTIP_DWELL_MS - 1); });
+      expect(item.getAttribute('title')).toBeNull();
+      act(() => { jest.advanceTimersByTime(1); });
+      expect(item.getAttribute('title')).toBe('This pane is also muted by its tab');
+
+      // And leaving takes it away again, so a sweep leaves nothing armed behind it.
+      act(() => {
+        item.dispatchEvent(new MouseEvent('mouseout', {
+          bubbles: true,
+          relatedTarget: document.body,
+        }));
+      });
+      expect(item.getAttribute('title')).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('but gives it to a keyboard user immediately, who can never dwell', () => {
+    renderWithMutedTab();
+    const item = muteItem();
+    expect(item.getAttribute('title')).toBeNull();
+
+    act(() => { item.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    expect(item.getAttribute('title')).toBe('This pane is also muted by its tab');
+
+    act(() => { item.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+    expect(item.getAttribute('title')).toBeNull();
   });
 });

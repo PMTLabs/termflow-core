@@ -10,8 +10,11 @@
  * never appeared.
  *
  * `apiBase.test.ts` pins the resolver and `apiBaseMemo.test.ts` the memo; this pins the
- * HANDOFF, which is the link that was missing. Every fetching method is covered, not just
- * the canvas one — they all read the same base URL, so they all had the same bug.
+ * HANDOFF, which is the link that was missing. The table below is meant to be the COMPLETE
+ * roster of the bridge's `fetch` call sites — `canvasApiRequest` has its own case above only
+ * because it takes a path rather than a terminal id — since they all read the same base URL
+ * and so all had the same bug. A fetching method that arrives with no row here is unpinned,
+ * and `getTerminalScreenText` shipped as exactly that.
  */
 
 // Needs a working implementation from the moment it is created: tauri-bridge invokes at
@@ -92,6 +95,17 @@ describe('tauri-bridge REST calls address the bound port', () => {
   it.each([
     ['getTerminalOutput', () => tauriBridge.getTerminalOutput('t1'), '/terminals/t1/output'],
     ['getTerminalSnapshot', () => tauriBridge.getTerminalSnapshot('t1'), '/terminals/t1/snapshot'],
+    // Sits next to `/snapshot` deliberately: those two are the pair a single character swap
+    // turns into each other, and the swap is INVISIBLE everywhere else. The only consumer is
+    // the rule editor's terminal hover card, whose tests mock `window.electronAPI` outright and
+    // never reach this module; and the card guards its read with `typeof body?.screen ===
+    // 'string'`, so a `/snapshot` body — which has no `screen` key — degrades to '' and leaves
+    // the card stuck on “Reading its screen…” forever rather than failing anything.
+    [
+      'getTerminalScreenText',
+      () => tauriBridge.getTerminalScreenText('t1'),
+      '/terminals/t1/screen',
+    ],
     [
       'getTerminalFullScrollback',
       () => tauriBridge.getTerminalFullScrollback!('t1'),

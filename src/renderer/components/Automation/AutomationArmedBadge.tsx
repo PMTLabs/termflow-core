@@ -1,7 +1,7 @@
 import React from 'react';
 import type { ArmedAutomation } from '../../services/automationArmed';
 import { useArmedAutomationCount, useArmedAutomations } from '../../services/automationArmed';
-import { armedOverflow, armedTabTitle, armedTitle } from './automationArmedSummary';
+import { AUTOMATION_GLYPH, armedOverflow, armedTabTitle, armedTitle } from './automationArmedSummary';
 import './automationSurfaces.css';
 
 /**
@@ -24,16 +24,6 @@ import './automationSurfaces.css';
  * COUNT rather than the entries so that the tab strip re-renders only when that number changes —
  * see `useArmedAutomationCount`.
  */
-
-/**
- * The glyph, defined once.
- *
- * A bolt because the feature's verb is *fires*, and because every other per-terminal status in this
- * app is a labelled glyph rather than a colour: `⊘` exited, `◎` canvas here, `🔔` unseen. No state
- * in this app is signalled by colour alone (`automationState.ts`), and an indicator whose whole job
- * is to be noticed in 16 pixels of tab strip is the last place to start.
- */
-const GLYPH = '⚡';
 
 const AutomationArmedBadgeImpl: React.FC<{
     /** The rules armed on THIS terminal, from `useArmedAutomations`. */
@@ -58,7 +48,7 @@ const AutomationArmedBadgeImpl: React.FC<{
             title={armedTitle(armed, now)}
             data-armed-count={armed.length}
         >
-            <span className="au-armed-glyph" aria-hidden="true">{GLYPH}</span>
+            <span className="au-armed-glyph" aria-hidden="true">{AUTOMATION_GLYPH}</span>
             {!compact && <span className="au-armed-label">{armed[0].rule.name}</span>}
             {/* The `+N` survives `compact`. Tam asked for it "because there is tight space", so the
                 surface with the least space is the one that most needs to say there is more than
@@ -89,7 +79,7 @@ const AutomationArmedTabBadgeImpl: React.FC<{ count: number }> = ({ count }) => 
     if (count === 0) return null;
     return (
         <span className="au-armed compact tabstrip" title={armedTabTitle(count)}>
-            <span className="au-armed-glyph" aria-hidden="true">{GLYPH}</span>
+            <span className="au-armed-glyph" aria-hidden="true">{AUTOMATION_GLYPH}</span>
             {count > 1 && <span className="au-armed-more">{`+${count - 1}`}</span>}
         </span>
     );

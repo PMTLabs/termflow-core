@@ -136,6 +136,17 @@ export interface ElectronAPI {
   // a client-side ED3 scrollback wipe (e.g. codex on a resize).
   getTerminalFullScrollback?: (terminalId: string) => Promise<{ blob: string; rows: number; cols: number }>;
 
+  // The current visible screen as PLAIN text (GET /api/terminals/:id/screen), rendered
+  // from the same backend vt100 parser the two calls above use. `getTerminalSnapshot`
+  // returns a STYLED blob built to be replayed into an xterm instance; stripping escapes
+  // back out of it is not the same thing (the formatted form encodes runs of blanks as
+  // cursor ops, so stripping collapses column alignment — see api_server.rs's
+  // `plain_screen_text_keeps_alignment_that_escape_stripping_destroys`). Callers that want
+  // text to read or match against want this one. `screen` is the whole viewport in one
+  // string; `rows`/`cols` are the size it was rendered at. Optional like its neighbours
+  // above: callers guard with `?.` instead of assuming the host implements it.
+  getTerminalScreenText?: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
+
   // Lightweight PTY-size fetch for dimension auto-heal (no snapshot render).
   getTerminalSize?: (id: string) => Promise<{ cols: number; rows: number }>;
 
@@ -373,8 +384,11 @@ export interface ElectronAPI {
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
 
-  // Terminal Automations (Plan 028) — the eleven commands of `automation_commands.rs`,
-  // in the order that file declares them. All optional and all Tauri-only: the store is
+  // Terminal Automations (Plan 028) — the fourteen commands of `automation_commands.rs`.
+  // The first eleven are in the order that file declares them; the three id-only writers
+  // that replaced a whole-rule `saveAutomation` — `addAutomationTarget`,
+  // `removeAutomationTarget`, `setAutomationVerbose` — are listed last here as the newest
+  // of them. All optional and all Tauri-only: the store is
   // SQLite in the desktop process, so the browser host throws rather than pretending.
   // `origin` is the window label, carried so a `saved` log line can name which window
   // made the change (§3.5, GUI 19) — never for concurrency control.
@@ -397,6 +411,56 @@ export interface ElectronAPI {
   resetAutomation?: (id: string, origin: string) => Promise<void>;
   /** `terminalId: null` re-arms every pair this rule watches. */
   rearmAutomation?: (ruleId: string, terminalId: string | null) => Promise<void>;
+  /**
+   * Pin one more terminal onto an existing rule's target list, without going through a
+   * full `saveAutomation` of the whole rule — so a caller holding only an id (a menu on a
+   * pane, say) never has to read, mutate and write back a rule it does not otherwise own.
+   *
+   * The boolean is the OUTCOME, not a success flag, and the two arms are not "written" and
+   * "not written". `true` = **the rule is still there and it now watches that terminal** —
+   * which covers an id it was already watching, a case that writes nothing at all and is
+   * deliberately reported as success, because it is what the click asked for and because
+   * re-stamping the row would re-arm the rule for a gesture that changed nothing. `false`
+   * = the rule id no longer names a rule — deleted from another window between the moment
+   * the caller learned the id and this write — so nothing was written and nothing is
+   * broken. Callers must branch on it (typically: tell the user, and drop the stale entry
+   * from whatever list they were showing); a rejection means a real IPC or store failure.
+   */
+  addAutomationTarget?: (ruleId: string, terminalId: string, origin: string) => Promise<boolean>;
+  /**
+   * `addAutomationTarget`'s mirror: unpin terminals from an existing rule, by id.
+   *
+   * Here for the same reason and reading the same way. `true` = the rule is still there and
+   * it does not watch those terminals — which covers ids it was not watching anyway, since
+   * the caller's list of "pinned but missing" terminals can be a commit behind the store.
+   * `false` = the rule is gone and nothing was written. A rejection is a real failure, and
+   * one of them is ordinary: forgetting the LAST pinned terminal of an enabled rule leaves
+   * it with nothing to watch, which the store's save gate refuses by design.
+   *
+   * A list rather than one id because the button is: a row forgets every pinned terminal
+   * the runtime currently calls missing, in one write.
+   */
+  removeAutomationTarget?: (
+    ruleId: string,
+    terminalIds: string[],
+    origin: string,
+  ) => Promise<boolean>;
+  /**
+   * Move a rule's *Log every check* deadline — a wall-clock ms, or `null` to switch it off.
+   *
+   * A deadline and not a flag: verbose logging writes thousands of rows a day per terminal
+   * and would evict everything worth keeping from a 200-entry log, so it expires on its own.
+   *
+   * `true` = the rule is still there and its deadline is now this. `false` = the rule is
+   * gone and nothing was written. Same reason as its two siblings: sending the whole rule
+   * back through `saveAutomation` to change this one column re-INSERTED rules deleted in
+   * another window and reverted concurrent edits to every other column.
+   */
+  setAutomationVerbose?: (
+    ruleId: string,
+    verboseUntil: number | null,
+    origin: string,
+  ) => Promise<boolean>;
 }
 
 declare global {

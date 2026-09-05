@@ -2,10 +2,11 @@
 //!
 //! Five criteria (plan §4.4). Two of them are where the bugs live:
 //!
-//! - `Command contains` reads the deepest foreground descendant's full COMMAND LINE, not the process
-//!   name, because an npm-installed agent is `node.exe` — which is why `detect_agent` reads the
-//!   cmdline to disambiguate. It projects off `get_foreground_process_info`'s returned pid so the
-//!   youngest-child descent is not implemented a third time.
+//! - `Command contains` reads the COMMAND LINE of every process on the terminal's foreground chain,
+//!   never the process name, because an npm-installed agent is `node.exe` — which is why
+//!   `detect_agent` reads the cmdline to disambiguate. It reads the WHOLE chain rather than its
+//!   deepest link because agents spawn helpers: `pwsh -> claude.exe -> bun.exe -> conhost.exe` is a
+//!   measurement off a real machine, and the deepest link there is `conhost.exe`.
 //! - `Working folder is under` must NOT be a string `starts_with`. Both sides normalise through
 //!   `open_commands::to_native_path` (tilde expansion, the Git-Bash/WSL `/d/...` -> `D:\...` remap,
 //!   separator normalisation) because the three cwd sources genuinely disagree, and then compare
@@ -104,7 +105,12 @@ pub fn resolve(criterion: Criterion, value: &str, rows: &[RosterRow]) -> BTreeSe
                 // `display_label`, NEVER `name` — `name` is `Terminal-{shell}` for every
                 // renderer-created terminal, so matching it would match the shell, not the tab.
                 Criterion::TabNameContains => contains_ci(row.display_label.as_deref(), needle),
-                Criterion::CommandContains => contains_ci(row.command_line.as_deref(), needle),
+                // ANY level of the foreground chain, never just its last link — see
+                // `RosterRow::command_lines`. The program a rule names normally sits in the
+                // middle of the chain, with its own helpers below it.
+                Criterion::CommandContains => {
+                    row.command_lines.iter().any(|line| contains_ci(Some(line), needle))
+                }
                 Criterion::WorkingFolderUnder => row
                     .cwd
                     .as_deref()
@@ -176,6 +182,20 @@ mod tests {
         ParsePreset, ParseStep, ReadMode, SendTo,
     };
 
+    /// One row whose foreground chain is exactly the levels given, shell first.
+    fn row_chain(tm: Option<&str>, cmd: &[&str]) -> RosterRow {
+        RosterRow {
+            terminal_id: tm.map(str::to_string),
+            process_id: format!("pc-{}", tm.unwrap_or("none")),
+            name: "Terminal-powershell".to_string(),
+            shell: "powershell".to_string(),
+            pid: 100,
+            display_label: None,
+            cwd: None,
+            command_lines: cmd.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     fn row(tm: Option<&str>, label: Option<&str>, cwd: Option<&str>, cmd: Option<&str>) -> RosterRow {
         RosterRow {
             terminal_id: tm.map(str::to_string),
@@ -185,7 +205,7 @@ mod tests {
             pid: 100,
             display_label: label.map(str::to_string),
             cwd: cwd.map(str::to_string),
-            command_line: cmd.map(str::to_string),
+            command_lines: cmd.into_iter().map(str::to_string).collect(),
         }
     }
 
@@ -344,6 +364,50 @@ mod tests {
         // No snapshot taken this window: no command line, no match — never "matches everything".
         let no_scan = [row(Some("tm-x"), Some("x"), None, None)];
         assert!(ids(resolve(Criterion::CommandContains, "node", &no_scan)).is_empty());
+    }
+
+    /// **The measured defect: the program a rule names is on the chain, but not at its end.**
+    ///
+    /// Read off a real machine — a terminal running the Claude CLI is
+    /// `pwsh -> claude.exe -> bun.exe -> conhost.exe`. A matcher that reads only the deepest
+    /// descendant tests `conhost.exe`'s command line, so `Command contains "claude"` selected
+    /// nothing, on every tick, forever. The whole chain is the haystack, and the assertion is a
+    /// LIST over the levels because "the agent is somewhere on it" is the property — one sample
+    /// cannot state that, and the level that used to be read is the one that does NOT match.
+    #[test]
+    fn command_contains_matches_any_level_of_the_chain_not_only_the_deepest() {
+        let rows = [row_chain(
+            Some("tm-agent"),
+            &[
+                r"C:\Program Files\PowerShell\7\pwsh.exe -NoLogo",
+                r"C:\Users\t\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe --resume",
+                r"bun.exe x tsc --noEmit",
+                r"\??\C:\WINDOWS\system32\conhost.exe 0x4",
+            ],
+        )];
+        for (needle, want, why) in [
+            ("pwsh", true, "the shell itself is the first link"),
+            ("claude", true, "THE case: the agent sits in the middle of the chain"),
+            ("bun", true, "a helper the agent spawned"),
+            ("conhost", true, "the deepest link, the only one the old matcher could see"),
+            ("codex", false, "a needle on no level still matches nothing"),
+        ] {
+            assert_eq!(
+                !ids(resolve(Criterion::CommandContains, needle, &rows)).is_empty(),
+                want,
+                "{:?}: {}",
+                needle,
+                why
+            );
+        }
+    }
+
+    /// An empty chain is "no scan taken", which must read as no match and never as matches-all.
+    #[test]
+    fn an_empty_chain_matches_nothing() {
+        let rows = [row_chain(Some("tm-x"), &[])];
+        assert!(ids(resolve(Criterion::CommandContains, "claude", &rows)).is_empty());
+        assert!(ids(resolve(Criterion::CommandContains, "x", &rows)).is_empty());
     }
 
     #[test]

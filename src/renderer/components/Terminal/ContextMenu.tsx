@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTooltipDwell } from '../../hooks/useTooltipDwell';
+// Re-exported because the dwell is part of THIS menu's observable contract even though the hook
+// that implements it is shared — the tests that tick it, and any caller reasoning about how long a
+// tooltip takes, are talking about the menu, not about a hook in `hooks/`.
+export { TOOLTIP_DWELL_MS } from '../../hooks/useTooltipDwell';
 import './ContextMenu.css';
 
 /**
@@ -35,19 +40,58 @@ export interface ContextMenuFlyoutRow {
   title?: string;
   /** Rows of a nested flyout. Present ⇒ this is a folder row. */
   children?: ContextMenuFlyoutRow[];
-  /** Run on click / Enter. Ignored for folder rows. */
+  /** Run on click / Enter. Ignored for folder rows. Runs BEFORE the dismissal a
+   *  `closeMenuOnSelect` row asks for — see that field, which explains why that order is the
+   *  correct one rather than the arbitrary one. */
   onSelect?: () => void;
   /**
-   * Close the WHOLE context menu after `onSelect`.
+   * Dismiss the WHOLE context menu, unconditionally, **after** `onSelect` has run.
    *
    * §4.5 is "**every** row closes the menu" — and every row this repo builds
-   * (`snippetsHistoryMenu.ts`) says so explicitly. That is deliberately a decision
-   * stated at each call site rather than a default here, for two reasons: it is a
-   * product rule about snippet and history rows, not a property of a generic
-   * flyout (a folder row opens a submenu and dismisses nothing); and stated as
-   * data it is assertable straight off the builder's output, where a default
-   * cannot be. Defaults to **false** so a row that never considered dismissal
-   * cannot tear down the surface the user is mid-interaction with.
+   * (`snippetsHistoryMenu.ts`, `AutomationMenuSection.tsx`) says so explicitly. That is
+   * deliberately a decision stated at each call site rather than a default here, for two
+   * reasons: it is a product rule about the rows this app happens to build, not a property
+   * of a generic flyout (a folder row opens a submenu and dismisses nothing); and stated as
+   * data it is assertable straight off the builder's output, where a default cannot be.
+   * Defaults to **false** so a row that never considered dismissal cannot tear down the
+   * surface the user is mid-interaction with.
+   *
+   * **The action runs first, and the dismissal is unconditional — a `finally`, not an
+   * ordering.** Both halves of that are load-bearing, and the first one was briefly the
+   * other way round on the strength of an argument that does not survive being measured.
+   *
+   * *The argument that failed.* Several rows here open a surface of their own: a modal
+   * editor (`AutomationMenuSection`'s rule and "New automation" rows) or a dialog
+   * (`snippetsHistoryMenu`'s "Add New Snippet"). This menu does not close itself when
+   * something is portalled on top of it, and while it is up it holds a document-level
+   * `mousedown` trap and a document-level Escape handler. It is tempting to conclude that
+   * the dismissal must therefore be asked for FIRST, so the modal never mounts under a live
+   * menu. It does not follow: `onCloseMenu()` is a queued `setState`, and React does not
+   * flush it until the end of the discrete event. Probing the real component — counting
+   * live document listeners from inside a row's `onSelect` — shows the menu still mounted
+   * with BOTH handlers installed at the moment the row opens its surface, **whichever order
+   * the two calls are in**. Reordering bought nothing here, and the paragraph that used to
+   * stand in this space claimed otherwise while conceding two lines later that React batches
+   * the two commits into one.
+   *
+   * *What order genuinely decides* is a close callback that does synchronous non-React
+   * work, and there the action-first order is the correct one rather than the arbitrary
+   * one. `TerminalDisplay`'s `closeContextMenu` puts DOM focus back in the terminal, and
+   * guards that with a ref which "Add New Snippet" sets as it opens its dialog. Run the
+   * close first and that ref is still `false`, so the guard falls through and
+   * `engine.focus()` fires on the terminal in the gap before the dialog mounts — which
+   * under DECSET 1004 focus reporting is a spurious focus-in/focus-out pair written to the
+   * PTY, on every click, visible to any TUI that redraws on focus. The row must be allowed
+   * to state its intent before the host acts on the dismissal.
+   *
+   * *Which leaves the one real defect the reorder was reaching for*: a row whose action
+   * RAISES — a store listener that throws inside a synchronous `emit()`, say — used to skip
+   * the dismissal outright and strand the menu on screen over the surface it had just
+   * opened. That is fixed by making the dismissal unconditional rather than by moving it:
+   * the `finally` runs on both paths, and the queued close still commits because React
+   * dispatches inside `batchedUpdates`, whose own `finally` flushes work already scheduled.
+   * `contextMenuFlyout.test.tsx` pins it with a host that really unmounts, and asserts the
+   * menu is gone from the DOM rather than that a mock was called.
    */
   closeMenuOnSelect?: boolean;
   /** Inert placeholder (an empty-state message). Rendered, never activated, and
@@ -139,6 +183,18 @@ interface ContextMenuProps {
   items: ContextMenuItem[];
   onClose: () => void;
   /**
+   * Show every `title` at once, skipping the dwell.
+   *
+   * For a menu that is not a list of ACTIONS you sweep through but a list of CANDIDATES you have
+   * to tell apart. `TerminalDisplay`'s path picker is the case: its labels deliberately strip the
+   * shared base directory so the rows read `…\\file.cs` rather than three long absolute paths, and
+   * the `title` holds the full path — which is to say the tooltip is the entire content of the
+   * menu, not an explanation of it. Three seconds per candidate to answer the only question the
+   * picker exists to answer is a regression, and there is no trail to suppress: nobody sweeps past
+   * a two-line disambiguation prompt on the way to something else.
+   */
+  instantTitles?: boolean;
+  /**
    * Render ONLY this item's flyout — open on the first paint, with no menu around it.
    *
    * The keyboard shortcut that opens the Snippets list is what this is for. Pressing a
@@ -204,6 +260,8 @@ interface FlyoutPanelProps {
   flyout: ContextMenuFlyout;
   /** 0 for the flyout hanging off a menu item, 1+ for a folder inside one. */
   depth: number;
+  /** See `ContextMenuProps.instantTitles` — threaded down so a picker's rows are exempt too. */
+  instantTitles?: boolean;
   /**
    * `true` when the panel this one hangs off is itself rendering to the LEFT of its
    * anchor. A cascade that has started leftward must keep going leftward: see the
@@ -212,7 +270,8 @@ interface FlyoutPanelProps {
   parentFlippedLeft?: boolean;
   /** Escape / ArrowLeft / Tab — closes THIS panel and returns focus to its opener. */
   onCloseSelf: () => void;
-  /** Dismiss the entire context menu (a row with `closeMenuOnSelect`). */
+  /** Dismiss the entire context menu — called for a `closeMenuOnSelect` row, before that
+   *  row's own `onSelect` runs. */
   onCloseMenu: () => void;
 }
 
@@ -261,17 +320,30 @@ interface FlyoutPanelProps {
 const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   flyout,
   depth,
+  instantTitles = false,
   parentFlippedLeft = false,
   onCloseSelf,
   onCloseMenu,
 }) => {
   const uid = useId();
+  // One per PANEL, not one shared down the cascade: each panel owns the rows it draws, and a
+  // nested panel opening is itself a move off the folder row that opened it.
+  const tip = useTooltipDwell();
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const activeRowRef = useRef<HTMLButtonElement>(null);
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+  /**
+   * Was the active row reached by the KEYBOARD?
+   *
+   * `onMouseEnter` also sets `activeIdx`, so "is the active row" cannot stand in for "was arrowed
+   * to" — using it directly would hand the hovered row its title instantly and delete the feature.
+   * Set by the arrow keys, cleared by the pointer, so the two navigation modes are distinguishable
+   * at the one place that has to tell them apart.
+   */
+  const [keyboardNav, setKeyboardNav] = useState(false);
   // Starts on the parent's side of the cascade, so the direction is already right on
   // the very first paint and stays right if nothing can ever be measured.
   const [flip, setFlip] = useState<{ left: boolean; shiftY: number }>({
@@ -312,6 +384,17 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     setActiveIdx(0);
     // Folders are hidden while filtering, so an open one has no anchor left.
     setOpenFolderId(null);
+    /**
+     * **And the dwell, which is the one with teeth.** The search box is focused when the panel
+     * opens, so re-filtering needs no pointer event at all — and `useTooltipDwell` is cleared only
+     * by pointer events. Without this, a dwelt key outlives the row that earned it and whatever
+     * lands on that key next inherits an armed tooltip: with Command History's rows, which were
+     * `history-${i}` until this same round, resting on the top row for three seconds and then
+     * typing popped a native tooltip for a DIFFERENT command with no delay, once per keystroke.
+     * The ids are content-derived now; this is the other half, and it is the half that also covers
+     * a row surviving the filter while nobody is resting on it.
+     */
+    tip.reset();
   }, [query]);
 
   // Keep the active row in view as the arrows move past the `max-height` (§4.4).
@@ -360,8 +443,13 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         setOpenFolderId(row.id);
         return;
       }
-      row.onSelect?.();
-      if (row.closeMenuOnSelect) onCloseMenu();
+      // The action runs first and the dismissal is in a `finally` — see `closeMenuOnSelect`
+      // for why that is the right way round, and why asking for the dismissal first is not.
+      try {
+        row.onSelect?.();
+      } finally {
+        if (row.closeMenuOnSelect) onCloseMenu();
+      }
     },
     [onCloseMenu],
   );
@@ -378,6 +466,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       e.preventDefault();
       const step = e.key === 'ArrowDown' ? 1 : -1;
       setActiveIdx((safeIdx + step + navigable.length) % navigable.length);
+      setKeyboardNav(true);
       return;
     }
     if (e.key === 'Enter') {
@@ -428,6 +517,14 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const renderRow = (row: ContextMenuFlyoutRow) => {
     const active = row.id === activeId;
     const folder = isFolder(row);
+    /**
+     * Both of this row's tooltips, gated on the dwell — with three exemptions, each documented on
+     * `useTooltipDwell` itself: a picker whose titles ARE its content, a disabled row that
+     * dispatches no mouse events, and the row a KEYBOARD user has arrowed to, for whom no mouse
+     * dwell will ever happen and whose `title` is the only copy of a truncated label's full text.
+     */
+    const tipFor = (t: string | undefined) =>
+      (instantTitles || row.disabled || (keyboardNav && active) ? t : tip.titleFor(row.id, t));
     return (
       <div className="context-menu-flyout-item" key={row.id}>
         <button
@@ -438,7 +535,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           aria-selected={active}
           className={`context-menu-flyout-row${active ? ' is-active' : ''}${row.disabled ? ' is-empty' : ''}`}
           disabled={row.disabled}
-          title={row.title}
+          title={tipFor(row.title)}
           tabIndex={-1}
           // Keep the caret in the search box: without this the press blurs the input,
           // and the keyboard would be dead the moment the mouse was used once.
@@ -446,13 +543,19 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           onMouseEnter={() => {
             const i = navigable.indexOf(row);
             if (i >= 0) setActiveIdx(i);
+            setKeyboardNav(false);
+            tip.onEnter(row.id);
           }}
+          onMouseLeave={tip.onLeave}
           onClick={() => activate(row)}
         >
           {row.icon && <span className="context-menu-flyout-icon">{row.icon}</span>}
           <span className="context-menu-flyout-label">{row.label}</span>
           {row.detail && (
-            <span className="context-menu-flyout-detail" title={row.detailTitle ?? row.detail}>
+            <span
+              className="context-menu-flyout-detail"
+              title={tipFor(row.detailTitle ?? row.detail)}
+            >
               {row.detail}
             </span>
           )}
@@ -533,6 +636,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           reintroduced, and it is no longer inside anything that clips. */}
       {openFolder && (
         <FlyoutPanel
+          instantTitles={instantTitles}
           flyout={{
             ...flyout,
             rows: openFolder.children!,
@@ -559,6 +663,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   y,
   items,
   onClose,
+  instantTitles = false,
   standaloneSubmenu,
 }) => {
   /** No menu chrome, no items — one flyout, at the requested point. */
@@ -605,6 +710,20 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   // A timer that outlives the menu would set state on an unmounted component, and keep a
   // closure over `items` alive for a menu the user has already dismissed.
   useEffect(() => cancelPendingClose, [cancelPendingClose]);
+
+  // The items' tooltips. The flyout panels hold their own — see `useTooltipDwell`.
+  //
+  // The cost, stated for THIS instance because it differs from the flyout's: one re-render of the
+  // portalled menu three seconds after the pointer stops, and one more as the previous row's title
+  // is taken away. That is new work — a host item's hover is otherwise pure CSS, unlike a flyout
+  // row, whose `is-active` marker already re-renders on `mouseenter`. It touches only `title`
+  // attributes, so it forces no layout and re-runs neither placement effect (theirs are keyed on
+  // `[x, y]` and `[visible, parentFlippedLeft]`).
+  //
+  // A host item is an ordinary Tab-focusable button, so the KEYBOARD half of this is plain DOM
+  // focus and the hook answers it — `tip.onFocus`/`tip.onBlur` below. It was a `useState` here for
+  // one round; it moved the moment the accordion needed the same exemption.
+  const tip = useTooltipDwell();
 
   // `standaloneSubmenu` bypasses `openSubmenuAt`, so its `onOpen` has to be fired here or
   // a shortcut-opened Command History would never warm its directory cache. Mount only:
@@ -668,23 +787,47 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
         const disabled = item.enabled === false;
         const submenuOpen = openSubmenu === index;
+        /**
+         * The dwell key: the item's own LABEL, and its index only as a fallback.
+         *
+         * `items` is rebuilt by the owner on every one of ITS renders, and this menu stays
+         * mounted across them — `TerminalDisplay` re-renders while the menu is open whenever
+         * agent detection settles, which inserts a *"Color scheme for …"* item above Copy and
+         * shifts every index below it. A dwelt tooltip keyed on position would then be handed
+         * to whichever item had slid into that slot: the wrong sentence, on the right-looking
+         * row, for the rest of the dwell. A label is what the user is actually pointing at.
+         *
+         * Two items sharing a label would share a key, which merely puts the attribute on both
+         * — only the one under the pointer can show a tooltip, so that is a non-event, unlike
+         * the mismatch above. The index fallback is for a labelless item, which cannot be one
+         * of a matching pair in any menu this repo builds.
+         */
+        const tipKey = item.label ?? `item-${index}`;
 
         const button = (
           <button
             key={index}
             className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}`}
             disabled={disabled}
-            title={item.title}
+            // Two exemptions here, both documented on `useTooltipDwell`: a picker whose titles
+            // ARE its content, and a disabled item (which dispatches no mouse events, and whose
+            // tooltip is the only thing saying why it is dimmed). The third — an item reached by
+            // the keyboard — is inside `titleFor`, fed by the focus handlers below.
+            title={instantTitles || disabled ? item.title : tip.titleFor(tipKey, item.title)}
             aria-haspopup={item.submenu ? 'menu' : undefined}
             aria-expanded={item.submenu ? submenuOpen : undefined}
             onMouseEnter={() => {
               if (disabled) return;
+              tip.onEnter(tipKey);
               // A plain item retires whatever flyout is open; a submenu parent opens its
               // own. Both live on the ITEM rather than on the host below, so a menu with
               // no submenus at all is untouched by any of this.
               if (item.submenu) openSubmenuAt(index, item);
               else scheduleCloseSubmenu();
             }}
+            onMouseLeave={tip.onLeave}
+            onFocus={() => tip.onFocus(tipKey)}
+            onBlur={() => tip.onBlur(tipKey)}
             onClick={() => {
               // A submenu parent OPENS its flyout instead of running the item and closing
               // the menu — the branch has to come before `onClose()` or the menu would be
@@ -731,6 +874,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               <FlyoutPanel
                 flyout={item.submenu}
                 depth={0}
+                instantTitles={instantTitles}
                 // With no menu behind it, retiring the panel alone would leave an empty
                 // box on screen still swallowing the next outside click. Escape and Tab
                 // therefore mean "dismiss", which is what they already meant to the user.
