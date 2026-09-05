@@ -25,9 +25,30 @@ import type { AutomationRule } from '../../types/electron';
  * The two footer actions' words, shared by the accordion below and `automationMenuItems`'s flyout
  * so a user who right-clicks a pane title and then the terminal an inch below it reads the same
  * thing in both places — the exact drift `armedMenuLabel` already exists to prevent, one level up.
+ *
+ * The first is a FUNCTION because the row now names the terminal it would pin (Tam: *"add terminal
+ * id to: New automation for this terminal (<id>)"*), and that is worth more than a shorter label:
+ * the three hosts draw this row over three different things — a pane title, a canvas node, the
+ * terminal surface itself — and a window with several panes open offers the identical sentence in
+ * each of them. The id is the one string that says WHICH, and it is the same id the picker ticks
+ * and the activity log prints, so the label and the editor it opens name the terminal the same way
+ * rather than each in their own words.
  */
-const NEW_AUTOMATION_LABEL = 'New automation for this terminal';
+function newAutomationLabel(terminalId: string): string {
+    return `New automation for this terminal (${terminalId})`;
+}
 const ADD_TO_EXISTING_LABEL = 'Add to an existing automation';
+/**
+ * The glyph in front of a RULE's name, wherever one is offered as a row (Tam: *"add icon before
+ * the automation name in the submenu"*).
+ *
+ * The same bolt the parent item carries, deliberately: it is the mark for *an automation*, and a
+ * second glyph invented for the child rows would say the children are a different kind of thing
+ * from the item they hang under. Stated once and used by every rule row in this file — the armed
+ * list and the "add to an existing automation" list, in both the accordion and the flyout — so a
+ * fourth list of rules cannot arrive wearing a fifth icon.
+ */
+const AUTOMATION_ROW_ICON = '⚡';
 /** Why the "add to an existing automation" list can come up empty even when rules exist: a
  *  `'rule'`-mode automation picks its terminals by criterion and ignores `targetIds` outright, so
  *  "adding" a terminal to one would be a control that visibly does nothing — the failure
@@ -304,7 +325,16 @@ export const AutomationMenuSection: React.FC<{
                             }}
                             title={`Edit “${view.name}”`}
                         >
-                            <span className="au-menu-rule-name">{view.name}</span>
+                            {/* The icon and the name share a LINE, which is why they are wrapped:
+                                `.au-menu-rule` is `flex-direction: column` so that a rule can be a
+                                name over its state, and an icon dropped in as a third child of that
+                                would stack on top of the name rather than sit before it. The state
+                                line is indented to match by the stylesheet, so the two lines read
+                                as one row. */}
+                            <span className="au-menu-rule-head">
+                                <span className="menu-icon">{AUTOMATION_ROW_ICON}</span>
+                                <span className="au-menu-rule-name">{view.name}</span>
+                            </span>
                             <span className="au-menu-rule-state">{view.stateLabel}</span>
                         </button>
                     ))}
@@ -318,7 +348,7 @@ export const AutomationMenuSection: React.FC<{
                         }}
                     >
                         <span className="menu-icon">➕</span>
-                        {NEW_AUTOMATION_LABEL}
+                        {newAutomationLabel(terminalId)}
                     </button>
                     <button
                         type="button"
@@ -346,7 +376,13 @@ export const AutomationMenuSection: React.FC<{
                                     }}
                                     title={`Add this terminal to “${rule.name}”`}
                                 >
-                                    <span className="au-menu-rule-name">{rule.name}</span>
+                                    {/* Same head wrapper as an armed row above, for the same
+                                        column-layout reason — and the same icon, because these are
+                                        the same kind of thing: a rule, offered by name. */}
+                                    <span className="au-menu-rule-head">
+                                        <span className="menu-icon">{AUTOMATION_ROW_ICON}</span>
+                                        <span className="au-menu-rule-name">{rule.name}</span>
+                                    </span>
                                 </button>
                             ))}
                         </div>
@@ -407,6 +443,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
         ? addable.map((rule): ContextMenuFlyoutRow => ({
             id: `add-to-${rule.id}`,
             label: rule.name,
+            icon: AUTOMATION_ROW_ICON,
             title: `Add this terminal to “${rule.name}” and save.`,
             onSelect: () => { void addTerminalToRule(rule.id, terminalId, rule.name); },
             closeMenuOnSelect: true,
@@ -426,18 +463,24 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
             rows: views.map((view): ContextMenuFlyoutRow => ({
                 id: `automation-${view.ruleId}`,
                 label: view.name,
+                icon: AUTOMATION_ROW_ICON,
                 // The state pill's words, in the dimmed right-hand column: the flyout's rows are
                 // one line, and this is the half the accordion prints underneath the name.
                 detail: view.stateLabel,
                 title: `${view.name} — ${view.stateLabel}. Opens this rule for editing.`,
                 onSelect: () => openAutomationEditorFor(view.ruleId),
                 // §4.5, and the behaviour the flat rows already had, when each rule was a plain
-                // menu item. Said per row because the flyout's own default is to keep the menu
-                // up — and an editor opening behind a menu that stayed is two surfaces both
-                // believing they have the keyboard. `ContextMenu.activate` dismisses BEFORE it
-                // runs `onSelect`, so this is the same "close, then open" the accordion above
-                // spells out as two statements; see `closeMenuOnSelect` for why that order is a
-                // contract of the flyout rather than a detail of it.
+                // menu item. Said per row because the flyout's own default is to keep the menu up,
+                // and a row that opens an editor and leaves the menu behind it has left a live
+                // outside-click trap over the surface it just opened.
+                //
+                // The ORDER here is the opposite of the accordion's, and both are deliberate:
+                // `ContextMenu.activate` runs `onSelect` first with the dismissal in a `finally`.
+                // This comment used to claim it dismissed first and call that "the same close,
+                // then open" the accordion states — it never did, and after the measurement in
+                // `closeMenuOnSelect`'s own note it must not: closing first fires the host's
+                // terminal refocus in the gap before the editor mounts. Read that field before
+                // touching either side.
                 closeMenuOnSelect: true,
             })),
             // The two cases used to collapse into one, back when this parent could not exist with
@@ -457,7 +500,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
             footerRows: [
                 {
                     id: 'new-automation',
-                    label: NEW_AUTOMATION_LABEL,
+                    label: newAutomationLabel(terminalId),
                     icon: '➕',
                     title: 'Open a new, unsaved automation already pointed at this terminal.',
                     onSelect: () => openAutomationEditorForDraft(newDraftFor(terminalId)),

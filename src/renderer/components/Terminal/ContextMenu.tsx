@@ -213,6 +213,90 @@ const EDGE_MARGIN = 5;
 const HOVER_CLOSE_DELAY_MS = 260;
 
 /**
+ * How long the pointer must REST on a row before its `title` tooltip may appear, in ms.
+ *
+ * Tam: *"on hover on the item in the right-context menu, delay 3 seconds to show the tooltip, so
+ * it does not annoy user to just open it and quickly navigate to item they want"*.
+ *
+ * Every row in this menu carries a `title` explaining what it does, and the browser pops that
+ * after its own short dwell — around a second, and not configurable from CSS or from the
+ * attribute. Opening the menu and sweeping down it to the row you were already aiming for is the
+ * common case, and it drags a trail of yellow boxes across the list on the way. Three seconds is
+ * long enough that a deliberate sweep never trips one, and short enough that stopping to ask
+ * *"what does this do?"* is answered before it feels broken.
+ */
+export const TOOLTIP_DWELL_MS = 3000;
+
+/**
+ * A `title` that exists only once the pointer has stopped moving.
+ *
+ * **The attribute is withheld, rather than a tooltip of our own being drawn.** A native tooltip's
+ * delay cannot be changed, but whether there is anything to show can: an element with no `title`
+ * has no tooltip, so arming the attribute on a timer moves the delay without inventing a second
+ * tooltip surface that would then have to answer for its own positioning, edge-flipping, theming
+ * and z-index inside a menu that already portals and cascades. The cost is one render per row the
+ * pointer settles on, which is a render this list already does for its `is-active` marker.
+ *
+ * **A DISABLED row keeps its title unconditionally, and that is not an oversight.** A disabled
+ * `<button>` dispatches no mouse events, so a dwell over one can never be measured and a delayed
+ * title would simply never arrive. It is also the row that needs its tooltip most: a control the
+ * user cannot press explains WHY only in that string, which is not a repeat of a label they can
+ * already read. Each call site applies that rule where it renders — see `renderRow`.
+ *
+ * The flyout's `headerToggle` is the other deliberate exception. Its accessible name survives
+ * either way — it carries an explicit `aria-label` beside the `title` — but it is a glyph-only
+ * button, so that string is the only text anywhere saying what pressing it does, and it is a
+ * control the pointer arrives at on purpose rather than one of a list being swept through. There
+ * is no annoyance here to delay away.
+ */
+function useTooltipDwell(): {
+  /** `title` for the row keyed by `key` — `undefined` until the pointer has rested on it. */
+  titleFor: (key: string, title: string | undefined) => string | undefined;
+  /** Wire to the row's `onMouseEnter`. */
+  onEnter: (key: string) => void;
+  /** Wire to the row's `onMouseLeave`. */
+  onLeave: () => void;
+} {
+  const [dwelt, setDwelt] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+
+  const stop = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+
+  const onEnter = useCallback((key: string) => {
+    stop();
+    // The row just left gives its tooltip up AT ONCE rather than when the new row earns its own,
+    // or a sweep would drag one stale box along behind the pointer for three seconds — the exact
+    // annoyance this exists to remove, merely delayed.
+    setDwelt(null);
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      setDwelt(key);
+    }, TOOLTIP_DWELL_MS);
+  }, [stop]);
+
+  const onLeave = useCallback(() => {
+    stop();
+    setDwelt(null);
+  }, [stop]);
+
+  // A timer that outlives the menu would set state on an unmounted component — the same reason
+  // the submenu's own close timer is torn down.
+  useEffect(() => stop, [stop]);
+
+  const titleFor = useCallback(
+    (key: string, title: string | undefined) => (dwelt === key ? title : undefined),
+    [dwelt],
+  );
+
+  return { titleFor, onEnter, onLeave };
+}
+
+/**
  * Default filter for the array form of `flyout.rows`.
  *
  * §4.3: "the moment the search box is non-empty, folders disappear and results
@@ -305,6 +389,9 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   onCloseMenu,
 }) => {
   const uid = useId();
+  // One per PANEL, not one shared down the cascade: each panel owns the rows it draws, and a
+  // nested panel opening is itself a move off the folder row that opened it.
+  const tip = useTooltipDwell();
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const activeRowRef = useRef<HTMLButtonElement>(null);
@@ -472,6 +559,9 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const renderRow = (row: ContextMenuFlyoutRow) => {
     const active = row.id === activeId;
     const folder = isFolder(row);
+    // A disabled row dispatches no mouse events, so it can never dwell and keeps both of its
+    // tooltips unconditionally — see `useTooltipDwell`.
+    const tipFor = (t: string | undefined) => (row.disabled ? t : tip.titleFor(row.id, t));
     return (
       <div className="context-menu-flyout-item" key={row.id}>
         <button
@@ -482,7 +572,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           aria-selected={active}
           className={`context-menu-flyout-row${active ? ' is-active' : ''}${row.disabled ? ' is-empty' : ''}`}
           disabled={row.disabled}
-          title={row.title}
+          title={tipFor(row.title)}
           tabIndex={-1}
           // Keep the caret in the search box: without this the press blurs the input,
           // and the keyboard would be dead the moment the mouse was used once.
@@ -490,13 +580,18 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           onMouseEnter={() => {
             const i = navigable.indexOf(row);
             if (i >= 0) setActiveIdx(i);
+            tip.onEnter(row.id);
           }}
+          onMouseLeave={tip.onLeave}
           onClick={() => activate(row)}
         >
           {row.icon && <span className="context-menu-flyout-icon">{row.icon}</span>}
           <span className="context-menu-flyout-label">{row.label}</span>
           {row.detail && (
-            <span className="context-menu-flyout-detail" title={row.detailTitle ?? row.detail}>
+            <span
+              className="context-menu-flyout-detail"
+              title={tipFor(row.detailTitle ?? row.detail)}
+            >
               {row.detail}
             </span>
           )}
@@ -650,6 +745,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   // closure over `items` alive for a menu the user has already dismissed.
   useEffect(() => cancelPendingClose, [cancelPendingClose]);
 
+  // The items' tooltips. The flyout panels hold their own — see `useTooltipDwell`.
+  const tip = useTooltipDwell();
+
   // `standaloneSubmenu` bypasses `openSubmenuAt`, so its `onOpen` has to be fired here or
   // a shortcut-opened Command History would never warm its directory cache. Mount only:
   // re-firing it whenever `items` is rebuilt — which is every render of the owner — would
@@ -718,17 +816,21 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             key={index}
             className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}`}
             disabled={disabled}
-            title={item.title}
+            // A disabled item cannot dwell, and is the item whose tooltip carries the most —
+            // the reason it is dimmed. See `useTooltipDwell`.
+            title={disabled ? item.title : tip.titleFor(`item-${index}`, item.title)}
             aria-haspopup={item.submenu ? 'menu' : undefined}
             aria-expanded={item.submenu ? submenuOpen : undefined}
             onMouseEnter={() => {
               if (disabled) return;
+              tip.onEnter(`item-${index}`);
               // A plain item retires whatever flyout is open; a submenu parent opens its
               // own. Both live on the ITEM rather than on the host below, so a menu with
               // no submenus at all is untouched by any of this.
               if (item.submenu) openSubmenuAt(index, item);
               else scheduleCloseSubmenu();
             }}
+            onMouseLeave={tip.onLeave}
             onClick={() => {
               // A submenu parent OPENS its flyout instead of running the item and closing
               // the menu — the branch has to come before `onClose()` or the menu would be

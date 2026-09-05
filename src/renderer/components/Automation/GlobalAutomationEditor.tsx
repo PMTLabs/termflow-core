@@ -89,11 +89,14 @@ export const GlobalAutomationEditor: React.FC = () => {
     return (
         <AutomationEditor
             rule={rule}
-            // A brand-new rule gets the same canvas the gallery's "blank" card and every template
-            // open on — `freshCanvas` is what tells the editor there is no saved `graph.layout` to
-            // honour yet. `draft !== null` is exactly "this open request came from
-            // `openAutomationEditorForDraft`, not from resolving an existing id".
-            freshCanvas={draft !== null}
+            // **`'seeded'`, not the gallery's `'blank'`** — the two used to be the same call, and
+            // that is what made "New automation for this terminal" open on an empty canvas with the
+            // terminal it had just pinned nowhere on screen, and let Escape throw that pick away
+            // without a prompt. `draft !== null` is exactly "this open request came from
+            // `openAutomationEditorForDraft`, not from resolving an existing id", and every such
+            // request is seeded: `newDraftFor` is its only producer and it always pins a terminal.
+            // See `CanvasOpening`.
+            opening={draft !== null ? 'seeded' : 'saved'}
             runtime={runtime}
             now={Date.now()}
             origin={getAutomationOrigin()}

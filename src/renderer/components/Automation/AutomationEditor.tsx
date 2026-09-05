@@ -57,7 +57,7 @@ import { faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
-import type { NodePos } from './automationDraft';
+import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
@@ -100,8 +100,16 @@ export const ENABLE_FLASH_MS = 1800;
 export interface AutomationEditorProps {
     /** The rule or draft to edit. `id: ''` means it has never been saved. */
     rule: AutomationRule;
-    /** A brand-new rule opens on an empty canvas; a template or an existing rule does not. */
-    freshCanvas: boolean;
+    /**
+     * What this open is: an existing rule or a template (`'saved'`), the gallery's blank card
+     * (`'blank'`), or a rule the menu already pointed at a terminal (`'seeded'`).
+     *
+     * A string rather than the boolean `freshCanvas` it replaced, because there are three openings
+     * and a boolean can only name two of them. See `CanvasOpening` for what each one decides — it
+     * settles both the canvas and the dirty baseline, which is why it is one value and not two
+     * props that could be handed down disagreeing with each other.
+     */
+    opening: CanvasOpening;
     /**
         * The WHOLE runtime payload, indexed here by the draft's own id rather than by the caller.
         *
@@ -132,7 +140,7 @@ const toast = (message: string, type: 'success' | 'error' | 'info' = 'info') => 
 
 export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     rule,
-    freshCanvas,
+    opening,
     runtime,
     now,
     origin,
@@ -140,8 +148,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     onOpenFullLog,
     onChanged,
 }) => {
-    const [draft, dispatch] = useReducer(draftReducer, { rule, freshCanvas }, (init) =>
-        draftFromRule(init.rule, init.freshCanvas));
+    const [draft, dispatch] = useReducer(draftReducer, { rule, opening }, (init) =>
+        draftFromRule(init.rule, init.opening));
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     const [terminals, setTerminals] = useState<WatchableTerminal[]>([]);

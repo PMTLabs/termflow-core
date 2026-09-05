@@ -103,7 +103,7 @@ describe('draft ⇄ row', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         // A FRESH canvas, so `present` can be varied without a remove — which no longer exists,
         // and cannot: see `automationSteps.ts`.
-        const draft = draftFromRule(rule, true);
+        const draft = draftFromRule(rule, 'blank');
         const moved = draftReducer(draft, { type: 'moveStep', step: 'monitor', pos: { x: 999, y: 999 } });
         const grown = draftReducer(moved, { type: 'addStep', step: 'monitor' });
 
@@ -118,6 +118,16 @@ describe('draft ⇄ row', () => {
 });
 
 describe('draftFromRule', () => {
+    /**
+     * What `AutomationMenuSection`'s `newDraftFor` hands the host for "New automation for this
+     * terminal": `blankDraft()` with the targeting overwritten and nothing else touched.
+     */
+    const seededRule = () => ({
+        ...blankDraft(),
+        targetMode: 'pinned' as const,
+        targetIds: ['tm-9'],
+    });
+
     it('draws all four steps for a template or an existing rule', () => {
         const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
         expect(draft.present).toEqual([...STEP_ORDER]);
@@ -130,10 +140,63 @@ describe('draftFromRule', () => {
         // Mockup §03's third state: an empty canvas and the "Start with Watch output" hint, so
         // building one from nothing is a thing the palette teaches rather than a thing that has
         // already happened.
-        const draft = draftFromRule(blankDraft(), true);
+        const draft = draftFromRule(blankDraft(), 'blank');
         expect(draft.present).toEqual([]);
         expect(draft.wires).toEqual([]);
         expect(draft.selected).toBeNull();
+    });
+
+    /**
+     * **The third opening — "New automation for this terminal" — and the two things it does that
+     * neither of the two above does.**
+     *
+     * The menu hands over a rule that already pins the terminal the user right-clicked, and this
+     * used to open on `'blank'`: an empty canvas, nothing selected, and a draft whose baseline was
+     * itself. Both halves of that were wrong in the same direction — the one decision that HAD been
+     * made was the one thing nothing on screen said. The canvas showed the "Start with Watch
+     * output" hint for a step that was already configured, and Escape threw the pinned terminal
+     * away without a prompt, because a draft compared against itself reads clean.
+     *
+     * Asserted as a pair with the `'blank'` case above rather than on its own: the two differ in
+     * exactly these fields, and a `draftFromRule` that ignored its second argument would satisfy
+     * either test alone.
+     */
+    it('draws the one step a SEEDED rule already has, and selects it', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        expect(draft.present).toEqual(['monitor']);
+        // One step wires to nothing — the palette is still how the other three arrive.
+        expect(draft.wires).toEqual([]);
+        // The whole point: the inspector opens on *Watch output* with the terminal already ticked,
+        // rather than one palette drag away from being noticed.
+        expect(draft.selected).toBe('monitor');
+    });
+
+    it('opens a SEEDED rule dirty, against a baseline that differs only in the seeded pick', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        expect(isDirty(draft)).toBe(true);
+        // Not merely "new rules are always dirty": the baseline names WHAT is unsaved, which is
+        // what makes *"Saving keeps them; leaving throws them away"* a true sentence here. Written
+        // as a whole-object equality rather than a `targetIds` spot-check, so a future seeding that
+        // contributed a second field (a name, a criterion) would fail this rather than quietly
+        // going unreported by the dirty check.
+        expect(draft.saved).toEqual({ ...draft.rule, targetIds: [] });
+    });
+
+    it('a SEEDED draft goes clean when the save lands', () => {
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const stored = { ...ruleFromDraft(draft), id: 'r-minted' };
+        expect(isDirty(draftReducer(draft, { type: 'saved', rule: stored }))).toBe(false);
+    });
+
+    it('a SEEDED draft goes clean if the seeded terminal is unticked', () => {
+        // The paired negative for the baseline, and the honest consequence of it: the prompt is
+        // about the PICK, not about the rule being new. Untick the terminal the menu added and
+        // change nothing else and you are looking at an untouched blank rule, which is not
+        // something to hold a *Leave without saving?* dialog over.
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const off = draftReducer(draft, { type: 'toggleTarget', id: 'tm-9' });
+        expect(off.rule.targetIds).toEqual([]);
+        expect(isDirty(off)).toBe(false);
     });
 
     it('opens clean, whatever it opened on', () => {
@@ -244,7 +307,7 @@ describe('isDirty', () => {
 });
 
 describe('the reducer', () => {
-    const draft = () => draftFromRule(blankDraft(), true);
+    const draft = () => draftFromRule(blankDraft(), 'blank');
 
     it('keeps steps in canonical order whatever order they were dropped in', () => {
         let d = draft();
@@ -260,7 +323,7 @@ describe('the reducer', () => {
         // Built in the order the palette enforces — `canAddStep` gates the gesture, and the
         // reducer trusts it, so arranging an order the palette refuses would be testing a state the
         // editor cannot reach.
-        const fresh = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), true);
+        const fresh = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'blank');
         const one = draftReducer(fresh, { type: 'addStep', step: 'monitor' });
         expect(one.wires).toEqual([]);
         const two = draftReducer(one, { type: 'addStep', step: 'parse' });

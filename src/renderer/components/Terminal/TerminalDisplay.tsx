@@ -901,20 +901,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           click: () => engine?.setSelectionMode(!selectionMode),
         },
       ] : []),
-      // This terminal's automations (Tam, follow-up to `plan/028` item D: the terminal area's menu
-      // must offer the same thing the pane title's does). ONE item that opens a hover flyout — the
-      // Snippets/Command History shape, asked for by name once that machinery existed — built by
-      // `automationMenuItems` from the same `armedEntryViews` the pane and canvas menus list from,
-      // so the three cannot name or order the rules differently.
-      //
-      // **Present whether or not anything is armed**, since the flyout gained "New automation for
-      // this terminal" and "Add to an existing automation" — actions whose whole point is the
-      // unarmed case. Still a spread, but for the one remaining empty case: a pane with no
-      // terminal at all, where `automationMenuItems(null)` is `[]`.
-      //
-      // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute below is: the
-      // rules are pinned to the terminal, so they are right wherever its surface is drawn.
-      ...automationMenuItems(terminalId),
       // plan/025 §2.7. Ungated — `paneId` is set on both surfaces (the canvas
       // overlay never renders its own TerminalDisplay; see the header comment
       // on usePaneMuteState above) — unlike the pane-tree items further up,
@@ -930,6 +916,29 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         },
       ] : []),
       { type: 'separator' as const },
+      // This terminal's automations (Tam, follow-up to `plan/028` item D: the terminal area's menu
+      // must offer the same thing the pane title's does). ONE item that opens a hover flyout — the
+      // Snippets/Command History shape, asked for by name once that machinery existed — built by
+      // `automationMenuItems` from the same `armedEntryViews` the pane and canvas menus list from,
+      // so the three cannot name or order the rules differently.
+      //
+      // **It sits with Command History and Snippets, not with Copy/Paste** (Tam: *"Move the
+      // Automation to the group of — Automation, Command History, Snippets"*). It spent a round
+      // above Mute, among the text-interaction controls, on the reasoning that it acts on the
+      // terminal rather than on the pane tree — true, and true of every item in this half of the
+      // menu, so it did not pick a group. These three do belong together: each is a flyout that
+      // opens a searchable list of saved, named things and puts one of them to work on this
+      // terminal, and they are the only three items in the menu shaped that way. Automation leads
+      // because it is the one that ARMS the terminal rather than typing into it once.
+      //
+      // **Present whether or not anything is armed**, since the flyout gained "New automation for
+      // this terminal" and "Add to an existing automation" — actions whose whole point is the
+      // unarmed case. Still a spread, but for the one remaining empty case: a pane with no
+      // terminal at all, where `automationMenuItems(null)` is `[]`.
+      //
+      // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute above is: the
+      // rules are pinned to the terminal, so they are right wherever its surface is drawn.
+      ...automationMenuItems(terminalId),
       // plan/029 §6. Command History ABOVE Snippets (stated acceptance criterion).
       // Both ungated — they must work while a TUI/CLI is running (P1), same class
       // as Copy/Paste/Clear/Mute above: they act on the terminal's own PTY write

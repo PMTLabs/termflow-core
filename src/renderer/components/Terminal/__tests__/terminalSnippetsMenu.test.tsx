@@ -32,7 +32,7 @@ import { readSource } from '../../../utils/readSource';
 jest.mock('../ContextMenu.css', () => ({}));
 
 // eslint-disable-next-line import/first
-import { ContextMenu, ContextMenuItem } from '../ContextMenu';
+import { ContextMenu, ContextMenuItem, TOOLTIP_DWELL_MS } from '../ContextMenu';
 // eslint-disable-next-line import/first
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from '../snippetsHistoryMenu';
 // eslint-disable-next-line import/first
@@ -417,10 +417,29 @@ describe('mounted through ContextMenu', () => {
     await openFlyout('Snippets');
     const row = flyoutRows().find((r) => r.textContent?.includes('git log'))!;
     const detail = row.querySelector('.context-menu-flyout-detail')!;
-    expect(row.getAttribute('title')).toBe('git log --oneline -n 20');
-    expect(detail.getAttribute('title')).toBe('Folder: Git\nTags: git, log');
-    // Two DIFFERENT tooltips - the point of the pair.
-    expect(detail.getAttribute('title')).not.toBe(row.getAttribute('title'));
+
+    // **Neither tooltip exists until the pointer has rested on the row** — `TOOLTIP_DWELL_MS`,
+    // which is what stops a sweep down the list dragging a trail of them along. Fake timers are
+    // installed HERE rather than for the whole suite: everything above uses an async `act`, which
+    // flushes through the timer APIs `useFakeTimers` replaces and can hang there.
+    expect(row.hasAttribute('title')).toBe(false);
+    expect(detail.hasAttribute('title')).toBe(false);
+    jest.useFakeTimers();
+    try {
+      act(() => {
+        row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }));
+      });
+      act(() => {
+        jest.advanceTimersByTime(TOOLTIP_DWELL_MS);
+      });
+
+      expect(row.getAttribute('title')).toBe('git log --oneline -n 20');
+      expect(detail.getAttribute('title')).toBe('Folder: Git\nTags: git, log');
+      // Two DIFFERENT tooltips - the point of the pair.
+      expect(detail.getAttribute('title')).not.toBe(row.getAttribute('title'));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('narrows the ROOT panel in folder mode and leaves the folder panel wide', async () => {
@@ -483,7 +502,22 @@ describe('mounted through ContextMenu', () => {
 const DISPLAY = readSource(path.join(__dirname, '..', 'TerminalDisplay.tsx'));
 
 describe('TerminalDisplay wiring (source-derived — see file header for why)', () => {
-  it('placement: existing separator, then Command History, then Snippets, then a NEW separator, then Clear', () => {
+  /**
+   * The group, not just the order (Tam: *"Move the Automation to the group of — Automation,
+   * Command History, Snippets"*).
+   *
+   * Automation spent a round further up, among Copy / Paste / Selection mode, on the reasoning
+   * that it acts on the terminal rather than on the pane tree — which is true of everything in
+   * that half of the menu, so it never picked a group at all. **"In the group" is a claim about
+   * the SEPARATORS, not only about relative order**, and asserting `automationAt < historyAt`
+   * alone would be satisfied by an Automation item sitting three separators higher up with a
+   * group all to itself. So both edges of the group are pinned: exactly one separator between
+   * Mute and Automation (the group opens there), and none at all between Automation and Command
+   * History (the three are one group).
+   */
+  it('placement: separator, then Automation, Command History, Snippets, then a NEW separator, then Clear', () => {
+    const muteAt = DISPLAY.indexOf("'Mute Pane Notifications',");
+    const automationAt = DISPLAY.indexOf('...automationMenuItems(terminalId),');
     const historyAt = DISPLAY.indexOf('buildCommandHistoryMenuItem(');
     // The ITEM in the menu array, not the builder call — the builder is now hoisted into
     // its own helper (shared with the keyboard-opened menu) and sits ABOVE this array, so
@@ -491,15 +525,26 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     // the order backwards.
     const snippetsAt = DISPLAY.indexOf('snippetsMenuItem(),');
     const clearAt = DISPLAY.indexOf("label: 'Clear',");
+    expect(muteAt).toBeGreaterThan(-1);
+    expect(automationAt).toBeGreaterThan(-1);
     expect(historyAt).toBeGreaterThan(-1);
     expect(snippetsAt).toBeGreaterThan(-1);
     expect(clearAt).toBeGreaterThan(-1);
+    expect(muteAt).toBeLessThan(automationAt);
+    expect(automationAt).toBeLessThan(historyAt);
     expect(historyAt).toBeLessThan(snippetsAt);
     expect(snippetsAt).toBeLessThan(clearAt);
 
-    // Exactly one separator between the two new items and Clear (the NEW one from §6).
-    const between = DISPLAY.slice(snippetsAt, clearAt);
-    expect((between.match(/type: 'separator'/g) ?? []).length).toBe(1);
+    const separators = (from: number, to: number) =>
+      (DISPLAY.slice(from, to).match(/type: 'separator'/g) ?? []).length;
+
+    // The group OPENS after Mute…
+    expect(separators(muteAt, automationAt)).toBe(1);
+    // …and Automation is INSIDE it, not a group of one above it.
+    expect(separators(automationAt, historyAt)).toBe(0);
+    expect(separators(historyAt, snippetsAt)).toBe(0);
+    // Exactly one separator between the group and Clear (the NEW one from §6).
+    expect(separators(snippetsAt, clearAt)).toBe(1);
   });
 
   it('targets this pane\'s own terminalId, not resolveKeyboardTerminalId', () => {

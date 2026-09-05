@@ -511,15 +511,96 @@ describe('the shared indicator and menu section', () => {
         expect(emptyRowFn('nope').label).toBe("No automations match 'nope'");
     });
 
-    it('the footer actions are present in both the armed and unarmed cases', async () => {
+    it('the footer actions are present in both the armed and unarmed cases, and the first names its terminal', async () => {
         seedTwoRules();
+        // Swept over two terminals rather than asserted once, because the id in that label is the
+        // one part of it a constant could still satisfy: a hard-coded `(tm-1)` passes any
+        // single-terminal check, and this menu is built per terminal.
         for (const terminalId of ['tm-1', 'tm-other']) {
             const items = automationMenuItems(terminalId);
             const footer = items[0].submenu!.footerRows!;
             expect(footer.map((r) => r.label)).toEqual([
-                'New automation for this terminal',
+                `New automation for this terminal (${terminalId})`,
                 'Add to an existing automation',
             ]);
+        }
+    });
+
+    /**
+     * **The words are still shared between the two hosts, now that one of them is computed.**
+     *
+     * The label was a module constant precisely so a user who right-clicks a pane title and then
+     * the terminal an inch below it reads the same sentence in both places. Turning it into a
+     * function of the terminal id is exactly the change that could have left one host on the old
+     * constant and the other on the new call, with nothing failing — so the accordion's rendered
+     * text is compared against the flyout's own row rather than against a literal of its own.
+     * The literal is asserted too, once, so both hosts drifting TOGETHER would still be caught.
+     */
+    it('both hosts spell the "New automation" row the same way, id included', async () => {
+        seedTwoRules();
+        const flyoutLabel = automationMenuItems('tm-1')[0].submenu!.footerRows![0].label;
+        expect(flyoutLabel).toBe('New automation for this terminal (tm-1)');
+
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const labels = [...container.querySelectorAll('.au-menu-action')].map((el) => el.textContent);
+        expect(labels.some((t) => t?.includes(flyoutLabel))).toBe(true);
+    });
+
+    /**
+     * **A rule offered by name carries the automation glyph — in every list, in both hosts**
+     * (Tam: *"add icon before the automation name in the submenu"*).
+     *
+     * Four lists, not one: armed rules and addable rules, each drawn twice because this file feeds
+     * an accordion and a flyout from the same entries. The screenshot that prompted this showed
+     * the flyout's armed list, and fixing only that one would have left three lists of rules
+     * looking like a different kind of thing from the row they hang under — which is the drift
+     * every other assertion in this file exists to prevent.
+     */
+    it('every rule row carries the automation icon, in the accordion and in the flyout', async () => {
+        seedTwoRules();
+
+        // --- the flyout host: its rows are DATA, so the icon is a field on them ---------------
+        const items = automationMenuItems('tm-1');
+        const armedRows = flyoutRows(items[0]);
+        const addRow = items[0].submenu!.footerRows!.find((r) => r.id === 'add-to-existing')!;
+        expect(armedRows.length).toBeGreaterThan(0);
+        expect(addRow.children!.length).toBeGreaterThan(0);
+        expect(armedRows.map((r) => r.icon)).toEqual(armedRows.map(() => '⚡'));
+        expect(addRow.children!.map((r) => r.icon)).toEqual(addRow.children!.map(() => '⚡'));
+
+        // --- the accordion host: the same rules, drawn rather than described ------------------
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        // Read BEFORE the nested list is opened: `.au-menu-rule` matches an addable row too, and
+        // this count is the only thing saying the armed list was covered rather than sampled.
+        const armedInDom = [...container.querySelectorAll('.au-menu-rule')];
+        expect(armedInDom).toHaveLength(armedRows.length);
+        for (const row of armedInDom) {
+            // The icon and the name share a LINE. `.au-menu-rule` is `flex-direction: column`, so
+            // an icon added as a bare sibling of the name would sit ABOVE it and look like a row
+            // of its own — a bug a `textContent` check could not see. Asserting the wrapper is
+            // what pins the layout the stylesheet then styles.
+            const head = row.querySelector('.au-menu-rule-head')!;
+            expect(head).not.toBeNull();
+            expect(head.querySelector('.menu-icon')!.textContent).toBe('⚡');
+            expect(head.querySelector('.au-menu-rule-name')).not.toBeNull();
+        }
+
+        // …and the nested "Add to an existing automation" list underneath it.
+        const addToggle = [...container.querySelectorAll('.au-menu-action')]
+            .find((el) => el.textContent?.includes('Add to an existing automation')) as HTMLButtonElement;
+        await act(async () => { addToggle.click(); });
+        const addableInDom = [
+            ...container.querySelectorAll('.context-menu-subpanel .context-menu-subpanel .au-menu-rule'),
+        ];
+        expect(addableInDom).toHaveLength(addRow.children!.length);
+        for (const row of addableInDom) {
+            expect(row.querySelector('.au-menu-rule-head .menu-icon')!.textContent).toBe('⚡');
         }
     });
 

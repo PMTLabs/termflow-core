@@ -264,15 +264,55 @@ export interface AutomationDraft {
 }
 
 /**
+ * What the editor is opening ON.
+ *
+ * It decides two things at once, and they are the same decision: **which steps the canvas draws**,
+ * and **what the dirty check compares against**. Keeping them in one value is what stops a fourth
+ * way of opening the editor from arriving with a canvas rule and no answer to "is this unsaved".
+ *
+ * - `'saved'` — an existing rule, or a template. All four steps drawn, because it is already a
+ *   complete rule, and clean, because what is on screen is what is stored (or, for a template,
+ *   what the user asked for verbatim).
+ * - `'blank'` — the gallery's blank card. Mockup §03's third state: an empty canvas and the
+ *   "Start with Watch output" hint, so building a rule from nothing is a thing the palette
+ *   TEACHES rather than a thing that has already happened. Clean, because nothing is there yet;
+ *   a *Leave without saving?* prompt over an untouched blank rule is a dialog about nothing.
+ * - `'seeded'` — "New automation for this terminal". Neither of the above: the menu has already
+ *   made a choice on the user's behalf, so the canvas must SHOW that choice and the editor must
+ *   know it is unsaved. See `draftFromRule` for both halves.
+ *
+ * This used to be a boolean (`emptyCanvas`). It stopped being one at the moment there were three
+ * openings rather than two — a flag that cannot say what you need it to say is the wrong type, not
+ * a thing to overload.
+ */
+export type CanvasOpening = 'saved' | 'blank' | 'seeded';
+
+/**
  * Open the editor on a rule.
  *
- * `emptyCanvas` is the mockup's third state — *a brand new rule* — whose canvas starts empty with
- * the "Start with Watch output" hint, so building one from nothing is a thing the palette teaches
- * rather than a thing that has already happened. A template and an existing rule both arrive with
- * all four steps drawn, because they are already complete rules.
+ * **The `'seeded'` opening is the only one whose two arms differ, and both differences are the
+ * point.** "New automation for this terminal" hands over a rule that already pins the terminal the
+ * user right-clicked, and the editor used to open it on `'blank'`'s empty canvas — so the one thing
+ * that had already been decided was the one thing nothing on screen said. The canvas showed the
+ * palette hint for a step that was already configured, and the *Leave without saving?* guard let
+ * Escape throw the pinned terminal away without a word, because the draft and its own baseline were
+ * the same object and so it read clean.
+ *
+ * So `'seeded'` draws `monitor` and selects it — the inspector opens on *Watch output* with the
+ * terminal already ticked, which is the state the menu row promised — and the BASELINE is this rule
+ * with the seeded pick removed. That is what makes the dirty check honest rather than merely loud:
+ * it names the pinned terminal as the unsaved work, so the prompt is telling the truth about what
+ * closing would cost, it clears itself the moment the rule is saved, and a user who unticks that
+ * terminal and changes nothing else is back to an untouched blank rule and is not nagged about it.
+ * `targetIds` alone, and not `targetMode`: `'pinned'` with an empty pick set is the mode the picker
+ * itself renders, so the baseline stays a rule the editor could actually be showing.
  */
-export function draftFromRule(rule: AutomationRule, emptyCanvas = false): AutomationDraft {
-    const present = emptyCanvas ? [] : [...STEP_ORDER];
+export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
+    const present: StepKind[] = opening === 'saved'
+        ? [...STEP_ORDER]
+        : opening === 'seeded'
+            ? ['monitor']
+            : [];
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -286,8 +326,11 @@ export function draftFromRule(rule: AutomationRule, emptyCanvas = false): Automa
         present,
         wires: defaultWires(present),
         layout,
-        selected: emptyCanvas ? null : 'monitor',
-        saved: resolved,
+        // `'blank'` alone opens with nothing selected: it is the only opening with nothing on the
+        // canvas to select. `'seeded'` selects the step it drew, which is what puts the pinned
+        // terminal in front of the user instead of one palette drag away from being noticed.
+        selected: opening === 'blank' ? null : 'monitor',
+        saved: opening === 'seeded' ? { ...resolved, targetIds: [] } : resolved,
     };
 }
 

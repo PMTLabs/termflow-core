@@ -75,6 +75,33 @@
     white-space: nowrap;
 }
 
+/* The icon and the name, on ONE line.
+ *
+ * `.au-menu-rule` above is a column — a rule is a name over its current state — so the row icon
+ * cannot simply be a third child of it: it would stack ON TOP of the name rather than sit before
+ * it. This is the line the two share. */
+.au-menu-rule-head {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    /* A flex item defaults to `min-width: auto`, which refuses to shrink below its own content —
+       so without this the name's `text-overflow: ellipsis` never engages and a long rule name
+       widens the whole menu instead of being cut. Needed on the item as well as the container. */
+    min-width: 0;
+}
+
+.au-menu-rule-head .au-menu-rule-name {
+    min-width: 0;
+}
+
+/* The state lines up under the NAME, not under the icon. 28px is `.menu-icon`'s 20px box plus its
+   8px right margin, from `PaneContextMenu.css` — both hosts of this accordion load it. The icon
+   marks the row as a whole, and a second line starting beneath it would read as an item of its
+   own rather than as this one's current state. */
+.au-menu-rule .au-menu-rule-state {
+    padding-left: 28px;
+}
+
 /* The state, in the same words the Settings list uses for it. Dimmer, because the name is what is
    being chosen and this is what it is doing. */
 .au-menu-rule-state {

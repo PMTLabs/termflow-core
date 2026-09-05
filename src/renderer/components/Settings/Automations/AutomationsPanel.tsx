@@ -423,7 +423,7 @@ export const AutomationsPanel: React.FC = () => {
                 {list}
                 <AutomationEditor
                     rule={view.draft}
-                    freshCanvas={view.fresh}
+                    opening={view.fresh ? 'blank' : 'saved'}
                     runtime={runtime}
                     now={now}
                     origin={origin}
