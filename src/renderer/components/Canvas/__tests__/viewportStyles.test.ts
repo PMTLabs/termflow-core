@@ -250,3 +250,64 @@ describe('lerpViewport', () => {
     expect(mid.z).toBeGreaterThan(0.5);
   });
 });
+
+/**
+ * The supersample must not reach a terminal.
+ *
+ * Measured in Edge 152, the WebView2 engine: under an ancestor `zoom: R`, xterm's WebGL
+ * renderer paints its glyphs at `1 / R`. The element box scales; the bitmap drawn into it does
+ * not. A canvas terminal rendered at half size at R=2 and blank at R=3, with its DOM background
+ * scaling correctly around it — reported as "the content shrinks to a quarter of the node as
+ * soon as I zoom in one step", which is exactly where `R = ceil(z / dpr)` crosses 1 -> 2.
+ *
+ * `.canvas-surface` therefore undoes the zoom for its own subtree and hands the factor back
+ * through the transform it already has. These pin the two halves as a PRODUCT, the way
+ * `worldStyle x rasterStyle` above does, because either half alone can be right while the pair
+ * disagrees — and a surface painting at a different scale from the one the geometry assumes is
+ * the whole bug.
+ */
+describe('rasterStyle publishes its own inverse, for .canvas-surface to undo', () => {
+  const DPRS = [1, 1.25, 1.5, 2, 3];
+  const ZOOMS = [Z_MIN, 0.4, 0.93, 1, 1.05, 1.4, 2, 2.6, 3.5, 4.75, 6.35];
+
+  it('emits R and 1/R whose product is 1, at every zoom and device scale', () => {
+    for (const dpr of DPRS) {
+      for (const z of ZOOMS) {
+        const st = rasterStyle({ x: 0, y: 0, z }, dpr) as Record<string, unknown>;
+        const r = Number(st['--canvas-raster-r']);
+        const inv = Number(st['--canvas-raster-inv']);
+        expect(r).toBe(worldRaster(z, dpr));
+        expect(r).toBe(st.zoom);
+        // The surface multiplies by `r` and zooms by `inv`; anything but 1 here is a terminal
+        // rendered at the wrong scale.
+        expect(r * inv).toBeCloseTo(1, 12);
+      }
+    }
+  });
+
+  it('leaves the surface geometry independent of R', () => {
+    // What `.canvas-surface` computes: `hostW * (surfaceScale * R) * (z / R)`. R must cancel,
+    // or a zoom step would move the terminal as well as resize it.
+    const hostW = 1536.666748046875;
+    const surfaceScale = NODE_W / hostW;
+    for (const dpr of DPRS) {
+      for (const z of ZOOMS) {
+        const r = worldRaster(z, dpr);
+        const withRaster = hostW * (surfaceScale * r) * (z / r);
+        const without = hostW * surfaceScale * z;
+        expect(withRaster).toBeCloseTo(without, 9);
+      }
+    }
+  });
+
+  it('never emits a raster of zero, which would make the inverse infinite', () => {
+    for (const dpr of DPRS) {
+      for (const z of ZOOMS) {
+        const r = Number((rasterStyle({ x: 0, y: 0, z }, dpr) as Record<string, unknown>)['--canvas-raster-r']);
+        expect(r).toBeGreaterThanOrEqual(1);
+        expect(r).toBeLessThanOrEqual(MAX_WORLD_R);
+        expect(Number.isFinite(1 / r)).toBe(true);
+      }
+    }
+  });
+});

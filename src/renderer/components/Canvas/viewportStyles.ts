@@ -29,6 +29,17 @@ export function worldStyle(vp: Viewport, dpr: number): React.CSSProperties {
 /**
  * The supersample, on `.canvas-raster` — the element between `.canvas-world` and the nodes.
  *
+ * **It must not reach a terminal.** Measured in Edge 152 (the WebView2 engine): under
+ * `zoom: R`, xterm's WEBGL renderer paints its glyphs at `1 / R` — the element box scales,
+ * the bitmap drawn into it does not — so a canvas terminal renders at half size at R=2 and
+ * not at all at R=3, while its DOM background scales correctly. `.canvas-surface` therefore
+ * carries `zoom: var(--canvas-raster-inv)` and multiplies its own transform by
+ * `var(--canvas-raster-r)`, which puts the terminal subtree back at an effective zoom of 1
+ * with the on-screen geometry unchanged. Chrome keeps the supersample, which is the only
+ * thing it was ever for: `0104ebf` measured terminal text as already sharp under
+ * `transform: scale()`, because a `<canvas>` composites from its own bitmap rather than
+ * being rasterised into the world's layer.
+ *
  * `zoom` rather than a second `transform`, because a transform would only nest one raster
  * magnification inside another; `zoom` multiplies the USED VALUE of every length in the subtree,
  * so the content is laid out — and therefore rasterised — R times larger.
@@ -45,7 +56,16 @@ export function worldStyle(vp: Viewport, dpr: number): React.CSSProperties {
  * geometry every gesture measures is unchanged too.
  */
 export function rasterStyle(vp: Viewport, dpr: number): React.CSSProperties {
-  return { zoom: worldRaster(vp.z, dpr) };
+  const r = worldRaster(vp.z, dpr);
+  return {
+    zoom: r,
+    // Published for `.canvas-surface`, which must UNDO this zoom for the terminal it hosts —
+    // see the `zoom` rule in `Canvas.css`. Both halves are emitted here so the CSS never has
+    // to divide: `zoom` takes a bare number and `calc()` inside it is not worth relying on
+    // across two engines, while the pair is exact for every R this can return.
+    ['--canvas-raster-r' as string]: `${r}`,
+    ['--canvas-raster-inv' as string]: `${1 / r}`,
+  } as React.CSSProperties;
 }
 
 /**

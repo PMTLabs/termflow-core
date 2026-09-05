@@ -140,29 +140,80 @@ describe('terminal host box is constant', () => {
     }
   });
 
+  // The counter-zoom, asserted on the RULE rather than on a rendered pixel, because jsdom
+  // paints nothing and this is the one place the pair can be checked at all.
+  //
+  // Both halves or neither. `zoom` alone shrinks the terminal to 1/R of where it belongs;
+  // the transform multiplier alone doubles it. The shift is in the same bracket for a reason
+  // that is easy to miss: `zoom` scales an element's own transform lengths too, so a translate
+  // left un-multiplied moves the surface by a fraction R of what it should.
+  it('undoes the world raster for its own subtree, and hands the factor back', () => {
+    const body = declarationsOf('.canvas-surface');
+
+    expect(body).toMatch(/zoom:\s*var\(--canvas-raster-inv,\s*1\)/);
+
+    // Balanced-paren extraction, not a regex: the arguments are nested `calc(var(…))`, and a
+    // naive `\(([^)]*)\)` stops at the first inner `)` — which silently returns a PREFIX that
+    // happens to contain the variable you were checking for. That is a test that passes on a
+    // broken rule, so the parser earns its lines here.
+    const argOf = (fn: string): string => {
+      const at = body.indexOf(`${fn}(`);
+      expect(at).toBeGreaterThanOrEqual(0);
+      let depth = 0;
+      for (let i = at + fn.length; i < body.length; i++) {
+        if (body[i] === '(') depth++;
+        else if (body[i] === ')' && --depth === 0) return body.slice(at + fn.length + 1, i);
+      }
+      throw new Error(`unbalanced ${fn}() in .canvas-surface`);
+    };
+
+    // Both halves or neither: `zoom` alone leaves the terminal at 1/R of where it belongs,
+    // the multiplier alone puts it at R times.
+    const scale = argOf('scale');
+    expect(scale).toContain('--node-surface-scale');
+    expect(scale).toContain('--canvas-raster-r');
+
+    const translate = argOf('translateY');
+    expect(translate).toContain('--node-surface-shift');
+    expect(translate).toContain('--canvas-raster-r');
+  });
+
   // Cross-file: a variable the stylesheet consumes but nothing provides resolves to an
   // invalid value, the host collapses to a zero box, `hasLayoutBox` goes false — and the
   // terminal silently never fits. Check the DESTINATION of the handoff, not just the
   // source, because an absent declaration is invisible from the CSS side.
   //
-  // There are TWO legitimate providers, not one. The geometry variables are computed per frame
-  // and published from `CanvasMode`; a purely static one (a palette entry, say) is declared on
-  // `.canvas-mode` in the stylesheet itself, where it needs no round trip through React. What
-  // must never happen is a variable with NEITHER — which is what this actually asserts.
-  it('has every canvas variable it consumes supplied by CanvasMode or by the stylesheet', () => {
+  // There are THREE legitimate providers, not one. Most geometry variables are computed per
+  // frame and published from `CanvasMode`; the raster pair is published by `viewportStyles`,
+  // which owns the `.canvas-raster` style; a purely static one (a palette entry, say) is
+  // declared on `.canvas-mode` in the stylesheet itself, where it needs no round trip through
+  // React. What must never happen is a variable with NONE — which is what this asserts.
+  //
+  // `viewportStyles` was added to this list when `--canvas-raster-r` / `--canvas-raster-inv`
+  // arrived and this test failed, which is the test doing its job: the variables were real and
+  // supplied, just not from the one file the scan knew about. Widening the SOURCES is right;
+  // widening the PATTERN would not have been.
+  const PROVIDERS = [
+    'components/Canvas/CanvasMode.tsx',
+    'components/Canvas/viewportStyles.ts',
+  ];
+
+  it('has every canvas variable it consumes supplied by a known provider or the stylesheet', () => {
     const css = readSource(CANVAS_CSS);
     const consumed = new Set(
       [...css.matchAll(/var\((--canvas-[a-z-]+)/g)].map((m) => m[1]),
     );
     expect(consumed.size).toBeGreaterThan(0);
 
-    const tsx = readSource(path.join(RENDERER, 'components/Canvas/CanvasMode.tsx'));
-    const provided = new Set([
-      ...[...tsx.matchAll(/'(--canvas-[a-z-]+)':/g)].map((m) => m[1]),
+    const provided = new Set<string>([
       // A DECLARATION, not a `var()` reference: anchored to the start of a declaration so
       // `var(--canvas-x, …)` — which is a use — cannot satisfy itself.
       ...[...css.matchAll(/(?:^|[{;])\s*(--canvas-[a-z-]+)\s*:/gm)].map((m) => m[1]),
     ]);
+    for (const file of PROVIDERS) {
+      const src = readSource(path.join(RENDERER, file));
+      for (const m of src.matchAll(/'(--canvas-[a-z-]+)'/g)) provided.add(m[1]);
+    }
     expect([...consumed].filter((v) => !provided.has(v))).toEqual([]);
   });
 
