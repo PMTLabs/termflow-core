@@ -123,9 +123,10 @@ export function useTooltipDwell(): TooltipDwell {
     }, [stop]);
 
     const onFocus = useCallback((key: string) => setFocused(key), []);
-    // Keyed rather than a bare `setFocused(null)`: focus can move straight from one control to the
-    // next, and in React the new control's `onFocus` may run before the old one's `onBlur`. Blindly
-    // clearing would then discard the focus that had just arrived.
+    // Keyed rather than a bare `setFocused(null)`, so a blur clears only the focus it is FOR.
+    // Moving between two controls fires `focusout` on the old one before `focusin` on the new, so a
+    // bare clear would also work today — which is the point: this does not depend on that order, and
+    // it stays correct for a handler that runs when its control is no longer the focused one.
     const onBlur = useCallback(
         (key: string) => setFocused((cur) => (cur === key ? null : cur)),
         [],
@@ -137,8 +138,12 @@ export function useTooltipDwell(): TooltipDwell {
         // left clears first and this line has nothing to do — which is why mutation testing found
         // both clears individually removable with the suite green. The path only this one covers is
         // a row that left the DOM without a `mouseleave`, which React does not synthesize on
-        // unmount; `reset()` covers the same shape from the list's side, and this covers the
-        // pointer's.
+        // unmount.
+        //
+        // `reset()` covers part of that shape from the list's side, but only PART: its one caller
+        // runs on a change of `query`, so a row set that changes because the DATA under it changed
+        // never reaches it. This line is what is left, and it survived the sweep until a test
+        // arrived at a second row with a null `relatedTarget` — the event shape an unmount leaves.
         setDwelt(null);
         timer.current = window.setTimeout(() => {
             timer.current = null;
