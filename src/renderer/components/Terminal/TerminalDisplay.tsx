@@ -25,6 +25,7 @@ import { termDiag, isTermDiagEnabled, setTermDiag } from '../../utils/diag';
 import { readClipboardText, writeClipboardText } from '../../utils/clipboard';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
 import { usePaneMuteState } from '../Panes/usePaneMuteState';
+import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
 import { store, RootState } from '../../store';
@@ -734,6 +735,35 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   useEffect(() => {
     engineRef.current?.setActive(isActive);
   }, [isActive]);
+
+  /**
+   * A menu belongs to the tab it was opened in.
+   *
+   * All four of these render through `ContextMenu`, which portals to `document.body` at
+   * `position: fixed`; `.tab-content`'s `visibility/opacity/content-visibility` hide only that
+   * tab's own subtree, and a background tab stays mounted — so a menu opened here kept painting
+   * over whichever tab the user switched to, where it reads as that tab's menu while acting on
+   * this terminal. `ContextMenu`'s own outside-`mousedown` and Escape dismissals do not fire for
+   * a switch by keyboard or by the API/MCP. See `useDismissOnTabDeactivate` for why it is the
+   * EDGE into inactive rather than the state, which is what keeps the Canvas overlay's menu (this
+   * component, `isActive` false throughout) working.
+   *
+   * The same four slots `onRelocated` clears, for the same reason and deliberately in the same
+   * order — a fifth floating surface added to this component has two places to be listed, and
+   * they are the two closest things to each other in this file that both mean "this menu can no
+   * longer be where it thinks it is".
+   *
+   * The raw setters, NOT `closeContextMenu`/`closeSnippetsMenu`/…: those call `refocusTerminal()`,
+   * and this terminal's tab has just gone off screen. The tab being switched TO focuses its own
+   * terminal from `shouldFocus` in this same commit, so refocusing here is a race for the
+   * keyboard that this side must not enter.
+   */
+  useDismissOnTabDeactivate(isActive, () => {
+    setContextMenu(null);
+    setSnippetsMenu(null);
+    setPathPicker(null);
+    setSchemaPicker(null);
+  });
 
   // Restore keyboard focus to this terminal when it becomes the active pane of
   // the active tab (e.g. switching back to a tab, or selecting a pane). xterm is

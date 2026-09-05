@@ -7,6 +7,7 @@ import { RootState, store } from '../../store';
 import { renamePanes } from '../../store/slices/panesSlice';
 import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import { usePaneMuteState } from './usePaneMuteState';
+import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { markSessionClosed, clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { BellIcon } from '../UI/BellIcon';
@@ -626,6 +627,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const handleCloseContextMenu = () => {
     setContextMenu(null);
   };
+
+  /**
+   * A menu belongs to the tab it was opened in. `PaneContextMenu` portals to `document.body`, so
+   * the `.tab-content` rules that hide a background tab never reach it and it would otherwise
+   * float over whichever tab the user switched to — see the hook for the full account.
+   *
+   * `setContextMenu(null)` directly rather than `handleCloseContextMenu`: they are the same call
+   * today, but the closer is the one an item's click runs, and that is where a focus restore
+   * would be added. Nothing may pull focus out of the tab the user has just switched TO.
+   */
+  useDismissOnTabDeactivate(isTabActive, () => setContextMenu(null));
 
   // Drag the pane by its title bar to move it (within a tab, across tabs, or out).
   const handleHeaderPointerDown = usePaneDrag({
