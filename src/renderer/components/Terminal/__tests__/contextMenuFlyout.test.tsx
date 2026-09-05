@@ -510,6 +510,26 @@ describe('tooltip dwell', () => {
         expect(titleOf(rows()[0])).toBe('the snippet text');
     });
 
+    it('follows the item it was earned on when the items list shifts underneath it', () => {
+        // The owner rebuilds `items` on every render of ITS own — `TerminalDisplay` re-renders
+        // while this menu is open whenever agent detection settles, which inserts an item ABOVE
+        // Copy and moves every index below it. Keyed on position, the tooltip earned by resting
+        // on Copy would be handed to whatever slid into Copy's old slot: the wrong sentence on a
+        // right-looking row. Keyed on the label, it stays where it was earned.
+        renderSync(twoItems());
+        hoverSync(menuItem('Copy'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        renderSync([
+            { label: 'Color scheme for "claude"', title: 'Pick a scheme for this agent.', click: () => {} },
+            ...twoItems(),
+        ]);
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+        expect(titleOf(menuItem('Color scheme'))).toBeNull();
+        expect(titleOf(menuItem('Paste'))).toBeNull();
+    });
+
     it('a DISABLED item keeps its tooltip, because it can never dwell', () => {
         // Two reasons, and either alone would be enough: a disabled <button> dispatches no mouse
         // events, so a delayed title would never arrive at all; and it is the row whose tooltip

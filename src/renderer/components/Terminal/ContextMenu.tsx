@@ -810,6 +810,22 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
         const disabled = item.enabled === false;
         const submenuOpen = openSubmenu === index;
+        /**
+         * The dwell key: the item's own LABEL, and its index only as a fallback.
+         *
+         * `items` is rebuilt by the owner on every one of ITS renders, and this menu stays
+         * mounted across them — `TerminalDisplay` re-renders while the menu is open whenever
+         * agent detection settles, which inserts a *"Color scheme for …"* item above Copy and
+         * shifts every index below it. A dwelt tooltip keyed on position would then be handed
+         * to whichever item had slid into that slot: the wrong sentence, on the right-looking
+         * row, for the rest of the dwell. A label is what the user is actually pointing at.
+         *
+         * Two items sharing a label would share a key, which merely puts the attribute on both
+         * — only the one under the pointer can show a tooltip, so that is a non-event, unlike
+         * the mismatch above. The index fallback is for a labelless item, which cannot be one
+         * of a matching pair in any menu this repo builds.
+         */
+        const tipKey = item.label ?? `item-${index}`;
 
         const button = (
           <button
@@ -818,12 +834,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             disabled={disabled}
             // A disabled item cannot dwell, and is the item whose tooltip carries the most —
             // the reason it is dimmed. See `useTooltipDwell`.
-            title={disabled ? item.title : tip.titleFor(`item-${index}`, item.title)}
+            title={disabled ? item.title : tip.titleFor(tipKey, item.title)}
             aria-haspopup={item.submenu ? 'menu' : undefined}
             aria-expanded={item.submenu ? submenuOpen : undefined}
             onMouseEnter={() => {
               if (disabled) return;
-              tip.onEnter(`item-${index}`);
+              tip.onEnter(tipKey);
               // A plain item retires whatever flyout is open; a submenu parent opens its
               // own. Both live on the ITEM rather than on the host below, so a menu with
               // no submenus at all is untouched by any of this.
