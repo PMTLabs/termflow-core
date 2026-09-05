@@ -607,6 +607,13 @@ pub struct AutomationStore {
     /// changed" case with no lock at all; every other case still goes to the row.
     target_cache: DashMap<(String, String), (Option<String>, Option<String>, i64)>,
     emit: Mutex<EmitState>,
+    /// Rows this build could not decode, drained by the caller that logs them.
+    ///
+    /// A `Mutex<Vec<_>>` rather than a return-value change: `list_rules` has several
+    /// callers and threading a second value through all of them to serve one of them
+    /// is churn for no gain. Drained rather than read, so a reload logs a bad row
+    /// once and not on every subsequent load.
+    skipped_rows: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl Default for AutomationStore {
@@ -625,6 +632,7 @@ impl AutomationStore {
             verbose_cache: DashMap::new(),
             target_cache: DashMap::new(),
             emit: Mutex::new(EmitState::default()),
+            skipped_rows: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -779,6 +787,11 @@ impl AutomationStore {
     // Rules
     // ------------------------------------------------------------------------------------------
 
+    /// Take the rows skipped since the last call. See `skipped_rows`.
+    pub fn take_skipped_rows(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.skipped_rows.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// Every rule, `ORDER BY sort_order, id`, each with its pinned `target_ids` filled in.
     ///
     /// Two queries and a group-by rather than one per rule: a rule list is drawn on every Settings
@@ -811,9 +824,24 @@ impl AutomationStore {
         let raws = stmt.query_map([], read_rule_row)?;
         let mut out = Vec::new();
         for raw in raws {
-            let mut rule = hydrate_rule(raw?)?;
-            rule.target_ids = targets.remove(&rule.id).unwrap_or_default();
-            out.push(rule);
+            let raw = raw?; // a SQLite error is still fatal — the DB is gone
+            let id = raw.id.clone();
+            match hydrate_rule(raw) {
+                Ok(mut rule) => {
+                    rule.target_ids = targets.remove(&rule.id).unwrap_or_default();
+                    out.push(rule);
+                }
+                // §3.3: a row this build cannot decode is ONE rule that does not run, never
+                // the whole library. `reload` already promises exactly this for an
+                // over-schema-version rule and says so in the user's words; a decode failure
+                // is the same event one layer down, so it gets the same sentence.
+                Err(e) => {
+                    self.skipped_rows
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push((id, format!("this rule needs a newer version of TermFlow ({e})")));
+                }
+            }
         }
         Ok(out)
     }
@@ -1159,6 +1187,9 @@ impl AutomationStore {
         match raw {
             None => Ok(None),
             Some(raw) => {
+                // Deliberately NOT the skip path §3.3 gives `list_rules`: a caller naming one rule
+                // wants that rule, and `Ok(None)` would read as "deleted" for a row that is merely
+                // undecodable by this build.
                 let mut rule = hydrate_rule(raw)?;
                 // The SAME predicate and order `list_rules` uses, in SQL, rather than reading every
                 // source and filtering in Rust. The two shapes differ deliberately — `list_rules`
@@ -1952,6 +1983,29 @@ mod tests {
             created_at: 1_000,
             updated_at: 1_000,
         }
+    }
+
+    /// Insert a row whose `graph` column is arbitrary text, bypassing `save_rule`'s
+    /// serialisation. There is no other way to author a row this build cannot decode.
+    fn write_raw_graph(store: &AutomationStore, id: &str, graph: &str) {
+        let guard = store.conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        conn.execute(
+            "INSERT INTO automation_rules
+               (id, name, enabled, runs_once, target_mode, criterion, criterion_value,
+                follow_new, completed_at, verbose_until, sort_order, schema_version,
+                graph, created_at, updated_at)
+             VALUES (?1, 'bad', 1, 0, 'rule', 'allTerminals', '', 1, NULL, NULL, 2, 1, ?2, 1000, 1000)",
+            rusqlite::params![id, graph],
+        )
+        .unwrap();
+    }
+
+    fn rule_named(name: &str) -> AutomationRule {
+        let mut r = rule(&format!("au-{name}")); // the existing fixture in this module
+        r.name = name.to_string();
+        r.sort_order = if name == "first" { 1 } else { 3 };
+        r
     }
 
     fn entry(rule_id: &str, kind: LogKind, at: i64) -> AutomationLogEntry {
@@ -3542,4 +3596,42 @@ mod tests {
         assert_eq!(checked, 5, "every call site of the class must be checked");
     }
 
+    #[test]
+    fn one_undecodable_row_is_skipped_and_the_rest_of_the_list_survives() {
+        let store = AutomationStore::new_in_memory();
+        // Two good rules either side of one whose graph blob names a variant this
+        // build does not know. That is exactly what an older build sees when it
+        // reads a v2 rule (spec §3.3): serde has no #[serde(other)] anywhere, so
+        // an unknown ENUM VARIANT fails the decode.
+        store.save_rule(&rule_named("first")).unwrap();
+        store.save_rule(&rule_named("third")).unwrap();
+        write_raw_graph(&store, "au-bad", r#"{"monitor":{"read":"fromTheFuture","cadence":"onOutput","everyMs":0}}"#);
+
+        let rules = store.list_rules().expect("a bad row must not fail the read");
+
+        let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "third"], "the good rules must survive");
+
+        let skipped = store.take_skipped_rows();
+        assert_eq!(skipped.len(), 1, "the skip must be reported, not silent");
+        assert_eq!(skipped[0].0, "au-bad");
+        assert!(
+            skipped[0].1.contains("newer version"),
+            "the reason must be the user-facing one reload() already uses, got: {}",
+            skipped[0].1
+        );
+    }
+
+    #[test]
+    fn a_skipped_row_is_reported_once_per_read_not_once_per_row_scanned() {
+        let store = AutomationStore::new_in_memory();
+        write_raw_graph(&store, "au-bad", r#"{"monitor":{"read":"fromTheFuture","cadence":"onOutput","everyMs":0}}"#);
+        store.list_rules().unwrap();
+        assert_eq!(store.take_skipped_rows().len(), 1);
+        assert_eq!(
+            store.take_skipped_rows().len(),
+            0,
+            "draining must clear — otherwise every reload re-logs the same row forever"
+        );
+    }
 }

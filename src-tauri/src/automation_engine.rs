@@ -332,6 +332,9 @@ impl AutomationEngine {
         let rules = store.list_rules()?;
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
         let mut report = ReloadReport::default();
+        // §3.3: rows the store could not decode. They never became `AutomationRule`s, so the
+        // loop below cannot see them — they are reported here or nowhere.
+        report.skipped.extend(store.take_skipped_rows());
 
         for rule in rules {
             if !rule.enabled || rule.completed_at.is_some() {
