@@ -77,30 +77,43 @@ const nonBlankString = (candidate: unknown): string | undefined =>
 /**
  * Which product wrote this envelope, or `null` for "none of ours" (plan/030 §4.1).
  *
- * Order is load-bearing. Each foreign format is keyed on its records array **plus** a
- * corroborating version field, so an unrelated file that merely happens to have a
- * `commands` key is reported as unsupported rather than parsed as Rephlo and reported as
- * "rejected 40 malformed". TermFlow is tested last and deliberately loosest — anything
- * carrying a `snippets` array or any `version` at all belongs to it, so a wrong-version or
- * version-less TermFlow file still reaches its own honest refusal in `snippetPorting.ts`
- * instead of being misrouted into a foreign parser.
+ * Order is load-bearing, and **our own marker is checked first**. A `snippets` array is
+ * TermFlow's signature, so a file carrying one is ours to interpret no matter what else it
+ * carries — which is what guarantees a wrong-version TermFlow export reaches its own named
+ * version refusal in `snippetPorting.ts`. Testing the foreign formats first let an
+ * envelope holding BOTH `snippets` and `commands` be swallowed as an empty Rephlo import,
+ * silently ignoring the snippets and skipping the version gate entirely.
+ *
+ * Each foreign format is then keyed on its records array **plus** a corroborating version
+ * field, so an unrelated file that merely happens to have a `commands` key is reported as
+ * unsupported rather than parsed as Rephlo and reported as "rejected 40 malformed".
+ *
+ * The final clause catches a TermFlow envelope with no records array at all — a bare
+ * `{ version }` — so that too gets the version message rather than "unsupported format".
  *
  * Both foreign checks are tolerant of a version they have never seen: InkSpoke's own
  * reader only warns on a newer `SchemaVersion`, and Rephlo's never branches on `version`
  * at all. Refusing a future minor bump would be stricter than the producers themselves.
+ *
+ * Every discriminator is read as an OWN property. JSON members always are, but this
+ * function is exported and testable, and an inherited `commands`/`version` answering for a
+ * field the envelope never carried would be a detection result nothing in the file
+ * justifies.
  */
 export function detectSnippetImportFormat(
   envelope: Record<string, unknown>,
 ): SnippetImportFormat | null {
-  if (Array.isArray(envelope.Mappings) && typeof envelope.SchemaVersion === 'number') {
+  const own = (key: string): boolean => Object.prototype.hasOwnProperty.call(envelope, key);
+  const ownArray = (key: string): boolean => own(key) && Array.isArray(envelope[key]);
+
+  if (ownArray('snippets')) return 'termflow';
+  if (ownArray('Mappings') && typeof envelope.SchemaVersion === 'number' && own('SchemaVersion')) {
     return 'inkspoke';
   }
-  if (Array.isArray(envelope.commands) && typeof envelope.version === 'string') {
+  if (ownArray('commands') && typeof envelope.version === 'string' && own('version')) {
     return 'rephlo';
   }
-  if (Array.isArray(envelope.snippets) || 'version' in envelope) {
-    return 'termflow';
-  }
+  if (own('version')) return 'termflow';
   return null;
 }
 
@@ -144,22 +157,36 @@ export function convertTermFlowEntries(entries: unknown[]): ConversionResult {
  * Every read of a params field goes through here — body, URL, and both encryption tells —
  * so the tolerance cannot be present at one site and absent at the next.
  *
- * Exact match first, then case-insensitive, which is what System.Text.Json itself does.
+ * **Last occurrence wins, in document order** — NOT exact-case-first, which is what this
+ * used to do and was wrong. When two keys of an object both fold to the same field,
+ * System.Text.Json applies them in the order they appear and the later one survives; it
+ * does not privilege the exactly-spelled one. So for
+ * `{"Text":"…","IsSecret":false,"isSecret":true}` InkSpoke sees `true`, and an exact-first
+ * reader saw `false` — i.e. it disagreed with the producer about whether a payload was
+ * encrypted, in the direction that imports ciphertext.
  *
- * `hasOwnProperty` rather than `in` is defensive only, and honestly so: none of the four
- * names ever passed here (`Text`, `Url`, `IsSecret`, `Nonce`) collides with a member of
- * `Object.prototype`, so swapping it for `in` changes no result today and no test can
- * catch the swap. It earns its place against the fifth name somebody adds, not against
- * anything currently reachable — so do not write a test asserting it matters, and do not
- * delete it as untested.
+ * `Object.keys` is own-enumerable only, so an inherited or prototype-borne key can never
+ * answer for a field the payload does not carry. Unlike the same choice in
+ * `detectSnippetImportFormat` — which is exported and genuinely reachable with a
+ * prototyped object — this one is unobservable: `params` is always `JSON.parse` output,
+ * and `for..in` differs from `Object.keys` on such an object only if somebody has added an
+ * ENUMERABLE property to `Object.prototype`. Mutation confirms the swap survives. It is
+ * kept for intent, not for a defect it currently prevents, so do not write a test for it.
  */
-function paramField(params: Record<string, unknown>, name: string): unknown {
-  if (Object.prototype.hasOwnProperty.call(params, name)) return params[name];
+function paramFields(params: Record<string, unknown>, name: string): unknown[] {
   const wanted = name.toLowerCase();
+  const found: unknown[] = [];
   for (const key of Object.keys(params)) {
-    if (key.toLowerCase() === wanted) return params[key];
+    if (key.toLowerCase() === wanted) found.push(params[key]);
   }
-  return undefined;
+  return found;
+}
+
+/** The value the producer would end up with — see {@link paramFields}. Use this for
+ *  CONTENT, where agreeing with the producer is the whole point. */
+function paramField(params: Record<string, unknown>, name: string): unknown {
+  const found = paramFields(params, name);
+  return found.length > 0 ? found[found.length - 1] : undefined;
 }
 
 /** `ActionParamsJson` is DOUBLE-encoded — a JSON string holding JSON — so it needs a
@@ -210,9 +237,19 @@ function inkSpokeGroupNames(groups: unknown): Map<string, string> {
  * payloads are never imported" quietly untrue for a hand-edited file.
  */
 function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
+  // ANY occurrence, not the one the producer would have kept — the deliberate asymmetry
+  // with `paramField`, and the reason `paramFields` is exposed at all.
+  //
+  // Content must agree with the producer; safety must not DEPEND on agreeing. Reading
+  // `{"IsSecret":false,"isSecret":true}` the producer's way happens to refuse, but the
+  // reversed spelling `{"isSecret":true,"IsSecret":false}` would then be imported — and
+  // being wrong there costs a terminal full of ciphertext, while being wrong the other way
+  // costs one honestly-counted `skippedUnsupported` on a file nobody can produce anyway.
+  // When a payload contradicts itself about whether it is a secret, believe the half that
+  // says it is.
   return (
-    Boolean(paramField(params, 'IsSecret')) ||
-    trimmedOrUndefined(paramField(params, 'Nonce')) !== undefined
+    paramFields(params, 'IsSecret').some(Boolean) ||
+    paramFields(params, 'Nonce').some((n) => trimmedOrUndefined(n) !== undefined)
   );
 }
 
@@ -224,8 +261,9 @@ function holdsEncryptedPayload(params: Record<string, unknown>): boolean {
  * path and nothing else, and `KeyCombo`/`OpenFile` are likewise not text — all of them are
  * counted as unsupported, not malformed.
  *
- * `SendEnterAfter` is read and then deliberately ignored: a TermFlow snippet inserts text
- * and never submits it, which is a product rule that predates this importer.
+ * `SendEnterAfter` is never read at all — no code here touches it. That is deliberate and
+ * not an oversight: a TermFlow snippet inserts text and never submits it, a product rule
+ * that predates this importer, so there is no behaviour for the field to select between.
  *
  * `IsEnabled: false` and `IsParameterized: true` mappings ARE imported. Both carry real
  * text the user wrote, and a snippet has no enabled state for the first to be lost to; a
@@ -322,7 +360,12 @@ export function convertRephloExport(envelope: Record<string, unknown>): Conversi
       rejected++;
       continue;
     }
-    if (command.isArchived) {
+    // `=== true`, not truthiness, and it matters for the bucket claim rather than for any
+    // real file: Rephlo serialises this from a C# bool, so only a hand-edited export can
+    // carry anything else — and truthiness put `isArchived: "false"` into
+    // `skippedUnsupported`, i.e. reported "not a snippet" for a record that plainly is
+    // not archived. A value that is not `true` is not an archive marker.
+    if (command.isArchived === true) {
       skippedUnsupported++;
       continue;
     }

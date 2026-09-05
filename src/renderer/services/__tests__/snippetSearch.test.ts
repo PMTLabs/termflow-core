@@ -239,6 +239,37 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     expect(filterSnippets([punct], 'ab')).toEqual([]);
   });
 
+  it('a case-equivalent query matches whichever case is typed (U+0130 expands on lowercase)', () => {
+    // 'İ' (U+0130) lower-cases to 'i' + U+0307 — a lowercase EXPANSION, which NFC cannot
+    // recompose because no precomposed 'i with dot above' exists. The haystack's initial
+    // is the bare 'i' (codePointAt(0) of the token), so a needle that keeps the combining
+    // dot could never match it: 'ih' found this snippet and 'İH' did not, for the same
+    // word in the same case-insensitive search. NFC alone does not catch it — the É/é
+    // fixtures below pass either way, which is why this one has to exist.
+    const item = s({ id: 'ist', text: 'İstanbul Handoff', createdAt: 0 });
+    expect(item.text.toLowerCase()).not.toContain('ih'); // so only the initials rung can fire
+    expect(filterSnippets([item], 'ih').map((x) => x.id)).toEqual(['ist']);
+    expect(filterSnippets([item], 'İH').map((x) => x.id)).toEqual(['ist']);
+  });
+
+  it('initials scan only the head of a long body — substring still reaches the rest', () => {
+    // The scan limit is a bound on a cost that is otherwise O(total library bytes) on one
+    // keystroke. Nothing becomes unfindable: the phrase past the cap is still found by
+    // typing the phrase, which is what this pins.
+    const filler = 'x '.repeat(1200); // 2400 chars, past INITIALS_SCAN_LIMIT
+    const buried = s({ id: 'b', text: filler + 'context handoff', createdAt: 0 });
+    expect(buried.text.indexOf('context handoff')).toBeGreaterThan(2000);
+    expect(filterSnippets([buried], 'ch')).toEqual([]);
+    expect(filterSnippets([buried], 'context').map((x) => x.id)).toEqual(['b']);
+  });
+
+  it('a bare word matches PART of a tag, not merely the whole tag', () => {
+    // Every other tag fixture queries the COMPLETE tag, so `tag === word` passes them all
+    // and the promised substring behaviour goes unpinned.
+    const tagged = s({ id: 'part', text: 'echo hello', tags: ['InkSpoke'], createdAt: 0 });
+    expect(filterSnippets([tagged], 'ink').map((x) => x.id)).toEqual(['part']);
+  });
+
   it('a bare word matches a tag, so an import source tag is findable by name', () => {
     const tagged = s({ id: 't', text: 'echo hello', tags: ['InkSpoke'], createdAt: 0 });
     const untagged = s({ id: 'u', text: 'echo hello there', createdAt: 0 });

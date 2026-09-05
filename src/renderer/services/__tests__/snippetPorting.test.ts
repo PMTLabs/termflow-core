@@ -542,6 +542,29 @@ describe('importSnippets — InkSpoke and Rephlo (plan/030)', () => {
     expect(result.reason).toContain('version');
     expect(result.reason).not.toContain('InkSpoke');
   });
+
+  it('a MIXED envelope still reaches the TermFlow version refusal, not a foreign parser', async () => {
+    // The disjoint fixture above cannot see this: with the foreign checks first, an
+    // envelope carrying both `snippets` and `commands` was consumed as an empty Rephlo
+    // import — reported as a cheerful "Imported 0", the snippets silently ignored and the
+    // version gate never reached. That is the failure mode the gate exists to prevent.
+    givenFile({ version: '2', exportedAt: 1, snippets: [snip()], commands: [] });
+
+    const result = await importSnippets([]);
+    expect(result.ok).toBe(false);
+    if (result.ok !== false) throw new Error('expected failure');
+    expect(result.reason).toContain('version');
+    expect(result.reason).toContain('"2"');
+  });
+
+  it('a mixed InkSpoke-shaped envelope carrying `snippets` is ours, not InkSpoke’s', async () => {
+    givenFile({ version: 1, exportedAt: 1, snippets: [snip({ text: 'mine' })], SchemaVersion: 2, Mappings: [] });
+
+    const result = await importSnippets([]);
+    if (result.ok !== true) throw new Error('expected ok');
+    expect(result.format).toBe('termflow');
+    expect(result.added.map((s) => s.text)).toEqual(['mine']);
+  });
 });
 
 describe('describeImport (plan/030 §4.3)', () => {

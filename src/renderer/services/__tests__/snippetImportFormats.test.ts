@@ -113,6 +113,26 @@ describe('detectSnippetImportFormat', () => {
     expect(detectSnippetImportFormat({ foo: 1, bar: [] })).toBeNull();
     expect(detectSnippetImportFormat({ items: [] })).toBeNull();
   });
+
+  it('OUR marker wins in a mixed envelope, so the version gate is never skipped', () => {
+    // Testing the foreign formats first let an envelope holding both `snippets` and
+    // `commands` be swallowed as an empty Rephlo import — the snippets silently ignored
+    // and the version refusal never reached. Every fixture in the block above uses
+    // DISJOINT discriminators, so none of them could see it.
+    expect(detectSnippetImportFormat({ version: '2', snippets: [], commands: [] })).toBe('termflow');
+    expect(
+      detectSnippetImportFormat({ version: 2, snippets: [], SchemaVersion: 2, Mappings: [] }),
+    ).toBe('termflow');
+    expect(detectSnippetImportFormat({ snippets: [], commands: [], version: '1.3' })).toBe('termflow');
+  });
+
+  it('ignores an INHERITED discriminator — own properties only', () => {
+    // JSON members are always own properties, so this guards the exported helper and any
+    // future non-JSON caller rather than the real import path.
+    expect(detectSnippetImportFormat(Object.create({ commands: [], version: '1.3' }))).toBeNull();
+    expect(detectSnippetImportFormat(Object.create({ snippets: [] }))).toBeNull();
+    expect(detectSnippetImportFormat(Object.create({ Mappings: [], SchemaVersion: 2 }))).toBeNull();
+  });
 });
 
 /* ── InkSpoke ─────────────────────────────────────────────────────────────────────── */
@@ -228,26 +248,47 @@ describe('convertInkSpokeExport', () => {
     expect(r.rejected).toBe(0);
   });
 
-  it('prefers the exact-case key when both spellings are present, as System.Text.Json does', () => {
-    // The folded spelling is listed FIRST on purpose. JSON key order is preserved, so with
-    // `Text` first this test would pass even with the exact-match check deleted — the
-    // case-insensitive scan would reach `Text` first anyway and the assertion would prove
-    // nothing about precedence.
-    const r = convertInkSpokeExport(
-      inkSpokeFile([mapping({}, { text: 'folded loses', Text: 'exact wins' })]),
+  it('takes the LAST colliding spelling in document order, as the producer does', () => {
+    // This used to assert that the exactly-spelled key wins, which is not the rule.
+    // System.Text.Json applies colliding properties in the order they appear and keeps the
+    // later value; it does not privilege the exact spelling. Both orders are asserted, so
+    // an implementation that privileges either casing fails one of them.
+    const forward = convertInkSpokeExport(
+      inkSpokeFile([mapping({}, { Text: 'first', text: 'last' })]),
     );
-    expect(r.drafts.map((d) => d.text)).toEqual(['exact wins']);
+    expect(forward.drafts.map((d) => d.text)).toEqual(['last']);
+    const reversed = convertInkSpokeExport(
+      inkSpokeFile([mapping({}, { text: 'first', Text: 'last' })]),
+    );
+    expect(reversed.drafts.map((d) => d.text)).toEqual(['last']);
+  });
+
+  it('refuses a payload whose spellings CONTRADICT each other about being secret', () => {
+    // Content follows the producer; safety must not DEPEND on following it. Reading these
+    // the producer's way refuses the first and imports the second — so the guard asks
+    // whether ANY spelling says secret, and both orders land in the same bucket.
+    const r = convertInkSpokeExport(
+      inkSpokeFile([
+        mapping({ Id: 'false-then-true' }, { Text: 'Y2lwaGVy', IsSecret: false, isSecret: true }),
+        mapping({ Id: 'true-then-false' }, { Text: 'Y2lwaGVy', isSecret: true, IsSecret: false }),
+        mapping({ Id: 'nonce-blank-then-real' }, { Text: 'Y2lwaGVy', Nonce: '  ', nonce: 'bm9uY2U=' }),
+        mapping({ Id: 'nonce-real-then-blank' }, { Text: 'Y2lwaGVy', nonce: 'bm9uY2U=', Nonce: '  ' }),
+      ]),
+    );
+    expect(r.drafts).toEqual([]);
+    expect(r.skippedUnsupported).toBe(4);
+    expect(r.rejected).toBe(0);
   });
 
   it('is unbothered by a params key named after an Object.prototype member', () => {
     // Named for what it pins: a payload carrying `constructor` or `__proto__` as a KEY
     // still converts normally and neither key reads as an encryption tell.
     //
-    // It does NOT prove `paramField` uses hasOwnProperty rather than `in` — verified by
-    // mutation: that swap survives, because none of the four names looked up (`Text`,
-    // `Url`, `IsSecret`, `Nonce`) collides with anything on `Object.prototype`. The
-    // hasOwnProperty is defence against the fifth name somebody adds, and there is no
-    // non-vacuous way to assert it until then.
+    // `paramFields` iterates `Object.keys`, which is own-enumerable only, so a prototype
+    // member cannot answer for a field the payload never carried. That is structural now
+    // rather than a guard — the earlier `hasOwnProperty` check was defence whose swap for
+    // `in` provably survived mutation, because none of the four names looked up collides
+    // with `Object.prototype`.
     // Raw JSON, not an object literal: `__proto__:` in a literal is the prototype setter,
     // so it would never survive JSON.stringify and the key would silently not be tested.
     // Parsed from text it is an ordinary own property, which is the case that matters.
@@ -422,6 +463,20 @@ describe('convertRephloExport', () => {
     expect(r.drafts[0].text).not.toContain('appended tail');
   });
 
+  it('treats a NON-boolean isArchived as not archived', () => {
+    // `isArchived: 'false'` is a hand-edited value Rephlo cannot produce, but truthiness
+    // filed it under skippedUnsupported — reporting "not a snippet" for a record that is
+    // plainly not archived. Only `true` is an archive marker.
+    const r = convertRephloExport(
+      rephloFile([
+        command({ name: 'stringy', isArchived: 'false' }),
+        command({ name: 'numeric', isArchived: 1 }),
+      ]),
+    );
+    expect(r.drafts.map((d) => d.label)).toEqual(['stringy', 'numeric']);
+    expect(r.skippedUnsupported).toBe(0);
+  });
+
   it('skips an archived command rather than rejecting it', () => {
     // plan/030 D7. Neither of Rephlo's export paths filters IsArchived, so a "selected"
     // export can carry something the user already threw away.
@@ -470,7 +525,11 @@ describe('convertRephloExport', () => {
     const r = convertRephloExport(
       rephloFile([command({ description: 'a note about this command' })]),
     );
-    expect(JSON.stringify(r.drafts[0])).not.toContain('a note about this command');
+    // The field must be ABSENT, not merely emptied or renamed. Checking the serialised
+    // draft for the original string passes a converter that keeps `description: ''`, or
+    // stores it transformed, or copies it under another key.
+    expect(Object.prototype.hasOwnProperty.call(r.drafts[0], 'description')).toBe(false);
+    expect(Object.keys(r.drafts[0]).sort()).toEqual(['folder', 'label', 'tags', 'text']);
   });
 });
 

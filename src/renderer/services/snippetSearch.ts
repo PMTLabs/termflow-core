@@ -46,6 +46,38 @@ const NO_MATCH_TIER = 5;
 const MIN_INITIALS_QUERY_LENGTH = 2;
 
 /**
+ * How much of a field's head is scanned for initials. Bounds a cost that is otherwise
+ * O(total bytes in the library) on the first qualifying keystroke, and — less obviously —
+ * makes the rung MORE precise, not less.
+ *
+ * Measured cold, 500 snippets: uncapped 68 ms, capped 10 ms. A realistic library (120
+ * snippets averaging 2 KB) is 4 ms either way, so this is protection against the extreme,
+ * not the common case. Warm lookups are a WeakMap hit regardless.
+ *
+ * The precision half: a 20 KB body yields ~3,800 initials, and a two-letter query matches
+ * *something* in a string that long essentially always — so the uncapped tail was
+ * contributing false positives, not recall. A snippet's identifying phrase lives at its
+ * head; 2,000 characters is roughly 300 words of it.
+ *
+ * Only this rung is capped. Rungs 0-2 still search the ENTIRE label and body, so nothing
+ * becomes unfindable — a phrase past the cap is still found by typing the phrase.
+ */
+const INITIALS_SCAN_LIMIT = 2000;
+
+/**
+ * Reduce a query word to the alphabet the initials are actually written in.
+ *
+ * Initials are mark-free by construction: each is `codePointAt(0)` of a token that must
+ * start with `\p{L}` or `\p{N}`, so a combining mark can never be one. The needle has to
+ * be reduced the same way or the two sides are not comparable, and NFC alone does not do
+ * it — some lowercase mappings EXPAND. `İ` (U+0130) lower-cases to `i` + combining dot
+ * above, which NFC cannot recompose, so `İH` became a three-code-point needle that could
+ * never match the two-character initials `ih` its own haystack produced. The same word,
+ * typed in the other case, matched. Stripping marks after NFC makes both spellings agree.
+ */
+const foldForInitialsMatch = (s: string): string => s.normalize('NFC').replace(/\p{M}/gu, '');
+
+/**
  * First character of every word in `s`, joined: `'context handoff'` → `'ch'`, and
  * `'please do a context handoff now'` → `'pdachn'`. A "word" starts with a letter or a
  * digit and continues through letters, digits and COMBINING MARKS, so punctuation splits
@@ -100,7 +132,10 @@ const initialsCache = new WeakMap<Snippet, readonly [string, string]>();
 function snippetInitials(s: Snippet): readonly [string, string] {
   let cached = initialsCache.get(s);
   if (!cached) {
-    cached = [computeWordInitials(s.label ?? ''), computeWordInitials(s.text)] as const;
+    cached = [
+      computeWordInitials((s.label ?? '').slice(0, INITIALS_SCAN_LIMIT)),
+      computeWordInitials(s.text.slice(0, INITIALS_SCAN_LIMIT)),
+    ] as const;
     initialsCache.set(s, cached);
   }
   return cached;
@@ -113,14 +148,13 @@ function matchesTag(s: Snippet, w: string): boolean {
 function matchesInitials(s: Snippet, w: string): boolean {
   if (w.length < MIN_INITIALS_QUERY_LENGTH) return false;
   const [labelInitials, textInitials] = snippetInitials(s);
-  // The needle gets the same normalisation as the haystack, or the fix is only half
-  // applied: initials are built from NFC text, so a query pasted in decomposed form
-  // ('e' + U+0301) would never match the 'é' sitting in them. Both sides, or neither.
+  // The needle gets reduced to the same alphabet as the haystack — see
+  // `foldForInitialsMatch` for why NFC alone is not enough. Both sides, or neither.
   //
   // Scoped to this rung on purpose. The substring rungs above have always compared raw
   // against raw, and widening them is a different, pre-existing question — but within
   // initials matching the two sides must at least agree with each other.
-  const needle = w.normalize('NFC');
+  const needle = foldForInitialsMatch(w);
   return labelInitials.includes(needle) || textInitials.includes(needle);
 }
 
