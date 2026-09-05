@@ -303,9 +303,16 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded';
  * with the seeded pick removed. That is what makes the dirty check honest rather than merely loud:
  * it names the pinned terminal as the unsaved work, so the prompt is telling the truth about what
  * closing would cost, it clears itself the moment the rule is saved, and a user who unticks that
- * terminal and changes nothing else is back to an untouched blank rule and is not nagged about it.
+ * terminal and changes nothing else is back AT THE BASELINE and is not nagged on the way out.
  * `targetIds` alone, and not `targetMode`: `'pinned'` with an empty pick set is the mode the picker
  * itself renders, so the baseline stays a rule the editor could actually be showing.
+ *
+ * **"Back at the baseline" is not "back to a blank rule", and the two are distinguishable on
+ * screen.** `newDraftFor` contributes `targetMode: 'pinned'` as well as the pick, and the baseline
+ * keeps the mode — so an unticked seeded draft is a PINNED rule watching nothing, which `problems()`
+ * reports as the blocking `targets.empty`, while `blankDraft()` is `'rule'`/`allTerminals` and has
+ * no problem at all. All the dirty check claims there is that nothing is UNSAVED, which is true.
+ * Whether the rule is finishable is a different question, asked and answered by `problems()`.
  */
 export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
     const present: StepKind[] = opening === 'saved'

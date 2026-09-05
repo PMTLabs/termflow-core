@@ -13,7 +13,11 @@ import {
     toastAutomationNotice,
 } from '../../services/automationEditorHost';
 import { blankDraft } from '../Settings/Automations/automationTemplates';
-import { armedEntryViews, armedMenuLabel } from './automationArmedSummary';
+// A VALUE import, unlike the `Terminal/ContextMenu` one below — and safe to be one for the same
+// reason that one is not: this module imports React and nothing else, so nothing is dragged into
+// `PaneContextMenu` or `CanvasNodeMenu` with it. That is why the dwell lives in `hooks/` at all.
+import { useTooltipDwell } from '../../hooks/useTooltipDwell';
+import { AUTOMATION_GLYPH, armedEntryViews, armedMenuLabel } from './automationArmedSummary';
 import './automationSurfaces.css';
 // Type-only, so no part of `Terminal/ContextMenu` — least of all its stylesheet — is pulled into
 // `PaneContextMenu` or `CanvasNodeMenu`, which import this module for the component above and have
@@ -39,16 +43,11 @@ function newAutomationLabel(terminalId: string): string {
 }
 const ADD_TO_EXISTING_LABEL = 'Add to an existing automation';
 /**
- * The glyph in front of a RULE's name, wherever one is offered as a row (Tam: *"add icon before
- * the automation name in the submenu"*).
- *
- * The same bolt the parent item carries, deliberately: it is the mark for *an automation*, and a
- * second glyph invented for the child rows would say the children are a different kind of thing
- * from the item they hang under. Stated once and used by every rule row in this file — the armed
- * list and the "add to an existing automation" list, in both the accordion and the flyout — so a
- * fourth list of rules cannot arrive wearing a fifth icon.
+ * A rule offered by name wears the same bolt the parent item does — deliberately, because a second
+ * glyph invented for the child rows would say the children are a different kind of thing from the
+ * item they hang under. `AUTOMATION_GLYPH` is that one bolt; see its own note for what it does and
+ * does not promise.
  */
-const AUTOMATION_ROW_ICON = '⚡';
 /** Why the "add to an existing automation" list can come up empty even when rules exist: a
  *  `'rule'`-mode automation picks its terminals by criterion and ignores `targetIds` outright, so
  *  "adding" a terminal to one would be a control that visibly does nothing — the failure
@@ -288,6 +287,12 @@ export const AutomationMenuSection: React.FC<{
      * really does replace — which is why `GlobalAutomationEditor` resolves its rule through it too.
      */
     const rules = useAutomationRules();
+    // Both rule rows below are ENABLED items carrying a title, which is the class the three-second
+    // dwell exists for — and the identical rules, drawn from the same entries into the flyout host,
+    // already delayed there. Without this the same rule popped instantly in the accordion and
+    // waited in the submenu. One hook per SECTION: the armed list and the addable list are two
+    // lists in one panel, and moving between them is a move off whichever row you were resting on.
+    const tip = useTooltipDwell();
 
     if (terminalId === null) return null;
 
@@ -295,6 +300,26 @@ export const AutomationMenuSection: React.FC<{
     // "just now" — the same rule `AutomationsPanel` states for its list.
     const views = armedEntryViews(armed, Date.now());
     const addable = addableRules(terminalId, rules);
+    /**
+     * One rule row's tooltip wiring, spread into the button.
+     *
+     * A helper rather than five attributes typed out twice: the two lists are the same kind of row
+     * and have already drifted once this round (the icon reached the flyout's rules before the
+     * accordion's), so the wiring that has to match is written once and applied.
+     *
+     * `onFocus`/`onBlur` are here because these are ordinary Tab-focusable buttons — unlike a
+     * flyout row, which is `tabIndex={-1}` and needs the other half of the keyboard exemption. Keys
+     * are namespaced by LIST as well as by rule id: the two lists are disjoint today only because
+     * `addableRules` filters out rules already watching this terminal, which is a rule about the
+     * data, not about the keys.
+     */
+    const rowTip = (key: string, title: string) => ({
+        title: tip.titleFor(key, title),
+        onMouseEnter: () => tip.onEnter(key),
+        onMouseLeave: tip.onLeave,
+        onFocus: () => tip.onFocus(key),
+        onBlur: () => tip.onBlur(key),
+    });
 
     return (
         <>
@@ -305,7 +330,7 @@ export const AutomationMenuSection: React.FC<{
                 onClick={() => setExpanded((v) => !v)}
                 aria-expanded={expanded}
             >
-                <span className="menu-icon">⚡</span>
+                <span className="menu-icon">{AUTOMATION_GLYPH}</span>
                 {armedMenuLabel(views.length)}
                 <span className="context-menu-expand-arrow">{expanded ? '▾' : '▸'}</span>
             </button>
@@ -323,7 +348,7 @@ export const AutomationMenuSection: React.FC<{
                                 onDismiss();
                                 openAutomationEditorFor(view.ruleId);
                             }}
-                            title={`Edit “${view.name}”`}
+                            {...rowTip(`armed-${view.ruleId}`, `Edit “${view.name}”`)}
                         >
                             {/* The icon and the name share a LINE, which is why they are wrapped:
                                 `.au-menu-rule` is `flex-direction: column` so that a rule can be a
@@ -332,7 +357,7 @@ export const AutomationMenuSection: React.FC<{
                                 line is indented to match by the stylesheet, so the two lines read
                                 as one row. */}
                             <span className="au-menu-rule-head">
-                                <span className="menu-icon">{AUTOMATION_ROW_ICON}</span>
+                                <span className="menu-icon">{AUTOMATION_GLYPH}</span>
                                 <span className="au-menu-rule-name">{view.name}</span>
                             </span>
                             <span className="au-menu-rule-state">{view.stateLabel}</span>
@@ -374,13 +399,13 @@ export const AutomationMenuSection: React.FC<{
                                         onDismiss();
                                         void addTerminalToRule(rule.id, terminalId, rule.name);
                                     }}
-                                    title={`Add this terminal to “${rule.name}”`}
+                                    {...rowTip(`add-${rule.id}`, `Add this terminal to “${rule.name}”`)}
                                 >
                                     {/* Same head wrapper as an armed row above, for the same
                                         column-layout reason — and the same icon, because these are
                                         the same kind of thing: a rule, offered by name. */}
                                     <span className="au-menu-rule-head">
-                                        <span className="menu-icon">{AUTOMATION_ROW_ICON}</span>
+                                        <span className="menu-icon">{AUTOMATION_GLYPH}</span>
                                         <span className="au-menu-rule-name">{rule.name}</span>
                                     </span>
                                 </button>
@@ -443,7 +468,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
         ? addable.map((rule): ContextMenuFlyoutRow => ({
             id: `add-to-${rule.id}`,
             label: rule.name,
-            icon: AUTOMATION_ROW_ICON,
+            icon: AUTOMATION_GLYPH,
             title: `Add this terminal to “${rule.name}” and save.`,
             onSelect: () => { void addTerminalToRule(rule.id, terminalId, rule.name); },
             closeMenuOnSelect: true,
@@ -452,7 +477,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
 
     return [{
         label: armedMenuLabel(views.length),
-        icon: '⚡',
+        icon: AUTOMATION_GLYPH,
         title: 'Automations watching this terminal, plus actions to arm a new one.',
         submenu: {
             searchPlaceholder: 'Search automations…',
@@ -463,7 +488,7 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
             rows: views.map((view): ContextMenuFlyoutRow => ({
                 id: `automation-${view.ruleId}`,
                 label: view.name,
-                icon: AUTOMATION_ROW_ICON,
+                icon: AUTOMATION_GLYPH,
                 // The state pill's words, in the dimmed right-hand column: the flyout's rows are
                 // one line, and this is the half the accordion prints underneath the name.
                 detail: view.stateLabel,

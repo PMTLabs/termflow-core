@@ -26,6 +26,7 @@ import {
     AutomationArmedForTerminals,
 } from '../AutomationArmedBadge';
 import { AutomationMenuSection, automationMenuItems } from '../AutomationMenuSection';
+import { TOOLTIP_DWELL_MS } from '../../../hooks/useTooltipDwell';
 import { ContextMenu } from '../../Terminal/ContextMenu';
 import type { ContextMenuFlyoutRow, ContextMenuItem } from '../../Terminal/ContextMenu';
 import {
@@ -538,15 +539,27 @@ describe('the shared indicator and menu section', () => {
      */
     it('both hosts spell the "New automation" row the same way, id included', async () => {
         seedTwoRules();
-        const flyoutLabel = automationMenuItems('tm-1')[0].submenu!.footerRows![0].label;
-        expect(flyoutLabel).toBe('New automation for this terminal (tm-1)');
+        // **Swept over two terminals, like the flyout's own footer test.** Exercised only at
+        // `tm-1`, this agreed with a hard-coded `(tm-1)` in either host — and an accordion that
+        // printed a constant while the flyout computed the id is precisely the drift this test
+        // was written to catch, so testing it at one terminal left the hole it exists to close.
+        for (const terminalId of ['tm-1', 'tm-other']) {
+            const flyoutLabel = automationMenuItems(terminalId)[0].submenu!.footerRows![0].label;
+            expect(flyoutLabel).toBe(`New automation for this terminal (${terminalId})`);
 
-        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
-        await act(async () => {
-            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
-        });
-        const labels = [...container.querySelectorAll('.au-menu-action')].map((el) => el.textContent);
-        expect(labels.some((t) => t?.includes(flyoutLabel))).toBe(true);
+            // `key` so each pass is a fresh MOUNT: this component owns its expanded/collapsed
+            // state, and re-rendering it with a new `terminalId` would keep the panel open from
+            // the previous pass — so the click below would collapse it and find no rows at all.
+            // A second right-click really is a new menu, so a remount is also the honest fixture.
+            await render(
+                <AutomationMenuSection key={terminalId} terminalId={terminalId} onDismiss={() => {}} />,
+            );
+            await act(async () => {
+                (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+            });
+            const labels = [...container.querySelectorAll('.au-menu-action')].map((el) => el.textContent);
+            expect(labels.some((t) => t?.includes(flyoutLabel))).toBe(true);
+        }
     });
 
     /**
@@ -589,6 +602,12 @@ describe('the shared indicator and menu section', () => {
             expect(head).not.toBeNull();
             expect(head.querySelector('.menu-icon')!.textContent).toBe('⚡');
             expect(head.querySelector('.au-menu-rule-name')).not.toBeNull();
+            // **BEFORE the name — the literal ask, and the one thing the three assertions above
+            // cannot see.** An icon rendered after the name satisfies all of them; in a flex row
+            // it would then sit to its RIGHT, which is not what was asked for and not what any
+            // `textContent` check would notice.
+            expect(head.firstElementChild).toBe(head.querySelector('.menu-icon'));
+            expect(head.children[1]).toBe(head.querySelector('.au-menu-rule-name'));
         }
 
         // …and the nested "Add to an existing automation" list underneath it.
@@ -600,8 +619,89 @@ describe('the shared indicator and menu section', () => {
         ];
         expect(addableInDom).toHaveLength(addRow.children!.length);
         for (const row of addableInDom) {
-            expect(row.querySelector('.au-menu-rule-head .menu-icon')!.textContent).toBe('⚡');
+            const head = row.querySelector('.au-menu-rule-head')!;
+            expect(head.querySelector('.menu-icon')!.textContent).toBe('⚡');
+            // Same order assertion as the armed list — the two rows are built independently.
+            expect(head.firstElementChild).toBe(head.querySelector('.menu-icon'));
+            expect(head.children[1]).toBe(head.querySelector('.au-menu-rule-name'));
         }
+    });
+
+    /**
+     * **The same rule, in the other host, waits the same three seconds.**
+     *
+     * The dwell shipped on `Terminal/ContextMenu` alone, so the flyout's rule rows delayed while
+     * the accordion's — the SAME rules, from the same entries, one right-click apart on the pane
+     * title — popped instantly. That is the reason `useTooltipDwell` is in `hooks/` rather than
+     * beside the menu that first needed it, and this is the test that says the second host
+     * actually took it up.
+     *
+     * Fake timers are installed AFTER the render: `render` here is an async `act`, and React's
+     * async act flushes through the very timer APIs `useFakeTimers` replaces, which can hang. The
+     * dwell's `setTimeout` is called on `mouseenter`, well after the switch, so it is fake by then.
+     */
+    const expectDwell = (row: Element, expected: string) => {
+        expect(row.getAttribute('title')).toBeNull();
+        jest.useFakeTimers();
+        try {
+            act(() => {
+                row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: null }));
+            });
+            // Still nothing: this is the sweep the feature exists to keep quiet.
+            expect(row.getAttribute('title')).toBeNull();
+            act(() => { jest.advanceTimersByTime(TOOLTIP_DWELL_MS - 1); });
+            expect(row.getAttribute('title')).toBeNull();
+            act(() => { jest.advanceTimersByTime(1); });
+            expect(row.getAttribute('title')).toBe(expected);
+        } finally {
+            jest.useRealTimers();
+        }
+    };
+
+    it('an ARMED rule row in the accordion delays its tooltip', async () => {
+        seedTwoRules();
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        expectDwell(container.querySelector('.au-menu-rule')!, 'Edit “Watch the build”');
+    });
+
+    it('and so does an ADDABLE rule row — the two lists are wired separately', async () => {
+        // `addableRules` filters out rules already watching this terminal, so the addable list is
+        // non-empty only for a terminal the seeded rules do NOT watch.
+        seedTwoRules();
+        await render(<AutomationMenuSection terminalId="tm-other" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const addToggle = [...container.querySelectorAll('.au-menu-action')]
+            .find((el) => el.textContent?.includes('Add to an existing automation')) as HTMLButtonElement;
+        await act(async () => { addToggle.click(); });
+        expectDwell(
+            container.querySelector('.context-menu-subpanel .context-menu-subpanel .au-menu-rule')!,
+            'Add this terminal to “Watch the build”',
+        );
+    });
+
+    it('but a KEYBOARD user gets the row description with no dwell at all', async () => {
+        // These rows are ordinary Tab-focusable buttons, unlike a flyout row (`tabIndex={-1}`,
+        // focus parked in the search box) — so here the keyboard exemption is plain DOM focus,
+        // and `useTooltipDwell` answers it directly. Without it, arrowing or tabbing to a rule
+        // would never surface its description, because `onEnter` is reachable only from a mouse.
+        seedTwoRules();
+        await render(<AutomationMenuSection terminalId="tm-1" onDismiss={() => {}} />);
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const row = container.querySelector('.au-menu-rule')!;
+        expect(row.getAttribute('title')).toBeNull();
+
+        act(() => { row.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+        expect(row.getAttribute('title')).toBe('Edit “Watch the build”');
+
+        act(() => { row.dispatchEvent(new FocusEvent('focusout', { bubbles: true })); });
+        expect(row.getAttribute('title')).toBeNull();
     });
 
     it('"New automation for this terminal" opens a draft targeting this terminal, disabled', async () => {

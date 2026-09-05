@@ -17,6 +17,28 @@ import type { ArmedAutomation } from '../../services/automationArmed';
 import { automationRowState } from '../Settings/Automations/automationState';
 
 /** One rule's line, in a menu or a tooltip. */
+/**
+ * The bolt, defined once for every surface that marks something as an automation.
+ *
+ * A bolt because the feature's verb is *fires*, and because every other per-terminal status in this
+ * app is a labelled glyph rather than a colour: `⊘` exited, `◎` canvas here, `🔔` unseen. No state
+ * in this app is signalled by colour alone (`automationState.ts`), and an indicator whose whole job
+ * is to be noticed in 16 pixels of tab strip is the last place to start.
+ *
+ * Used by the armed badge on its four surfaces, by the "Automations" parent item in both
+ * context-menu hosts, and — since Tam asked for *"an icon before the automation name in the
+ * submenu"* — by every row that offers a rule BY NAME: the armed list and the "add to an existing
+ * automation" list, each drawn once in the accordion and once in the flyout. Eight call sites for
+ * one mark, so a ninth surface cannot arrive wearing a different one; it was four separate
+ * declarations until the row icon made that a real risk rather than a tidy one.
+ *
+ * **It is not a UNIQUE mark, and nothing should claim it is.** `TerminalDisplay` gives the WebGL
+ * toggle the same bolt a few rows below the Automations item in the very same menu, and
+ * `SearchResults` uses it for a command hit. What one constant buys is that the automation surfaces
+ * agree with EACH OTHER — not that a bolt means "automation" wherever it turns up.
+ */
+export const AUTOMATION_GLYPH = '⚡';
+
 export interface ArmedEntryView {
     ruleId: string;
     /** The rule's own name. */

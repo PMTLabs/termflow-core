@@ -38,15 +38,31 @@ export interface TooltipDwell {
     titleFor(key: string, title: string | undefined): string | undefined;
     /** Wire to the row's `onMouseEnter`. */
     onEnter(key: string): void;
-    /** Wire to the row's `onMouseLeave`. */
+    /** Wire to the row's `onMouseLeave`. Clears the dwell; leaves focus alone — see `reset`. */
     onLeave(): void;
     /**
-     * Forget whatever was dwelt, with no pointer event involved.
+     * Wire to a focusable control's `onFocus`. A control the keyboard has reached shows its title
+     * at once, with no dwell — see the note on the hook itself.
+     */
+    onFocus(key: string): void;
+    /** Wire to the same control's `onBlur`, with the same key. */
+    onBlur(key: string): void;
+    /**
+     * Forget the dwell, with no pointer event involved. The same clear as `onLeave`, under the
+     * name its other caller needs.
      *
-     * The same clear as `onLeave`, under the name its other caller needs. A LIST can change under
-     * a pointer that never moved — type into a flyout's auto-focused search box and its rows
-     * re-filter — and a dwelt key that outlives the row it was earned on is a tooltip the next
-     * occupant of that key inherits for free. See the note on `titleFor` about what a key must be.
+     * A LIST can change under a pointer that never moved — type into a flyout's auto-focused
+     * search box and its rows re-filter — and a dwelt key that outlives the row it was earned on
+     * is a tooltip the next occupant of that key inherits for free. See the note on `titleFor`
+     * about what a key must be.
+     *
+     * **It deliberately leaves FOCUS alone**, which is also why `onLeave` can share it. DOM focus
+     * is the browser's state and this only mirrors it, so the mirror is cleared by the matching
+     * `onBlur` and by nothing else: a pointer sweeping across a focused control and off it fires
+     * `mouseleave`, and clearing focus there would take the description away from a keyboard user
+     * who never touched the mouse. A control removed while focused fires no blur and does leave a
+     * stale key — but only a control with the SAME key could inherit it, and a key names the row,
+     * never its position, so that is the row itself.
      */
     reset(): void;
 }
@@ -66,19 +82,32 @@ export interface TooltipDwell {
  * real-window question — it is the one thing about this feature that has to be checked by hand,
  * with a trackpad and a lifted finger, and it has no fallback if it turns out to be false.
  *
- * **Two exemptions belong at the CALL SITES, not here.**
- * - A **disabled** control keeps its title unconditionally: a disabled `<button>` dispatches no
- *   mouse events, so a dwell over one can never be measured and a delayed title would simply never
- *   arrive. It is also the row that needs its tooltip most — a control you cannot press explains
- *   why only in that string.
- * - A **keyboard-reached** row keeps its title too, and that is an accessibility fix rather than a
- *   convenience: `onEnter` is reachable only from a mouse, so arrow-key navigation would otherwise
- *   never surface a description at all — and for a snippet or a history command the `title` is the
- *   only copy of the full, untruncated text. A keyboard user cannot generate the trail this hook
- *   exists to suppress, so gating them buys nothing.
+ * **The DISABLED exemption belongs at the call sites, not here.** A disabled `<button>` dispatches
+ * no mouse events, so a dwell over one can never be measured and a delayed title would simply never
+ * arrive. It is also the control that needs its tooltip most — one you cannot press explains why
+ * only in that string.
+ *
+ * **The KEYBOARD exemption is answered here, and it is an accessibility fix rather than a
+ * convenience.** `onEnter` is reachable only from a mouse, so without an exemption arrow-key or Tab
+ * navigation would never surface a description at all — and for a snippet or a history command the
+ * `title` is the only copy of the full, untruncated text the label ellipses. A keyboard user cannot
+ * generate the trail this hook exists to suppress, so gating them buys nothing.
+ *
+ * For an ordinary focusable control — a host menu item, a rule row in the accordion — "reached by
+ * the keyboard" is DOM focus, and `onFocus`/`onBlur` own it. That lived as a private `useState` in
+ * `ContextMenu` for exactly one round before three more call sites arrived behind it, and a
+ * per-site copy of an accessibility exemption is a per-site chance to ship without it — the same
+ * shape as the row icon that reached one of four rule lists.
+ *
+ * A flyout ROW cannot use focus and keeps its own flag instead: those rows are `tabIndex={-1}` with
+ * focus held in the search box and the active row named by `aria-activedescendant`, so DOM focus
+ * never lands on one. See `ContextMenu`'s `keyboardNav`.
  */
 export function useTooltipDwell(): TooltipDwell {
     const [dwelt, setDwelt] = useState<string | null>(null);
+    // The control that currently has DOM focus, if it is one of ours. Deliberately NOT folded into
+    // `dwelt`: the two are earned differently, cleared differently, and can be true at once.
+    const [focused, setFocused] = useState<string | null>(null);
     const timer = useRef<number | null>(null);
 
     const stop = useCallback(() => {
@@ -92,6 +121,15 @@ export function useTooltipDwell(): TooltipDwell {
         stop();
         setDwelt(null);
     }, [stop]);
+
+    const onFocus = useCallback((key: string) => setFocused(key), []);
+    // Keyed rather than a bare `setFocused(null)`: focus can move straight from one control to the
+    // next, and in React the new control's `onFocus` may run before the old one's `onBlur`. Blindly
+    // clearing would then discard the focus that had just arrived.
+    const onBlur = useCallback(
+        (key: string) => setFocused((cur) => (cur === key ? null : cur)),
+        [],
+    );
 
     const onEnter = useCallback((key: string) => {
         stop();
@@ -121,9 +159,10 @@ export function useTooltipDwell(): TooltipDwell {
          * instead of by sweeping. Two rows sharing a key is harmless by comparison: only one of
          * them can be under the pointer.
          */
-        (key: string, title: string | undefined) => (dwelt === key ? title : undefined),
-        [dwelt],
+        (key: string, title: string | undefined) =>
+            (dwelt === key || focused === key ? title : undefined),
+        [dwelt, focused],
     );
 
-    return { titleFor, onEnter, onLeave: reset, reset };
+    return { titleFor, onEnter, onLeave: reset, onFocus, onBlur, reset };
 }

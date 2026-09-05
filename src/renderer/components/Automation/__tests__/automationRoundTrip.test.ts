@@ -18,6 +18,7 @@ import {
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
 import { DEFAULT_LAYOUT, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
+import { problems } from '../automationValidation';
 import { STEP_ORDER, defaultWires } from '../automationSteps';
 import type { AutomationRule } from '../../../types/electron';
 
@@ -169,17 +170,44 @@ describe('draftFromRule', () => {
         // The whole point: the inspector opens on *Watch output* with the terminal already ticked,
         // rather than one palette drag away from being noticed.
         expect(draft.selected).toBe('monitor');
+        /**
+         * **And the RULE itself, absolutely — every other assertion in this describe is about the
+         * canvas.** `present`/`wires`/`selected` say what is drawn; none of them says the rule
+         * being drawn is still the one the menu handed over. A `draftFromRule` that rewrote
+         * `targetMode` to `'rule'` on the seeded path satisfied all of them, and all 369 automation
+         * tests, while reproducing the exact defect this opening exists to fix: MonitorPanel then
+         * renders the criterion UI, and the terminal the user right-clicked is nowhere on screen.
+         *
+         * Spelled out from `seededRule()` rather than compared against `draft.rule`'s own fields,
+         * so the oracle cannot move with the implementation. The layout is the one licensed
+         * difference: `draftFromRule` resolves it for a rule that predates the field.
+         */
+        expect(draft.rule).toEqual({
+            ...seededRule(),
+            graph: { ...seededRule().graph, layout: DEFAULT_LAYOUT },
+        });
     });
 
     it('opens a SEEDED rule dirty, against a baseline that differs only in the seeded pick', () => {
         const draft = draftFromRule(seededRule(), 'seeded');
         expect(isDirty(draft)).toBe(true);
-        // Not merely "new rules are always dirty": the baseline names WHAT is unsaved, which is
-        // what makes *"Saving keeps them; leaving throws them away"* a true sentence here. Written
-        // as a whole-object equality rather than a `targetIds` spot-check, so a future seeding that
-        // contributed a second field (a name, a criterion) would fail this rather than quietly
-        // going unreported by the dirty check.
-        expect(draft.saved).toEqual({ ...draft.rule, targetIds: [] });
+        /**
+         * Not merely "new rules are always dirty": the baseline names WHAT is unsaved, which is
+         * what makes *"Saving keeps them; leaving throws them away"* a true sentence here.
+         *
+         * **Stated from the UNSEEDED starting point, not as `{ ...draft.rule, targetIds: [] }`.**
+         * That form restates the implementation's own formula, so the promise this comment used to
+         * make — that a future seeding contributing a second field would fail here — was one it
+         * could not keep: both sides would move together and the test would stay green while the
+         * dirty check silently stopped reporting the new field. Anchored to `blankDraft()`, a
+         * second seeded field has to be written down here or the equality breaks.
+         */
+        expect(draft.saved).toEqual({
+            ...blankDraft(),
+            targetMode: 'pinned',
+            targetIds: [],
+            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+        });
     });
 
     it('a SEEDED draft goes clean when the save lands', () => {
@@ -191,12 +219,33 @@ describe('draftFromRule', () => {
     it('a SEEDED draft goes clean if the seeded terminal is unticked', () => {
         // The paired negative for the baseline, and the honest consequence of it: the prompt is
         // about the PICK, not about the rule being new. Untick the terminal the menu added and
-        // change nothing else and you are looking at an untouched blank rule, which is not
-        // something to hold a *Leave without saving?* dialog over.
+        // change nothing else and there is nothing UNSAVED left to warn about — not something to
+        // hold a *Leave without saving?* dialog over.
         const draft = draftFromRule(seededRule(), 'seeded');
         const off = draftReducer(draft, { type: 'toggleTarget', id: 'tm-9' });
         expect(off.rule.targetIds).toEqual([]);
         expect(isDirty(off)).toBe(false);
+    });
+
+    it('…but that is not the same as being back at a blank rule, and the editor still says so', () => {
+        /**
+         * The sentence this pins used to read *"you are looking at an untouched blank rule"*, in
+         * both the test above and `draftFromRule`'s own doc. It is false, and the difference is
+         * visible to the user: `newDraftFor` contributes `targetMode: 'pinned'` as well as the
+         * pick, and the baseline drops only the pick — so what is on screen after the untick is a
+         * PINNED rule watching nothing, which `problems()` blocks the save on, while `blankDraft()`
+         * is `'rule'`/`allTerminals` and has no problem at all.
+         *
+         * "Nothing unsaved" and "ready to save" are two different questions. The dirty check
+         * answers only the first, and this is the test that stops the comment claiming otherwise.
+         */
+        const draft = draftFromRule(seededRule(), 'seeded');
+        const off = draftReducer(draft, { type: 'toggleTarget', id: 'tm-9' });
+
+        expect(off.rule.targetMode).toBe('pinned');
+        expect(blankDraft().targetMode).toBe('rule');
+        expect(problems(off.rule).some((p) => p.code === 'targets.empty')).toBe(true);
+        expect(problems(blankDraft()).some((p) => p.code === 'targets.empty')).toBe(false);
     });
 
     it('opens clean, whatever it opened on', () => {

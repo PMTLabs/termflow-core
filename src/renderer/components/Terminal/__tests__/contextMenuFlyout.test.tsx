@@ -693,6 +693,106 @@ describe('tooltip dwell', () => {
         expect(titleOf(menuItem('Copy'))).toBeNull();
     });
 
+    /**
+     * **The clear inside `onEnter`, isolated — nothing else reaches this path.**
+     *
+     * Every sweep test above leaves one row before entering the next, and on that path
+     * `onMouseLeave` has already cleared the dwell, so removing `onEnter`'s own clear leaves them
+     * all green. `reset()` covers the list-driven half — but only when the change is driven by the
+     * QUERY, since that is the only thing its effect watches; rows can also change because the
+     * DATA under them changed, with no keystroke involved.
+     *
+     * What is left is a dwelt key that no `mouseleave` ever cleared, because React fires none for
+     * a row that leaves the DOM under a stationary pointer. The event shape below is exactly that:
+     * the pointer arrives at a second row with no leave on the first. Without the clear, the first
+     * row keeps its armed tooltip while the pointer is demonstrably somewhere else.
+     */
+    it('entering a row clears a dwell that no `mouseleave` ever cleared', () => {
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'first' }), row('b', 'two', { title: 'second' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('first');
+
+        // Arrive at the second row WITHOUT leaving the first — a null `relatedTarget` is how the
+        // browser reports a pointer that came from outside the tree, and how an unmount leaves it.
+        hoverSync(rows()[1], null);
+        expect(titleOf(rows()[0])).toBeNull();
+        // …and the new row has to earn its own, as always.
+        expect(titleOf(rows()[1])).toBeNull();
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[1])).toBe('second');
+    });
+
+    /**
+     * **`instantTitles` means the whole menu, panels included.**
+     *
+     * Three mutants survived here before this test: the ROW gate ignoring the flag, and the flag
+     * not being threaded into the depth-0 panel or into a nested one. Nothing in production would
+     * have caught any of them — the path picker that motivated the prop is a flat list of items
+     * with no submenu — so this is the test that makes the prop's own sentence true rather than
+     * aspirational, for the first picker that grows a folder.
+     */
+    it('`instantTitles` reaches the flyout ROWS, and a panel nested under them', () => {
+        act(() => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    instantTitles
+                    items={[{
+                        label: 'Snippets',
+                        submenu: {
+                            rows: [
+                                row('a', 'one', { title: 'the whole snippet' }),
+                                row('f', 'a folder', {
+                                    children: [row('c', 'three', { title: 'the nested one' })],
+                                }),
+                            ],
+                        },
+                    }]}
+                    onClose={onClose}
+                />,
+            );
+        });
+        hoverSync(menuItem('Snippets'));
+        // No dwell served and no keyboard used — the flag alone has to be doing this.
+        expect(titleOf(rows()[0])).toBe('the whole snippet');
+
+        // Clicking a folder opens it; ArrowRight would too, but that also sets `keyboardNav`,
+        // which is a different exemption and would mask the one under test.
+        act(() => {
+            rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        });
+        expect(panels()).toHaveLength(2);
+        expect(titleOf(rows(1)[0])).toBe('the nested one');
+    });
+
+    it('a FOCUSED item keeps its title when the pointer sweeps over it and away', () => {
+        // The pointer and the keyboard are two independent claims on the same tooltip, and only
+        // the one that made a claim may drop it. Sharing one clear between `onMouseLeave` and the
+        // re-filter `reset()` is fine; extending that clear to FOCUS is not — it would take the
+        // description away from a keyboard user who never touched the mouse, at the moment some
+        // unrelated pointer left the item. That mutant passes every other test in this file.
+        renderSync(twoItems());
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        hoverSync(menuItem('Copy'));
+        hoverSync(menuItem('Paste'), menuItem('Copy'));
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+
+        // Only blur takes it away.
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
     it('`instantTitles` exempts a whole menu — for a picker whose titles ARE its content', () => {
         // `TerminalDisplay`'s path picker: the labels deliberately strip the shared base directory,
         // so the full path in `title` is the only thing telling three same-named files apart.

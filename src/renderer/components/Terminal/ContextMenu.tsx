@@ -719,16 +719,11 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   // row, whose `is-active` marker already re-renders on `mouseenter`. It touches only `title`
   // attributes, so it forces no layout and re-runs neither placement effect (theirs are keyed on
   // `[x, y]` and `[visible, parentFlippedLeft]`).
+  //
+  // A host item is an ordinary Tab-focusable button, so the KEYBOARD half of this is plain DOM
+  // focus and the hook answers it — `tip.onFocus`/`tip.onBlur` below. It was a `useState` here for
+  // one round; it moved the moment the accordion needed the same exemption.
   const tip = useTooltipDwell();
-  /**
-   * The item that has DOM FOCUS, if any — the keyboard's equivalent of a hover.
-   *
-   * A host item is an ordinary Tab-focusable button, and `useTooltipDwell` is armed only from
-   * `onMouseEnter`, so without this a keyboard user never reaches any item's description at all.
-   * Focus is not something a sweep produces — the pointer does not focus a button — so there is no
-   * trail to suppress on this path and nothing is given up by answering it immediately.
-   */
-  const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
   // `standaloneSubmenu` bypasses `openSubmenuAt`, so its `onOpen` has to be fired here or
   // a shortcut-opened Command History would never warm its directory cache. Mount only:
@@ -814,14 +809,11 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             key={index}
             className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}`}
             disabled={disabled}
-            // Three exemptions, all documented on `useTooltipDwell`: a picker whose titles ARE its
-            // content, a disabled item (which dispatches no mouse events, and whose tooltip is the
-            // only thing saying why it is dimmed), and an item reached by the keyboard.
-            title={
-              instantTitles || disabled || focusedKey === tipKey
-                ? item.title
-                : tip.titleFor(tipKey, item.title)
-            }
+            // Two exemptions here, both documented on `useTooltipDwell`: a picker whose titles
+            // ARE its content, and a disabled item (which dispatches no mouse events, and whose
+            // tooltip is the only thing saying why it is dimmed). The third — an item reached by
+            // the keyboard — is inside `titleFor`, fed by the focus handlers below.
+            title={instantTitles || disabled ? item.title : tip.titleFor(tipKey, item.title)}
             aria-haspopup={item.submenu ? 'menu' : undefined}
             aria-expanded={item.submenu ? submenuOpen : undefined}
             onMouseEnter={() => {
@@ -834,8 +826,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               else scheduleCloseSubmenu();
             }}
             onMouseLeave={tip.onLeave}
-            onFocus={() => setFocusedKey(tipKey)}
-            onBlur={() => setFocusedKey((cur) => (cur === tipKey ? null : cur))}
+            onFocus={() => tip.onFocus(tipKey)}
+            onBlur={() => tip.onBlur(tipKey)}
             onClick={() => {
               // A submenu parent OPENS its flyout instead of running the item and closing
               // the menu — the branch has to come before `onClose()` or the menu would be

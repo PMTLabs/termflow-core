@@ -84,12 +84,19 @@
     display: flex;
     align-items: center;
     width: 100%;
-    /* A flex item defaults to `min-width: auto`, which refuses to shrink below its own content —
-       so without this the name's `text-overflow: ellipsis` never engages and a long rule name
-       widens the whole menu instead of being cut. Needed on the item as well as the container. */
-    min-width: 0;
 }
 
+/* A flex item defaults to `min-width: auto`, which along the MAIN axis means "refuse to shrink
+   below your own content" — so without this the name's `text-overflow: ellipsis` never engages and
+   the name pushes its row wider instead of being cut.
+
+   Only the NAME needs it, and this declaration used to be on the head as well, doing nothing:
+   `.au-menu-rule-head` is a flex item too, but of `.au-menu-rule`, which is a COLUMN — so its width
+   is the cross axis, where `auto` already computes to 0, and `width: 100%` above pins it anyway.
+
+   And what it buys is the ellipsis once the menu has a width to obey. It does not CAP the menu: a
+   long rule name in a menu free to grow still grows it, which is the accordion overflow recorded in
+   `termflow-fabric/docs/progress/047`. */
 .au-menu-rule-head .au-menu-rule-name {
     min-width: 0;
 }
