@@ -24,6 +24,16 @@
  *    live component. A slow row resolving into that paints the previous terminal's screen under the
  *    new terminal's NAME, which is the single mistake this whole card exists to prevent, and the
  *    `cancelled` check after the `await` is all that stands between them.
+ * 4b. **And the same mis-attribution with no fetch in flight at all.** The effect returns before
+ *    `setShown` on three paths — the arrived-at row's cache entry is fresh, it is inside the
+ *    failure backoff, or its screen comes back empty — so the previous row's screen is a SETTLED
+ *    state under the new row's name, not a frame. The render-time re-seed (`previewFor`) is what
+ *    prevents it, it had no DOM coverage at all, and deleting it left the whole suite green.
+ * 4c. **The card follows a row that moves with nothing listening for it yet.** Between the commit
+ *    that takes the hover and the passive effect that arms the new row's listener, a scroll is
+ *    refused by the outgoing row's guard and heard by nobody else. The effect therefore reads the
+ *    box once on attach; and a `resize` writes unconditionally, because the card's position depends
+ *    on the viewport as well as on the row and only the row is compared.
  * 5. **The poll stops with the hover, and the cache does not grow for the life of the window.**
  *    Both failures are invisible at runtime — a leaked timer and an immortal `Map` look exactly
  *    like a working card — so both are asserted by COUNTING. Never by watching for a warning:
@@ -427,28 +437,165 @@ describe('the terminal picker', () => {
     });
 
     /**
-     * **A scroll belonging to the row the pointer has just left is ignored, not applied.**
+     * **A resize that changes the VIEWPORT and not the row.**
      *
-     * This looks impossible — the effect's cleanup removes the old row's listener — and it is not,
-     * because the removal is not immediate. `mouseover` is a CONTINUOUS-priority event in React, so
-     * the move to the next row is queued rather than flushed: for the rest of that frame the
-     * previous row's listener is still attached while the state it would write into already belongs
-     * to the next row. A scroll landing in that window — and a scroll is precisely what changes
-     * which row is under a still pointer, so the two arrive together by nature rather than by
-     * coincidence — takes row A's box and stamps it on row B's card. The card then names B while
-     * pointing at where A used to be, which is the one failure this whole component exists to
-     * prevent, reached from the other side.
+     * The case above moves the row's rect, so it pins "the resize listener fires" and nothing more:
+     * it passes for a handler that reads the row and never looks at the window. But
+     * `hoverCardPosition` takes the viewport as its second argument and clamps against it, and
+     * `sameAnchor` compares three numbers off the ROW — so a resize that changes `innerHeight`
+     * without moving the row returns `cur` unchanged, React bails out of the render, and the card
+     * keeps a `top` computed against a viewport that is gone. On a `position: fixed` element that
+     * means hanging off the bottom edge.
      *
-     * Both events go inside ONE `act` for that reason. Split into two, React commits the hover
-     * change between them, the stale listener is gone, and the test proves nothing.
+     * This is structural rather than a race, and it is unreachable today only by accident: the
+     * editor's `.au-modal` is `95vw × 95vh` and centred, so every real resize happens to move every
+     * row. That guarantee lives in a stylesheet this component never references, so it is not one
+     * this component may rely on.
+     *
+     * The expected positions are derived from `hoverCardPosition` rather than typed, because the
+     * claim under test is *"the card is re-clamped against the LIVE viewport"* and not any
+     * particular arithmetic — the clamp itself is pinned by its own `describe` below. A card that
+     * never re-renders keeps the first pair, which is what makes the two distinguishable.
+     */
+    it('re-clamps against the new viewport when the window resizes and the row does not move', async () => {
+        const dims = (w: number, h: number) => {
+            Object.defineProperty(window, 'innerWidth', { configurable: true, value: w });
+            Object.defineProperty(window, 'innerHeight', { configurable: true, value: h });
+        };
+        const wide = { width: window.innerWidth, height: window.innerHeight };
+        try {
+            const r = rows();
+            await show([r.live]);
+            const row = rowFor(r.live.terminalId);
+            // Low enough on the starting viewport that the BOTTOM clamp is what decides `top`, so
+            // shrinking the window has somewhere to move the card to.
+            row.getBoundingClientRect = () => boxAt(700);
+            await hover(row);
+
+            const before = hoverCardPosition(boxAt(700), wide);
+            expect((card() as HTMLElement).style.top).toBe(`${before.top}px`);
+            expect((card() as HTMLElement).style.left).toBe(`${before.left}px`);
+
+            const narrow = { width: 500, height: 500 };
+            dims(narrow.width, narrow.height);
+            // The row's rect is deliberately NOT touched.
+            await act(async () => {
+                window.dispatchEvent(new Event('resize'));
+            });
+
+            const after = hoverCardPosition(boxAt(700), narrow);
+            // Both axes move, and both are re-read from `window` at render time — so this fails for
+            // any implementation that decides "nothing changed" from the row alone.
+            expect(after.top).not.toBe(before.top);
+            expect(after.left).not.toBe(before.left);
+            expect((card() as HTMLElement).style.top).toBe(`${after.top}px`);
+            expect((card() as HTMLElement).style.left).toBe(`${after.left}px`);
+        } finally {
+            dims(wide.width, wide.height);
+        }
+    });
+
+    /**
+     * **A scroll landing in the hand-off between two rows is refused by one side and unheard by the
+     * other — and the card still has to end up on the row it belongs to, at that row's box.**
+     *
+     * This is the ordinary shape of a wheel flick over a still pointer rather than an exotic one.
+     * Frame N brings row B under the cursor and React takes the hover — `mouseover` carries
+     * CONTINUOUS priority, so that update is queued rather than flushed, and the effect that would
+     * arm B's listener is passive and runs later still. Frame N+1 scrolls again. The only listener
+     * attached is A's, and it REFUSES the write (`cur.el !== hoveredEl`), correctly: the box it
+     * holds is A's, and stamping it on B's card names one row while pointing at another. Nobody
+     * else is listening yet. Then the flick ENDS — the pointer never moves, no further scroll
+     * comes, and nothing is scheduled that would correct anything.
+     *
+     * So the settled position has to come from the effect READING the box when it attaches, not
+     * from an event. Held by the listeners alone the card sits at 200 — B's box as of one frame
+     * before the scroll that moved it — for as long as the pointer rests there.
+     *
+     * Both events go inside ONE `act`, and that is what makes the gap reproducible at all: split
+     * into two, React commits the hover between them, B's listener is attached before the scroll
+     * arrives, and the test proves nothing.
      *
      * The move is spelled as a `mouseout` on the row being LEFT, which is not interchangeable with
      * the `mouseover` the `hover` helper dispatches: React's enter/leave plugin returns early from
      * a `mouseover` whose `relatedTarget` is inside its own tree, on the grounds that the matching
      * `mouseout` will produce the pair. Written the other way round this test hovers nothing, and
      * fails against the correct component.
+     *
+     * **What this does NOT pin, said out loud rather than left looking covered: the refusal
+     * itself.** Delete `cur.el !== hoveredEl` and A's listener writes A's box into B's card — and
+     * then the attach-time read overwrites it with B's, so every assertion here still passes. The
+     * test that used to stand here DID kill that mutant, because it left B's box unmoved and so
+     * could not tell "refused" from "repaired"; naming it after the guard once the repair exists
+     * would be a claim this file cannot make. The difference the guard makes is one PAINTED frame:
+     * passive effects flush in a macrotask after paint, so without it the browser shows the card at
+     * the other row's coordinates once before it is put right. jsdom has no frame to read, and this
+     * suite has already tried both ways round it — a `MutationObserver` is served the corrected DOM,
+     * and `flushSync` will not force a continuous-priority update. The guard stays because
+     * preventing a wrong paint beats repairing one; it is recorded here as unpinned.
      */
-    it('ignores a scroll that belongs to the row the pointer has just left', async () => {
+    /**
+     * **The list relayouts under a still pointer — the third way a row moves, and the one no event
+     * reports.**
+     *
+     * The two listeners cover the row moving because something SCROLLED or the window RESIZED. A
+     * relayout of the list itself fires neither, and it is not exotic: the roster poll replaces
+     * `rows` every few seconds, so any terminal above the hovered one closing shifts it, and so does
+     * a single keystroke in the filter box hiding a row above. Because the row is keyed by
+     * `terminalId` it stays the SAME DOM node, so the anchor effect — which was keyed on the element
+     * alone — never re-armed and never re-read.
+     *
+     * That made it a SETTLED wrong anchor rather than a dropped frame: the card sat at the box
+     * captured by the last gesture, naming one row while pointing at where that row used to be,
+     * until the user moved the pointer. Both halves are asserted here, because the same node
+     * surviving is the precondition for the bug and would otherwise be an unstated assumption.
+     */
+    it('re-reads the anchor when the LIST relayouts and the row keeps its element', async () => {
+        const r = rows();
+        await show([r.live, r.other]);
+        const b = rowFor(r.other.terminalId);
+        b.getBoundingClientRect = () => boxAt(200);
+
+        await hover(b);
+        expect((card() as HTMLElement).style.top).toBe('200px');
+
+        // The roster poll drops the row ABOVE the hovered one. No scroll, no resize, no pointer
+        // event — and `r.other` is still open, so its own hover is not ended.
+        b.getBoundingClientRect = () => boxAt(120);
+        await show([r.other]);
+
+        // Same node, so nothing about the element changed and no listener re-armed.
+        expect(rowFor(r.other.terminalId)).toBe(b);
+        expect(card()!.textContent).toContain(r.other.terminalId);
+        expect((card() as HTMLElement).style.top).toBe('120px');
+    });
+
+    /** …and the same for a filter keystroke, which relayouts the list without any roster change. */
+    it('re-reads the anchor when a filter keystroke hides a row above the hovered one', async () => {
+        const r = rows();
+        await show([r.live, r.other]);
+        const b = rowFor(r.other.terminalId);
+        b.getBoundingClientRect = () => boxAt(200);
+
+        await hover(b);
+        expect((card() as HTMLElement).style.top).toBe('200px');
+
+        b.getBoundingClientRect = () => boxAt(120);
+        const filter = container.querySelector<HTMLInputElement>('input[aria-label="Filter terminals"]')!;
+        await act(async () => {
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, 'value',
+            )!.set!;
+            // Matches `other`'s folder only, so `live` leaves the list and `other` stays hovered.
+            setter.call(filter, 'termflow-fabric');
+            filter.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        expect(rowFor(r.other.terminalId)).toBe(b);
+        expect((card() as HTMLElement).style.top).toBe('120px');
+    });
+
+    it('lands the card on the arrived-at row‘s CURRENT box, after a scroll neither listener wrote', async () => {
         const r = rows();
         await show([r.live, r.other]);
         const a = rowFor(r.live.terminalId);
@@ -460,15 +607,19 @@ describe('the terminal picker', () => {
         expect((card() as HTMLElement).style.top).toBe('120px');
 
         await act(async () => {
-            // "The pointer went from row A to row B", as one event: React derives A's
-            // `onMouseLeave` and B's `onMouseEnter` from this single `mouseout`.
+            // Frame N: row B comes under the still pointer. React derives A's `onMouseLeave` and
+            // B's `onMouseEnter` from this single `mouseout`, capturing B's box as it is now.
             a.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: b }));
-            a.getBoundingClientRect = () => boxAt(48);
+            // Frame N+1: the flick is still going, and both rows move.
+            a.getBoundingClientRect = () => boxAt(20);
+            b.getBoundingClientRect = () => boxAt(92);
             (container.querySelector('.au-tpick') ?? container).dispatchEvent(new Event('scroll'));
         });
 
         expect(card()!.textContent).toContain(r.other.terminalId);
-        expect((card() as HTMLElement).style.top).toBe('200px');
+        // Not 200 (B's box one frame ago, which is where a listen-only effect leaves it) and not
+        // 20 (A's box, which is what the refusal exists to keep out).
+        expect((card() as HTMLElement).style.top).toBe('92px');
     });
 
     /**
@@ -665,6 +816,62 @@ describe('the terminal picker', () => {
         expect(text).toContain(r.other.terminalId);
         expect(text).toContain(`on screen: ${r.other.processId}`);
         expect(text).not.toContain(`on screen: ${r.live.processId}`);
+    });
+
+    /**
+     * **The same mis-attribution as a SETTLED state, which is the one the DOM can be asked about.**
+     *
+     * The case above hangs the FIRST row's fetch, so terminal A's screen never enters the card's
+     * state and B has nothing to inherit — it pins the `cancelled` check and says nothing about the
+     * render-time re-seed. That re-seed (`previewFor` at the top of `AuTerminalPreview`) had no DOM
+     * coverage at all: deleting it and painting `shown` unconditionally left the whole suite green,
+     * on the strength of a comment claiming the bad frame lasts one commit and cannot be read back
+     * from jsdom.
+     *
+     * It does not last one commit. The effect returns before `setShown` on three paths, and this is
+     * the commonest: the arrived-at row's cache entry is still inside `SNAPSHOT_TTL_MS`, so `tick`
+     * stops at `shouldRefresh` and NOTHING will correct the card until the TTL expires — up to two
+     * seconds of terminal A's screen under terminal B's id, name and folder, which is the single
+     * mistake this card exists to prevent. Running the pointer back over a row visited moments ago
+     * is the ordinary way to reach it.
+     *
+     * So the oracle here is the settled text of the card, with no frame capture of any kind. `Date.
+     * now` is frozen so that "B's entry is still fresh" is a fact of the arrangement rather than a
+     * bet on how long three hovers take, and the fetch count is asserted to prove the refusal
+     * actually happened — served from cache, the wiring is the ONLY thing left that can be right.
+     */
+    it('paints the arrived-at row‘s screen, not the one it came from, when the new row is already cached', async () => {
+        const clock = jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+        try {
+            const r = rows();
+            api.getTerminalScreenText.mockImplementation((id: string) =>
+                Promise.resolve(screenBody(id, `on screen: ${id}`)));
+            await show([r.live, r.other]);
+
+            // Warm B, so that arriving at it later takes the `shouldRefresh === false` path.
+            await hover(rowFor(r.other.terminalId));
+            await settle();
+            expect(card()!.textContent).toContain(`on screen: ${r.other.processId}`);
+
+            // A is now what the component last committed…
+            await hover(rowFor(r.live.terminalId));
+            await settle();
+            expect(card()!.textContent).toContain(`on screen: ${r.live.processId}`);
+
+            // …and back to B, inside the TTL.
+            await hover(rowFor(r.other.terminalId));
+            await settle();
+
+            const text = card()!.textContent ?? '';
+            expect(text).toContain(r.other.terminalId);
+            expect(text).toContain(`on screen: ${r.other.processId}`);
+            expect(text).not.toContain(`on screen: ${r.live.processId}`);
+            // Two fetches, not three: the third hover was served from the cache, so no `setShown`
+            // ran and the render-time re-seed is what put B's screen on screen.
+            expect(api.getTerminalScreenText).toHaveBeenCalledTimes(2);
+        } finally {
+            clock.mockRestore();
+        }
     });
 
     /**
@@ -873,38 +1080,52 @@ describe('the terminal picker', () => {
 
 describe('previewFor', () => {
         /**
-         * **A screen that belongs to another terminal is never painted, not even for one frame.**
+         * **A screen that belongs to another terminal is never painted.**
          *
          * Moving the pointer from row A to row B changes the card's props, and the identity block
          * repaints from those props IN THAT RENDER. Anything the preview held in its own state was
          * still A's until something updated it — so a preview keeping a bare screen string and
          * resetting it from an effect painted B's id, name and folder over A's screen and corrected
-         * itself on the next tick. One frame, no error, no warning, and precisely the wrong answer
-         * to the only question this card exists to answer.
+         * itself later. No error, no warning, and precisely the wrong answer to the only question
+         * this card exists to answer.
          *
-         * **Asserted here rather than through the DOM, and that is not for want of trying.** The
-         * bad frame is a commit, not a settled state: by the time `act` returns, the effect has put
-         * it right, so every end-state assertion is identical for both implementations. A
-         * `MutationObserver` is served the corrected DOM (its callback is a microtask), and
-         * `flushSync` does not force the continuous-priority update a `mouseover` schedules. Both
-         * were written, and both passed against the broken component — which is why the invariant
-         * now lives in a function that takes its inputs as arguments.
+         * **These are the three branches; the WIRING is pinned in the DOM, above.** The comment
+         * that used to sit here said the opposite — that the bad frame is a commit rather than a
+         * settled state, so no DOM assertion could tell the two implementations apart, and that the
+         * invariant therefore "lives in a function that takes its inputs as arguments". Both halves
+         * were wrong. The effect never reaches `setShown` at all on three paths (a fresh cache
+         * entry, the failure backoff, an empty screen), which makes the mis-attribution a settled
+         * state lasting up to seconds — see *"paints the arrived-at row's screen…"*. And the
+         * function did not take its inputs as arguments: it called `seedFor`, which reads a
+         * module-level cache with no reset, so the `null` asserted below was a property of that
+         * singleton rather than of the call. The seed is now passed IN, which is what makes these
+         * three cases decidable from what they are handed.
          */
         const of = (processId: string, screen: string | null): Preview =>
             ({ processId, screen, failed: false });
 
         it('discards a screen belonging to a different terminal', () => {
-            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b').screen).toBeNull();
+            const seed = of('pc-b', null);
+            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b', seed)).toBe(seed);
             // The id travels with it: a `Preview` that kept A's id would fail the same comparison
             // on the very next render and re-seed for ever.
-            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b').processId).toBe('pc-b');
+            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b', seed).processId).toBe('pc-b');
+        });
+
+        it('takes the seed‘s screen, not a blank one, when the arrived-at row is cached', () => {
+            // The seed is where a re-hover inside the TTL gets its screen from, so discarding the
+            // foreign state must not also discard THIS row's own cached frame — that would paint
+            // the waiting line over a screen the card is already holding.
+            const seeded = of('pc-b', 'B is on screen');
+            expect(previewFor(of('pc-a', 'A is on screen'), 'pc-b', seeded).screen)
+                .toBe('B is on screen');
         });
 
         it('keeps the screen that does belong to this terminal', () => {
             const mine = of('pc-a', 'A is on screen');
             // By identity: re-seeding a value that was already correct would drop a fetched screen
             // on every render and leave the card fetching for ever.
-            expect(previewFor(mine, 'pc-a')).toBe(mine);
+            expect(previewFor(mine, 'pc-a', of('pc-a', null))).toBe(mine);
         });
 
         it('clears a failure recorded against a different terminal', () => {
@@ -912,7 +1133,7 @@ describe('previewFor', () => {
             // Otherwise the row the pointer has just arrived at inherits "could not be read" from
             // the row it left — the same mis-attribution wearing the error message instead of the
             // screen.
-            expect(previewFor(failed, 'pc-b').failed).toBe(false);
+            expect(previewFor(failed, 'pc-b', of('pc-b', null)).failed).toBe(false);
         });
     });
 

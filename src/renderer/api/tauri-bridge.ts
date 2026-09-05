@@ -227,6 +227,16 @@ interface ElectronAPI {
   resetAutomation: (id: string, origin: string) => Promise<void>;
   rearmAutomation: (ruleId: string, terminalId: string | null) => Promise<void>;
   addAutomationTarget: (ruleId: string, terminalId: string, origin: string) => Promise<boolean>;
+  removeAutomationTarget: (
+    ruleId: string,
+    terminalIds: string[],
+    origin: string,
+  ) => Promise<boolean>;
+  setAutomationVerbose: (
+    ruleId: string,
+    verboseUntil: number | null,
+    origin: string,
+  ) => Promise<boolean>;
 }
 
 // Every listen() returns Promise<UnlistenFn>; discarding it makes the
@@ -877,8 +887,9 @@ const tauriBridge: ElectronAPI = {
   // --- Terminal Automations (Plan 028) ---
   //
   // Thin `invoke` wrappers over `automation_commands.rs`, one per command. The first
-  // eleven follow that file's declaration order; `addAutomationTarget` is appended last
-  // here as the newest of them, wherever it sits in the Rust module. Every argument name
+  // eleven follow that file's declaration order; the three id-only writers that replaced a
+  // whole-rule `saveAutomation` are appended last here as the newest of them, wherever
+  // they sit in the Rust module. Every argument name
   // here is the camelCase form Tauri derives from the Rust parameter — `rule_id` on the
   // Rust side is `ruleId` on the wire, and a mismatch is a silent 422 rather than a type
   // error (`mcp-split-pane-422`), which is why these live in one place instead of at each
@@ -919,6 +930,24 @@ const tauriBridge: ElectronAPI = {
   // (422), which surfaces as "the button did nothing" rather than as a type error here.
   addAutomationTarget: async (ruleId, terminalId, origin) =>
     invoke<boolean>('add_automation_target', { ruleId, terminalId, origin }),
+  // Unpin terminals from an existing rule's target list — the same shape as the add, and
+  // the same reason for existing. The Settings list's *Forget it* button used to filter
+  // `targetIds` on a rule object it had read out of a cached list and write the whole
+  // thing back through `saveAutomation`, which is an unconditional upsert: a rule deleted
+  // in another window came back, and a concurrent edit to any other column was reverted.
+  //
+  // The boolean reads exactly as the add's does: `false` means the rule id no longer names
+  // a rule and NOTHING was written; `true` covers ids the rule was not watching anyway,
+  // because the caller's "pinned but missing" list can be a commit behind.
+  removeAutomationTarget: async (ruleId, terminalIds, origin) =>
+    invoke<boolean>('remove_automation_target', { ruleId, terminalIds, origin }),
+  // Move a rule's *Log every check* deadline. `null` switches it off.
+  //
+  // The third site of that class. `verboseUntil` is one nullable column, and setting it
+  // through `saveAutomation` sent fifteen others back with it — so a logging switch could
+  // resurrect a deleted rule and revert someone else's edit to the message.
+  setAutomationVerbose: async (ruleId, verboseUntil, origin) =>
+    invoke<boolean>('set_automation_verbose', { ruleId, verboseUntil, origin }),
 };
 
 // Global event listeners to bridge Tauri events to DOM events

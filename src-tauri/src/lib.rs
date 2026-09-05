@@ -1501,6 +1501,8 @@ pub fn run() {
         automation_commands::dry_run_automation,
         automation_commands::save_automation,
         automation_commands::add_automation_target,
+        automation_commands::remove_automation_target,
+        automation_commands::set_automation_verbose,
         automation_commands::delete_automation,
         automation_commands::duplicate_automation,
         automation_commands::set_automation_enabled,

@@ -67,6 +67,8 @@ interface Api {
     deleteAutomation: jest.Mock;
     resetAutomation: jest.Mock;
     saveAutomation: jest.Mock;
+    removeAutomationTarget: jest.Mock;
+    setAutomationVerbose: jest.Mock;
 }
 
 function installApi(rules: AutomationRule[]): Api {
@@ -79,6 +81,10 @@ function installApi(rules: AutomationRule[]): Api {
         deleteAutomation: jest.fn(() => Promise.resolve(true)),
         resetAutomation: jest.fn(() => Promise.resolve()),
         saveAutomation: jest.fn(() => Promise.resolve(null)),
+        // Both answer `true` by default — *the rule is still there*. The `false` arm is the
+        // deleted-in-another-window race and is arranged explicitly by the tests that want it.
+        removeAutomationTarget: jest.fn(() => Promise.resolve(true)),
+        setAutomationVerbose: jest.fn(() => Promise.resolve(true)),
     };
     (window as unknown as { electronAPI: unknown }).electronAPI = api;
     return api;
@@ -273,12 +279,17 @@ describe('AutomationsPanel', () => {
         expect(toggle!.getAttribute('aria-checked')).toBe('false');
 
         await act(async () => toggle!.click());
-        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
-        const [saved] = api.saveAutomation.mock.calls[0];
+        expect(api.setAutomationVerbose).toHaveBeenCalledTimes(1);
+        const [ruleId, until] = api.setAutomationVerbose.mock.calls[0];
+        expect(ruleId).toBe('au-1');
         // A DEADLINE, not a flag: the store's gate compares each entry's timestamp against it, and
         // an always-on verbose log evicts everything worth keeping from a 200-entry buffer.
-        expect(saved.verboseUntil).toBeGreaterThan(Date.now());
-        expect(saved.id).toBe('au-1');
+        expect(until).toBeGreaterThan(Date.now());
+        // **And the whole rule does not go with it.** This switch used to send the captured rule
+        // object back through `saveAutomation`, an unconditional upsert — so flicking it could
+        // re-INSERT a rule deleted in another window, and could revert that window's edit to any of
+        // the fourteen columns riding along beside the one column it meant to change.
+        expect(api.saveAutomation).not.toHaveBeenCalled();
     });
 
     it('reads an EXPIRED verbose window as off, not as on', async () => {
@@ -340,9 +351,72 @@ describe('AutomationsPanel', () => {
         expect(forgets).toHaveLength(1);
 
         await act(async () => forgets[0].click());
-        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
-        expect(api.saveAutomation.mock.calls[0][0].id).toBe('au-pinned');
-        expect(api.saveAutomation.mock.calls[0][0].targetIds).toEqual([]);
+        expect(api.removeAutomationTarget).toHaveBeenCalledTimes(1);
+        // **Ids only, and the store computes the new pick set.** The `targetIds` this used to send
+        // were filtered in the renderer off a rule object read from a list that refreshes
+        // asynchronously, and written back through `saveAutomation` — the unconditional upsert whose
+        // insert arm resurrected rules another window had deleted. `removeAutomationTarget` names
+        // the rule and the terminals; nothing else crosses the wire, so there is nothing left to
+        // clobber a concurrent edit with.
+        expect(api.removeAutomationTarget.mock.calls[0].slice(0, 2)).toEqual([
+            'au-pinned',
+            ['tm-gone'],
+        ]);
+        expect(api.saveAutomation).not.toHaveBeenCalled();
+    });
+
+    it('says so when the rule a row was clicked on has already been deleted', async () => {
+        // `false` is not a failure and not a success: it is *the rule is gone, and nothing was
+        // written* — the race the store-side existence check exists to lose safely. Silence is the
+        // worst of the three outcomes, because the row the user clicked describes a rule that no
+        // longer exists, so "the button did nothing" is exactly what it looks like from outside.
+        const pinned = rule({ id: 'au-pinned', targetMode: 'pinned', targetIds: ['tm-gone'] });
+        const api = installApi([pinned]);
+        api.getAutomationRuntime.mockResolvedValue({
+            rules: {
+                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
+            },
+        });
+        api.removeAutomationTarget.mockResolvedValue(false);
+        await mount();
+
+        // The other window's delete, landing between this list's fetch and the click.
+        api.listAutomations.mockResolvedValue([]);
+        await act(async () => {
+            [...container.querySelectorAll('button')]
+                .find((b) => b.textContent === 'Forget it')!
+                .click();
+        });
+
+        expect(container.querySelector('.au-errline.standalone')?.textContent).toContain(
+            'that automation no longer exists',
+        );
+        // And the ghost is off the list — the sentence explains a list that has already corrected
+        // itself, rather than sitting above a row the user can go on clicking.
+        expect(container.querySelectorAll('.au-row')).toHaveLength(0);
+    });
+
+    it('says so when the verbose switch is flicked on a rule that has already been deleted', async () => {
+        // The same branch at the other call site. Both had to be rewired, and a fix that reached one
+        // of them is what this whole round is about.
+        const api = installApi([rule()]);
+        api.setAutomationVerbose.mockResolvedValue(false);
+        await mount();
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Activity log for Context handoff reminder"]')!
+                .click();
+        });
+
+        await act(async () => {
+            container
+                .querySelector<HTMLButtonElement>('[aria-label="Log every check for Context handoff reminder"]')!
+                .click();
+        });
+
+        // The log view replaces the list, so the panel's own error line is not on screen — the
+        // sentence has to reach the surface the user is actually looking at.
+        expect(container.textContent).toContain('that automation no longer exists');
     });
 
     it('lets Just fired expire on its own, with no further events', async () => {

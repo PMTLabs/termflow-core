@@ -76,6 +76,32 @@ export const AutomationsPanel: React.FC = () => {
         }
     };
 
+    /**
+     * `run` for the commands whose answer is a **boolean that is not a success flag**.
+     *
+     * *Forget it* and *Log every check* both send only ids now, and the store decides whether the
+     * rule is still there inside the transaction that writes — `false` means it was deleted in
+     * another window between this list being fetched and the click landing, and that nothing was
+     * written. That branch has to be SAID. It is the one case where the row the user clicked
+     * described a rule that no longer exists, so the button appearing to do nothing is exactly what
+     * it looks like from the outside, and silence would leave a user re-clicking a control that can
+     * never work again.
+     *
+     * The refresh runs on that branch too, and it is the other half of the repair: it is what takes
+     * the ghost row off the list, so the sentence explains a list that has already corrected itself.
+     */
+    const runOnRule = async (what: string, fn: () => Promise<boolean>) => {
+        try {
+            setActionError(null);
+            if (!(await fn())) {
+                setActionError(`${what} failed — that automation no longer exists.`);
+            }
+            await refresh();
+        } catch (e) {
+            setActionError(`${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    };
+
     // Deliberately NOT memoised. `now` changes every render by construction, so a `useMemo` keyed
     // on it can never hit — it would read as caching while doing strictly more work than the plain
     // filter it wraps.
@@ -145,6 +171,23 @@ export const AutomationsPanel: React.FC = () => {
         setView({ kind: 'list' });
     };
 
+    /**
+     * The action line, in the ONE spelling every view uses.
+     *
+     * The list had it and the log view did not, and the log view REPLACES the list — so a sentence
+     * written by an action taken from the log bar was set into state and then rendered nowhere at
+     * all. That was survivable while the only such action was the verbose toggle and the only
+     * sentence was a thrown error; it stopped being survivable when that toggle gained a `false`
+     * answer meaning *the rule you are looking at has been deleted*, which is precisely a thing the
+     * user must be told rather than left to infer from a switch that flicked back.
+     */
+    const alertLine = (message: React.ReactNode) => (
+        <div className="au-errline standalone" role="alert">
+            <span aria-hidden="true">⚠</span>
+            <span>{message}</span>
+        </div>
+    );
+
     const list = (
         <div className="au-panel">
             <div className="au-panelhead">
@@ -168,12 +211,7 @@ export const AutomationsPanel: React.FC = () => {
                 </button>
             </div>
 
-            {(error || actionError) && (
-                <div className="au-errline standalone" role="alert">
-                    <span aria-hidden="true">⚠</span>
-                    <span>{actionError ?? error}</span>
-                </div>
-            )}
+            {(error || actionError) && alertLine(actionError ?? error)}
 
             <div className="au-listbar">
                 <span className="au-count">
@@ -266,12 +304,19 @@ export const AutomationsPanel: React.FC = () => {
                         onDelete={(r) => setPendingDelete(r)}
                         onReset={(r) =>
                             void run('Resetting', () => api!.resetAutomation!(r.id, origin))}
+                        // **Ids, never the rule.** This used to filter `targetIds` on `r` — a rule
+                        // object out of a list this panel refreshes asynchronously — and send the
+                        // whole thing back through `saveAutomation`, which is an unconditional
+                        // upsert whose insert arm creates the row. So *Forget it* clicked on a rule
+                        // another window had already deleted re-INSERTED it, exactly as *Add to an
+                        // existing automation* did before `addAutomationTarget` replaced it; and a
+                        // concurrent edit to the message or the name was reverted by every other
+                        // column riding along beside the pick set this gesture meant to change.
+                        // `removeAutomationTarget` makes the existence check and the removal one
+                        // transaction, and `runOnRule` says so when the answer is no.
                         onForget={(r, ids) =>
-                            void run('Forgetting the terminal', () =>
-                                api!.saveAutomation!(
-                                    { ...r, targetIds: r.targetIds.filter((t) => !ids.includes(t)) },
-                                    origin,
-                                ))}
+                            void runOnRule('Forgetting the terminal', () =>
+                                api!.removeAutomationTarget!(r.id, ids, origin))}
                     />
                 ))}
             </div>
@@ -339,6 +384,13 @@ export const AutomationsPanel: React.FC = () => {
 
     if (view.kind === 'log') {
         return (
+            <>
+            {/*
+              * Only `actionError`, never the rule-list `error`: the log view has its own read-error
+              * state (`logError`, below), and the list's failure to load is not something this view
+              * can act on or explain.
+              */}
+            {actionError && alertLine(actionError)}
             <ActivityLogView
                 rule={rules.find((r) => r.id === view.ruleId) ?? null}
                 entries={log}
@@ -346,11 +398,19 @@ export const AutomationsPanel: React.FC = () => {
                 error={logError}
                 now={now}
                 onScopeChange={(ruleId) => showLog(ruleId)}
+                // The same class as `onForget` above, at its least obvious site: a switch that sets
+                // ONE nullable column was sending the whole captured rule back through the upsert,
+                // so it could resurrect a rule deleted in another window and revert an edit made in
+                // one. `setAutomationVerbose` sends the id and the deadline. It also deliberately
+                // does not move the rule's `updated_at` — `reload` re-arms a rule whose `updated_at`
+                // moves, and turning the log's detail up to find out why a rule is not firing must
+                // not re-arm the rule being watched.
                 onSetVerbose={(r, until) =>
-                    void run('Changing the log detail', () =>
-                        api!.saveAutomation!({ ...r, verboseUntil: until }, origin))}
+                    void runOnRule('Changing the log detail', () =>
+                        api!.setAutomationVerbose!(r.id, until, origin))}
                 onBack={backToList}
             />
+            </>
         );
     }
 

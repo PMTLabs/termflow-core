@@ -282,6 +282,101 @@ describe('the shared indicator and menu section', () => {
         open.mockRestore();
     });
 
+    /**
+     * …and so does the SECOND action row, which no test had ever clicked.
+     *
+     * Every assertion this row had read its LABEL ("offers both footer actions…") or called the
+     * flyout twin's `onSelect` as a bare function, with no menu around it and therefore no
+     * dismissal to be out of order with. Reversing the two statements in the accordion's handler
+     * was a free mutation for as long as that was true — the same gap that let the flyout host
+     * ship running backwards.
+     *
+     * The order matters here for the reason it matters for an armed rule, and slightly more: the
+     * draft editor is a modal, `PaneContextMenu` and `CanvasNodeMenu` do not close themselves when
+     * one is portalled over them, and a brand-new rule is the one the user is about to TYPE into.
+     * The spy calls through, so the draft asserted below is the one the editor host really
+     * received rather than one this test invented.
+     */
+    it('dismisses the menu BEFORE opening a draft for "New automation for this terminal"', async () => {
+        seedTwoRules();
+        const order: string[] = [];
+        const realOpenDraft = automationEditorHostModule.openAutomationEditorForDraft;
+        const openDraft = jest
+            .spyOn(automationEditorHostModule, 'openAutomationEditorForDraft')
+            .mockImplementation((draft: AutomationRule) => {
+                order.push('open-draft');
+                realOpenDraft(draft);
+            });
+        await render(
+            <AutomationMenuSection terminalId="tm-1" onDismiss={() => { order.push('dismiss'); }} />,
+        );
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+
+        const newAction = [...container.querySelectorAll('.au-menu-action')]
+            .find((el) => el.textContent?.includes('New automation for this terminal')) as HTMLButtonElement;
+        expect(newAction).toBeTruthy();
+        await act(async () => newAction.click());
+
+        expect(order).toEqual(['dismiss', 'open-draft']);
+        // …and it is a draft for THIS terminal, so the sequence above is not being satisfied by
+        // some other open request that happened to fire.
+        expect(getOpenAutomationDraft()!.targetIds).toEqual(['tm-1']);
+
+        openDraft.mockRestore();
+    });
+
+    /**
+     * …and the THIRD action row, the one that writes.
+     *
+     * `addTerminalToRule` opens no modal, so the reason the order matters is a different one and
+     * it is stated in that function's own header: it carries no in-flight guard, and the argument
+     * for not needing one is that the row does not survive its first click. That argument is only
+     * as good as the dismissal actually being asked for first — dismiss-after leaves the row on
+     * screen for the whole synchronous body of the handler, which is where a double-click lands.
+     *
+     * The oracle is the REAL command (`window.electronAPI.addAutomationTarget`), not a spy on the
+     * module-private function, so the recorded event is the write itself.
+     */
+    it('dismisses the menu BEFORE writing, for "Add to an existing automation"', async () => {
+        __seedAutomationArmedForTest(
+            [{ ...rule('r1', 'Pinned rule'), targetMode: 'pinned', targetIds: [] }],
+            { rules: {} },
+        );
+        const order: string[] = [];
+        const { add } = installAddApi();
+        add.mockImplementation(() => { order.push('add'); return Promise.resolve(true); });
+        const refresh = jest
+            .spyOn(automationArmedModule, 'refreshAutomationArmed')
+            .mockImplementation(() => {});
+
+        await render(
+            <AutomationMenuSection terminalId="tm-9" onDismiss={() => { order.push('dismiss'); }} />,
+        );
+        await act(async () => {
+            (container.querySelector('.context-menu-item') as HTMLButtonElement).click();
+        });
+        const addToggle = [...container.querySelectorAll('.au-menu-action')]
+            .find((el) => el.textContent?.includes('Add to an existing automation')) as HTMLButtonElement;
+        await act(async () => addToggle.click());
+
+        // Nothing is armed on `tm-9`, so every `.au-menu-rule` on screen is an addable row.
+        const addableRows = [...container.querySelectorAll('.au-menu-rule')];
+        expect(addableRows.map((r) => r.querySelector('.au-menu-rule-name')!.textContent))
+            .toEqual(['Pinned rule']);
+
+        await act(async () => (addableRows[0] as HTMLButtonElement).click());
+
+        expect(order).toEqual(['dismiss', 'add']);
+        // The write really went to the rule that was clicked — without this the sequence above
+        // would also be satisfied by a handler that dismissed and then wrote to nothing in
+        // particular.
+        expect(add.mock.calls).toEqual([['r1', 'tm-9', expect.any(String)]]);
+
+        refresh.mockRestore();
+    });
+
     it('offers the SAME rules, in the same order, to the terminal-area menu', async () => {
         // Tam's follow-up: the terminal's own content menu must carry what the pane title's does.
         // It renders from an item ARRAY and cannot host the accordion component, so it is the one
@@ -320,13 +415,22 @@ describe('the shared indicator and menu section', () => {
         expect(getOpenAutomationRuleId()).toBe('r2');
     });
 
-    it('opens on HOVER, and a row opens that rule and dismisses the menu', async () => {
+    it('opens on HOVER, and a row dismisses the menu BEFORE opening that rule', async () => {
         // Tam: *"we need to do the same submenu on hover on the automations item"*. Hover-opening
         // is `ContextMenu`'s own contract, but it only reaches this feature if the item handed to
         // it is really a submenu PARENT — a plain `click` item renders identically right up until
         // the pointer rests on it, which is the whole of what changed here.
         seedTwoRules();
-        const onClose = jest.fn();
+        const order: string[] = [];
+        const onClose = jest.fn(() => { order.push('dismiss'); });
+        // Calls THROUGH to the real implementation, so `getOpenAutomationRuleId()` below still
+        // means what it says — the spy is here to timestamp the call, not to replace it. The
+        // original has to be captured before `spyOn` swaps the property, or the mock would be
+        // calling itself.
+        const realOpen = automationEditorHostModule.openAutomationEditorFor;
+        const open = jest
+            .spyOn(automationEditorHostModule, 'openAutomationEditorFor')
+            .mockImplementation((ruleId: string) => { order.push(`open:${ruleId}`); realOpen(ruleId); });
         await render(
             <ContextMenu x={10} y={10} items={automationMenuItems('tm-1')} onClose={onClose} />,
         );
@@ -360,8 +464,24 @@ describe('the shared indicator and menu section', () => {
         await act(async () => (rendered[1] as HTMLButtonElement).click());
 
         expect(getOpenAutomationRuleId()).toBe('r2');
-        // `closeMenuOnSelect` — the editor must not open behind a menu that stayed up.
+        // **The SEQUENCE, not two counters.** This is the host the accordion's ordering test could
+        // not speak for: its rows are DATA, so the dismissal is `ContextMenu.activate` honouring
+        // `closeMenuOnSelect` rather than a statement in this file. `getOpenAutomationRuleId() ===
+        // 'r2'` plus `onClose` once is satisfied by either order, so on its own it pins nothing
+        // about which happens first — and this host was in fact reordered, twice, while that pair
+        // stayed green. Recording both calls into one array is what closes it, and the rule id
+        // rides along so "the SECOND row's rule" is pinned by the same equality.
+        //
+        // The order here is the generic host's, and it is ACTION FIRST — see
+        // `ContextMenu.tsx`'s `closeMenuOnSelect` doc, which measures why dismissing first buys
+        // nothing (the close is a queued setState that has not flushed when the editor mounts,
+        // either way round) and costs a spurious terminal focus. The accordion's own rows, three
+        // tests up, dismiss first because that call is a statement in `AutomationMenuSection` —
+        // the two hosts differ, and each is pinned to what it actually does.
         expect(onClose).toHaveBeenCalledTimes(1);
+        expect(order).toEqual(['open:r2', 'dismiss']);
+
+        open.mockRestore();
     });
 
     it('still offers ONE item for an unarmed terminal, with no `(0)` in its label', async () => {

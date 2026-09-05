@@ -25,12 +25,17 @@ import type { WatchableTerminal } from '../../types/electron';
 import { AuTerminalHoverCard, evictPreviewsOutside } from './AuTerminalHoverCard';
 
 /**
- * The three fields `hoverCardPosition` actually reads.
+ * The three fields of the ROW that `hoverCardPosition` reads — and only those: the other half of
+ * what that function reads is the viewport, which is not in here and cannot be.
  *
  * Compared field by field rather than by object identity, because `getBoundingClientRect()` mints a
  * fresh `DOMRect` on every call: an identity check would report "moved" on every pointer move and
  * re-render the card at the same coordinates a hundred times a second. Width and height are left
  * out because nothing about the card's placement depends on them.
+ *
+ * Knowing only the row, this is not on its own an answer to *"does the card need re-clamping"* — a
+ * window resize changes the viewport and need not move the row at all. The effect below is where
+ * that is settled, by not consulting this on a `resize`.
  */
 const sameAnchor = (a: DOMRect, b: DOMRect): boolean =>
     a.top === b.top && a.left === b.left && a.right === b.right;
@@ -120,8 +125,20 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
      * to cancel on every path out of this effect, and a frame of lag on a card whose entire
      * complaint is that it lags behind its row.
      *
-     * Keyed on the ELEMENT rather than on `hovered`, so it is attached once per hovered row instead
-     * of being torn down and rebuilt by every anchor update it causes.
+     * Keyed on the ELEMENT and on the RENDERED LIST — not on `hovered`, whose anchor this effect
+     * writes, and which would therefore rebuild it on every update it causes.
+     *
+     * **`shown` is in there because a row moves for a third reason, and it is the quiet one.** The
+     * two events above cover the row moving because something SCROLLED or the window RESIZED. A
+     * relayout of the list itself fires neither: the roster poll replaces `rows` every few seconds
+     * and any terminal above this one closing shifts it, and so does one keystroke in the filter
+     * box hiding a row above. The hovered row is keyed by `terminalId`, so it is the SAME DOM node
+     * throughout — the element does not change, no listener re-arms, no pointer event is coming
+     * because the pointer never moved, and the card goes on being drawn at the box captured by the
+     * last gesture. That is a settled wrong anchor, not a dropped frame: it persists until the user
+     * moves the pointer. Re-running on `shown` takes the reading the relayout owed. It costs a
+     * listener swap per roster poll, which is two `addEventListener` calls every few seconds
+     * against a card that is only mounted while a pointer is resting on a row.
      *
      * **`cur.el !== hoveredEl` is not belt-and-braces, and the window it closes is the ordinary
      * case rather than a rare one.** The cleanup below does remove this listener when the pointer
@@ -135,24 +152,65 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
      * `sameAnchor` is the cheaper half: a scroll of some other element on the page still fires here
      * (that is the price of the capture phase), and returning `cur` unchanged is what makes React
      * bail out of the render rather than re-committing the card at the coordinates it already has.
+     *
+     * **And that guard is why this takes a reading BEFORE it listens.** The window it closes is
+     * real, but closing it leaves the arriving row with nobody writing for it: the outgoing row's
+     * listener refuses the scroll (`cur.el !== hoveredEl`) and the arriving row's listener does not
+     * exist yet, because this effect is passive and runs after the commit that scheduled it. A wheel
+     * flick lands both events in that gap by nature — frame N brings row B under a still pointer and
+     * commits the hover with B's box as it is at frame N, frame N+1 scrolls again and is dropped by
+     * both sides — and then the flick ends, the pointer never moves, and nothing further is coming.
+     * The card sits at frame-N coordinates with no correction scheduled. Reading once on attach
+     * makes the anchor right as of the moment this effect is ARMED rather than as of the last event
+     * that reached it: a settled-state guarantee instead of a race the listeners happen to win. It
+     * cannot fight the guard or loop — at attach `cur.el` IS `hoveredEl`, the write changes only
+     * `anchor`, and this effect is keyed on the element.
+     *
+     * That read also makes the guard above unkillable by any test in this repo, and it is worth
+     * knowing which of the two a green suite is speaking for. Drop the guard and A's box lands on
+     * B's card — and this read then overwrites it with B's, so every settled assertion still holds.
+     * What is lost is one PAINTED frame: passive effects flush in a macrotask after paint, so the
+     * card is shown at the other row's coordinates once and repaired afterwards. Preventing a wrong
+     * paint beats repairing one, so the guard stays; `auTerminalPickerHover.test.tsx` says out loud
+     * that it is the read, not the guard, that its assertions pin.
+     *
+     * **A resize skips the `sameAnchor` bail-out, because it is a change to the OTHER input.**
+     * `hoverCardPosition` is a function of the anchor AND the live viewport, and `sameAnchor`
+     * compares three numbers off the row: a resize that changes `innerWidth`/`innerHeight` without
+     * moving the row returns `cur` unchanged, React bails out of the render, and the card keeps a
+     * `top` clamped against a viewport that no longer exists — hanging off the bottom edge, on an
+     * element that is `position: fixed`. That it is unreachable today is an accident of a
+     * stylesheet: `.au-modal` is `95vw × 95vh` and centred, so every resize does move the row. This
+     * component never references that file and cannot check it, and the guarantee is not the CSS's
+     * to make. Forcing the write costs one render per `resize` — an event that has just relaid out
+     * the entire document.
      */
     useEffect(() => {
         if (hoveredEl === null) return undefined;
-        const reread = () => {
+        const reread = (viewportMayHaveMoved: boolean) => {
             const box = hoveredEl.getBoundingClientRect();
             setHovered((cur) => (
-                cur === null || cur.el !== hoveredEl || sameAnchor(cur.anchor, box)
+                cur === null
+                || cur.el !== hoveredEl
+                || (!viewportMayHaveMoved && sameAnchor(cur.anchor, box))
                     ? cur
                     : { ...cur, anchor: box }
             ));
         };
-        window.addEventListener('scroll', reread, true);
-        window.addEventListener('resize', reread);
+        const onScroll = () => reread(false);
+        const onResize = () => reread(true);
+        // Before the listeners, not instead of them: whatever moved this row between the gesture
+        // that captured its box and this effect being armed had nobody to report it.
+        reread(false);
+        window.addEventListener('scroll', onScroll, true);
+        window.addEventListener('resize', onResize);
         return () => {
-            window.removeEventListener('scroll', reread, true);
-            window.removeEventListener('resize', reread);
+            window.removeEventListener('scroll', onScroll, true);
+            window.removeEventListener('resize', onResize);
         };
-    }, [hoveredEl]);
+        // `shown` is a dependency for its IDENTITY, not its contents: any re-render that could have
+        // relaid the list out mints a new array, and taking a fresh reading is exactly the response.
+    }, [hoveredEl, shown]);
 
     /**
      * A hover ends when its ROW does, and not only when the pointer says so.
@@ -272,9 +330,11 @@ export const AuTerminalPicker: React.FC<AuTerminalPickerProps> = ({
                                 el: e.currentTarget,
                             })}
                             // **The row moves under a pointer that does not.** Re-read on the
-                            // gesture the pointer is already making, so a move within a row that
-                            // has shifted for a reason nothing fires an event for — the roster poll
-                            // replacing the rows above this one, say — still finds the card.
+                            // gesture the pointer is already making. This is the cheapest of the
+                            // three re-reads and the least load-bearing: a relayout of the list is
+                            // caught by the effect above (which depends on `shown`) without waiting
+                            // for the pointer, and this one only shortens the wait when the pointer
+                            // happens to move anyway.
                             // Unchanged rects return the same state object, so React bails out and
                             // a move across a row that has not shifted costs no render at all.
                             //

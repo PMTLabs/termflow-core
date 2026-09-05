@@ -487,8 +487,29 @@ describe('activating a row', () => {
         expect(onClose).not.toHaveBeenCalled();
     });
 
-    it('closes the whole menu for a row that asks to (Add New Snippet)', async () => {
-        const add = jest.fn();
+    /**
+     * **"Both fired" is the assertion that let this host be reordered on a false premise.**
+     *
+     * `add` once plus `onClose` once is satisfied by either sequence, so for as long as that was
+     * all this said, the order here was free. It was briefly changed to dismiss-then-act, on the
+     * argument that a `closeMenuOnSelect` row opens a surface and this menu holds a document-level
+     * `mousedown` trap and Escape listener until it is asked to go — so acting first would mount a
+     * modal under a live menu. Measured against the real component, that argument is wrong:
+     * `onCloseMenu()` is a queued `setState` that React does not flush until the end of the
+     * discrete event, so the menu is still mounted with both handlers installed when the row opens
+     * its surface EITHER WAY ROUND. Nothing was bought, and the reorder cost something real — see
+     * `ContextMenu.tsx`'s `closeMenuOnSelect` doc for the spurious terminal focus it caused.
+     *
+     * So the sequence is pinned, and pinned to the ACTION FIRST: the row states its intent, then
+     * the host acts on the dismissal, which is the order a close callback doing synchronous DOM
+     * work needs. This is the generic host's ordering oracle — every future `closeMenuOnSelect`
+     * caller inherits the rule from here — and the guarantee that matters for the row's sake is
+     * the separate one below: the dismissal happens even when the action throws.
+     */
+    it('runs a row that asks to dismiss, THEN dismisses (Add New Snippet)', async () => {
+        const order: string[] = [];
+        onClose.mockImplementation(() => { order.push('close'); });
+        const add = jest.fn(() => { order.push('select'); });
         await render(
             menuWith({
                 rows: [row('a', 'alpha')],
@@ -500,6 +521,66 @@ describe('activating a row', () => {
 
         expect(add).toHaveBeenCalledTimes(1);
         expect(onClose).toHaveBeenCalledTimes(1);
+        expect(order).toEqual(['select', 'close']);
+    });
+
+    /**
+     * …and the dismissal survives a row whose action THROWS — which, for a caller of this generic
+     * host, is where the two orders stop settling to the same DOM.
+     *
+     * With nothing throwing they do settle the same: React batches the dismissal and whatever
+     * `onSelect` schedules into one commit, so "close first" and "close second" are told apart
+     * only by a recorded sequence (the test above). A throw splits them. `AutomationMenuSection`'s
+     * rows call `openAutomationEditorFor`, which mutates the host's `openRuleId` and THEN notifies
+     * its subscribers synchronously — so a subscriber that raises used to take the dismissal down
+     * with it, leaving the editor open under a menu that never closed and still owned Escape.
+     *
+     * The oracle here is settled state rather than a counter: a host that really unmounts on
+     * `onClose`, and `.context-menu` gone from the document afterwards. Reordering `activate`
+     * fails this on that DOM query, not on a mock — with the dismissal after `onSelect` the throw
+     * skips it, and the whole menu is still rendered.
+     */
+    it('still dismisses when the action of the row throws', async () => {
+        let thrown = 0;
+        const Host: React.FC = () => {
+            const [open, setOpen] = React.useState(true);
+            return open
+                ? (
+                    <ContextMenu
+                        x={10}
+                        y={10}
+                        items={menuWith({
+                            rows: [row('boom', 'Explodes', {
+                                onSelect: () => { thrown += 1; throw new Error('subscriber raised'); },
+                                closeMenuOnSelect: true,
+                            })],
+                        })}
+                        onClose={() => setOpen(false)}
+                    />
+                )
+                : null;
+        };
+        await act(async () => { root.render(<Host />); });
+        await click(menuItem('Snippets'));
+        expect(rows()).toHaveLength(1);
+
+        // React reports a handler's exception through the global error path rather than
+        // rethrowing it at the dispatch site, and jest-environment-jsdom turns that report into
+        // an uncaught exception that fails whichever test is running. `preventDefault()` in the
+        // capture phase marks the ErrorEvent handled, which is what jsdom checks before
+        // escalating. It suppresses the REPORT only — the throw has already happened, and the
+        // assertion below is a DOM query, so nothing about this rig can make the test pass for
+        // the wrong reason.
+        const swallow = (e: Event) => e.preventDefault();
+        window.addEventListener('error', swallow, true);
+        try {
+            await click(rows()[0]);
+        } finally {
+            window.removeEventListener('error', swallow, true);
+        }
+        expect(thrown).toBe(1);
+
+        expect(document.querySelector('.context-menu')).toBeNull();
     });
 
     it('does nothing for a disabled row', async () => {

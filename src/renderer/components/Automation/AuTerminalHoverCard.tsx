@@ -234,23 +234,35 @@ const seedFor = (processId: string): Preview => ({
 });
 
 /**
- * What to paint for `processId`, given whatever the component last committed.
+ * What to paint for `processId`, given whatever the component last committed and the seed that
+ * belongs to `processId`.
  *
- * **The whole of the fix for "terminal A's screen under terminal B's name", and pure so that it can
- * be pinned.** State that belongs to another terminal is not merely out of date, it is wrong, so it
- * is discarded here rather than corrected later: a `Preview` carrying a different `processId` is
- * replaced by that terminal's own seed before anything renders.
+ * **The whole of the fix for "terminal A's screen under terminal B's name".** State that belongs to
+ * another terminal is not merely out of date, it is wrong, so it is discarded here rather than
+ * corrected later: a `Preview` carrying a different `processId` is replaced by that terminal's own
+ * seed before anything renders.
  *
- * Exported because this invariant is not observable from the outside. The mis-attribution it
- * prevents lasts exactly one commit — the identity block repaints from props in the same render,
- * and an effect's correction lands on the next tick — and jsdom offers no way to read that frame: a
- * `MutationObserver` callback is a microtask and is served the already-corrected DOM, and
- * `flushSync` does not force a continuous-priority update like the one a `mouseover` schedules.
- * Both were tried, and both passed against the broken component. So the property is asserted here,
- * where it is a function of its arguments and nothing else.
+ * **The seed is an ARGUMENT, and it used to be a `seedFor(processId)` call made in here.** That made
+ * the claim this comment carried — "a function of its arguments and nothing else" — untrue, because
+ * `seedFor` reads `previewCache`, a module-level singleton with no reset. The unit case asserting
+ * that a foreign screen becomes `null` passed only because that cache happened to hold no entry for
+ * the id the test made up, and would have flipped the moment one was put there. Taking the seed as a
+ * value is what makes the three branches below decidable from the call alone.
+ *
+ * **Calling this is not the same as the invariant holding, and only the DOM can say which.** The
+ * comment that used to stand here argued the opposite — that the mis-attribution lasts exactly one
+ * commit and so cannot be read back from jsdom, a `MutationObserver` being served the corrected DOM
+ * and `flushSync` not forcing the continuous-priority update a `mouseover` schedules. That was true
+ * of the effect-driven implementation this replaced, and is false of this one: there are three paths
+ * on which the effect never reaches `setShown` at all — the arrived-at row's cache entry is still
+ * fresh, it is inside `SnapshotCache`'s failure backoff, or its screen comes back empty — and on
+ * every one of them the wrong screen is a SETTLED state lasting seconds, not a frame. So the wiring
+ * is pinned in the DOM by `auTerminalPickerHover.test.tsx`'s *"paints the arrived-at row's screen,
+ * not the one it came from, when the new row is already cached"*, and the cases beside it pin these
+ * three branches without a round trip each.
  */
-export function previewFor(shown: Preview, processId: string): Preview {
-    return shown.processId === processId ? shown : seedFor(processId);
+export function previewFor(shown: Preview, processId: string, seeded: Preview): Preview {
+    return shown.processId === processId ? shown : seeded;
 }
 
 /**
@@ -279,8 +291,12 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
     const [shown, setShown] = useState<Preview>(() => seedFor(processId));
     // Whatever React last committed belongs to the terminal it was fetched FOR. On the render where
     // `processId` changes, that is the previous one — so this render re-seeds from the cache rather
-    // than trusting an effect that has not run yet.
-    const current = previewFor(shown, processId);
+    // than trusting an effect that has not run yet, and on three of its paths never runs at all.
+    //
+    // The seed is built unconditionally, one `Map` read per render, and thrown away on the path that
+    // keeps `shown`. That is the price of `previewFor` being decidable from its arguments; the
+    // alternative is the cache read happening inside it, where a test cannot control it.
+    const current = previewFor(shown, processId, seedFor(processId));
 
     const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -326,11 +342,30 @@ const AuTerminalPreview: React.FC<{ processId: string }> = ({ processId }) => {
                 const screen = typeof body?.screen === 'string' ? body.screen : '';
                 if (screen.length === 0) {
                     // Not a failure, and so not backed off: `/screen` 404s for an id it cannot
-                    // resolve (the bridge turns that into a rejection, caught below), which leaves
-                    // an empty body meaning only "this terminal is registered but its parser has
-                    // nothing yet" — a state the next poll normally clears. Nothing is cached, so
-                    // the next tick retries at the poll interval rather than after the TTL, and any
-                    // frame already cached for this terminal keeps being shown.
+                    // resolve (the bridge turns that into a rejection, caught below), so an empty
+                    // body arrives as a 200 and says only that the terminal is addressable and its
+                    // grid rendered to nothing. TWO causes reach here and the client cannot tell
+                    // them apart — `AppState::screen_text` returns `None` for a terminal with no
+                    // screen parser yet, which the handler spends as `unwrap_or_default()`; and
+                    // `vt100`'s `contents()` renders an all-blank grid as the empty string, which
+                    // is what a `clear` with nothing printed after it looks like.
+                    //
+                    // Nothing is `put`, so `shouldRefresh` keeps answering true and the next tick
+                    // re-reads at the POLL interval rather than after the TTL — 700ms, not the
+                    // 2100ms cadence `AU_PREVIEW_POLL_MS` describes — for as long as the answer
+                    // stays empty. And nothing is `setShown`, so whatever frame the card already
+                    // has keeps standing, with no staleness bound on it. On the first cause that
+                    // resolves itself the moment the parser exists. On the second it does NOT: a
+                    // cleared terminal goes on showing what was on it before the clear until it
+                    // prints something. This comment used to say "a state the next poll normally
+                    // clears", which is true of the first cause and false of the second.
+                    //
+                    // The stale frame is the deliberate half of the trade, and it is the same one
+                    // `failWith` above makes: the alternative is an empty `<pre>`, which is
+                    // indistinguishable from a fetch that failed, on the one surface whose whole
+                    // job is saying what is on a terminal right now. A shell reprints its prompt
+                    // and a TUI repaints, so a screen that renders to nothing AND stays that way
+                    // is rare enough not to earn a fourth thing for this box to say.
                     return schedule();
                 }
                 previewCache.put(processId, {

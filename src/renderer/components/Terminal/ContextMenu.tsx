@@ -35,19 +35,57 @@ export interface ContextMenuFlyoutRow {
   title?: string;
   /** Rows of a nested flyout. Present ⇒ this is a folder row. */
   children?: ContextMenuFlyoutRow[];
-  /** Run on click / Enter. Ignored for folder rows. */
+  /** Run on click / Enter. Ignored for folder rows. Runs AFTER the dismissal a
+   *  `closeMenuOnSelect` row asks for — see that field. */
   onSelect?: () => void;
   /**
-   * Close the WHOLE context menu after `onSelect`.
+   * Dismiss the WHOLE context menu, **before** `onSelect` runs.
    *
    * §4.5 is "**every** row closes the menu" — and every row this repo builds
-   * (`snippetsHistoryMenu.ts`) says so explicitly. That is deliberately a decision
-   * stated at each call site rather than a default here, for two reasons: it is a
-   * product rule about snippet and history rows, not a property of a generic
-   * flyout (a folder row opens a submenu and dismisses nothing); and stated as
-   * data it is assertable straight off the builder's output, where a default
-   * cannot be. Defaults to **false** so a row that never considered dismissal
-   * cannot tear down the surface the user is mid-interaction with.
+   * (`snippetsHistoryMenu.ts`, `AutomationMenuSection.tsx`) says so explicitly. That is
+   * deliberately a decision stated at each call site rather than a default here, for two
+   * reasons: it is a product rule about the rows this app happens to build, not a property
+   * of a generic flyout (a folder row opens a submenu and dismisses nothing); and stated as
+   * data it is assertable straight off the builder's output, where a default cannot be.
+   * Defaults to **false** so a row that never considered dismissal cannot tear down the
+   * surface the user is mid-interaction with.
+   *
+   * **The action runs first, and the dismissal is unconditional — a `finally`, not an
+   * ordering.** Both halves of that are load-bearing, and the first one was briefly the
+   * other way round on the strength of an argument that does not survive being measured.
+   *
+   * *The argument that failed.* Several rows here open a surface of their own: a modal
+   * editor (`AutomationMenuSection`'s rule and "New automation" rows) or a dialog
+   * (`snippetsHistoryMenu`'s "Add New Snippet"). This menu does not close itself when
+   * something is portalled on top of it, and while it is up it holds a document-level
+   * `mousedown` trap and a document-level Escape handler. It is tempting to conclude that
+   * the dismissal must therefore be asked for FIRST, so the modal never mounts under a live
+   * menu. It does not follow: `onCloseMenu()` is a queued `setState`, and React does not
+   * flush it until the end of the discrete event. Probing the real component — counting
+   * live document listeners from inside a row's `onSelect` — shows the menu still mounted
+   * with BOTH handlers installed at the moment the row opens its surface, **whichever order
+   * the two calls are in**. Reordering bought nothing here, and the paragraph that used to
+   * stand in this space claimed otherwise while conceding two lines later that React batches
+   * the two commits into one.
+   *
+   * *What order genuinely decides* is a close callback that does synchronous non-React
+   * work, and there the action-first order is the correct one rather than the arbitrary
+   * one. `TerminalDisplay`'s `closeContextMenu` puts DOM focus back in the terminal, and
+   * guards that with a ref which "Add New Snippet" sets as it opens its dialog. Run the
+   * close first and that ref is still `false`, so the guard falls through and
+   * `engine.focus()` fires on the terminal in the gap before the dialog mounts — which
+   * under DECSET 1004 focus reporting is a spurious focus-in/focus-out pair written to the
+   * PTY, on every click, visible to any TUI that redraws on focus. The row must be allowed
+   * to state its intent before the host acts on the dismissal.
+   *
+   * *Which leaves the one real defect the reorder was reaching for*: a row whose action
+   * RAISES — a store listener that throws inside a synchronous `emit()`, say — used to skip
+   * the dismissal outright and strand the menu on screen over the surface it had just
+   * opened. That is fixed by making the dismissal unconditional rather than by moving it:
+   * the `finally` runs on both paths, and the queued close still commits because React
+   * dispatches inside `batchedUpdates`, whose own `finally` flushes work already scheduled.
+   * `contextMenuFlyout.test.tsx` pins it with a host that really unmounts, and asserts the
+   * menu is gone from the DOM rather than that a mock was called.
    */
   closeMenuOnSelect?: boolean;
   /** Inert placeholder (an empty-state message). Rendered, never activated, and
@@ -212,7 +250,8 @@ interface FlyoutPanelProps {
   parentFlippedLeft?: boolean;
   /** Escape / ArrowLeft / Tab — closes THIS panel and returns focus to its opener. */
   onCloseSelf: () => void;
-  /** Dismiss the entire context menu (a row with `closeMenuOnSelect`). */
+  /** Dismiss the entire context menu — called for a `closeMenuOnSelect` row, before that
+   *  row's own `onSelect` runs. */
   onCloseMenu: () => void;
 }
 
@@ -360,8 +399,13 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         setOpenFolderId(row.id);
         return;
       }
-      row.onSelect?.();
-      if (row.closeMenuOnSelect) onCloseMenu();
+      // The action runs first and the dismissal is in a `finally` — see `closeMenuOnSelect`
+      // for why that is the right way round, and why asking for the dismissal first is not.
+      try {
+        row.onSelect?.();
+      } finally {
+        if (row.closeMenuOnSelect) onCloseMenu();
+      }
     },
     [onCloseMenu],
   );

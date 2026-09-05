@@ -122,13 +122,17 @@ function addableRules(terminalId: string, rules: readonly AutomationRule[]): Aut
  * event with this very refetch. So the stale list is repaired on that branch regardless; a call here
  * would be a second copy of a refetch already on its way.
  *
- * **No in-flight guard, and none is needed.** Both call sites are `void addTerminalToRule(…)`, so a
- * row clicked twice would run this twice — except that neither row survives the first click. The
- * accordion calls `onDismiss()` (its host's `onClose`) BEFORE this, and the flyout row carries
- * `closeMenuOnSelect`, which `ContextMenu` honours in the same handler on the line after
- * `onSelect?.()`. Both are synchronous React state updates inside one discrete event, so the row is
- * unmounted before the browser can dispatch a second click at it. Even a hypothetical second call
- * would be the no-op the store already answers `true` to.
+ * **No in-flight guard, and none is needed** — but not for the reason this paragraph used to
+ * give. Both call sites are `void addTerminalToRule(…)`, so a row clicked twice would run this
+ * twice; what stops that is that neither row survives the first click. The accordion calls
+ * `onDismiss()` (its host's `onClose`) on the line before this one, and the flyout row carries
+ * `closeMenuOnSelect`, which `ContextMenu.activate` honours in a `finally` on the line *after*
+ * `onSelect?.()`. Those are opposite orders, and it makes no difference here: both are React state
+ * updates inside one discrete event, so both commit together and the row is unmounted before the
+ * browser can dispatch a second click at it. The claim that used to stand here — that the guard was
+ * unnecessary *because* the dismissal came first — named a cause that does no work, and was wrong
+ * about the flyout besides. Even a hypothetical second call would be the no-op the store already
+ * answers `true` to.
  */
 async function addTerminalToRule(
     ruleId: string,
@@ -211,9 +215,29 @@ export const AutomationMenuSection: React.FC<{
      */
     terminalId: string | null;
     /**
-     * Dismiss the host menu. REQUIRED, and called before the editor opens rather than after: the
-     * two menus close by different mechanisms (`onClose` here, `onDismiss` there) and neither
-     * closes itself when a portalled dialog appears on top of it.
+     * Dismiss the host menu. REQUIRED, and in THIS component called before the action the row was
+     * clicked for — the editor open, or the target write — rather than after.
+     *
+     * **What that ordering buys is a failed action, not a keyboard.** This paragraph used to argue
+     * that a menu still on screen and an editor mounted under it are two surfaces both believing
+     * they own the keyboard, and that dismissing first made that impossible. Measured, it does not:
+     * every host's dismissal is a parent `setState`, React does not flush it until the end of the
+     * discrete event, and so the menu is still mounted with its handlers live at the moment the
+     * editor mounts — whichever order the two calls are in. The real guarantee is narrower and
+     * still worth having: if the action raises, the dismissal has already been queued, so the menu
+     * does not strand itself on screen over a surface that failed to open.
+     *
+     * **The third host reaches that guarantee by the opposite road, and deliberately.** Its rows
+     * are data, so they say `closeMenuOnSelect: true` and `ContextMenu.activate` runs `onSelect`
+     * first with the dismissal in a `finally` — same protection against a throwing action, without
+     * moving a close callback that does synchronous DOM work ahead of the row that guards it. See
+     * that field's own note; do not "align" the two by moving either one.
+     *
+     * Every one of this component's three action rows is pinned to that order by a click-driven
+     * test in `automationArmedSurfaces.test.tsx` (armed rule, "New automation…", and an
+     * "Add to an existing automation" target), each asserting the SEQUENCE rather than that both
+     * calls happened — a pair of counters is satisfied by either order, which is how the flyout
+     * host ran backwards for a round with a green suite.
      */
     onDismiss: () => void;
 }> = ({ terminalId, onDismiss }) => {
@@ -407,10 +431,13 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
                 detail: view.stateLabel,
                 title: `${view.name} — ${view.stateLabel}. Opens this rule for editing.`,
                 onSelect: () => openAutomationEditorFor(view.ruleId),
-                // §4.5, and the behaviour the flat rows already had: `ContextMenu` closes after
-                // any plain item's `click`. Said per row because the flyout's default is to keep
-                // the menu up, and an editor opening behind a menu that stayed is two surfaces
-                // both believing they have the keyboard.
+                // §4.5, and the behaviour the flat rows already had, when each rule was a plain
+                // menu item. Said per row because the flyout's own default is to keep the menu
+                // up — and an editor opening behind a menu that stayed is two surfaces both
+                // believing they have the keyboard. `ContextMenu.activate` dismisses BEFORE it
+                // runs `onSelect`, so this is the same "close, then open" the accordion above
+                // spells out as two statements; see `closeMenuOnSelect` for why that order is a
+                // contract of the flyout rather than a detail of it.
                 closeMenuOnSelect: true,
             })),
             // The two cases used to collapse into one, back when this parent could not exist with

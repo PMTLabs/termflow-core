@@ -42,7 +42,9 @@ export interface ActivityLogViewProps {
     error: string | null;
     now: number;
     onScopeChange: (ruleId: string | null) => void;
-    /** Writes `verboseUntil` through `saveAutomation`; `null` turns it off. */
+    /** Writes `verboseUntil` through the id-keyed `setAutomationVerbose` command; `null` turns
+     *  it off. NOT through `saveAutomation` — see the note at the switch itself for why that
+     *  matters, and why moving it back would be a regression rather than a simplification. */
     onSetVerbose: (rule: AutomationRule, until: number | null) => void;
     onBack: () => void;
 }
@@ -119,8 +121,20 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                   * those apart were the two being gated off. Nothing in §12 assigned this to any
                   * milestone; it belongs with the log view, which is here.
                   *
-                  * It needs no new command: `save_rule` already persists whatever `verbose_until`
-                  * the rule carries, so this is an ordinary definition mutation and reloads like one.
+                  * **It has its own command, and must keep it.** This used to say it needed
+                  * none, because `save_rule` already persists whatever `verbose_until` the rule
+                  * carries. That is true, it is why the switch was wired that way, and it is
+                  * exactly why it had to be rewired: sending the whole rule back through
+                  * `saveAutomation` is an unconditional upsert whose missing-rule arm INSERTS, so a
+                  * logging switch flipped on a Settings list that had gone stale would resurrect a
+                  * rule another window had deleted — and revert any edit made there meanwhile.
+                  * `set_automation_verbose` takes the rule id and the deadline, decides existence
+                  * inside the transaction that writes, and reports back a rule that is gone.
+                  *
+                  * It is also NOT a definition mutation, which is the other half the old sentence
+                  * got wrong: verbose is a logging gate the engine never reads back, so the command
+                  * deliberately does not `reload`, and `automation_commands.rs` carries a test
+                  * asserting that it must not start one.
                   */}
                 {rule && (
                     <span className="au-verbose">

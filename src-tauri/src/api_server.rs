@@ -4639,6 +4639,15 @@ mod tests {
     /// asserted from the source text instead - which is what kills the "point it at
     /// `screen_snapshot`" mutant that a payload test, handed its text already rendered, cannot
     /// see.
+    ///
+    /// **The third assertion is what ties the payload test to the handler at all.** The test above
+    /// calls `screen_body` DIRECTLY, so it pins that helper's key names and nothing about who uses
+    /// them: replace this handler's tail with an inline `json!({ "text": ... })` and every screen
+    /// test in this file still passes, `screen_body` quietly becoming dead code. The renderer would
+    /// then find no `screen` key, and `AuTerminalHoverCard`'s `typeof body?.screen === 'string'`
+    /// guard turns that into an empty string - a hover card stuck on "Reading its screen..." for
+    /// ever, at the poll cadence, with nothing anywhere reporting a failure. Requiring the handler
+    /// to go THROUGH `screen_body` is what makes the payload test speak for the wire.
     #[test]
     fn the_screen_route_reads_the_grid_not_the_replay_blob() {
         let body = get_terminal_screen_body();
@@ -4649,6 +4658,64 @@ mod tests {
         assert!(
             !body.contains("screen_snapshot"),
             "the handler must NOT serve the escape-sequence replay blob, body was:\n{body}"
+        );
+        assert!(
+            body.contains("screen_body("),
+            "the handler must serve the pinned wire contract rather than an inline body, \
+             or the payload test above pins a helper nothing calls, body was:\n{body}"
+        );
+    }
+
+    /// The `.route(...)` chain in `start_api_server`, sliced from `Router::new()` to the first
+    /// `.layer(` — the auth middleware, and the first link in that chain that is not a route.
+    ///
+    /// Source-derived for the same reason as `get_terminal_screen_body` above: the router is built
+    /// inline inside `start_api_server`, which wants an `AppState<Wry>` and an already-bound
+    /// listener, and this test binary can produce neither. Nothing in-process can build the real
+    /// router and ask it what it answers, so what it was BUILT FROM is read instead.
+    ///
+    /// There was no existing precedent for asserting a registration.
+    /// `test_batch_routes_coexist_with_param_routes` builds its OWN replica router — that proves
+    /// matchit tolerates those paths side by side, and would survive any deletion from the real
+    /// chain. So this follows the wiring-from-source shape `canvas_endpoints.rs` established
+    /// instead. The needle is exact call text, which a rustfmt reflow would break — loudly, which
+    /// is the failure direction worth having.
+    fn router_route_table() -> String {
+        let source =
+            crate::automation_engine::test_host::strip_comments(include_str!("api_server.rs"));
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests must follow the code")];
+        let start = code
+            .find("Router::new()")
+            .expect("`Router::new()` not found - this guard must fail loudly, not pass vacuously");
+        let rest = &code[start..];
+        let end = rest.find(".layer(").expect("the route chain must end at the first middleware");
+        let table = rest[..end].to_string();
+        // Diagnostic, not detective: a caller asking "is route X here?" cannot pass on a slice
+        // that stopped early — `contains` just goes false — but it would report a MOVED slice as
+        // a DELETED route and send the next reader to the wrong file. `/ws` is the last route
+        // before the auth layer, so a slice holding it holds the whole chain.
+        assert!(
+            table.contains(".route(\"/ws\", get(ws_handler))"),
+            "the route-chain slice stopped short of the last route - the chain moved:\n{table}"
+        );
+        table
+    }
+
+    /// `GET /api/terminals/:id/screen` must be REGISTERED, not merely implemented.
+    ///
+    /// The two tests above pin what the response body carries, that the handler goes through the
+    /// helper that carries it, and what it reads the text from - and ALL of that survives deleting
+    /// the `.route(...)` line, because both read source text rather than exercising the router. Nothing else in the crate notices either — the
+    /// route has no in-tree caller, so an unrouted handler costs a `dead_code` warning at worst —
+    /// and the one client, the rule editor's terminal hover card, turns the resulting 404 into a
+    /// silent “Reading its screen…” that never resolves rather than an error anyone sees.
+    #[test]
+    fn the_screen_route_is_registered_as_a_get() {
+        assert!(
+            router_route_table()
+                .contains(".route(\"/api/terminals/:id/screen\", get(get_terminal_screen))"),
+            "GET /api/terminals/:id/screen must be on the router - a handler that exists is not \
+             the same as a handler that is reachable"
         );
     }
 
