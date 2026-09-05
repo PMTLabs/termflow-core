@@ -269,9 +269,14 @@ function useTooltipDwell(): {
 
   const onEnter = useCallback((key: string) => {
     stop();
-    // The row just left gives its tooltip up AT ONCE rather than when the new row earns its own,
-    // or a sweep would drag one stale box along behind the pointer for three seconds — the exact
-    // annoyance this exists to remove, merely delayed.
+    // **Not merely belt-and-braces with `onLeave`.** On every path a sweep takes, the row being
+    // left clears first and this line has nothing to do — which is exactly why mutation testing
+    // found both clears individually removable with the suite green. The path only this one
+    // covers is a row leaving the DOM under a stationary pointer: type into the search box and
+    // the list re-filters around it, and React reports no `mouseleave` for an unmount. The dwelt
+    // id is then stale, and the row would come back carrying its tooltip already armed — the
+    // delay skipped on a visit the user never rested through. `onLeave`'s own clear has its own
+    // exclusive path (leaving the menu with no row arrived at); each has a test that isolates it.
     setDwelt(null);
     timer.current = window.setTimeout(() => {
       timer.current = null;
