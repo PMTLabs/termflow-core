@@ -213,6 +213,7 @@ export interface ElectronAPI {
 
   // Backlog 003: open a detected URL / file / file-in-editor from terminal output.
   openExternal?: (url: string) => Promise<void>;
+  openDevtools?: () => Promise<void>;
   openPath?: (path: string) => Promise<void>;
   openInEditor?: (editor: string, path: string, line?: number, col?: number) => Promise<void>;
 

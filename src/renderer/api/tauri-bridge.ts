@@ -92,6 +92,9 @@ interface ElectronAPI {
   probeReattachPromptGate: (processId: string) => Promise<{ promptHook: boolean; atPrompt: boolean } | null>;
   resolveTerminalPath: (processId: string, rel: string) => Promise<string[]>;
   openExternal: (url: string) => Promise<void>;
+  /// Settings → Updates “Open developer tools”. The WebView2 right-click menu is
+  /// cancelled in the backend (context_menu.rs), so this is the only way to DevTools.
+  openDevtools: () => Promise<void>;
   openPath: (path: string) => Promise<void>;
   openInEditor: (editor: string, path: string, line?: number, col?: number) => Promise<void>;
   pickExecutablePath: () => Promise<string | null>;
@@ -458,6 +461,9 @@ const tauriBridge: ElectronAPI = {
 
   openExternal: async (url) => {
     await invoke('open_external', { url });
+  },
+  openDevtools: async () => {
+    await invoke('open_devtools');
   },
   openPath: async (path) => {
     await invoke('open_path', { path });
