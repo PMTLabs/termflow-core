@@ -248,10 +248,63 @@ describe('draftFromRule', () => {
         expect(problems(blankDraft()).some((p) => p.code === 'targets.empty')).toBe(false);
     });
 
-    it('opens clean, whatever it opened on', () => {
+    /**
+     * **The fourth opening — a template picked from the gallery.**
+     *
+     * Tam: *"click New automation -> select predefined template -> it should become Unsaved, when
+     * user close it should show confirmation"*. The gallery handed a picked template to the editor
+     * on `'saved'`, whose baseline is the rule itself, so it read CLEAN and Escape threw the chosen
+     * template away without a word. That is the `'seeded'` defect again, one card to the left: a
+     * choice had been made, and nothing on the way out said so.
+     *
+     * The baseline is the blank rule the gallery was showing BEFORE the click, which makes the whole
+     * template the unsaved work — because that is what it is.
+     */
+    it('opens a picked TEMPLATE dirty, against the blank rule the gallery started from', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'template');
+        expect(isDirty(draft)).toBe(true);
+        expect(draft.saved).toEqual({
+            ...blankDraft(),
+            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+        });
+    });
+
+    it('every template opens dirty, not just the first', () => {
+        // A one-template check is satisfied by a baseline that happens to differ from THAT rule;
+        // the claim is about the opening, so it is asserted over the whole gallery.
+        for (const template of AUTOMATION_TEMPLATES) {
+            expect(isDirty(draftFromRule(draftFromTemplate(template), 'template'))).toBe(true);
+        }
+    });
+
+    it('a TEMPLATE draws all four steps, like the complete rule it is', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const draft = draftFromRule(rule, 'template');
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.selected).toBe('monitor');
+        // The RULE, absolutely — for the reason the seeded oracle is absolute: `present`/`wires`/
+        // `selected` are all about the canvas, and none of them would notice this opening quietly
+        // rewriting a field of the template on its way through.
+        expect(draft.rule).toEqual({ ...rule, graph: { ...rule.graph, layout: DEFAULT_LAYOUT } });
+    });
+
+    it('a TEMPLATE goes clean when the save lands', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]), 'template');
+        const stored = { ...ruleFromDraft(draft), id: 'r-minted' };
+        expect(isDirty(draftReducer(draft, { type: 'saved', rule: stored }))).toBe(false);
+    });
+
+    it("the 'saved' opening is clean, whatever rule it opened on", () => {
+        // Templates used here as fixtures for "a complete rule" — this is the path an EXISTING rule
+        // takes out of the Settings list, NOT the path the gallery takes. A picked template goes
+        // through `'template'` and opens dirty; see above. The name of this test said "whatever it
+        // opened ON", which was read as "whatever opening", and that reading is now false.
         for (const [, rule] of AUTOMATION_TEMPLATES.map((t) => ['', draftFromTemplate(t)] as const)) {
             expect(isDirty(draftFromRule(rule))).toBe(false);
         }
+        // …and the blank card, the other opening that must not nag.
+        expect(isDirty(draftFromRule(blankDraft(), 'blank'))).toBe(false);
     });
 });
 

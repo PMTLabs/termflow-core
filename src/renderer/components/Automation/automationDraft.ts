@@ -28,6 +28,10 @@ import type { AutomationRule } from '../../types/electron';
 import type { StepKind, Wire } from './automationSteps';
 import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
+// The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
+// state the gallery was showing before a card was clicked. Same direction `AutomationMenuSection`
+// already imports it in; `automationTemplates` imports nothing back, so there is no cycle.
+import { blankDraft } from '../Settings/Automations/automationTemplates';
 
 export interface NodePos {
     x: number;
@@ -270,9 +274,8 @@ export interface AutomationDraft {
  * and **what the dirty check compares against**. Keeping them in one value is what stops a fourth
  * way of opening the editor from arriving with a canvas rule and no answer to "is this unsaved".
  *
- * - `'saved'` — an existing rule, or a template. All four steps drawn, because it is already a
- *   complete rule, and clean, because what is on screen is what is stored (or, for a template,
- *   what the user asked for verbatim).
+ * - `'saved'` — an existing rule, opened from the list. All four steps drawn, because it is
+ *   already a complete rule, and clean, because what is on screen is what is stored.
  * - `'blank'` — the gallery's blank card. Mockup §03's third state: an empty canvas and the
  *   "Start with Watch output" hint, so building a rule from nothing is a thing the palette
  *   TEACHES rather than a thing that has already happened. Clean, because nothing is there yet;
@@ -280,12 +283,19 @@ export interface AutomationDraft {
  * - `'seeded'` — "New automation for this terminal". Neither of the above: the menu has already
  *   made a choice on the user's behalf, so the canvas must SHOW that choice and the editor must
  *   know it is unsaved. See `draftFromRule` for both halves.
+ * - `'template'` — a card picked from the gallery. Drawn exactly like `'saved'`, because a template
+ *   IS a complete rule — but UNSAVED, because picking one is a choice the user made and nothing has
+ *   stored it yet. Tam: *"select predefined template -> it should become Unsaved, when user close
+ *   it should show confirmation"*.
  *
- * This used to be a boolean (`emptyCanvas`). It stopped being one at the moment there were three
- * openings rather than two — a flag that cannot say what you need it to say is the wrong type, not
- * a thing to overload.
+ * This used to be a boolean (`emptyCanvas`), then a three-way. It stopped being a boolean at the
+ * moment there were three openings rather than two, and the fourth arrived for the same reason the
+ * third did: a flag that cannot say what you need it to say is the wrong type, not a thing to
+ * overload. Note that the four are **two independent questions** that happen to be answered
+ * together — what the canvas draws, and what the dirty check compares against — and `'template'` is
+ * the case that proves they are independent: it draws like `'saved'` and compares like nothing else.
  */
-export type CanvasOpening = 'saved' | 'blank' | 'seeded';
+export type CanvasOpening = 'saved' | 'blank' | 'seeded' | 'template';
 
 /**
  * Open the editor on a rule.
@@ -307,6 +317,13 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded';
  * `targetIds` alone, and not `targetMode`: `'pinned'` with an empty pick set is the mode the picker
  * itself renders, so the baseline stays a rule the editor could actually be showing.
  *
+ * **`'template'` is the same argument with everything in it.** The gallery used to hand a picked
+ * template over on `'saved'`, whose baseline is the rule itself — so a template read CLEAN, and
+ * Escape threw away the card the user had just chosen without a word. Identical to the `'seeded'`
+ * defect one screen to the left: a choice had been made and nothing on the way out said so. Its
+ * baseline is the blank rule the gallery was showing BEFORE the click, which makes the whole
+ * template the unsaved work, because that is what it is.
+ *
  * **"Back at the baseline" is not "back to a blank rule", and the two are distinguishable on
  * screen.** `newDraftFor` contributes `targetMode: 'pinned'` as well as the pick, and the baseline
  * keeps the mode — so an unticked seeded draft is a PINNED rule watching nothing, which `problems()`
@@ -315,11 +332,13 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded';
  * Whether the rule is finishable is a different question, asked and answered by `problems()`.
  */
 export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
-    const present: StepKind[] = opening === 'saved'
-        ? [...STEP_ORDER]
+    // `'blank'` alone draws nothing; `'seeded'` draws the one step it configured; `'saved'` and
+    // `'template'` are both complete rules and draw all four.
+    const present: StepKind[] = opening === 'blank'
+        ? []
         : opening === 'seeded'
             ? ['monitor']
-            : [];
+            : [...STEP_ORDER];
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -337,8 +356,38 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
         // canvas to select. `'seeded'` selects the step it drew, which is what puts the pinned
         // terminal in front of the user instead of one palette drag away from being noticed.
         selected: opening === 'blank' ? null : 'monitor',
-        saved: opening === 'seeded' ? { ...resolved, targetIds: [] } : resolved,
+        saved: baselineFor(opening, resolved, layout),
     };
+}
+
+/**
+ * The value the dirty check compares against — *what leaving would throw away*, stated as a rule.
+ *
+ * Two of the four openings answer with something other than the rule itself, and in both the
+ * DIFFERENCE is precisely the unsaved work:
+ *
+ * - `'seeded'` drops the terminal the menu pinned, so the prompt is about that pick and clears
+ *   itself if the user unticks it.
+ * - `'template'` drops everything, because everything is unsaved: the baseline is the blank rule the
+ *   gallery was showing before the card was clicked. It carries the RESOLVED layout so that the
+ *   arrangement alone can never be what makes a freshly picked template read dirty — the same
+ *   both-sides rule `comparable` follows, and the same one that keeps a layout-less legacy rule from
+ *   opening dirty.
+ *
+ * `'saved'` and `'blank'` are the rule itself. An existing rule is already stored, and a blank canvas
+ * has nothing on it yet — a *Leave without saving?* prompt over either is a dialog about nothing.
+ */
+function baselineFor(
+    opening: CanvasOpening,
+    resolved: AutomationRule,
+    layout: Record<StepKind, NodePos>,
+): AutomationRule {
+    if (opening === 'seeded') return { ...resolved, targetIds: [] };
+    if (opening === 'template') {
+        const blank = blankDraft();
+        return { ...blank, graph: { ...blank.graph, layout } };
+    }
+    return resolved;
 }
 
 /** The saved arrangement, or the default one for a rule that predates the field. */

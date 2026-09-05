@@ -507,6 +507,69 @@ describe('AutomationsPanel', () => {
             .toBe('⏱ Fired 4 min ago · 2 times since it started running');
     });
 
+    /**
+     * **Tam's flow, end to end**: *"click New automation -> select predefined template -> it should
+     * become Unsaved, when user close it should show confirmation"*.
+     *
+     * The unit tests in `automationRoundTrip` pin the `'template'` opening itself. This pins the
+     * WIRING, which is where it was actually broken: the panel decided the opening from a
+     * `fresh: boolean` that only knew "blank or not", so every template arrived as `'saved'` and
+     * opened clean. Both halves of the ask are asserted here because they are one mechanism — the
+     * dialog is driven by `isDirty`, so a template that opened clean closed silently.
+     */
+    const openGallery = async () => {
+        await act(async () => {
+            [...container.querySelectorAll('button')]
+                .find((b) => b.textContent?.includes('New automation'))!
+                .click();
+        });
+    };
+    // The editor portals to <body>, so it is never inside `container`.
+    const closeEditor = async () => {
+        await act(async () => {
+            (document.querySelector('[aria-label="Close editor"]') as HTMLButtonElement).click();
+        });
+    };
+
+    it('a picked TEMPLATE opens unsaved, and closing it asks before throwing it away', async () => {
+        installApi([]);
+        await mount();
+        await openGallery();
+
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        // "it should become Unsaved" — the editor's own chip, before anything is touched.
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+
+        await closeEditor();
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+        expect(document.body.textContent).toContain('Leave without saving?');
+    });
+
+    it('but the BLANK card decides nothing, so it still closes without a dialog', async () => {
+        // The paired negative, and the reason this is an opening rather than "new rules are dirty":
+        // a *Leave without saving?* prompt over an untouched empty canvas is a dialog about nothing.
+        installApi([]);
+        await mount();
+        await openGallery();
+        await act(async () => {
+            (container.querySelector('.au-tplcard.blank') as HTMLButtonElement).click();
+        });
+
+        expect(document.querySelector('.au-unsaved')).toBeNull();
+        // And it is the BLANK opening, not merely a clean one: an empty canvas with the palette
+        // hint. Without this, handing the blank card `'template'` too would pass — its baseline
+        // works out identical to the rule, so it reads clean either way, and only the CANVAS
+        // differs. That mutant survived until this line.
+        expect(document.querySelector('.au-emptyhint')).not.toBeNull();
+        expect(document.querySelectorAll('.au-node')).toHaveLength(0);
+
+        await closeEditor();
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+    });
+
     it('the template gallery shows the six templates plus a blank card', async () => {
         installApi([]);
         await mount();

@@ -16,6 +16,7 @@ import { AutomationRow } from './AutomationRow';
 import { TemplateGallery } from './TemplateGallery';
 import { ActivityLogView } from './ActivityLogView';
 import { AutomationEditor } from '../../Automation/AutomationEditor';
+import type { CanvasOpening } from '../../Automation/automationDraft';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
 import { consumePendingAutomationLog } from '../../../services/automationEditorHost';
@@ -29,8 +30,15 @@ type View =
     | { kind: 'list' }
     | { kind: 'gallery' }
     | { kind: 'log'; ruleId: string | null }
-    /** `fresh` is the blank card, which opens on an EMPTY canvas (mockup §03's third state). */
-    | { kind: 'editor'; draft: AutomationRule; fresh: boolean };
+    /**
+     * `opening` is what the editor is opening ON — it decides the canvas AND the dirty baseline
+     * together; see `CanvasOpening`.
+     *
+     * It was `fresh: boolean`, naming only the blank card (mockup §03's third state). That stopped
+     * being enough the moment a picked TEMPLATE had to open unsaved while an existing rule still
+     * opened clean: three answers from this panel alone, and a boolean has two.
+     */
+    | { kind: 'editor'; draft: AutomationRule; opening: CanvasOpening };
 
 export const AutomationsPanel: React.FC = () => {
     const {
@@ -146,8 +154,8 @@ export const AutomationsPanel: React.FC = () => {
         return () => clearTimeout(id);
     }, [nextExpiry]);
 
-    const openEditor = (draft: AutomationRule, fresh = false) =>
-        setView({ kind: 'editor', draft, fresh });
+    const openEditor = (draft: AutomationRule, opening: CanvasOpening = 'saved') =>
+        setView({ kind: 'editor', draft, opening });
 
     const showLog = (ruleId: string | null) => {
         setLogScope({ ruleId, newestFirst: false });
@@ -377,7 +385,11 @@ export const AutomationsPanel: React.FC = () => {
         return (
             <TemplateGallery
                 onBack={backToList}
-                onPick={(draft, templateId) => openEditor(draft, templateId === 'blank')}
+                // The blank card is the one pick that decides nothing about the rule's content,
+                // so it is the one that opens clean. Every other card is a template the user chose
+                // and has not saved — which is what `'template'` says, and what makes Escape ask.
+                onPick={(draft, templateId) =>
+                    openEditor(draft, templateId === 'blank' ? 'blank' : 'template')}
             />
         );
     }
@@ -423,7 +435,7 @@ export const AutomationsPanel: React.FC = () => {
                 {list}
                 <AutomationEditor
                     rule={view.draft}
-                    opening={view.fresh ? 'blank' : 'saved'}
+                    opening={view.opening}
                     runtime={runtime}
                     now={now}
                     origin={origin}
