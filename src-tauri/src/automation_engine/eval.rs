@@ -282,18 +282,39 @@ pub fn coerce(raw: &str) -> Option<f64> {
 /// that did not match. That is DIFFERENT from an empty string, and the two consumers treat it
 /// differently on purpose (§4.4 substitutes `""`, §5.5 makes a numeric clause `Unknown`), so the
 /// distinction is preserved here rather than flattened.
+///
+/// **Both surfaces hold every group the PATTERN declares, not every group that matched**, and the two
+/// therefore read identically:
+///
+/// | positional | by name | means | §4.4 |
+/// |---|---|---|---|
+/// | `n <= count()`, slot `None` | `has_name(k)`, `name(k)` is `None` | declared, did not participate | substitute `""`, send proceeds |
+/// | `n > count()` | `!has_name(k)` | the pattern has no such group | refuse the send, log the token |
+///
+/// A `named` map holding only the groups that PARTICIPATED cannot tell those two rows apart — a
+/// legitimate `(?<retry>\d+)?` that did not match would look exactly like `${typo}`, and §4.4's row 3
+/// forbids refusing the send on the first. So the map is keyed on the declared names and carries the
+/// `Option` inside, exactly as `groups` does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Captures {
     pub groups: Vec<Option<String>>,
-    pub named: std::collections::BTreeMap<String, String>,
+    pub named: std::collections::BTreeMap<String, Option<String>>,
 }
 
 impl Captures {
+    /// The group's text. `None` for both "did not participate" and "out of range" — `count()`
+    /// separates them.
     pub fn group(&self, n: usize) -> Option<&str> {
         self.groups.get(n).and_then(|g| g.as_deref())
     }
+    /// The named group's text: declared AND participated. `None` for both "declared but did not
+    /// participate" and "not declared at all" — `has_name` separates them, as `count` does positionally.
     pub fn name(&self, k: &str) -> Option<&str> {
-        self.named.get(k).map(|s| s.as_str())
+        self.named.get(k).and_then(|v| v.as_deref())
+    }
+    /// Whether the PATTERN declares this name, whether or not it participated in this match.
+    pub fn has_name(&self, k: &str) -> bool {
+        self.named.contains_key(k)
     }
     /// Capture groups excluding group 0, which is the whole match and always present.
     pub fn count(&self) -> usize {
@@ -305,8 +326,11 @@ impl Captures {
 ///
 /// Both branches of `evaluate_text` build this, so it is one function rather than two copies: two
 /// implementations of the same thing drift, and the half that drifts here is the half a `$1` reads.
-/// `named` holds only the groups that PARTICIPATED, which is why a name absent from the map and a
-/// group whose slot is `None` say the same thing.
+///
+/// **`named` is keyed on `capture_names()` — what the PATTERN declares — not on which names matched.**
+/// Keying it on the match would drop a declared-but-non-participating name from the map entirely, and
+/// §4.4 needs that case to be distinguishable from an undeclared one. The `Option` in the value is
+/// what carries participation, mirroring `groups` exactly.
 fn bag_from(re: &Regex, c: &regex::Captures<'_>) -> Captures {
     Captures {
         groups: (0..c.len())
@@ -315,7 +339,7 @@ fn bag_from(re: &Regex, c: &regex::Captures<'_>) -> Captures {
         named: re
             .capture_names()
             .flatten()
-            .filter_map(|n| c.name(n).map(|m| (n.to_string(), m.as_str().to_string())))
+            .map(|n| (n.to_string(), c.name(n).map(|m| m.as_str().to_string())))
             .collect(),
     }
 }
@@ -886,6 +910,41 @@ mod tests {
         assert_eq!(c.name("retry"), None, "a named group that did not participate is None");
     }
 
+    /// §4.4 gives two DIFFERENT answers to two cases `name()` alone collapses: a declared group that
+    /// did not participate substitutes to `""` and the send proceeds, while an undeclared token
+    /// refuses the send. `has_name` is what tells them apart, and it must be keyed on what the
+    /// PATTERN declares — a map built from the participating names cannot express row 1 at all.
+    #[test]
+    fn a_declared_name_that_did_not_participate_is_not_an_unknown_name() {
+        let r = re(r"API error (?<code>\d+)(?: · retry in (?<retry>\d+)s)?");
+        let (_, caps) = extract(&r, Keep::Brackets, "API error 529");
+        let c = caps.expect("a match");
+
+        assert_eq!(c.name("code"), Some("529"));
+        assert!(c.has_name("code"));
+
+        // Declared, did not participate: §4.4 substitutes "" and SENDS.
+        assert!(c.has_name("retry"), "the pattern declares `retry`, so it is not an unknown token");
+        assert_eq!(c.name("retry"), None, "…but it did not participate in this match");
+
+        // Never declared: §4.4 REFUSES the send. Same `name()` answer, different `has_name()`.
+        assert!(!c.has_name("typo"), "a token the pattern never declared is out of range");
+        assert_eq!(c.name("typo"), None);
+
+        // The two rows are only distinguishable because `has_name` disagrees where `name` agrees.
+        assert_ne!(
+            c.has_name("retry"),
+            c.has_name("typo"),
+            "a non-participating group and an undeclared token must not read the same"
+        );
+
+        // And the positional surface says the same thing the same way, so a caller writing the §4.4
+        // rule twice writes it identically: within `count()` but `None`, versus beyond `count()`.
+        assert_eq!(c.count(), 2);
+        assert_eq!(c.group(2), None, "declared, did not participate");
+        assert_eq!(c.group(3), None, "out of range — separated by `count()`, not by `group()`");
+    }
+
     #[test]
     fn no_match_produces_no_captures() {
         let re = Regex::new(r"ctx:(\d+)%").unwrap();
@@ -904,6 +963,30 @@ mod tests {
         let (read, caps) = extract(&re, Keep::Brackets, "ctx:11%\nctx:63%");
         assert_eq!(read, Read::Value(63.0));
         assert_eq!(caps.unwrap().group(1), Some("63"));
+    }
+
+    /// The numeric arm's half of the same handoff. `extract`'s own tests call `extract` directly, so
+    /// they say nothing about whether the bag it returns ever reaches `Evaluation` — and Tasks 4 and 5
+    /// read it there, on numeric rules. Without this the arm pair is a partial-class fix: the text arm
+    /// pinned, the identical wiring beside it not.
+    #[test]
+    fn a_numeric_rule_carries_its_captures_onto_the_evaluation() {
+        let g = ctx_rule();
+        let ev = evaluate_text(
+            &g,
+            &re(&g.parse.find),
+            NO_ECHOES,
+            ArmState::armed(),
+            &|_| Some("ctx:63%".into()),
+            0,
+        )
+        .expect("a live read");
+        assert_eq!(ev.condition, Truth::True);
+        assert_eq!(
+            ev.captures.as_ref().and_then(|c| c.group(1)),
+            Some("63"),
+            "the bag `extract` returned must reach `Evaluation`, not stop at the call site"
+        );
     }
 
     /// Before this task the text branch ran `is_match`, so this returned `None` and every `$1` in a
