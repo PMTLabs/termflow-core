@@ -252,6 +252,51 @@ describe('filterSnippets — initials and tag matching (plan/030 P0)', () => {
     expect(filterSnippets([item], 'İH').map((x) => x.id)).toEqual(['ist']);
   });
 
+  it('a query of only combining marks matches nothing, not everything', () => {
+    // Round-4 blocker. The floor used to be measured on the RAW word: two combining marks
+    // are length 2, so they cleared it, and the fold then reduced them to ''. Every string
+    // contains '', so this query matched the entire library at the initials rung - the one
+    // input that silently turns the search box into a no-op.
+    //
+    // Both premises are asserted rather than assumed: if a later change made the token
+    // empty before it ever reached the rung, this would still pass while pinning nothing.
+    const marks = '\u0301\u0308'; // acute + diaeresis, no base letter to attach to
+    expect(marks).toHaveLength(2); // ...so a raw-length floor lets it through
+    expect(marks.normalize('NFC').replace(/\p{M}/gu, '')).toBe(''); // ...and folds to nothing
+    const items = [
+      s({ id: 'a', label: 'Deploy notes', text: 'ship it', createdAt: 0 }),
+      s({ id: 'b', text: 'context handoff', createdAt: 0 }),
+    ];
+    expect(filterSnippets(items, marks)).toEqual([]);
+  });
+
+  it('a one-character query does not match by initials, and that IS observable', () => {
+    // The rule the floor enforces, pinned. An earlier comment on the constant claimed that
+    // dropping it changed no result anywhere, reasoning that a one-letter initials hit must
+    // already be a substring hit. That holds only while both rungs read the same bytes, and
+    // only this rung normalises: against the DECOMPOSED spelling, the composed '\u00e9'
+    // misses every substring rung and matches the initials. Delete the constant and this
+    // snippet comes back at tier 4 - so the constant is observable, and the old comment's
+    // instruction not to test it was suppressing this exact case.
+    const nfd = s({ id: 'nfd', text: 'E\u0301cole handoff', createdAt: 0 });
+    expect(nfd.text.toLowerCase()).not.toContain('\u00e9'); // no substring rung can fire...
+    expect(filterSnippets([nfd], '\u00e9h').map((x) => x.id)).toEqual(['nfd']); // initials do
+    expect(filterSnippets([nfd], '\u00e9')).toEqual([]); // one character is below the floor
+  });
+
+  it('the length floor counts FOLDED characters, not raw code points', () => {
+    // 'e' + U+0301 is two code points and one visible character. A floor measured on the
+    // raw word admits it as a two-character query; measured on the fold it is the single
+    // initial '\u00e9' and falls below the floor - which is what a reader means by "one
+    // letter". The COMPOSED haystack cannot match it as a substring, so the floor is the
+    // only thing deciding here, which is what makes this pin the ORDER of fold and gate.
+    const item = s({ id: 'comp', text: '\u00c9cole handoff', createdAt: 0 });
+    expect('e\u0301').toHaveLength(2); // a raw-length floor would admit it...
+    expect(item.text.toLowerCase()).not.toContain('e\u0301'); // ...no substring rung fires
+    expect(filterSnippets([item], 'e\u0301')).toEqual([]);
+    expect(filterSnippets([item], 'e\u0301h').map((x) => x.id)).toEqual(['comp']); // match
+  });
+
   it('initials scan only the head of a long body — substring still reaches the rest', () => {
     // The scan limit is a bound on a cost that is otherwise O(total library bytes) on one
     // keystroke. Nothing becomes unfindable: the phrase past the cap is still found by

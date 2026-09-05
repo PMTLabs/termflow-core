@@ -33,15 +33,27 @@ export function parseSnippetQuery(query: string): { tags: string[]; words: strin
 const NO_MATCH_TIER = 5;
 
 /**
- * Shortest query word that may match by initials (plan/030 D2) — a pure short-circuit,
- * NOT a filter, and the distinction is worth stating because it is easy to mis-test.
+ * Shortest FOLDED needle that may match by initials (plan/030 D2) — a deliberate noise
+ * floor, and it is measured after the fold rather than on the raw word. Both halves of
+ * that sentence were wrong in an earlier version of this comment; both are corrected here.
  *
- * Every character of a field's initials is by construction also a character OF that
- * field, so a one-letter word that matches the initials necessarily matches the field as
- * a substring too, and `wordTier` has already returned rung 2 or better before it ever
- * reaches `matchesInitials`. Dropping this constant changes no result anywhere; it only
- * saves computing (and caching) the initials of a whole library on a single keystroke.
- * Do not write a test asserting it changes what comes back — such a test passes vacuously.
+ * It is NOT result-neutral. This comment used to claim that every character of a field's
+ * initials is also a character of that field, so a one-letter word matching the initials
+ * must already have matched a substring rung — and that dropping the constant therefore
+ * changed nothing. That holds only while both rungs read the same bytes, and they do not:
+ * only this rung normalises. Against the DECOMPOSED spelling of `École handoff` the
+ * composed one-character query `é` misses every substring rung and matches the initials
+ * `éh`. Measured: tier 5 with the constant, tier 4 without it. The old comment also told
+ * the reader not to write a test for this, on the grounds that it would pass vacuously;
+ * that instruction suppressed exactly the test that pins the rule, and it is gone.
+ *
+ * Measuring AFTER the fold is what makes the count mean what a reader means by it. The
+ * fold strips combining marks, so a raw length counts code points the comparison never
+ * sees — `İ` alone is one visible character but two once lower-cased. The case that
+ * mattered is the degenerate one: a word of two combining marks has raw length 2, clears
+ * a raw gate, and folds to the EMPTY string. Every string contains `''`, so that query
+ * matched the entire library at this rung. Gating on the folded length rejects it as the
+ * zero-length needle it actually is.
  */
 const MIN_INITIALS_QUERY_LENGTH = 2;
 
@@ -146,15 +158,20 @@ function matchesTag(s: Snippet, w: string): boolean {
 }
 
 function matchesInitials(s: Snippet, w: string): boolean {
-  if (w.length < MIN_INITIALS_QUERY_LENGTH) return false;
-  const [labelInitials, textInitials] = snippetInitials(s);
   // The needle gets reduced to the same alphabet as the haystack — see
   // `foldForInitialsMatch` for why NFC alone is not enough. Both sides, or neither.
+  //
+  // Folded BEFORE the length gate, never after. The fold can shorten the needle and can
+  // empty it outright, so a gate placed above this line measures a string this function
+  // never compares — which is how a two-mark query once matched every snippet in the
+  // library. See {@link MIN_INITIALS_QUERY_LENGTH}.
   //
   // Scoped to this rung on purpose. The substring rungs above have always compared raw
   // against raw, and widening them is a different, pre-existing question — but within
   // initials matching the two sides must at least agree with each other.
   const needle = foldForInitialsMatch(w);
+  if (needle.length < MIN_INITIALS_QUERY_LENGTH) return false;
+  const [labelInitials, textInitials] = snippetInitials(s);
   return labelInitials.includes(needle) || textInitials.includes(needle);
 }
 
