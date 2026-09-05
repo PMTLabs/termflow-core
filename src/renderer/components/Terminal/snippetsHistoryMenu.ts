@@ -164,6 +164,19 @@ const HISTORY_BROWSE_LIMIT = 25;
  * goes through the same `insert` callback as Snippets (D12) — never
  * `engine.insertCommand()`, which deletes the whole typed input line first.
  */
+/**
+ * A short, stable, DOM-id-safe key for a command string (djb2).
+ *
+ * Two commands colliding would merely share a row key, which costs nothing the code depends on:
+ * only one row can be under the pointer, and the two would have to be present in the same
+ * ≤`HISTORY_BROWSE_LIMIT` window to meet at all.
+ */
+function hashCommand(cmd: string): string {
+  let h = 5381;
+  for (let i = 0; i < cmd.length; i += 1) h = ((h << 5) + h + cmd.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 export function buildCommandHistoryMenuItem(opts: {
   cwd: string | undefined;
   insert: (command: string) => void;
@@ -181,8 +194,16 @@ export function buildCommandHistoryMenuItem(opts: {
         const commands = q
           ? commandHistoryService.match(q, { cwd, limit: HISTORY_BROWSE_LIMIT })
           : commandHistoryService.recent({ cwd, limit: HISTORY_BROWSE_LIMIT });
-        return commands.map((cmd, i) => ({
-          id: `history-${i}`,
+        return commands.map((cmd) => ({
+          // **Derived from the COMMAND, never from its position.** `ContextMenuFlyoutRow.id` is
+          // documented as a stable identity, and this list is re-derived on every keystroke — so a
+          // positional id meant row 0 was a different command after each one, while anything keyed
+          // on that id (the open folder, `aria-activedescendant`, and the tooltip dwell) went on
+          // pointing at "row 0". The dwell was the one that showed: a tooltip earned by resting on
+          // the top row popped instantly for whatever command replaced it. Hashed rather than the
+          // command itself because the id becomes a DOM id (`rowDomId`), and commands contain
+          // spaces.
+          id: `history-${hashCommand(cmd)}`,
           label: cmd,
           title: cmd,
           onSelect: () => insert(cmd),

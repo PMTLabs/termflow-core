@@ -337,14 +337,23 @@ describe('hovering away', () => {
         // This used to watch `console.error` for React's set-state-on-an-unmounted-component
         // warning. React 18 removed that warning, so the assertion held whether or not anything
         // was cleaned up — mutation testing while the tooltip dwell was added found it green with
-        // the cleanup deleted. The pending timer is what actually exists, so it is what to count.
+        // the cleanup deleted.
+        //
+        // Counting timers needs the CLOSE timer to be the only one pending, and hovering the plain
+        // item that arms it also arms a tooltip dwell. Leaving the menu afterwards clears the
+        // dwell (its `onMouseLeave`) and leaves the close armed, which nothing cancels — so by the
+        // time the count is taken, the one timer left is this test's own subject.
         renderSync(menuWith({ rows: [row('a', 'x')] }));
         hoverSync(menuItem('Snippets'));
         hoverSync(menuItem('Copy'), menuItem('Snippets'));
-        expect(jest.getTimerCount()).toBeGreaterThan(0);
+        const offMenu = document.createElement('div');
+        document.body.appendChild(offMenu);
+        hoverSync(offMenu, menuItem('Copy'));
+        expect(jest.getTimerCount()).toBe(1);
 
         act(() => root.unmount());
         expect(jest.getTimerCount()).toBe(0);
+        offMenu.remove();
         // Re-created so the shared afterEach still has something to unmount.
         root = createRoot(container);
     });
@@ -504,10 +513,61 @@ describe('tooltip dwell', () => {
         typeSync(search(), '');
         expect(labels()).toEqual(['one']);
 
+        // **Asserted here, before any pointer event.** The first version of this test hovered the
+        // row and only then looked at the title — which asserts that a FRESH dwell must be earned,
+        // something the sweep tests above already cover, and says nothing about the state the doc
+        // above calls unreachable. It was reachable: review re-ran it with this line and the row
+        // came back carrying 'the snippet text'.
+        expect(titleOf(rows()[0])).toBeNull();
+
         hoverSync(rows()[0], search());
         expect(titleOf(rows()[0])).toBeNull();
         tick(TOOLTIP_DWELL_MS);
         expect(titleOf(rows()[0])).toBe('the snippet text');
+    });
+
+    /**
+     * The same hole from the other side, in the shape the real Command History has.
+     *
+     * `buildCommandHistoryMenuItem` passes the FUNCTION form of `rows` and used to mint
+     * `history-${i}` — a POSITION — from a list it re-derives on every keystroke. So resting on the
+     * top row armed `history-0`, and after one keystroke a different command occupied that id and
+     * inherited the armed tooltip with no delay at all: the trail the dwell removes, triggered by
+     * typing instead of by sweeping, on a surface whose search box is focused the moment it opens.
+     *
+     * Two things closed it and this test needs both. The ids are content-derived now, so a
+     * different command cannot land on a dwelt key; and the panel resets the dwell when its row set
+     * changes, so a row that SURVIVES the filter does not keep an armed title either. The array
+     * form would not exercise this — `filterRows` preserves each row's own id — so the fixture uses
+     * the function form, as the real builder does.
+     */
+    it('a re-filter clears the dwell, even when a row keeps its slot', () => {
+        const cmds = ['git status', 'npm run build', 'cargo test'];
+        renderSync(menuWith({
+            searchPlaceholder: 'Search command history…',
+            rows: (q: string) => cmds
+                .filter((c) => c.includes(q.trim()))
+                .map((c) => ({ id: `history-${c.replace(/\W+/g, '')}`, label: c, title: c })),
+            emptyRow: row('none', 'No command history yet', { disabled: true }),
+        }));
+        hoverSync(menuItem('Snippets'));
+        hoverSync(rows()[0], menuItem('Snippets'));
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('git status');
+
+        // One keystroke, no pointer event. A different command now occupies position 0.
+        typeSync(search(), 'cargo');
+        expect(labels()).toEqual(['cargo test']);
+        expect(titleOf(rows()[0])).toBeNull();
+
+        // And the row that KEEPS its identity across a re-filter loses its armed title too.
+        typeSync(search(), '');
+        hoverSync(rows()[0], search());
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[0])).toBe('git status');
+        typeSync(search(), 'git');
+        expect(labels()).toEqual(['git status']);
+        expect(titleOf(rows()[0])).toBeNull();
     });
 
     it('follows the item it was earned on when the items list shifts underneath it', () => {
@@ -577,6 +637,80 @@ describe('tooltip dwell', () => {
         expect(titleOf(detail(0))).toBeNull();
     });
 
+    /**
+     * **A keyboard user never hovers, so without an exemption they never get a description.**
+     *
+     * Flyout rows are `tabIndex={-1}` with focus held in the search box and the current row named
+     * by `aria-activedescendant`, so arrow-key navigation fires no mouse event at all — and for a
+     * snippet or a history command the `title` is the only copy of the full, untruncated text that
+     * the label ellipses. A keyboard user also cannot produce the trail the dwell exists to
+     * suppress, so gating them costs the feature nothing and costs them the description.
+     */
+    it('the row a KEYBOARD user arrows to keeps its title, with no dwell', () => {
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        expect(titleOf(rows()[0])).toBeNull();
+
+        act(() => {
+            search().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        });
+        // Row 0 was already active on open; one ArrowDown moves to row 1 and marks the mode.
+        expect(titleOf(rows()[1])).toBe('the other one');
+        expect(titleOf(rows()[0])).toBeNull();
+    });
+
+    it('and hovering afterwards puts the dwell back — the active row is not enough on its own', () => {
+        // `onMouseEnter` also sets `activeIdx`, so "is the active row" cannot stand in for "was
+        // arrowed to": read that way, the hovered row would hand out its title instantly and the
+        // feature would be gone. This is the paired negative for that.
+        renderSync(menuWith({
+            rows: [row('a', 'one', { title: 'the whole snippet' }), row('b', 'two', { title: 'the other one' })],
+        }));
+        hoverSync(menuItem('Snippets'));
+        act(() => {
+            search().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        });
+        expect(titleOf(rows()[1])).toBe('the other one');
+
+        hoverSync(rows()[1], search());
+        expect(titleOf(rows()[1])).toBeNull();
+        tick(TOOLTIP_DWELL_MS);
+        expect(titleOf(rows()[1])).toBe('the other one');
+    });
+
+    it('a host item that has keyboard FOCUS keeps its title too', () => {
+        renderSync(twoItems());
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBe('Copy the selected terminal text.');
+        act(() => {
+            menuItem('Copy').dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+        });
+        expect(titleOf(menuItem('Copy'))).toBeNull();
+    });
+
+    it('`instantTitles` exempts a whole menu — for a picker whose titles ARE its content', () => {
+        // `TerminalDisplay`'s path picker: the labels deliberately strip the shared base directory,
+        // so the full path in `title` is the only thing telling three same-named files apart.
+        // Delaying it three seconds per candidate delays the one answer the menu exists to give.
+        act(() => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    instantTitles
+                    items={[{ label: 'file.cs', title: 'D:/a/b/file.cs', click: () => {} }]}
+                    onClose={onClose}
+                />,
+            );
+        });
+        expect(titleOf(menuItem('file.cs'))).toBe('D:/a/b/file.cs');
+    });
+
     it('the flyout header toggle keeps its title unconditionally', () => {
         // A glyph-only button, aimed at on purpose rather than swept past, whose `title` is the
         // only text anywhere saying what pressing it does. There is no annoyance here to delay.
@@ -590,14 +724,19 @@ describe('tooltip dwell', () => {
     });
 
     it('a dwell armed before the menu unmounts is torn down with it', () => {
-        // **Asserted on the timer, not on a console warning.** The obvious version of this test
-        // watches `console.error` for React's set-state-on-an-unmounted-component warning — which
-        // React 18 removed, so it passes whether or not the effect cleans anything up. Mutation
-        // testing said so: dropping the cleanup outright left that version green. The pending
-        // timer is the thing that actually exists, so it is the thing to count.
-        renderSync(twoItems());
-        hoverSync(menuItem('Copy'));
-        expect(jest.getTimerCount()).toBeGreaterThan(0);
+        // **Asserted on the timer, not on a console warning** — React 18 removed the
+        // set-state-after-unmount warning, so that version passed with the cleanup deleted.
+        //
+        // **And on a DELTA of exactly one, over a fixture where nothing else can arm.** Counting
+        // `getTimerCount() > 0` was the second vacuous oracle here: hovering a PLAIN item also
+        // arms `scheduleCloseSubmenu`'s 260ms timer, so the count was satisfied by that alone and
+        // the test stayed green against a `useTooltipDwell` with no timer in it at all. A submenu
+        // parent takes the `openSubmenuAt` branch instead, which cancels rather than arms — so the
+        // one timer that appears here is the dwell, and this test can only be about the dwell.
+        renderSync([{ label: 'Snippets', title: 'Browse snippets.', submenu: { rows: [row('a', 'x')] } }]);
+        const before = jest.getTimerCount();
+        hoverSync(menuItem('Snippets'));
+        expect(jest.getTimerCount()).toBe(before + 1);
 
         act(() => root.unmount());
         expect(jest.getTimerCount()).toBe(0);

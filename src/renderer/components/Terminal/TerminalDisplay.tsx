@@ -1050,6 +1050,12 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         <ContextMenu
           x={pathPicker.x}
           y={pathPicker.y}
+          // Its rows' titles ARE its content: `pickerLabel` strips the shared base directory so
+          // the rows read as short tails, and the full path — the only thing telling three
+          // same-named files apart — lives in `title`. Withholding that for three seconds per
+          // candidate would delay the one answer the picker exists to give, and there is no trail
+          // to suppress: nobody sweeps past a disambiguation prompt on the way somewhere else.
+          instantTitles
           items={pathPicker.candidates.map((c) => ({
             label: pickerLabel(c, pathPicker.base),
             icon: '📄',
