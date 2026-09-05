@@ -1985,6 +1985,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     </p>
                 )}
             </div>
+            {/* The WebView2 right-click menu is cancelled in the backend
+                (context_menu.rs) so only TermFlow's own menus appear — which also
+                removed the browser's "Inspect". This is now the only way in. */}
+            <div className="setting-item">
+                <label className="setting-label">Developer tools</label>
+                <p className="help-text">
+                    Opens the WebView inspector for this window, for reporting rendering
+                    or console issues. Right-click no longer offers “Inspect”.
+                </p>
+                <button
+                    className="save-btn apply-btn"
+                    data-testid="open-devtools"
+                    onClick={() => { void window.electronAPI?.openDevtools?.(); }}
+                >
+                    Open DevTools
+                </button>
+            </div>
         </div>
     );
 

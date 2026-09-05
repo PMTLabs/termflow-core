@@ -1,17 +1,17 @@
-//! Trims the WebView2 right-click context menu to only "Print" and "Inspect"
-//! (Windows only).
+//! Suppresses the WebView2 right-click context menu everywhere the renderer does
+//! not draw its own (Windows only).
 //!
 //! The default Edge/WebView2 menu (Back, Reload, Save as, Print, More tools,
 //! Inspect, …) appears wherever the renderer does NOT handle its own
-//! `contextmenu` event — e.g. the in-app title bar. The terminal area calls
-//! `preventDefault`, so WebView2 never raises `ContextMenuRequested` there and
-//! this filter leaves the terminal's own React menu untouched.
-
-/// Item `Name`s of the WebView2 default menu we keep. These are the stable
-/// command names exposed by WebView2 (not the localized labels). See
-/// https://learn.microsoft.com/microsoft-edge/webview2/concepts/context-menus
-#[cfg(windows)]
-const KEEP: [&str; 2] = ["print", "inspectElement"];
+//! `contextmenu` event — e.g. the in-app title bar, the tab strip, the canvas
+//! background. It was previously trimmed to Print + Inspect; those two are
+//! browser chrome, not TermFlow features, so the menu is now cancelled outright
+//! and right-click only ever opens one of the app's own React menus. DevTools
+//! moved to Settings → Updates ("Open developer tools").
+//!
+//! The terminal area calls `preventDefault`, so WebView2 never raises
+//! `ContextMenuRequested` there and this filter leaves the terminal's own React
+//! menu untouched.
 
 /// Install the context-menu filter on a window's WebView2 instance. No-op on
 /// non-Windows platforms (the default menu issue is WebView2-specific).
@@ -21,8 +21,7 @@ pub fn install(window: &tauri::WebviewWindow) {
         ICoreWebView2ContextMenuRequestedEventArgs, ICoreWebView2_11,
     };
     use webview2_com::ContextMenuRequestedEventHandler;
-    use windows::core::{Interface, PWSTR};
-    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::core::Interface;
 
     let label = window.label().to_string();
     let result = window.with_webview(move |webview| unsafe {
@@ -47,35 +46,18 @@ pub fn install(window: &tauri::WebviewWindow) {
                 // Over an editable target (text input / textarea — e.g. the Settings
                 // "Default editor" field) keep the full native menu so Cut / Copy /
                 // Paste / Undo / Select all stay available. Trimming to print+inspect
-                // there left users unable to right-click → Paste. We only trim the
-                // browser-navigation noise on NON-editable areas.
+                // there left users unable to right-click → Paste. We only cancel the
+                // browser-chrome menu on NON-editable areas.
                 if let Ok(target) = args.ContextMenuTarget() {
                     let mut editable = windows_core::BOOL(0);
                     if target.IsEditable(&mut editable).is_ok() && editable.as_bool() {
                         return Ok(());
                     }
                 }
-                let items = args.MenuItems()?;
-                let mut count: u32 = 0;
-                items.Count(&mut count)?;
-                // Walk backward so RemoveValueAtIndex doesn't shift indices we
-                // haven't visited yet.
-                for i in (0..count).rev() {
-                    let item = items.GetValueAtIndex(i)?;
-                    let mut name_ptr = PWSTR::null();
-                    item.Name(&mut name_ptr)?;
-                    let name = if name_ptr.is_null() {
-                        String::new()
-                    } else {
-                        let s = name_ptr.to_string().unwrap_or_default();
-                        // WebView2 allocates the string with CoTaskMemAlloc; free it.
-                        CoTaskMemFree(Some(name_ptr.0 as *const core::ffi::c_void));
-                        s
-                    };
-                    if !KEEP.contains(&name.as_str()) {
-                        items.RemoveValueAtIndex(i)?;
-                    }
-                }
+                // `Handled = true` tells WebView2 the app owns this menu, so it
+                // displays nothing. Removing every item instead would still pop an
+                // empty frame.
+                args.SetHandled(true)?;
                 Ok(())
             },
         ));

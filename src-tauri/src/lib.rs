@@ -1292,8 +1292,9 @@ pub fn run() {
         // lists every open window). Rebuilt on window create/destroy/title-change.
         commands::refresh_menu(&app.handle());
 
-        // Trim the WebView2 right-click menu (Windows) to Print + Inspect on the
-        // primary window. New windows install the same filter at build time.
+        // Cancel the WebView2 right-click menu (Windows) on the primary window so
+        // only TermFlow's own React menus appear. New windows install the same
+        // filter at build time.
         if let Some(main) = app.get_webview_window("main") {
             // The main window's title comes from tauri.conf.json, so mark it here.
             // Every later update goes through set_window_title, which decorates too.
@@ -1583,6 +1584,7 @@ pub fn run() {
         commands::refresh_window_menu,
         commands::set_window_title,
         commands::close_self_window,
+        commands::open_devtools,
         commands::set_keep_running_in_background,
         peer_commands::fabric_status,
         peer_commands::peers_list,

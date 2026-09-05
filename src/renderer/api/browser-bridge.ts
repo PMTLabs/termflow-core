@@ -247,6 +247,10 @@ class BrowserBridge implements ElectronAPI {
         // No native opener in the browser host.
     }
 
+    async openDevtools(): Promise<void> {
+        // The browser host already has its own DevTools (F12).
+    }
+
     async openPath(_path: string): Promise<void> {
         // No native opener in the browser host.
     }

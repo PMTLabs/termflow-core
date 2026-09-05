@@ -2188,6 +2188,18 @@ pub fn close_self_window(window: tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+/// Open the WebView developer tools for the calling window.
+///
+/// The WebView2 right-click menu is cancelled outright (see `context_menu`), so
+/// "Inspect" is gone; Settings → Updates is the only way in. The `devtools`
+/// tauri feature is enabled unconditionally in Cargo.toml, so this works in
+/// release builds too.
+#[tauri::command]
+pub fn open_devtools(window: tauri::WebviewWindow) {
+    log::info!("open_devtools: opening for '{}'", window.label());
+    window.open_devtools();
+}
+
 /// Resolve a possibly-bare executable name (e.g. "cmd.exe", "wsl.exe") to a full
 /// path by searching PATH, so the icon can be read from the real binary.
 #[cfg(windows)]
