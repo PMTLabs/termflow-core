@@ -476,8 +476,27 @@ impl AutomationRuntime {
     /// clock, `BASE_TICK_MS`, no second sweep, no new task) — this is not a second gap detector of
     /// its own, it is one more thing the existing one does once it has already decided nobody was
     /// watching.
-    pub fn drop_stale_parked(&self, now_ms: i64, max_age_ms: i64) {
-        self.parked.retain(|_, p| now_ms - p.due_at_ms <= max_age_ms);
+    /// **Returns how many it dropped**, because the caller has to tell the windows. A row whose send
+    /// is parked reads *"Waiting to send"* from `parked_at` alone, and the renderer's countdown stops
+    /// re-arming once the deadline passes — so a send dropped here with nothing announced leaves the
+    /// row on *"Waiting to send · in 0s"* until some unrelated arm transition repaints it.
+    /// `forget_pair`/`forget_terminal` escape that only because the targeting diff marks dirty on
+    /// their behalf, and nothing does for a resume.
+    ///
+    /// A count and not a bool for the same reason the seeding hands back ids: the caller must be able
+    /// to stay silent when a resume dropped nothing, or every wake repaints every open Settings page
+    /// to say that nothing happened. Counted inside `retain` rather than as a length difference,
+    /// which the tap can move underneath a pair of reads.
+    pub fn drop_stale_parked(&self, now_ms: i64, max_age_ms: i64) -> usize {
+        let mut dropped = 0usize;
+        self.parked.retain(|_, p| {
+            let fresh = now_ms - p.due_at_ms <= max_age_ms;
+            if !fresh {
+                dropped += 1;
+            }
+            fresh
+        });
+        dropped
     }
 
     /// When this pair's parked send comes due, or `None` if nothing is parked for it.

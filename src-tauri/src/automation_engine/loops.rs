@@ -209,7 +209,15 @@ pub async fn evaluator_step(
         // only in memory ... an unbounded wait promises something the feature cannot keep"). Reusing
         // this branch rather than a second sweep is the point: one clock, `BASE_TICK_MS`, no
         // `interval`, no new task.
-        engine.runtime.drop_stale_parked(now_ms, crate::automation_validation::MAX_DELAY_MS);
+        //
+        // **And say so**, which nothing else here does. The seeding beside this emits `activity` for
+        // the rows it writes; a dropped park writes no row and moves no arm state, so without this
+        // the pair's *"Waiting to send"* pill sits on a countdown that reached zero and stopped,
+        // until something unrelated repaints it. Marked and not emitted: one drain point, one rate
+        // limit, and `evaluate_tick` below is that point.
+        if engine.runtime.drop_stale_parked(now_ms, crate::automation_validation::MAX_DELAY_MS) > 0 {
+            engine.mark_state_dirty();
+        }
     }
     evaluate_tick(engine, host, cursor, now_ms).await
 }
@@ -2248,6 +2256,60 @@ mod tests {
             fake.written().is_empty(),
             "a stale parked send fired into whatever is now in the terminal: {:?}",
             fake.written()
+        );
+    }
+
+    /// **A resume that drops a parked send must tell the windows — and one that drops nothing
+    /// must not.**
+    ///
+    /// `pairState` answers `'pending'` for any non-null `parkedAt`, with no expiry check, and the
+    /// renderer's countdown stops re-arming once the deadline passes. So the drop above left the row
+    /// reading *"Waiting to send · in 0s"* for a send that will never go out, until some unrelated
+    /// arm transition happened to repaint it. The seeding right beside it does emit; this did not.
+    ///
+    /// **Both directions, because "mark dirty on every resume" passes the first half.** A wake that
+    /// dropped nothing has nothing to announce, and an unconditional mark would repaint every open
+    /// Settings page on every lid-open for the life of the app — the cost the targeting tick's own
+    /// diff exists to avoid.
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_that_drops_a_parked_send_announces_it_and_one_that_drops_nothing_does_not() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        // The crossing parks a send due at 301_000 (five minutes out).
+        evaluator_step(&engine, &host, 0, None, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(301_000), "premise: it is parked");
+
+        // A resume that drops nothing: over `RESUME_GAP_MS`, and the send is not yet even due.
+        let quiet = fake.states.load(std::sync::atomic::Ordering::Relaxed);
+        evaluator_step(&engine, &host, 0, Some(1_000), 120_000).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            fake.states.load(std::sync::atomic::Ordering::Relaxed),
+            quiet,
+            "a wake that dropped nothing repainted every open Settings page anyway"
+        );
+
+        // A resume that DOES drop it. The rate limit is long since spent at this distance, so a
+        // state event here is this drop's own and not a coalesced earlier one.
+        let woke_at = 301_000 + crate::automation_validation::MAX_DELAY_MS + 1;
+        evaluator_step(&engine, &host, 0, Some(120_000), woke_at).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            engine.runtime.parked_at("au-1", "tm-1").is_none(),
+            "premise: the send was stale enough to drop"
+        );
+        assert!(
+            fake.states.load(std::sync::atomic::Ordering::Relaxed) > quiet,
+            "the send was dropped and the row was left counting down to a message that never comes"
         );
     }
 
