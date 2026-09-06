@@ -28,6 +28,7 @@ pub mod dry;
 pub mod eval;
 pub mod host;
 pub mod loops;
+pub mod schedule;
 pub mod subst;
 #[cfg(test)]
 pub mod test_host;
@@ -39,7 +40,7 @@ use crate::automation::runtime::AutomationRuntime;
 use crate::automation_engine::eval::ArmState;
 use crate::automation_store::{
     AutomationGraph, AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError,
-    Clause, Finds, Keep, LogKind, Source, Test,
+    Clause, Finds, Keep, LogKind, Source, Test, TimerStep,
 };
 
 /// Start the engine: load the rules, then the three tasks (plan §2.1, §2.3, §4.4).
@@ -379,6 +380,22 @@ impl AutomationEngine {
         store: &AutomationStore,
         now_ms: i64,
     ) -> Result<ReloadReport, AutomationStoreError> {
+        self.reload_at(store, now_ms, schedule::local_now(now_ms))
+    }
+
+    /// `reload`, with the local wall-clock day handed in rather than read.
+    ///
+    /// **The seam exists for the seeding below and for nothing else.** What that seeding does
+    /// depends on the machine's time zone — "is 09:00 already past" has no answer without one — so a
+    /// test that could only pass `now_ms` would be asserting against wherever the runner happens to
+    /// be, and would be a coin flip near midnight. `reload` is the whole of production: it reads the
+    /// clock through `schedule::local_now`, the one conversion in the crate.
+    pub fn reload_at(
+        &self,
+        store: &AutomationStore,
+        now_ms: i64,
+        now_local: schedule::LocalTime,
+    ) -> Result<ReloadReport, AutomationStoreError> {
         let rules = store.list_rules()?;
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
         let mut report = ReloadReport::default();
@@ -439,6 +456,28 @@ impl AutomationEngine {
             let unchanged = next.get(&id).is_some_and(|l| l.rule.updated_at == was);
             if !unchanged {
                 self.runtime.forget_rule(&id);
+            }
+        }
+
+        // **A schedule whose minute has already passed today is marked as fired today** (§6.3).
+        //
+        // `schedule_due` compares `now >= target`, so an absent day mark and a target three hours
+        // in the past are the launch case and a crossing spelled the same way. Seeding here is what
+        // tells them apart: an app STARTED at 14:00 does not deliver a 09:00 prompt on arrival,
+        // while an app RUNNING across 09:00 has no seed for today and fires. Firing a missed prompt
+        // late is the "nagging on arrival" behaviour plan 028 Q3 already ruled against for arm
+        // state. Without this the `>=` that keeps a spring-forward schedule alive would also
+        // deliver every schedule the app was closed for.
+        //
+        // **After the forget loop, deliberately.** `forget_rule` drops everything a changed rule
+        // owns, this map included, so a seed written before it would be wiped for exactly the rules
+        // that need it most — a rule saved at 14:00 is re-seeded here and does not fire on the next
+        // tick. Reading `next` rather than the live map keeps it one pass, before the swap.
+        for live in next.values() {
+            if let Some(TimerStep { mode }) = &live.rule.graph.timer {
+                if schedule::target_already_past(mode, now_local) {
+                    self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
+                }
             }
         }
 
@@ -725,6 +764,112 @@ mod tests {
         // pattern — which is what an `unwrap_or_default()` anywhere on this path would produce.
         let live = engine.snapshot_live();
         assert!(live[0].re.is_none(), "a rule with no pattern must carry no compiled regex");
+    }
+
+    /// A Monday, as a local ordinal day. `schedule_only_rule`'s mask is Mon–Fri, so the rule this
+    /// module seeds is one that genuinely could fire on the day the test names.
+    fn monday_2026_09_07() -> i32 {
+        use chrono::Datelike;
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("a real date");
+        assert_eq!(date.weekday(), chrono::Weekday::Mon);
+        date.num_days_from_ce()
+    }
+
+    fn at(day_ordinal: i32, minute_of_day: i32) -> schedule::LocalTime {
+        schedule::LocalTime { day_ordinal, minute_of_day }
+    }
+
+    /// **The 09:00 prompt must not arrive at 14:00 because the app started late** (§6.3, plan 028 Q3).
+    ///
+    /// `schedule_due` compares `now >= target` — which is what keeps a spring-forward 02:30 schedule
+    /// alive on a day with no 02:30 — and an absent day mark plus a target three hours in the past is
+    /// spelled exactly like a crossing. The seeding in `reload` is the only thing that tells the two
+    /// apart, so this asserts the pair TOGETHER: what `reload` left behind, handed to the predicate.
+    /// Asserting `last_fired_day == Some(day)` alone would pass a seed the predicate ignored.
+    #[test]
+    fn a_schedule_missed_while_the_app_was_closed_does_not_fire_on_launch() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let launch = at(monday_2026_09_07(), 14 * 60);
+        engine.reload_at(&store, 0, launch).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(launch.day_ordinal),
+            "a 09:00 schedule loaded at 14:00 has already missed today"
+        );
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), launch),
+            "the prompt arrived on launch, five hours late"
+        );
+        // Tomorrow is a different day, and the rule is not broken — only today is spent.
+        let tuesday = at(launch.day_ordinal + 1, 9 * 60);
+        assert!(schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), tuesday));
+    }
+
+    /// The other direction, and it is the one the seeding must not break: a schedule whose minute is
+    /// still ahead at launch is left unmarked, and fires when the tick reaches it.
+    #[test]
+    fn a_schedule_still_ahead_at_launch_fires_when_its_minute_arrives() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "09:00 has not happened yet");
+        assert!(schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60)));
+    }
+
+    /// **The seeding runs AFTER the forget loop, and this is what says so.**
+    ///
+    /// Saving a rule moves its `updated_at`, and `reload` drops everything that rule owns — the day
+    /// mark included. Seeded before that loop, the mark would be wiped for exactly the rules that
+    /// need it, and a schedule edited at 14:00 would deliver its 09:00 message on the next tick.
+    #[test]
+    fn a_schedule_edited_after_its_minute_is_re_seeded_rather_than_unmarked() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let afternoon = at(monday_2026_09_07(), 14 * 60);
+        engine.reload_at(&store, 0, afternoon).unwrap();
+
+        // The user edits the rule's message and saves: `updated_at` moves, so `forget_rule` runs.
+        sched.name = "renamed".into();
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 1_000, afternoon).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), Some(afternoon.day_ordinal));
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), afternoon),
+            "an edit at 14:00 delivered the 09:00 message on the next tick"
+        );
+    }
+
+    /// A delay rule has no day to seed: `AfterMatch` is parked at its crossing, not scheduled.
+    #[test]
+    fn an_after_match_rule_is_given_no_day() {
+        let store = AutomationStore::new_in_memory();
+        let mut delayed = rule("au-delay", r"ctx:(\d+)%");
+        delayed.graph.timer =
+            Some(TimerStep { mode: crate::automation_store::TimerMode::AfterMatch { delay_ms: 30_000 } });
+        store.save_rule(&delayed).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        engine.reload_at(&store, 0, at(monday_2026_09_07(), 23 * 60)).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-delay"), None);
     }
 
     /// §2.7: an uncompilable pattern is reported once per LOAD. The evaluator runs four times a second

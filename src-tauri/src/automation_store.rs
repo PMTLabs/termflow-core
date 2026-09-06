@@ -406,6 +406,16 @@ pub enum TimerMode {
 /// question, and a mask re-declared in the engine is how they drift apart.
 pub const WEEKDAY_BITS_MASK: u8 = 0b0111_1111;
 
+/// The exclusive upper bound on `TimerMode::DailyAt::minute_of_day` — `0..1440`, midnight inclusive.
+///
+/// **Here for the same reason `WEEKDAY_BITS_MASK` is**, and it is the same defect one field over:
+/// `minute_of_day` is a bare `i32`, so `-5` and `5000` both decode, and neither is a time of day.
+/// `-5` makes `now >= target` true from midnight onwards — a rule that fires the moment the app
+/// starts, every day — and `5000` makes it true never. `automation_validation`'s `timer.badMinute`
+/// asks whether the rule can ever fire *sensibly* and §6.3's `schedule_due` asks whether it fires
+/// now; both read this bound, so a hand-crafted or corrupted row is refused by both or by neither.
+pub const MINUTES_PER_DAY: i32 = 24 * 60;
+
 /// The four steps, stored whole as a JSON blob in `automation_rules.graph`.
 ///
 /// Blob rather than normalised because it is never queried and never written at a different cadence

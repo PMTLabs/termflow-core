@@ -61,6 +61,7 @@ export type ProblemCode =
     | 'cond.clauseWithoutParse'
     | 'timer.delayTooShort'
     | 'timer.delayTooLong'
+    | 'timer.badMinute'
     | 'timer.noDays'
     | 'action.empty'
     | 'action.echo'
@@ -354,7 +355,18 @@ export const MAX_DELAY_MS = 10 * 60 * 1_000;
 const WEEKDAY_BITS_MASK = 0b0111_1111;
 
 /**
- * Everything wrong with the WAIT step — §8's three `timer.*` codes (plan 032 §6.2, §12 item 1).
+ * The exclusive upper bound on a `dailyAt` timer's `minuteOfDay` — `0..1440`, midnight inclusive.
+ *
+ * The field is a bare number on both sides of the wire, and nothing else bounds it: `-5` makes the
+ * engine's `now >= target` true from midnight every day, and `5000` makes it true never — a rule
+ * that looks armed and silently is not. `automation_store.rs` holds the same bound for
+ * `automation_validation.rs` and for §6.3's `schedule_due`, and the shared fixture's three
+ * `timer.badMinute` cases are what keep this copy honest rather than merely commented.
+ */
+export const MINUTES_PER_DAY = 24 * 60;
+
+/**
+ * Everything wrong with the WAIT step — §8's `timer.*` codes (plan 032 §6.2, §6.3, §12 item 1).
  *
  * Absent (no wait step at all) reports nothing: every rule saved before this milestone, and every
  * rule that does not use one, is unaffected.
@@ -391,8 +403,22 @@ function timerProblems(graph: AutomationGraph): Problem[] {
                 ),
             );
         }
-    } else if ((mode.dailyAt.days & WEEKDAY_BITS_MASK) === 0) {
-        out.push(problem('blocks', 'timer', 'timer.noDays', 'Pick at least one day for this to run.'));
+    } else {
+        const { minuteOfDay, days } = mode.dailyAt;
+        if (minuteOfDay < 0 || minuteOfDay >= MINUTES_PER_DAY) {
+            // The last minute of the day is DERIVED, never restated: `23:59` written out is a
+            // sentence that goes false the day the bound moves. The floor is literal because zero is
+            // what "minute of day" counts from — there is no constant behind it.
+            const last = MINUTES_PER_DAY - 1;
+            const hh = String(Math.floor(last / 60)).padStart(2, '0');
+            const mm = String(last % 60).padStart(2, '0');
+            out.push(
+                problem('blocks', 'timer', 'timer.badMinute', `Pick a time between 00:00 and ${hh}:${mm}.`),
+            );
+        }
+        if ((days & WEEKDAY_BITS_MASK) === 0) {
+            out.push(problem('blocks', 'timer', 'timer.noDays', 'Pick at least one day for this to run.'));
+        }
     }
 
     return out;
@@ -549,7 +575,7 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...clauseProblems(rule.graph));
 
     // --- timer -----------------------------------------------------------------------------------
-    // §8's three `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
+    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
     // and a schedule whose weekday mask selects no day.
     out.push(...timerProblems(rule.graph));
 
@@ -671,6 +697,7 @@ const BADGES: Record<ProblemCode, string> = {
     'cond.clauseWithoutParse': 'needs a pattern to compare from',
     'timer.delayTooShort': 'wait is too short',
     'timer.delayTooLong': 'wait is too long',
+    'timer.badMinute': 'needs a time of day',
     'timer.noDays': 'needs a day picked',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',

@@ -16,6 +16,7 @@ import type { AutomationRule } from '../../../types/electron';
 import {
     MAX_DELAY_MS,
     MIN_DELAY_MS,
+    MINUTES_PER_DAY,
     MIN_TIMER_MS,
     badgeFor,
     blockingProblems,
@@ -67,6 +68,7 @@ describe('automationValidation — the shared fixture', () => {
             'cond.clauseWithoutParse',
             'timer.delayTooShort',
             'timer.delayTooLong',
+            'timer.badMinute',
             'timer.noDays',
             'action.empty',
             'action.echo',
@@ -157,6 +159,31 @@ describe('automationValidation — the words the user reads', () => {
         expect(find(withDelay(MAX_DELAY_MS), 'timer.delayTooLong')?.message).toBe(
             `Wait less than ${MAX_DELAY_MS / 60_000} minutes — a waiting message is held in memory and is lost if TermFlow quits.`,
         );
+    });
+
+    /**
+     * **`timer.badMinute` quotes the bound rather than restating it**, for the same reason both
+     * delay bounds do: *"between 00:00 and 23:59"* typed out is a sentence that goes false the day
+     * `MINUTES_PER_DAY` moves and says nothing when it does. The floor stays literal because zero is
+     * what a minute-of-day counts from; there is no constant behind it to drift.
+     *
+     * `automation_validation.rs` asserts this same sentence, built the same way — the shared fixture
+     * compares `code`, so the words are pinned once per implementation.
+     */
+    it('quotes the last minute of the day from its constant, rather than restating it', () => {
+        const at = (minuteOfDay: number): AutomationRule => ({
+            ...base(),
+            graph: { ...base().graph, timer: { mode: { dailyAt: { minuteOfDay, days: 0b0001_1111 } } } },
+        });
+        const last = MINUTES_PER_DAY - 1;
+        const want = `Pick a time between 00:00 and ${String(Math.floor(last / 60)).padStart(2, '0')}:${String(last % 60).padStart(2, '0')}.`;
+        expect(want).toBe('Pick a time between 00:00 and 23:59.');
+
+        expect(find(at(MINUTES_PER_DAY), 'timer.badMinute')?.message).toBe(want);
+        expect(find(at(-1), 'timer.badMinute')?.message).toBe(want);
+        // And the legal ends of the range report nothing at all.
+        expect(find(at(0), 'timer.badMinute')).toBeUndefined();
+        expect(find(at(last), 'timer.badMinute')).toBeUndefined();
     });
 
     it('reports the browser regex error, not a generic one', () => {

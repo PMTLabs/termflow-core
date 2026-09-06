@@ -157,6 +157,25 @@ pub struct AutomationRuntime {
     /// `snapshot_live()`, which the drain runs inside (§6.1) — but a map with no purge is a leak,
     /// and this one holds a `Captures` per entry.
     parked: DashMap<(String, String), ParkedSend>,
+    /// `rule_id` -> the local ordinal day this schedule rule last fired on (§6.3).
+    ///
+    /// **Keyed by the RULE alone, and that is the difference between this and every map above it.**
+    /// A schedule rule reads no terminal: `schedule_due` asks a clock, and the answer is the same
+    /// for all of the rule's targets, so "09:00 has happened today" is one fact and not one per
+    /// pair. Keyed per pair it would also be the *wrong* fact — a terminal that joins the watched
+    /// set at 10:00 has no entry for today, so a per-pair guard would deliver the 09:00 prompt to it
+    /// on arrival, which is exactly the behaviour §6.3 and plan 028 Q3 rule against. The walk marks
+    /// the day once, after it has pushed a send for every leaf it is going to.
+    ///
+    /// **Seeded by `reload`, not only written by the tick.** `>=` on the minute means an absent
+    /// entry and a target already past are indistinguishable from a crossing, so at load every
+    /// schedule whose minute has gone by is marked as today — an app started at 14:00 does not
+    /// deliver a 09:00 prompt on arrival, while an app running across 09:00 still does.
+    ///
+    /// Purged by `forget_rule` alone: it is a fact about the rule's own day, which a terminal
+    /// closing or leaving a watched set does not undo. In memory only, like `parked` — launch
+    /// starts empty, and `reload` runs at launch, which is what puts the seed there.
+    last_fired_day: DashMap<String, i32>,
 }
 
 impl AutomationRuntime {
@@ -227,6 +246,7 @@ impl AutomationRuntime {
         self.last_decision.retain(|(r, _), _| r != rule_id);
         self.fires.retain(|(r, _), _| r != rule_id);
         self.parked.retain(|(r, _), _| r != rule_id);
+        self.last_fired_day.remove(rule_id);
         self.watched.remove(rule_id);
         // Completion and *Reset* both arrive here, and they want opposite things from the claim —
         // completion no longer needs it (the rule has left the live set), and a reset must not
@@ -442,6 +462,25 @@ impl AutomationRuntime {
         self.parked
             .get(&(rule_id.to_string(), tm.to_string()))
             .map(|e| e.value().due_at_ms)
+    }
+
+    // --- the schedule's day (§6.3) ----------------------------------------------------------------
+
+    /// The local ordinal day this schedule rule last fired on, or `None` if it has not fired since
+    /// the rule was loaded. Handed straight to `schedule_due` as its double-fire guard.
+    pub fn last_fired_day(&self, rule_id: &str) -> Option<i32> {
+        self.last_fired_day.get(rule_id).map(|e| *e.value())
+    }
+
+    /// Mark this schedule rule as done for `day_ordinal`.
+    ///
+    /// Written from two places and they mean the same thing: the walk, when it has dispatched the
+    /// day's sends, and `reload`, when the day's minute had already passed before the rule was
+    /// loaded. Overwrites, because a later day always supersedes an earlier one and the only writer
+    /// of an earlier one is a clock that moved backwards — which `schedule_due` reads as "not today"
+    /// and fires once more, the same direction `due_now` takes for a negative age.
+    pub fn set_last_fired_day(&self, rule_id: &str, day_ordinal: i32) {
+        self.last_fired_day.insert(rule_id.to_string(), day_ordinal);
     }
 
     pub fn last_decision(&self, rule_id: &str, tm: &str) -> Option<crate::automation_engine::eval::Decision> {

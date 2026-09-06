@@ -27,7 +27,7 @@ use regex::{Regex, RegexBuilder};
 use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
-    Test, TextOp, TimerMode, WEEKDAY_BITS_MASK,
+    Test, TextOp, TimerMode, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -279,7 +279,7 @@ pub const MIN_DELAY_MS: i64 = 1_000;
 /// message goes unstripped.
 pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 
-/// Everything wrong with the WAIT step — §8's three `timer.*` codes (plan 032 §6.2, §12 item 1).
+/// Everything wrong with the WAIT step — §8's `timer.*` codes (plan 032 §6.2, §6.3, §12 item 1).
 ///
 /// `None` (no wait step at all) reports nothing: every rule saved before this milestone, and every
 /// rule that does not use one, is unaffected.
@@ -316,7 +316,24 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
                 ));
             }
         }
-        TimerMode::DailyAt { days, .. } => {
+        TimerMode::DailyAt { minute_of_day, days } => {
+            // **`minute_of_day` is a bare `i32` and nothing else checks it.** An out-of-range target
+            // does not fail loudly — it fails by never firing (`5000`) or by firing from midnight
+            // every day (`-5`, which makes `now >= target` true from the first tick). The bound is
+            // `automation_store`'s, for the same reason the mask is: §6.3's `schedule_due` refuses
+            // the same values, so a row that reached the store some other way is refused by both.
+            if !(0..MINUTES_PER_DAY).contains(minute_of_day) {
+                // The last minute of the day is DERIVED, never restated: `23:59` written out is a
+                // sentence that goes false the day the bound moves. The floor is literal because
+                // zero is what "minute of day" counts from — there is no constant behind it.
+                let last = MINUTES_PER_DAY - 1;
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.badMinute",
+                    format!("Pick a time between 00:00 and {:02}:{:02}.", last / 60, last % 60),
+                ));
+            }
             // The mask is `automation_store`'s, beside the field it describes — §6.3's
             // `schedule_due` reads the same one, so "can this ever fire" and "does it fire now"
             // cannot answer from two different tables.
@@ -505,8 +522,8 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(clause_problems(&rule.graph));
 
     // --- timer ----------------------------------------------------------------------------------
-    // §8's three `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
-    // and a schedule whose weekday mask selects no day.
+    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL, a
+    // schedule whose target is not a time of day, and one whose weekday mask selects no day.
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
@@ -980,6 +997,7 @@ mod tests {
             "cond.clauseWithoutParse",
             "timer.delayTooShort",
             "timer.delayTooLong",
+            "timer.badMinute",
             "timer.noDays",
             "action.empty",
             "action.echo",
@@ -1046,6 +1064,46 @@ mod tests {
                 MAX_DELAY_MS / 60_000
             )
         );
+    }
+
+    /// **`timer.badMinute` quotes the bound rather than restating it**, for the same reason both
+    /// delay bounds do: *"between 00:00 and 23:59"* typed out is a sentence that goes false the day
+    /// `MINUTES_PER_DAY` moves and says nothing when it does. The floor stays literal because zero is
+    /// what a minute-of-day counts from; there is no constant behind it to drift.
+    ///
+    /// `automationValidation.ts` asserts this same sentence, built the same way — the shared fixture
+    /// compares `code`, so the words are pinned once per implementation.
+    #[test]
+    fn the_bad_minute_message_derives_the_last_minute_of_the_day() {
+        let with_minute = |minute_of_day: i32| {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day, days: WEEKDAY_BITS_MASK },
+            });
+            rule
+        };
+
+        let last = MINUTES_PER_DAY - 1;
+        let want = format!("Pick a time between 00:00 and {:02}:{:02}.", last / 60, last % 60);
+        assert_eq!(want, "Pick a time between 00:00 and 23:59.", "the derivation must read as a time");
+
+        for minute in [-1, MINUTES_PER_DAY] {
+            let found = problems(&with_minute(minute));
+            let bad = found
+                .iter()
+                .find(|p| p.code == "timer.badMinute")
+                .unwrap_or_else(|| panic!("minute_of_day {minute} is not a time of day: {found:?}"));
+            assert_eq!(bad.message, want);
+            assert!(bad.blocks(), "a schedule that cannot fire sensibly must not be saveable enabled");
+        }
+
+        // And the legal ends of the range report nothing at all.
+        for minute in [0, MINUTES_PER_DAY - 1] {
+            assert!(
+                !problems(&with_minute(minute)).iter().any(|p| p.code == "timer.badMinute"),
+                "minute_of_day {minute} is a time of day"
+            );
+        }
     }
 
     /// An empty pattern matches every position of every string, so an unguarded echo check told

@@ -2807,6 +2807,180 @@
           "code": "timer.noDays"
         }
       ]
+    },
+    {
+      "name": "timer.badMinute \u2014 a minute past the end of the day blocks",
+      "why": "`minuteOfDay` is a bare integer and nothing else bounds it. 1440 is the first value that is not a time of day: `now >= 1440` is true never, so the rule would look armed and fire silently never. The engine's `schedule_due` refuses the same value.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 1440,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.badMinute"
+        }
+      ]
+    },
+    {
+      "name": "timer.badMinute's ceiling \u2014 23:59 is the last legal minute",
+      "why": "One minute under the bound, and legal. The pair pins the boundary from both sides, the same way the two `timer.delayTooLong` cases do.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 1439,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.badMinute \u2014 a negative minute-of-day blocks",
+      "why": "The other end, and the dangerous one: `now >= -5` is true from midnight, so a corrupt row would fire on the first tick of every day rather than never.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": -5,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.badMinute"
+        }
+      ]
     }
   ]
 }
