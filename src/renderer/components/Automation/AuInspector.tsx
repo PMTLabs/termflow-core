@@ -12,7 +12,7 @@ import type { AutomationRuntimePairState } from '../../services/automationEvents
 import type { AutomationDraft, DraftAction } from './automationDraft';
 import type { PanelModel } from './automationDerive';
 import { panelFor } from './automationDerive';
-import type { Problem } from './automationValidation';
+import type { Problem, ProblemField } from './automationValidation';
 import type { StepKind } from './automationSteps';
 import { STEP_LABELS } from './automationSteps';
 import { STEP_GLYPHS } from './AuNode';
@@ -37,11 +37,30 @@ export interface AuInspectorProps {
     dispatch: (action: DraftAction) => void;
 }
 
-const FIELD_STEPS: Record<string, StepKind> = {
+/**
+ * Which step's panel fixes a problem, keyed by the problem's own field.
+ *
+ * **`Record<ProblemField, StepKind>`, never `Record<string, …>`** — the index signature is what let
+ * `'timer'` be missing and still compile, and the two consumers below both dereference the result:
+ * `STEP_LABELS[FIELD_STEPS[p.field]]` renders `STEP_LABELS[undefined]` into the DOM and
+ * `onFocusStep(FIELD_STEPS[p.field])` hands `undefined` to a `(step: StepKind) => void`. So every
+ * `timer.*` problem — a wait too short, a schedule with no day picked — drew a blank label on a
+ * button that then focused nothing. The exhaustive type turns the next such omission into a `tsc`
+ * failure, which is the same protection `BADGES` already gives `ProblemCode`.
+ *
+ * **`timer` points at `action` until task 23 gives `StepKind` its own `'timer'`.** There is no
+ * timer step to focus yet, and of the four that exist `action` is the only one every rule has —
+ * `monitor`, `parse` and `cond` are all absent on a schedule rule (plan 032 §3.1), which is exactly
+ * the rule kind these problems belong to, so pointing there would focus a card standing for nothing.
+ * The wait is also part of *what happens when it fires*, which is `action`'s own subtitle. Tasks
+ * 23/24 change this line to `timer: 'timer'` and the compiler will not let them forget it.
+ */
+const FIELD_STEPS: Record<ProblemField, StepKind> = {
     targets: 'monitor',
     monitor: 'monitor',
     parse: 'parse',
     cond: 'cond',
+    timer: 'action',
     action: 'action',
 };
 
