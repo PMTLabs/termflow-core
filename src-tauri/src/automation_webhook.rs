@@ -246,6 +246,36 @@ mod tests {
         assert_eq!(receive_body(captured), raw.as_bytes());
     }
 
+    /// The renderer preview has its own implementation, so the exact bytes for every provider live
+    /// in one fixture both sides read. `payload` stays private to this module in production; this
+    /// child test module reaches it through Rust's normal private-item test visibility.
+    #[test]
+    fn payload_matches_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            provider: WebhookProvider,
+            message: String,
+            expected: String,
+        }
+
+        let raw = include_str!(
+            "../../src/renderer/components/Automation/__fixtures__/webhookPayloadCases.json"
+        );
+        let fixture: Fixture = serde_json::from_str(raw).expect("the shared payload fixture parses");
+        assert_eq!(fixture.cases.len(), 5, "all provider and escaping cases stay covered");
+
+        for case in fixture.cases {
+            let actual = String::from_utf8(payload(case.provider, &case.message))
+                .expect("every payload fixture body is UTF-8");
+            assert_eq!(actual, case.expected, "payload fixture case: {}", case.name);
+        }
+    }
+
     #[tokio::test]
     async fn a_capture_containing_json_syntax_cannot_break_a_preset_payload() {
         let (url, captured) = capture_endpoint();

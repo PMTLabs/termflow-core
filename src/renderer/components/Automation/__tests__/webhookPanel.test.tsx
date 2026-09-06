@@ -5,11 +5,21 @@ import { createRoot, Root } from 'react-dom/client';
 import { AuInspector } from '../AuInspector';
 import { draftFromRule } from '../automationDraft';
 import { problems } from '../automationValidation';
+import payloadFixture from '../__fixtures__/webhookPayloadCases.json';
+import { previewWebhookPayload } from '../panels/WebhookPanel';
 import type { AutomationRule, AutomationWebhookProvider } from '../../../types/electron';
 import { blankDraft } from '../../Settings/Automations/automationTemplates';
 
 const SECRET_A = 'https://hooks.example.invalid/secret-a';
 const SECRET_B = 'https://hooks.example.invalid/secret-b';
+
+interface PayloadCase {
+    provider: AutomationWebhookProvider;
+    message: string;
+    expected: string;
+}
+
+const payloadCases = (payloadFixture as unknown as { cases: PayloadCase[] }).cases;
 
 function ruleWithWebhook(
     id: string,
@@ -89,16 +99,9 @@ describe('the webhook inspector', () => {
     });
 
     it('never renders the URL in the preview', async () => {
-        const expected: Array<[AutomationWebhookProvider, string, string]> = [
-            ['discord', 'build failed', '{"content":"build failed"}'],
-            ['slack', 'build failed', '{"text":"build failed"}'],
-            ['teams', 'build failed', '{"@context":"http://schema.org/extensions","@type":"MessageCard","text":"build failed"}'],
-            ['custom', '{ "kind": "custom" }', '{ "kind": "custom" }'],
-        ];
-
-        for (const [provider, body, payload] of expected) {
-            await show(ruleWithWebhook('au-a', provider, body));
-            expect(preview().textContent).toBe(payload);
+        for (const payloadCase of payloadCases) {
+            await show(ruleWithWebhook('au-a', payloadCase.provider, payloadCase.message));
+            expect(preview().textContent).toBe(payloadCase.expected);
             expect(preview().textContent).not.toContain(SECRET_A);
             expect(container.textContent).not.toContain(SECRET_A);
             for (const element of container.querySelectorAll<HTMLElement>('[title], [aria-label]')) {
@@ -106,6 +109,14 @@ describe('the webhook inspector', () => {
                 expect(element.getAttribute('aria-label') ?? '').not.toContain(SECRET_A);
             }
             expect([...container.querySelectorAll('button')].some((button) => /copy/i.test(button.textContent ?? ''))).toBe(false);
+        }
+    });
+
+    it('previewWebhookPayload matches the shared fixture', () => {
+        expect(payloadCases).toHaveLength(5);
+        for (const payloadCase of payloadCases) {
+            expect(previewWebhookPayload(payloadCase.provider, payloadCase.message))
+                .toBe(payloadCase.expected);
         }
     });
 
