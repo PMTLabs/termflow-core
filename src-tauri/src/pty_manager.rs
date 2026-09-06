@@ -1121,6 +1121,77 @@ fn foreground_chain(start_pid: u32, sys: &System) -> Vec<u32> {
     )
 }
 
+/// [`foreground_chain`] with each level's executable name attached, shell first.
+///
+/// A level sysinfo cannot report (protected, or cross-arch on Windows) keeps its place with an
+/// EMPTY name rather than being dropped: it is still a real process whose cwd may be readable, and
+/// removing it would silently shorten the chain — the same rule `foreground_command_lines` follows
+/// for the same reason.
+fn foreground_chain_named(parent_pid: u32, sys: &System) -> Vec<(u32, String)> {
+    foreground_chain(parent_pid, sys)
+        .into_iter()
+        .map(|pid| {
+            let name = sys
+                .process(Pid::from(pid as usize))
+                .map(|p| p.name().to_string_lossy().to_string())
+                .unwrap_or_default();
+            (pid, name)
+        })
+        .collect()
+}
+
+/// The Windows console-host helpers: `conhost.exe` / `OpenConsole.exe`.
+///
+/// These are ConPTY plumbing, not programs the user ran, and they sit at the END of a real
+/// foreground chain: `pwsh -> claude.exe -> bun.exe -> conhost.exe` is a measurement off a live
+/// machine, not an invention (see [`foreground_chain_from`]). Anything that reads only the deepest
+/// link therefore reads the console host, which breaks in two separate ways:
+///
+///   * its PEB working directory is **`C:\WINDOWS`**, never the user's project — so a terminal
+///     sitting in `D:\work\project` resolves clicked relative paths against `C:\WINDOWS` and every
+///     of them is "not found", and the 30s cwd refresh PERSISTS `C:\WINDOWS` into the session
+///     snapshot, reopening the terminal there on the next restart; and
+///   * its NAME is what "which program is in front" reports — so a live Claude session is
+///     announced as `conhost.exe` in the close-confirmation list and the peers panel.
+///
+/// Deliberately NOT applied to [`foreground_command_lines`]: automation's `Command contains`
+/// matches against the RAW chain, and a user rule naming `conhost` must keep matching — which
+/// `automation::targeting` asserts directly.
+fn is_console_host(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(stem, "conhost" | "openconsole")
+}
+
+/// The deepest level of a foreground chain that names a program the user actually ran.
+///
+/// `chain` is shell-first, so the search ends at the shell itself — a chain of nothing but console
+/// hosts is impossible (the shell heads it), and an empty chain yields `None` for the caller to
+/// fall back on.
+fn deepest_real_program(chain: &[(u32, String)]) -> Option<u32> {
+    chain
+        .iter()
+        .rev()
+        .find(|(_, name)| !is_console_host(name))
+        .map(|(pid, _)| *pid)
+}
+
+/// The working directory of the deepest chain level that BOTH names a real program and has a
+/// readable cwd. `chain` is shell-first: `(name, cwd)` per level.
+///
+/// Climbing on an unreadable level (rather than giving up on it) generalises the old
+/// `deepest.or_else(shell)` fallback to every level in between. That matters on the exact shape
+/// this exists for — under `claude.exe` the readable, correct directory belongs to a MIDDLE link,
+/// and jumping straight back to the shell would discard it. It also beats the shell for PowerShell
+/// specifically, whose PEB cwd is frozen at its spawn directory and never follows `Set-Location`.
+fn deepest_chain_cwd(chain: &[(String, Option<String>)]) -> Option<String> {
+    chain
+        .iter()
+        .rev()
+        .find(|(name, cwd)| cwd.is_some() && !is_console_host(name))
+        .and_then(|(_, cwd)| cwd.clone())
+}
+
 pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) -> (u32, String) {
     let local_sys;
     let sys = if let Some(s) = sys_opt {
@@ -1130,10 +1201,11 @@ pub fn get_foreground_process_info(parent_pid: u32, sys_opt: Option<&System>) ->
         &local_sys
     };
 
-    // The deepest descendant, which is the same answer this has always given: "which process is in
-    // front". Callers that need to recognise a program ANYWHERE under the shell take
+    // The deepest descendant that is not console-host plumbing — "which program is in front".
+    // Callers that need to recognise a program ANYWHERE under the shell take
     // `foreground_command_lines` instead.
-    let pid = *foreground_chain(parent_pid, sys).last().unwrap_or(&parent_pid);
+    let chain = foreground_chain_named(parent_pid, sys);
+    let pid = deepest_real_program(&chain).unwrap_or(parent_pid);
     let current_name = sys
         .process(Pid::from(pid as usize))
         .map(|p| p.name().to_string_lossy().to_string())
@@ -1380,9 +1452,14 @@ fn cwd_of(sys: &System, pid: u32) -> Option<String> {
 
 /// Best-effort CWD of a terminal's foreground process. Walks to the youngest
 /// descendant of `parent_pid` (so a `cd` inside a running program is reflected),
-/// reading its cwd; falls back to the shell pid, then None. Returns None when the
-/// OS won't report it (e.g. a protected/cross-arch process on Windows) so callers
-/// can fall back to the app default.
+/// reading its cwd; climbs back up the chain past console hosts and levels the OS
+/// won't report, ending at the shell pid, then None. Returns None when no level is
+/// readable (e.g. a protected/cross-arch process on Windows) so callers can fall
+/// back to the app default.
+///
+/// The climb is load-bearing, not defensive: the deepest link of a real agent chain is
+/// `conhost.exe`, whose working directory is `C:\WINDOWS` — see [`is_console_host`] for
+/// the measurement and for what accepting it broke.
 ///
 /// NOTE: on Windows this reads the process's PEB working directory, which **cmd**
 /// and Unix shells keep current but **PowerShell does NOT** update on `Set-Location`
@@ -1397,8 +1474,11 @@ pub fn get_process_cwd(parent_pid: u32) -> Option<String> {
 /// mem / disks / networks), so resolving a BATCH of terminals must scan once and
 /// reuse it here, not once per terminal — see `commands::get_terminal_cwds`.
 pub fn get_process_cwd_with(sys: &System, parent_pid: u32) -> Option<String> {
-    let (fg_pid, _name) = get_foreground_process_info(parent_pid, Some(sys));
-    cwd_of(sys, fg_pid).or_else(|| cwd_of(sys, parent_pid))
+    let chain: Vec<(String, Option<String>)> = foreground_chain_named(parent_pid, sys)
+        .into_iter()
+        .map(|(pid, name)| (name, cwd_of(sys, pid)))
+        .collect();
+    deepest_chain_cwd(&chain)
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -1560,8 +1640,124 @@ mod cwd_tests {
     use super::detect_agent;
 
     use super::{get_foreground_agent, get_foreground_agent_with_exe};
+    use super::{deepest_chain_cwd, deepest_real_program, is_console_host};
     use super::PS_CWD_INTEGRATION;
     use sysinfo::System;
+
+    /// One level of a foreground chain, as `deepest_chain_cwd` consumes it.
+    fn level(name: &str, cwd: Option<&str>) -> (String, Option<String>) {
+        (name.to_string(), cwd.map(str::to_string))
+    }
+
+    /// **The defect, in the exact shape it was measured in on a live machine.**
+    ///
+    /// `pwsh -> claude.exe -> cmd.exe -> conhost.exe`, with every level's PEB working directory
+    /// read off a running TermFlow. The chain's LAST link is the console host and its directory is
+    /// `C:\WINDOWS`; every other link sits in the user's project. A cwd read that accepts the
+    /// deepest link therefore answered `C:\WINDOWS` for a terminal open in
+    /// `D:\work\project` — so every clicked relative path resolved under `C:\WINDOWS` and
+    /// came back "not found", and the 30s refresh PERSISTED that directory into the session
+    /// snapshot on top of it.
+    ///
+    /// This only became visible after an offload-and-update reattach because `state.terminal_cwds`
+    /// (the OSC 9;9 map, which short-circuits this scan) is in-process app state: a restart empties
+    /// it, and a PowerShell sitting inside a running agent emits no new prompt, so nothing refills
+    /// it and the process fallback runs unopposed. cmd/bash/WSL/zsh never populate that map at all,
+    /// so for them the fallback — and this bug — ran on every single tick.
+    ///
+    /// Asserted over the pure picker rather than a live process table for the same reason
+    /// `foreground_chain_from` is: the walk IS the behaviour, and a real process tree cannot be
+    /// arranged into the shape a test needs.
+    #[test]
+    fn the_cwd_walk_climbs_past_a_console_host_at_the_end_of_the_chain() {
+        let chain = [
+            level("pwsh.exe", Some(r"D:\work\project")),
+            level("claude.exe", Some(r"D:\work\project")),
+            level("cmd.exe", Some(r"D:\work\project")),
+            level("conhost.exe", Some(r"C:\WINDOWS")),
+        ];
+        assert_eq!(
+            deepest_chain_cwd(&chain).as_deref(),
+            Some(r"D:\work\project"),
+            "the console host's C:\\WINDOWS must never be a terminal's working directory"
+        );
+    }
+
+    /// The climb does not stop at the first skip, and it does not give up and jump to the shell.
+    ///
+    /// `bun.exe -> conhost.exe` is the OTHER measured leaf shape, and above it sits a level the OS
+    /// would not report (protected / cross-arch — sysinfo returns no cwd). The correct answer is the
+    /// deepest level that has one, which here is the AGENT's directory — the one the user is
+    /// actually working in, and the one the old `deepest.or_else(shell)` fallback threw away in
+    /// favour of the shell's.
+    ///
+    /// The shell's directory is deliberately DIFFERENT from the agent's, so falling back to it is a
+    /// distinguishable failure rather than an accidental pass.
+    #[test]
+    fn the_cwd_walk_climbs_past_a_level_the_os_will_not_report() {
+        let chain = [
+            level("pwsh.exe", Some(r"D:\work")),
+            level("claude.exe", Some(r"D:\work\project")),
+            level("bun.exe", None),
+            level("conhost.exe", Some(r"C:\WINDOWS")),
+        ];
+        assert_eq!(
+            deepest_chain_cwd(&chain).as_deref(),
+            Some(r"D:\work\project"),
+            "an unreadable level must be climbed past, not treated as the end of the walk"
+        );
+    }
+
+    /// The deepest level still wins when nothing on the chain needs skipping — the climb must not
+    /// have quietly become "prefer the shell". `codex` is the measured non-conhost leaf shape.
+    #[test]
+    fn the_cwd_walk_still_takes_the_deepest_level_when_it_is_a_real_program() {
+        let chain = [
+            level("pwsh.exe", Some(r"D:\work")),
+            level("cmd.exe", Some(r"D:\work")),
+            level("codex.exe", Some(r"D:\work\project\subdir")),
+        ];
+        assert_eq!(
+            deepest_chain_cwd(&chain).as_deref(),
+            Some(r"D:\work\project\subdir"),
+        );
+        // Nothing readable anywhere is still None, so callers fall back to the app default rather
+        // than to a directory invented here.
+        assert_eq!(deepest_chain_cwd(&[level("pwsh.exe", None)]), None);
+        assert_eq!(deepest_chain_cwd(&[]), None);
+    }
+
+    /// `/api/processes` reports "which program is in front", and it read the same deepest link —
+    /// so a live Claude session was announced as `conhost.exe` in the close-confirmation list and
+    /// the peers panel. Same chain, same skip, asserted where that answer is chosen.
+    #[test]
+    fn the_foreground_program_is_the_deepest_level_that_is_not_a_console_host() {
+        let chain = [
+            (100u32, "pwsh.exe".to_string()),
+            (200, "claude.exe".to_string()),
+            (300, "bun.exe".to_string()),
+            (400, "conhost.exe".to_string()),
+        ];
+        assert_eq!(deepest_real_program(&chain), Some(300));
+        // An empty chain has no answer; the caller falls back to the shell pid it asked about.
+        assert_eq!(deepest_real_program(&[]), None);
+    }
+
+    /// A guard is only as good as the spellings it recognises, so this asserts the whole SET
+    /// rather than one sample: both console hosts, both cases, with and without the extension —
+    /// and, on the other side, that it does not swallow ordinary programs whose names merely
+    /// CONTAIN one of the words. `conhost` matching by substring would drop a real program's
+    /// directory on the floor, which is the same class of over-match the automation matcher was
+    /// bitten by.
+    #[test]
+    fn the_console_host_guard_matches_every_spelling_and_nothing_else() {
+        for name in ["conhost.exe", "CONHOST.EXE", "ConHost.Exe", "conhost", "OpenConsole.exe", "openconsole.exe", "openconsole", "OPENCONSOLE"] {
+            assert!(is_console_host(name), "{name} must be recognised as a console host");
+        }
+        for name in ["cmd.exe", "pwsh.exe", "claude.exe", "node.exe", "bun.exe", "bash.exe", "codex.exe", "", "conhostile.exe", "myconhost.exe", "openconsole-viewer.exe", "conhost.exe.bak"] {
+            assert!(!is_console_host(name), "{name} must NOT be treated as a console host");
+        }
+    }
 
     #[test]
     fn ps_prompt_syncs_win32_cwd_and_reports_osc() {
