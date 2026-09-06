@@ -473,7 +473,7 @@ mod tests {
     use super::*;
     use crate::automation_engine::eval::ArmState;
     use crate::automation_store::{
-        ActionStep, AutomationGraph, Cadence, CompareOp, CondKind, CondStep, Criterion, Keep,
+        ActionStep, AutomationGraph, Cadence, CompareOp, CondStep, Criterion, Finds, Keep,
         LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode, SendTo, TargetMode,
         SUPPORTED_SCHEMA_VERSION,
     };
@@ -507,9 +507,10 @@ mod tests {
                     keep: Keep::Brackets,
                 },
                 cond: CondStep {
-                    kind: CondKind::Number,
+                    finds: Finds::Reading,
                     op: Some(CompareOp::Gt),
                     threshold: Some(25.0),
+                    ..Default::default()
                 },
                 action: ActionStep {
                     message: "prepare to do context-hand-off".to_string(),

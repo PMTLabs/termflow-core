@@ -23,7 +23,7 @@
 
 use regex::Regex;
 
-use crate::automation_store::{AutomationGraph, CompareOp, CondKind, Keep, ReadMode};
+use crate::automation_store::{AutomationGraph, CompareOp, Finds, Keep, ReadMode};
 
 /// How many lines back a "new output as it appears" read looks.
 ///
@@ -224,9 +224,9 @@ pub fn next_state(prev: ArmState, condition: Truth, now_ms: i64) -> (ArmState, D
 /// The cost is stated rather than hidden: after a pair's first fire, an event that appears and scrolls
 /// off the visible screen inside one check interval is missed. That is the same trade the re-arm rule
 /// already makes in the other direction, and `Re-arm now` is the manual backstop for both.
-pub fn depth_for(kind: CondKind, read: ReadMode, prev: ArmState) -> ReadDepth {
-    match (kind, prev) {
-        (CondKind::Text, p) if p.has_seen_fire() => ReadDepth::VisibleScreen,
+pub fn depth_for(finds: Finds, read: ReadMode, prev: ArmState) -> ReadDepth {
+    match (finds, prev) {
+        (Finds::Event, p) if p.has_seen_fire() => ReadDepth::VisibleScreen,
         _ => match read {
             ReadMode::NewOutput => ReadDepth::Window(MATCH_WINDOW_LINES),
             ReadMode::OnScreen => ReadDepth::VisibleScreen,
@@ -557,11 +557,11 @@ pub fn evaluate_text(
     read: &dyn Fn(ReadDepth) -> Option<String>,
     now_ms: i64,
 ) -> Option<Evaluation> {
-    let depth = depth_for(graph.cond.kind, graph.monitor.read, prev);
+    let depth = depth_for(graph.cond.finds, graph.monitor.read, prev);
     let text = strip_echoes(&read(depth)?, echoes);
 
-    let (outcome, condition, captures) = match graph.cond.kind {
-        CondKind::Text => {
+    let (outcome, condition, captures) = match graph.cond.finds {
+        Finds::Event => {
             // `captures_iter(..).last()`, NOT `is_match` and NOT `.next()`. `is_match` is what made
             // a word rule produce no captures at all — not even group 1 — so every `$1` in spec
             // 032's own scenarios resolved to nothing. `.last()` for the same reason the numeric
@@ -571,7 +571,7 @@ pub fn evaluate_text(
             let bag = caps.map(|c| bag_from(re, &c));
             (Outcome::Presence(hit), Truth::from_compare(hit), bag)
         }
-        CondKind::Number => {
+        Finds::Reading => {
             let (value, caps) = extract(re, graph.parse.keep, &text);
             let now = match (&value, graph.cond.op, graph.cond.threshold) {
                 (Read::Value(v), Some(op), Some(t)) => Truth::from_compare(compare(op, *v, t)),
@@ -608,7 +608,7 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------------------------
 
-    fn graph(find: &str, kind: CondKind, op: Option<CompareOp>, threshold: Option<f64>) -> AutomationGraph {
+    fn graph(find: &str, finds: Finds, op: Option<CompareOp>, threshold: Option<f64>) -> AutomationGraph {
         AutomationGraph {
             layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
@@ -618,7 +618,7 @@ mod tests {
                 find: find.to_string(),
                 keep: Keep::Brackets,
             },
-            cond: CondStep { kind, op, threshold },
+            cond: CondStep { finds, op, threshold, ..Default::default() },
             action: ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
                 send_to: SendTo::Matched,
@@ -630,11 +630,11 @@ mod tests {
     }
 
     fn ctx_rule() -> AutomationGraph {
-        graph(r"ctx:(\d+)%", CondKind::Number, Some(CompareOp::Gt), Some(25.0))
+        graph(r"ctx:(\d+)%", Finds::Reading, Some(CompareOp::Gt), Some(25.0))
     }
 
     fn failed_rule() -> AutomationGraph {
-        graph(r"FAILED \d+ test", CondKind::Text, None, None)
+        graph(r"FAILED \d+ test", Finds::Event, None, None)
     }
 
     /// A `ScreenSource` over a REAL `vt100::Parser`, resolving the depth exactly as `AppState`'s own
@@ -995,7 +995,7 @@ mod tests {
     /// two scenarios are both word rules.
     #[test]
     fn a_word_rule_captures_its_groups() {
-        let g = graph(r"API error (\d+)", CondKind::Text, None, None);
+        let g = graph(r"API error (\d+)", Finds::Event, None, None);
         let ev = evaluate_text(
             &g,
             &re(&g.parse.find),
@@ -1018,7 +1018,7 @@ mod tests {
     /// kind of rule does not collect".
     #[test]
     fn a_word_rules_captures_track_its_answer() {
-        let g = graph(r"API error (\d+)", CondKind::Text, None, None);
+        let g = graph(r"API error (\d+)", Finds::Event, None, None);
         let seen = evaluate_text(
             &g,
             &re(&g.parse.find),
@@ -1089,7 +1089,7 @@ mod tests {
     /// crossing.
     #[test]
     fn a_non_finite_read_cannot_satisfy_any_operator() {
-        let g = graph(r"v:(\S+)", CondKind::Number, Some(CompareOp::Neq), Some(25.0));
+        let g = graph(r"v:(\S+)", Finds::Reading, Some(CompareOp::Neq), Some(25.0));
         let ev = evaluate_text(&g, &re(r"v:(\S+)"), NO_ECHOES, ArmState::armed(), &|_| Some("v:NaN".into()), 1)
             .expect("text was available");
         assert_eq!(ev.condition, Truth::Unknown, "a value that is not a number is not a reading");
@@ -1134,7 +1134,7 @@ mod tests {
     // §10.2d — two depths
     // -----------------------------------------------------------------------------------------
 
-    /// The SELECTION first, as a full table over all three dimensions — kind x read mode x prev.
+    /// The SELECTION first, as a full table over all three dimensions — finds x read mode x prev.
     ///
     /// Varying only one dimension is how a wrong key survives a suite: an implementation that ignores
     /// `prev` passes any test whose rows all share one arm state, and one that ignores `read` passes
@@ -1144,31 +1144,31 @@ mod tests {
         let w = ReadDepth::Window(200);
         let s = ReadDepth::VisibleScreen;
         let fired = ArmState::Fired { at_ms: 0 };
-        let cases: &[(CondKind, ReadMode, ArmState, ReadDepth)] = &[
+        let cases: &[(Finds, ReadMode, ArmState, ReadDepth)] = &[
             // Presence: the deep window while "has this happened?" is still open...
-            (CondKind::Text, ReadMode::NewOutput, ArmState::Unseen, w),
-            (CondKind::Text, ReadMode::NewOutput, ArmState::armed(), w),
+            (Finds::Event, ReadMode::NewOutput, ArmState::Unseen, w),
+            (Finds::Event, ReadMode::NewOutput, ArmState::armed(), w),
             // ...and the screen once it has been answered — INCLUDING after a re-arm, which is the
             // case that re-fires on a stale scrollback line if it reads the window.
-            (CondKind::Text, ReadMode::NewOutput, fired, s),
-            (CondKind::Text, ReadMode::NewOutput, ArmState::re_armed(), s),
+            (Finds::Event, ReadMode::NewOutput, fired, s),
+            (Finds::Event, ReadMode::NewOutput, ArmState::re_armed(), s),
             // Presence already reading on-screen: both directions are the screen, no special case.
-            (CondKind::Text, ReadMode::OnScreen, ArmState::Unseen, s),
-            (CondKind::Text, ReadMode::OnScreen, ArmState::armed(), s),
-            (CondKind::Text, ReadMode::OnScreen, fired, s),
-            (CondKind::Text, ReadMode::OnScreen, ArmState::re_armed(), s),
+            (Finds::Event, ReadMode::OnScreen, ArmState::Unseen, s),
+            (Finds::Event, ReadMode::OnScreen, ArmState::armed(), s),
+            (Finds::Event, ReadMode::OnScreen, fired, s),
+            (Finds::Event, ReadMode::OnScreen, ArmState::re_armed(), s),
             // Numeric: a value persists, so the rule's own depth in BOTH directions and after a fire.
-            (CondKind::Number, ReadMode::NewOutput, ArmState::Unseen, w),
-            (CondKind::Number, ReadMode::NewOutput, ArmState::armed(), w),
-            (CondKind::Number, ReadMode::NewOutput, fired, w),
-            (CondKind::Number, ReadMode::NewOutput, ArmState::re_armed(), w),
-            (CondKind::Number, ReadMode::OnScreen, ArmState::Unseen, s),
-            (CondKind::Number, ReadMode::OnScreen, ArmState::armed(), s),
-            (CondKind::Number, ReadMode::OnScreen, fired, s),
-            (CondKind::Number, ReadMode::OnScreen, ArmState::re_armed(), s),
+            (Finds::Reading, ReadMode::NewOutput, ArmState::Unseen, w),
+            (Finds::Reading, ReadMode::NewOutput, ArmState::armed(), w),
+            (Finds::Reading, ReadMode::NewOutput, fired, w),
+            (Finds::Reading, ReadMode::NewOutput, ArmState::re_armed(), w),
+            (Finds::Reading, ReadMode::OnScreen, ArmState::Unseen, s),
+            (Finds::Reading, ReadMode::OnScreen, ArmState::armed(), s),
+            (Finds::Reading, ReadMode::OnScreen, fired, s),
+            (Finds::Reading, ReadMode::OnScreen, ArmState::re_armed(), s),
         ];
-        for (kind, read, prev, want) in cases {
-            assert_eq!(depth_for(*kind, *read, *prev), *want, "{:?} {:?} {:?}", kind, read, prev);
+        for (finds, read, prev, want) in cases {
+            assert_eq!(depth_for(*finds, *read, *prev), *want, "{:?} {:?} {:?}", finds, read, prev);
         }
     }
 
@@ -1564,7 +1564,7 @@ mod tests {
     /// be "always fires".
     #[test]
     fn a_numeric_rule_without_an_operator_is_never_true() {
-        let g = graph(r"ctx:(\d+)%", CondKind::Number, None, Some(25.0));
+        let g = graph(r"ctx:(\d+)%", Finds::Reading, None, Some(25.0));
         let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), NO_ECHOES, ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
             .unwrap();
         assert_eq!(ev.condition, Truth::Unknown);

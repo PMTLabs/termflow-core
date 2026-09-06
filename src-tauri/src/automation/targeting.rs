@@ -178,7 +178,7 @@ pub fn watched_set(
 mod tests {
     use super::*;
     use crate::automation_store::{
-        ActionStep, AutomationGraph, Cadence, CompareOp, CondKind, CondStep, Keep, MonitorStep,
+        ActionStep, AutomationGraph, Cadence, CompareOp, CondStep, Finds, Keep, MonitorStep,
         ParsePreset, ParseStep, ReadMode, SendTo,
     };
 
@@ -479,7 +479,7 @@ mod tests {
                     find: r"ctx:(\d+)%".into(),
                     keep: Keep::Brackets,
                 },
-                cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+                cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
                 action: ActionStep {
                     message: "m".into(),
                     send_to: SendTo::Matched,

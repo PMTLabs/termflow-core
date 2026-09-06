@@ -781,7 +781,7 @@ mod tests {
     // only ever be one of each.
     use crate::automation_engine::test_host::*;
     use crate::automation::roster::RosterRow;
-    use crate::automation_store::CondKind;
+    use crate::automation_store::Finds;
 
     // =============================================================================================
     // §10.5 — the tap
@@ -943,7 +943,7 @@ mod tests {
     async fn a_crossing_types_the_resolved_message() {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse.find = r"FAILED (\d+) tests in (\S+)".into();
-            g.cond.kind = CondKind::Text;
+            g.cond.finds = Finds::Event;
             g.action.message = "Fix the $1 failing tests in $2".into();
             g.action.substitute = true;
         });
@@ -967,7 +967,7 @@ mod tests {
     async fn substitution_off_types_the_message_verbatim() {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse.find = r"FAILED (\d+)".into();
-            g.cond.kind = CondKind::Text;
+            g.cond.finds = Finds::Event;
             g.action.message = "awk '{print $1}'".into();
             g.action.substitute = false;
         });
@@ -998,7 +998,7 @@ mod tests {
     async fn an_unresolvable_token_refuses_the_send_and_logs_it() {
         let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|g| {
             g.parse.find = r"FAILED (\d+)".into();
-            g.cond.kind = CondKind::Text;
+            g.cond.finds = Finds::Event;
             g.action.message = "Fix $3".into();
             g.action.substitute = true;
         });

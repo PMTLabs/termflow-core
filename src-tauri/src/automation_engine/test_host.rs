@@ -16,8 +16,8 @@ use crate::automation_engine::eval::ReadDepth;
 use crate::automation_engine::host::EngineHost;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
-    ActionStep, AutomationGraph, AutomationRule, AutomationStore, Cadence, CompareOp, CondKind,
-    CondStep, Criterion, Keep, LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode,
+    ActionStep, AutomationGraph, AutomationRule, AutomationStore, Cadence, CompareOp, CondStep,
+    Criterion, Finds, Keep, LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode,
     SendTo, TargetMode, SUPPORTED_SCHEMA_VERSION,
 };
 
@@ -200,7 +200,7 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
                 find: r"ctx:(\d+)%".into(),
                 keep: Keep::Brackets,
             },
-            cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+            cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
             action: ActionStep {
                 message: "prepare to do context-hand-off".into(),
                 send_to: SendTo::Matched,
@@ -239,7 +239,7 @@ pub(crate) fn wired() -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHo
 
 /// The canonical rule, with its graph adjustable through a closure — for a test that needs to change
 /// more than the one or two fields `ctx_rule_saying`/`presence_rule` cover (§4.2/§4.4's substitution
-/// tests vary `parse.find`, `cond.kind`, `action.message` and `action.substitute` together).
+/// tests vary `parse.find`, `cond.finds`, `action.message` and `action.substitute` together).
 pub(crate) fn rig_with_rule(
     f: impl FnOnce(&mut AutomationGraph),
 ) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
@@ -301,7 +301,7 @@ pub(crate) fn presence_rule(id: &str, find: &str, message: &str, sort_order: i64
     let mut rule = ctx_rule_saying(id, message, sort_order);
     rule.graph.parse.find = find.into();
     rule.graph.parse.keep = Keep::Whole;
-    rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+    rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
     rule
 }
 

@@ -70,7 +70,7 @@ pub enum TargetMode {
 /// Which text the rule matches against — the rule's own preference. The two modes differ by window
 /// depth through one helper.
 ///
-/// Orthogonal to it, a `CondKind::Text` rule picks its depth per DIRECTION regardless of this setting:
+/// Orthogonal to it, a `Finds::Event` rule picks its depth per DIRECTION regardless of this setting:
 /// the 200 lines to fire (do not miss an event a chatty build scrolled past) and the visible screen to
 /// re-arm (it is only still happening if it is still on screen). Plan §2.2, §2.2c.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -118,18 +118,98 @@ pub enum Keep {
     Whole,
 }
 
-/// Whether the rule compares a number or just asks whether some text appeared.
+/// **What the pattern finds** — a reading that persists, or an event that happened.
 ///
-/// **Stored, not inferred**, and these are the mockup's own two values verbatim (`cond:{ kind:'number',
-/// … }` and template 4's `cond:{ kind:'text' }`). Plan §2.2c makes this select a genuinely different
-/// READ DEPTH — a value persists, so a numeric rule reads the 200-line window in both directions; an
-/// event does not, so a text rule fires off the window but re-arms off the visible screen. Deriving the
-/// kind from "is `op` set" would let a data-entry accident change which text the rule sees.
+/// This is a question about the PATTERN, and it selects the **read depth**, not the comparison.
+/// `depth_for` (`automation_engine/eval.rs`) is the only consumer: a value persists — `ctx:63%` is
+/// still the current usage even when nothing reprints it — while an event's continued presence in
+/// scrollback is not evidence it is still happening, so an `Event` rule reads the deep window to
+/// NOTICE it and the visible screen to LET IT GO.
+///
+/// **It cannot be derived from the clause types, and 032 §5.2 exists to say so.**
+/// `API error 529 … retry in 60s` is an *event* that contains a *number*; a rule testing `$2 > 60`
+/// on it is numerically compared and eventfully read. Inferring `Reading` from "there is a numeric
+/// clause" would give that rule the deep window in both directions, so `API error` would stay
+/// findable in 200 lines of scrollback on a quiet terminal, the condition would never go false, and
+/// the rule would sit in `Fired` for the rest of the session.
+///
+/// **Stored, not inferred**, for the same reason it always was: deriving it from "is `op` set" would
+/// let a data-entry accident change which text the rule sees.
+///
+/// The rename from `CondKind { Number, Text }` is **Rust, TS and UI copy only**. The serde name of
+/// the field stays `kind` and these values stay `"number"` / `"text"`, so the wire is byte-identical
+/// to v1 — which matters in both directions: a v1 rule must still load, and an OLDER build reading a
+/// v2 rule must still decode it, because an unknown enum-variant string is a hard decode failure
+/// (§3.3). Do **not** add a container-level `rename_all` here; the per-variant renames are the
+/// contract and a container rule would fight them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Finds {
+    /// A value that persists. Reads its configured depth in both directions.
+    #[serde(rename = "number")]
+    Reading,
+    /// An event. Reads the deep window to notice it and the visible screen to let it go.
+    #[serde(rename = "text")]
+    Event,
+}
+
+/// Which captured token a clause reads — the **same token vocabulary as the message** (§4.3), so the
+/// grammar is learned once and one validator serves both. `$0` · `$1..$n` · `${name}`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Source {
+    /// `$0` — the whole match.
+    Whole,
+    /// `$1`..`$n` — a numbered capture group.
+    Group(u8),
+    /// `${name}` — a named capture group.
+    Named(String),
+}
+
+/// The text comparators, in the order the operator drop-down draws them. Plan §5.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum CondKind {
-    Number,
-    Text,
+pub enum TextOp {
+    Is,
+    IsNot,
+    Contains,
+    NotContains,
+    Matches,
+    IsEmpty,
+    IsNotEmpty,
+}
+
+/// How one clause compares its token. **The clause's type IS the operator's** — there is no separate
+/// type control that could contradict it (§5.9). Not `Finds`: see that type for why the two come
+/// apart.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Test {
+    Number { op: CompareOp, value: f64 },
+    Text { op: TextOp, value: String },
+}
+
+/// One comparison: a token, and what to ask of it. Plan §5.3.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Clause {
+    pub source: Source,
+    pub test: Test,
+}
+
+/// How the clause list is folded. **One join for the whole list, not mixed precedence** —
+/// `$1 = "429" AND $2 > 60 OR $3 = "quota"` has two readings and no parentheses to choose between
+/// them, and the acceptance criterion asks the relationship to be unambiguous (§5.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Join {
+    #[default]
+    And,
+    Or,
+}
+
+/// `And` is the default, so it is not written. Keeps a v1 rule's blob byte-identical — see `CondStep`.
+fn is_default_join(join: &Join) -> bool {
+    matches!(join, Join::And)
 }
 
 /// The six comparators the mockup's drop-down draws, in its order. Plan §2.2b.
@@ -188,17 +268,49 @@ pub struct ParseStep {
     pub keep: Keep,
 }
 
-/// Step 3 — "Compare it". Plan §2.2b.
+/// Step 3 — "Compare it". Plan §2.2b, 032 §5.3.
+///
+/// **Every field here is `skip_serializing_if`, and that is load-bearing.** A rule that uses no v2
+/// feature must not GAIN a key on the way out, which is what makes §3.2's "only stamp
+/// `schema_version` 2 when a v2 feature is actually used" implementable — and what keeps such a rule
+/// loadable on an older build. A v1 numeric rule round-trips byte for byte; the one difference in
+/// the other direction is that an absent `op`/`threshold` is now omitted rather than written as
+/// `null`, which every build decodes identically because both carry `#[serde(default)]`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CondStep {
-    pub kind: CondKind,
-    /// `None` when `kind == Text`.
-    #[serde(default)]
+    /// The serde name stays `kind`; only the Rust/TS/UI name moved. See `Finds`.
+    #[serde(rename = "kind")]
+    pub finds: Finds,
+    /// In order. **Empty means "fire when the pattern matches"** — exactly today's text rule, which
+    /// is why the empty list is not a special case invented here (§5.4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clauses: Vec<Clause>,
+    /// One join for the whole list. `And` unless said otherwise.
+    #[serde(default, skip_serializing_if = "is_default_join")]
+    pub join: Join,
+    /// v1 only. Read at load, folded into `clauses`, never written again (§5.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub op: Option<CompareOp>,
-    /// `None` when `kind == Text`.
-    #[serde(default)]
+    /// v1 only. Read at load, folded into `clauses`, never written again (§5.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<f64>,
+}
+
+/// Written by hand rather than derived so that `Finds` keeps NO `Default`: which text a rule reads is
+/// always an explicit choice, never something a struct-update expression can fill in behind the
+/// author's back. `Reading` here is only the residue of `..Default::default()`, and every caller
+/// names `finds` itself.
+impl Default for CondStep {
+    fn default() -> Self {
+        Self {
+            finds: Finds::Reading,
+            clauses: Vec::new(),
+            join: Join::And,
+            op: None,
+            threshold: None,
+        }
+    }
 }
 
 /// Step 4 — "Send to terminal". Plan §2.5, Q1.
@@ -1987,9 +2099,10 @@ mod tests {
                 keep: Keep::Brackets,
             },
             cond: CondStep {
-                kind: CondKind::Number,
+                finds: Finds::Reading,
                 op: Some(CompareOp::Gt),
                 threshold: Some(25.0),
+                ..Default::default()
             },
             action: ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
@@ -3693,5 +3806,54 @@ mod tests {
             0,
             "draining must clear — otherwise every reload re-logs the same row forever"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Plan 032 §5.2/§5.3 — `finds` (read depth) split from the per-clause `Test` (comparison).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn the_wire_format_of_finds_is_unchanged_from_v1() {
+        // The rename is Rust-and-UI only. If this serialises "reading" instead of "number",
+        // every v1 rule stops loading AND every older build stops reading v2 rules —
+        // and §3.3 says the second failure takes the whole list with it.
+        let c = CondStep { finds: Finds::Reading, ..Default::default() };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["kind"], "number");
+        let e = CondStep { finds: Finds::Event, ..Default::default() };
+        assert_eq!(serde_json::to_value(&e).unwrap()["kind"], "text");
+    }
+
+    #[test]
+    fn a_v1_cond_blob_still_deserialises() {
+        let c: CondStep = serde_json::from_str(r#"{"kind":"number","op":"gt","threshold":25.0}"#).unwrap();
+        assert_eq!(c.finds, Finds::Reading);
+        assert_eq!(c.op, Some(CompareOp::Gt));
+        assert!(c.clauses.is_empty(), "v1 has no clause list; the fold happens at load, not here");
+    }
+
+    /// The other half of the wire contract: a rule that uses no v2 feature must not GAIN a key.
+    ///
+    /// Separate from `the_wire_format_of_finds_is_unchanged_from_v1` because it fails for a different
+    /// reason — that one catches a changed VALUE, this one a changed KEY SET, and §3.2's per-rule
+    /// `schema_version` stamp is only implementable while both hold. A `clauses: []` or a
+    /// `join: "and"` written into an untouched v1 rule is a rule an older build reads as v2-shaped.
+    #[test]
+    fn a_rule_using_no_v2_feature_gains_no_key_on_the_way_out() {
+        // Byte for byte, not merely key-for-key: this is the exact blob a v1 build wrote.
+        let v1 = r#"{"kind":"number","op":"gt","threshold":25.0}"#;
+        let round_tripped = serde_json::to_string(&serde_json::from_str::<CondStep>(v1).unwrap()).unwrap();
+        assert_eq!(round_tripped, v1);
+
+        // And an event rule, which has no `op`/`threshold` to carry: `kind` alone.
+        let e = CondStep { finds: Finds::Event, ..Default::default() };
+        assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"kind":"text"}"#);
+    }
+
+    #[test]
+    fn a_clause_round_trips() {
+        let c = Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: 60.0 } };
+        let s = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<Clause>(&s).unwrap(), c);
     }
 }

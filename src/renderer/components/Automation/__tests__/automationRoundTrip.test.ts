@@ -82,6 +82,18 @@ describe('draft ⇄ row', () => {
                 // `substitute` is a plan-032 field none of the templates set — pinning it `true`
                 // here is what makes a dropped mapping fail this test rather than pass vacuously.
                 action: { ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph.action, substitute: true },
+                // The plan-032 clause list and its join. Both are optional AND both have a default
+                // the backend omits from the wire, so a dropped mapping would pass vacuously unless
+                // this fixture sets them — and `join` is set to the NON-default `or` for that reason.
+                cond: {
+                    ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph.cond,
+                    clauses: [
+                        { source: { group: 1 }, test: { text: { op: 'is', value: '429' } } },
+                        { source: { group: 2 }, test: { number: { op: 'gt', value: 60 } } },
+                        { source: 'whole', test: { text: { op: 'isNotEmpty', value: '' } } },
+                    ],
+                    join: 'or',
+                },
                 layout: {
                     monitor: { x: 11, y: 12 },
                     parse: { x: 21, y: 22 },

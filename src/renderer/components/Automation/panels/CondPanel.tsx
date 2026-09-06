@@ -6,7 +6,7 @@
  * and the pill in the list can never say different things about one rule.
  */
 import React from 'react';
-import type { AutomationCompareOp, AutomationCondKind } from '../../../types/electron';
+import type { AutomationCompareOp, AutomationFinds } from '../../../types/electron';
 import type { AutomationRuntimePairState } from '../../../services/automationEvents';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
@@ -58,7 +58,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                             // left null: switching to "compare a number" and immediately reporting
                             // two problems would be the editor creating the problem it reports.
                             patch: {
-                                kind: 'number' as AutomationCondKind,
+                                kind: 'number' as AutomationFinds,
                                 op: cond.op ?? 'gt',
                                 threshold: cond.threshold ?? 25,
                             },
@@ -72,7 +72,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                     onPick={() =>
                         dispatch({
                             type: 'cond',
-                            patch: { kind: 'text' as AutomationCondKind, op: null, threshold: null },
+                            patch: { kind: 'text' as AutomationFinds, op: null, threshold: null },
                         })}
                 />
             </AuField>

@@ -277,7 +277,7 @@ mod tests {
     use super::*;
     use crate::automation_engine::eval::{ArmState, Captures};
     use crate::automation_engine::test_host::*;
-    use crate::automation_store::{CondKind, CondStep, Keep, LogOrder, LogScope};
+    use crate::automation_store::{CondStep, Finds, Keep, LogOrder, LogScope};
 
     fn kinds(report: &DryRunReport) -> Vec<&str> {
         report.steps.iter().map(|s| s.kind.as_str()).collect()
@@ -464,7 +464,7 @@ mod tests {
         let mut uncompilable = ctx_rule("au-1");
         uncompilable.graph.parse.find = r"ctx:(\d+%".into();
         let mut presence = ctx_rule("au-1");
-        presence.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        presence.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         presence.graph.parse.find = "HANDOFF".into();
         presence.graph.parse.keep = Keep::Whole;
 
@@ -550,7 +550,7 @@ mod tests {
     fn a_dry_run_strips_this_terminals_echo_needles() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         rule.graph.parse.find = "HANDOFF".into();
         rule.graph.parse.keep = Keep::Whole;
         fake.say("pc-1", "HANDOFF now\n");
@@ -646,7 +646,7 @@ mod tests {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
         rule.graph.parse.find = r"FAILED (\d+) tests in (\S+)".into();
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         rule.graph.action.message = "Fix the $1 failing tests in $2".into();
         rule.graph.action.substitute = true;
         fake.say("pc-1", "FAILED 17 tests in a.ts");
@@ -669,7 +669,7 @@ mod tests {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
         rule.graph.parse.find = r"FAILED (\d+)".into();
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         rule.graph.action.message = "Fix $3".into();
         rule.graph.action.substitute = true;
         fake.say("pc-1", "FAILED 17");

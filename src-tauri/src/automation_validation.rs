@@ -26,7 +26,7 @@ use regex::{Regex, RegexBuilder};
 
 use crate::automation_engine::subst;
 use crate::automation_store::{
-    AutomationGraph, AutomationRule, Cadence, CondKind, Criterion, Keep, TargetMode,
+    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, TargetMode,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -153,7 +153,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     // every test stayed green, because no test ran this against a text rule at all. That is the
     // `validation-rule-strands-a-scoped-default` class: a rule written for the step that READS a
     // field, applied to every rule that merely HAS it.
-    let numeric = graph.cond.kind == CondKind::Number;
+    let numeric = graph.cond.finds == Finds::Reading;
 
     if numeric && graph.parse.keep == Keep::Brackets && groups == 0 {
         // Never a silent fall-back to the whole match: the user asked for the bracketed part, and
@@ -246,7 +246,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // --- threshold ------------------------------------------------------------------------------
     // A numeric rule with no operator or no threshold cannot be true of anything, and `evaluate`
     // reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
-    if rule.graph.cond.kind == CondKind::Number
+    if rule.graph.cond.finds == Finds::Reading
         && (rule.graph.cond.op.is_none() || rule.graph.cond.threshold.is_none())
     {
         out.push(Problem::new(
@@ -366,7 +366,7 @@ mod tests {
     /// the point is that a text rule carries the field and never reads it.
     fn text_graph(find: &str, keep: Keep) -> AutomationGraph {
         let mut g = graph(find, keep);
-        g.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        g.cond = CondStep { finds: Finds::Event, ..Default::default() };
         g
     }
 
@@ -375,7 +375,7 @@ mod tests {
             layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
             parse: ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep },
-            cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+            cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
             action: ActionStep {
                 message: "m".into(),
                 send_to: SendTo::Matched,
@@ -609,7 +609,7 @@ mod tests {
     fn a_message_matching_its_own_pattern_warns_and_never_blocks() {
         let mut rule = valid_rule();
         rule.graph.parse.find = "HANDOFF".into();
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         rule.graph.action.message = "HANDOFF now".into();
 
         let found = problems(&rule);
@@ -745,7 +745,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
         rule.graph.action.message = "anything at all".into();
 
         let found = problems(&rule);
