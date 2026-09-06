@@ -536,7 +536,10 @@ impl AutomationEngine {
         // owns, the day mark included, so a seed written before it would be wiped for exactly the
         // rules that need it most — a rule saved at 14:00 is re-seeded here and does not fire on
         // the next tick. Reading `next` rather than the live map keeps it one pass, before the swap.
-        if !self.seed_missed_schedules(next.values(), now_local, store, now_ms).is_empty() {
+        // `None`: a load has no last-observed instant. Nothing was watching this rule's clock before
+        // the process started, or before this commit put the rule in the live set, so the whole of
+        // today up to `now_local` is the unobserved window.
+        if !self.seed_missed_schedules(next.values(), None, now_local, store, now_ms).is_empty() {
             report.emit = true;
         }
 
@@ -579,6 +582,13 @@ impl AutomationEngine {
     /// premise — *nothing was observing the tick while the minute passed* — so a second copy of
     /// "is this rule's target already past" would be two answers to one question.
     ///
+    /// **`since_local` is what the two callers do NOT share, and it is why the question is
+    /// [`schedule::target_missed_since`] rather than "is the target in the past".** A load has no
+    /// last-observed instant — `None`, and the whole day up to now is unobserved. A resume has one,
+    /// exactly: `prev_tick_ms`, the iteration before the gap. A target that arrives at or after that
+    /// resume instant was missed by nobody, and suppressing it spends the day at the very instant the
+    /// rule came due.
+    ///
     /// **It writes a log row for every day it actually spends** (§7). Suppressing the prompt is the
     /// right behaviour and it is also completely invisible: the user set a 09:00 reminder, it did
     /// not arrive, and until this row there was nothing anywhere that said why — the shape
@@ -600,6 +610,7 @@ impl AutomationEngine {
     pub(crate) fn seed_missed_schedules<'a>(
         &self,
         rules: impl IntoIterator<Item = &'a Arc<LiveRule>>,
+        since_local: Option<schedule::LocalTime>,
         now_local: schedule::LocalTime,
         store: &AutomationStore,
         now_ms: i64,
@@ -607,7 +618,7 @@ impl AutomationEngine {
         let mut emit_for: Vec<String> = Vec::new();
         for live in rules {
             if let Some(TimerStep { mode }) = &live.rule.graph.timer {
-                if !schedule::target_already_past(mode, now_local) {
+                if !schedule::target_missed_since(mode, since_local, now_local) {
                     continue;
                 }
                 let suppressing =

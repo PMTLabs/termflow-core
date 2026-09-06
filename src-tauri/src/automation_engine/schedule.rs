@@ -120,6 +120,54 @@ pub fn target_already_past(mode: &TimerMode, now_local: LocalTime) -> bool {
     (0..MINUTES_PER_DAY).contains(minute_of_day) && now_local.minute_of_day >= *minute_of_day
 }
 
+/// Did this schedule's target go by inside a window nobody was observing?
+///
+/// **The seeding's real question, and the one `target_already_past` could only approximate.** That
+/// predicate answers *is the target in the past*, which is right for a LAUNCH — nothing was
+/// observing anything before the process existed, so `since` is `None` and it is the whole of the
+/// answer. It is wrong for a RESUME: the walk knows exactly when it last looked, and a target that
+/// arrives at or after the instant it looked again has not been missed by anybody. It is due, and
+/// the walk in that same step is about to fire it.
+///
+/// Without this, a suspend at 08:58:50 and a resume at 09:00:00 spent the day for a 09:00 rule
+/// — `540 >= 540` — wrote *"09:00 went by while nothing was watching the clock"* about a minute
+/// that had just that instant arrived, and the walk then read `fires_now = false`. The lateness that
+/// triggered it can be arbitrarily close to zero.
+///
+/// **Compared as absolute minutes, spanning days, and that is what keeps a slept-through morning
+/// suppressed.** A lid closed at 18:00 on Monday and opened at 10:00 on Tuesday has a `since` whose
+/// minute-of-day (1080) is *later* than the target's (540), yet TUESDAY's 09:00 did arrive inside the
+/// gap. Minute-of-day alone would read that as "already past when we last looked" and deliver the
+/// prompt an hour late, every morning — the exact defect the wake path was added to fix.
+///
+/// **Minute granularity, deliberately, on both bounds.** [`LocalTime`] is minute-resolution by
+/// design and this module has exactly one clock conversion; deriving the target's millisecond
+/// instant would mean local-time arithmetic by hand, which is what `local_now`'s own doc rules out.
+/// So a resume landing anywhere inside the target's own minute fires it — at most 59 s late, which
+/// is what a machine that never slept does anyway, since `>=` fires on the first tick at or after
+/// the boundary. A resume landing in a LATER minute has genuinely missed it, and says so.
+pub fn target_missed_since(mode: &TimerMode, since: Option<LocalTime>, now_local: LocalTime) -> bool {
+    let Some(since) = since else {
+        return target_already_past(mode, now_local);
+    };
+    let TimerMode::DailyAt { minute_of_day, .. } = mode else {
+        return false;
+    };
+    if !(0..MINUTES_PER_DAY).contains(minute_of_day) {
+        return false;
+    }
+    let target = absolute_minute(now_local.day_ordinal, *minute_of_day);
+    absolute_minute(since.day_ordinal, since.minute_of_day) < target
+        && target < absolute_minute(now_local.day_ordinal, now_local.minute_of_day)
+}
+
+/// Minutes since the ordinal epoch — a total order over [`LocalTime`], for comparing two of them
+/// that may fall on different days. `i64` because `day_ordinal * 1440` leaves an `i32` uncomfortably
+/// close to its ceiling for a far-future date, and nothing here needs that to be a live question.
+fn absolute_minute(day_ordinal: i32, minute_of_day: i32) -> i64 {
+    day_ordinal as i64 * MINUTES_PER_DAY as i64 + minute_of_day as i64
+}
+
 /// Do these two versions of a rule's timer aim at the SAME minute of the day?
 ///
 /// **`reload`'s question, and the one that decides whether an edit keeps the day it already spent.**
@@ -403,6 +451,78 @@ mod tests {
         ));
         assert!(!target_already_past(&daily_at(-5, ALL_DAYS), local(monday, 0)));
         assert!(!target_already_past(&daily_at(MINUTES_PER_DAY, ALL_DAYS), local(monday, 0)));
+    }
+
+    /// **The gap window, on both bounds and across a day boundary.**
+    ///
+    /// `target_missed_since` is what a resume asks, and the engine tests can only reach it through a
+    /// whole `evaluator_step`. This is the predicate itself, as a table, because two of its rows are
+    /// exactly the rows that were wrong or that a simpler comparison would get wrong:
+    ///
+    /// - **Landing ON the target minute is not a miss.** This is the defect: 08:58:50 to 09:00:00 is
+    ///   a resume, and `now >= target` spent the day at the instant the rule came due.
+    /// - **Landing a minute later IS a miss**, so the fix cannot swallow the suppression it protects.
+    /// - **Overnight**, where `since`'s minute-of-day (1080) is *later* than the target's (540) and
+    ///   yet the target arrived inside the gap. Compared as minute-of-day rather than as absolute
+    ///   minutes this row reads "not missed" and the 09:00 prompt is typed in at 10:00 the next
+    ///   morning — the wake path's whole reason for existing.
+    /// - **Already past when we last looked**, the window's lower bound. It is asserted HERE because
+    ///   it is not independently observable through the engine: a target already past at the last
+    ///   observed instant has a day mark from that instant, so the row is gated off anyway. It is
+    ///   kept because it is what makes the function's name true — the question is *did it fall
+    ///   inside the window nobody observed*, and a caller that ever supplies a `since` from another
+    ///   source gets the right answer rather than an incidentally right one.
+    /// - **`None` is a launch**, and the whole day up to now is unobserved: `target_already_past`,
+    ///   unchanged, equality included.
+    #[test]
+    fn the_gap_window_is_asked_between_the_last_observation_and_now() {
+        let monday = day(2026, 9, 7, Weekday::Mon);
+        let tuesday = monday + 1;
+        let nine = daily_at(9 * 60, ALL_DAYS);
+
+        // Suspend 08:58, resume 09:00 — the minute arrived at the resume, not inside the gap.
+        assert!(
+            !target_missed_since(&nine, Some(local(monday, 8 * 60 + 58)), local(monday, 9 * 60)),
+            "a resume landing on the target minute has missed nothing; it is due"
+        );
+        // One minute later, and it genuinely went by unobserved.
+        assert!(target_missed_since(
+            &nine,
+            Some(local(monday, 8 * 60 + 58)),
+            local(monday, 9 * 60 + 1)
+        ));
+        // The lid closed at 18:00 and opened at 10:00 the next day.
+        assert!(
+            target_missed_since(&nine, Some(local(monday, 18 * 60)), local(tuesday, 10 * 60)),
+            "Tuesday's 09:00 arrived inside the gap, however late in Monday the last look was"
+        );
+        // Already past when we last looked: that instant was observed, whatever happened at it.
+        assert!(!target_missed_since(&nine, Some(local(monday, 9 * 60 + 30)), local(monday, 14 * 60)));
+        // A target still ahead of the resume is not a miss under any reading.
+        assert!(!target_missed_since(&nine, Some(local(monday, 7 * 60)), local(monday, 8 * 60)));
+
+        // `None` is a launch, and it is `target_already_past` exactly — equality included, which is
+        // what keeps an app STARTED at 09:00 from delivering the 09:00 prompt on arrival.
+        for now in [0, 9 * 60 - 1, 9 * 60, 14 * 60, MINUTES_PER_DAY - 1] {
+            assert_eq!(
+                target_missed_since(&nine, None, local(monday, now)),
+                target_already_past(&nine, local(monday, now)),
+                "now={now}"
+            );
+        }
+
+        // The same two refusals every predicate in this module makes.
+        assert!(!target_missed_since(
+            &TimerMode::AfterMatch { delay_ms: 30_000 },
+            Some(local(monday, 0)),
+            local(monday, MINUTES_PER_DAY - 1)
+        ));
+        assert!(!target_missed_since(&daily_at(-5, ALL_DAYS), Some(local(monday, 0)), local(monday, 60)));
+        assert!(!target_missed_since(
+            &daily_at(MINUTES_PER_DAY, ALL_DAYS),
+            Some(local(monday, 0)),
+            local(monday, 60)
+        ));
     }
 
     /// **The mask is not part of "same target minute", and that is the ruling, not an oversight.**

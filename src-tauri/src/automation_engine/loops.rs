@@ -175,7 +175,7 @@ pub async fn evaluator_step(
     prev_tick_ms: Option<i64>,
     now_ms: i64,
 ) -> usize {
-    if prev_tick_ms.is_some_and(|prev| now_ms - prev > RESUME_GAP_MS) {
+    if let Some(prev) = prev_tick_ms.filter(|prev| now_ms - prev > RESUME_GAP_MS) {
         // `local_now` is a pure function of `now_ms`, which was read once by the caller, so asking
         // it here and again inside the walk cannot produce two different days — the "exactly one
         // clock per tick" property is about the timestamp, and there is still exactly one.
@@ -185,8 +185,15 @@ pub async fn evaluator_step(
         // than folded into the state emit at the end of `evaluate_tick`: that one announces ARM
         // transitions, and a suppressed schedule changes no arm state at all — it is a log row and
         // nothing else, so the log's own event is the one that has to carry it.
+        // **`prev` is the last instant anything WAS observing the tick**, and handing it down is the
+        // difference between *"is this target in the past"* and *"did it go by while nobody was
+        // looking"*. Without it a suspend at 08:58:50 and a resume at 09:00:00 spent the day for a
+        // 09:00 rule and wrote a row saying the minute had gone by unwatched — at the instant it
+        // arrived. Both instants go through `local_now`, the one conversion, so the window and the
+        // day it is measured in cannot come from two different clocks.
         let emit_for = engine.seed_missed_schedules(
             &engine.snapshot_live(),
+            Some(schedule::local_now(prev)),
             schedule::local_now(now_ms),
             host.store(),
             now_ms,
@@ -1770,6 +1777,56 @@ mod tests {
         assert!(
             rows.iter().all(|(kind, _, _)| kind != "Held"),
             "a rule that fired was also told it had missed its minute: {rows:?}"
+        );
+    }
+
+    /// **A resume that lands ON the target minute fires it — it has not been missed, it is due.**
+    ///
+    /// `seed_missed_schedules` was handed only `now`, and `target_already_past` compares at MINUTE
+    /// granularity, so it could not tell how far into the unobserved gap the target fell. Suspend at
+    /// 08:58:50, resume at 09:00:00: the gap is 70 s, over `RESUME_GAP_MS`, `540 >= 540` marked the
+    /// day and wrote a `Held` row, and the walk in the very same step then read `fires_now = false`.
+    /// The 09:00 reminder was suppressed at the exact instant it was due, and the lateness can be
+    /// arbitrarily close to zero. `prev_tick_ms` is the value that answers it, and it was in scope at
+    /// the call site all along.
+    ///
+    /// **Both halves are asserted.** The send alone cannot see a spurious row, and the row count
+    /// alone cannot see a lost send — the same pairing
+    /// `a_schedule_that_fires_on_the_tick_writes_no_suppression_row` makes for the ordinary tick.
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_landing_on_the_target_minute_fires_rather_than_spending_the_day() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1")],
+            &[("au-sched", &["tm-1"])],
+        );
+        // `wire` reloads at epoch 0, whose LOCAL day may already be past 09:00 west of UTC.
+        let before = log_rows(&fake.store).len();
+        let slept_at = at_local(2026, 9, 7, Weekday::Mon, 8, 58) + 50_000;
+        let woke_at = at_local(2026, 9, 7, Weekday::Mon, 9, 0);
+        assert!(
+            woke_at - slept_at > RESUME_GAP_MS,
+            "premise: 70 s is a resume and not a slow tick, so the seeding branch is entered"
+        );
+
+        evaluator_step(&engine, &host, 0, Some(slept_at), woke_at).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "the 09:00 reminder was suppressed at the instant it came due: {:?}",
+            fake.written()
+        );
+        let rows: Vec<_> = log_rows(&fake.store).split_off(before);
+        assert!(
+            rows.iter().all(|(kind, _, _)| kind != "Held"),
+            "a minute that had only just arrived was written up as gone by: {rows:?}"
+        );
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(day_ordinal(2026, 9, 7)),
+            "premise: it is the SEND that marked the day, not the seed"
         );
     }
 
