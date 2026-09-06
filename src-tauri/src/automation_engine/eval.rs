@@ -444,9 +444,13 @@ pub fn test_clause(c: &Clause, caps: &Captures) -> Truth {
                 Source::Group(n) => caps.group(*n as usize),
                 Source::Named(k) => caps.name(k),
             };
-            match token.and_then(coerce) {
-                Some(v) => Truth::from_compare(compare(*op, v, *value)),
-                None => Truth::Unknown,
+            // A clause with no threshold yet asks nothing, so it can be told nothing — `Unknown`,
+            // the same answer an unreadable token gets, and for the same reason. It is a blocking
+            // validation problem (`cond.clauseNeedsValue`), so only a hand-edited row reaches here;
+            // reading it as `False` would make an unfinished comparison decide the rule.
+            match (token.and_then(coerce), value) {
+                (Some(v), Some(t)) => Truth::from_compare(compare(*op, v, *t)),
+                _ => Truth::Unknown,
             }
         }
         Test::Text { op, value } => {
@@ -1325,7 +1329,7 @@ mod tests {
             groups: vec![Some("code 529 x".into()), Some("529".into()), None],
             named: Default::default(),
         };
-        let num = |n, op, v| Clause { source: Source::Group(n), test: Test::Number { op, value: v } };
+        let num = |n, op, v| Clause { source: Source::Group(n), test: Test::Number { op, value: Some(v) } };
         let txt = |n, op, v: &str| Clause { source: Source::Group(n), test: Test::Text { op, value: v.into() } };
 
         assert_eq!(test_clause(&num(1, CompareOp::Gt, 500.0), &caps), Truth::True);
@@ -1339,6 +1343,33 @@ mod tests {
         assert_eq!(test_clause(&txt(2, TextOp::Contains, "x"), &caps), Truth::False);
         assert_eq!(test_clause(&txt(1, TextOp::Is, "529"), &caps), Truth::True);
         assert_eq!(test_clause(&txt(0, TextOp::Contains, "529"), &caps), Truth::True);
+    }
+
+    /// A numeric clause whose threshold has not been typed yet asks nothing, so it can be told
+    /// nothing. `Truth::Unknown` — never `False`, which would let an unfinished comparison decide
+    /// the rule, and never `True`, which would fire on it.
+    ///
+    /// Reachable only from a hand-edited row: `cond.clauseNeedsValue` blocks it on both sides of
+    /// the wire. It is a state the panel can hold, though, and the whole reason `value` is
+    /// `Option<f64>` rather than `f64` — so what the engine does with it is pinned, not assumed.
+    #[test]
+    fn a_numeric_clause_with_no_threshold_is_unknown_whatever_the_token_holds() {
+        let caps = Captures {
+            groups: vec![Some("529".into()), Some("529".into())],
+            named: Default::default(),
+        };
+        for op in [CompareOp::Gt, CompareOp::Lt, CompareOp::Eq, CompareOp::Neq] {
+            let c = Clause { source: Source::Group(1), test: Test::Number { op, value: None } };
+            assert_eq!(
+                test_clause(&c, &caps),
+                Truth::Unknown,
+                "a readable token and no threshold is still nothing learned, op {op:?}"
+            );
+        }
+        // The paired positive, over the same token: a threshold that IS there decides normally.
+        let filled =
+            Clause { source: Source::Group(1), test: Test::Number { op: CompareOp::Gt, value: Some(1.0) } };
+        assert_eq!(test_clause(&filled, &caps), Truth::True);
     }
 
     #[test]
@@ -1396,7 +1427,7 @@ mod tests {
         let mut g = graph_with(Finds::Event, r"API error (\d+)");
         g.cond.clauses.push(Clause {
             source: Source::Group(1),
-            test: Test::Number { op: CompareOp::Gt, value: 1.0 },
+            test: Test::Number { op: CompareOp::Gt, value: Some(1.0) },
         });
         let fired = ArmState::Fired { at_ms: 0 };
         assert_eq!(depth_for(g.cond.finds, g.monitor.read, fired), ReadDepth::VisibleScreen);
@@ -1417,7 +1448,7 @@ mod tests {
         let mut g = graph_with(Finds::Event, r"API error (\d+)");
         g.cond.clauses.push(Clause {
             source: Source::Group(1),
-            test: Test::Number { op: CompareOp::Gt, value: 1.0 },
+            test: Test::Number { op: CompareOp::Gt, value: Some(1.0) },
         });
         let r = re(&g.parse.find);
         let src = VtSource::new(4, 80);
@@ -1465,7 +1496,7 @@ mod tests {
         let mut g = graph_with(Finds::Event, r"API error (\d+) . retry in (\d+)s");
         g.cond.clauses = vec![
             Clause { source: Source::Group(1), test: Test::Text { op: TextOp::Is, value: "529".into() } },
-            Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: 30.0 } },
+            Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: Some(30.0) } },
         ];
         g.cond.join = Join::And;
         let re = Regex::new(&g.parse.find).unwrap();

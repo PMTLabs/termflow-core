@@ -58,8 +58,9 @@ const NUM_OPS: AutomationCompareOp[] = ['gt', 'gte', 'lt', 'lte', 'eq', 'neq'];
 /** The two text operators that take no operand at all. */
 const NO_VALUE_OPS = new Set<AutomationTextOp>(['isEmpty', 'isNotEmpty']);
 
-const isNumTest = (test: AutomationTest): test is { number: { op: AutomationCompareOp; value: number } } =>
-    'number' in test;
+const isNumTest = (
+    test: AutomationTest,
+): test is { number: { op: AutomationCompareOp; value: number | null } } => 'number' in test;
 
 /** The `<select>` value for a source — a stable string key, not the source object itself. */
 function sourceKey(source: AutomationSource): string {
@@ -98,7 +99,8 @@ function needsValue(test: AutomationTest): boolean {
 }
 
 function valueOf(test: AutomationTest): string {
-    return isNumTest(test) ? String(test.number.value) : test.text.value;
+    if (!isNumTest(test)) return test.text.value;
+    return test.number.value === null ? '' : String(test.number.value);
 }
 
 /**
@@ -117,10 +119,12 @@ function withOp(test: AutomationTest, key: string): AutomationTest {
             number: {
                 op: op as AutomationCompareOp,
                 // Same-kind (number -> a different number op): keep the value. Cross-kind
-                // (text -> number): NaN, the same "nothing entered yet" a save already blocks on
-                // (`automationValidation.ts`'s own `!Number.isFinite` guard) — never the old text
-                // coerced into a number.
-                value: wasNum ? test.number.value : NaN,
+                // (text -> number): `null`, "nothing entered yet" — never the old text coerced
+                // into a number, and never `NaN`, which has no JSON spelling: `invoke` turns it
+                // into `null` on the wire, so the value that actually reached the backend was one
+                // the DTO had no field type for and the whole save was refused. `null` is what the
+                // wire carries and what `cond.clauseNeedsValue` blocks on, on both sides.
+                value: wasNum ? test.number.value : null,
             },
         };
     }
@@ -135,7 +139,12 @@ function withOp(test: AutomationTest, key: string): AutomationTest {
 function withValue(test: AutomationTest, raw: string): AutomationTest {
     if (isNumTest(test)) {
         const trimmed = raw.trim();
-        return { number: { ...test.number, value: trimmed.length === 0 ? NaN : Number(trimmed) } };
+        // Empty, or something that is not a number at all (`12a`): `null`, for the reason `withOp`
+        // gives above. `Number('12a')` is `NaN`, which the wire cannot carry.
+        const parsed = trimmed.length === 0 ? null : Number(trimmed);
+        return {
+            number: { ...test.number, value: parsed === null || !Number.isFinite(parsed) ? null : parsed },
+        };
     }
     return { text: { ...test.text, value: raw } };
 }
@@ -253,9 +262,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                                         aria-label="Compare against"
                                         placeholder={isNumTest(clause.test) ? 'number' : 'text'}
                                         inputMode={isNumTest(clause.test) ? 'decimal' : undefined}
-                                        value={isNumTest(clause.test) && Number.isNaN(clause.test.number.value)
-                                            ? ''
-                                            : valueOf(clause.test)}
+                                        value={valueOf(clause.test)}
                                         onChange={(e) =>
                                             updateClause(i, { test: withValue(clause.test, e.target.value) })}
                                     />

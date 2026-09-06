@@ -536,9 +536,15 @@ export type AutomationTextOp =
 /**
  * How one clause compares its token. **The clause's type IS the operator's** — there is no separate
  * type control that could contradict it (§5.9).
+ *
+ * **A numeric clause's `value` is nullable, and `null` means "nothing entered yet".** It is what
+ * `CondPanel` writes the moment a row is switched from a text operator to a numeric one, or a
+ * number is half-typed, and §8 names that state directly (`cond.clauseNeedsValue`: *"a numeric
+ * clause with no threshold"*). `NaN` cannot stand in for it: it has no JSON spelling, `invoke`
+ * turns it into `null` on the wire anyway, and Rust's `Option<f64>` is what receives it.
  */
 export type AutomationTest =
-  | { number: { op: AutomationCompareOp; value: number } }
+  | { number: { op: AutomationCompareOp; value: number | null } }
   | { text: { op: AutomationTextOp; value: string } };
 
 /** One comparison: a token, and what to ask of it. Plan §5.3. */

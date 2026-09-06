@@ -264,12 +264,14 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
         }
 
         if ('number' in clause.test) {
-            // Unreachable through any valid JSON literal today — `value` is a mandatory `number`,
-            // never absent — but a value computed elsewhere (or a future relaxed input) can still
-            // be non-finite, and comparing against NaN/Infinity is exactly the silent-failure
-            // shape `CompareOp::Neq`'s own doc warns about for a COERCED token. Defensive, not
-            // speculative: the check costs nothing and the failure mode it guards is real.
-            if (!Number.isFinite(clause.test.number.value)) {
+            // **Reached by the ordinary path.** `value` is `number | null`, and `null` is what
+            // `CondPanel` writes the moment a row is switched from a text operator to a numeric
+            // one, or a number is half-typed — §8's *"a numeric clause with no threshold"*. The
+            // finiteness half stays for a value that arrives by computation rather than by typing:
+            // comparing against NaN/Infinity is exactly the silent-failure shape `CompareOp::Neq`'s
+            // own doc warns about for a COERCED token.
+            const { value } = clause.test.number;
+            if (value === null || !Number.isFinite(value)) {
                 out.push(
                     problem(
                         'blocks',

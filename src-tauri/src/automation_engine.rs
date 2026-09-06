@@ -143,7 +143,7 @@ pub fn fold_v1_clauses(graph: &mut AutomationGraph, re: &Regex) {
         }
         Keep::Brackets => Source::Group(1),
     };
-    graph.cond.clauses.push(Clause { source, test: Test::Number { op, value: threshold } });
+    graph.cond.clauses.push(Clause { source, test: Test::Number { op, value: Some(threshold) } });
 }
 
 /// The rule ids a `reload` should announce, or `None` if it wrote nothing worth announcing.
@@ -574,7 +574,7 @@ mod tests {
                 source: Source::Whole,
                 test: Test::Text { op: TextOp::Contains, value: "err".into() },
             },
-            Clause { source: Source::Group(1), test: Test::Number { op: CompareOp::Gt, value: 1.0 } },
+            Clause { source: Source::Group(1), test: Test::Number { op: CompareOp::Gt, value: Some(1.0) } },
         ];
         g
     }

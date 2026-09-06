@@ -106,7 +106,10 @@ const TEXT_OPS_WITHOUT_VALUE = new Set<AutomationTextOp>(['isEmpty', 'isNotEmpty
 function clauseSentence(clause: AutomationClause): string {
     const token = sourceText(clause.source);
     if ('number' in clause.test) {
-        return `${token} ${NUM_OP_LABELS[clause.test.number.op]} ${clause.test.number.value}`;
+        // A threshold that has not been typed yet reads as the same ellipsis an un-typed text
+        // operand gets below, never as the literal word `null`.
+        const { op, value } = clause.test.number;
+        return `${token} ${NUM_OP_LABELS[op]} ${value === null ? '…' : value}`;
     }
     const { op, value } = clause.test.text;
     const operand = TEXT_OPS_WITHOUT_VALUE.has(op) ? '' : ` ${value || '…'}`;

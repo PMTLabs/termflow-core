@@ -718,8 +718,21 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
             expect(test.number.op).toBe('gt');
             // Otherwise "529" silently becomes a numeric threshold — the clause's own operand must
             // be cleared, never coerced, on a text-to-number switch.
-            expect(Number.isNaN(test.number.value)).toBe(true);
+            expect(test.number.value).toBeNull();
         }
+
+        /**
+         * **And what the panel mints has to cross the IPC wire.** This is the same switch, followed
+         * by the hop `invoke` performs — the editor sends a blocked draft deliberately (switched
+         * off, never refused), so this clause reaches the backend on the very next Save.
+         *
+         * `null` survives `JSON.stringify`; `NaN` does not — it becomes `null` in transit, so the
+         * value the panel held and the value the backend received were two different things, and
+         * `Test::Number { value: f64 }` refused the whole rule with an opaque
+         * ``invalid args `rule` ``. The editor could then neither save nor close.
+         */
+        const crossed = JSON.parse(JSON.stringify(action.clauses)) as AutomationClause[];
+        expect(crossed).toEqual(action.clauses);
     });
 
     it('offers only tokens the pattern actually produces', async () => {

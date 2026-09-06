@@ -109,7 +109,14 @@ fn text_op_words(op: TextOp) -> &'static str {
 fn clause_phrase(c: &Clause) -> String {
     let token = crate::automation_validation::source_text(&c.source);
     match &c.test {
-        Test::Number { op, value } => format!("{} {} {}", token, symbol(*op), eval::fmt_num(*value)),
+        // An unfilled threshold prints as the blank it is rather than as a made-up number: a
+        // numeric clause with no value is authorable (`CondPanel` mints one the moment a row turns
+        // numeric) and blocked by `cond.clauseNeedsValue`, so the Test pane has to be able to say
+        // it out loud.
+        Test::Number { op, value: Some(v) } => {
+            format!("{} {} {}", token, symbol(*op), eval::fmt_num(*v))
+        }
+        Test::Number { op, value: None } => format!("{} {} (no number yet)", token, symbol(*op)),
         Test::Text { op, value } if matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty) => {
             format!("{} {}", token, text_op_words(*op))
         }
@@ -699,7 +706,7 @@ mod tests {
             clauses: vec![
                 Clause {
                     source: Source::Group(1),
-                    test: ClauseTest::Number { op: CompareOp::Gt, value: 400.0 },
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(400.0) },
                 },
                 Clause {
                     source: Source::Group(2),
@@ -739,7 +746,7 @@ mod tests {
             finds: Finds::Event,
             clauses: vec![Clause {
                 source: Source::Group(1),
-                test: ClauseTest::Number { op: CompareOp::Gt, value: 60.0 },
+                test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
             }],
             join: Join::And,
             ..Default::default()

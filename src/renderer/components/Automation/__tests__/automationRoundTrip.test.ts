@@ -91,6 +91,13 @@ describe('draft ⇄ row', () => {
                         { source: { group: 1 }, test: { text: { op: 'is', value: '429' } } },
                         { source: { group: 2 }, test: { number: { op: 'gt', value: 60 } } },
                         { source: 'whole', test: { text: { op: 'isNotEmpty', value: '' } } },
+                        // **A numeric clause with no threshold yet** — the state `CondPanel` mints
+                        // the instant a row is switched to a numeric operator, and the one the wire
+                        // could not carry: `NaN` has no JSON spelling, so it arrived as `null` and
+                        // `Test::Number { value: f64 }` refused the rule. Every other clause here
+                        // holds a finite value, so without this row the mapping passes vacuously
+                        // over the only shape that ever failed.
+                        { source: { group: 1 }, test: { number: { op: 'lt', value: null } } },
                     ],
                     join: 'or',
                 },

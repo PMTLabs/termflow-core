@@ -2043,6 +2043,61 @@
       ]
     },
     {
+      "name": "cond.clauseNeedsValue — a NUMERIC clause with no threshold",
+      "why": "Plan 032 §8's own wording for this code, and the shape `CondPanel` mints every time a row is switched from a text operator to a numeric one. It crosses the wire as `\"value\": null`, so this case also pins that BOTH sides decode a null threshold rather than refusing the rule.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": null } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.clauseNeedsValue"
+        }
+      ]
+    },
+    {
       "name": "cond.clauseNeedsValue's exception — 'is empty' needs no text",
       "why": "The paired positive: without this, the check above could be an unconditional 'value must be non-empty' that would also block the one operator the spec explicitly exempts.",
       "rule": {

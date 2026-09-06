@@ -207,13 +207,14 @@ fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
 
         match &clause.test {
             Test::Number { value, .. } => {
-                // Unreachable through any valid JSON literal today — `value` is a mandatory
-                // `f64`, never absent — but a value arriving via computation (or a future
-                // relaxed input) can still be non-finite, and comparing against NaN/Infinity is
-                // exactly the silent-failure shape `CompareOp::Neq`'s own doc warns about for a
-                // COERCED token. Defensive, not speculative: the check costs nothing and the
-                // failure mode it guards is real.
-                if !value.is_finite() {
+                // **Reached by the ordinary path, not a defensive edge.** `value` is
+                // `Option<f64>`, and `None` is what `CondPanel` writes the moment a row is
+                // switched from a text operator to a numeric one, or a number is half-typed —
+                // §8's *"a numeric clause with no threshold"* in the flesh. The finiteness half
+                // stays for a value that arrives by computation rather than by typing: comparing
+                // against NaN/Infinity is exactly the silent-failure shape `CompareOp::Neq`'s own
+                // doc warns about for a COERCED token.
+                if !value.is_some_and(f64::is_finite) {
                     out.push(Problem::new(
                         Severity::Blocks,
                         "cond",
@@ -905,25 +906,36 @@ mod tests {
         assert_eq!(found[0].code, "parse.empty");
     }
 
-    /// `Test::Number { value }` is a mandatory `f64`, never absent — no JSON literal can produce a
-    /// clause the fixture's `serde_json::from_str` would even accept with a missing or non-numeric
-    /// `value`. So `!value.is_finite()` is unreachable through the product today, and unreachable
-    /// through the fixture too. It is still promised behaviour (`clause_problems`'s own comment), so
-    /// it is pinned here directly, constructing the clause in code rather than through JSON — a
-    /// branch that is promised but never exercised is a coverage hole with a rationale
+    /// **`value: None` is the ordinary case, not an edge one**, and the comment this test used to
+    /// carry ("unreachable through the product") was wrong the day `CondPanel` became a clause
+    /// list: switching a row from a text operator to a numeric one mints a clause with no
+    /// threshold, which is precisely §8's *"a numeric clause with no threshold"*. It travels the
+    /// wire as `{"value":null}` and must block, not decode-fail.
+    ///
+    /// The non-finite half stays a defensive check — no JSON literal spells `NaN` or `Infinity`, so
+    /// it is pinned here by constructing the clause in code rather than through the shared fixture:
+    /// a branch that is promised but never exercised is a coverage hole with a rationale
     /// (`a-comment-that-forbids-a-test`), not proof the branch does what it claims.
     #[test]
-    fn a_non_finite_clause_value_needs_a_value() {
+    fn a_numeric_clause_with_no_usable_value_needs_a_value() {
         let mut g = graph(r"ctx:(\d+)%", Keep::Brackets);
         g.cond = CondStep {
             finds: Finds::Event,
             clauses: vec![Clause {
                 source: Source::Whole,
-                test: Test::Number { op: CompareOp::Gt, value: f64::NAN },
+                test: Test::Number { op: CompareOp::Gt, value: None },
             }],
             ..Default::default()
         };
 
+        // The reachable one first: nothing entered yet.
+        assert_eq!(
+            clause_problems(&g).iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            vec!["cond.clauseNeedsValue"],
+            "a numeric clause with no threshold is §8's own wording for this code"
+        );
+
+        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::NAN) };
         let found = clause_problems(&g);
         assert_eq!(
             found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
@@ -932,12 +944,12 @@ mod tests {
         );
 
         // Paired: `f64::INFINITY` is also non-finite and must trip the same guard, not merely NaN.
-        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: f64::INFINITY };
+        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::INFINITY) };
         let found = clause_problems(&g);
         assert_eq!(found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(), vec!["cond.clauseNeedsValue"]);
 
         // And the paired positive: an ordinary finite value reports nothing at all.
-        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: 25.0 };
+        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(25.0) };
         assert!(clause_problems(&g).is_empty(), "a finite value must not be flagged");
     }
 }

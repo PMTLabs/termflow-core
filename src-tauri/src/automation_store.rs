@@ -184,7 +184,24 @@ pub enum TextOp {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Test {
-    Number { op: CompareOp, value: f64 },
+    /// **`value` is `Option<f64>` because a numeric clause with no threshold is a real, authorable
+    /// state** — §8 names it (`cond.clauseNeedsValue`: *"a numeric clause with no threshold"*), and
+    /// `CondPanel` mints one every time a row is switched from a text operator to a numeric one, or
+    /// a number is half-typed. A bare `f64` had no spelling for that: the panel used `f64::NAN`'s TS
+    /// twin, `JSON.stringify` turned it into `null` on the way through `invoke`, and serde refused
+    /// the whole rule — so the editor could not save, and its navigation guard would not let it
+    /// close. `None` is the wire's own word for "nothing entered yet", and validation blocks it
+    /// exactly as it blocks a text clause with no text.
+    ///
+    /// `#[serde(default)]` is for consistency with every other optional field here rather than the
+    /// mechanism: serde already treats a literal `Option<T>` as implicitly optional on a MISSING key.
+    /// It is `null` — a key that is present and empty — that needs `Option`, and that is what the
+    /// wire actually carries.
+    Number {
+        op: CompareOp,
+        #[serde(default)]
+        value: Option<f64>,
+    },
     Text { op: TextOp, value: String },
 }
 
@@ -3896,7 +3913,7 @@ mod tests {
 
     #[test]
     fn a_clause_round_trips() {
-        let c = Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: 60.0 } };
+        let c = Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: Some(60.0) } };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Clause>(&s).unwrap(), c);
     }
