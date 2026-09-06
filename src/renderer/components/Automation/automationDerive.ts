@@ -476,8 +476,10 @@ export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
  *
  * `action` is the one step no rule can be without — a rule with nothing to send is not a rule — so
  * it is the only kind this answers `true` for unconditionally. The other three are optional on the
- * DTO, and `draftFromRule` draws all four cards for any saved rule whatever the graph holds, so a
- * schedule rule (§6.3) opens with three cards standing for steps it does not have.
+ * DTO. Since task 29 `draftFromRule` draws only the steps a rule HAS, so the editor no longer opens
+ * a schedule rule on three cards standing for steps it does not have — but this answer is still
+ * load-bearing for every other reader of a graph, the test pane included, and for a row that reached
+ * the store by some other route.
  */
 function hasStep(rule: AutomationRule, step: StepKind): boolean {
     return step === 'action' || rule.graph[step] != null;

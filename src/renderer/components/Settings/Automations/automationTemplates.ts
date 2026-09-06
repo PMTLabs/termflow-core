@@ -20,7 +20,7 @@
  */
 import type { AutomationRule } from '../../../types/electron';
 
-/** Which of the four steps a template is really about — the gallery card's icon colour. */
+/** Which of a template's steps it is really about — the gallery card's icon colour. */
 export type TemplateAccent = 'monitor' | 'parse' | 'cond' | 'action';
 
 export interface AutomationTemplate {

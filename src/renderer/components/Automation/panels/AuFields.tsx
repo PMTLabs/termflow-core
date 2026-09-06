@@ -1,8 +1,8 @@
 /**
  * The inspector's field primitives (mockup §04).
  *
- * Small on purpose: four panels drawing the same radio three different ways is how a surface starts
- * looking like four surfaces. Nothing here knows what an automation is.
+ * Small on purpose: five panels drawing the same radio three different ways is how a surface starts
+ * looking like five surfaces. Nothing here knows what an automation is.
  */
 import React from 'react';
 

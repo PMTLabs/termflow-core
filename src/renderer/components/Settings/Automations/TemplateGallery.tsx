@@ -51,13 +51,13 @@ export const TemplateGallery: React.FC<TemplateGalleryProps> = ({ onBack, onPick
                 </span>
                 <span className="au-tplbody">
                     <span className="au-tplwhy">
-                        An empty canvas. Drag the four steps in yourself — watch, read, compare,
+                        An empty canvas. Drag the steps in yourself — watch, read, compare, wait,
                         send. Everything a template does, you can do from here; it just takes longer.
                     </span>
                 </span>
                 <span className="au-tplfoot">
                     <span className="au-yc">You&apos;ll set</span>
-                    <span className="au-editchip">all four steps</span>
+                    <span className="au-editchip">every step</span>
                 </span>
             </button>
         </div>

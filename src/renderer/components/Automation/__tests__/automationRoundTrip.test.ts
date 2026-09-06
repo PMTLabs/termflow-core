@@ -28,7 +28,7 @@ import {
 import { problems } from '../automationValidation';
 import { STEP_ORDER, canAddStep, defaultWires } from '../automationSteps';
 
-/** The four steps every rule has drawn for it, whatever its graph holds — the wait is opt-in. */
+/** The steps an ordinary v1 rule has, and therefore the cards it opens with — the wait is opt-in. */
 const WITHOUT_TIMER = STEP_ORDER.filter((s) => s !== 'timer');
 import type { AutomationRule } from '../../../types/electron';
 
@@ -275,7 +275,7 @@ describe('draftFromRule', () => {
         targetIds: ['tm-9'],
     });
 
-    it('draws all four ordinary steps for a template or an existing rule', () => {
+    it('draws the four ordinary steps a template or an existing rule has', () => {
         const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
         expect(draft.present).toEqual(WITHOUT_TIMER);
         expect(draft.wires).toEqual(defaultWires(WITHOUT_TIMER));
@@ -284,13 +284,13 @@ describe('draftFromRule', () => {
     });
 
     /**
-     * **The wait step is drawn only when the rule HAS one, and the other four never are.**
+     * **Every step is drawn exactly when the rule HAS it, the wait included.**
      *
-     * The asymmetry is the point, and both halves matter. A card standing for an absent monitor
-     * reads *"not in this rule"* and is how a schedule rule shows what it is missing; a card
-     * standing for an absent WAIT would be on every rule ever written, and `canAddStep` refuses a
-     * step that is already present — so drawing it unconditionally would make the palette's only
-     * route to adding one permanently closed.
+     * The wait used to be the sole exception to *"draw all four whatever the graph holds"*, and
+     * the reason it had to be is the reason the exception became the rule: `canAddStep` refuses a
+     * step that is already present, so a card drawn for an absent step closes the palette's only
+     * route to adding one. That was true of the wait on every rule ever written, and true of
+     * monitor/parse/cond on a schedule rule — which is the half task 29 fixed.
      */
     it('draws the wait step exactly when the rule has one', () => {
         const withWait = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
@@ -566,7 +566,7 @@ describe('draftFromRule', () => {
         }
     });
 
-    it('a TEMPLATE draws all four ordinary steps, like the complete rule it is', () => {
+    it('a TEMPLATE draws the four ordinary steps it has, like the complete rule it is', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         const draft = draftFromRule(rule, 'template');
         expect(draft.present).toEqual(WITHOUT_TIMER);

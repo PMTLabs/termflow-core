@@ -2,14 +2,16 @@
  * The one draft the whole editor is derived from (plan 028 §6.2).
  *
  * `useReducer(draftReducer, …)` over a single value. **Nothing derived is stored**: problems, faces,
- * the palette summary, the header's blocked reason and all four inspector panels are computed in
- * render by `automationValidation` and `automationDerive`, memoised on the draft alone.
+ * the palette summary, the header's blocked reason and every inspector panel are computed in render
+ * by `automationValidation` and `automationDerive`, memoised on the draft alone.
  *
  * ## What round-trips, and what does not
  *
- * `rule` is the wire DTO — it goes to `save_automation` unchanged, and comes back from the store the
- * same shape. `present` and `wires` are **session-only canvas state**, re-derived from the four steps
- * on every open: they carry no user choice, so the canvas is a *drawing of* the rule.
+ * `rule` is the wire DTO — it comes back from the store the same shape it went out in. `present` and
+ * `wires` are **session-only canvas state**, re-derived on every open from the steps the rule HAS:
+ * they carry no user choice, so the canvas is a *drawing of* the rule. What a save writes is not
+ * quite `rule` as it stands, though — see `ruleFromDraft` for the one group of steps the canvas gets
+ * to omit.
  *
  * **`layout` DOES round-trip, corrected here.** This paragraph used to say it did not, on the
  * grounds that the `graph` blob had "no place to put a node position, and adding one would be a
@@ -45,7 +47,7 @@ export interface NodePos {
     y: number;
 }
 
-/** A finished rule is four cards on a ~900×260 world (§6.5) — hence no minimap. */
+/** A finished rule is a handful of cards on a ~900×260 world (§6.5) — hence no minimap. */
 export const AU_NODE_W = 244;
 // The card is a FIXED box, so its height has to be big enough for the tallest face any step can
 // draw, and that is the monitor's: three rows (Watch / Read / Check) whose first value is the
@@ -297,7 +299,7 @@ export function auWirePath(
 export interface AutomationDraft {
     /** The DTO. This, and only this, is what a save sends. */
     rule: AutomationRule;
-    /** Which steps are on the canvas. All four for a template or an existing rule; none for a blank. */
+    /** Which steps are on the canvas: the ones a template or an existing rule HAS; none for a blank. */
     present: StepKind[];
     wires: Wire[];
     layout: Record<StepKind, NodePos>;
@@ -320,8 +322,8 @@ export interface AutomationDraft {
  * and **what the dirty check compares against**. Keeping them in one value is what stops a fourth
  * way of opening the editor from arriving with a canvas rule and no answer to "is this unsaved".
  *
- * - `'saved'` — an existing rule, opened from the list. All four steps drawn, because it is
- *   already a complete rule, and clean, because what is on screen is what is stored.
+ * - `'saved'` — an existing rule, opened from the list. Every step the rule HAS is drawn, because it
+ *   is already a complete rule, and clean, because what is on screen is what is stored.
  * - `'blank'` — the gallery's blank card. Mockup §03's third state: an empty canvas and the
  *   "Start with Watch output" hint, so building a rule from nothing is a thing the palette
  *   TEACHES rather than a thing that has already happened. Clean, because nothing is there yet;
@@ -581,8 +583,8 @@ export function isDirty(draft: AutomationDraft): boolean {
 function comparable(rule: AutomationRule): string {
     // The layout is normalised for the same reason `targetIds` is, and it is a stronger case: this
     // one crosses the wire into a Rust `BTreeMap` and comes back with ITS key order, while the
-    // draft's own object carries insertion order. Two orders of the same four positions are the
-    // same arrangement, and `JSON.stringify` cannot know that.
+    // draft's own object carries insertion order. Two orders of the same positions are the same
+    // arrangement, and `JSON.stringify` cannot know that.
     const layout = rule.graph.layout;
     const graph = layout
         ? {

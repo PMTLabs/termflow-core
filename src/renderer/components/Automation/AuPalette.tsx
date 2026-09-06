@@ -1,5 +1,5 @@
 /**
- * The left rail: the four steps you can drag on, and what this rule currently says (mockup §03).
+ * The left rail: the steps you can drag on, and what this rule currently says (mockup §03).
  *
  * The *This rule* summary is `ruleSummary(draft.rule)` — derived, like everything else — so the rail
  * cannot summarise a rule the canvas is not drawing.

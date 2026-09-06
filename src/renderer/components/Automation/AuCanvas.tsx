@@ -9,7 +9,7 @@
  * `fitViewport`, `wheelAction`, `shouldArmSpacePan`, `exceedsDragSlop`. One implementation of the
  * arithmetic, two hosts.
  *
- * **No minimap**, per §6.5: a finished rule is four cards on a ~900×260 world, and the mockup ships
+ * **No minimap**, per §6.5: a finished rule is a handful of cards on a ~900×260 world, and the mockup ships
  * a zoom cluster and no minimap.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -26,7 +26,7 @@ import { AuWires } from './AuWires';
 import { useAuNodeDrag } from './useAuNodeDrag';
 import { useAuWireDrag } from './useAuWireDrag';
 
-/** The editor is a modal, not an infinite world: four cards never need 12×. */
+/** The editor is a modal, not an infinite world: five cards at most never need 12×. */
 const AU_Z_MAX = 2.2;
 
 export interface AuCanvasProps {
