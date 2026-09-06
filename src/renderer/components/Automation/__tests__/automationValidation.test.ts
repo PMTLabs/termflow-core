@@ -67,7 +67,7 @@ describe('automationValidation — the shared fixture', () => {
         // "at least 20" and this test would stay green. `all.length` is DERIVED from `BADGES`
         // (never hand-typed), so bumping this number is the one place a new code cannot be added
         // silently — it forces a look at whether the fixture actually covers it.
-        expect(all.length).toBe(23);
+        expect(all.length).toBe(29);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });
 });

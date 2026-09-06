@@ -4376,16 +4376,20 @@ mod tests {
         assert!(skipped[0].1.contains("bad graph blob"));
 
         // Save errors also carry the store's Display through the command layer. Exercise the real
-        // enable/save validation with a well-typed webhook rule rather than inventing an error text.
+        // enable/save validation with a well-typed, secret-bearing webhook rule rather than
+        // inventing an error text.
         let mut invalid = rule("au-save");
         invalid.graph.webhook = Some(WebhookStep {
-            provider: WebhookProvider::Discord,
+            provider: WebhookProvider::Custom,
             url: secret.to_string(),
-            body: "done".to_string(),
-            substitute: false,
+            body: r#"{\"result\": ${value}}"#.to_string(),
+            substitute: true,
         });
-        invalid.graph.action.as_mut().expect("action fixture").message.clear();
-        let error = store.save_rule(&invalid).expect_err("empty action is refused").to_string();
+        invalid.graph.parse.as_mut().expect("parse fixture").find = r"(?<value>\\w+)".to_string();
+        let error = store
+            .save_rule(&invalid)
+            .expect_err("post-substitution custom JSON is refused")
+            .to_string();
         assert!(!error.contains(secret), "save error leaked: {error}");
     }
 

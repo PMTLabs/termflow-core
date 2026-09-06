@@ -22,12 +22,15 @@
 //! about the parse step alone and need nothing but the graph. **M3 lands the whole-rule rules** (no
 //! terminals, empty message, the echo warning) with the enable path, and **M5 the shared fixture**.
 
-use regex::{Regex, RegexBuilder};
+use std::collections::BTreeMap;
 
-use crate::automation_engine::subst;
+use regex::{Regex, RegexBuilder};
+use reqwest::Url;
+
+use crate::automation_engine::{eval, subst};
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
-    Test, TextOp, TimerMode, TimerStep, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
+    Test, TextOp, TimerMode, TimerStep, WebhookProvider, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -126,6 +129,34 @@ fn token_supplied(compiled: &Regex, group: Option<usize>, name: Option<&str>) ->
         (Some(n), _) => n <= compiled.captures_len().saturating_sub(1),
         (None, Some(name)) => compiled.capture_names().any(|cn| cn == Some(name)),
         (None, None) => true, // $0 / Source::Whole is always the whole match.
+    }
+}
+
+fn sample_webhook_captures(compiled: &Regex) -> eval::Captures {
+    let groups = (0..compiled.captures_len())
+        .map(|index| Some(format!("[g{index}]")))
+        .collect();
+    let named = compiled
+        .capture_names()
+        .filter_map(|name| name.map(|name| (name.to_string(), Some(format!("[{name}]")))))
+        .collect::<BTreeMap<_, _>>();
+
+    eval::Captures { groups, named }
+}
+
+fn rendered_webhook_body(webhook: &crate::automation_store::WebhookStep, parse: Option<&ParseStep>) -> String {
+    if !webhook.substitute {
+        return webhook.body.clone();
+    }
+    let Some(parse) = parse else {
+        return webhook.body.clone();
+    };
+    let Ok(compiled) = compile(&parse.find) else {
+        return webhook.body.clone();
+    };
+    match subst::substitute(&webhook.body, Some(&sample_webhook_captures(&compiled))) {
+        Ok(body) => body,
+        Err(_) => webhook.body.clone(),
     }
 }
 
@@ -643,8 +674,19 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
-    if (rule.graph.action.is_none() && rule.graph.webhook.is_none())
-        || rule.graph.action.as_ref().is_some_and(|action| action.message.trim().is_empty())
+    if rule.graph.action.is_none() && rule.graph.webhook.is_none() {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "action",
+            "rule.noDestination",
+            "Add a terminal message or a webhook destination.",
+        ));
+    } else if rule.graph.webhook.is_none()
+        && rule
+        .graph
+        .action
+        .as_ref()
+        .is_some_and(|action| action.message.trim().is_empty())
     {
         out.push(Problem::new(
             Severity::Blocks,
@@ -733,6 +775,53 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                         ));
                     }
                 }
+            }
+        }
+    }
+
+    // --- webhook ---------------------------------------------------------------------------------
+    if let Some(webhook) = rule.graph.webhook.as_ref() {
+        if webhook.url.trim().is_empty() {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "action",
+                "webhook.urlEmpty",
+                "Provide a webhook URL.",
+            ));
+        } else if let Ok(url) = Url::parse(webhook.url.trim()) {
+            if url.scheme() != "https" {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "action",
+                    "webhook.urlNotHttps",
+                    "Provide an https webhook URL.",
+                ));
+            }
+        } else {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "action",
+                "webhook.urlMalformed",
+                "Provide a well-formed webhook URL.",
+            ));
+        }
+
+        if webhook.body.trim().is_empty() {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "action",
+                "webhook.bodyEmpty",
+                "Enter a webhook body.",
+            ));
+        } else if webhook.provider == WebhookProvider::Custom {
+            let rendered_body = rendered_webhook_body(webhook, parse_step(&rule.graph));
+            if serde_json::from_str::<serde_json::Value>(&rendered_body).is_err() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "action",
+                    "webhook.bodyNotJson",
+                    "The webhook body must be valid JSON.",
+                ));
             }
         }
     }
@@ -1137,6 +1226,12 @@ mod tests {
             "action.echo",
             "action.tokenWithoutParse",
             "action.unknownToken",
+            "rule.noDestination",
+            "webhook.urlEmpty",
+            "webhook.urlMalformed",
+            "webhook.urlNotHttps",
+            "webhook.bodyEmpty",
+            "webhook.bodyNotJson",
         ] {
             assert!(codes.contains(code), "no fixture case produces `{code}`");
         }

@@ -33,7 +33,7 @@ import type {
     AutomationRule,
     AutomationSource,
 } from '../../types/electron';
-import { tokensUsed } from './automationTokens';
+import { previewSubstitute, tokensUsed } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
@@ -69,6 +69,12 @@ export type ProblemCode =
     | 'timer.scheduleWithMonitor'
     | 'timer.neverRuns'
     | 'action.empty'
+    | 'rule.noDestination'
+    | 'webhook.urlEmpty'
+    | 'webhook.urlMalformed'
+    | 'webhook.urlNotHttps'
+    | 'webhook.bodyEmpty'
+    | 'webhook.bodyNotJson'
     | 'action.echo'
     | 'action.tokenWithoutParse'
     | 'action.unknownToken';
@@ -228,6 +234,41 @@ export function sourceText(source: AutomationSource): string {
 function parseStep(graph: AutomationGraph): AutomationParseStep | null {
     const parse = graph.parse;
     return parse && parse.find.trim().length > 0 ? parse : null;
+}
+
+function webhookSampleValues(groups: { count: number; names: Set<string> }): Record<string, string> {
+    const sample: Record<string, string> = {};
+    for (let index = 0; index <= groups.count; index += 1) {
+        sample[String(index)] = `[g${index}]`;
+    }
+    for (const name of groups.names) {
+        sample[name] = `[${name}]`;
+    }
+    return sample;
+}
+
+function renderWebhookBodyForValidation(
+    webhook: NonNullable<AutomationGraph['webhook']>,
+    parse: AutomationParseStep | null,
+): string {
+    if (!webhook.substitute || !parse || webhook.body.trim().length === 0) {
+        return webhook.body;
+    }
+
+    const groups = groupsOf(parse.find);
+    if (compilePattern(parse.find) === null) {
+        return webhook.body;
+    }
+
+    const sample = webhookSampleValues(groups);
+    const rendered = previewSubstitute(webhook.body, groups, sample);
+    if (!rendered.ok) {
+        return webhook.body;
+    }
+
+    return rendered.parts
+        .map((p) => (p.kind === 'text' ? p.text : p.token))
+        .join('');
 }
 
 /**
@@ -610,7 +651,7 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
  */
 export function problems(rule: AutomationRule): Problem[] {
     const out: Problem[] = [];
-    const { monitor, parse, cond, action } = rule.graph;
+    const { monitor, parse, cond, action, webhook } = rule.graph;
 
     // --- target ----------------------------------------------------------------------------------
     // Only a PINNED rule can be empty in a way validation can see. A criterion rule that currently
@@ -719,7 +760,16 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
-    if ((!action && !rule.graph.webhook) || action?.message.trim().length === 0) {
+    if (!action && !webhook) {
+        out.push(
+            problem(
+                'blocks',
+                'action',
+                'rule.noDestination',
+                'Add a terminal message or a webhook destination.',
+            ),
+        );
+    } else if (action?.message.trim().length === 0 && !webhook) {
         out.push(
             problem(
                 'blocks',
@@ -749,6 +799,67 @@ export function problems(rule: AutomationRule): Problem[] {
                         + 'TermFlow ignores its own message, but a shorter pattern is safer.',
                 ),
             );
+        }
+    }
+
+    if (webhook) {
+        if (webhook.url.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'action',
+                    'webhook.urlEmpty',
+                    'Provide a webhook URL.',
+                ),
+            );
+        } else {
+            try {
+                const parsed = new URL(webhook.url.trim());
+                if (parsed.protocol !== 'https:') {
+                    out.push(
+                        problem(
+                            'blocks',
+                            'action',
+                            'webhook.urlNotHttps',
+                            'Provide an https webhook URL.',
+                        ),
+                    );
+                }
+            } catch {
+                out.push(
+                    problem(
+                        'blocks',
+                        'action',
+                        'webhook.urlMalformed',
+                        'Provide a well-formed webhook URL.',
+                    ),
+                );
+            }
+        }
+
+        if (webhook.body.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'action',
+                    'webhook.bodyEmpty',
+                    'Enter a webhook body.',
+                ),
+            );
+        } else if (webhook.provider === 'custom') {
+            const rendered = renderWebhookBodyForValidation(webhook, parseStep(rule.graph));
+            try {
+                JSON.parse(rendered);
+            } catch {
+                out.push(
+                    problem(
+                        'blocks',
+                        'action',
+                        'webhook.bodyNotJson',
+                        'The webhook body must be valid JSON.',
+                    ),
+                );
+            }
         }
     }
 
@@ -847,6 +958,12 @@ export const BADGES: Record<ProblemCode, string> = {
     'timer.scheduleWithMonitor': 'the watch is ignored',
     'timer.neverRuns': 'this rule can never run',
     'action.empty': 'needs a message',
+    'rule.noDestination': 'needs a destination',
+    'webhook.urlEmpty': 'needs a webhook URL',
+    'webhook.urlMalformed': 'needs a valid webhook URL',
+    'webhook.urlNotHttps': 'needs an https webhook',
+    'webhook.bodyEmpty': 'needs a webhook body',
+    'webhook.bodyNotJson': 'webhook body is not valid JSON',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',
     'action.unknownToken': 'names a value the pattern has not got',

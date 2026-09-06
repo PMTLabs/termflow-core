@@ -92,7 +92,12 @@ pub async fn run_tap(
 #[cfg(test)]
 mod task8_tests {
     use super::*;
-    use crate::automation_engine::test_host::{ctx_rule, rig_with_rule, strip_comments, wire};
+    use crate::automation_engine::test_host::{
+        ctx_rule,
+        rig_with_rule_bypassing_the_enable_gate,
+        strip_comments,
+        wire_bypassing_the_enable_gate,
+    };
     use crate::automation_store::{LogOrder, LogScope, WebhookProvider, WebhookStep};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -192,7 +197,7 @@ mod task8_tests {
     /// its malformed webhook endpoint fails. That failure must not suppress the terminal delivery.
     #[tokio::test]
     async fn a_failed_webhook_leaves_the_terminal_send_alone() {
-        let (engine, fake, host) = rig_with_rule(|graph| {
+        let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
             // reqwest rejects this while building the request; it cannot leave this machine.
             add_discord_webhook(graph, "not a valid URL".into());
         });
@@ -233,7 +238,7 @@ mod task8_tests {
         let mut rule = ctx_rule("au-1");
         rule.runs_once = true;
         add_discord_webhook(&mut rule.graph, url);
-        let (engine, fake, host) = wire(vec![rule]);
+        let (engine, fake, host) = wire_bypassing_the_enable_gate(vec![rule]);
         let send = pending(&engine, &host, ArmState::armed(), 4_000);
         fake.close("tm-1");
 
@@ -263,7 +268,8 @@ mod task8_tests {
     #[tokio::test]
     async fn a_crossing_records_one_fire_however_many_destinations_it_had() {
         let (url, requested) = webhook_endpoint();
-        let (engine, _fake, host) = rig_with_rule(|graph| add_discord_webhook(graph, url));
+        let (engine, _fake, host) =
+            rig_with_rule_bypassing_the_enable_gate(|graph| add_discord_webhook(graph, url));
         let send = pending(&engine, &host, ArmState::armed(), 4_000);
 
         run_crossing(engine.clone(), host.clone(), send).await;
@@ -286,7 +292,7 @@ mod task8_tests {
         let mut rule = ctx_rule("au-1");
         rule.runs_once = true;
         add_discord_webhook(&mut rule.graph, url);
-        let (engine, fake, host) = wire(vec![rule]);
+        let (engine, fake, host) = wire_bypassing_the_enable_gate(vec![rule]);
         let send = pending(&engine, &host, ArmState::armed(), 4_000);
         let task = tokio::spawn(run_crossing(engine.clone(), host.clone(), send));
 
@@ -324,7 +330,8 @@ mod task8_tests {
     #[tokio::test]
     async fn one_crossing_with_two_destinations_writes_one_row_each() {
         let (url, requested) = webhook_endpoint();
-        let (engine, fake, host) = rig_with_rule(|graph| add_discord_webhook(graph, url));
+        let (engine, fake, host) =
+            rig_with_rule_bypassing_the_enable_gate(|graph| add_discord_webhook(graph, url));
         let send = pending(&engine, &host, ArmState::armed(), 4_242);
 
         run_crossing(engine.clone(), host.clone(), send).await;

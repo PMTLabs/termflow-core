@@ -3331,6 +3331,234 @@
           "code": "timer.scheduleWithMonitor"
         }
       ]
+    },
+    {
+      "name": "Webhook — must have a destination",
+      "why": "A rule with no action and no webhook is blocked before save or enable.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "rule.noDestination"
+        }
+      ]
+    },
+    {
+      "name": "Webhook — URL is required",
+      "why": "An empty webhook URL is blocked before save or enable.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "webhook": {
+            "provider": "discord",
+            "url": "",
+            "body": "build failed"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "webhook.urlEmpty"
+        }
+      ]
+    },
+    {
+      "name": "Webhook — malformed URL is blocked",
+      "why": "A non-URL string cannot be used as a webhook destination.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "webhook": {
+            "provider": "discord",
+            "url": "not-a-url",
+            "body": "build failed"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "webhook.urlMalformed"
+        }
+      ]
+    },
+    {
+      "name": "Webhook — URL must be https",
+      "why": "An HTTP webhook destination is blocked because plaintext webhook traffic is unsafe.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "webhook": {
+            "provider": "discord",
+            "url": "http://hooks.example.invalid/relay",
+            "body": "build failed"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "webhook.urlNotHttps"
+        }
+      ]
+    },
+    {
+      "name": "Webhook — body is required",
+      "why": "A blank webhook body cannot be sent.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "webhook": {
+            "provider": "discord",
+            "url": "https://example.invalid/hook",
+            "body": ""
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "webhook.bodyEmpty"
+        }
+      ]
+    },
+    {
+      "name": "Webhook — custom body must be JSON (post-substitution)",
+      "why": "Custom webhooks validate the resolved body; this template would not parse after substitution.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "(?<value>\\\\w+)",
+            "keep": "brackets"
+          },
+          "webhook": {
+            "provider": "custom",
+            "url": "https://example.invalid/hook",
+            "body": "{\"k\": ${value}}",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "webhook.bodyNotJson"
+        }
+      ]
     }
   ]
 }
