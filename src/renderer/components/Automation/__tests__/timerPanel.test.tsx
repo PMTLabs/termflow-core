@@ -46,7 +46,22 @@ const ruleWith = (mode: AutomationTimerMode): AutomationRule => {
 };
 
 const delayed = (delayMs: number) => ruleWith({ afterMatch: { delayMs } });
-const scheduled = (minuteOfDay: number, days: number) => ruleWith({ dailyAt: { minuteOfDay, days } });
+
+/**
+ * **A schedule rule has no monitor, no parse and no cond** (plan 032 §3.1, §6.3) — and this fixture
+ * used to keep all three, because it was built from `blankDraft()` and only the timer was replaced.
+ *
+ * Every schedule case in this file was therefore asserting against a rule carrying the blocking
+ * `timer.scheduleWithMonitor`, and none of them noticed: they ask about the wait's own fields. It is
+ * also a shape the editor can no longer produce — `ruleFromDraft` omits the three input steps as a
+ * group when the canvas draws none of them (C1) — so the fixture was pinning the panel against a
+ * rule the product cannot save.
+ */
+const scheduled = (minuteOfDay: number, days: number): AutomationRule => {
+    const rule = ruleWith({ dailyAt: { minuteOfDay, days } });
+    const { monitor: _m, parse: _p, cond: _c, ...graph } = rule.graph;
+    return { ...rule, graph };
+};
 
 describe('the Wait inspector', () => {
     let container: HTMLDivElement;

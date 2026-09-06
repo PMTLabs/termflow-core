@@ -33,7 +33,7 @@ import type {
     AutomationTimerMode,
 } from '../../types/electron';
 import type { StepKind, TimerShape, Wire } from './automationSteps';
-import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
+import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
 // The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
 // state the gallery was showing before a card was clicked. Same direction `AutomationMenuSection`
@@ -409,8 +409,28 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
         // canvas to select. `'seeded'` selects the step it drew, which is what puts the pinned
         // terminal in front of the user instead of one palette drag away from being noticed.
         selected: opening === 'blank' ? null : 'monitor',
-        saved: baselineFor(opening, resolved, layout),
+        saved: baselineFor(opening, resolved, layout, present),
     };
+}
+
+/**
+ * The graph as a save would WRITE it — the group omission C1 turns on, in one place.
+ *
+ * Applied to the draft's own rule by `ruleFromDraft` and to the dirty check's BASELINE by
+ * `baselineFor`, from the same `present`. One side only is what `comparable`'s own header forbids:
+ * a blank canvas omits the three input steps on the way out, so a baseline that kept them made
+ * every untouched blank rule read dirty the instant it opened — a *Leave without saving?* prompt
+ * over a dialog about nothing, which is the exact defect `'blank'`'s baseline exists to prevent.
+ */
+function graphAsWritten(
+    graph: AutomationRule['graph'],
+    present: readonly StepKind[],
+): AutomationRule['graph'] {
+    if (INPUT_STEPS.some((s) => present.includes(s))) return graph;
+    // The KEYS go, not `undefined` values: §3.1's own note says the backend omits an absent step
+    // rather than sending `null`, so an absent step must not decode as a present-but-empty one.
+    const { monitor: _m, parse: _p, cond: _c, ...rest } = graph;
+    return rest;
 }
 
 /**
@@ -434,13 +454,15 @@ function baselineFor(
     opening: CanvasOpening,
     resolved: AutomationRule,
     layout: Record<StepKind, NodePos>,
+    present: readonly StepKind[],
 ): AutomationRule {
-    if (opening === 'seeded') return { ...resolved, targetIds: [] };
-    if (opening === 'template') {
-        const blank = blankDraft();
-        return { ...blank, graph: { ...blank.graph, layout } };
-    }
-    return resolved;
+    const base = opening === 'template'
+        ? { ...blankDraft(), graph: { ...blankDraft().graph, layout } }
+        : opening === 'seeded'
+            ? { ...resolved, targetIds: [] }
+            : resolved;
+    // Both sides through the same omission — see `graphAsWritten`.
+    return { ...base, graph: graphAsWritten(base.graph, present) };
 }
 
 /** The saved arrangement, or the default one for a rule that predates the field. */
@@ -462,13 +484,35 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
 /**
  * What a save sends.
  *
- * The canvas ARRANGEMENT is part of it; which steps are drawn and how they are wired still is not.
- * `present` and `wires` are re-derived from the four steps on every open and carry no user choice,
- * but a card's position is a choice, and one the user expects to survive — which is exactly what
- * makes it dirty-able and therefore what makes the unsaved-changes prompt honest.
+ * The canvas ARRANGEMENT is part of it, and so — for the three INPUT steps, as a group — is which
+ * cards are drawn. How they are wired still is not: `wires` is re-derived on every open from the
+ * steps the rule has and carries no user choice, while a card's position is a choice, and one the
+ * user expects to survive — which is exactly what makes it dirty-able and therefore what makes the
+ * unsaved-changes prompt honest.
  *
  * Injected HERE rather than mirrored into `draft.rule` on every drag, so `draft.layout` stays the
  * single owner of the arrangement and the two cannot disagree.
+ *
+ * **`monitor`, `parse` and `cond` are omitted when the canvas draws none of them — as a GROUP,
+ * never one at a time (C1).** `blankDraft()` scaffolds all three into the graph and there is no
+ * remove gesture, so a user who dragged *Wait* and *Send to terminal* onto an empty canvas and
+ * picked *At a time of day* produced a rule carrying a monitor: `timer.scheduleWithMonitor` blocked
+ * it, the header refused to enable it, `set_enabled_checked` refused it independently, and the
+ * blocking message told them to *"remove the Watch output step"* — a control that does not exist.
+ * The milestone's headline feature could not be authored in the product at all.
+ *
+ * **Per step it would open a worse hole than it closes**, which is why the group is the unit.
+ * *Watch → Wait → Send* would then write a monitor with no parse and no cond, and NOTHING reports
+ * that: `patternProblems` returns nothing for an absent parse and `clauseProblems` nothing for an
+ * absent cond, both deliberately, and there is no `ProblemCode` for *"this rule can never run"*.
+ * The rule would save, enable, count as live and never evaluate — where today the scaffold's blank
+ * `find` at least blocks it visibly with `parse.empty`. All-or-nothing is also
+ * `eval::InputSteps::of`'s own contract, so this follows the runtime's rule rather than inventing a
+ * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
+ * the partial cases.
+ *
+ * `action` is never omitted — §3.1 keeps it required on the DTO — and `timer` needs no rule here,
+ * because `addStep` materialises it into the graph exactly when the canvas reveals it.
  *
  * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
  * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
@@ -492,7 +536,7 @@ export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
     if (cond && (cond.clauses ?? []).length > 0 && (cond.op != null || cond.threshold != null)) {
         graph.cond = { ...cond, op: null, threshold: null };
     }
-    return { ...draft.rule, graph };
+    return { ...draft.rule, graph: graphAsWritten(graph, draft.present) };
 }
 
 /**

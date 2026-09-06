@@ -48,6 +48,20 @@ export const STEP_ORDER: readonly StepKind[] = Object.freeze([
 ]);
 
 /**
+ * The rule's INPUT — the three steps that read a terminal, **and the group they travel as** (§3.1).
+ *
+ * `eval::InputSteps::of` answers `None` unless a graph holds all three, and its own doc says why:
+ * *"a `monitor` with no `parse` has no pattern to look for, and a `cond` with no `parse` has nothing
+ * to compare, so a rule holding a strict subset cannot be evaluated either"*. That is a fact about
+ * the runtime, so the editor mirrors it rather than inventing a second contract —
+ * `ruleFromDraft` omits these three together or not at all, and nothing writes a strict subset.
+ *
+ * `timer` and `action` are deliberately not here: the wait reads nothing, and the send is the one
+ * step every rule has.
+ */
+export const INPUT_STEPS: readonly StepKind[] = Object.freeze(['monitor', 'parse', 'cond']);
+
+/**
  * Which of the wait step's two modes a rule is in — the DTO's own two spellings (§6.2, §6.3).
  *
  * A string rather than the DTO type, because nothing in this module reads a rule: the caller looks

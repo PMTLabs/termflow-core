@@ -482,20 +482,27 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     };
 
     // --- derived ---------------------------------------------------------------------------------------
+    //
+    // **`writing`, never `draft.rule` — the same one-object rule the enable gate and the dry run
+    // already follow.** Since C1, `ruleFromDraft` omits the three input steps when the canvas draws
+    // none of them, so `draft.rule` still carries `blankDraft()`'s scaffold for a rule that will be
+    // saved without it. Judged from the draft, a *Wait → Send* canvas summarised itself as a
+    // watching rule in the left rail, and `runtimeFootStep` found the scaffold's `cond` and put the
+    // runtime pill on a card that is not even drawn instead of on the Wait step it belongs to.
     const ctx = { pairs, now, problems };
     const faces = useMemo(() => {
         const out: Partial<Record<StepKind, NodeFace>> = {};
-        for (const step of STEP_ORDER) out[step] = faceFor(draft.rule, step, ctx);
+        for (const step of STEP_ORDER) out[step] = faceFor(writing, step, ctx);
         return out as Record<StepKind, NodeFace>;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft.rule, problems, pairs, now]);
+    }, [writing, problems, pairs, now]);
 
     const states = useMemo(() => {
         const out: Partial<Record<StepKind, NodeState>> = {};
-        for (const step of STEP_ORDER) out[step] = stateFor(draft.rule, step, ctx);
+        for (const step of STEP_ORDER) out[step] = stateFor(writing, step, ctx);
         return out as Record<StepKind, NodeState>;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft.rule, problems, pairs, now]);
+    }, [writing, problems, pairs, now]);
 
     // What each wire is carrying, from the draft — and from the last dry run when there is one,
     // because a real value beats a described one.
@@ -541,7 +548,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     });
 
     const rowState = pairs && Object.keys(pairs).length > 0
-        ? automationRowState(draft.rule, pairs, now)
+        ? automationRowState(writing, pairs, now)
         : null;
 
     return createPortal(
@@ -711,7 +718,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 <div className="au-mbody">
                     <AuPalette
                         present={draft.present}
-                        summary={ruleSummary(draft.rule)}
+                        summary={ruleSummary(writing)}
                         onBeginDrag={(step, e) => paletteDrag.begin(step, e)}
                         onAdd={(step) => addStep(step)}
                     />
