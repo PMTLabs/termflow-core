@@ -743,4 +743,43 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(opts[0]).toContain('$0');
         expect(opts[1]).toContain('$1');
     });
+
+    /**
+     * **`Source::Named` was validated and folded but never authorable.** It is modelled on both
+     * sides, `cond.unknownToken` has a `${bogus}` fixture case for it, and `fold_v1_clauses`
+     * PRODUCES one for a `(?<value>…)` pattern — so a clause could arrive holding a named token,
+     * round-trip through the panel's fallback `<option>`, and never be creatable in the first
+     * place. `groupsOf` has returned the name set since M2; the dropdown simply never read it.
+     *
+     * Both spellings are offered, and that is the point: a named group also occupies a numbered
+     * slot, so `$1` and `${code}` are two names for one capture.
+     */
+    it('offers the pattern\'s named groups as well as its numbered ones', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'err (?<code>\\d+) (?<why>\\w+)' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        const opts = [...select.options].map((o) => o.textContent ?? '');
+        expect(opts).toEqual([
+            expect.stringContaining('$0'),
+            '$1',
+            '$2',
+            '${code}',
+            '${why}',
+        ]);
+        // And the VALUES are the keys `sourceFromKey` round-trips, not the labels.
+        expect([...select.options].map((o) => o.value)).toEqual([
+            'whole',
+            'group:1',
+            'group:2',
+            'named:code',
+            'named:why',
+        ]);
+    });
+
+    it('offers no named option for a pattern that declares none', async () => {
+        // The paired negative: an unconditional `${…}` row, or one built from a stale name set,
+        // would satisfy the test above and break this.
+        await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        expect([...select.options].map((o) => o.value)).toEqual(['whole', 'group:1']);
+    });
 });

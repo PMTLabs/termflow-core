@@ -76,16 +76,28 @@ function sourceFromKey(key: string): AutomationSource {
 }
 
 /**
- * Only the tokens the pattern actually PRODUCES (§5.9) — `$0` plus its declared groups, never a
- * free-text field a user could point at a group the pattern does not have. Bound to `groupsOf`
- * rather than re-deriving the group count.
+ * Only the tokens the pattern actually PRODUCES (§5.9) — `$0`, its numbered groups and its NAMED
+ * ones, never a free-text field a user could point at a group the pattern does not have. Bound to
+ * `groupsOf` rather than re-deriving the group count.
+ *
+ * **The named groups are offered because `Source::Named` is otherwise unauthorable.** It is
+ * modelled, validated (`cond.unknownToken` has a `${bogus}` fixture case), and PRODUCED by the v1
+ * fold for a `(?<value>…)` pattern — so a clause could arrive holding one, round-trip through the
+ * fallback `<option>` below, and never be creatable. A named group also occupies a numbered slot,
+ * so both spellings appear: they are two names for one capture, and `${name}` is the one that
+ * survives an edit to the pattern that renumbers the brackets.
  */
 function tokenOptions(find: string): Array<{ key: string; label: string }> {
     const out: Array<{ key: string; label: string }> = [{ key: 'whole', label: '$0 — the whole match' }];
     if (compilePattern(find) === null) return out;
-    const { count } = groupsOf(find);
+    const { count, names } = groupsOf(find);
     for (let i = 1; i <= count; i += 1) {
         out.push({ key: `group:${i}`, label: `$${i}` });
+    }
+    // After the numbered ones, in the pattern's own declaration order — `groupsOf` reads them off
+    // `exec('').groups`, which JavaScript builds left to right.
+    for (const name of names) {
+        out.push({ key: `named:${name}`, label: `\${${name}}` });
     }
     return out;
 }
