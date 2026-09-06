@@ -395,7 +395,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             Severity::Blocks,
             "cond",
             "cond.incomplete",
-            "Choose how to compare the value, and the number to compare it with.",
+            "Add a comparison — this rule reads a value but has nothing to compare it with.",
         ));
     }
 
@@ -874,6 +874,31 @@ mod tests {
         ] {
             assert!(codes.contains(code), "no fixture case produces `{code}`");
         }
+    }
+
+    /// **A message must name a control that is on screen.** This one said *"Choose how to compare
+    /// the value, and the number to compare it with"* — the `<select>` and `<input>` pair that was
+    /// deleted when `CondPanel` became a clause list (§5.9). Choosing *A reading that stays true* on
+    /// a rule with no clauses reached it immediately, and the editor blocked with instructions for
+    /// two controls that no longer exist.
+    ///
+    /// `automationValidation.ts` asserts the same sentence, character for character: the shared
+    /// fixture compares `code` rather than prose, so the words are pinned once per implementation
+    /// and a change to either one has to be made in both.
+    #[test]
+    fn cond_incomplete_names_a_control_that_is_on_screen() {
+        let mut rule = valid_rule();
+        rule.graph.cond = CondStep { finds: Finds::Reading, ..Default::default() };
+
+        let found = problems(&rule);
+        let incomplete = found
+            .iter()
+            .find(|p| p.code == "cond.incomplete")
+            .unwrap_or_else(|| panic!("a Reading rule with no clauses must be incomplete: {found:?}"));
+        assert_eq!(
+            incomplete.message,
+            "Add a comparison — this rule reads a value but has nothing to compare it with."
+        );
     }
 
     /// An empty pattern matches every position of every string, so an unguarded echo check told

@@ -439,7 +439,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 'blocks',
                 'cond',
                 'cond.incomplete',
-                'Choose how to compare the value, and the number to compare it with.',
+                'Add a comparison — this rule reads a value but has nothing to compare it with.',
             ),
         );
     }

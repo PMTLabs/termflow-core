@@ -560,7 +560,20 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         case 'cond':
             return withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } });
         case 'clauses':
-            return withGraph(draft, { cond: { ...rule.graph.cond, clauses: action.clauses } });
+            // **A clause list SUPERSEDES `op`/`threshold`, so adding one has to clear the pair.**
+            // §5.3 makes them v1-only: read at load, folded into `clauses` by `fold_v1_clauses`,
+            // never written again. Merging `clauses` alone left them on the row, and
+            // `skip_serializing_if = "Option::is_none"` re-wrote them on the next save — a row
+            // carrying two contradictory conditions, where THIS build runs the clause and an older
+            // one ignores `clauses` entirely and runs `> 25`.
+            //
+            // Only when the resulting list is non-empty: removing the last clause from a v1 rule
+            // must leave it the rule it was, not silently strip its only comparison.
+            return withGraph(draft, {
+                cond: action.clauses.length > 0
+                    ? { ...rule.graph.cond, clauses: action.clauses, op: null, threshold: null }
+                    : { ...rule.graph.cond, clauses: action.clauses },
+            });
         case 'action':
             return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
         case 'select':

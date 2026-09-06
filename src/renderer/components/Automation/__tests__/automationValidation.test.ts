@@ -99,6 +99,29 @@ describe('automationValidation — the words the user reads', () => {
         );
     });
 
+    /**
+     * **A message must name a control that is on screen.** This one said *"Choose how to compare
+     * the value, and the number to compare it with"* — the `<select>` and `<input>` pair that was
+     * deleted when the condition became a clause list (§5.9). Choosing *A reading that stays true*
+     * on a rule with no clauses reached it immediately, and the editor blocked with instructions
+     * for two controls that no longer exist.
+     *
+     * `Add a comparison` is the button that is actually there, spelled exactly as the button
+     * spells it. `automation_validation.rs` asserts the same sentence, character for character.
+     */
+    it('names a control that is on screen', () => {
+        const reading: AutomationRule = {
+            ...base(),
+            graph: {
+                ...base().graph,
+                cond: { kind: 'number', op: null, threshold: null, clauses: [] },
+            },
+        };
+        expect(find(reading, 'cond.incomplete')?.message).toBe(
+            'Add a comparison — this rule reads a value but has nothing to compare it with.',
+        );
+    });
+
     it('quotes the floor in the interval message, rather than restating it', () => {
         const fast: AutomationRule = {
             ...base(),

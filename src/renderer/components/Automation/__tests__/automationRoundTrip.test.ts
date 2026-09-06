@@ -143,6 +143,51 @@ describe('draft ⇄ row', () => {
     });
 });
 
+/**
+ * §5.3 — `op`/`threshold` are v1 only: read at load, folded into `clauses`, **never written
+ * again**. The clause list is the condition once there is one, and a row carrying both is a row
+ * with two contradictory conditions on it: this build runs the clause, while an older build
+ * ignores `clauses` entirely and runs `> 25`.
+ */
+describe('a v1 rule that gains a clause', () => {
+    /** The canonical v1 numeric rule, exactly as a pre-M2 build wrote it. */
+    const v1 = (): AutomationRule => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        return {
+            ...base,
+            graph: { ...base.graph, cond: { kind: 'number', op: 'gt', threshold: 25 } },
+        };
+    };
+
+    it('stops carrying the superseded op/threshold on the row a save writes', () => {
+        const before = ruleFromDraft(draftFromRule(v1())).graph.cond;
+        expect(before.op).toBe('gt');
+        expect(before.threshold).toBe(25);
+
+        const withClause = draftReducer(draftFromRule(v1()), {
+            type: 'clauses',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'lt', value: 90 } } }],
+        });
+        // What a SAVE writes — `ruleFromDraft`, not `draft.rule` — and after the wire hop, which
+        // is where `skip_serializing_if = "Option::is_none"` decides whether the pair is re-written.
+        const saved = overTheWire(ruleFromDraft(withClause)).graph.cond;
+        expect(saved.clauses).toHaveLength(1);
+        expect(saved.op ?? null).toBeNull();
+        expect(saved.threshold ?? null).toBeNull();
+    });
+
+    it('keeps them when the clause list goes back to empty', () => {
+        // The paired negative, and the reason the clearing is conditional: removing the last clause
+        // from a v1 rule must leave it the rule it was, not silently strip its only comparison and
+        // turn it into one that fires on every match.
+        const emptied = draftReducer(draftFromRule(v1()), { type: 'clauses', clauses: [] });
+        const saved = ruleFromDraft(emptied).graph.cond;
+        expect(saved.clauses).toEqual([]);
+        expect(saved.op).toBe('gt');
+        expect(saved.threshold).toBe(25);
+    });
+});
+
 describe('draftFromRule', () => {
     /**
      * What `AutomationMenuSection`'s `newDraftFor` hands the host for "New automation for this
