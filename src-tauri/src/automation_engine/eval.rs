@@ -624,6 +624,7 @@ mod tests {
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".to_string(),
+                substitute: false,
             },
         }
     }

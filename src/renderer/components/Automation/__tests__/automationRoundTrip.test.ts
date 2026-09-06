@@ -79,6 +79,9 @@ describe('draft ⇄ row', () => {
             // the wire rather than being quietly replaced by `DEFAULT_LAYOUT` on the way through.
             graph: {
                 ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph,
+                // `substitute` is a plan-032 field none of the templates set — pinning it `true`
+                // here is what makes a dropped mapping fail this test rather than pass vacuously.
+                action: { ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph.action, substitute: true },
                 layout: {
                     monitor: { x: 11, y: 12 },
                     parse: { x: 21, y: 22 },

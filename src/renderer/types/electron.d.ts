@@ -544,6 +544,9 @@ export interface AutomationActionStep {
   submit: boolean;
   /** Q1's hybrid. `'default'` rather than route A's own `'copilot'`, which navigates history in a shell. */
   cliType: string;
+  /** Replace $1/$2/${name} in `message` with the pattern's captures. Off for every rule
+   *  written before this field existed — see plan 032 §4.2. */
+  substitute?: boolean;
 }
 
 /** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */

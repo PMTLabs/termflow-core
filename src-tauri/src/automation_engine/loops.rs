@@ -24,8 +24,9 @@ use crate::automation::targeting::watched_set;
 use crate::automation_engine::due::{
     due_now, select_due, settled_processes, BASE_TICK_MS, MAX_EVALS_PER_TICK, TARGETING_TICK_MS,
 };
-use crate::automation_engine::eval::{self, ArmState, Decision, Evaluation, Outcome, Read};
+use crate::automation_engine::eval::{self, ArmState, Captures, Decision, Evaluation, Outcome, Read};
 use crate::automation_engine::host::{EngineHost, HostPort};
+use crate::automation_engine::subst;
 use crate::automation_engine::{AutomationEngine, LiveRule};
 use crate::automation_store::{AutomationLogEntry, Cadence, Criterion, LogKind, TargetMode};
 use crate::state::ChannelPayload;
@@ -102,6 +103,13 @@ pub struct PendingSend {
     pub prev: ArmState,
     pub label: Option<String>,
     pub at_ms: i64,
+    /// This crossing's capture groups, for `run_send` to resolve `action.substitute` against.
+    /// `Decision::Sent` only ever follows a `Truth::True`, and both `evaluate`'s branches only ever
+    /// report that with a real match behind it — so `evaluate_pair` always hands this `Some`.
+    /// `None` exists for the fixtures (`pending()`) that build a `PendingSend` directly for a test
+    /// that is not about substitution at all; `subst::substitute` refuses a `None` the same way it
+    /// refuses an empty `Captures` — only if the message actually names a token.
+    pub captures: Option<Captures>,
 }
 
 pub async fn run_evaluator(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>) {
@@ -310,6 +318,9 @@ pub fn evaluate_pair(
         // written after the terminal is gone, when there is no name left to look up.
         label: host.label_for(&pair.tm),
         at_ms: now_ms,
+        // This crossing's own captures, so `run_send` resolves `$1`/`$2` against the match that
+        // actually fired rather than re-reading the terminal after the fact.
+        captures: ev.captures,
     }))
 }
 
@@ -426,6 +437,24 @@ pub async fn run_send(
     }
 
     let action = &rule.graph.action;
+    let body = if action.substitute {
+        match subst::substitute(&action.message, send.captures.as_ref()) {
+            Ok(s) => s,
+            // §4.4: refuse. A message with a live `$3` still in it typed into a running agent is
+            // the "unintended content" this whole feature exists to prevent, and a refusal that is
+            // logged is the safe fallback it asks for instead.
+            Err(e) => {
+                return fail(
+                    &engine,
+                    &host,
+                    &send,
+                    &format!("nothing sent — {e} had no value at the moment it fired"),
+                );
+            }
+        }
+    } else {
+        action.message.clone()
+    };
     let (separator, end_indicator) =
         crate::api_server::get_cli_pattern(&action.cli_type).unwrap_or(("", "\r"));
     let outcome = crate::automation::send::deliver(
@@ -433,7 +462,7 @@ pub async fn run_send(
         &pc,
         &action.cli_type,
         crate::automation::send::SubmitPattern { separator, end_indicator },
-        &action.message,
+        &body,
         action.submit,
     )
     .await;
@@ -449,8 +478,10 @@ pub async fn run_send(
     // record when the crossing happened and not when the typing finished.
     let landed = at + began.elapsed().as_millis() as i64;
     // §2.6 layer 1, then layer 2: the needle first, so a tick that slips through the settle window
-    // still strips it.
-    engine.runtime.push_echo(&tm, &crate::automation::send::normalise(&action.message), landed);
+    // still strips it. The needle is `body` — what actually reached the terminal — never
+    // `action.message`: with substitution on, the terminal echoes the RESOLVED text, and a needle
+    // still carrying `$1` would never match it.
+    engine.runtime.push_echo(&tm, &crate::automation::send::normalise(&body), landed);
     engine.runtime.settle_until(&tm, landed + ECHO_SETTLE_MS);
     engine.runtime.record_fire(&rule.id, &tm, at);
 
@@ -750,6 +781,7 @@ mod tests {
     // only ever be one of each.
     use crate::automation_engine::test_host::*;
     use crate::automation::roster::RosterRow;
+    use crate::automation_store::CondKind;
 
     // =============================================================================================
     // §10.5 — the tap
@@ -899,6 +931,87 @@ mod tests {
         assert!(!engine.runtime.is_settling("tm-1", 2_000 + gap + ECHO_SETTLE_MS + 1));
     }
 
+    // =============================================================================================
+    // §4.2, §4.4 — substitution on the send path
+    // =============================================================================================
+
+    /// The crossing types the RESOLVED message, not the template — `$1`/`$2` swapped for the
+    /// pattern's own captures. Pre-armed rather than driven through a first-sight tick, so the one
+    /// `evaluate_tick` call is the crossing itself (`Armed` + true -> `Sent`), the same shape
+    /// `a_rule_re_arms_when_the_only_thing_left_on_screen_is_its_own_echo` uses to isolate a send.
+    #[tokio::test(start_paused = true)]
+    async fn a_crossing_types_the_resolved_message() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = r"FAILED (\d+) tests in (\S+)".into();
+            g.cond.kind = CondKind::Text;
+            g.action.message = "Fix the $1 failing tests in $2".into();
+            g.action.substitute = true;
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "FAILED 17 tests in a.ts");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(
+            fake.written().iter().any(|w| w.contains("Fix the 17 failing tests in a.ts")),
+            "the resolved message was never typed: {:?}",
+            fake.written()
+        );
+    }
+
+    /// The regression this flag exists to prevent: `substitute: false` (the default) sends the
+    /// message byte for byte, `$` and all, even though it is syntactically full of tokens.
+    #[tokio::test(start_paused = true)]
+    async fn substitution_off_types_the_message_verbatim() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = r"FAILED (\d+)".into();
+            g.cond.kind = CondKind::Text;
+            g.action.message = "awk '{print $1}'".into();
+            g.action.substitute = false;
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "FAILED 17");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(
+            fake.written().iter().any(|w| w.contains("awk '{print $1}'")),
+            "the literal message was never typed: {:?}",
+            fake.written()
+        );
+    }
+
+    /// §4.4's last row. Validation should have caught this, so reaching it means a rule got here
+    /// another way — and the answer is still "type nothing": refuse the send and log the token
+    /// rather than type a live `$3` into a running agent.
+    #[tokio::test(start_paused = true)]
+    async fn an_unresolvable_token_refuses_the_send_and_logs_it() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = r"FAILED (\d+)".into();
+            g.cond.kind = CondKind::Text;
+            g.action.message = "Fix $3".into();
+            g.action.substitute = true;
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "FAILED 17");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(fake.written().is_empty(), "nothing may be typed: {:?}", fake.written());
+        let log = log_details(&fake.store);
+        assert!(
+            log.iter().any(|(_, detail)| detail.contains("$3")),
+            "the failure row must name the token, got: {log:?}"
+        );
+        assert!(log.iter().any(|(kind, _)| kind == "Failed"), "and it must be a Failed row: {log:?}");
+    }
+
     /// A terminal that is not live is DORMANT, not dead: no evaluation, no log line, no state change.
     /// The natural wrong implementation — treating an absent terminal as "condition false" — re-arms
     /// every rule on every terminal that is merely closed for a moment.
@@ -959,6 +1072,9 @@ mod tests {
             prev,
             label: host.label_for("tm-1"),
             at_ms,
+            // None of this fixture's callers exercise substitution — they are the rollback/
+            // serialisation suites, which vary the terminal and the queue, not the message.
+            captures: None,
         }
     }
 

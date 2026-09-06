@@ -216,6 +216,15 @@ pub struct ActionStep {
     /// own default of `"copilot"` (Down-Arrow + CR), which navigates history in a plain shell.
     #[serde(default = "default_cli_type")]
     pub cli_type: String,
+    /// Whether `$1`, `$2`, `${name}` in `message` are replaced with the pattern's captures.
+    ///
+    /// **Defaults to `false`, and that is a correctness decision, not caution.** `$` is a legal
+    /// literal today — `awk '{print $1}'` and `echo $PATH` are messages people have already
+    /// written — so substituting by default would silently rewrite them with no error. Every
+    /// rule written before this field loads with it off and sends exactly what it sent
+    /// yesterday. Plan 032 §4.2.
+    #[serde(default)]
+    pub substitute: bool,
 }
 
 fn default_send_to() -> SendTo {
@@ -1958,6 +1967,7 @@ mod tests {
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".to_string(),
+                substitute: false,
             },
         }
     }
@@ -2186,6 +2196,27 @@ mod tests {
         assert_eq!(loaded.schema_version, SUPPORTED_SCHEMA_VERSION + 1);
         assert!(!loaded.is_runnable(), "and the engine is told to skip it");
         assert!(listed.iter().find(|r| r.id == "au-ok").unwrap().is_runnable());
+    }
+
+    /// Plan 032 §4.2: a graph blob written by a build before `substitute` existed has no such key at
+    /// all — decoding it must not fail, and must not turn substitution on behind the user's back.
+    /// `awk '{print $1}'` is a message someone may already have saved, and this is the test that
+    /// pins it keeps sending literally after the upgrade.
+    ///
+    /// A mutation that changes `#[serde(default)]` to a function returning `true` is exactly the
+    /// regression this guards: only THIS test would catch it, because every fixture literal in this
+    /// crate sets `substitute` explicitly and so never exercises serde's own default.
+    #[test]
+    fn a_graph_with_no_substitute_key_decodes_with_it_off() {
+        let raw = r#"{
+            "monitor": {"read": "newOutput", "cadence": "onOutput", "everyMs": 0},
+            "parse": {"preset": "custom", "find": "FAILED (\\d+)", "keep": "brackets"},
+            "cond": {"kind": "text"},
+            "action": {"message": "awk '{print $1}'", "sendTo": "matched", "submit": true, "cliType": "default"}
+        }"#;
+        let decoded: AutomationGraph =
+            serde_json::from_str(raw).expect("a graph missing only a newer optional field must still decode");
+        assert!(!decoded.action.substitute, "a rule from before this field existed must load with it off");
     }
 
     // -- §10.14b ------------------------------------------------------------------------------

@@ -206,6 +206,7 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".into(),
+                substitute: false,
             },
         },
         created_at: 1_000,
@@ -234,6 +235,17 @@ pub(crate) fn wire(rules: Vec<AutomationRule>) -> (Arc<AutomationEngine>, Arc<Fa
 /// The canonical rule, alone.
 pub(crate) fn wired() -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
     wire(vec![ctx_rule("au-1")])
+}
+
+/// The canonical rule, with its graph adjustable through a closure — for a test that needs to change
+/// more than the one or two fields `ctx_rule_saying`/`presence_rule` cover (§4.2/§4.4's substitution
+/// tests vary `parse.find`, `cond.kind`, `action.message` and `action.substitute` together).
+pub(crate) fn rig_with_rule(
+    f: impl FnOnce(&mut AutomationGraph),
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let mut rule = ctx_rule("au-1");
+    f(&mut rule.graph);
+    wire(vec![rule])
 }
 
 pub(crate) fn log_kinds(store: &AutomationStore) -> Vec<String> {

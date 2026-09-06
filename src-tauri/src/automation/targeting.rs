@@ -485,6 +485,7 @@ mod tests {
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".into(),
+                    substitute: false,
                 },
             },
             created_at: 0,
