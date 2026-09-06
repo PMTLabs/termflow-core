@@ -1585,6 +1585,15 @@ impl AutomationStore {
     /// A row from a NEWER build (`rule.schema_version > SUPPORTED_SCHEMA_VERSION`) is written back
     /// with its own number **unchanged**: this build cannot know which v3+ feature such a graph
     /// uses, and recomputing would silently relabel it (task 27 ruling R3).
+    ///
+    /// **The NUMBER is unchanged. The GRAPH is not (M6 review, doc-only fix).** `rule.graph` here
+    /// is not the bytes the newer build wrote — it is whatever THIS build's `serde` could make of
+    /// them, decoded lossily by `read_rule_on` before ever reaching this function: a v3+ field this
+    /// build's `AutomationGraph` does not know about is already gone. `add_target_to_rule`,
+    /// `remove_target_from_rule` and `duplicate_automation` all load a rule this way and re-serialise
+    /// the WHOLE graph through here, so each one re-writes a graph already missing whatever it could
+    /// not parse. No v3 exists yet, so this is prospective — but the stamp staying honest must not be
+    /// read as the graph staying whole, which is exactly the sentence above invited on its own.
     fn write_rule(
         tx: &rusqlite::Transaction<'_>,
         rule: &AutomationRule,
