@@ -337,7 +337,19 @@ export function faceFor(rule: AutomationRule, step: StepKind, ctx: DeriveContext
     return { title: STEP_LABELS[step], rows, foot: null, footTone: null };
 }
 
-export type NodeTone = 'error' | 'warn' | 'live' | 'ready';
+export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
+
+/**
+ * Does the rule actually HAVE this step? (plan 032 §3.1.)
+ *
+ * `action` is the one step no rule can be without — a rule with nothing to send is not a rule — so
+ * it is the only kind this answers `true` for unconditionally. The other three are optional on the
+ * DTO, and `draftFromRule` draws all four cards for any saved rule whatever the graph holds, so a
+ * schedule rule (§6.3) opens with three cards standing for steps it does not have.
+ */
+function hasStep(rule: AutomationRule, step: StepKind): boolean {
+    return step === 'action' || rule.graph[step] != null;
+}
 
 export interface NodeState {
     tone: NodeTone;
@@ -351,6 +363,24 @@ export function stateFor(rule: AutomationRule, step: StepKind, ctx: DeriveContex
     if (blocking) return { tone: 'error', title: blocking.message };
     const warning = mine.find((p) => p.severity === 'warns');
     if (warning) return { tone: 'warn', title: warning.message };
+    // **A step the rule does not HAVE is not a step that is configured.**
+    //
+    // `stateFor` never consulted `rule.graph`, so for an absent step — where validation correctly
+    // reports nothing — it fell through to a green dot reading *"This step is configured."* on a
+    // card whose own rows, from `stepValues`, read *"not in this rule"*. Same card, two claims: the
+    // fourth site of the class `430a6d3` fixed at three. The title is built FROM
+    // `NOT_IN_THIS_RULE` so the dot and the rows cannot be reworded apart.
+    //
+    // **Below the two problem branches, not above them, and that is deliberate.** The monitor
+    // step's field list includes `targets`, and targeting survives an absent monitor step —
+    // `targetMode`/`targetIds` are the rule's own columns (see `stepValues`), so a pinned schedule
+    // rule with nothing ticked reports the blocking `targets.empty` against a step it does not
+    // have, and the Watch row on that very card says which terminals are missing. An absent-step
+    // guard placed first would swallow a real, actionable, on-screen error to say something the
+    // rows already say.
+    if (!hasStep(rule, step)) {
+        return { tone: 'absent', title: `This step is ${NOT_IN_THIS_RULE.text}.` };
+    }
     if (step === 'cond' && ctx.pairs && Object.keys(ctx.pairs).length > 0) {
         const state = automationRowState(rule, ctx.pairs, ctx.now);
         return { tone: 'live', title: state.pillText };

@@ -227,6 +227,79 @@ describe('automationDerive — the monitor node owns both of its problem categor
     });
 });
 
+/**
+ * **A card standing for a step the rule does not have must not claim it is configured.**
+ *
+ * `draftFromRule` draws all four cards for any SAVED rule, whatever the graph holds, so a schedule
+ * rule (plan 032 §3.1, §6.3) opens with three cards whose rows read *"not in this rule"*. `stateFor`
+ * never consulted `rule.graph`: validation correctly reports nothing for an absent step, so it fell
+ * straight through to a green dot titled *"This step is configured."* — same card, two claims, the
+ * fourth site of the class `430a6d3` fixed at three.
+ */
+describe('automationDerive — a step the rule does not have', () => {
+    /** A schedule rule: no monitor, no parse, no cond — it fires on the clock. */
+    const scheduleRule = () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = base.graph;
+        return {
+            ...base,
+            id: 'au-sched',
+            enabled: true,
+            graph: { ...graph, timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } } },
+        };
+    };
+
+    it.each(['monitor', 'parse', 'cond'] as const)(
+        'does not report %s as configured when the rule has no such step',
+        (step) => {
+            const rule = scheduleRule();
+            const ctx = ctxFor(rule);
+            // The premise, so a fixture that quietly grew the step back cannot make this vacuous.
+            expect(rule.graph[step]).toBeUndefined();
+
+            const state = stateFor(rule, step, ctx);
+            expect(state.tone).toBe('absent');
+            expect(state.title).toBe('This step is not in this rule.');
+            // And the dot agrees with the rows on the very same card.
+            expect(faceText(rule, step)).toContain('not in this rule');
+        },
+    );
+
+    it('still says CONFIGURED for the one step every rule has', () => {
+        // The paired positive: a guard that answered `absent` for everything would pass the table
+        // above completely, and `action` is the step no rule can be without.
+        const rule = scheduleRule();
+        expect(stateFor(rule, 'action', ctxFor(rule))).toEqual({
+            tone: 'ready',
+            title: 'This step is configured.',
+        });
+    });
+
+    it('and a live pair does not make an absent compare step live', () => {
+        // The `cond` branch is the one that would otherwise have reached the runtime pill instead
+        // of the green dot — a different wrong answer for the same card, not a right one.
+        const ctx: DeriveContext = {
+            now: NOW,
+            problems: [],
+            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1, missing: false } },
+        };
+        expect(stateFor(scheduleRule(), 'cond', ctx).tone).toBe('absent');
+    });
+
+    it('but a real problem on an absent step still outranks it', () => {
+        // **Why the guard sits BELOW the two problem branches.** `STEP_FIELDS.monitor` includes
+        // `targets`, and targeting survives an absent monitor step — `targetMode`/`targetIds` are
+        // the rule's own columns — so a pinned schedule rule with nothing ticked has a blocking,
+        // actionable problem reported against a step it does not have, and the Watch row on that
+        // card names it. Swallowing that to repeat what the rows already say would be a worse card,
+        // not a truer one.
+        const rule = { ...scheduleRule(), targetMode: 'pinned' as const, targetIds: [] };
+        const ctx = ctxFor(rule);
+        expect(ctx.problems.map((p) => p.code)).toContain('targets.empty');
+        expect(stateFor(rule, 'monitor', ctx).tone).toBe('error');
+    });
+});
+
 describe('automationDerive — missing values are marked, not blank', () => {
     it('says what is missing rather than showing an empty row', () => {
         // §07's own node: `Find | nothing to look for`, drawn in the warning colour. A blank row

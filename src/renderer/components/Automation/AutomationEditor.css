@@ -528,6 +528,12 @@
     background: #3fb950;
 }
 
+/* A step the rule does not have (plan 032 §3.1) — the same grey the bare dot uses, written out so
+   a future edit of the base rule cannot silently give this one a meaning it has not got. */
+.au-editor .au-nstate.absent {
+    background: #7d818c;
+}
+
 .au-editor .au-nbody {
     flex: 1;
     padding: 6px 9px 6px 11px;
