@@ -6,7 +6,8 @@
 //!
 //! **A `$` that is not a token stays a literal `$`.** `awk '{print $1}'` is a message somebody
 //! has already written, and the opt-in `ActionStep.substitute` flag (§4.2) is what keeps it
-//! working — but even with substitution on, `$x` and a trailing `$` are text.
+//! working — but even with substitution on, `$x` and a trailing `$` are text. The shared fixture
+//! pins both token recognition and the rendered substitution result on this side and the renderer.
 
 use crate::automation_engine::eval::Captures;
 use std::fmt;
@@ -153,6 +154,21 @@ mod tests {
         }
     }
 
+    /// The shared grammar fixture's declared capture universe: enough numbered slots to exercise
+    /// `${12}`, plus both names it uses. Values are deliberately mechanical so a rendered row
+    /// exposes scanner/literal drift rather than depending on the production-shaped `caps()`.
+    fn fixture_caps() -> Captures {
+        Captures {
+            groups: std::iter::once(Some("whole".to_string()))
+                .chain((1..=12).map(|n| Some(format!("g{n}"))))
+                .collect(),
+            named: BTreeMap::from([
+                ("file".to_string(), Some("file".to_string())),
+                ("1x".to_string(), Some("one-x".to_string())),
+            ]),
+        }
+    }
+
     #[test]
     fn the_shared_token_fixture_agrees_with_the_scanner() {
         #[derive(serde::Deserialize)]
@@ -163,6 +179,7 @@ mod tests {
         struct Case {
             input: String,
             tokens: Vec<FixtureToken>,
+            rendered: String,
         }
         #[derive(serde::Deserialize)]
         #[serde(tag = "kind", rename_all = "lowercase")]
@@ -189,6 +206,12 @@ mod tests {
                 })
                 .collect();
             assert_eq!(tokens_used(&case.input), want, "input was {:?}", case.input);
+            assert_eq!(
+                substitute(&case.input, Some(&fixture_caps())).expect("fixture captures resolve every token"),
+                case.rendered,
+                "input was {:?}",
+                case.input,
+            );
         }
     }
 

@@ -17,9 +17,17 @@ const named = (name: string): Token => ({ kind: 'named', name, text: `\${${name}
 interface FixtureCase {
     input: string;
     tokens: Array<{ kind: 'group'; n: number } | { kind: 'named'; name: string }>;
+    rendered: string;
 }
 
 const cases = (fixture as unknown as { cases: FixtureCase[] }).cases;
+const fixtureGroups = { count: 12, names: new Set(['file', '1x']) };
+const fixtureSample: Record<string, string> = {
+    '0': 'whole',
+    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [String(i + 1), `g${i + 1}`])),
+    file: 'file',
+    '1x': 'one-x',
+};
 
 describe('tokensUsed — the shared grammar fixture', () => {
     it('has not shrunk to nothing', () => {
@@ -31,6 +39,9 @@ describe('tokensUsed — the shared grammar fixture', () => {
         const want = testCase.tokens.map((token) =>
             token.kind === 'group' ? group(token.n) : named(token.name));
         expect(tokensUsed(testCase.input)).toEqual(want);
+
+        const preview = previewSubstitute(testCase.input, fixtureGroups, fixtureSample);
+        expect(preview).toEqual({ ok: true, parts: [{ kind: 'text', text: testCase.rendered }] });
     });
 });
 

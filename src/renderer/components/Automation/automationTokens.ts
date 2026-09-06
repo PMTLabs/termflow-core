@@ -1,17 +1,18 @@
 /**
- * The `$0` / `$1` / `${name}` / `$$` grammar, scan-only — ported from the ONE scanner
+ * The `$0` / `$1` / `${name}` / `$$` grammar, scanned for validation and preview rendering — ported from the ONE scanner
  * `src-tauri/src/automation_engine/subst.rs` owns for the Rust side (`scan`, read that module's
  * doc first for the full grammar table: `$$` escaping, `$x` and a trailing `$` as literals,
  * `${12}` vs `$12`).
  *
  * **Why a second scanner exists at all, and why it must not drift from the first.** The renderer
- * has no `substitute` — only the backend ever types a message into a pty — so this side only
- * needs to know WHICH tokens a message names, never to resolve them. But `automationValidation.ts`
+ * has no send-side `substitute` — only the backend ever types a message into a pty — but its
+ * preview resolves the same tokens a user is about to send. `automationValidation.ts`
  * uses this to decide whether a message can be SAVED, and `subst::substitute` is what decides
  * whether it can be SENT; if the two scanners ever recognised a different grammar, a message could
  * pass validation here and still be refused at send time — the exact failure `two-implementations-
  * one-fix` warns about, just one module over. `automationTokenCases.json` is read by this side and
- * by `subst.rs`, so an edit to either scanner has one grammar table to disagree with.
+ * by `subst.rs`, so an edit to either scanner has one grammar table to disagree with on both
+ * recognised tokens and rendered output.
  *
  * **One simplification from the Rust `Token` enum: no separate `Whole` variant.** Rust keeps `$0`
  * (`Token::Whole`) and `${0}` (`Token::Group(0)`) as distinct enum cases only because `substitute`
