@@ -99,6 +99,7 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     // `draft.present`, not a reason to give one kind two default positions.
     timer: { x: AU_GAP_X * 3, y: 0 },
     action: { x: AU_GAP_X * 4, y: 0 },
+    webhook: { x: AU_GAP_X * 5, y: 0 },
 };
 
 /**
@@ -438,14 +439,23 @@ function graphAsWritten(
 ): AutomationRule['graph'] {
     const keepInput = INPUT_STEPS.some((s) => present.includes(s));
     const keepAction = present.includes('action');
-    if (keepInput && keepAction) return graph;
+    const keepWebhook = present.includes('webhook');
+    const graphHasInput = INPUT_STEPS.some((step) => step in graph);
+    // Preserve the graph object whenever it already says exactly what the canvas says. Besides
+    // avoiding churn, that preserves property order for the dirty check's wire-shaped baseline.
+    if (
+        (keepInput || !graphHasInput)
+        && (keepAction || !('action' in graph))
+        && (keepWebhook || !('webhook' in graph))
+    ) return graph;
     // The KEYS go, not `undefined` values. In particular, an action scaffold hidden by the canvas
     // must not survive serialisation and submit an Enter in a supposedly webhook-only rule.
-    const { monitor, parse, cond, action, ...rest } = graph;
+    const { monitor, parse, cond, action, webhook, ...rest } = graph;
     return {
         ...rest,
         ...(keepInput ? { monitor, parse, cond } : {}),
         ...(keepAction ? { action } : {}),
+        ...(keepWebhook ? { webhook } : {}),
     };
 }
 
@@ -524,8 +534,8 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
  * the partial cases.
  *
- * `action` is never omitted — §3.1 keeps it required on the DTO — and `timer` needs no rule here,
- * because `addStep` materialises it into the graph exactly when the canvas reveals it.
+ * The two destinations are omitted independently when their cards are absent; `timer` needs no rule
+ * here, because `addStep` materialises it into the graph exactly when the canvas reveals it.
  *
  * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
  * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
@@ -731,6 +741,11 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
         const action = rule.graph.action ?? blankDraft().graph.action;
         return action ? { ...rule, graph: { ...rule.graph, action } } : rule;
     }
+    if (step === 'webhook') {
+        return rule.graph.webhook == null
+            ? { ...rule, graph: { ...rule.graph, webhook: { provider: 'discord', url: '', body: '' } } }
+            : rule;
+    }
     if (INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
     const blank = blankDraft().graph;
     return {
@@ -886,6 +901,22 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         case 'addWire':
             return { ...draft, wires: [...draft.wires, action.wire] };
         case 'removeWire':
+            // A destination card has exactly one incoming wire, so its wire chip is its remove
+            // gesture. Removing it must remove the destination too: merely hiding the card while
+            // retaining `action` would leave a live terminal send on a webhook-only canvas.
+            if (action.wire.to.step === 'action' || action.wire.to.step === 'webhook') {
+                const destination = action.wire.to.step;
+                const { [destination]: _removed, ...graph } = rule.graph;
+                const present = draft.present.filter((step) => step !== destination);
+                const next = { ...rule, graph };
+                return {
+                    ...draft,
+                    rule: next,
+                    present,
+                    wires: defaultWires(present, timerShapeOf(next)),
+                    selected: draft.selected === destination ? null : draft.selected,
+                };
+            }
             return {
                 ...draft,
                 wires: draft.wires.filter(

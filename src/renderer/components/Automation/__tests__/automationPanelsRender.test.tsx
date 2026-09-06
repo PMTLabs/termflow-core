@@ -183,6 +183,8 @@ describe('the inspector panels — rendered, per template', () => {
             // sentence about a missing step both surfaces state in prose.
             timer: ['when'],
             action: ['message', 'send'],
+            // Task 11 adds the canvas card. Its editable inspector is deliberately Task 12.
+            webhook: [],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         for (const step of STEP_ORDER) {

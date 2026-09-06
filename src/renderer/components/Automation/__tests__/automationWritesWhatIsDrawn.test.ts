@@ -26,6 +26,13 @@ const run = (draft: AutomationDraft, actions: DraftAction[]): AutomationDraft =>
 const blockingCodes = (draft: AutomationDraft): string[] =>
     blockingProblems(problems(ruleFromDraft(draft))).map((p) => p.code);
 
+const webhook = { provider: 'discord' as const, url: 'https://hooks.example.invalid/canvas', body: 'done' };
+
+const configuredWebhook = (draft: AutomationDraft): AutomationDraft => ({
+    ...draft,
+    rule: { ...draft.rule, graph: { ...draft.rule.graph, webhook } },
+});
+
 describe('the editor writes the steps the canvas draws', () => {
     it('omits a hidden action scaffold from the graph a save serializes', () => {
         const draft = draftFromRule(blankDraft(), 'blank');
@@ -43,6 +50,74 @@ describe('the editor writes the steps the canvas draws', () => {
         const after = draftReducer(draft, { type: 'action', patch: { message: 'do not send' } });
         expect(after).toBe(draft);
         expect(after.rule.graph).not.toHaveProperty('action');
+    });
+
+    it('creates and reopens a webhook-only canvas without serializing the action scaffold', () => {
+        const created = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'webhook' },
+        ]));
+
+        const saved = JSON.parse(JSON.stringify(ruleFromDraft(created)));
+        expect(saved.graph.action).toBeUndefined();
+        expect(saved.graph.webhook).toEqual(webhook);
+
+        const reopened = draftFromRule(saved);
+        expect(reopened.present).toEqual(['monitor', 'parse', 'cond', 'webhook']);
+        expect(reopened.wires).toEqual([
+            { from: { step: 'monitor', port: 'out' }, to: { step: 'parse', port: 'in' } },
+            { from: { step: 'parse', port: 'out' }, to: { step: 'cond', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        ]);
+    });
+
+    it('adds a terminal send beside a webhook destination and reopens both', () => {
+        const withBoth = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'webhook' },
+            { type: 'addStep', step: 'action' },
+            { type: 'action', patch: { message: 'send this too' } },
+        ]));
+
+        const reopened = draftFromRule(JSON.parse(JSON.stringify(ruleFromDraft(withBoth))));
+        expect(reopened.present).toEqual(['monitor', 'parse', 'cond', 'action', 'webhook']);
+        expect(reopened.wires).toEqual([
+            { from: { step: 'monitor', port: 'out' }, to: { step: 'parse', port: 'in' } },
+            { from: { step: 'parse', port: 'out' }, to: { step: 'cond', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        ]);
+    });
+
+    it('removes either destination through its wire chip without retaining an action scaffold', () => {
+        const withBoth = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'action' },
+            { type: 'action', patch: { message: 'send this too' } },
+            { type: 'addStep', step: 'webhook' },
+        ]));
+
+        const withoutTerminal = draftReducer(withBoth, {
+            type: 'removeWire',
+            wire: { from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } },
+        });
+        expect(withoutTerminal.present).toEqual(['monitor', 'parse', 'cond', 'webhook']);
+        expect(ruleFromDraft(withoutTerminal).graph.action).toBeUndefined();
+        expect(ruleFromDraft(withoutTerminal).graph.webhook).toEqual(webhook);
+
+        const withoutWebhook = draftReducer(withBoth, {
+            type: 'removeWire',
+            wire: { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        });
+        expect(withoutWebhook.present).toEqual(['monitor', 'parse', 'cond', 'action']);
+        expect(ruleFromDraft(withoutWebhook).graph.webhook).toBeUndefined();
+        expect(ruleFromDraft(withoutWebhook).graph.action?.message).toBe('send this too');
     });
 
     /**

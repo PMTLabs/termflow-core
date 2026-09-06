@@ -52,6 +52,8 @@ export const STEP_FIELDS: Record<StepKind, ProblemField[]> = {
     cond: ['cond'],
     timer: ['timer'],
     action: ['action'],
+    // Webhook validation is still owned by the destination field until Task 12 adds its panel.
+    webhook: [],
 };
 
 export interface DeriveContext {
@@ -268,7 +270,7 @@ export function describeDelay(ms: number): string {
  * face that silently picked `values[1]` would break the moment a row moved.
  */
 export function stepValues(rule: AutomationRule, step: StepKind): Record<string, StepValue> {
-    const { monitor, parse, cond, timer, action } = rule.graph;
+    const { monitor, parse, cond, timer, action, webhook } = rule.graph;
     switch (step) {
         case 'monitor':
             return {
@@ -361,6 +363,8 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
                 send: value(action.submit ? SEND_PHRASES.submit : SEND_PHRASES.hold),
                 sendTo: value(SEND_TO_PHRASES[action.sendTo]),
             };
+        case 'webhook':
+            return { provider: webhook ? value(webhook.provider) : NOT_IN_THIS_RULE };
     }
 }
 
@@ -405,6 +409,11 @@ const FACE_ROWS: Record<StepKind, Array<{ label: string; key: string }>> = {
     action: [
         { label: 'Send', key: 'message' },
         { label: 'Then', key: 'send' },
+    ],
+    webhook: [
+        // The endpoint is a credential. Provider is the only webhook configuration safe to show
+        // on the canvas; Task 12 owns its editable inspector.
+        { label: 'Post', key: 'provider' },
     ],
 };
 
@@ -480,9 +489,8 @@ export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
 /**
  * Does the rule actually HAVE this step? (plan 032 §3.1.)
  *
- * `action` is the one step no rule can be without — a rule with nothing to send is not a rule — so
- * it is the only kind this answers `true` for unconditionally. The other three are optional on the
- * DTO. Since task 29 `draftFromRule` draws only the steps a rule HAS, so the editor no longer opens
+ * Every step is optional on the DTO: a rule needs at least one destination, not necessarily a
+ * terminal send. Since task 29 `draftFromRule` draws only the steps a rule HAS, so the editor no longer opens
  * a schedule rule on three cards standing for steps it does not have — but this answer is still
  * load-bearing for every other reader of a graph, the test pane included, and for a row that reached
  * the store by some other route.
