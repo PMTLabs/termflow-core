@@ -657,6 +657,55 @@ const withGraph = (
 ): AutomationDraft => withRule(draft, { ...draft.rule, graph: { ...draft.rule.graph, ...graph } });
 
 /**
+ * How far below a card the next row of cards begins — the vertical twin of `AU_GAP_X`'s reasoning.
+ *
+ * Only `freeSlot` uses it, and only when a default slot is already occupied. Big enough that the two
+ * cards read as two rows rather than as a near-miss; `AU_NODE_H` alone would leave their borders
+ * touching.
+ */
+const AU_GAP_Y = 48;
+
+/** Do two cards' boxes overlap at all? `AU_NODE_W` × `AU_NODE_H`, axis-aligned. */
+const overlaps = (a: NodePos, b: NodePos): boolean =>
+    Math.abs(a.x - b.x) < AU_NODE_W && Math.abs(a.y - b.y) < AU_NODE_H;
+
+/**
+ * Where to draw a card the palette has just added — **its default slot, unless something is
+ * standing in it**.
+ *
+ * `addStep` used to place nothing at all, so a new card simply took `DEFAULT_LAYOUT`'s position
+ * whatever was already there. A template does not show it: a template carries no persisted
+ * `graph.layout`, so every card is at its default and the wait's column is empty. It takes a rule
+ * whose arrangement was SAVED with a card in that slot — a layout persisted before `timer` was
+ * inserted at the fourth position, where `action` sat at `AU_GAP_X * 3`, or, needing no upgrade at
+ * all, any card the user dragged there and saved.
+ *
+ * **Pushed DOWN rather than along**, because the column carries meaning: the wait belongs between
+ * the comparison and the send, and a card shunted right of the send would be drawn in the wrong
+ * place to avoid being drawn in the same place. A row below is unambiguous, obviously deliberate,
+ * and one drag from wherever the user wants it.
+ *
+ * Only the cards on the CANVAS are avoided. `layout` carries a position for every kind, drawn or
+ * not, so testing against all of them would dodge cards that are not there.
+ */
+function freeSlot(
+    layout: Record<StepKind, NodePos>,
+    drawn: readonly StepKind[],
+    step: StepKind,
+): NodePos {
+    let pos = layout[step] ?? DEFAULT_LAYOUT[step];
+    const others = drawn.filter((s) => s !== step).map((s) => layout[s]).filter(Boolean);
+    // Bounded by the number of cards: each pass clears at least the lowest card it collided with,
+    // so it cannot run longer than there are cards to clear.
+    for (let guard = 0; guard <= others.length; guard += 1) {
+        const hit = others.filter((p) => overlaps(pos, p));
+        if (hit.length === 0) break;
+        pos = { x: pos.x, y: Math.max(...hit.map((p) => p.y)) + AU_NODE_H + AU_GAP_Y };
+    }
+    return pos;
+}
+
+/**
  * The rule with the graph fields a newly revealed card needs — see `addStep`'s own note.
  *
  * Returns the rule UNCHANGED when there is nothing to fill in, so `addStep` on a complete rule is
@@ -795,6 +844,10 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                 rule: next,
                 present,
                 wires: defaultWires(present, timerShapeOf(next)),
+                // Clear of the cards already on the canvas — see `freeSlot`. A drag supplies its own
+                // position and the editor dispatches `moveStep` straight after this, so this is the
+                // answer for the CLICK path and the starting point for the drag one.
+                layout: { ...draft.layout, [action.step]: freeSlot(draft.layout, present, action.step) },
                 selected: action.step,
             };
         }

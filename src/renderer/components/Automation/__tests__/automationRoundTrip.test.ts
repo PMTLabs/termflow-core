@@ -17,7 +17,14 @@ import {
     blankDraft,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import { DEFAULT_LAYOUT, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
+import {
+    AU_NODE_H,
+    DEFAULT_LAYOUT,
+    draftFromRule,
+    draftReducer,
+    isDirty,
+    ruleFromDraft,
+} from '../automationDraft';
 import { problems } from '../automationValidation';
 import { STEP_ORDER, canAddStep, defaultWires } from '../automationSteps';
 
@@ -384,6 +391,39 @@ describe('draftFromRule', () => {
         expect(added.present).toEqual(['parse', 'timer', 'action']);
         // Sourced from `blankDraft()`, never from a second set of defaults written here.
         expect(added.rule.graph.parse).toEqual(blankDraft().graph.parse);
+    });
+
+    /**
+     * **T4-c / M3: a click-added card must not land on top of one that is already there.**
+     *
+     * `addStep` never consulted `draft.layout`, so a new card took `DEFAULT_LAYOUT`'s slot whatever
+     * was standing in it. A template does not reproduce it — a template carries no persisted
+     * `graph.layout`, so `layoutOf` answers `DEFAULT_LAYOUT`, where `action` has already moved out
+     * of the wait's column. It takes a rule whose arrangement was SAVED with a card in that slot:
+     * either a layout persisted before `timer` was inserted at the fourth position, or — needing no
+     * upgrade at all — any card the user dragged there and saved.
+     *
+     * Asserted as *clear of the other card*, not merely *not equal*: two positions one pixel apart
+     * are two cards on top of each other.
+     */
+    it('places a new card clear of one already standing in its default slot', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        rule.graph.layout = { ...DEFAULT_LAYOUT, action: { ...DEFAULT_LAYOUT.timer } };
+        const draft = draftFromRule(rule);
+        // The premise: the send really is sitting where a wait card would be placed.
+        expect(draft.layout.action).toEqual(DEFAULT_LAYOUT.timer);
+
+        const added = draftReducer(draft, { type: 'addStep', step: 'timer' });
+        expect(added.layout.timer).not.toEqual(added.layout.action);
+        expect(Math.abs(added.layout.timer.y - added.layout.action.y))
+            .toBeGreaterThanOrEqual(AU_NODE_H);
+    });
+
+    /** And the case it must not move: nothing in the way, so the canonical slot is kept. */
+    it('leaves a new card in its default slot when nothing is standing there', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
+        const added = draftReducer(draft, { type: 'addStep', step: 'timer' });
+        expect(added.layout.timer).toEqual(DEFAULT_LAYOUT.timer);
     });
 
     it('draws NOTHING for a brand-new rule', () => {
