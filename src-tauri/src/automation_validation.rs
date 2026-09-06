@@ -26,7 +26,8 @@ use regex::{Regex, RegexBuilder};
 
 use crate::automation_engine::subst;
 use crate::automation_store::{
-    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, TargetMode,
+    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, Source, TargetMode, Test,
+    TextOp,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -112,6 +113,139 @@ pub fn compile(find: &str) -> Result<Regex, String> {
         .size_limit(1 << 20)
         .build()
         .map_err(|e| e.to_string())
+}
+
+/// Whether a captured token — a clause's [`Source`], or a message's `$N`/`${name}` — is one
+/// `compiled`'s groups can actually supply.
+///
+/// **Shared by `cond.unknownToken` and `action.unknownToken`**, so a clause and a message can
+/// never disagree about what `$2` means (plan 032 §8) — two different answers to "does this
+/// pattern have a group 2" is the drift this milestone keeps having to fix.
+fn token_supplied(compiled: &Regex, group: Option<usize>, name: Option<&str>) -> bool {
+    match (group, name) {
+        (Some(n), _) => n <= compiled.captures_len().saturating_sub(1),
+        (None, Some(name)) => compiled.capture_names().any(|cn| cn == Some(name)),
+        (None, None) => true, // $0 / Source::Whole is always the whole match.
+    }
+}
+
+/// `$0` / `$2` / `${name}`, for a clause's own problem message.
+fn source_text(source: &Source) -> String {
+    match source {
+        Source::Whole => "$0".to_string(),
+        Source::Group(n) => format!("${n}"),
+        Source::Named(name) => format!("${{{name}}}"),
+    }
+}
+
+/// Whether this rule has a working PARSE step to source clause tokens from.
+///
+/// **`parse` is not yet `Option`** — every rule carries a [`crate::automation_store::ParseStep`]
+/// — so today "no parse step" means the declared pattern is blank, exactly what `parse.empty`
+/// already reports on the `parse` field. When `parse` becomes optional (a later milestone's
+/// schedule rule, plan 032 §6.3), this becomes
+/// `graph.parse.as_ref().is_some_and(|p| !p.find.trim().is_empty())`, and every caller stays
+/// correct because there is only this one call site to update.
+fn has_parse_step(graph: &AutomationGraph) -> bool {
+    !graph.parse.find.trim().is_empty()
+}
+
+/// Everything wrong with the COND step's clause list — §8's four `cond.*` codes (plan 032 §5.3,
+/// §5.4).
+///
+/// **An empty list is legal and reports nothing.** It means "fire when the pattern matches",
+/// exactly today's text rule — not a special case invented for this check, the existing
+/// behaviour written down (§5.4).
+fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let clauses = &graph.cond.clauses;
+    if clauses.is_empty() {
+        return out;
+    }
+
+    if !has_parse_step(graph) {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "cond",
+            "cond.clauseWithoutParse",
+            "This condition compares a captured value, but the rule has no pattern to capture it from.",
+        ));
+        return out;
+    }
+
+    // Only ask the pattern for its groups once it can compile — an uncompilable pattern is
+    // already `parse.uncompilable`'s problem, not this one's, exactly like `action.unknownToken`.
+    let compiled = compile(&graph.parse.find).ok();
+
+    for clause in clauses {
+        if let Some(re) = &compiled {
+            let bad = match &clause.source {
+                Source::Whole => false,
+                Source::Group(n) => !token_supplied(re, Some(*n as usize), None),
+                Source::Named(name) => !token_supplied(re, None, Some(name.as_str())),
+            };
+            if bad {
+                let count = re.captures_len().saturating_sub(1);
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "cond",
+                    "cond.unknownToken",
+                    format!(
+                        "{} has nothing to stand for. The pattern in Read a value has {} bracketed \
+                         group{}, so the highest you can use is ${}.",
+                        source_text(&clause.source),
+                        count,
+                        if count == 1 { "" } else { "s" },
+                        count
+                    ),
+                ));
+            }
+        }
+
+        match &clause.test {
+            Test::Number { value, .. } => {
+                // Unreachable through any valid JSON literal today — `value` is a mandatory
+                // `f64`, never absent — but a value arriving via computation (or a future
+                // relaxed input) can still be non-finite, and comparing against NaN/Infinity is
+                // exactly the silent-failure shape `CompareOp::Neq`'s own doc warns about for a
+                // COERCED token. Defensive, not speculative: the check costs nothing and the
+                // failure mode it guards is real.
+                if !value.is_finite() {
+                    out.push(Problem::new(
+                        Severity::Blocks,
+                        "cond",
+                        "cond.clauseNeedsValue",
+                        "Enter a number to compare this value with.",
+                    ));
+                }
+            }
+            Test::Text { op, value } => {
+                let needs_value = !matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty);
+                if needs_value && value.trim().is_empty() {
+                    out.push(Problem::new(
+                        Severity::Blocks,
+                        "cond",
+                        "cond.clauseNeedsValue",
+                        "Enter some text to compare this value with.",
+                    ));
+                } else if *op == TextOp::Matches {
+                    if let Err(e) = compile(value) {
+                        out.push(Problem::new(
+                            Severity::Blocks,
+                            "cond",
+                            "cond.badClausePattern",
+                            format!(
+                                "This clause's own pattern could not be understood: {}",
+                                first_line(&e)
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// Everything wrong with a rule's PARSE step. Ordered blocks-first, so a caller showing one shows the
@@ -257,6 +391,12 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         ));
     }
 
+    // --- clauses --------------------------------------------------------------------------------
+    // §8's four `cond.*` codes: a clause sourcing a token the pattern cannot supply, a clause with
+    // no value to compare, a `matches` clause whose own pattern will not compile, and any clause
+    // at all on a rule with no pattern to read them from.
+    out.extend(clause_problems(&rule.graph));
+
     // --- message --------------------------------------------------------------------------------
     if rule.graph.action.message.trim().is_empty() {
         out.push(Problem::new(
@@ -321,9 +461,9 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             for token in subst::tokens_used(&rule.graph.action.message) {
                 let bad = match &token {
                     subst::Token::Whole => false,
-                    subst::Token::Group(n) => *n > count,
+                    subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
                     subst::Token::Named(name) => {
-                        !compiled.capture_names().any(|cn| cn == Some(name.as_str()))
+                        !token_supplied(&compiled, None, Some(name.as_str()))
                     }
                 };
                 if !bad {
@@ -714,6 +854,10 @@ mod tests {
             "parse.noBrackets",
             "parse.manyGroups",
             "cond.incomplete",
+            "cond.unknownToken",
+            "cond.clauseNeedsValue",
+            "cond.badClausePattern",
+            "cond.clauseWithoutParse",
             "action.empty",
             "action.echo",
             "action.tokenWithoutParse",

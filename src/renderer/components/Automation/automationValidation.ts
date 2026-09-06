@@ -28,6 +28,7 @@
 import type {
     AutomationGraph,
     AutomationRule,
+    AutomationSource,
 } from '../../types/electron';
 import { tokensUsed } from './automationTokens';
 
@@ -53,6 +54,10 @@ export type ProblemCode =
     | 'parse.noBrackets'
     | 'parse.manyGroups'
     | 'cond.incomplete'
+    | 'cond.unknownToken'
+    | 'cond.clauseNeedsValue'
+    | 'cond.badClausePattern'
+    | 'cond.clauseWithoutParse'
     | 'action.empty'
     | 'action.echo'
     | 'action.tokenWithoutParse'
@@ -163,6 +168,137 @@ export function groupsOf(find: string): { count: number; names: Set<string> } {
     } catch {
         return { count: 0, names: new Set() };
     }
+}
+
+/**
+ * Whether a captured token — a clause's `AutomationSource`, or a message's `$N`/`${name}` — is
+ * one the pattern's compiled groups can actually supply.
+ *
+ * **Shared by `cond.unknownToken` and `action.unknownToken`**, so a clause and a message can
+ * never disagree about what `$2` means (plan 032 §8) — two different answers to "does this
+ * pattern have a group 2" is the drift this milestone keeps having to fix.
+ */
+function tokenSupplied(
+    groups: { count: number; names: Set<string> },
+    group: number | null,
+    name: string | null,
+): boolean {
+    if (group !== null) return group <= groups.count;
+    if (name !== null) return groups.names.has(name);
+    return true; // $0 / Source::Whole is always the whole match.
+}
+
+/** `$0` / `$2` / `${name}`, for a clause's own problem message. */
+function sourceText(source: AutomationSource): string {
+    if (source === 'whole') return '$0';
+    if ('group' in source) return `$${source.group}`;
+    return `\${${source.named}}`;
+}
+
+/**
+ * Whether the rule has a working PARSE step to source clause tokens from.
+ *
+ * **`parse` is not yet optional** — every rule carries an `AutomationParseStep` — so today "no
+ * parse step" means the declared pattern is blank, exactly what `parse.empty` already reports on
+ * the `parse` field. When `parse` becomes optional (a later milestone's schedule rule, plan 032
+ * §6.3), this becomes `graph.parse == null || graph.parse.find.trim().length === 0`, and every
+ * caller stays correct because there is only this one call site to update.
+ */
+function hasParseStep(graph: AutomationGraph): boolean {
+    return graph.parse.find.trim().length > 0;
+}
+
+/**
+ * Everything wrong with the COND step's clause list — §8's four `cond.*` codes (plan 032 §5.3,
+ * §5.4).
+ *
+ * **An empty list is legal and reports nothing.** It means "fire when the pattern matches",
+ * exactly today's text rule — not a special case invented for this check, the existing behaviour
+ * written down (§5.4).
+ */
+function clauseProblems(graph: AutomationGraph): Problem[] {
+    const out: Problem[] = [];
+    const clauses = graph.cond.clauses ?? [];
+    if (clauses.length === 0) return out;
+
+    if (!hasParseStep(graph)) {
+        out.push(
+            problem(
+                'blocks',
+                'cond',
+                'cond.clauseWithoutParse',
+                'This condition compares a captured value, but the rule has no pattern to capture it from.',
+            ),
+        );
+        return out;
+    }
+
+    // Only ask the pattern for its groups once it can compile — an uncompilable pattern is
+    // already `parse.uncompilable`'s problem, not this one's, exactly like `action.unknownToken`.
+    const groups = compilePattern(graph.parse.find) !== null ? groupsOf(graph.parse.find) : null;
+
+    for (const clause of clauses) {
+        if (groups) {
+            const bad = clause.source === 'whole'
+                ? false
+                : 'group' in clause.source
+                    ? !tokenSupplied(groups, clause.source.group, null)
+                    : !tokenSupplied(groups, null, clause.source.named);
+            if (bad) {
+                out.push(
+                    problem(
+                        'blocks',
+                        'cond',
+                        'cond.unknownToken',
+                        `${sourceText(clause.source)} has nothing to stand for. The pattern in Read a value has `
+                            + `${groups.count} bracketed group${groups.count === 1 ? '' : 's'}, so the highest you can use is $${groups.count}.`,
+                    ),
+                );
+            }
+        }
+
+        if ('number' in clause.test) {
+            // Unreachable through any valid JSON literal today — `value` is a mandatory `number`,
+            // never absent — but a value computed elsewhere (or a future relaxed input) can still
+            // be non-finite, and comparing against NaN/Infinity is exactly the silent-failure
+            // shape `CompareOp::Neq`'s own doc warns about for a COERCED token. Defensive, not
+            // speculative: the check costs nothing and the failure mode it guards is real.
+            if (!Number.isFinite(clause.test.number.value)) {
+                out.push(
+                    problem(
+                        'blocks',
+                        'cond',
+                        'cond.clauseNeedsValue',
+                        'Enter a number to compare this value with.',
+                    ),
+                );
+            }
+        } else {
+            const { op, value } = clause.test.text;
+            const needsValue = op !== 'isEmpty' && op !== 'isNotEmpty';
+            if (needsValue && value.trim().length === 0) {
+                out.push(
+                    problem(
+                        'blocks',
+                        'cond',
+                        'cond.clauseNeedsValue',
+                        'Enter some text to compare this value with.',
+                    ),
+                );
+            } else if (op === 'matches' && compilePattern(value) === null) {
+                out.push(
+                    problem(
+                        'blocks',
+                        'cond',
+                        'cond.badClausePattern',
+                        `This clause's own pattern could not be understood: ${compileError(value)}`,
+                    ),
+                );
+            }
+        }
+    }
+
+    return out;
 }
 
 /**
@@ -296,6 +432,12 @@ export function problems(rule: AutomationRule): Problem[] {
         );
     }
 
+    // --- clauses ---------------------------------------------------------------------------------
+    // §8's four `cond.*` codes: a clause sourcing a token the pattern cannot supply, a clause with
+    // no value to compare, a `matches` clause whose own pattern will not compile, and any clause
+    // at all on a rule with no pattern to read them from.
+    out.push(...clauseProblems(rule.graph));
+
     // --- message ---------------------------------------------------------------------------------
     if (action.message.trim().length === 0) {
         out.push(
@@ -354,9 +496,11 @@ export function problems(rule: AutomationRule): Problem[] {
                 ),
             );
         } else if (compilePattern(parse.find) !== null) {
-            const { count, names } = groupsOf(parse.find);
+            const groups = groupsOf(parse.find);
             for (const t of tokensUsed(action.message)) {
-                const bad = t.kind === 'group' ? t.n > count : !names.has(t.name);
+                const bad = t.kind === 'group'
+                    ? !tokenSupplied(groups, t.n, null)
+                    : !tokenSupplied(groups, null, t.name);
                 if (!bad) continue;
                 out.push(
                     problem(
@@ -364,7 +508,7 @@ export function problems(rule: AutomationRule): Problem[] {
                         'action',
                         'action.unknownToken',
                         `${t.text} has nothing to stand for. The pattern in Read a value has `
-                            + `${count} bracketed group${count === 1 ? '' : 's'}, so the highest you can use is $${count}.`,
+                            + `${groups.count} bracketed group${groups.count === 1 ? '' : 's'}, so the highest you can use is $${groups.count}.`,
                     ),
                 );
             }
@@ -401,6 +545,10 @@ const BADGES: Record<ProblemCode, string> = {
     'parse.noBrackets': 'needs brackets',
     'parse.manyGroups': 'more than one group',
     'cond.incomplete': 'needs a comparison',
+    'cond.unknownToken': 'names a value the pattern has not got',
+    'cond.clauseNeedsValue': 'needs a value to compare with',
+    'cond.badClausePattern': 'pattern not understood',
+    'cond.clauseWithoutParse': 'needs a pattern to compare from',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',
