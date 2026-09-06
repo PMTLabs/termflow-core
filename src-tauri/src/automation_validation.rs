@@ -24,10 +24,11 @@
 
 use regex::{Regex, RegexBuilder};
 
+use crate::automation::runtime::ECHO_TTL_MS;
 use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, Source, TargetMode, Test,
-    TextOp,
+    TextOp, TimerMode,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -252,6 +253,67 @@ fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
     out
 }
 
+/// The floor on an `AfterMatch` wait — plan 032 §12 item 1. `MIN_TIMER_MS` (250 ms) is a POLL floor
+/// and too permissive for a delay: a sub-second "wait" is a send, not a wait.
+pub const MIN_DELAY_MS: i64 = 1_000;
+
+/// Bits 0–6 of `TimerMode::DailyAt::days` are Mon..Sun (plan §3.1). `u8` has an 8th bit (0x80) that
+/// names no weekday at all — this mask is what `timer.noDays` checks against, so a hand-crafted or
+/// corrupted mask with ONLY that spare bit set is still treated as "no day selected" rather than
+/// slipping past validation into a schedule that silently never fires.
+const WEEKDAY_BITS_MASK: u8 = 0b0111_1111;
+
+/// Everything wrong with the WAIT step — §8's three `timer.*` codes (plan 032 §6.2, §12 item 1).
+///
+/// `None` (no wait step at all) reports nothing: every rule saved before this milestone, and every
+/// rule that does not use one, is unaffected.
+fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let Some(timer) = &graph.timer else {
+        return out;
+    };
+
+    match &timer.mode {
+        TimerMode::AfterMatch { delay_ms } => {
+            if *delay_ms < MIN_DELAY_MS {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.delayTooShort",
+                    "Wait at least 1 second before sending.",
+                ));
+            } else if *delay_ms >= ECHO_TTL_MS {
+                // §6.2: the engine forgets its own echo needle after ECHO_TTL_MS. A wait at or
+                // beyond that fires after the guard that would have hidden the send has already
+                // expired, so the rule can read its own message back and re-trigger itself — a real
+                // feedback loop, not a tidiness rule. Referencing the constant, rather than a
+                // literal, is what keeps this cap correct if ECHO_TTL_MS ever moves.
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.delayTooLong",
+                    format!(
+                        "Wait less than {} minutes, or the rule may hear its own message and fire again.",
+                        ECHO_TTL_MS / 60_000
+                    ),
+                ));
+            }
+        }
+        TimerMode::DailyAt { days, .. } => {
+            if days & WEEKDAY_BITS_MASK == 0 {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.noDays",
+                    "Pick at least one day for this to run.",
+                ));
+            }
+        }
+    }
+
+    out
+}
+
 /// Everything wrong with a rule's PARSE step. Ordered blocks-first, so a caller showing one shows the
 /// one that matters.
 pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
@@ -405,6 +467,11 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // at all on a rule with no pattern to read them from.
     out.extend(clause_problems(&rule.graph));
 
+    // --- timer ----------------------------------------------------------------------------------
+    // §8's three `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
+    // and a schedule whose weekday mask selects no day.
+    out.extend(timer_problems(&rule.graph));
+
     // --- message --------------------------------------------------------------------------------
     if rule.graph.action.message.trim().is_empty() {
         out.push(Problem::new(
@@ -492,7 +559,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     }
 
     // STABLE, so within each severity the problems stay in step order — targets, monitor, parse,
-    // cond, action — which is the order the inspector's problem list draws them in.
+    // cond, timer, action — which is the order the inspector's problem list draws them in.
     out.sort_by_key(|p| !p.blocks());
     out
 }
@@ -867,6 +934,9 @@ mod tests {
             "cond.clauseNeedsValue",
             "cond.badClausePattern",
             "cond.clauseWithoutParse",
+            "timer.delayTooShort",
+            "timer.delayTooLong",
+            "timer.noDays",
             "action.empty",
             "action.echo",
             "action.tokenWithoutParse",

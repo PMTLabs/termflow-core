@@ -2307,6 +2307,506 @@
         }
       },
       "expected": []
+    },
+    {
+      "name": "timer.delayTooShort — 999 ms blocks",
+      "why": "Spec §12 item 1: a wait under 1 second is a send, not a wait.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 999
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.delayTooShort"
+        }
+      ]
+    },
+    {
+      "name": "timer.delayTooShort's floor — exactly 1 second is clean",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 1000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "an AfterMatch wait in the middle of the range is clean",
+      "why": "The plan's own example — detect `API error`, wait 30 s, then send `resume`.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 30000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.delayTooLong — exactly ECHO_TTL_MS blocks",
+      "why": "§6.2: a wait at or beyond the echo TTL can outlive the guard that hides its own send, so the rule can hear its own message and re-fire. ECHO_TTL_MS is 10 minutes (runtime.rs:36).",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 600000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.delayTooLong"
+        }
+      ]
+    },
+    {
+      "name": "timer.delayTooLong's cap — one ms under ECHO_TTL_MS is clean",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 599999
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — an empty weekday mask blocks",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 0
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
+        }
+      ]
+    },
+    {
+      "name": "timer.noDays — one day selected is legal",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 1
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — all seven days selected is legal",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 127
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — the spare 8th bit alone still blocks",
+      "why": "`days` is a `u8` with 8 bits for 7 weekdays (Mon=bit0..Sun=bit6). Bit 7 (0x80) selects no real day, so a mask with only that bit set must still block — otherwise a corrupt or hand-crafted mask could look like it has a day while the schedule never fires.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 128
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
+        }
+      ]
     }
   ]
 }

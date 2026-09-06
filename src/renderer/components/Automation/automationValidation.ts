@@ -35,7 +35,7 @@ import { tokensUsed } from './automationTokens';
 export type Severity = 'blocks' | 'warns';
 
 /** Which step owns a problem, so the editor can point at the panel that fixes it. */
-export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'action';
+export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
 
 /**
  * A stable identity for the RULE that fired.
@@ -58,6 +58,9 @@ export type ProblemCode =
     | 'cond.clauseNeedsValue'
     | 'cond.badClausePattern'
     | 'cond.clauseWithoutParse'
+    | 'timer.delayTooShort'
+    | 'timer.delayTooLong'
+    | 'timer.noDays'
     | 'action.empty'
     | 'action.echo'
     | 'action.tokenWithoutParse'
@@ -310,6 +313,70 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
 }
 
 /**
+ * The floor on an `AfterMatch` wait — plan 032 §12 item 1. `MIN_TIMER_MS` (250 ms) is a POLL floor
+ * and too permissive for a delay: a sub-second "wait" is a send, not a wait.
+ */
+export const MIN_DELAY_MS = 1_000;
+
+/**
+ * Mirrors `ECHO_TTL_MS` in `src-tauri/src/automation/runtime.rs:36` (10 minutes, as
+ * `10 * 60 * 1_000`). TypeScript cannot import a Rust constant, so this number is typed by hand —
+ * kept honest, not merely commented, by the shared fixture's two `timer.delayTooLong` boundary
+ * cases: one wait at exactly this value (blocks) and one a millisecond under it (clean). If
+ * `ECHO_TTL_MS` ever moves in `runtime.rs` without this constant moving with it, one of those two
+ * cases starts failing on THIS side, in this file's own test run — the drift cannot go silent.
+ */
+export const ECHO_TTL_MS = 10 * 60 * 1_000;
+
+/**
+ * Bits 0–6 of a `dailyAt` timer's `days` are Mon..Sun (plan §3.1). The type is a `number` on this
+ * side, but the wire value is a Rust `u8`, which has an 8th bit (0x80) that names no weekday at
+ * all. This mask is what `timer.noDays` checks against, so a hand-crafted or corrupted mask with
+ * ONLY that spare bit set is still "no day selected" rather than slipping past validation into a
+ * schedule that silently never fires — the same decision `automation_validation.rs` makes.
+ */
+const WEEKDAY_BITS_MASK = 0b0111_1111;
+
+/**
+ * Everything wrong with the WAIT step — §8's three `timer.*` codes (plan 032 §6.2, §12 item 1).
+ *
+ * Absent (no wait step at all) reports nothing: every rule saved before this milestone, and every
+ * rule that does not use one, is unaffected.
+ */
+function timerProblems(graph: AutomationGraph): Problem[] {
+    const out: Problem[] = [];
+    const { timer } = graph;
+    if (!timer) return out;
+
+    const { mode } = timer;
+    if ('afterMatch' in mode) {
+        const { delayMs } = mode.afterMatch;
+        if (delayMs < MIN_DELAY_MS) {
+            out.push(
+                problem('blocks', 'timer', 'timer.delayTooShort', 'Wait at least 1 second before sending.'),
+            );
+        } else if (delayMs >= ECHO_TTL_MS) {
+            // §6.2: the engine forgets its own echo needle after ECHO_TTL_MS. A wait at or beyond
+            // that fires after the guard that would have hidden the send has already expired, so
+            // the rule can read its own message back and re-trigger itself — a real feedback loop,
+            // not a tidiness rule.
+            out.push(
+                problem(
+                    'blocks',
+                    'timer',
+                    'timer.delayTooLong',
+                    `Wait less than ${ECHO_TTL_MS / 60_000} minutes, or the rule may hear its own message and fire again.`,
+                ),
+            );
+        }
+    } else if ((mode.dailyAt.days & WEEKDAY_BITS_MASK) === 0) {
+        out.push(problem('blocks', 'timer', 'timer.noDays', 'Pick at least one day for this to run.'));
+    }
+
+    return out;
+}
+
+/**
  * Everything wrong with a rule's PARSE step. Blocks first, so a caller showing one shows the one
  * that matters.
  */
@@ -450,6 +517,11 @@ export function problems(rule: AutomationRule): Problem[] {
     // at all on a rule with no pattern to read them from.
     out.push(...clauseProblems(rule.graph));
 
+    // --- timer -----------------------------------------------------------------------------------
+    // §8's three `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
+    // and a schedule whose weekday mask selects no day.
+    out.push(...timerProblems(rule.graph));
+
     // --- message ---------------------------------------------------------------------------------
     if (action.message.trim().length === 0) {
         out.push(
@@ -528,7 +600,7 @@ export function problems(rule: AutomationRule): Problem[] {
     }
 
     // STABLE, so within each severity the problems stay in step order — targets, monitor, parse,
-    // cond, action — which is the order the inspector's problem list draws them in.
+    // cond, timer, action — which is the order the inspector's problem list draws them in.
     return [...out.filter((p) => p.severity === 'blocks'), ...out.filter((p) => p.severity !== 'blocks')];
 }
 
@@ -561,6 +633,9 @@ const BADGES: Record<ProblemCode, string> = {
     'cond.clauseNeedsValue': 'needs a value to compare with',
     'cond.badClausePattern': 'pattern not understood',
     'cond.clauseWithoutParse': 'needs a pattern to compare from',
+    'timer.delayTooShort': 'wait is too short',
+    'timer.delayTooLong': 'wait is too long',
+    'timer.noDays': 'needs a day picked',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',
