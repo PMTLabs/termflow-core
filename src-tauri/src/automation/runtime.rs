@@ -557,6 +557,11 @@ mod tests {
                 rt.park(rule, tm, a_parked_send(50_000));
             }
         }
+        // The one RULE-keyed map with a value in it (§6.3): a schedule's day is a fact about the
+        // rule, not about any pair, so it is populated here and asserted by `forget_rule`'s test.
+        for rule in ["au-1", "au-2"] {
+            rt.set_last_fired_day(rule, 739_866);
+        }
         // `dirty` is PROCESS-keyed; the two ids are deliberately different strings.
         rt.mark_dirty("pc-test-1");
         rt.mark_dirty("pc-test-2");
@@ -707,6 +712,12 @@ mod tests {
         }
         assert!(rt.watched_for("au-1").is_empty());
         assert_eq!(rt.watched_for("au-2").len(), 2);
+        // The rule-keyed map goes with the rest. A schedule left marked as fired-today across an
+        // edit is a rule that cannot fire again until tomorrow — and `reload` re-seeds the mark
+        // straight afterwards if the minute really has passed, so keeping it here would only make
+        // the two writers disagree.
+        assert_eq!(rt.last_fired_day("au-1"), None);
+        assert_eq!(rt.last_fired_day("au-2"), Some(739_866), "the other rule's day is untouched");
     }
 
     /// §2.4's per-pair teardown, for a leaf that has left one rule's watched set.
