@@ -1283,6 +1283,125 @@ mod tests {
         );
     }
 
+    // =============================================================================================
+    // §6.1 — the three cancellation gates, as three tests, never one parametrised one
+    // =============================================================================================
+    //
+    // They close three DIFFERENT gates that happen to agree today. Disabled and deleted are cut off
+    // by `snapshot_live()` itself — `reload`'s loop drops a `!enabled` rule from `next` on that check
+    // alone, and a deleted row is simply absent from `store.list_rules()`, so neither rule is in the
+    // live set at all and the walk over it never visits the pair. Edited is different: the rule stays
+    // enabled and stays live, so `snapshot_live()` alone would still return it — what actually stops
+    // it is `reload`'s OWN diff (`automation_engine.rs`'s `previous`/`next` comparison), which calls
+    // `forget_rule` the moment `updated_at` moves, and `forget_rule` is one of the three places
+    // §6.1/Task 16 taught to purge `parked`. A single parametrised test could not tell these three
+    // mechanisms apart if one of them rotted while the other two kept the test green.
+
+    /// **Disabled.** `set_enabled_checked` never touches `updated_at` — the rule drops out of
+    /// `snapshot_live()` on `!rule.enabled` alone.
+    #[tokio::test(start_paused = true)]
+    async fn a_disabled_rule_does_not_fire_its_parked_send() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        // Guard against the vacuous version: a test that never parked anything would trivially type
+        // nothing and stay green forever.
+        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+
+        fake.store.set_enabled_checked("au-1", false).unwrap();
+        engine.reload(&fake.store, 2_000).unwrap();
+        assert!(!engine.is_live("au-1"), "the premise: disabling drops it from the live set");
+
+        evaluate_tick(&engine, &host, 0, 31_001).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().is_empty(),
+            "a disabled rule's parked send must not fire: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **Deleted.** The row is gone from the store entirely, so `reload` never sees it and it is
+    /// absent from `next` the same way a disabled rule is.
+    #[tokio::test(start_paused = true)]
+    async fn a_deleted_rule_does_not_fire_its_parked_send() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+
+        assert!(fake.store.delete_rule("au-1").unwrap(), "the premise: the rule existed to delete");
+        engine.reload(&fake.store, 2_000).unwrap();
+        assert!(!engine.is_live("au-1"), "the premise: a deleted rule is not live");
+
+        evaluate_tick(&engine, &host, 0, 31_001).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().is_empty(),
+            "a deleted rule's parked send must not fire: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **Edited.** The rule stays enabled and stays live — `snapshot_live()` alone would still return
+    /// it, which is exactly why this test is not redundant with the other two: it is `reload`'s diff,
+    /// not the walk's outer filter, that has to do the work here.
+    #[tokio::test(start_paused = true)]
+    async fn an_edited_rule_does_not_fire_its_parked_send() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+
+        let mut edited =
+            fake.store.get_rule("au-1").unwrap().expect("the rule must still be in the store");
+        edited.updated_at = 2_000;
+        fake.store.save_rule(&edited).unwrap();
+        engine.reload(&fake.store, 2_000).unwrap();
+        assert!(
+            engine.is_live("au-1"),
+            "the premise: an edit keeps the rule live, unlike disable/delete"
+        );
+        // `forget_rule` (called because `updated_at` moved) also clears `watched`, which in
+        // production the targeting tick re-derives from the rule's criteria within
+        // `TARGETING_TICK_MS` — that tick does not run in this harness. Re-establishing it here is
+        // NOT the thing under test; skipping it would let the walk skip "tm-1" for a reason that has
+        // nothing to do with §6.1, and the test would pass vacuously for the wrong reason.
+        engine.runtime.set_watched("au-1", ["tm-1".to_string()].into());
+
+        evaluate_tick(&engine, &host, 0, 31_001).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().is_empty(),
+            "an edited rule's stale parked send must not fire: {:?}",
+            fake.written()
+        );
+    }
+
     /// **R6 survives the delay.** A `runs_once` rule with a Wait step parks on every terminal that
     /// crosses during the wait — the arm machine cannot stop that, because those are different
     /// pairs — and they all come ripe on the same tick. The claim is what makes it one message, and
