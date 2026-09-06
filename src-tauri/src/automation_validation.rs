@@ -378,9 +378,13 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(pattern_problems(&rule.graph));
 
     // --- threshold ------------------------------------------------------------------------------
-    // A numeric rule with no operator or no threshold cannot be true of anything, and `evaluate`
-    // reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
+    // A numeric rule with no operator, no threshold, AND no clauses cannot be true of anything, and
+    // `evaluate` reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
+    // `op` / `threshold` are v1-only (§5.3): a rule built in the clause-list editor leaves both
+    // `None` and expresses its comparison as a clause instead, so an empty clause list is what
+    // actually makes this incomplete, not a bare absence of `op`/`threshold`.
     if rule.graph.cond.finds == Finds::Reading
+        && rule.graph.cond.clauses.is_empty()
         && (rule.graph.cond.op.is_none() || rule.graph.cond.threshold.is_none())
     {
         out.push(Problem::new(

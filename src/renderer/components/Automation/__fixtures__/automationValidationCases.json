@@ -1041,6 +1041,55 @@
       ]
     },
     {
+      "name": "a Reading rule with one clause and no operator/threshold is the new authoring path — legal",
+      "why": "Plan 032 §5.3/§5.9: M2 added a clause list as a SECOND way to express a comparison. `cond.incomplete` predates clauses and must not block the path they exist to enable — a rule built entirely in the new CondPanel (finds: Reading, one clause, op/threshold left null) has to be enableable.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 500 } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
       "name": "a TEXT rule needs neither operator nor threshold",
       "rule": {
         "id": "au-fix",
