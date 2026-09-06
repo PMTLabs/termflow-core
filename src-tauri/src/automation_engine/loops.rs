@@ -1512,6 +1512,81 @@ mod tests {
         );
     }
 
+    /// **A target inside another rule's settle window still gets the scheduled message.**
+    ///
+    /// 2.6 layer 2 means *nothing READS this terminal*, and a schedule send reads nothing — the same
+    /// reason 6.2's parked drain sits above the same gate. Below it, a terminal that happened to be
+    /// inside another rule's `ECHO_SETTLE_MS` window at 09:00 would be skipped, and because the day is
+    /// marked whether or not a leaf was reachable, skipped for the whole day. Moving the branch under
+    /// the gate leaves every other test in this file green, which is why this one exists.
+    #[tokio::test(start_paused = true)]
+    async fn a_settling_target_still_receives_the_scheduled_message() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1"), ("tm-2", "pc-2")],
+            &[("au-sched", &["tm-1", "tm-2"])],
+        );
+        let nine = at_local(2026, 9, 7, Weekday::Mon, 9, 0);
+        // Something else wrote into tm-2 a moment ago, so no reader may touch it.
+        engine.runtime.settle_until("tm-2", nine + ECHO_SETTLE_MS);
+
+        evaluate_tick(&engine, &host, 0, nine).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1", "pc-2"],
+            "a settle window keeps readers out, not writers: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **`prev` and `label` on the schedule route**, which are the two `PendingSend` fields 6.3
+    /// gives no obvious answer for.
+    ///
+    /// `prev` is what `run_send`'s three failure paths roll the arm state back to, and a schedule
+    /// crossing has none to roll back to — so it is READ from the pair rather than assumed, which
+    /// makes `restore_arm` write back the value it just read. A constant `ArmState::Unseen` is a
+    /// harmless no-op for a rule with no monitor and destroys the arm state of a rule that has both,
+    /// which is why the fixture here is the hybrid.
+    ///
+    /// `label` is resolved at DECIDE time for 2.8's reason: this row is written after the terminal is
+    /// gone, and a lookup at write time returns `None` for exactly the line the Name column serves.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_schedule_send_rolls_back_to_what_was_there_and_still_names_the_terminal() {
+        let mut hybrid = ctx_rule_saying("au-both", "stand-up notes?", 1);
+        hybrid.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+        });
+        let (engine, fake, host) =
+            wire_targets(vec![hybrid], &[("tm-1", "pc-1")], &[("au-both", &["tm-1"])]);
+        engine.runtime.set_arm("au-both", "tm-1", ArmState::Fired { at_ms: 5 });
+
+        // Decided while the terminal is open; it closes before the spawned send takes its turn.
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        fake.close("tm-1");
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert!(fake.written().is_empty(), "{:?} reached a closed terminal", fake.written());
+        assert_eq!(
+            engine.runtime.arm_state("au-both", "tm-1"),
+            ArmState::Fired { at_ms: 5 },
+            "the rollback wrote something other than what the decision found"
+        );
+        let rows = log_rows(&fake.store);
+        assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
+        assert_eq!(rows[0].0, "Failed", "{rows:?}");
+        assert!(
+            rows[0].1.contains("the terminal closed before the message was sent"),
+            "{rows:?}"
+        );
+        assert_eq!(
+            rows[0].2.as_deref(),
+            Some("tm-1"),
+            "the name must be the one resolved at decide time: {rows:?}"
+        );
+    }
+
     /// **R6 binds a schedule rule too.** The one `sends.push` in this module lives inside `admit`,
     /// which is what applies the single-run claim; a schedule branch that pushed directly would opt
     /// the whole rule kind out of `runs_once`, exactly as 6.2's parked route once did.
