@@ -75,6 +75,18 @@ pub struct ParkedSend {
     /// Wall-clock ms at or after which the tick may take this. `now_ms + delay_ms`, computed once
     /// at the crossing so no reader has to know the delay.
     pub due_at_ms: i64,
+    /// The process this crossing was READ from, carried for the whole of the wait.
+    ///
+    /// `run_send`'s restart guard compares the leaf's process at lock time against
+    /// `PendingSend.pair.pc`. Built at the DRAIN from a fresh `process_for_leaf`, that comparison
+    /// is a value against itself and covers only the queue wait — never the 30 s to 10 min park.
+    /// `forget_terminal` covers Ctrl+R, because a restart is offered only after the shell exits and
+    /// that path runs `cleanup_terminal_state` → `forget_terminal` → purge; it does NOT cover a
+    /// spawn that re-indexes a LIVE leaf, and `IdentityIndex::index` overwrites `leaf_to_process`
+    /// unconditionally with no purge. That is the hazard `Pair::pc` was added for, and the failure
+    /// is a message decided from a dead run typed into a live shell — with `submit: true`,
+    /// executed there.
+    pub pc: String,
     pub captures: Option<Captures>,
     pub prev: ArmState,
     pub label: Option<String>,
@@ -515,6 +527,7 @@ mod tests {
     fn a_parked_send(due_at_ms: i64) -> ParkedSend {
         ParkedSend {
             due_at_ms,
+            pc: "pc-test-1".to_string(),
             captures: None,
             prev: ArmState::armed(),
             label: Some("codex · core".to_string()),

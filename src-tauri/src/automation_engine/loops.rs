@@ -199,7 +199,11 @@ pub async fn evaluate_tick(
                     engine,
                     &mut sends,
                     PendingSend {
-                        pair: Pair { rule: live.clone(), tm: tm.clone(), pc: pc.clone() },
+                        // **`parked.pc`, never the `pc` this tick just resolved.** The restart
+                        // guard in `run_send` compares the leaf's process at lock time against
+                        // this field; filled from the drain's own lookup it compares a value
+                        // against itself and the whole park is unguarded.
+                        pair: Pair { rule: live.clone(), tm: tm.clone(), pc: parked.pc },
                         prev: parked.prev,
                         label: parked.label,
                         at_ms: now_ms,
@@ -424,9 +428,12 @@ pub fn evaluate_pair(
             &pair.tm,
             ParkedSend {
                 due_at_ms: now_ms + delay_ms,
-                // The crossing's own captures and the crossing's own `prev`, for the same reasons
+                // The crossing's own process, captures and `prev`, for the same reasons
                 // `PendingSend` carries them — and more sharply here, because by the time this
-                // fires the terminal has scrolled on and there is nothing left to re-read.
+                // fires the terminal has scrolled on and there is nothing left to re-read. `pc` is
+                // what makes `run_send`'s restart guard cover the WAIT and not just the queue: see
+                // `ParkedSend::pc`.
+                pc: pair.pc.clone(),
                 captures: ev.captures,
                 prev,
                 label: host.label_for(&pair.tm),
@@ -530,6 +537,11 @@ pub async fn run_send(
     // replaced one. `Pair` already carries the `pc` this crossing was READ from, so ask the question
     // that does distinguish them: a message decided from one run must never be typed into the next,
     // which with `submit: true` also executes it there.
+    //
+    // **The window is the whole distance from the crossing, not just the queue.** §6.2's parked
+    // send is decided up to `MAX_DELAY_MS` before it is drained, and `ParkedSend::pc` is what
+    // carries the crossing's process across that wait — built from the drain's own lookup instead,
+    // this comparison would be a value against itself for every delayed rule.
     if pc != send.pair.pc {
         return fail(&engine, &host, &send, "the terminal restarted before the message was sent");
     }
@@ -1411,6 +1423,69 @@ mod tests {
             fake.written(),
             log_details(&fake.store)
         );
+    }
+
+    /// **The restart guard has to cover the WAIT, not just the queue.**
+    ///
+    /// `run_send` compares `host.process_for_leaf(&tm)` at lock time against `send.pair.pc`. For a
+    /// parked send that field was filled at the DRAIN, from the same lookup — a value compared with
+    /// itself, so the guard covered the few milliseconds of queue wait and none of the 30 s to
+    /// 10 min park this milestone introduced.
+    ///
+    /// `forget_terminal` is not the answer: it covers Ctrl+R, where the shell has exited and
+    /// `cleanup_terminal_state` purges, but `IdentityIndex::index` overwrites `leaf_to_process`
+    /// unconditionally on every spawn and purges nothing — so a leaf re-pointed at a live
+    /// replacement leaves the parked send in place, addressed at a run that never printed the
+    /// matched text. With `submit: true` the message is also RUN there.
+    ///
+    /// A table, because the negative alone passes vacuously: "nothing was typed" is equally true of
+    /// a rule that never fired. The `Failed` row is asserted as well as the absent write, so a
+    /// send silently dropped for some other reason cannot pass as this guard working.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_send_whose_leaf_was_re_indexed_during_the_wait_is_never_typed_into() {
+        for (restarted, want) in [(true, 0usize), (false, 1usize)] {
+            let (engine, fake, host) = rig_with_rule(|g| {
+                g.parse_mut().find = "API error".into();
+                g.cond_mut().finds = Finds::Event;
+                g.action.message = "resume".into();
+                g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            });
+            engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+            engine.runtime.mark_dirty("pc-1");
+            fake.say("pc-1", "API error");
+
+            evaluate_tick(&engine, &host, 0, 1_000).await;
+            assert_eq!(
+                engine.runtime.parked_at("au-1", "tm-1"),
+                Some(31_000),
+                "restarted={restarted}: the premise — it parked"
+            );
+
+            if restarted {
+                // A spawn re-indexing a LIVE leaf, which is all `IdentityIndex::index` does. Not a
+                // `forget_terminal`, because that is the path this hazard is NOT on.
+                fake.leaves.lock().unwrap().insert("tm-1".into(), "pc-2".into());
+            }
+
+            evaluate_tick(&engine, &host, 0, 31_001).await;
+            tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+            assert_eq!(
+                times_sent(&fake, "resume"),
+                want,
+                "restarted={}: a message decided from one run reached a different one: {:?}",
+                restarted,
+                fake.written()
+            );
+            if restarted {
+                let log = log_details(&fake.store);
+                assert!(
+                    log.iter().any(|(kind, detail)| kind == "Failed"
+                        && detail.contains("the terminal restarted before the message was sent")),
+                    "the refusal must be a Failed row the user can see: {log:?}"
+                );
+            }
+        }
     }
 
     // =============================================================================================
