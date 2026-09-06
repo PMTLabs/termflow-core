@@ -14,6 +14,7 @@
 import fixture from '../__fixtures__/automationValidationCases.json';
 import type { AutomationRule } from '../../../types/electron';
 import {
+    BADGES,
     MAX_DELAY_MS,
     MIN_DELAY_MS,
     MINUTES_PER_DAY,
@@ -52,29 +53,16 @@ describe('automationValidation — the shared fixture', () => {
     it('covers every rule this module can report', () => {
         // Otherwise the two implementations are pinned to each other only on the paths someone
         // remembered — and the ones nobody remembered are exactly where they drift.
+        //
+        // **DERIVED from `BADGES`, never hand-typed.** This was a literal array of twenty codes,
+        // which meant a twenty-first `ProblemCode` added to both implementations with no fixture
+        // case left this test green — a "we covered every code" list that covers whatever someone
+        // remembered to add to it is the exact silent divergence the module header warns about.
+        // `BADGES` is `Record<ProblemCode, string>` and already fails `tsc` on a missing key, so it
+        // is the one table a new code cannot slip past.
         const covered = new Set(cases.flatMap((c) => c.expected.map((e) => e.code)));
-        const all: ProblemCode[] = [
-            'targets.empty',
-            'targets.criterion',
-            'monitor.interval',
-            'parse.empty',
-            'parse.uncompilable',
-            'parse.noBrackets',
-            'parse.manyGroups',
-            'cond.incomplete',
-            'cond.unknownToken',
-            'cond.clauseNeedsValue',
-            'cond.badClausePattern',
-            'cond.clauseWithoutParse',
-            'timer.delayTooShort',
-            'timer.delayTooLong',
-            'timer.badMinute',
-            'timer.noDays',
-            'action.empty',
-            'action.echo',
-            'action.tokenWithoutParse',
-            'action.unknownToken',
-        ];
+        const all = Object.keys(BADGES) as ProblemCode[];
+        expect(all.length).toBeGreaterThanOrEqual(20);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });
 });

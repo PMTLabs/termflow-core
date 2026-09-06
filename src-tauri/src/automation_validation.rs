@@ -522,8 +522,10 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(clause_problems(&rule.graph));
 
     // --- timer ----------------------------------------------------------------------------------
-    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL, a
-    // schedule whose target is not a time of day, and one whose weekday mask selects no day.
+    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
+    // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
+    // that constant's own doc — a schedule whose target is not a time of day, and one whose
+    // weekday mask selects no day.
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
@@ -982,6 +984,15 @@ mod tests {
 
         // Every rule this module can report has to appear in the fixture, or the two
         // implementations are only pinned to each other on the paths someone remembered.
+        //
+        // **This list is HAND-TYPED and this side has no way to derive it.** A `code` here is a
+        // `&'static str` handed to `Problem::new`, not a variant of anything, so there is no
+        // exhaustive table for the compiler to check a new one against — where the TypeScript
+        // mirror derives its list from `BADGES`, which is a `Record<ProblemCode, string>` and fails
+        // `tsc` on a missing key. A twenty-first code added to both implementations with no fixture
+        // case therefore stays green HERE until someone adds it below; the TS side is the one that
+        // would go red. Said out loud rather than left to look symmetrical, because pretending both
+        // halves are protected is worse than one that is not.
         for code in [
             "targets.empty",
             "targets.criterion",

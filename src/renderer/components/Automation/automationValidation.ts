@@ -575,8 +575,9 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...clauseProblems(rule.graph));
 
     // --- timer -----------------------------------------------------------------------------------
-    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond the echo TTL,
-    // and a schedule whose weekday mask selects no day.
+    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
+    // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
+    // that constant's own doc — and a schedule whose weekday mask selects no day.
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
@@ -681,8 +682,13 @@ export function problemsFor(list: Problem[], field: ProblemField): Problem[] {
  *
  * Keyed on `code`, never on the message: a badge derived by slicing prose is a test that passes
  * until someone fixes a typo. A code with no entry here has no badge rather than a wrong one.
+ *
+ * **Exported so the shared fixture's exhaustiveness check can DERIVE its list of codes from it.**
+ * `Record<ProblemCode, string>` already fails `tsc` on a missing key, so this table is the one
+ * place a new code cannot be forgotten — and a hand-typed "we covered every code" array beside it
+ * is a list that goes quietly stale, which is the divergence this module's header warns about.
  */
-const BADGES: Record<ProblemCode, string> = {
+export const BADGES: Record<ProblemCode, string> = {
     'targets.empty': 'needs terminals',
     'targets.criterion': 'needs something to match',
     'monitor.interval': 'checks too often',
