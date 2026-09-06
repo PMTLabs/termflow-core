@@ -419,6 +419,7 @@ impl AutomationEngine {
         // A spent day belongs to a target minute, not to the live generation that happened to
         // contain that rule. Disabled rules are deliberately absent from `next`, so validate every
         // retained mark against the store before the live-set teardown can make it invisible.
+        let mut invalidated_marks = HashSet::new();
         for (id, _, marked_minute) in self.runtime.last_fired_marks() {
             let still_targets_marked_minute = matches!(
                 store_timers.get(&id).and_then(|timer| timer.as_ref()),
@@ -426,6 +427,7 @@ impl AutomationEngine {
             );
             if !still_targets_marked_minute {
                 self.runtime.forget_last_fired_day(&id);
+                invalidated_marks.insert(id);
             }
         }
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
@@ -527,6 +529,7 @@ impl AutomationEngine {
                 })
                 .collect()
         };
+        let previously_live: HashSet<String> = previous.iter().map(|(id, _, _)| id.clone()).collect();
         for (id, was, timer_was) in previous {
             let after = next.get(&id);
             if after.is_some_and(|l| l.rule.updated_at == was) {
@@ -557,13 +560,23 @@ impl AutomationEngine {
         }
 
         // **After the forget loop, deliberately.** `forget_rule` drops everything a changed rule
-        // owns, the day mark included, so a seed written before it would be wiped for exactly the
-        // rules that need it most — a rule saved at 14:00 is re-seeded here and does not fire on
-        // the next tick. Reading `next` rather than the live map keeps it one pass, before the swap.
-        // `None`: a load has no last-observed instant. Nothing was watching this rule's clock before
-        // the process started, or before this commit put the rule in the live set, so the whole of
-        // today up to `now_local` is the unobserved window.
-        if !self.seed_missed_schedules(next.values(), None, now_local, store, now_ms).is_empty() {
+        // owns, the day mark included, so a seed written before it would be wiped for a newly live
+        // schedule or one whose target minute just changed. `None` means this eligible rule has no
+        // last-observed instant: it joined the live set, so the whole of today up to `now_local` is
+        // the unobserved window. A rule live on both sides of this reload was already observed and
+        // must keep its pending occurrence for the evaluator tick.
+        let seedable: Vec<&Arc<LiveRule>> = next
+            .values()
+            .filter(|live| {
+                let id = &live.rule.id;
+                // A reload only has an unobserved clock window for a schedule entering the live
+                // set, or for the new target of a mark reconciliation just invalidated. A valid
+                // mark carried across disable/re-enable is already spent and must not be reseeded.
+                (!previously_live.contains(id) || invalidated_marks.contains(id))
+                    && self.runtime.last_fired_day(id).is_none()
+            })
+            .collect();
+        if !self.seed_missed_schedules(seedable, None, now_local, store, now_ms).is_empty() {
             report.emit = true;
         }
 
@@ -1288,6 +1301,42 @@ mod tests {
             engine.runtime.last_fired_day("au-sched"),
             None,
             "a deleted disabled rule retained its spent-day mark"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_save_does_not_spend_a_live_schedule_that_the_next_tick_must_dispatch() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let mut other = crate::automation_engine::test_host::schedule_only_rule("au-other");
+        other.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        store.save_rule(&sched).unwrap();
+        store.save_rule(&other).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+
+        // 09:01: saving the unrelated evening rule reloads both live rules, but the engine was
+        // already watching the morning schedule when its minute passed.
+        other.name = "renamed evening schedule".into();
+        other.updated_at += 1;
+        store.save_rule(&other).unwrap();
+        let report = engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 1)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "an unrelated save spent the unchanged schedule before its next evaluator tick"
+        );
+        assert!(!report.emit, "the unrelated save wrote a false missed-schedule row");
+        assert!(log_rows(&store).is_empty(), "the unchanged schedule wrote a Held row: {:?}", log_rows(&store));
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert!(
+            schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60 + 1)),
+            "the next evaluator tick would not dispatch the 09:00 schedule"
         );
     }
 
