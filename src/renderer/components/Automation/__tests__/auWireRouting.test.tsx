@@ -18,7 +18,7 @@ import { createRoot, Root } from 'react-dom/client';
 
 import { AuCanvas } from '../AuCanvas';
 import { DEFAULT_LAYOUT, draftFromRule } from '../automationDraft';
-import { faceFor, stateFor } from '../automationDerive';
+import { WIRE_CHIPS, faceFor, stateFor } from '../automationDerive';
 import type { NodeFace, NodeState } from '../automationDerive';
 import { problems } from '../automationValidation';
 import { STEP_ORDER } from '../automationSteps';
@@ -105,5 +105,49 @@ describe('AuCanvas — wire routing follows the cards', () => {
         // kept the old direction-based anchor while `AuNode` moved the dot, this would still be
         // `cond.x + AU_NODE_W` and the line would visibly detach from its dot.
         expect(pathStarts()).toContain(flipped.cond.x);
+    });
+
+    /**
+     * **M1 on the surface it was seen on.** `AuWires` renders `{chip ?? '·'}`, so a wire whose
+     * source port is missing from the chip map draws a bare dot — which is what a schedule rule's
+     * ONLY wire did. `automationDerive.test.ts` pins the map's exhaustiveness; this pins that the
+     * chip a real canvas draws is the word and not the fallback.
+     */
+    it("draws a word on the wait step’s wire, not the missing-chip dot", async () => {
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = draftFromTemplate(
+            AUTOMATION_TEMPLATES[0],
+        ).graph;
+        const rule = {
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: { ...graph, timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } } },
+        };
+        const draft = draftFromRule(rule);
+        const ctx = { now: NOW, problems: problems(rule) };
+        const faces = {} as Record<StepKind, NodeFace>;
+        const states = {} as Record<StepKind, NodeState>;
+        for (const step of STEP_ORDER) {
+            faces[step] = faceFor(rule, step, ctx);
+            states[step] = stateFor(rule, step, ctx);
+        }
+        await act(async () => {
+            root.render(
+                <AuCanvas
+                    draft={draft}
+                    faces={faces}
+                    states={states}
+                    chips={WIRE_CHIPS}
+                    onSelect={() => {}}
+                    onMove={() => {}}
+                    onConnect={() => {}}
+                    onDisconnect={() => {}}
+                    onRefuse={() => {}}
+                    onViewportReady={() => {}}
+                />,
+            );
+        });
+
+        const chips = [...container.querySelectorAll('.au-chip')].map((c) => c.textContent);
+        expect(chips).toEqual([WIRE_CHIPS['timer.out']]);
+        expect(chips).not.toContain('·');
     });
 });

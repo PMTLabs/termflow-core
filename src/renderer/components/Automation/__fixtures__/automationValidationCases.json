@@ -1041,6 +1041,55 @@
       ]
     },
     {
+      "name": "a Reading rule with one clause and no operator/threshold is the new authoring path — legal",
+      "why": "Plan 032 §5.3/§5.9: M2 added a clause list as a SECOND way to express a comparison. `cond.incomplete` predates clauses and must not block the path they exist to enable — a rule built entirely in the new CondPanel (finds: Reading, one clause, op/threshold left null) has to be enableable.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 500 } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
       "name": "a TEXT rule needs neither operator nor threshold",
       "rule": {
         "id": "au-fix",
@@ -1522,6 +1571,1611 @@
         }
       },
       "expected": []
+    },
+    {
+      "name": "action.unknownToken — $3 with two groups",
+      "why": "Two groups exist, but the message asks for a third. `substitute` is opt-in (plan 032 §4.2), so a text rule can carry this pattern and message with the toggle off with nothing wrong — the case right after this one.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+) in (\\S+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix $3",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "no problem when substitution is off",
+      "why": "The same $1 that would be a token with `substitute` on is the literal `awk '{print $1}'` people already write — opt-in is what keeps it working.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "awk '{print $1}'",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": false
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "$$1 is escaped, not a token",
+      "why": "The scanner shared with `subst.rs` treats `$$` as an escaped literal dollar, so `$$1` never reaches the token check at all, whatever the pattern can supply.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "x",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "cost $$1",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "action.tokenWithoutParse — substitute is on but there is no pattern",
+      "why": "The toggle says the message means to insert a capture, which nothing can be true of before a pattern exists — asked regardless of whether a token has actually been typed yet, the same way `cond.incomplete` is asked regardless of what a clause would compare against.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix $1",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "parse",
+          "code": "parse.empty"
+        },
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.tokenWithoutParse"
+        }
+      ]
+    },
+    {
+      "name": "action.unknownToken — ${bogus} when the pattern has no such name",
+      "why": "The named branch of the token check (`!names.has(t.name)`) had no case of its own — only the positional `$3` case above did. A named lookup for a group the pattern never declares must block exactly like an out-of-range number does.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "(?<value>\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix ${bogus}",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "substitute is on, the pattern exists, and the message names no token",
+      "why": "The one shape neither validator's fixture pinned: `substitute` true with a real pattern, but a message that never asks for a capture. There is nothing for `tokensUsed` to walk, so nothing should block.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "go now",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "cond.unknownToken — a clause sources $2 beyond the pattern's group count",
+      "why": "Plan 032 §8. Same predicate as `action.unknownToken` (`token_supplied`/`tokenSupplied`), applied to a clause's `Source` instead of a message token — one group exists, the clause asks for a second.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "group": 2 }, "test": { "number": { "op": "gt", "value": 10 } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "cond.unknownToken — a clause sources ${bogus} the pattern has no group for",
+      "why": "The named branch of the same predicate: the pattern declares no name at all, so `${bogus}` cannot be legal in a clause any more than it would be in a message.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "named": "bogus" }, "test": { "text": { "op": "is", "value": "5" } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "cond.clauseNeedsValue — a text clause with no text",
+      "why": "`contains` is not in the `isEmpty`/`isNotEmpty` exception, so an empty `value` cannot be compared against anything.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": "whole", "test": { "text": { "op": "contains", "value": "" } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.clauseNeedsValue"
+        }
+      ]
+    },
+    {
+      "name": "cond.clauseNeedsValue — a NUMERIC clause with no threshold",
+      "why": "Plan 032 §8's own wording for this code, and the shape `CondPanel` mints every time a row is switched from a text operator to a numeric one. It crosses the wire as `\"value\": null`, so this case also pins that BOTH sides decode a null threshold rather than refusing the rule.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": null } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.clauseNeedsValue"
+        }
+      ]
+    },
+    {
+      "name": "cond.clauseNeedsValue's exception — 'is empty' needs no text",
+      "why": "The paired positive: without this, the check above could be an unconditional 'value must be non-empty' that would also block the one operator the spec explicitly exempts.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": "whole", "test": { "text": { "op": "isEmpty", "value": "" } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "cond.badClausePattern — a matches clause whose own regex will not compile",
+      "why": "One grammar, one compiler (`compile`/`compilePattern`) — the same one that checks the rule's own pattern also checks a `matches` clause's, so there is no second regex parser to disagree with the first.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": "whole", "test": { "text": { "op": "matches", "value": "(unterminated" } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.badClausePattern"
+        }
+      ]
+    },
+    {
+      "name": "cond.clauseWithoutParse — a clause on a rule with no pattern",
+      "why": "A schedule rule has no pattern to capture from at all; today that is approximated by a blank `find`, which `parse.empty` already blocks — this is the SECOND, independent fact that the cond panel also has something to fix.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": [
+              { "source": "whole", "test": { "text": { "op": "contains", "value": "quota" } } }
+            ]
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "parse",
+          "code": "parse.empty"
+        },
+        {
+          "severity": "blocks",
+          "field": "cond",
+          "code": "cond.clauseWithoutParse"
+        }
+      ]
+    },
+    {
+      "name": "an empty clause list is legal — fire on the match",
+      "why": "Plan 032 §5.4: empty `clauses` is not a special case invented for this milestone, it is R8's existing text rule written down. A validator that blocked it would break every rule that fires on a bare match today.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED \\d+ test",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null,
+            "clauses": []
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.delayTooShort — 999 ms blocks",
+      "why": "Spec §12 item 1: a wait under 1 second is a send, not a wait.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 999
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.delayTooShort"
+        }
+      ]
+    },
+    {
+      "name": "timer.delayTooShort's floor — exactly 1 second is clean",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 1000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "an AfterMatch wait in the middle of the range is clean",
+      "why": "The plan's own example — detect `API error`, wait 30 s, then send `resume`.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 30000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.delayTooLong — exactly MAX_DELAY_MS blocks",
+      "why": "§12 item 2: a parked send is held in memory and nowhere else, so a wait long enough to outlive the session is a message the feature would never deliver. MAX_DELAY_MS is 10 minutes (automation_validation.rs).",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 600000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.delayTooLong"
+        }
+      ]
+    },
+    {
+      "name": "timer.delayTooLong's cap — one ms under MAX_DELAY_MS is clean",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 599999
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — an empty weekday mask blocks",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 0
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
+        }
+      ]
+    },
+    {
+      "name": "timer.noDays — one day selected is legal",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 1
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — all seven days selected is legal",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 127
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.noDays — the spare 8th bit alone still blocks",
+      "why": "`days` is a `u8` with 8 bits for 7 weekdays (Mon=bit0..Sun=bit6). Bit 7 (0x80) selects no real day, so a mask with only that bit set must still block — otherwise a corrupt or hand-crafted mask could look like it has a day while the schedule never fires.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 128
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
+        }
+      ]
+    },
+    {
+      "name": "timer.badMinute \u2014 a minute past the end of the day blocks",
+      "why": "`minuteOfDay` is a bare integer and nothing else bounds it. 1440 is the first value that is not a time of day: `now >= 1440` is true never, so the rule would look armed and fire silently never. The engine's `schedule_due` refuses the same value.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 1440,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.badMinute"
+        }
+      ]
+    },
+    {
+      "name": "timer.badMinute's ceiling \u2014 23:59 is the last legal minute",
+      "why": "One minute under the bound, and legal. The pair pins the boundary from both sides, the same way the two `timer.delayTooLong` cases do.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 1439,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.badMinute \u2014 a negative minute-of-day blocks",
+      "why": "The other end, and the dangerous one: `now >= -5` is true from midnight, so a corrupt row would fire on the first tick of every day rather than never.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": -5,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.badMinute"
+        }
+      ]
+    },
+    {
+      "name": "timer.scheduleWithMonitor — a schedule on a rule that still watches its terminals",
+      "why": "§6.3's walk skips `host.tail` for the WHOLE rule once the timer is `dailyAt`, silently — no log row, nothing on screen. A monitor left on such a rule is never actually run again, so this must block rather than warn.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.scheduleWithMonitor"
+        }
+      ]
+    },
+    {
+      "name": "timer.scheduleWithMonitor's other half — a DELAY on a watching rule is the point of a delay",
+      "why": "The paired negative: `schedule_due` is deliberately false for `AfterMatch`, so a delay does not silence the read chain the way a `dailyAt` timer does. A watching rule with a delay is exactly what a delay is for, and this is what makes the code a rule about `dailyAt` rather than about timers in general.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 30000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.scheduleWithMonitor — reported ahead of the schedule’s own fields",
+      "why": "Two problems on one rule, and the ORDER is asserted: the shape problem (`scheduleWithMonitor`) is a fact about the rule and is reported before `noDays`, which is a fact about the schedule's own fields — both sides sort blocks in emission order, so an implementation that reordered them would fail here even though both codes are present.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 0
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.scheduleWithMonitor"
+        },
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
+        }
+      ]
+    },
+    {
+      "name": "timer.neverRuns — a Wait with nothing to cross it blocks",
+      "why": "R7's oracle shape, measured by the M5 review: blank -> addStep 'timer' -> addStep 'action' -> type a message. `InputSteps::of` needs monitor, parse AND cond together and this rule has none of the three, only a Wait and a message, so nothing can ever cross the wait to reach it. Must report EXACTLY one blocking problem, not the zero `reload`'s old silent runtime skip effectively gave it.",
+      "rule": {
+        "id": "au-fix",
+        "name": "New automation",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 2,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 30000
+              }
+            }
+          },
+          "action": {
+            "message": "resume",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.neverRuns"
+        }
+      ]
+    },
+    {
+      "name": "timer.neverRuns — no timer at all and no input steps either",
+      "why": "Reachable through the API even though the editor cannot express it: plan 032 §3.1 makes monitor, parse, cond AND timer independently optional, so a bare graph with only an action is a real row the store can hold. The message must not tell the user to switch a Wait step that is not there (C1's own mistake) — it names the two ADD remedies instead.",
+      "rule": {
+        "id": "au-fix",
+        "name": "New automation",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 2,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "action": {
+            "message": "resume",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.neverRuns"
+        }
+      ]
+    },
+    {
+      "name": "timer.scheduleWithMonitor — a parse step with no monitor is silenced too",
+      "why": "I2: the skip is of the WHOLE read chain, not the monitor alone. A graph with `parse` (or `cond`) but no `monitor`, plus `dailyAt`, was admitted by `reload` under the old `monitor.is_some()` predicate, ran on the clock, and silently never read its own pattern. Widened to `monitor.is_some() || parse.is_some() || cond.is_some()`, matching task 27's identical widening of `schema_version_for`.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.scheduleWithMonitor"
+        }
+      ]
     }
   ]
 }

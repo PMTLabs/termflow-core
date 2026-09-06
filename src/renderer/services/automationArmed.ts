@@ -75,6 +75,11 @@ function emit(): void {
  * identity gives for free. The pair objects are replaced by `automation:state`, up to once a second
  * for as long as anything is live, and almost always with the same values. That is the flood this
  * function exists to absorb.
+ *
+ * **The field list is an allowlist, so every new field on the DTO is a decision made HERE.** A field
+ * this function does not name cannot wake a badge: `parkedAt` arrived for plan 032 section 7's
+ * `pending` state, and left off this list it would have let a pane that had started counting down go
+ * on rendering *Armed - waiting* until some unrelated field happened to move.
  */
 function sameArmed(a: ArmedAutomation[], b: ArmedAutomation[]): boolean {
     if (a.length !== b.length) return false;
@@ -86,6 +91,7 @@ function sameArmed(a: ArmedAutomation[], b: ArmedAutomation[]): boolean {
             && entry.pair.lastFiredAt === other.pair.lastFiredAt
             && entry.pair.firedCount === other.pair.firedCount
             && entry.pair.missing === other.pair.missing
+            && entry.pair.parkedAt === other.pair.parkedAt
         );
     });
 }

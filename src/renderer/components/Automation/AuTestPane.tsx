@@ -24,7 +24,29 @@ const VERDICTS: Record<DryRunReport['verdict'], { label: string; tone: string }>
     unreadable: { label: 'Nothing could be read', tone: 'error' },
 };
 
-const MARKS: Record<string, string> = { ok: '✓', failed: '✕', skipped: '·' };
+/**
+ * The pill's label — which is not always `VERDICTS[report.verdict].label` verbatim.
+ *
+ * §4.4's send-time refusal (a token beyond what the pattern can supply, or no pattern at all) can
+ * leave the ACTION step `failed` while the CONDITION that drove `verdict` was true. This pane's
+ * own invariant is that the verdict answers the condition, not the arm machine — so `verdict`
+ * itself must not change here, and it does not: this reads `report.steps` ONLY for the label,
+ * leaving `VERDICTS` and its exhaustiveness untouched. Without it, a user editing a message with a
+ * blocking `action.unknownToken` problem saw a green "Would fire" directly above the `✕` action
+ * row that said the send was refused — two rows on one screen making opposite claims about the
+ * same run.
+ */
+function pillFor(report: DryRunReport): { label: string; tone: string } {
+    const base = VERDICTS[report.verdict];
+    if (report.verdict !== 'would-fire') return base;
+    const actionFailed = report.steps.find((s) => s.kind === 'action')?.status === 'failed';
+    if (!actionFailed) return base;
+    return { label: 'Would fire — but nothing would be sent', tone: base.tone };
+}
+
+// `unknown` is `Truth::Unknown` — the step RAN and could not be answered, which is neither a pass
+// nor a failure and must not be drawn as either. `·` belongs to `skipped`, the step that never ran.
+const MARKS: Record<string, string> = { ok: '✓', failed: '✕', skipped: '·', unknown: '?' };
 
 export interface AuTestPaneProps {
     report: DryRunReport | null;
@@ -67,9 +89,9 @@ export const AuTestPane: React.FC<AuTestPaneProps> = ({
             </label>
             <span className="au-grow" />
             {report && (
-                <span className={`au-pill ${VERDICTS[report.verdict].tone}`}>
+                <span className={`au-pill ${pillFor(report).tone}`}>
                     <span className="au-pd" />
-                    {VERDICTS[report.verdict].label}
+                    {pillFor(report).label}
                 </span>
             )}
             <button type="button" className="au-btn sm" disabled={running || !chosen} onClick={onRun}>

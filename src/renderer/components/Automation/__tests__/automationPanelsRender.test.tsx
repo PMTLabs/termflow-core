@@ -23,8 +23,13 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 
 import { AuInspector } from '../AuInspector';
+import { ActionPanel } from '../panels/ActionPanel';
+import * as ActionPanelModule from '../panels/ActionPanel';
+import { CondPanel } from '../panels/CondPanel';
 import { draftFromRule } from '../automationDraft';
-import { faceFor } from '../automationDerive';
+import type { AutomationDraft } from '../automationDraft';
+import { faceFor, panelFor } from '../automationDerive';
+import { tokensUsed } from '../automationTokens';
 import { problems } from '../automationValidation';
 import { displayedPattern } from '../automationPresets';
 import { STEP_ORDER } from '../automationSteps';
@@ -33,7 +38,14 @@ import {
     AUTOMATION_TEMPLATES,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import type { AutomationRule } from '../../../types/electron';
+import type {
+    AutomationActionStep,
+    AutomationClause,
+    AutomationCompareOp,
+    AutomationRule,
+    AutomationSource,
+    AutomationTextOp,
+} from '../../../types/electron';
 
 describe('the inspector panels — rendered, per template', () => {
     let container: HTMLDivElement;
@@ -120,10 +132,23 @@ describe('the inspector panels — rendered, per template', () => {
         for (const rule of rules) {
             const others = rules.filter((r) => r !== rule);
 
-            const actionText = await show(rule, 'action');
+            // **The DISPLAYED VALUE, not the whole panel's text.** Task 7 added static chrome to
+            // this panel — chip labels `$0`/`$1`/`$2`, help copy that names `$1` by example — which
+            // is present on EVERY action panel regardless of which rule is open, and one template's
+            // own message is the single character `'1'`. A whole-container substring check flags
+            // that chrome as if it were a leaked value; reading the same `.au-cap` span the
+            // per-template loop above reads is the precise oracle for "the value this panel is
+            // SHOWING", exactly as that loop's own comment already argues.
+            await show(rule, 'action');
+            // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
+            // below pass vacuously against an empty string whenever the preview was blocked and
+            // `.au-cap` was absent from the DOM altogether.
+            const capNode = container.querySelector('.au-cap');
+            expect(capNode).not.toBeNull();
+            const shownMessage = capNode!.textContent ?? '';
             for (const other of others) {
                 if (other.graph.action.message === rule.graph.action.message) continue;
-                expect(actionText).not.toContain(other.graph.action.message);
+                expect(shownMessage).not.toContain(other.graph.action.message);
             }
 
             await show(rule, 'parse');
@@ -150,7 +175,13 @@ describe('the inspector panels — rendered, per template', () => {
         const SAID: Record<StepKind, string[]> = {
             monitor: ['terminals'],
             parse: ['find'],
-            cond: ['compare', 'threshold'],
+            // Task 14: the face's single `fires` row (the clause sentence, or its legacy
+            // fallback) replaced the old two-row `compare`/`threshold` layout — see `FACE_ROWS`.
+            cond: ['fires'],
+            // No template carries a wait step, so what this pins for `timer` is the ABSENT case —
+            // that the panel and the card word *not in this rule* identically, which is the one
+            // sentence about a missing step both surfaces state in prose.
+            timer: ['when'],
             action: ['message', 'send'],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
@@ -330,5 +361,612 @@ describe('the inspector panels — rendered, per template', () => {
         const text = await show(rule, 'cond');
         expect(text).toContain(says);
         expect(text).not.toContain(doesNotSay);
+    });
+});
+
+/**
+ * Task 7 — the substitute checkbox, the token chips, and the live preview (plan 032 §4.2, mockup
+ * §04). Mounts `ActionPanel` directly rather than through `AuInspector`: the behaviour under test
+ * is entirely this panel's own (the checkbox and chips write only `action.*`, and the preview reads
+ * only `draft.rule.graph` + `sample`), so a direct mount is the narrowest oracle that still reads
+ * the real component's DOM rather than `automationDerive`'s records — the same reasoning the file
+ * header gives for testing panels rendered instead of `stepValues() === stepValues()`.
+ */
+describe('ActionPanel — the substitute checkbox, token chips, and live preview (mockup §04)', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(async () => {
+        await act(async () => root.unmount());
+        container.remove();
+    });
+
+    const noop = () => {};
+
+    /**
+     * The first template's own pattern — `ctx:(\d+)%`, exactly ONE bracketed group — with only the
+     * action step overridden. `$1` is therefore always in range and `$2`/`$3` never are, which is
+     * what lets a test tell "resolves" apart from "out of range" without inventing a pattern of
+     * its own.
+     */
+    function draftWith(actionPatch: Partial<AutomationActionStep>): AutomationDraft {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: { ...base.graph, action: { ...base.graph.action, ...actionPatch } },
+        };
+        return { ...draftFromRule(rule), selected: 'action' };
+    }
+
+    async function renderAction(
+        actionPatch: Partial<AutomationActionStep>,
+        opts: { sample?: Record<string, string>; dispatch?: (a: unknown) => void } = {},
+    ) {
+        const draft = draftWith(actionPatch);
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(
+                <ActionPanel
+                    draft={draft}
+                    model={model}
+                    dispatch={opts.dispatch ?? noop}
+                    sample={opts.sample}
+                />,
+            );
+        });
+        return {
+            draft,
+            preview: () => container.querySelector('[data-testid="action-preview"]'),
+            messageInput: () =>
+                container.querySelector<HTMLInputElement>('input[aria-label="Message to send"]')!,
+        };
+    }
+
+    it('types $1 literally when substitution is off', async () => {
+        const { preview } = await renderAction({ message: 'fix $1', substitute: false });
+        expect(preview()?.textContent).toContain('fix $1');
+    });
+
+    it('resolves $1 from the sample capture when substitution is on', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $1', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).toContain('fix 17');
+    });
+
+    it('shows the blocking problem and no preview for an out-of-range token', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $3', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).toContain('Nothing would be sent');
+    });
+
+    it('renders the substitute toggle as a real, labelled checkbox — not a styled div', async () => {
+        await renderAction({ message: 'fix $1', substitute: false });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        expect(box).not.toBeNull();
+        expect(box!.checked).toBe(false);
+        expect(container.querySelector('.au-checkrow')?.textContent).toContain('Insert captured values');
+    });
+
+    it('checks the box once substitution is already on', async () => {
+        await renderAction({ message: 'fix $1', substitute: true });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        expect(box!.checked).toBe(true);
+    });
+
+    it('dispatches the toggle when the checkbox is clicked', async () => {
+        const dispatch = jest.fn();
+        await renderAction({ message: 'fix $1', substitute: false }, { dispatch });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]')!;
+        await act(async () => box.click());
+        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { substitute: true } });
+    });
+
+    it("renders one chip per group the pattern produces, plus $0 and $$, and marks the next one out of range as dead", async () => {
+        await renderAction({ message: '', substitute: false });
+        const chips = [...container.querySelectorAll('.au-tokens .au-token')].map((el) => el.textContent);
+        expect(chips).toEqual(['$0', '$1', '$2', '$$']);
+        const dead = [...container.querySelectorAll('.au-tokens .au-token.dead')].map((el) => el.textContent);
+        expect(dead).toEqual(['$2']);
+    });
+
+    it('clicking a chip inserts it into the message at the cursor', async () => {
+        const dispatch = jest.fn();
+        const { messageInput } = await renderAction({ message: 'fix ', substitute: false }, { dispatch });
+        const input = messageInput();
+        input.focus();
+        input.setSelectionRange(4, 4); // right after "fix "
+        const chip = [...container.querySelectorAll('.au-tokens .au-token')]
+            .find((el) => el.textContent === '$1') as HTMLButtonElement;
+        await act(async () => chip.click());
+        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { message: 'fix $1' } });
+    });
+
+    it('uses a braced token for group 10 and the next dead boundary, while leaving single digits bare', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: Array.from({ length: 10 }, () => '(\\d+)').join(''),
+                },
+                action: { ...base.graph.action, message: 'send ', substitute: true },
+            },
+        };
+        const dispatch = jest.fn();
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        await act(async () => {
+            root.render(<ActionPanel draft={draft} model={panelFor(rule, 'action', { problems: [] })} dispatch={dispatch} />);
+        });
+
+        const chips = [...container.querySelectorAll('.au-tokens .au-token')];
+        expect(chips.map((chip) => chip.textContent)).toContain('$9');
+        expect(chips.map((chip) => chip.textContent)).toContain('${10}');
+        expect(chips.filter((chip) => chip.classList.contains('dead')).map((chip) => chip.textContent))
+            .toEqual(['${11}']);
+
+        await act(async () => (chips.find((chip) => chip.textContent === '${10}') as HTMLButtonElement).click());
+        const action = dispatch.mock.calls[0][0] as { patch: { message: string } };
+        expect(action.patch.message).toBe('send ${10}');
+        expect(tokensUsed(action.patch.message)).toEqual([
+            expect.objectContaining({ kind: 'group', n: 10 }),
+        ]);
+    });
+
+    /**
+     * Mutation guard: the preview must read `action.message` through the resolution rule, not
+     * print it verbatim regardless of `substitute`. See task-7-report.md's mutation-check note —
+     * this is the test that fails when the resolution branch is bypassed.
+     */
+    it('does not show the raw token once substitution has resolved it', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $1', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).not.toContain('$1');
+    });
+
+    /**
+     * Milestone M1 review, Important 1. The plan's own flagship example: `\S` is not in
+     * `sayPattern`'s escape table, so its paraphrase — and with it `sampleFromPattern`'s worked
+     * example — is `null` for this pattern. Before this fix, `previewSubstitute`'s `sample[key] ??
+     * ''` rendered that identically to "this optional group did not match", so the preview showed
+     * `Fix the  failing tests in ` for a message that would actually type real captured text. Both
+     * tokens are IN RANGE (the pattern has two groups), so the preview must not be `blocked` —
+     * there is nothing wrong with the message, only nothing yet to show for it.
+     */
+    it('renders a placeholder — not nothing — for a token with no derivable sample, and says the preview is an example', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: 'FAILED (\\d+) tests in (\\S+)',
+                    keep: 'brackets',
+                },
+                action: { ...base.graph.action, message: 'Fix the $1 failing tests in $2', substitute: true },
+            },
+        };
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(<ActionPanel draft={draft} model={model} dispatch={noop} />);
+        });
+
+        const preview = container.querySelector('[data-testid="action-preview"]');
+        expect(preview?.classList.contains('blocked')).toBe(false);
+
+        const placeholders = [...container.querySelectorAll('.au-tok-ph')].map((el) => el.textContent);
+        expect(placeholders).toEqual(['⟨$1⟩', '⟨$2⟩']);
+
+        // The literal text around the placeholders is still shown — only the two tokens lack a
+        // sample.
+        expect(preview?.textContent).toContain('Fix the');
+        expect(preview?.textContent).toContain('failing tests in');
+
+        // And the panel says plainly that this is a guessed example, not a real capture.
+        expect(container.textContent).toContain('This preview uses an example');
+    });
+
+    /**
+     * The paired negative: once a real sample is supplied — a test pinning one, or in future a
+     * real dry-run capture — the SAME pattern resolves normally and carries no "this is an
+     * example" disclaimer, because it is no longer a guess.
+     */
+    it('does not call the preview an example once a real sample resolves every token', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: 'FAILED (\\d+) tests in (\\S+)',
+                    keep: 'brackets',
+                },
+                action: { ...base.graph.action, message: 'Fix the $1 failing tests in $2', substitute: true },
+            },
+        };
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(
+                <ActionPanel
+                    draft={draft}
+                    model={model}
+                    dispatch={noop}
+                    sample={{ 1: '17', 2: 'a.ts' }}
+                />,
+            );
+        });
+
+        expect(container.querySelector('.au-tok-ph')).toBeNull();
+        expect(container.querySelector('[data-testid="action-preview"]')?.textContent)
+            .toContain('Fix the 17 failing tests in a.ts');
+        expect(container.textContent).not.toContain('This preview uses an example');
+    });
+});
+
+/**
+ * Task 14 — CondPanel becomes a clause list with an explicit join (plan 032 §5.9, mockup §06).
+ *
+ * Mounts `CondPanel` directly, for the same reason the ActionPanel block above does: the behaviour
+ * under test — adding/removing rows, the join's visibility, clearing an operand on a type switch,
+ * and the token dropdown's contents — is entirely this panel's own.
+ *
+ * Adapted from the task brief's illustrative (vitest/testing-library) snippets to this project's
+ * actual jest + raw-DOM (`react-dom/client` + `act`) conventions — there is no `@testing-library/*`
+ * dependency here, and the real `CondPanel` is dispatch-based (`dispatch`), not `onChange`-based.
+ */
+describe('CondPanel — the finds radio, the clause list, the join (mockup §06)', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(async () => {
+        await act(async () => root.unmount());
+        container.remove();
+    });
+
+    const noop = () => {};
+
+    const TEXT_OP_BY_LABEL: Record<string, AutomationTextOp> = {
+        is: 'is',
+        'is not': 'isNot',
+        contains: 'contains',
+        'does not contain': 'notContains',
+        matches: 'matches',
+        'is empty': 'isEmpty',
+        'is not empty': 'isNotEmpty',
+    };
+    const NUM_OP_BY_LABEL: Record<string, AutomationCompareOp> = {
+        'is over': 'gt',
+        'is at least': 'gte',
+        'is under': 'lt',
+        'is at most': 'lte',
+        equals: 'eq',
+        'does not equal': 'neq',
+    };
+
+    /** A clause from the mockup's own shorthand — `clause('$1', 'is over', '30')`. */
+    function clause(token: string, opLabel: string, value: string): AutomationClause {
+        const source: AutomationSource = token === '$0' ? 'whole' : { group: Number(token.slice(1)) };
+        if (opLabel in NUM_OP_BY_LABEL) {
+            return { source, test: { number: { op: NUM_OP_BY_LABEL[opLabel], value: Number(value) } } };
+        }
+        return { source, test: { text: { op: TEXT_OP_BY_LABEL[opLabel], value } } };
+    }
+
+    /** Two declared groups by default, so `$1`/`$2` are always in range unless a test overrides `find`. */
+    function draftWithClauses(clauses: AutomationClause[], find = '(\\d+):(\\d+)'): AutomationDraft {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: { ...base.graph.parse, preset: 'custom', literal: null, find, keep: 'brackets' },
+                cond: { ...base.graph.cond, kind: 'text', clauses, join: 'and' },
+            },
+        };
+        return { ...draftFromRule(rule), selected: 'cond' };
+    }
+
+    async function renderCond(
+        clauses: AutomationClause[],
+        opts: { find?: string; dispatch?: (a: unknown) => void } = {},
+    ) {
+        const draft = draftWithClauses(clauses, opts.find);
+        const model = panelFor(draft.rule, 'cond', { problems: [] });
+        await act(async () => {
+            root.render(
+                <CondPanel
+                    draft={draft}
+                    model={model}
+                    now={1_700_000_000_000}
+                    onRearm={null}
+                    dispatch={(opts.dispatch ?? noop) as never}
+                />,
+            );
+        });
+    }
+
+    it('adds and removes clause rows', async () => {
+        const dispatch = jest.fn();
+        await renderCond([clause('$1', 'is', '529')], { dispatch });
+        const addBtn = [...container.querySelectorAll('button')]
+            .find((b) => /add a comparison/i.test(b.textContent ?? '')) as HTMLButtonElement;
+        expect(addBtn).toBeTruthy();
+        await act(async () => addBtn.click());
+        expect(dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({
+                type: 'clauses',
+                clauses: expect.arrayContaining([expect.anything(), expect.anything()]),
+            }),
+        );
+    });
+
+    it('hides the join control until there are two clauses', async () => {
+        await renderCond([clause('$1', 'is', '529')]);
+        expect(container.querySelector('[role="group"]')).toBeNull();
+
+        await renderCond([clause('$1', 'is', '529'), clause('$2', 'is over', '30')]);
+        const group = container.querySelector('[role="group"]');
+        expect(group).not.toBeNull();
+        expect(group!.getAttribute('aria-label')).toMatch(/combine/i);
+    });
+
+    it('clears the operand when a row switches between text and number', async () => {
+        const dispatch = jest.fn();
+        await renderCond([clause('$1', 'is', '529')], { dispatch });
+        const opSelect = container.querySelector<HTMLSelectElement>('[aria-label="How to compare"]')!;
+        const overOption = [...opSelect.options].find((o) => /is over/i.test(o.textContent ?? ''))!;
+        expect(overOption).toBeTruthy();
+        await act(async () => {
+            opSelect.value = overOption.value;
+            opSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        const action = dispatch.mock.calls[0][0] as { type: string; clauses: AutomationClause[] };
+        expect(action.type).toBe('clauses');
+        expect(action.clauses).toHaveLength(1);
+        const { test } = action.clauses[0];
+        expect('number' in test).toBe(true);
+        if ('number' in test) {
+            expect(test.number.op).toBe('gt');
+            // Otherwise "529" silently becomes a numeric threshold — the clause's own operand must
+            // be cleared, never coerced, on a text-to-number switch.
+            expect(test.number.value).toBeNull();
+        }
+
+        /**
+         * **And what the panel mints has to cross the IPC wire.** This is the same switch, followed
+         * by the hop `invoke` performs — the editor sends a blocked draft deliberately (switched
+         * off, never refused), so this clause reaches the backend on the very next Save.
+         *
+         * `null` survives `JSON.stringify`; `NaN` does not — it becomes `null` in transit, so the
+         * value the panel held and the value the backend received were two different things, and
+         * `Test::Number { value: f64 }` refused the whole rule with an opaque
+         * ``invalid args `rule` ``. The editor could then neither save nor close.
+         */
+        const crossed = JSON.parse(JSON.stringify(action.clauses)) as AutomationClause[];
+        expect(crossed).toEqual(action.clauses);
+    });
+
+    it('offers only tokens the pattern actually produces', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        const opts = [...select.options].map((o) => o.textContent ?? '');
+        expect(opts).toHaveLength(2);
+        expect(opts[0]).toContain('$0');
+        expect(opts[1]).toContain('$1');
+    });
+
+    /**
+     * **`Source::Named` was validated and folded but never authorable.** It is modelled on both
+     * sides, `cond.unknownToken` has a `${bogus}` fixture case for it, and `fold_v1_clauses`
+     * PRODUCES one for a `(?<value>…)` pattern — so a clause could arrive holding a named token,
+     * round-trip through the panel's fallback `<option>`, and never be creatable in the first
+     * place. `groupsOf` has returned the name set since M2; the dropdown simply never read it.
+     *
+     * Both spellings are offered, and that is the point: a named group also occupies a numbered
+     * slot, so `$1` and `${code}` are two names for one capture.
+     */
+    it('offers the pattern\'s named groups as well as its numbered ones', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'err (?<code>\\d+) (?<why>\\w+)' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        const opts = [...select.options].map((o) => o.textContent ?? '');
+        // Each option carries the value it holds in the live preview (§5.9), so `${why}` is never
+        // picked blind — `sayPattern`'s own worked example for this pattern is `err 63 abc`.
+        expect(opts).toEqual([
+            expect.stringContaining('$0'),
+            '$1 — "63"',
+            '$2 — "abc"',
+            '${code} — "63"',
+            '${why} — "abc"',
+        ]);
+        // And the VALUES are the keys `sourceFromKey` round-trips, not the labels.
+        expect([...select.options].map((o) => o.value)).toEqual([
+            'whole',
+            'group:1',
+            'group:2',
+            'named:code',
+            'named:why',
+        ]);
+    });
+
+    it('offers no named option for a pattern that declares none', async () => {
+        // The paired negative: an unconditional `${…}` row, or one built from a stale name set,
+        // would satisfy the test above and break this.
+        await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        expect([...select.options].map((o) => o.value)).toEqual(['whole', 'group:1']);
+    });
+
+    /* ------------------------------------------------------ task 28: §5.9's other two bullets --- */
+
+    /** Every row's verdict chip, in order. */
+    const verdicts = () => [...container.querySelectorAll('.au-cv')].map((el) => ({
+        text: (el.textContent ?? '').trim(),
+        cls: el.className,
+    }));
+
+    it('shows what $0 holds, and keeps its words when there is nothing to show', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'ctx:(\\d+)%' });
+        const opts = [...container.querySelectorAll<HTMLOptionElement>(
+            '[aria-label="Which captured value"] option',
+        )].map((o) => o.textContent ?? '');
+        expect(opts).toEqual(['$0 — "ctx:63%"', '$1 — "63"']);
+
+        // …and a pattern with no worked example to read falls back to the words, never to a blank
+        // or an invented value.
+        await renderCond([clause('$1', 'is', 'x')], { find: 'FAILED (\\d+) tests in (\\S+)' });
+        const bare = [...container.querySelectorAll<HTMLOptionElement>(
+            '[aria-label="Which captured value"] option',
+        )].map((o) => o.textContent ?? '');
+        expect(bare).toEqual(['$0 — the whole match', '$1', '$2']);
+    });
+
+    /**
+     * **The three answers must READ as three answers.** §5.9's second bullet is what makes AND/OR
+     * concrete, and it is only concrete if a row that could not be answered is visibly not a row
+     * that failed: an OR chain carries an unknown, and a red ✕ beside it tells the user the rule
+     * will not fire when it may well.
+     *
+     * `ctx:(\w+)` supplies `$1 = "abc"`: text comparisons give the pass/fail pair, while the
+     * declared (not stale) source is still unparseable to a number and therefore gives unknown.
+     */
+    it('draws a passing row, a failing row and an unknown row as three different things', async () => {
+        await renderCond([
+            clause('$1', 'is', 'abc'),
+            clause('$1', 'is', 'x'),
+            clause('$1', 'is over', '25'),
+        ], { find: 'ctx:(\\w+)' });
+        const [pass, fail, unknown] = verdicts();
+        expect(pass.text).toContain('passes');
+        expect(fail.text).toContain('fails');
+        expect(unknown.text).toContain('unknown');
+        // The assertion that the mutation in step 5 has to break: unknown is not the failing
+        // treatment, in either the words or the class that colours them.
+        expect(unknown.text).not.toBe(fail.text);
+        expect(unknown.cls).not.toBe(fail.cls);
+        expect(pass.cls).not.toBe(fail.cls);
+        expect(container.querySelectorAll('.au-cheld')).toHaveLength(3);
+    });
+
+    it('keeps a capture reading but hides its verdict for a blocking operand or pattern', async () => {
+        await renderCond([clause('$1', 'contains', '')]);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('$1 holds "63"');
+
+        await renderCond([clause('$1', 'matches', '(')]);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('$1 holds "63"');
+    });
+
+    it('does not crash or draw a verdict when an invalidated named capture is an inherited object key', async () => {
+        // The clause was valid while the pattern declared `(?<toString>\\d+)`; after that group
+        // is removed it must stay visibly invalid, not resolve Object.prototype.toString and crash
+        // while trying to coerce a function to a number.
+        await renderCond([
+            { source: { named: 'toString' }, test: { number: { op: 'gt', value: 25 } } },
+        ], { find: '(\\d+)' });
+
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('${toString} did not match');
+    });
+
+    it('still judges a declared text capture that did not participate as empty text', async () => {
+        // Unlike the stale `toString` above, `retry` is still declared. The sampler returns an
+        // ordinary capture record for a real match in which this optional group did not join, so
+        // text predicates deliberately read its missing slot as `''` and retain their verdict.
+        const sample = jest.spyOn(ActionPanelModule, 'sampleFromPattern').mockReturnValue({ '0': '' });
+        try {
+            await renderCond([
+                { source: { named: 'retry' }, test: { text: { op: 'isEmpty', value: '' } } },
+            ], { find: '(?<retry>\\d+)?' });
+            expect(container.querySelector('.au-cheld')?.textContent).toContain('${retry} did not match');
+            expect(verdicts()).toEqual([expect.objectContaining({ text: expect.stringContaining('passes') })]);
+        } finally {
+            sample.mockRestore();
+        }
+    });
+
+    it('says what each row\'s token holds, and says plainly when it holds nothing', async () => {
+        await renderCond([clause('$1', 'is over', '25'), clause('$3', 'is over', '25')]);
+        const held = [...container.querySelectorAll('.au-cheld')].map((el) => (el.textContent ?? '').trim());
+        expect(held[0]).toBe('$1 holds "63"');
+        // Not `holds ""` — a token that did not participate is a different fact from one that
+        // captured an empty string, and it is the reason the row above it is unknown.
+        expect(held[1]).toBe('$3 did not match');
+        // The stale source is invalid rather than merely unknown, so it has no verdict pill.
+        expect(verdicts()).toHaveLength(1);
+    });
+
+    /**
+     * **No verdict at all is better than a wrong one.** Two different absences, one answer: a
+     * pattern that will not compile, and one that compiles but has no worked example to read
+     * (`sampleFromPattern` returns `null`, never `{}`). Neither may default to pass or fail.
+     */
+    it('draws no verdict when there is no reading to judge against, and does not throw', async () => {
+        await renderCond([clause('$1', 'is over', '25')], { find: '(unclosed' });
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelectorAll('.au-cheld')).toHaveLength(0);
+        expect(container.querySelectorAll('.au-cread')).toHaveLength(0);
+
+        await renderCond([clause('$1', 'is over', '25')], { find: 'FAILED (\\d+) tests in (\\S+)' });
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+
+        // **The positive control**, without which both assertions above pass on a panel that draws
+        // no verdicts at all — which is exactly what this panel did before this task.
+        await renderCond([clause('$1', 'is over', '25')], { find: 'ctx:(\\d+)%' });
+        expect(verdicts()).toHaveLength(1);
+    });
+
+    /**
+     * **A reading has to say where it came from.** `$1 holds "63"` beside a green tick is a claim,
+     * and the thing it is read from is `sayPattern`'s worked example — not a terminal. Without the
+     * note a user reasonably reads the row as live output and trusts a verdict about a line no
+     * terminal ever printed.
+     */
+    it('says the readings come from the worked example, and only while there are readings', async () => {
+        await renderCond([clause('$1', 'is over', '25')], { find: 'ctx:(\\d+)%' });
+        const text = container.textContent ?? '';
+        expect(text).toContain('worked example');
+        expect(text).toContain('not from a terminal');
+
+        // Not on a rule with no reading to explain — the rows there carry no verdict either.
+        await renderCond([clause('$1', 'is over', '25')], { find: '(unclosed' });
+        expect(container.textContent ?? '').not.toContain('worked example');
+
+        // …nor on a rule with no comparisons at all.
+        await renderCond([], { find: 'ctx:(\\d+)%' });
+        expect(container.textContent ?? '').not.toContain('worked example');
     });
 });

@@ -24,8 +24,10 @@
 
 use regex::{Regex, RegexBuilder};
 
+use crate::automation_engine::subst;
 use crate::automation_store::{
-    AutomationGraph, AutomationRule, Cadence, CondKind, Criterion, Keep, TargetMode,
+    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
+    Test, TextOp, TimerMode, TimerStep, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -113,12 +115,339 @@ pub fn compile(find: &str) -> Result<Regex, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Whether a captured token — a clause's [`Source`], or a message's `$N`/`${name}` — is one
+/// `compiled`'s groups can actually supply.
+///
+/// **Shared by `cond.unknownToken` and `action.unknownToken`**, so a clause and a message can
+/// never disagree about what `$2` means (plan 032 §8) — two different answers to "does this
+/// pattern have a group 2" is the drift this milestone keeps having to fix.
+fn token_supplied(compiled: &Regex, group: Option<usize>, name: Option<&str>) -> bool {
+    match (group, name) {
+        (Some(n), _) => n <= compiled.captures_len().saturating_sub(1),
+        (None, Some(name)) => compiled.capture_names().any(|cn| cn == Some(name)),
+        (None, None) => true, // $0 / Source::Whole is always the whole match.
+    }
+}
+
+/// `$0` / `$2` / `${name}`, for a clause's own problem message.
+///
+/// `pub(crate)` rather than a second copy: `dry.rs`'s Test-pane wording for a clause list needs the
+/// same token spelling this validator's own messages use — `two-implementations-one-fix`.
+pub(crate) fn source_text(source: &Source) -> String {
+    match source {
+        Source::Whole => "$0".to_string(),
+        Source::Group(n) => format!("${n}"),
+        Source::Named(name) => format!("${{{name}}}"),
+    }
+}
+
+/// The rule's PARSE step, when it has one that can source clause tokens.
+///
+/// **Two different absences, one answer.** A *schedule* rule (plan 032 §6.3) has no parse step at
+/// all; an ordinary rule can have one whose declared pattern is blank, which `parse.empty` already
+/// reports on the `parse` field. Neither can supply a token, so both read `None` here — and every
+/// caller stays correct because this is the one place that decides it.
+///
+/// Returns the step rather than a bool so a caller that has proved presence does not have to ask
+/// again: a second `graph.parse.as_ref()` below this would be a redundant guard masking this one.
+fn parse_step(graph: &AutomationGraph) -> Option<&ParseStep> {
+    graph.parse.as_ref().filter(|p| !p.find.trim().is_empty())
+}
+
+/// Everything wrong with the COND step's clause list — §8's four `cond.*` codes (plan 032 §5.3,
+/// §5.4).
+///
+/// **An empty list is legal and reports nothing.** It means "fire when the pattern matches",
+/// exactly today's text rule — not a special case invented for this check, the existing
+/// behaviour written down (§5.4).
+fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
+    let mut out = Vec::new();
+    // No cond step at all is no clauses at all — a schedule rule (§6.3) reports nothing here.
+    // Absence is a no-op for this check, never a substitute check invented for it (§8's table
+    // already anticipates it, in `cond.clauseWithoutParse` below).
+    let Some(cond) = graph.cond.as_ref() else {
+        return out;
+    };
+    let clauses = &cond.clauses;
+    if clauses.is_empty() {
+        return out;
+    }
+
+    let Some(parse) = parse_step(graph) else {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "cond",
+            "cond.clauseWithoutParse",
+            "This condition compares a captured value, but the rule has no pattern to capture it from.",
+        ));
+        return out;
+    };
+
+    // Only ask the pattern for its groups once it can compile — an uncompilable pattern is
+    // already `parse.uncompilable`'s problem, not this one's, exactly like `action.unknownToken`.
+    let compiled = compile(&parse.find).ok();
+
+    for clause in clauses {
+        if let Some(re) = &compiled {
+            let bad = match &clause.source {
+                Source::Whole => false,
+                Source::Group(n) => !token_supplied(re, Some(*n as usize), None),
+                Source::Named(name) => !token_supplied(re, None, Some(name.as_str())),
+            };
+            if bad {
+                let count = re.captures_len().saturating_sub(1);
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "cond",
+                    "cond.unknownToken",
+                    format!(
+                        "{} has nothing to stand for. The pattern in Read a value has {} bracketed \
+                         group{}, so the highest you can use is ${}.",
+                        source_text(&clause.source),
+                        count,
+                        if count == 1 { "" } else { "s" },
+                        count
+                    ),
+                ));
+            }
+        }
+
+        match &clause.test {
+            Test::Number { value, .. } => {
+                // **Reached by the ordinary path, not a defensive edge.** `value` is
+                // `Option<f64>`, and `None` is what `CondPanel` writes the moment a row is
+                // switched from a text operator to a numeric one, or a number is half-typed —
+                // §8's *"a numeric clause with no threshold"* in the flesh. The finiteness half
+                // stays for a value that arrives by computation rather than by typing: comparing
+                // against NaN/Infinity is exactly the silent-failure shape `CompareOp::Neq`'s own
+                // doc warns about for a COERCED token.
+                if !value.is_some_and(f64::is_finite) {
+                    out.push(Problem::new(
+                        Severity::Blocks,
+                        "cond",
+                        "cond.clauseNeedsValue",
+                        "Enter a number to compare this value with.",
+                    ));
+                }
+            }
+            Test::Text { op, value } => {
+                let needs_value = !matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty);
+                if needs_value && value.trim().is_empty() {
+                    out.push(Problem::new(
+                        Severity::Blocks,
+                        "cond",
+                        "cond.clauseNeedsValue",
+                        "Enter some text to compare this value with.",
+                    ));
+                } else if *op == TextOp::Matches {
+                    if let Err(e) = compile(value) {
+                        out.push(Problem::new(
+                            Severity::Blocks,
+                            "cond",
+                            "cond.badClausePattern",
+                            format!(
+                                "This clause's own pattern could not be understood: {}",
+                                first_line(&e)
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The floor on an `AfterMatch` wait — plan 032 §12 item 1. `MIN_TIMER_MS` (250 ms) is a POLL floor
+/// and too permissive for a delay: a sub-second "wait" is a send, not a wait.
+pub const MIN_DELAY_MS: i64 = 1_000;
+
+/// The ceiling on an `AfterMatch` wait — plan 032 §12 item 2.
+///
+/// **A parked send lives only in memory.** `AutomationRuntime.parked` is a `DashMap` built empty at
+/// launch and never persisted, so a wait that outlives the process is a message the feature quietly
+/// never sends. The cap is what keeps the promise the editor makes when it accepts a delay small
+/// enough to survive an ordinary session.
+///
+/// **It equals `ECHO_TTL_MS` today by coincidence, and the two are unrelated — do not couple them.**
+/// This cap used to be written as `ECHO_TTL_MS` on the theory that a longer wait outlives the echo
+/// needle that hides the rule's own message from itself. That theory is false: `run_send` calls
+/// `push_echo(&tm, .., landed)` where `landed` is the moment the write LANDED, and `push_echo` sets
+/// `until_ms = now_ms + ECHO_TTL_MS`, so a needle's life starts at the SEND. The wait between the
+/// crossing and the send cannot shorten it, and there is no delay length at which a rule's own
+/// message goes unstripped.
+pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
+
+/// **A rule needs input steps XOR a schedule, and this is the guard for the XOR itself** — not a
+/// property of the delay instance that first surfaced it (plan 032 review, R7).
+///
+/// The runtime's own answer to "can this rule ever do anything" is
+/// [`crate::automation_engine::eval::InputSteps::of`]: `None` unless `monitor`, `parse` and `cond`
+/// are ALL present. The one other way a rule can ever fire is a `DailyAt` schedule, which reads
+/// nothing and does not need them. Anything else — a lone `AfterMatch` wait with nothing to cross
+/// it, a bare graph with no timer and no input steps at all, a monitor with no parse — can never do
+/// anything, and it must say so in VALIDATION rather than rely on `reload`'s silent runtime skip:
+/// that skip is a fact about ONE producer's output, and C1 happened because three separate
+/// producers each reasoned about what "the editor" writes and were each wrong. A rule holds for
+/// every producer — the editor, the REST API, an import, an older build, and the mode-switch path
+/// that reaches this same shape by switching a saved schedule rule's timer back to a delay without
+/// touching the input steps at all.
+///
+/// **Mutually exclusive with `timer.scheduleWithMonitor` by construction**, not by a check added to
+/// keep them apart: this fires only when `scheduled` is false, and that code fires only when it is
+/// true. One graph can never trip both with contradictory remedies.
+///
+/// The remedy differs by shape, and saying so honestly is the whole reason this is not
+/// `timer.delayWithoutMonitor`: with a Wait step already on the canvas the fix is either add a
+/// Watch step or switch that Wait to a schedule; with no Wait step at all there is no "switch it" to
+/// offer, only "add a Watch step" or "add a Wait step set to a schedule". Naming a control the user
+/// does not have is exactly C1's mistake, so the message branches on `graph.timer` rather than
+/// stating one sentence that is wrong half the time.
+///
+/// **A blank message defers to `action.empty` alone** (found by `automationWritesWhatIsDrawn.test`'s
+/// own T4-f case, which this guard broke on the first pass). A brand-new draft with nothing drawn on
+/// it has an empty message and no input steps, and that shape trips this predicate too — but
+/// `timer` is not the mandatory field `action` is, so telling a user who has not typed anything yet
+/// that their (still nonexistent) Wait card is unreachable is exactly the "claim about an undrawn
+/// card" that module exists to rule out. Once a message is typed, if the rule still cannot run,
+/// that IS the moment to say so — which is R7's own oracle: a message typed, a Wait added, nothing
+/// to cross it.
+fn never_runs_problem(graph: &AutomationGraph) -> Option<Problem> {
+    let has_input_steps = graph.monitor.is_some() && graph.parse.is_some() && graph.cond.is_some();
+    let scheduled = matches!(graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
+    if has_input_steps || scheduled || graph.action.message.trim().is_empty() {
+        return None;
+    }
+    let message = if graph.timer.is_some() {
+        "This rule waits, but nothing will ever start the wait: it has no Watch output step to \
+         match against. Add one, or switch this Wait to run at a time of day instead."
+    } else {
+        "This rule has nothing that could ever run it: no terminals to watch, and no schedule \
+         either. Add a Watch output step, or add a Wait step set to run at a time of day."
+    };
+    Some(Problem::new(Severity::Blocks, "timer", "timer.neverRuns", message))
+}
+
+/// Everything wrong with the WAIT step — §8's `timer.*` codes (plan 032 §6.2, §6.3, §12 item 1).
+///
+/// `None` (no wait step at all) reports nothing: every rule saved before this milestone, and every
+/// rule that does not use one, is unaffected.
+fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let Some(timer) = &graph.timer else {
+        return out;
+    };
+
+    match &timer.mode {
+        TimerMode::AfterMatch { delay_ms } => {
+            if *delay_ms < MIN_DELAY_MS {
+                // The number is DERIVED, never restated: a floor quoted as a literal lies the day
+                // the constant moves, which is the same reason `monitor.interval` quotes
+                // `MIN_TIMER_MS`.
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.delayTooShort",
+                    format!("Wait at least {} second before sending.", MIN_DELAY_MS / 1_000),
+                ));
+            } else if *delay_ms >= MAX_DELAY_MS {
+                // §12 item 2, and NOT the echo needle — see `MAX_DELAY_MS`'s own doc for why that
+                // justification was false. A parked send is held in memory and nowhere else, so the
+                // words name the thing the cap actually protects the user from.
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.delayTooLong",
+                    format!(
+                        "Wait less than {} minutes — a waiting message is held in memory and is lost if TermFlow quits.",
+                        MAX_DELAY_MS / 60_000
+                    ),
+                ));
+            }
+        }
+        TimerMode::DailyAt { minute_of_day, days } => {
+            // **A schedule DISABLES the whole read chain, silently, and that is why this blocks**
+            // (§6.3, §8).
+            //
+            // `run_evaluator`'s walk asks `schedule_due` for a `DailyAt` rule and skips `host.tail`
+            // entirely — for the whole rule, on every tick. So a rule carrying a schedule alongside
+            // `monitor`, `parse` and/or `cond` stops reading its terminals: no log row, nothing on
+            // screen, the pattern and the comparison simply never run again. Reported FIRST, because
+            // it is a fact about the rule's shape while the two below are about the schedule's own
+            // fields, and the shared fixture pins that order from both sides.
+            //
+            // **Wider than a monitor check alone (I2).** The skip is of the whole read chain, not
+            // the monitor: a graph with `parse` and/or `cond` but no `monitor` is admitted by
+            // `reload`, runs on the clock, and silently ignores the pattern and the comparison too.
+            // Task 27 already made exactly this widening for `schema_version_for` — spec's
+            // `monitor.is_none()` widened to all three input steps, for the same reason: an older
+            // build's `AutomationGraph` had them as required fields, so any one of the three is what
+            // actually breaks the read, not the monitor specifically. This closes the second of the
+            // two sites that needed it.
+            //
+            // **Making the editor's layout exclusive is not enough**, and this module already ruled
+            // so one function down: `schedule_due` range-checks `minute_of_day` and the weekday mask
+            // precisely because a row that reached the store by another route — the API, an import —
+            // must not be runnable-but-never-firing on one side and unfireable on the other
+            // (`an_unfireable_rule_is_unfireable_on_both_sides`). Those routes can write any of the
+            // three input steps alongside a `DailyAt` just as easily as a monitor.
+            if graph.monitor.is_some() || graph.parse.is_some() || graph.cond.is_some() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.scheduleWithMonitor",
+                    "A schedule fires on the clock, so this rule will not read its terminals. \
+                     Switch the Wait step back to after a match.",
+                ));
+            }
+            // **`minute_of_day` is a bare `i32` and nothing else checks it.** An out-of-range target
+            // does not fail loudly — it fails by never firing (`5000`) or by firing from midnight
+            // every day (`-5`, which makes `now >= target` true from the first tick). The bound is
+            // `automation_store`'s, for the same reason the mask is: §6.3's `schedule_due` refuses
+            // the same values, so a row that reached the store some other way is refused by both.
+            if !(0..MINUTES_PER_DAY).contains(minute_of_day) {
+                // The last minute of the day is DERIVED, never restated: `23:59` written out is a
+                // sentence that goes false the day the bound moves. The floor is literal because
+                // zero is what "minute of day" counts from — there is no constant behind it.
+                let last = MINUTES_PER_DAY - 1;
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.badMinute",
+                    format!("Pick a time between 00:00 and {:02}:{:02}.", last / 60, last % 60),
+                ));
+            }
+            // The mask is `automation_store`'s, beside the field it describes — §6.3's
+            // `schedule_due` reads the same one, so "can this ever fire" and "does it fire now"
+            // cannot answer from two different tables.
+            if days & WEEKDAY_BITS_MASK == 0 {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.noDays",
+                    "Pick at least one day for this to run.",
+                ));
+            }
+        }
+    }
+
+    out
+}
+
 /// Everything wrong with a rule's PARSE step. Ordered blocks-first, so a caller showing one shows the
 /// one that matters.
 pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let mut out = Vec::new();
 
-    if graph.parse.find.trim().is_empty() {
+    // A schedule rule (§6.3) has no parse step at all, which is NOT the same thing as a blank
+    // pattern: there is no field here to be empty, so `parse.empty` would be describing a step the
+    // rule does not have. Nothing to report — §8's table adds no code for this.
+    let Some(parse) = graph.parse.as_ref() else {
+        return out;
+    };
+
+    if parse.find.trim().is_empty() {
         out.push(Problem::new(Severity::Blocks, "parse", "parse.empty", "Enter something to look for."));
         return out;
     }
@@ -128,7 +457,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     // checked as one expression and executed as another — three treatments of one field, across
     // `pattern_problems`, `reload` and `pattern_refused_at_load`. Now there is one: trimmed for the
     // emptiness question, verbatim for every other.
-    let compiled = match compile(&graph.parse.find) {
+    let compiled = match compile(&parse.find) {
         Ok(re) => re,
         Err(e) => {
             out.push(Problem::new(
@@ -152,9 +481,10 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     // every test stayed green, because no test ran this against a text rule at all. That is the
     // `validation-rule-strands-a-scoped-default` class: a rule written for the step that READS a
     // field, applied to every rule that merely HAS it.
-    let numeric = graph.cond.kind == CondKind::Number;
+    // No cond step is no comparison, so `keep` — a NUMERIC-only concern — has nothing to answer to.
+    let numeric = graph.cond.as_ref().is_some_and(|c| c.finds == Finds::Reading);
 
-    if numeric && graph.parse.keep == Keep::Brackets && groups == 0 {
+    if numeric && parse.keep == Keep::Brackets && groups == 0 {
         // Never a silent fall-back to the whole match: the user asked for the bracketed part, and
         // comparing something else is how a rule types the wrong thing into a terminal.
         out.push(Problem::new(
@@ -166,13 +496,14 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
         ));
     }
 
-    if numeric && graph.parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
+    if numeric && parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
         out.push(Problem::new(
             Severity::Warns,
             "parse",
             "parse.manyGroups",
-            "This pattern has more than one bracketed group. The first one is used; \
-             name one of them `value` to choose a different one.",
+            "This pattern has more than one bracketed group. The comparison uses the first one; \
+name one of them `value` to use a different one instead. The rest are still available \
+in the message, as $2, $3 and so on.",
         ));
     }
 
@@ -229,7 +560,13 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     }
 
     // --- interval -------------------------------------------------------------------------------
-    if rule.graph.monitor.cadence == Cadence::Timer && rule.graph.monitor.every_ms < MIN_TIMER_MS {
+    // A schedule rule (§6.3) has no monitor step, so it has no poll interval to be too fast.
+    if rule
+        .graph
+        .monitor
+        .as_ref()
+        .is_some_and(|m| m.cadence == Cadence::Timer && m.every_ms < MIN_TIMER_MS)
+    {
         out.push(Problem::new(
             Severity::Blocks,
             "monitor",
@@ -242,18 +579,47 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(pattern_problems(&rule.graph));
 
     // --- threshold ------------------------------------------------------------------------------
-    // A numeric rule with no operator or no threshold cannot be true of anything, and `evaluate`
-    // reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
-    if rule.graph.cond.kind == CondKind::Number
-        && (rule.graph.cond.op.is_none() || rule.graph.cond.threshold.is_none())
-    {
+    // A numeric rule with no operator, no threshold, AND no clauses cannot be true of anything, and
+    // `evaluate` reads it as `Truth::Unknown` forever — a rule that runs, logs, and can never fire.
+    // `op` / `threshold` are v1-only (§5.3): a rule built in the clause-list editor leaves both
+    // `None` and expresses its comparison as a clause instead, so an empty clause list is what
+    // actually makes this incomplete, not a bare absence of `op`/`threshold`.
+    // A rule with no cond step reads no value and has nothing to compare it with, so there is no
+    // incomplete comparison to report — the check is a no-op for it, not a substitute check.
+    if rule.graph.cond.as_ref().is_some_and(|c| {
+        c.finds == Finds::Reading
+            && c.clauses.is_empty()
+            && (c.op.is_none() || c.threshold.is_none())
+    }) {
         out.push(Problem::new(
             Severity::Blocks,
             "cond",
             "cond.incomplete",
-            "Choose how to compare the value, and the number to compare it with.",
+            "Add a comparison — this rule reads a value but has nothing to compare it with.",
         ));
     }
+
+    // --- clauses --------------------------------------------------------------------------------
+    // §8's four `cond.*` codes: a clause sourcing a token the pattern cannot supply, a clause with
+    // no value to compare, a `matches` clause whose own pattern will not compile, and any clause
+    // at all on a rule with no pattern to read them from.
+    out.extend(clause_problems(&rule.graph));
+
+    // --- timer ----------------------------------------------------------------------------------
+    // R7, first: a rule with no way to ever run at all — neither the input steps `InputSteps::of`
+    // needs nor a schedule. Reported ahead of `timer_problems` for the same reason
+    // `timer.scheduleWithMonitor` leads that function: it is a fact about the rule's shape, and the
+    // two guards are mutually exclusive by construction (this one fires only when `scheduled` is
+    // false; that one only when it is true), so a single graph never gets contradictory advice.
+    if let Some(p) = never_runs_problem(&rule.graph) {
+        out.push(p);
+    }
+
+    // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
+    // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
+    // that constant's own doc — a schedule whose target is not a time of day, one whose weekday
+    // mask selects no day, and one on a rule that still reads its terminals and would silently stop.
+    out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
     if rule.graph.action.message.trim().is_empty() {
@@ -263,7 +629,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             "action.empty",
             "Enter the message this rule should type.",
         ));
-    } else if !rule.graph.parse.find.trim().is_empty() {
+    } else if let Some(parse) = parse_step(&rule.graph) {
         // §2.6's failure, told to the user before it happens: a rule whose own message matches its
         // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
         // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
@@ -280,7 +646,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         // can only widen the match, so ` HANDOFF` — which the engine will never match against the
         // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
         // bug, so the shared fixture agreed with itself and could not see it.
-        if let Ok(re) = compile(&rule.graph.parse.find) {
+        if let Ok(re) = compile(&parse.find) {
             if re.is_match(&rule.graph.action.message) {
                 out.push(Problem::new(
                     Severity::Warns,
@@ -293,8 +659,63 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         }
     }
 
+    // --- token substitution -----------------------------------------------------------------
+    // §4.4, opt-in via `ActionStep.substitute` (plan 032 §4.2). Without this, a message naming a
+    // token the pattern cannot supply reaches `subst::substitute` only at SEND time, where §4.4's
+    // own table refuses the send — silently, from the rule's own log, well after the user who
+    // wrote "fix $3" believed they were done. This stops it at save/enable time instead.
+    //
+    // `subst::tokens_used` is the SAME scanner `substitute` reads (see that module's doc): a
+    // second scanner here could recognise a different grammar and let a message pass that the
+    // send then refuses anyway.
+    // **Absent and blank are one answer here**, and it is the one §8's table already names: the
+    // toggle claims the message inserts a capture, and a rule with no parse step at all captures
+    // nothing, exactly like one whose pattern is still empty. `parse_step` is what makes the two
+    // spellings indistinguishable to this check.
+    if rule.graph.action.substitute {
+        match parse_step(&rule.graph) {
+            // The toggle itself claims the message inserts a capture, which nothing can be true
+            // of before a pattern exists — asked regardless of whether a token has actually been
+            // typed yet, the same way the threshold check above is asked regardless of what a
+            // clause would compare against.
+            None => out.push(Problem::new(
+                Severity::Blocks,
+                "action",
+                "action.tokenWithoutParse",
+                "This message inserts captured values, but the rule has no pattern to capture them from.",
+            )),
+            Some(parse) => {
+                if let Ok(compiled) = compile(&parse.find) {
+                    let count = compiled.captures_len().saturating_sub(1);
+                    for token in subst::tokens_used(&rule.graph.action.message) {
+                        let bad = match &token {
+                            subst::Token::Whole => false,
+                            subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
+                            subst::Token::Named(name) => {
+                                !token_supplied(&compiled, None, Some(name.as_str()))
+                            }
+                        };
+                        if !bad {
+                            continue;
+                        }
+                        out.push(Problem::new(
+                            Severity::Blocks,
+                            "action",
+                            "action.unknownToken",
+                            format!(
+                                "{token} has nothing to stand for. The pattern in Read a value has \
+                                 {count} bracketed group{}, so the highest you can use is ${count}.",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // STABLE, so within each severity the problems stay in step order — targets, monitor, parse,
-    // cond, action — which is the order the inspector's problem list draws them in.
+    // cond, timer, action — which is the order the inspector's problem list draws them in.
     out.sort_by_key(|p| !p.blocks());
     out
 }
@@ -307,8 +728,8 @@ fn first_line(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::automation_store::{
-        ActionStep, Cadence, CompareOp, CondStep, MonitorStep, ParsePreset, ParseStep, ReadMode,
-        SendTo,
+        ActionStep, Cadence, Clause, CompareOp, CondStep, MonitorStep, ParsePreset, ParseStep,
+        ReadMode, SendTo, TimerStep,
     };
     use crate::automation_store::{AutomationRule, Criterion, TargetMode};
 
@@ -316,21 +737,23 @@ mod tests {
     /// the point is that a text rule carries the field and never reads it.
     fn text_graph(find: &str, keep: Keep) -> AutomationGraph {
         let mut g = graph(find, keep);
-        g.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        g.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         g
     }
 
     fn graph(find: &str, keep: Keep) -> AutomationGraph {
         AutomationGraph {
             layout: None,
-            monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-            parse: ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep },
-            cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+            timer: None,
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            parse: Some(ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep }),
+            cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
             action: ActionStep {
                 message: "m".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".into(),
+                substitute: false,
             },
         }
     }
@@ -489,24 +912,24 @@ mod tests {
             (
                 "a timer faster than the engine can tick",
                 Box::new(|r: &mut AutomationRule| {
-                    r.graph.monitor.cadence = Cadence::Timer;
-                    r.graph.monitor.every_ms = MIN_TIMER_MS - 1;
+                    r.graph.monitor_mut().cadence = Cadence::Timer;
+                    r.graph.monitor_mut().every_ms = MIN_TIMER_MS - 1;
                 }),
                 "monitor",
             ),
             (
                 "a pattern that will not compile",
-                Box::new(|r: &mut AutomationRule| r.graph.parse.find = r"ctx:(\d+%".into()),
+                Box::new(|r: &mut AutomationRule| r.graph.parse_mut().find = r"ctx:(\d+%".into()),
                 "parse",
             ),
             (
                 "a numeric rule with no threshold",
-                Box::new(|r: &mut AutomationRule| r.graph.cond.threshold = None),
+                Box::new(|r: &mut AutomationRule| r.graph.cond_mut().threshold = None),
                 "cond",
             ),
             (
                 "a numeric rule with no operator",
-                Box::new(|r: &mut AutomationRule| r.graph.cond.op = None),
+                Box::new(|r: &mut AutomationRule| r.graph.cond_mut().op = None),
                 "cond",
             ),
             (
@@ -540,15 +963,15 @@ mod tests {
     #[test]
     fn a_timer_exactly_at_the_floor_is_allowed() {
         let mut rule = valid_rule();
-        rule.graph.monitor.cadence = Cadence::Timer;
-        rule.graph.monitor.every_ms = MIN_TIMER_MS;
+        rule.graph.monitor_mut().cadence = Cadence::Timer;
+        rule.graph.monitor_mut().every_ms = MIN_TIMER_MS;
         assert_eq!(problems(&rule), vec![]);
 
         // And `every_ms` is meaningless for an output-driven rule, so it must not be judged there —
         // the struct carries the field whatever the cadence says.
         let mut on_output = valid_rule();
-        on_output.graph.monitor.cadence = Cadence::OnOutput;
-        on_output.graph.monitor.every_ms = 0;
+        on_output.graph.monitor_mut().cadence = Cadence::OnOutput;
+        on_output.graph.monitor_mut().every_ms = 0;
         assert_eq!(problems(&on_output), vec![], "a field is judged by the step that READS it");
     }
 
@@ -557,8 +980,8 @@ mod tests {
     #[test]
     fn a_message_matching_its_own_pattern_warns_and_never_blocks() {
         let mut rule = valid_rule();
-        rule.graph.parse.find = "HANDOFF".into();
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.parse_mut().find = "HANDOFF".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "HANDOFF now".into();
 
         let found = problems(&rule);
@@ -578,7 +1001,7 @@ mod tests {
     #[test]
     fn blocking_problems_come_before_warnings() {
         let mut rule = valid_rule();
-        rule.graph.parse.find = r"ctx:(\d+)(%)".into();
+        rule.graph.parse_mut().find = r"ctx:(\d+)(%)".into();
         rule.graph.action.message = String::new();
 
         let found = problems(&rule);
@@ -654,6 +1077,15 @@ mod tests {
 
         // Every rule this module can report has to appear in the fixture, or the two
         // implementations are only pinned to each other on the paths someone remembered.
+        //
+        // **This list is HAND-TYPED and this side has no way to derive it.** A `code` here is a
+        // `&'static str` handed to `Problem::new`, not a variant of anything, so there is no
+        // exhaustive table for the compiler to check a new one against — where the TypeScript
+        // mirror derives its list from `BADGES`, which is a `Record<ProblemCode, string>` and fails
+        // `tsc` on a missing key. A twenty-first code added to both implementations with no fixture
+        // case therefore stays green HERE until someone adds it below; the TS side is the one that
+        // would go red. Said out loud rather than left to look symmetrical, because pretending both
+        // halves are protected is worse than one that is not.
         for code in [
             "targets.empty",
             "targets.criterion",
@@ -663,10 +1095,334 @@ mod tests {
             "parse.noBrackets",
             "parse.manyGroups",
             "cond.incomplete",
+            "cond.unknownToken",
+            "cond.clauseNeedsValue",
+            "cond.badClausePattern",
+            "cond.clauseWithoutParse",
+            "timer.delayTooShort",
+            "timer.delayTooLong",
+            "timer.badMinute",
+            "timer.noDays",
+            "timer.scheduleWithMonitor",
+            "timer.neverRuns",
             "action.empty",
             "action.echo",
+            "action.tokenWithoutParse",
+            "action.unknownToken",
         ] {
             assert!(codes.contains(code), "no fixture case produces `{code}`");
+        }
+    }
+
+    /// **A message must name a control that is on screen.** This one said *"Choose how to compare
+    /// the value, and the number to compare it with"* — the `<select>` and `<input>` pair that was
+    /// deleted when `CondPanel` became a clause list (§5.9). Choosing *A reading that stays true* on
+    /// a rule with no clauses reached it immediately, and the editor blocked with instructions for
+    /// two controls that no longer exist.
+    ///
+    /// `automationValidation.ts` asserts the same sentence, character for character: the shared
+    /// fixture compares `code` rather than prose, so the words are pinned once per implementation
+    /// and a change to either one has to be made in both.
+    #[test]
+    fn cond_incomplete_names_a_control_that_is_on_screen() {
+        let mut rule = valid_rule();
+        rule.graph.cond = Some(CondStep { finds: Finds::Reading, ..Default::default() });
+
+        let found = problems(&rule);
+        let incomplete = found
+            .iter()
+            .find(|p| p.code == "cond.incomplete")
+            .unwrap_or_else(|| panic!("a Reading rule with no clauses must be incomplete: {found:?}"));
+        assert_eq!(
+            incomplete.message,
+            "Add a comparison — this rule reads a value but has nothing to compare it with."
+        );
+    }
+
+    /// **The message names the Wait mode switch the editor actually offers.**
+    ///
+    /// The complement is asserted in the same test, and it is what makes this a rule about
+    /// `DailyAt` rather than about timers: a DELAY on a watching rule is exactly what a delay is
+    /// for. `automationValidation.ts` asserts the same sentence, character for character.
+    #[test]
+    fn the_schedule_with_monitor_message_names_the_workable_mode_switch() {
+        let mut scheduled = valid_rule();
+        scheduled.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK },
+        });
+        assert!(scheduled.graph.monitor.is_some(), "the canonical rule watches something");
+
+        let found = problems(&scheduled);
+        let clash = found
+            .iter()
+            .find(|p| p.code == "timer.scheduleWithMonitor")
+            .unwrap_or_else(|| panic!("a schedule silences this rule's monitor: {found:?}"));
+        assert_eq!(
+            clash.message,
+            "A schedule fires on the clock, so this rule will not read its terminals. \
+             Switch the Wait step back to after a match."
+        );
+        assert!(clash.blocks(), "a monitor that silently never runs must not be saveable enabled");
+
+        // A DELAY on a watching rule is the point of a delay.
+        let mut delayed = valid_rule();
+        delayed.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        assert!(
+            !problems(&delayed).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+            "a delay does not stop the rule watching"
+        );
+
+        // And a GENUINE schedule rule — no monitor, no parse, no cond, exactly §6.3's shape — has
+        // no read chain left to silence. Clearing `monitor` alone is NOT this shape (I2): the
+        // canonical rule's `parse` and `cond` are still `Some`, so a test that only cleared
+        // `monitor` would have passed on the very predicate I2 widened past.
+        let mut only_schedule = scheduled.clone();
+        only_schedule.graph.monitor = None;
+        only_schedule.graph.parse = None;
+        only_schedule.graph.cond = None;
+        assert!(
+            !problems(&only_schedule).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+            "a schedule rule with no read chain at all has nothing to silence"
+        );
+    }
+
+    /// **I2 — the skip is of the whole read chain, not the monitor.** §6.3's walk skips
+    /// `host.tail` for the WHOLE rule, so `parse` and/or `cond` without a `monitor` are silently
+    /// ignored by a `DailyAt` rule exactly as a monitor would be. The old predicate
+    /// (`monitor.is_some()` alone) let a `parse` + `DailyAt` graph with no monitor through `reload`
+    /// to run on the clock and silently never read its pattern.
+    ///
+    /// Swept over the three fields independently, so a fix that widened only one of them (say,
+    /// `parse` but not `cond`) is caught rather than a single hand-picked case passing by luck.
+    #[test]
+    fn schedule_with_monitor_widens_to_any_read_step_not_only_the_monitor() {
+        let daily = TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK };
+
+        let cases: Vec<(&str, Box<dyn Fn(&mut AutomationGraph)>)> = vec![
+            ("monitor alone", Box::new(|g: &mut AutomationGraph| {
+                g.parse = None;
+                g.cond = None;
+            })),
+            ("parse alone", Box::new(|g: &mut AutomationGraph| {
+                g.monitor = None;
+                g.cond = None;
+            })),
+            ("cond alone", Box::new(|g: &mut AutomationGraph| {
+                g.monitor = None;
+                g.parse = None;
+            })),
+        ];
+        for (name, mutate) in cases {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep { mode: daily.clone() });
+            mutate(&mut rule.graph);
+            assert!(
+                problems(&rule).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+                "{name} left on a `DailyAt` rule must still block: {:?}",
+                problems(&rule)
+            );
+        }
+
+        // The paired negative: none of the three present has nothing left to silence.
+        let mut none_left = valid_rule();
+        none_left.graph.timer = Some(TimerStep { mode: daily });
+        none_left.graph.monitor = None;
+        none_left.graph.parse = None;
+        none_left.graph.cond = None;
+        assert!(!problems(&none_left).iter().any(|p| p.code == "timer.scheduleWithMonitor"));
+    }
+
+    // =============================================================================================
+    // R7 — a rule needs input steps XOR a schedule; anything else can never run
+    // =============================================================================================
+
+    /// **The oracle shape.** `blank → addStep 'timer' → addStep 'action' → type a message`: a Wait
+    /// step and an action, nothing that could ever cross the wait. Exactly one blocking problem —
+    /// not zero (this rule was previously admitted all the way to `reload`, which skipped it
+    /// silently) and not more than one (the default delay must not also trip `timer.delayTooShort`
+    /// or `timer.delayTooLong`).
+    #[test]
+    fn a_wait_with_nothing_to_cross_it_blocks_with_exactly_one_problem() {
+        let mut rule = valid_rule();
+        rule.graph.monitor = None;
+        rule.graph.parse = None;
+        rule.graph.cond = None;
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        rule.graph.action.message = "resume".into();
+
+        let found = problems(&rule);
+        assert_eq!(
+            found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            vec!["timer.neverRuns"],
+            "{found:?}"
+        );
+        assert!(found[0].blocks());
+        assert_eq!(found[0].field, "timer");
+        assert!(
+            found[0].message.contains("Add one, or switch this Wait to run at a time of day"),
+            "a Wait already on the canvas can be switched: {:?}",
+            found[0].message
+        );
+    }
+
+    /// **The wider shape (I2/R7 together): no timer at all, and no input steps either.** Reachable
+    /// through the API even though the editor cannot express "no steps, no timer, just a message" —
+    /// §3.1 makes all four of `monitor`/`parse`/`cond`/`timer` independently optional. The message
+    /// must not tell the user to "switch" a Wait step that does not exist (C1's own mistake).
+    #[test]
+    fn a_bare_graph_with_no_timer_and_no_input_steps_also_blocks() {
+        let mut rule = valid_rule();
+        rule.graph.monitor = None;
+        rule.graph.parse = None;
+        rule.graph.cond = None;
+        rule.graph.timer = None;
+
+        let found = problems(&rule);
+        let never_runs = found
+            .iter()
+            .find(|p| p.code == "timer.neverRuns")
+            .unwrap_or_else(|| panic!("a bare graph with no timer must still block: {found:?}"));
+        assert!(
+            !never_runs.message.to_lowercase().contains("switch"),
+            "there is no Wait step on screen to switch: {:?}",
+            never_runs.message
+        );
+        assert!(never_runs.message.contains("Add a Watch output step"));
+    }
+
+    /// **The paired negatives.** A genuine schedule rule (no input steps, but `DailyAt`) and an
+    /// ordinary rule (all three input steps, no timer at all) both run, and neither trips this code.
+    #[test]
+    fn a_schedule_or_a_complete_set_of_input_steps_never_trips_never_runs() {
+        let scheduled = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        assert!(
+            !problems(&scheduled).iter().any(|p| p.code == "timer.neverRuns"),
+            "{:?}",
+            problems(&scheduled)
+        );
+
+        let mut ordinary = valid_rule();
+        ordinary.graph.timer = None;
+        assert!(
+            !problems(&ordinary).iter().any(|p| p.code == "timer.neverRuns"),
+            "{:?}",
+            problems(&ordinary)
+        );
+    }
+
+    /// **R7 and I2 are the two halves of one invariant, and a single graph must never trip both**
+    /// with contradictory advice (one saying "add a Watch step", the other "remove" one). They are
+    /// mutually exclusive by construction: `never_runs_problem` only fires when the rule is NOT
+    /// scheduled, and `timer.scheduleWithMonitor` only fires when it IS. Swept rather than asserted
+    /// for one shape, because "mutually exclusive by construction" is exactly the kind of claim a
+    /// single hand-picked case can make look true by accident.
+    #[test]
+    fn never_runs_and_schedule_with_monitor_are_mutually_exclusive() {
+        for timer in [
+            None,
+            Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } }),
+            Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK },
+            }),
+        ] {
+            for (monitor, parse, cond) in [
+                (true, true, true),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+                (false, false, false),
+            ] {
+                let mut rule = valid_rule();
+                rule.graph.timer = timer.clone();
+                if !monitor {
+                    rule.graph.monitor = None;
+                }
+                if !parse {
+                    rule.graph.parse = None;
+                }
+                if !cond {
+                    rule.graph.cond = None;
+                }
+                let found = problems(&rule);
+                let codes: Vec<&str> = found.iter().map(|p| p.code.as_str()).collect();
+                assert!(
+                    !(codes.contains(&"timer.neverRuns") && codes.contains(&"timer.scheduleWithMonitor")),
+                    "timer={timer:?} monitor={monitor} parse={parse} cond={cond}: {codes:?}"
+                );
+            }
+        }
+    }
+
+    /// **Both delay bounds quote their own constant.** `timer.delayTooShort` restated its floor as
+    /// the literal words *"at least 1 second"* while `MIN_DELAY_MS` sat three lines above it, which
+    /// is a sentence that goes false the day the floor moves and says nothing when it does.
+    ///
+    /// The cap's words are pinned here too, because they are the half that was WRONG: they blamed
+    /// the echo needle (see `MAX_DELAY_MS`), which no wait length can outlive.
+    /// `automationValidation.ts` asserts the same two sentences, built the same way.
+    #[test]
+    fn both_delay_bounds_quote_their_constant_rather_than_restating_it() {
+        let with_delay = |delay_ms: i64| {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } });
+            rule
+        };
+
+        let short = problems(&with_delay(MIN_DELAY_MS - 1));
+        let short = short.iter().find(|p| p.code == "timer.delayTooShort").expect("under the floor");
+        assert_eq!(
+            short.message,
+            format!("Wait at least {} second before sending.", MIN_DELAY_MS / 1_000)
+        );
+
+        let long = problems(&with_delay(MAX_DELAY_MS));
+        let long = long.iter().find(|p| p.code == "timer.delayTooLong").expect("at the cap");
+        assert_eq!(
+            long.message,
+            format!(
+                "Wait less than {} minutes — a waiting message is held in memory and is lost if TermFlow quits.",
+                MAX_DELAY_MS / 60_000
+            )
+        );
+    }
+
+    /// **`timer.badMinute` quotes the bound rather than restating it**, for the same reason both
+    /// delay bounds do: *"between 00:00 and 23:59"* typed out is a sentence that goes false the day
+    /// `MINUTES_PER_DAY` moves and says nothing when it does. The floor stays literal because zero is
+    /// what a minute-of-day counts from; there is no constant behind it to drift.
+    ///
+    /// `automationValidation.ts` asserts this same sentence, built the same way — the shared fixture
+    /// compares `code`, so the words are pinned once per implementation.
+    #[test]
+    fn the_bad_minute_message_derives_the_last_minute_of_the_day() {
+        let with_minute = |minute_of_day: i32| {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day, days: WEEKDAY_BITS_MASK },
+            });
+            rule
+        };
+
+        let last = MINUTES_PER_DAY - 1;
+        let want = format!("Pick a time between 00:00 and {:02}:{:02}.", last / 60, last % 60);
+        assert_eq!(want, "Pick a time between 00:00 and 23:59.", "the derivation must read as a time");
+
+        for minute in [-1, MINUTES_PER_DAY] {
+            let found = problems(&with_minute(minute));
+            let bad = found
+                .iter()
+                .find(|p| p.code == "timer.badMinute")
+                .unwrap_or_else(|| panic!("minute_of_day {minute} is not a time of day: {found:?}"));
+            assert_eq!(bad.message, want);
+            assert!(bad.blocks(), "a schedule that cannot fire sensibly must not be saveable enabled");
+        }
+
+        // And the legal ends of the range report nothing at all.
+        for minute in [0, MINUTES_PER_DAY - 1] {
+            assert!(
+                !problems(&with_minute(minute)).iter().any(|p| p.code == "timer.badMinute"),
+                "minute_of_day {minute} is a time of day"
+            );
         }
     }
 
@@ -692,11 +1448,58 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "anything at all".into();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 1, "only the empty pattern, no echo warning: {found:?}");
         assert_eq!(found[0].code, "parse.empty");
+    }
+
+    /// **`value: None` is the ordinary case, not an edge one**, and the comment this test used to
+    /// carry ("unreachable through the product") was wrong the day `CondPanel` became a clause
+    /// list: switching a row from a text operator to a numeric one mints a clause with no
+    /// threshold, which is precisely §8's *"a numeric clause with no threshold"*. It travels the
+    /// wire as `{"value":null}` and must block, not decode-fail.
+    ///
+    /// The non-finite half stays a defensive check — no JSON literal spells `NaN` or `Infinity`, so
+    /// it is pinned here by constructing the clause in code rather than through the shared fixture:
+    /// a branch that is promised but never exercised is a coverage hole with a rationale
+    /// (`a-comment-that-forbids-a-test`), not proof the branch does what it claims.
+    #[test]
+    fn a_numeric_clause_with_no_usable_value_needs_a_value() {
+        let mut g = graph(r"ctx:(\d+)%", Keep::Brackets);
+        g.cond = Some(CondStep {
+            finds: Finds::Event,
+            clauses: vec![Clause {
+                source: Source::Whole,
+                test: Test::Number { op: CompareOp::Gt, value: None },
+            }],
+            ..Default::default()
+        });
+
+        // The reachable one first: nothing entered yet.
+        assert_eq!(
+            clause_problems(&g).iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            vec!["cond.clauseNeedsValue"],
+            "a numeric clause with no threshold is §8's own wording for this code"
+        );
+
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::NAN) };
+        let found = clause_problems(&g);
+        assert_eq!(
+            found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            vec!["cond.clauseNeedsValue"],
+            "a non-finite clause value must report the same code as an empty text value: {found:?}"
+        );
+
+        // Paired: `f64::INFINITY` is also non-finite and must trip the same guard, not merely NaN.
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::INFINITY) };
+        let found = clause_problems(&g);
+        assert_eq!(found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(), vec!["cond.clauseNeedsValue"]);
+
+        // And the paired positive: an ordinary finite value reports nothing at all.
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(25.0) };
+        assert!(clause_problems(&g).is_empty(), "a finite value must not be flagged");
     }
 }

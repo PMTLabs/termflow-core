@@ -17,9 +17,10 @@ import {
     describeCadence,
     describeCriterion,
     describeLastFired,
-    describeRule,
     describeWatching,
 } from './automationState';
+import { describeRule } from '../../Automation/automationDerive';
+import { AuRuleSentence } from '../../Automation/AuRuleSentence';
 
 /**
  * The footer's fire history is the ENGINE'S LIVE STATE, and it is not the rule's lifetime.
@@ -72,6 +73,8 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
 }) => {
     const state = automationRowState(rule, pairs, now);
     const sentence = describeRule(rule);
+    // Schedules target terminals to send a message; only event rules watch those terminals' output.
+    const targetVerb = rule.graph.timer && 'dailyAt' in rule.graph.timer.mode ? 'Sending to' : 'Watching';
     const missing = Object.entries(pairs ?? {})
         .filter(([, p]) => p.missing)
         .map(([tm]) => tm);
@@ -109,21 +112,12 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                 </div>
 
                 <div className="au-sentence">
-                    {sentence.lead} <b>{sentence.subject}</b>
-                    {sentence.verb && (
-                        <>
-                            {' '}<span className="au-arrow">{sentence.verb}</span>{' '}
-                            <b>{sentence.threshold}</b>
-                        </>
-                    )}{' '}
-                    <span className="au-arrow">→</span> {sentence.verbSend}{' '}
-                    <span className="au-msg">&quot;{sentence.message}&quot;</span>
-                    {sentence.sendNote && <span className="au-arrow">{sentence.sendNote}</span>}
+                    <AuRuleSentence sentence={sentence} />
                 </div>
 
                 <div className="au-meta">
                     <span className="au-k">
-                        ◉ Watching <span className="au-term">{describeWatching(rule, pairs)}</span>
+                        ◉ {targetVerb} <span className="au-term">{describeWatching(rule, pairs)}</span>
                     </span>
                     {watched.length > 0 && (
                         <span className="au-k">

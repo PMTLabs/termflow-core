@@ -29,14 +29,18 @@ export interface ParsePanelProps {
 
 export const ParsePanel: React.FC<ParsePanelProps> = ({ draft, model, report, dispatch, onTest }) => {
     const { parse } = draft.rule.graph;
-    const exact = parse.preset === 'exactWords';
+    // Every control here is bound to the parse step, so there is nothing to draw without one.
+    // A rule with no parse step (plan 032 §3.1's schedule rule) should not reach this panel at all
+    // — which step cards are drawn is tasks 23-25's; this is the guard, not that decision.
+    const exact = parse?.preset === 'exactWords';
     // A CONTROL BINDING — the input's `value`, not something this panel displays about the rule.
-    const shown = displayedPattern(parse);
+    const shown = parse ? displayedPattern(parse) : '';
     // DISPLAYED, so it comes from the model like everything else this panel says out loud. It used
     // to be this component's own `sayPattern(parse.find, parse.keep)` call.
     const saying = model.saying;
     const parseStep = report?.steps.find((s) => s.kind === 'parse') ?? null;
     const bracketProblem = model.problems.find((p) => p.code === 'parse.noBrackets');
+    if (!parse) return null;
 
     return (
         <>

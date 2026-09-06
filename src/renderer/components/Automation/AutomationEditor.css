@@ -327,6 +327,14 @@
     color: #c08b52;
 }
 
+/* Mockup's `--n-timer`. Hardcoded hex, no custom properties, matching the four above (plan §9). */
+.au-editor .au-palitem.timer .au-palico,
+.au-editor .au-node.timer .au-nico,
+.au-editor .au-gi.timer {
+    background: rgba(196, 123, 156, 0.18);
+    color: #c47b9c;
+}
+
 .au-editor .au-palitem.action .au-palico,
 .au-editor .au-node.action .au-nico,
 .au-editor .au-gi.action {
@@ -526,6 +534,12 @@
 
 .au-editor .au-nstate.ready {
     background: #3fb950;
+}
+
+/* A step the rule does not have (plan 032 §3.1) — the same grey the bare dot uses, written out so
+   a future edit of the base rule cannot silently give this one a meaning it has not got. */
+.au-editor .au-nstate.absent {
+    background: #7d818c;
 }
 
 .au-editor .au-nbody {
@@ -848,6 +862,17 @@
     opacity: 0.5;
 }
 
+/* A step that DID run and could not be answered — `Truth::Unknown`. Neither a pass nor a failure,
+   so it is neither green nor red, and full-opacity rather than dimmed like `skipped`: the step ran.
+   Amber, the same tone the problem list uses for a warning. */
+.au-editor .au-dstep.unknown {
+    border-color: #6b5320;
+}
+
+.au-editor .au-dstep.unknown .au-mk {
+    color: #d29922;
+}
+
 .au-editor .au-dstep .au-nm {
     flex: 0 0 132px;
     color: #cfd2d8;
@@ -1136,6 +1161,127 @@
     border-color: #4a5b66;
 }
 
+/* A chip past the pattern's own groups — still clickable (typing it is what a §05 "out of range"
+   problem is FOR), just visibly not one the pattern can supply. */
+.au-editor .au-token.dead {
+    border-style: dashed;
+    color: #6a6e77;
+}
+
+/* ------------------------------------------------------------- cond clauses --- */
+/* Task 14 — the clause list (plan 032 §5.9, mockup §06). `.au-crow`'s three controls follow
+   `.au-frow`'s flex layout rather than reusing it directly, because a row also carries the delete
+   button `.au-frow`'s two-field layout never needed. */
+
+.au-editor .au-clauses {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.au-editor .au-crow {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 8px;
+    background: #1c1d22;
+    border: 1px solid #2b2d33;
+    border-radius: 7px;
+}
+
+.au-editor .au-crow .au-finput {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+}
+
+.au-editor .au-novalue {
+    flex: 1;
+    font-size: 0.85rem;
+    font-style: italic;
+    color: #6a6e77;
+}
+
+.au-editor .au-crow-del {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    font-size: 0.8rem;
+    color: #ffaea8;
+    background: transparent;
+    border: 1px solid #3a3c44;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.au-editor .au-crow-del:hover {
+    background: rgba(248, 81, 73, 0.09);
+    border-color: #6e2b28;
+}
+
+/* Task 28 — §5.9's live reading. `.au-clause` wraps the controls and the reading beneath them, so
+   `.au-crow` keeps the flex layout its three controls were written for rather than becoming a
+   column that has to re-state all of it. */
+
+.au-editor .au-clause {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.au-editor .au-cread {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 9px;
+    font-size: 0.8rem;
+}
+
+.au-editor .au-cheld {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-family: var(--font-mono, monospace);
+    color: #8b8f98;
+}
+
+.au-editor .au-cv {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 7px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+}
+
+/* Three values, three treatments. `unknown` is deliberately NOT the failing colour: an OR chain can
+   still be carried by a row nothing could answer, and a red cross there claims the rule will not
+   fire when it may well. */
+.au-editor .au-cv.pass {
+    color: #7ee2a8;
+    background: rgba(63, 185, 80, 0.10);
+    border-color: #2c5c3a;
+}
+
+.au-editor .au-cv.fail {
+    color: #ffaea8;
+    background: rgba(248, 81, 73, 0.10);
+    border-color: #6e2b28;
+}
+
+.au-editor .au-cv.unknown {
+    color: #a9adb6;
+    background: #23242a;
+    border-color: #3a3c44;
+    border-style: dashed;
+}
+
 .au-editor .au-plainsay {
     margin-top: 7px;
     padding: 7px 9px;
@@ -1166,6 +1312,14 @@
 
 .au-editor .au-preview .au-hit {
     color: #9fd8f7;
+}
+
+/* An out-of-range token (mockup §05) — the send would be refused, so the preview says so rather
+   than showing a message nothing would actually type. */
+.au-editor .au-preview.blocked {
+    color: #ffc9c5;
+    background: rgba(248, 81, 73, 0.09);
+    border-color: #6e2b28;
 }
 
 .au-editor .au-cap {
@@ -1218,29 +1372,6 @@
 
 .au-editor .au-termcount .au-as {
     color: #6a6e77;
-}
-
-.au-editor .au-rearmnote {
-    margin-bottom: 16px;
-    padding: 9px 10px;
-    font-size: 0.85rem;
-    line-height: 1.6;
-    color: #a9adb6;
-    background: rgba(236, 203, 119, 0.06);
-    border: 1px solid #4a4022;
-    border-radius: 8px;
-}
-
-.au-editor .au-rearmnote .au-rt {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 5px;
-    color: #eccb77;
-}
-
-.au-editor .au-rearmnote p {
-    margin: 0;
 }
 
 .au-editor .au-rightnow {
@@ -1412,6 +1543,11 @@
 .au-editor .au-pill.matched {
     color: #eccb77;
     border-color: #5b4a25;
+}
+
+.au-editor .au-pill.pending {
+    color: #7fdde4;
+    border-color: #1f5f66;
 }
 
 .au-editor .au-pill.error {

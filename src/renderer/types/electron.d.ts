@@ -502,12 +502,60 @@ export type AutomationParsePreset = 'percentage' | 'number' | 'errorCode' | 'exa
 export type AutomationKeep = 'brackets' | 'whole';
 
 /**
- * Stored, not inferred from whether `op` is set: it selects a different READ DEPTH for re-arming, and
- * that must not turn on a data-entry accident. These are the mockup's own two values.
+ * **What the pattern finds** — a reading that persists, or an event that happened. It selects the
+ * rule's READ DEPTH (and so its re-arm story), never the comparison: the per-clause `AutomationTest`
+ * answers that. Plan 032 §5.2 — the two cannot be derived from each other, because
+ * `API error 529 … retry in 60s` is an *event* that contains a *number*.
+ *
+ * Stored, not inferred from whether `op` is set: that must not turn on a data-entry accident.
+ *
+ * The Rust/TS/UI name moved from `CondKind`; **the wire values did not**. `'number'` is a reading and
+ * `'text'` is an event, so a v1 rule still loads and an older build still decodes a v2 one.
  */
-export type AutomationCondKind = 'number' | 'text';
+export type AutomationFinds = 'number' | 'text';
 
 export type AutomationCompareOp = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq';
+
+/**
+ * Which captured token a clause reads — the same token vocabulary as the message (§4.3).
+ * `'whole'` = `$0`; `{ group: n }` = `$n`; `{ named: s }` = `${s}`.
+ *
+ * Externally tagged, exactly as serde writes Rust's `Source`.
+ */
+export type AutomationSource = 'whole' | { group: number } | { named: string };
+
+/** The text comparators, in the order the operator drop-down draws them. */
+export type AutomationTextOp =
+  | 'is'
+  | 'isNot'
+  | 'contains'
+  | 'notContains'
+  | 'matches'
+  | 'isEmpty'
+  | 'isNotEmpty';
+
+/**
+ * How one clause compares its token. **The clause's type IS the operator's** — there is no separate
+ * type control that could contradict it (§5.9).
+ *
+ * **A numeric clause's `value` is nullable, and `null` means "nothing entered yet".** It is what
+ * `CondPanel` writes the moment a row is switched from a text operator to a numeric one, or a
+ * number is half-typed, and §8 names that state directly (`cond.clauseNeedsValue`: *"a numeric
+ * clause with no threshold"*). `NaN` cannot stand in for it: it has no JSON spelling, `invoke`
+ * turns it into `null` on the wire anyway, and Rust's `Option<f64>` is what receives it.
+ */
+export type AutomationTest =
+  | { number: { op: AutomationCompareOp; value: number | null } }
+  | { text: { op: AutomationTextOp; value: string } };
+
+/** One comparison: a token, and what to ask of it. Plan §5.3. */
+export interface AutomationClause {
+  source: AutomationSource;
+  test: AutomationTest;
+}
+
+/** One join for the whole list, not mixed precedence (§5.7). `'and'` is the default. */
+export type AutomationJoin = 'and' | 'or';
 
 /** Q2: a recipient's arm state does not change — re-arm belongs to the observation. */
 export type AutomationSendTo = 'matched' | 'all';
@@ -528,10 +576,19 @@ export interface AutomationParseStep {
 }
 
 export interface AutomationCondStep {
-  kind: AutomationCondKind;
-  /** Absent when `kind === 'text'`. */
+  /** The wire name stays `kind`; only the Rust/TS/UI name moved. See `AutomationFinds`. */
+  kind: AutomationFinds;
+  /**
+   * In order. **Absent or empty means "fire when the pattern matches"** — exactly today's event
+   * rule (§5.4). Absent on every rule written before this field existed, and the backend omits it
+   * when empty so such a rule's blob stays byte-identical to v1.
+   */
+  clauses?: AutomationClause[];
+  /** Absent means `'and'` — omitted by the backend when it is the default, for the same reason. */
+  join?: AutomationJoin;
+  /** v1 only: read at load, folded into `clauses`, never written again. */
   op?: AutomationCompareOp | null;
-  /** Absent when `kind === 'text'`. */
+  /** v1 only: read at load, folded into `clauses`, never written again. */
   threshold?: number | null;
 }
 
@@ -545,13 +602,49 @@ export interface AutomationActionStep {
   submit: boolean;
   /** Q1's hybrid. `'default'` rather than route A's own `'copilot'`, which navigates history in a shell. */
   cliType: string;
+  /** Replace $1/$2/${name} in `message` with the pattern's captures. Off for every rule
+   *  written before this field existed — see plan 032 §4.2. */
+  substitute?: boolean;
+}
+
+/**
+ * Optional fifth step — "Wait" in every user-facing string. **Never write the bare word "Timer" in
+ * UI copy** — `AutomationCadence`'s `'timer'` already means the monitor's poll interval, a
+ * different thing entirely. `AutomationTimerStep`/`AutomationTimerMode` mirror the Rust names
+ * (spec §3.1) and are fine as identifiers; the constraint is on strings a user reads.
+ *
+ * `afterMatch` parks a send for `delayMs` (§6.2), and `dailyAt` schedules it (§6.3). This type
+ * records the persisted schema for those implemented modes.
+ */
+export type AutomationTimerMode =
+  | { afterMatch: { delayMs: number } }
+  | { dailyAt: { minuteOfDay: number; days: number } };
+
+export interface AutomationTimerStep {
+  mode: AutomationTimerMode;
 }
 
 /** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */
 export interface AutomationGraph {
-  monitor: AutomationMonitorStep;
-  parse: AutomationParseStep;
-  cond: AutomationCondStep;
+  /**
+   * Absent on a **schedule rule** (plan 032 §3.1, §6.3) — one that fires at a wall-clock time and
+   * reads nothing at all. The first three steps are the rule's INPUT and travel together: a rule
+   * either has all three or none.
+   *
+   * Targeting is unaffected: `targetMode`, `criterion`, `criterionValue`, `followNew` and
+   * `targetIds` are columns on the rule, not fields of the monitor step, so a schedule rule still
+   * has its terminals.
+   *
+   * The backend omits the key entirely rather than sending `null` — an absent step must not decode
+   * as a present-but-empty one on an older build.
+   */
+  monitor?: AutomationMonitorStep;
+  /** Absent on a schedule rule: there is no pattern, which is not the same as a blank one. */
+  parse?: AutomationParseStep;
+  /** Absent on a schedule rule: nothing was read, so there is nothing to compare. */
+  cond?: AutomationCondStep;
+  /** Absent on every rule saved before this milestone and on every rule that does not use it. */
+  timer?: AutomationTimerStep;
   action: AutomationActionStep;
   /**
    * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —
@@ -619,13 +712,28 @@ export interface AutomationLogEntry {
  * `automation_engine::dry::StepTrace`.
  */
 export interface DryRunStep {
-  /** `monitor` | `parse` | `cond` | `action` — always all four, always in the graph's order. */
-  kind: 'monitor' | 'parse' | 'cond' | 'action';
+  /**
+   * `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+   * count.** A plain rule (no wait step) reports the original four, in the graph's order. A DELAY
+   * rule (`timer.mode.afterMatch`) inserts `timer` between `cond` and `action`, five steps. A
+   * SCHEDULE rule (`timer.mode.dailyAt`) has no `monitor`, `parse` or `cond` at all — it reads
+   * nothing (plan 032 §6.3) — so its report carries only `timer` and `action`.
+   *
+   * This corrects an earlier version of this doc comment that said "always all four, always in the
+   * graph's order": that was already only true for a rule with no wait step, and plan 032 §6–§7 is
+   * what made it stop being true for the other two shapes.
+   */
+  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
   /**
    * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
    * not be drawn as one.
+   *
+   * `unknown` is `Truth::Unknown` — the step DID run and could not be answered. A clause can reach
+   * it on a perfectly successful match: a numeric clause on a non-numeric token, a group that did
+   * not participate, a `matches` clause whose own pattern will not compile (plan 032 §5.5). It is
+   * neither a pass nor a failure, and it is not `skipped`, whose words are *"not reached"*.
    */
-  status: 'ok' | 'failed' | 'skipped';
+  status: 'ok' | 'failed' | 'skipped' | 'unknown';
   detail: string;
 }
 

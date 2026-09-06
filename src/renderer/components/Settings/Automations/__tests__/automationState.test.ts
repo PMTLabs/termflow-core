@@ -13,10 +13,13 @@ import {
     describeCadence,
     describeCriterion,
     describeLastFired,
-    describeRule,
     describeWatching,
     JUST_FIRED_MS,
 } from '../automationState';
+// `describeRule` moved to `automationDerive` so it and `ruleSummary` — the Settings row and the
+// editor's left rail, one rule in two renderings — read one `condSentence`. Its tests stay here,
+// with the rest of the row's own sentence.
+import { condSentence, describeRule } from '../../../Automation/automationDerive';
 
 const NOW = 1_700_000_000_000;
 
@@ -48,7 +51,7 @@ function rule(over: Partial<AutomationRule> = {}): AutomationRule {
 }
 
 function pair(over: Partial<AutomationRuntimePairState> = {}): AutomationRuntimePairState {
-    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, ...over };
+    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null, ...over };
 }
 
 describe('automationRowState — the state table', () => {
@@ -57,7 +60,7 @@ describe('automationRowState — the state table', () => {
         // say, and a disabled rule's runtime state is stale by definition.
         const state = automationRowState(
             rule({ enabled: false }),
-            { 'tm-1': pair({ missing: true }) },
+            { 'tm-1': pair({ missing: true, parkedAt: null }) },
             NOW,
         );
         expect(state.id).toBe('off');
@@ -86,7 +89,7 @@ describe('automationRowState — the state table', () => {
     });
 
     it('reports error for a missing pinned terminal', () => {
-        const state = automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW);
+        const state = automationRowState(rule(), { 'tm-1': pair({ missing: true, parkedAt: null }) }, NOW);
         expect(state.id).toBe('error');
     });
 
@@ -208,6 +211,133 @@ describe('automationRowState — the state table', () => {
     });
 
     /**
+     * **A parked send is a `pending` pair, and the pill counts it down** (plan 032 §6.2, §7).
+     *
+     * The arm machine says `Fired` from the moment a crossing is DECIDED — deliberately, so a second
+     * tick mid-send cannot queue a duplicate — and a Wait step then holds the message for up to ten
+     * minutes. Reading `state` alone, the row said *Fired · waiting to re-arm* about a message
+     * nothing had typed: a receipt for something that has not happened.
+     *
+     * The pair here carries BOTH, because that is the only shape the engine actually produces —
+     * `parked` is written in the same statement that writes `Fired`. A test that parked without
+     * arming would pass on an implementation that read `parkedAt` only in the `unseen` branch.
+     */
+    it('counts down a parked send, ahead of the arm state written beside it', () => {
+        const state = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({
+                    state: 'fired',
+                    lastFiredAt: null,
+                    firedCount: 0,
+                    parkedAt: NOW + 28_400,
+                }),
+            },
+            NOW,
+        );
+        expect(state.id).toBe('pending');
+        expect(state.label).toBe('Waiting to send · in 29s');
+        expect(state.pillText).toBe('Waiting to send · in 29s');
+        // **Not "Timer".** `Cadence`'s `'timer'` is the monitor's poll interval and this is the Wait
+        // step; two controls called Timer on one screen is how the two get confused.
+        expect(state.pillText).not.toMatch(/timer/i);
+    });
+
+    it('words the countdown in minutes once a second count would be unreadable', () => {
+        const state = automationRowState(
+            rule(),
+            { 'tm-1': pair({ parkedAt: NOW + 4 * 60_000 }) },
+            NOW,
+        );
+        expect(state.label).toBe('Waiting to send · in 4 min');
+    });
+
+    /**
+     * Rounded UP, and the final second is why.
+     *
+     * `Math.floor` reads *in 0s* for the whole last second — a stalled countdown at exactly the
+     * moment the feature is working — and a deadline already in the past (the tick that drains it
+     * has not run yet) would read as a negative.
+     */
+    it('never counts below one second while a send is still parked', () => {
+        expect(automationRowState(rule(), { 'tm-1': pair({ parkedAt: NOW + 1 }) }, NOW).label)
+            .toBe('Waiting to send · in 1s');
+        expect(automationRowState(rule(), { 'tm-1': pair({ parkedAt: NOW - 500 }) }, NOW).label)
+            .toBe('Waiting to send · in 0s');
+    });
+
+    /** Two waits, one pill: the number has to be the one about to come true. */
+    it('counts down the SOONEST parked send across the terminals it watches', () => {
+        const state = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({ parkedAt: NOW + 90_000 }),
+                'tm-2': pair({ parkedAt: NOW + 12_000 }),
+            },
+            NOW,
+        );
+        expect(state.label).toBe('Waiting to send · in 12s');
+    });
+
+    /**
+     * **A schedule rule that has fired must not read *Armed · waiting*** (plan 032 §6.3, §7).
+     *
+     * The schedule path reads no screen and writes NO arm state — that is the property that lets a
+     * `dailyAt` timer share a rule with a monitor without perturbing its machine once a day — but
+     * `run_send` still calls `record_fire`. So a 09:00 rule that had just typed into a terminal
+     * reported `state: 'unseen'` with a fresh `lastFiredAt`, and the row painted *Armed · waiting*
+     * in the pill directly above *Fired 1 time, 2 minutes ago* in its own footer. One row, two
+     * answers — the defect `everFired` exists to prevent, arriving from the other direction.
+     *
+     * Folded HERE rather than by making `run_send` write an arm state, which would give a rule that
+     * reads no screen a position in a machine about reading screens.
+     */
+    it('reads a fired schedule rule as fired, though its arm state never moved', () => {
+        const justSent = automationRowState(
+            rule(),
+            { 'tm-1': pair({ state: 'unseen', lastFiredAt: NOW - 1_000, firedCount: 1 }) },
+            NOW,
+        );
+        expect(justSent.id).toBe('fired');
+        expect(justSent.label).toBe('Just fired');
+
+        // And it settles on the SAME clock the monitor route uses, so a schedule row and a monitor
+        // row beside it cannot stop saying "Just fired" at different moments.
+        const settled = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({
+                    state: 'unseen',
+                    lastFiredAt: NOW - JUST_FIRED_MS - 1,
+                    firedCount: 1,
+                }),
+            },
+            NOW,
+        );
+        expect(settled.id).toBe('rearm');
+        expect(settled.label).toBe('Fired · waiting to re-arm');
+    });
+
+    /**
+     * The negative half, and it is what keeps the fold above narrow.
+     *
+     * `armed` after a fire is an ordinary monitor rule that has genuinely re-armed — its condition
+     * went false and it is watching again — and *Armed · waiting* is the correct answer for it.
+     * Widening the fold to any `lastFiredAt` reclassifies every re-armed monitor pair as `rearm`,
+     * which is what `does not borrow a fire from a pair outside the winning state` above catches
+     * from the other side.
+     */
+    it('leaves a re-armed monitor pair armed and waiting, fire history and all', () => {
+        expect(
+            automationRowState(
+                rule(),
+                { 'tm-1': pair({ state: 'armed', lastFiredAt: NOW - 1_000, firedCount: 4 }) },
+                NOW,
+            ).id,
+        ).toBe('waiting');
+    });
+
+    /**
      * `matched` is in the union because mockup §09 teaches the word and M5's editor uses the same
      * seven ids — but **nothing produces it**, and this test says so in a way that goes red the
      * moment that stops being true. The evaluator advances the arm to `Fired` in the same statement
@@ -223,13 +353,17 @@ describe('automationRowState — the state table', () => {
             for (const missing of [false, true]) {
                 for (const lastFiredAt of [null, NOW, NOW - JUST_FIRED_MS - 1]) {
                     for (const firedCount of [0, 3]) {
-                        seen.add(
-                            automationRowState(
-                                rule(),
-                                { 'tm-1': { state, lastFiredAt, firedCount, missing } },
-                                NOW,
-                            ).id,
-                        );
+                        // The fifth dimension, added with `pending`: the sweep is only exhaustive
+                        // while it covers every FIELD, and a new one silently narrows it otherwise.
+                        for (const parkedAt of [null, NOW + 30_000]) {
+                            seen.add(
+                                automationRowState(
+                                    rule(),
+                                    { 'tm-1': { state, lastFiredAt, firedCount, missing, parkedAt } },
+                                    NOW,
+                                ).id,
+                            );
+                        }
                     }
                 }
             }
@@ -237,7 +371,7 @@ describe('automationRowState — the state table', () => {
         expect(seen.has('matched')).toBe(false);
         // The premise: the sweep really did reach the other states, so the assertion above is not
         // passing because nothing ran.
-        expect([...seen].sort()).toEqual(['error', 'fired', 'rearm', 'waiting']);
+        expect([...seen].sort()).toEqual(['error', 'fired', 'pending', 'rearm', 'waiting']);
     });
 });
 
@@ -245,7 +379,7 @@ describe('automationRowState — the qualifier', () => {
     it("says '1 of 2' when the pairs disagree, and names the state's own noun", () => {
         const state = automationRowState(
             rule(),
-            { 'tm-1': pair({ missing: true }), 'tm-2': pair() },
+            { 'tm-1': pair({ missing: true, parkedAt: null }), 'tm-2': pair() },
             NOW,
         );
         expect(state.id).toBe('error');
@@ -257,7 +391,7 @@ describe('automationRowState — the qualifier', () => {
         // *Error · 2 of 2 missing* says nothing *Error* did not.
         const state = automationRowState(
             rule(),
-            { 'tm-1': pair({ missing: true }), 'tm-2': pair({ missing: true }) },
+            { 'tm-1': pair({ missing: true, parkedAt: null }), 'tm-2': pair({ missing: true, parkedAt: null }) },
             NOW,
         );
         expect(state.qualifier).toBeNull();
@@ -265,7 +399,7 @@ describe('automationRowState — the qualifier', () => {
     });
 
     it('says nothing for a single watched terminal', () => {
-        expect(automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW).qualifier)
+        expect(automationRowState(rule(), { 'tm-1': pair({ missing: true, parkedAt: null }) }, NOW).qualifier)
             .toBeNull();
     });
 });
@@ -280,15 +414,29 @@ describe('automationRowState — severity, pair by pair', () => {
     const CASES: Array<[string, AutomationRuntimePairState, AutomationRuntimePairState, string]> = [
         [
             'error beats just-fired',
-            pair({ missing: true }),
+            pair({ missing: true, parkedAt: null }),
             pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
             'error',
         ],
         [
             'error beats waiting-to-re-arm',
-            pair({ missing: true }),
+            pair({ missing: true, parkedAt: null }),
             pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
             'error',
+        ],
+        [
+            // The Part-1 mutation's oracle: rank `pending` anywhere below `fired` and this row goes
+            // red, because the receipt would hide the message that has not been typed yet.
+            'error beats a countdown',
+            pair({ missing: true }),
+            pair({ parkedAt: NOW + 30_000 }),
+            'error',
+        ],
+        [
+            'a countdown beats just-fired',
+            pair({ parkedAt: NOW + 30_000 }),
+            pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
+            'pending',
         ],
         [
             'just-fired beats waiting-to-re-arm',
@@ -319,9 +467,82 @@ describe('the row reads as a sentence', () => {
         expect(s.lead).toBe('when the number in');
         expect(s.subject).toBe('ctx:(\\d+)%');
         expect(s.verb).toBe('rises above');
-        expect(s.threshold).toBe('25');
+        expect(s.detail).toBe('25');
         expect(s.verbSend).toBe('send');
         expect(s.sendNote).toBeNull();
+    });
+
+    /**
+     * **A clause list supersedes `op`/`threshold`, and the row has to say so.**
+     *
+     * All three shapes in one table, because the bug was that each was wrong in its own direction
+     * and a single-case test would have caught one of them:
+     *
+     * - a rule authored in the clause panel leaves `op`/`threshold` null, and the row used to read
+     *   the empty pair — *"rises above"* with no number at all, beside a node face reading the
+     *   clause;
+     * - a v1 rule someone added a clause to still carries `op: 'gt'`, and the row showed the
+     *   SUPERSEDED `> 25` while the engine ran the clause;
+     * - an event rule with clauses got `verb: null` and dropped its comparisons entirely.
+     *
+     * Asserted against `condSentence`'s own output rather than a re-spelled copy of it: the
+     * property is that the row and the node face read ONE function (§1.1), so hard-coding the words
+     * here would let the two drift apart again while this test stayed green.
+     */
+    it.each([
+        ['a reading authored in the clause panel', 'number' as const, null, null],
+        ['a v1 rule that has GAINED a clause', 'number' as const, 'gt' as const, 25],
+        ['an event rule with clauses', 'text' as const, null, null],
+    ])('describes %s by its clauses, never by op/threshold', (_label, kind, op, threshold) => {
+        const r = rule();
+        r.graph.cond = {
+            kind,
+            op,
+            threshold,
+            join: 'and',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'gt', value: 30 } } }],
+        };
+        const s = describeRule(r);
+        expect(s.detail).toBe(condSentence(r.graph.cond));
+        expect(s.detail).toBe('$1 is over 30');
+        // Neither the superseded v1 pair nor the empty-pair placeholder survives anywhere in it.
+        expect(`${s.lead} ${s.subject} ${s.verb} ${s.detail}`).not.toContain('25');
+        expect(s.verb).not.toBeNull();
+    });
+
+    it('still reads a v1 rule with NO clauses by its own comparison', () => {
+        // The paired negative for the table above: clearing `op`/`threshold` from every rule, or
+        // routing the no-clause case through the clause branch, would satisfy it and break this.
+        const r = rule();
+        r.graph.cond = { kind: 'number', op: 'lt', threshold: 5, clauses: [] };
+        const s = describeRule(r);
+        expect(s.verb).toBe('falls below');
+        expect(s.detail).toBe('5');
+    });
+
+    /**
+     * **The blocked shape: a reading with neither a clause list nor a complete pair.**
+     *
+     * Reachable from ordinary authoring — choosing *A reading that stays true* seeds no clause —
+     * and it never fires. The row invented `OP_WORDS[cond.op ?? 'gt']` for it, so it read *"rises
+     * above"* followed by an empty `<b>`, describing a comparison the rule does not carry. Read
+     * through `condSentence` for the same §1.1 reason the clause table above is: the node face and
+     * the row must not make opposite claims about one rule.
+     */
+    it.each([
+        ['no operator and no threshold', null, null],
+        ['an operator but no threshold', 'gt' as const, null],
+        ['a threshold but no operator', null, 25],
+    ])('never invents a comparison for a reading with %s', (_label, op, threshold) => {
+        const r = rule();
+        r.graph.cond = { kind: 'number', op, threshold, clauses: [] };
+        const s = describeRule(r);
+        expect(s.detail).toBe(condSentence(r.graph.cond));
+        expect(s.detail).toBe('the comparison is not finished');
+        // The two halves of the old defect: an invented verb, and a `detail` the row draws as an
+        // empty `<b>`.
+        expect(s.verb).not.toBe('rises above');
+        expect(s.detail).not.toBeNull();
     });
 
     it('says "type … — no Enter" for an action that deliberately does not submit', () => {
@@ -348,6 +569,82 @@ describe('the row reads as a sentence', () => {
         expect(s.verb).toBeNull();
     });
 
+    /**
+     * Plan 032 §7 — the Wait step's own clause in the row's sentence (task 25).
+     *
+     * **The acceptance shape, not the acceptance STRING.** The brief that specified these two cases
+     * quoted *"when output has API error → wait 30s → type resume"* and *"at 09:00 on weekdays →
+     * type /context"*, but this codebase's existing voice already differs from that quote in its own
+     * established ways (`when output starts matching`, `describeDelay`'s `30 seconds` rather than
+     * `30s`) — so what is pinned here is the SHAPE each acceptance case names: a delay rule's
+     * sentence names the wait BETWEEN the match and the send, and a schedule rule's leads with the
+     * clock and never mentions output at all.
+     */
+    describe('the wait step (plan 032 §7)', () => {
+        it('delay mode: names the wait between the condition and the send', () => {
+            const r = rule();
+            r.graph.cond = { kind: 'text', op: null, threshold: null };
+            r.graph.parse = { preset: 'exactWords', literal: null, find: 'API error', keep: 'whole' };
+            r.graph.action = { message: 'resume', sendTo: 'matched', submit: false, cliType: 'default' };
+            r.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+
+            const s = describeRule(r);
+
+            expect(s.lead).toBe('when output starts matching');
+            expect(s.subject).toBe('API error');
+            expect(s.waitClause).toBe('wait 30 seconds');
+            expect(s.verbSend).toBe('type');
+            expect(s.message).toBe('resume');
+        });
+
+        it('a delay with no length typed yet names no wait clause', () => {
+            // The validator's own `timer.delayTooShort` covers this; the row must not invent a
+            // number the rule does not have for a field that is merely unset.
+            const r = rule();
+            r.graph.timer = { mode: { afterMatch: { delayMs: 0 } } };
+            expect(describeRule(r).waitClause).toBeNull();
+        });
+
+        it('a rule with no wait step at all names no wait clause', () => {
+            expect(describeRule(rule()).waitClause).toBeNull();
+        });
+
+        /**
+         * **Schedule mode leads with the clock and never mentions output.** The mutation this test is
+         * written to kill: making the schedule branch fall through to the delay-mode wording (e.g. by
+         * deleting or short-circuiting the `'dailyAt' in timer.mode` check) would make this rule read
+         * through its `parse`/`cond` — which it still carries in this fixture — as
+         * *"when the number in ctx:(\d+)% rises above 25"*, exactly the sentence this test forbids.
+         */
+        it('schedule mode: leads with the clock, mentions no output, whatever else the rule carries', () => {
+            const r = rule();
+            r.graph.timer = { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } };
+            r.graph.action = { message: '/context', sendTo: 'matched', submit: true, cliType: 'default' };
+
+            const s = describeRule(r);
+
+            expect(s.lead).toBe('at');
+            expect(s.subject).toBe('09:00 on weekdays');
+            expect(s.verb).toBeNull();
+            expect(s.detail).toBeNull();
+            expect(s.waitClause).toBeNull();
+            expect(s.verbSend).toBe('send');
+            expect(s.message).toBe('/context');
+            // The premise this test polices: this fixture (`rule()`) still carries its own
+            // monitor/parse/cond — the sentence must not smuggle any of their words in anyway.
+            expect(r.graph.cond).not.toBeUndefined();
+            const whole = `${s.lead} ${s.subject} ${s.verb ?? ''} ${s.detail ?? ''}`;
+            expect(whole).not.toMatch(/ctx|number|output|matches|rises/);
+        });
+
+        it('an unfinished schedule (no days picked) says only what it sends, like a rule with no trigger', () => {
+            const r = rule();
+            r.graph.timer = { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0 } } };
+            const s = describeRule(r);
+            expect(s.lead).not.toBe('at');
+        });
+    });
+
     it('describes a PINNED rule by its picked terminals, not by its stale criterion', () => {
         // A pinned rule still carries a criterion — the columns are non-optional and keep whatever
         // they last held — and `watched_set` ignores it entirely for that mode. Switching on the
@@ -360,7 +657,7 @@ describe('the row reads as a sentence', () => {
             targetIds: ['tm-1', 'tm-2'],
         });
         expect(describeCriterion(pinned)).toBe('2 picked terminals');
-        expect(describeWatching(pinned, { 'tm-1': pair(), 'tm-2': pair({ missing: true }) }))
+        expect(describeWatching(pinned, { 'tm-1': pair(), 'tm-2': pair({ missing: true, parkedAt: null }) }))
             .toBe('2 picked terminals · 1 open');
 
         const one = rule({ targetMode: 'pinned', targetIds: ['tm-1'] });
@@ -394,5 +691,33 @@ describe('the row reads as a sentence', () => {
         const streamed = rule();
         streamed.graph.monitor.cadence = 'onOutput';
         expect(describeCadence(streamed)).toBe('On every new line');
+    });
+
+    /**
+     * Plan 032 §7 (task 25) — the cadence chip for a rule with no monitor step at all.
+     *
+     * `describeCadence`'s own doc comment used to say *"say nothing rather than invent a check
+     * interval… until then"*, naming this exact milestone. `clockTime`/`describeDays` come from
+     * `automationTimerWords.ts` rather than `automationDerive.ts` — the module this file cannot
+     * import without a cycle — so this also pins that the import actually resolves to something.
+     */
+    it('describes a SCHEDULE rule\'s cadence by its clock, having no monitor step at all', () => {
+        const { monitor: _m, ...rest } = rule().graph;
+        const scheduled = rule();
+        scheduled.graph = {
+            ...rest,
+            timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } },
+        };
+        expect(describeCadence(scheduled)).toBe('At 09:00, weekdays');
+
+        // An unfinished schedule (no days picked) has nothing to name yet — the same "say nothing"
+        // answer a rule with no monitor and no timer at all gets.
+        const unfinished = rule();
+        unfinished.graph = { ...rest, timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0 } } } };
+        expect(describeCadence(unfinished)).toBe('—');
+
+        const neither = rule();
+        neither.graph = { ...rest };
+        expect(describeCadence(neither)).toBe('—');
     });
 });

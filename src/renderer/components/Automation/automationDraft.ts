@@ -2,14 +2,16 @@
  * The one draft the whole editor is derived from (plan 028 §6.2).
  *
  * `useReducer(draftReducer, …)` over a single value. **Nothing derived is stored**: problems, faces,
- * the palette summary, the header's blocked reason and all four inspector panels are computed in
- * render by `automationValidation` and `automationDerive`, memoised on the draft alone.
+ * the palette summary, the header's blocked reason and every inspector panel are computed in render
+ * by `automationValidation` and `automationDerive`, memoised on the draft alone.
  *
  * ## What round-trips, and what does not
  *
- * `rule` is the wire DTO — it goes to `save_automation` unchanged, and comes back from the store the
- * same shape. `present` and `wires` are **session-only canvas state**, re-derived from the four steps
- * on every open: they carry no user choice, so the canvas is a *drawing of* the rule.
+ * `rule` is the wire DTO — it comes back from the store the same shape it went out in. `present` and
+ * `wires` are **session-only canvas state**, re-derived on every open from the steps the rule HAS:
+ * they carry no user choice, so the canvas is a *drawing of* the rule. What a save writes is not
+ * quite `rule` as it stands, though — see `ruleFromDraft` for the one group of steps the canvas gets
+ * to omit.
  *
  * **`layout` DOES round-trip, corrected here.** This paragraph used to say it did not, on the
  * grounds that the `graph` blob had "no place to put a node position, and adding one would be a
@@ -24,9 +26,16 @@
  * shape meet (§7.7), and the round-trip test asserts draft → wire → row → wire → draft is identity
  * for all six templates.
  */
-import type { AutomationRule } from '../../types/electron';
-import type { StepKind, Wire } from './automationSteps';
-import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
+import type {
+    AutomationClause,
+    AutomationCondStep,
+    AutomationMonitorStep,
+    AutomationParseStep,
+    AutomationRule,
+    AutomationTimerMode,
+} from '../../types/electron';
+import type { StepKind, TimerShape, Wire } from './automationSteps';
+import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
 // The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
 // state the gallery was showing before a card was clicked. Same direction `AutomationMenuSection`
@@ -38,7 +47,7 @@ export interface NodePos {
     y: number;
 }
 
-/** A finished rule is four cards on a ~900×260 world (§6.5) — hence no minimap. */
+/** A finished rule is a handful of cards on a ~900×260 world (§6.5) — hence no minimap. */
 export const AU_NODE_W = 244;
 // The card is a FIXED box, so its height has to be big enough for the tallest face any step can
 // draw, and that is the monitor's: three rows (Watch / Read / Check) whose first value is the
@@ -84,7 +93,12 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     monitor: { x: 0, y: 0 },
     parse: { x: AU_GAP_X, y: 0 },
     cond: { x: AU_GAP_X * 2, y: 0 },
-    action: { x: AU_GAP_X * 3, y: 0 },
+    // Fourth, where a DELAY sits — between the verdict and the send (§6.2). A schedule rule has no
+    // cards to its left, so it opens with a wide empty gutter and its two cards on the right; that
+    // is a fit-to-content question for the viewport, which `AuCanvas` already answers from
+    // `draft.present`, not a reason to give one kind two default positions.
+    timer: { x: AU_GAP_X * 3, y: 0 },
+    action: { x: AU_GAP_X * 4, y: 0 },
 };
 
 /**
@@ -100,6 +114,40 @@ export type PortSide = 'l' | 'r';
 
 /** The map key for one port. Exported so nobody builds this string a second, different way. */
 export const portKey = (step: StepKind, port: string): string => `${step}.${port}`;
+
+/**
+ * Which of the wait step's two modes this rule is in — **the one place the DTO is read for it**.
+ *
+ * `automationSteps` is arithmetic over names and does not read a rule; it takes the answer as an
+ * argument (`defaultWires`' `shape`). This is the function that produces it, so a second reading of
+ * `graph.timer.mode` cannot drift from the first. A rule with no wait step answers `'afterMatch'`,
+ * which is the shape whose wires a rule without one is a subset of — the four-step chain.
+ */
+export function timerShapeOf(rule: AutomationRule): TimerShape {
+    const mode = rule.graph.timer?.mode;
+    return mode && 'dailyAt' in mode ? 'dailyAt' : 'afterMatch';
+}
+
+/**
+ * The wait a newly added step holds until the user says otherwise (mockup §02's own scenario).
+ *
+ * Delay mode, because that is the mode with a predecessor: dropping the card at the end of a
+ * finished rule and having it fire on a clock instead would silently stop the rule watching
+ * anything (§6.3, and `timer.scheduleWithMonitor`). Thirty seconds is the brief's own example and
+ * is comfortably inside `MIN_DELAY_MS`..`MAX_DELAY_MS`, so the card is not born blocked.
+ */
+export const DEFAULT_TIMER_MODE: AutomationTimerMode = { afterMatch: { delayMs: 30_000 } };
+
+/**
+ * What *At a time of day* starts from — mockup §03's own rule, 09:00 on weekdays.
+ *
+ * A default that picks days matters more than the hour does: an empty mask is `timer.noDays`, so a
+ * mask-less default would block the rule the instant the radio moved, which is a control punishing
+ * the user for using it. Bits 0–6 are Mon..Sun (§3.1).
+ */
+export const DEFAULT_SCHEDULE_MODE: AutomationTimerMode = {
+    dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 },
+};
 
 /** Where a port sits when nothing is wired to it: the reading order, inputs left and outputs right. */
 export function defaultPortSide(dir: 'in' | 'out'): PortSide {
@@ -251,7 +299,7 @@ export function auWirePath(
 export interface AutomationDraft {
     /** The DTO. This, and only this, is what a save sends. */
     rule: AutomationRule;
-    /** Which steps are on the canvas. All four for a template or an existing rule; none for a blank. */
+    /** Which steps are on the canvas: the ones a template or an existing rule HAS; none for a blank. */
     present: StepKind[];
     wires: Wire[];
     layout: Record<StepKind, NodePos>;
@@ -274,8 +322,8 @@ export interface AutomationDraft {
  * and **what the dirty check compares against**. Keeping them in one value is what stops a fourth
  * way of opening the editor from arriving with a canvas rule and no answer to "is this unsaved".
  *
- * - `'saved'` — an existing rule, opened from the list. All four steps drawn, because it is
- *   already a complete rule, and clean, because what is on screen is what is stored.
+ * - `'saved'` — an existing rule, opened from the list. Every step the rule HAS is drawn, because it
+ *   is already a complete rule, and clean, because what is on screen is what is stored.
  * - `'blank'` — the gallery's blank card. Mockup §03's third state: an empty canvas and the
  *   "Start with Watch output" hint, so building a rule from nothing is a thing the palette
  *   TEACHES rather than a thing that has already happened. Clean, because nothing is there yet;
@@ -333,12 +381,31 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded' | 'template';
  */
 export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
     // `'blank'` alone draws nothing; `'seeded'` draws the one step it configured; `'saved'` and
-    // `'template'` are both complete rules and draw all four.
+    // `'template'` are complete rules and draw **the steps their graph actually holds**.
+    //
+    // That last arm used to draw all four original steps whatever the graph held, on the premise —
+    // written out beside `canAddStep` — that *"a rule's graph carries all four steps whatever is
+    // drawn"*. §3.1 made it false: `monitor`, `parse` and `cond` are `Option` now and a schedule
+    // rule (§6.3) genuinely has none of them. Two symptoms were reported separately from one cause.
+    // A saved schedule rule opened with three cards standing for steps it does not have, whose
+    // panels render nothing; and it could never have them ADDED back, because `canAddStep` refused
+    // each one as *"This rule already has a Watch step"* while `graph.monitor` was absent. The user
+    // was stuck with the shape they first saved.
+    //
+    // **`'blank'` and `'seeded'` stay opening-driven, and must.** `blankDraft()` materialises all
+    // four steps as a SCAFFOLD, so deriving from the graph there would draw four cards on a canvas
+    // whose whole point is that it is empty. The two new-rule openings are saying something the
+    // graph cannot.
+    //
+    // `action` is drawn unconditionally because §3.1 keeps it required — there is no absence to
+    // detect — and the wait is drawn on the same rule as the other three now, rather than as the
+    // exception it used to be: a rule that has one gets its card, a rule that does not can be
+    // offered one by the palette.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : [...STEP_ORDER];
+            : STEP_ORDER.filter((s) => s === 'action' || rule.graph[s] != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -350,14 +417,34 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
     return {
         rule: resolved,
         present,
-        wires: defaultWires(present),
+        wires: defaultWires(present, timerShapeOf(resolved)),
         layout,
         // `'blank'` alone opens with nothing selected: it is the only opening with nothing on the
         // canvas to select. `'seeded'` selects the step it drew, which is what puts the pinned
         // terminal in front of the user instead of one palette drag away from being noticed.
         selected: opening === 'blank' ? null : 'monitor',
-        saved: baselineFor(opening, resolved, layout),
+        saved: baselineFor(opening, resolved, layout, present),
     };
+}
+
+/**
+ * The graph as a save would WRITE it — the group omission C1 turns on, in one place.
+ *
+ * Applied to the draft's own rule by `ruleFromDraft` and to the dirty check's BASELINE by
+ * `baselineFor`, from the same `present`. One side only is what `comparable`'s own header forbids:
+ * a blank canvas omits the three input steps on the way out, so a baseline that kept them made
+ * every untouched blank rule read dirty the instant it opened — a *Leave without saving?* prompt
+ * over a dialog about nothing, which is the exact defect `'blank'`'s baseline exists to prevent.
+ */
+function graphAsWritten(
+    graph: AutomationRule['graph'],
+    present: readonly StepKind[],
+): AutomationRule['graph'] {
+    if (INPUT_STEPS.some((s) => present.includes(s))) return graph;
+    // The KEYS go, not `undefined` values: §3.1's own note says the backend omits an absent step
+    // rather than sending `null`, so an absent step must not decode as a present-but-empty one.
+    const { monitor: _m, parse: _p, cond: _c, ...rest } = graph;
+    return rest;
 }
 
 /**
@@ -381,13 +468,15 @@ function baselineFor(
     opening: CanvasOpening,
     resolved: AutomationRule,
     layout: Record<StepKind, NodePos>,
+    present: readonly StepKind[],
 ): AutomationRule {
-    if (opening === 'seeded') return { ...resolved, targetIds: [] };
-    if (opening === 'template') {
-        const blank = blankDraft();
-        return { ...blank, graph: { ...blank.graph, layout } };
-    }
-    return resolved;
+    const base = opening === 'template'
+        ? { ...blankDraft(), graph: { ...blankDraft().graph, layout } }
+        : opening === 'seeded'
+            ? { ...resolved, targetIds: [] }
+            : resolved;
+    // Both sides through the same omission — see `graphAsWritten`.
+    return { ...base, graph: graphAsWritten(base.graph, present) };
 }
 
 /** The saved arrangement, or the default one for a rule that predates the field. */
@@ -409,16 +498,56 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
 /**
  * What a save sends.
  *
- * The canvas ARRANGEMENT is part of it; which steps are drawn and how they are wired still is not.
- * `present` and `wires` are re-derived from the four steps on every open and carry no user choice,
- * but a card's position is a choice, and one the user expects to survive — which is exactly what
- * makes it dirty-able and therefore what makes the unsaved-changes prompt honest.
+ * The canvas ARRANGEMENT is part of it, and so — for the three INPUT steps, as a group — is which
+ * cards are drawn. How they are wired still is not: `wires` is re-derived on every open from the
+ * steps the rule has and carries no user choice, while a card's position is a choice, and one the
+ * user expects to survive — which is exactly what makes it dirty-able and therefore what makes the
+ * unsaved-changes prompt honest.
  *
  * Injected HERE rather than mirrored into `draft.rule` on every drag, so `draft.layout` stays the
  * single owner of the arrangement and the two cannot disagree.
+ *
+ * **`monitor`, `parse` and `cond` are omitted when the canvas draws none of them — as a GROUP,
+ * never one at a time.** `blankDraft()` scaffolds all three into the graph, while a *Wait* and
+ * *Send to terminal* canvas whose Wait has been set to *At a time of day* writes a schedule rule
+ * without an input chain to silence — the switch matters, since a dragged-in Wait starts as
+ * `DEFAULT_TIMER_MODE`, an `afterMatch` delay.
+ *
+ * **Per step it would open a worse hole than it closes**, which is why the group is the unit.
+ * *Watch → Wait → Send* would then write a monitor with no parse and no cond. That incomplete
+ * draft can remain disabled while it is being built, but once it has a message `timer.neverRuns`
+ * blocks an enabled write; it cannot become a live, non-runnable rule. The scaffold's blank `find`
+ * also makes the partial state visible with `parse.empty`. All-or-nothing is also
+ * `eval::InputSteps::of`'s own contract, so this follows the runtime's rule rather than inventing a
+ * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
+ * the partial cases.
+ *
+ * `action` is never omitted — §3.1 keeps it required on the DTO — and `timer` needs no rule here,
+ * because `addStep` materialises it into the graph exactly when the canvas reveals it.
+ *
+ * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
+ * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
+ * again — and leaving it on a clause-carrying row writes two contradictory conditions, where THIS
+ * build runs the clause and an older one ignores `clauses` entirely and runs `> 25`.
+ *
+ * Asked HERE rather than in the reducer's `clauses` case, which is where it was: a gate in the
+ * caller is one every later path opts out of, and this one was already defeated by the shortest
+ * sequence there is. *+ Add a comparison* nulled the pair on the way in, *Remove comparison 1* left
+ * the list empty, and the rule was then blocked and saved with its only comparison gone. Asked of
+ * the row being WRITTEN, an empty list simply never reaches the clearing.
+ *
+ * **Only when the pair is actually there.** Writing `op: null` unconditionally would ADD two keys
+ * to every v2 rule, whose stored `cond` omits them (`skip_serializing_if = "Option::is_none"`) —
+ * and `isDirty` compares this against the rule as it came off the wire, so every clause rule would
+ * have opened reading dirty. The same both-sides rule `comparable` and `draftFromRule` follow.
  */
 export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
-    return { ...draft.rule, graph: { ...draft.rule.graph, layout: draft.layout } };
+    const graph = { ...draft.rule.graph, layout: draft.layout };
+    const cond = graph.cond;
+    if (cond && (cond.clauses ?? []).length > 0 && (cond.op != null || cond.threshold != null)) {
+        graph.cond = { ...cond, op: null, threshold: null };
+    }
+    return { ...draft.rule, graph: graphAsWritten(graph, draft.present) };
 }
 
 /**
@@ -451,8 +580,8 @@ export function isDirty(draft: AutomationDraft): boolean {
 function comparable(rule: AutomationRule): string {
     // The layout is normalised for the same reason `targetIds` is, and it is a stronger case: this
     // one crosses the wire into a Rust `BTreeMap` and comes back with ITS key order, while the
-    // draft's own object carries insertion order. Two orders of the same four positions are the
-    // same arrangement, and `JSON.stringify` cannot know that.
+    // draft's own object carries insertion order. Two orders of the same positions are the same
+    // arrangement, and `JSON.stringify` cannot know that.
     const layout = rule.graph.layout;
     const graph = layout
         ? {
@@ -484,12 +613,29 @@ export type DraftAction =
     | { type: 'followNew'; followNew: boolean }
     | { type: 'targets'; ids: string[] }
     | { type: 'toggleTarget'; id: string }
-    | { type: 'monitor'; patch: Partial<AutomationRule['graph']['monitor']> }
-    | { type: 'preset'; preset: AutomationRule['graph']['parse']['preset'] }
+    | { type: 'monitor'; patch: Partial<AutomationMonitorStep> }
+    | { type: 'preset'; preset: AutomationParseStep['preset'] }
     | { type: 'literal'; literal: string }
     | { type: 'find'; find: string }
-    | { type: 'keep'; keep: AutomationRule['graph']['parse']['keep'] }
-    | { type: 'cond'; patch: Partial<AutomationRule['graph']['cond']> }
+    | { type: 'keep'; keep: AutomationParseStep['keep'] }
+    | { type: 'cond'; patch: Partial<AutomationCondStep> }
+    /**
+     * The whole clause list, replaced — the same shape `targets` already uses for `targetIds`
+     * (plan 032 §5.9), rather than `CondPanel` reaching for the generic `cond` patch to smuggle an
+     * array through `Partial<AutomationRule['graph']['cond']>`. `CondPanel` computes the next
+     * array itself (add/remove/edit a row) and dispatches the whole thing; the reducer only merges
+     * it into `cond`, exactly like every other field there.
+     */
+    | { type: 'clauses'; clauses: AutomationClause[] }
+    /**
+     * The whole mode, replaced — never a patch.
+     *
+     * `AutomationTimerMode` is externally tagged (`{afterMatch:…}` / `{dailyAt:…}`) and Rust's
+     * `TimerMode` is an enum, so a value carrying both keys is not a mode with a stale field in it:
+     * it is a blob `serde_json` refuses. A `Partial<…>` here would make that shape expressible, and
+     * expressible-but-refused is the shape that saves clean and comes back broken.
+     */
+    | { type: 'timer'; mode: AutomationTimerMode }
     | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
@@ -508,6 +654,80 @@ const withGraph = (
     draft: AutomationDraft,
     graph: Partial<AutomationRule['graph']>,
 ): AutomationDraft => withRule(draft, { ...draft.rule, graph: { ...draft.rule.graph, ...graph } });
+
+/**
+ * How far below a card the next row of cards begins — the vertical twin of `AU_GAP_X`'s reasoning.
+ *
+ * Only `freeSlot` uses it, and only when a default slot is already occupied. Big enough that the two
+ * cards read as two rows rather than as a near-miss; `AU_NODE_H` alone would leave their borders
+ * touching.
+ */
+const AU_GAP_Y = 48;
+
+/** Do two cards' boxes overlap at all? `AU_NODE_W` × `AU_NODE_H`, axis-aligned. */
+const overlaps = (a: NodePos, b: NodePos): boolean =>
+    Math.abs(a.x - b.x) < AU_NODE_W && Math.abs(a.y - b.y) < AU_NODE_H;
+
+/**
+ * Where to draw a card the palette has just added — **its default slot, unless something is
+ * standing in it**.
+ *
+ * `addStep` used to place nothing at all, so a new card simply took `DEFAULT_LAYOUT`'s position
+ * whatever was already there. A template does not show it: a template carries no persisted
+ * `graph.layout`, so every card is at its default and the wait's column is empty. It takes a rule
+ * whose arrangement was SAVED with a card in that slot — a layout persisted before `timer` was
+ * inserted at the fourth position, where `action` sat at `AU_GAP_X * 3`, or, needing no upgrade at
+ * all, any card the user dragged there and saved.
+ *
+ * **Pushed DOWN rather than along**, because the column carries meaning: the wait belongs between
+ * the comparison and the send, and a card shunted right of the send would be drawn in the wrong
+ * place to avoid being drawn in the same place. A row below is unambiguous, obviously deliberate,
+ * and one drag from wherever the user wants it.
+ *
+ * Only the cards on the CANVAS are avoided. `layout` carries a position for every kind, drawn or
+ * not, so testing against all of them would dodge cards that are not there.
+ */
+function freeSlot(
+    layout: Record<StepKind, NodePos>,
+    drawn: readonly StepKind[],
+    step: StepKind,
+): NodePos {
+    let pos = layout[step] ?? DEFAULT_LAYOUT[step];
+    const others = drawn.filter((s) => s !== step).map((s) => layout[s]).filter(Boolean);
+    // Bounded by the number of cards: each pass clears at least the lowest card it collided with,
+    // so it cannot run longer than there are cards to clear.
+    for (let guard = 0; guard <= others.length; guard += 1) {
+        const hit = others.filter((p) => overlaps(pos, p));
+        if (hit.length === 0) break;
+        pos = { x: pos.x, y: Math.max(...hit.map((p) => p.y)) + AU_NODE_H + AU_GAP_Y };
+    }
+    return pos;
+}
+
+/**
+ * The rule with the graph fields a newly revealed card needs — see `addStep`'s own note.
+ *
+ * Returns the rule UNCHANGED when there is nothing to fill in, so `addStep` on a complete rule is
+ * still presentation-only and cannot make an unedited draft read dirty.
+ */
+function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
+    if (step === 'timer') {
+        return rule.graph.timer == null
+            ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
+            : rule;
+    }
+    if (step === 'action' || INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
+    const blank = blankDraft().graph;
+    return {
+        ...rule,
+        graph: {
+            ...rule.graph,
+            monitor: rule.graph.monitor ?? blank.monitor,
+            parse: rule.graph.parse ?? blank.parse,
+            cond: rule.graph.cond ?? blank.cond,
+        },
+    };
+}
 
 export function draftReducer(draft: AutomationDraft, action: DraftAction): AutomationDraft {
     const { rule } = draft;
@@ -539,18 +759,58 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                     ? rule.targetIds.filter((id) => id !== action.id)
                     : [...rule.targetIds, action.id],
             });
+        // **A patch to a step the rule does not have is a no-op, never a materialisation.** Plan
+        // 032 §3.1 lets a schedule rule carry no monitor/parse/cond at all, and these six actions
+        // come from panels that are only mounted for a step the rule HAS. Filling the gap in from
+        // a default here would mint the step behind the user's back — and for `parse` that default
+        // is an EMPTY pattern, which matches everything. Authoring a step that is absent belongs to
+        // the palette (tasks 23-25), which adds it explicitly.
         case 'monitor':
-            return withGraph(draft, { monitor: { ...rule.graph.monitor, ...action.patch } });
+            return rule.graph.monitor
+                ? withGraph(draft, { monitor: { ...rule.graph.monitor, ...action.patch } })
+                : draft;
         case 'preset':
-            return withGraph(draft, { parse: applyPreset(rule.graph.parse, action.preset) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: applyPreset(rule.graph.parse, action.preset) })
+                : draft;
         case 'literal':
-            return withGraph(draft, { parse: setLiteral(rule.graph.parse, action.literal) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: setLiteral(rule.graph.parse, action.literal) })
+                : draft;
         case 'find':
-            return withGraph(draft, { parse: setFind(rule.graph.parse, action.find) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: setFind(rule.graph.parse, action.find) })
+                : draft;
         case 'keep':
-            return withGraph(draft, { parse: { ...rule.graph.parse, keep: action.keep } });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: { ...rule.graph.parse, keep: action.keep } })
+                : draft;
         case 'cond':
-            return withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } });
+            return rule.graph.cond
+                ? withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } })
+                : draft;
+        case 'clauses':
+            // **The clause list, and nothing else.** A clause list supersedes `op`/`threshold`
+            // (§5.3), but clearing the pair HERE is a gate in the caller: it fires on the way in,
+            // so `+ Add a comparison` followed by `Remove comparison 1` left a v1 rule with an
+            // empty list AND no pair — blocked, and saved with its only comparison gone. The
+            // clearing belongs to `ruleFromDraft`, which asks the question of the row actually
+            // being written rather than of a keystroke on the way to it.
+            if (!rule.graph.cond) return draft;
+            return withGraph(draft, { cond: { ...rule.graph.cond, clauses: action.clauses } });
+        case 'timer': {
+            // The same no-op discipline the five patches above follow: `TimerPanel` is mounted only
+            // for a rule that HAS the step, and filling one in from a default here would mint a
+            // wait behind the user's back. The palette's `addStep` is what adds one.
+            if (!rule.graph.timer) return draft;
+            const next = { ...rule, graph: { ...rule.graph, timer: { mode: action.mode } } };
+            // **The wires follow the mode**, and this is the only place they can: the two modes draw
+            // different pictures (§6.2 threads the wait between the verdict and the send, §6.3 makes
+            // it the only wire), and `wires` is re-derived on open and on `addStep` and nowhere else.
+            // Without this, switching to a schedule left the canvas drawing the delay's chain over a
+            // rule that no longer reads anything.
+            return { ...draft, rule: next, wires: defaultWires(draft.present, timerShapeOf(next)) };
+        }
         case 'action':
             return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
         case 'select':
@@ -562,7 +822,32 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             const present = STEP_ORDER.filter(
                 (s) => s === action.step || draft.present.includes(s),
             );
-            return { ...draft, present, wires: defaultWires(present), selected: action.step };
+            // **An add MATERIALISES whatever it reveals.** Revealing a card over nothing gives the
+            // panel no step to bind to and the save nothing to write — which was already the
+            // reasoning for the wait step, and is a fact about ABSENCE rather than about timers.
+            // Task 29 made it general: `draftFromRule` now draws only the steps a rule has, so
+            // `monitor`, `parse` and `cond` can be absent when the palette offers them too.
+            //
+            // **The three input steps materialise as a GROUP**, the same all-or-nothing contract
+            // `ruleFromDraft` writes them under and `eval::InputSteps::of` reads them under. Filling
+            // in only the revealed card would put a monitor with no parse into an incomplete graph.
+            // It may remain disabled while the editor fills it in, but `timer.neverRuns` blocks an
+            // enabled write once the rule has a message, before it could be live and non-runnable.
+            //
+            // Shapes come from `blankDraft()`, never from a second set of defaults written here —
+            // two answers to *"what does an empty Watch step look like"* would drift.
+            const next = materialise(rule, action.step);
+            return {
+                ...draft,
+                rule: next,
+                present,
+                wires: defaultWires(present, timerShapeOf(next)),
+                // Clear of the cards already on the canvas — see `freeSlot`. A drag supplies its own
+                // position and the editor dispatches `moveStep` straight after this, so this is the
+                // answer for the CLICK path and the starting point for the drag one.
+                layout: { ...draft.layout, [action.step]: freeSlot(draft.layout, present, action.step) },
+                selected: action.step,
+            };
         }
         case 'moveStep':
             return { ...draft, layout: { ...draft.layout, [action.step]: action.pos } };

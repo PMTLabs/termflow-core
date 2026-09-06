@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
 
-use crate::automation_engine::eval::ArmState;
+use crate::automation_engine::eval::{ArmState, Captures};
 
 /// How many echo needles one terminal may carry at once (§2.6).
 pub const ECHO_CAP: usize = 4;
@@ -50,6 +50,46 @@ pub struct EchoNeedle {
     /// Wall-clock ms after which the needle is stale and stops being stripped. A needle that never
     /// expired would blind the rule to the user typing the same words themselves.
     pub until_ms: i64,
+}
+
+/// One crossing whose message is waiting out a `TimerMode::AfterMatch` delay (§6.2).
+///
+/// **Not persisted, deliberately** (§12): a parked send does not survive quitting the app. The
+/// whole feature is *"recover from the error that just happened"*, and a queue that replayed
+/// yesterday's `resume` into today's shell is the "nagging on arrival" behaviour plan 028 Q3 already
+/// ruled against for arm state.
+///
+/// It carries **exactly what `PendingSend` would have carried** had the crossing dispatched
+/// immediately, and for the same reasons:
+///
+/// - `captures` are the groups of the match that actually crossed. By the time the delay expires the
+///   terminal has scrolled on, so re-reading it at send time would resolve `$1` against whatever
+///   happens to be on screen then — or against nothing at all.
+/// - `prev` is the arm state this pair held BEFORE the crossing, so a send that fails 30 s later
+///   rolls back to exactly where it was rather than to a fresh `Armed`; the `seen_fire` bit is a
+///   fact about this pair's history (§2.2c).
+/// - `label` is resolved at decide time, because `failed — the terminal closed` is written when
+///   there is no name left to look up (§2.8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParkedSend {
+    /// Wall-clock ms at or after which the tick may take this. `now_ms + delay_ms`, computed once
+    /// at the crossing so no reader has to know the delay.
+    pub due_at_ms: i64,
+    /// The process this crossing was READ from, carried for the whole of the wait.
+    ///
+    /// `run_send`'s restart guard compares the leaf's process at lock time against
+    /// `PendingSend.pair.pc`. Built at the DRAIN from a fresh `process_for_leaf`, that comparison
+    /// is a value against itself and covers only the queue wait — never the 30 s to 10 min park.
+    /// `forget_terminal` covers Ctrl+R, because a restart is offered only after the shell exits and
+    /// that path runs `cleanup_terminal_state` → `forget_terminal` → purge; it does NOT cover a
+    /// spawn that re-indexes a LIVE leaf, and `IdentityIndex::index` overwrites `leaf_to_process`
+    /// unconditionally with no purge. That is the hazard `Pair::pc` was added for, and the failure
+    /// is a message decided from a dead run typed into a live shell — with `submit: true`,
+    /// executed there.
+    pub pc: String,
+    pub captures: Option<Captures>,
+    pub prev: ArmState,
+    pub label: Option<String>,
 }
 
 /// Every map the engine keys by a terminal or a rule.
@@ -106,6 +146,46 @@ pub struct AutomationRuntime {
     /// rule writes a `held` row four times a second and the 200-row per-rule cap evicts that rule's own
     /// `sent` row inside a minute.
     last_decision: DashMap<(String, String), crate::automation_engine::eval::Decision>,
+    /// `(rule_id, tm_id)` -> a crossing whose message is waiting out its `AfterMatch` delay (§6.2).
+    ///
+    /// **One more map, and no new clock.** `loops.rs`'s header rules out a `tokio::time::interval`
+    /// per rule, and this is what replaces it: the send sits here and the evaluator's existing
+    /// 250 ms tick takes it when it is ripe. Keyed like `arm`, so the pair is the unit — one rule
+    /// crossing on three terminals parks three sends, exactly as it would have dispatched three.
+    ///
+    /// Purged by all three teardowns. On an edit that keeps a rule live, purging its old entry is
+    /// what cancels the old action: `snapshot_live()` still contains that rule's identity and does
+    /// not reject a parked send merely because its definition changed. The map also holds a
+    /// `Captures` per entry, so an unpurged entry is a leak.
+    parked: DashMap<(String, String), ParkedSend>,
+    /// `rule_id` -> the local ordinal day this schedule rule last fired on (§6.3).
+    ///
+    /// **Keyed by the RULE alone, and that is the difference between this and every map above it.**
+    /// A schedule rule reads no terminal: `schedule_due` asks a clock, and the answer is the same
+    /// for all of the rule's targets, so "09:00 has happened today" is one fact and not one per
+    /// pair. Keyed per pair it would also be the *wrong* fact — a terminal that joins the watched
+    /// set at 10:00 has no entry for today, so a per-pair guard would deliver the 09:00 prompt to it
+    /// on arrival, which is exactly the behaviour §6.3 and plan 028 Q3 rule against. The walk marks
+    /// the day once, after it has pushed a send for every leaf it is going to.
+    ///
+    /// **Seeded by `reload`, not only written by the tick.** `>=` on the minute means an absent
+    /// entry and a target already past are indistinguishable from a crossing, so at load every
+    /// schedule whose minute has gone by is marked as today — an app started at 14:00 does not
+    /// deliver a 09:00 prompt on arrival, while an app running across 09:00 still does.
+    ///
+    /// Purged by `forget_rule` alone: it is a fact about the rule's own day, which a terminal
+    /// closing or leaving a watched set does not undo. In memory only, like `parked` — launch
+    /// starts empty, and `reload` runs at launch, which is what puts the seed there.
+    ///
+    /// **`reload` carries it ACROSS that purge when the rule's target minute has not moved**
+    /// (`schedule::same_target_minute`), and this map is the only one it does that for. Every save
+    /// moves `updated_at`, so `forget_rule` runs on a rename — and the re-seed that follows cannot
+    /// tell *never fired today* from *fired today, the mark was just deleted*. It decided the day had
+    /// been missed and wrote *"09:00 went by while nothing was watching the clock"* into the log
+    /// half an hour after the `sent` row for that same run. The other maps here want the purge: an
+    /// edit resetting a rule's arm state is Q11, and settled decision 7 wants the next crossing to be
+    /// a real one. A day that was spent stays spent.
+    last_fired_day: DashMap<String, (i32, i32)>,
 }
 
 impl AutomationRuntime {
@@ -160,6 +240,12 @@ impl AutomationRuntime {
         self.arm.remove(&key);
         self.last_eval_ms.remove(&key);
         self.last_decision.remove(&key);
+        // A leaf that has left this rule's watched set is a leaf the walk in `evaluate_tick` no
+        // longer visits, so its parked send would sit here until the process exited. `fires` is the
+        // one map kept across this teardown, and for a reason that does not apply to a pending
+        // write: a fire COUNT survives a terminal dropping out and coming back, an unsent message
+        // decided from output the rule is no longer watching does not.
+        self.parked.remove(&key);
     }
 
     /// Everything one rule owns: its arm keys, its evaluation stamps and its watched set. Called when
@@ -169,6 +255,8 @@ impl AutomationRuntime {
         self.last_eval_ms.retain(|(r, _), _| r != rule_id);
         self.last_decision.retain(|(r, _), _| r != rule_id);
         self.fires.retain(|(r, _), _| r != rule_id);
+        self.parked.retain(|(r, _), _| r != rule_id);
+        self.last_fired_day.remove(rule_id);
         self.watched.remove(rule_id);
         // Completion and *Reset* both arrive here, and they want opposite things from the claim —
         // completion no longer needs it (the rule has left the live set), and a reset must not
@@ -216,6 +304,9 @@ impl AutomationRuntime {
         self.last_eval_ms.retain(|(_, t), _| t != tm);
         self.last_decision.retain(|(_, t), _| t != tm);
         self.fires.retain(|(_, t), _| t != tm);
+        // Ctrl+R reuses the leaf for a brand-new PTY. A parked send decided from the DEAD shell's
+        // output must not be typed into the live one — with `submit: true` it would also run there.
+        self.parked.retain(|(_, t), _| t != tm);
         self.echoes.remove(tm);
         self.send_locks.remove(tm);
         self.settled_until.remove(tm);
@@ -347,6 +438,117 @@ impl AutomationRuntime {
             .map(|e| *e.value())
     }
 
+    // --- the parked send (§6.2) -------------------------------------------------------------------
+
+    /// Hold this crossing's message until `p.due_at_ms`.
+    ///
+    /// **Overwrites**, and there is nothing to protect: `set_arm` writes `Fired` at decide time,
+    /// before the park, so the pair cannot cross again until it is rearmed. A second park for one pair
+    /// therefore means the condition went false, re-armed and crossed again inside the delay — a
+    /// genuinely newer crossing, whose captures are the ones the message should resolve against.
+    pub fn park(&self, rule_id: &str, tm: &str, p: ParkedSend) {
+        self.parked.insert((rule_id.to_string(), tm.to_string()), p);
+    }
+
+    /// Take this pair's parked send **only if it is ripe**, atomically.
+    ///
+    /// `remove_if` rather than a read-then-remove: the test and the removal are one operation, so a
+    /// send that is not yet due is left exactly where it was rather than being taken out and put
+    /// back — which is the shape that loses it if anything between the two returns early. The tick
+    /// calls this for every watched pair on every pass, so "not due" is by far the common answer and
+    /// it must be a pure read of the map.
+    pub fn take_parked_due(&self, rule_id: &str, tm: &str, now_ms: i64) -> Option<ParkedSend> {
+        self.parked
+            .remove_if(&(rule_id.to_string(), tm.to_string()), |_, p| p.due_at_ms <= now_ms)
+            .map(|(_, p)| p)
+    }
+
+    /// Drop any parked send whose wait has been stale for longer than `max_age_ms` (I3).
+    ///
+    /// **A suspend is not a quit, and `MAX_DELAY_MS` only promises the second one.** `parked` is
+    /// in-memory only and not persisted, so §12's promise is "a wait cannot outlive the process" —
+    /// but a laptop lid closing does not end the process, so a send parked at 17:59:50 with a 30 s
+    /// delay is still in this map at 10:00 the next morning and, unguarded, fires on the first tick
+    /// after wake into whatever is now in that terminal. This is the same premise as the schedule
+    /// gap detector (`AutomationEngine::seed_missed_schedules`): *"nobody was observing the tick."*
+    ///
+    /// **Called only from the resume branch, alongside `seed_missed_schedules` — never on an
+    /// ordinary tick.** Reusing that one gap detector is the point (`loops.rs`'s standing rule: one
+    /// clock, `BASE_TICK_MS`, no second sweep, no new task) — this is not a second gap detector of
+    /// its own, it is one more thing the existing one does once it has already decided nobody was
+    /// watching.
+    /// **Returns how many it dropped**, because the caller has to tell the windows. A row whose send
+    /// is parked reads *"Waiting to send"* from `parked_at` alone, and the renderer's countdown stops
+    /// re-arming once the deadline passes — so a send dropped here with nothing announced leaves the
+    /// row on *"Waiting to send · in 0s"* until some unrelated arm transition repaints it.
+    /// `forget_pair`/`forget_terminal` escape that only because the targeting diff marks dirty on
+    /// their behalf, and nothing does for a resume.
+    ///
+    /// A count and not a bool for the same reason the seeding hands back ids: the caller must be able
+    /// to stay silent when a resume dropped nothing, or every wake repaints every open Settings page
+    /// to say that nothing happened. Counted inside `retain` rather than as a length difference,
+    /// which the tap can move underneath a pair of reads.
+    pub fn drop_stale_parked(&self, now_ms: i64, max_age_ms: i64) -> usize {
+        let mut dropped = 0usize;
+        self.parked.retain(|_, p| {
+            let fresh = now_ms - p.due_at_ms <= max_age_ms;
+            if !fresh {
+                dropped += 1;
+            }
+            fresh
+        });
+        dropped
+    }
+
+    /// When this pair's parked send comes due, or `None` if nothing is parked for it.
+    ///
+    /// A read, for the *"scheduled, counting down"* row state §7 threads through to the five armed
+    /// surfaces. It never expires anything: a countdown that pruned what it was reporting would be
+    /// the same defect `echoes_for` had.
+    pub fn parked_at(&self, rule_id: &str, tm: &str) -> Option<i64> {
+        self.parked
+            .get(&(rule_id.to_string(), tm.to_string()))
+            .map(|e| e.value().due_at_ms)
+    }
+
+    // --- the schedule's day (§6.3) ----------------------------------------------------------------
+
+    /// The local ordinal day this schedule rule last fired on, or `None` if it has not fired since
+    /// the rule was loaded. Handed straight to `schedule_due` as its double-fire guard.
+    pub fn last_fired_day(&self, rule_id: &str) -> Option<i32> {
+        self.last_fired_day.get(rule_id).map(|e| e.value().0)
+    }
+
+    /// The complete spent-day mark, including the target minute it was spent under.
+    pub fn last_fired_mark(&self, rule_id: &str) -> Option<(i32, i32)> {
+        self.last_fired_day.get(rule_id).map(|e| *e.value())
+    }
+
+    /// A snapshot for reload's store-backed mark reconciliation.
+    pub fn last_fired_marks(&self) -> Vec<(String, i32, i32)> {
+        self.last_fired_day
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().0, entry.value().1))
+            .collect()
+    }
+
+    /// Drop only a spent-day mark. Unlike `forget_rule`, reconciliation has established that the
+    /// schedule instant changed or disappeared, not that every other runtime key is stale.
+    pub fn forget_last_fired_day(&self, rule_id: &str) {
+        self.last_fired_day.remove(rule_id);
+    }
+
+    /// Mark this schedule rule as done for `day_ordinal`.
+    ///
+    /// Written from two places and they mean the same thing: the walk, when it has dispatched the
+    /// day's sends, and `reload`, when the day's minute had already passed before the rule was
+    /// loaded. Overwrites, because a later day always supersedes an earlier one and the only writer
+    /// of an earlier one is a clock that moved backwards — which `schedule_due` reads as "not today"
+    /// and fires once more, the same direction `due_now` takes for a negative age.
+    pub fn set_last_fired_day(&self, rule_id: &str, day_ordinal: i32, minute_of_day: i32) {
+        self.last_fired_day.insert(rule_id.to_string(), (day_ordinal, minute_of_day));
+    }
+
     pub fn last_decision(&self, rule_id: &str, tm: &str) -> Option<crate::automation_engine::eval::Decision> {
         self.last_decision
             .get(&(rule_id.to_string(), tm.to_string()))
@@ -418,12 +620,28 @@ mod tests {
         for rule in ["au-1", "au-2"] {
             for tm in ["tm-test-1", "tm-test-2"] {
                 rt.set_last_decision(rule, tm, crate::automation_engine::eval::Decision::Held);
+                rt.park(rule, tm, a_parked_send(50_000));
             }
+        }
+        // The one RULE-keyed map with a value in it (§6.3): a schedule's day is a fact about the
+        // rule, not about any pair, so it is populated here and asserted by `forget_rule`'s test.
+        for rule in ["au-1", "au-2"] {
+            rt.set_last_fired_day(rule, 739_866, 9 * 60);
         }
         // `dirty` is PROCESS-keyed; the two ids are deliberately different strings.
         rt.mark_dirty("pc-test-1");
         rt.mark_dirty("pc-test-2");
         rt
+    }
+
+    fn a_parked_send(due_at_ms: i64) -> ParkedSend {
+        ParkedSend {
+            due_at_ms,
+            pc: "pc-test-1".to_string(),
+            captures: None,
+            prev: ArmState::armed(),
+            label: Some("codex · core".to_string()),
+        }
     }
 
     /// §10.4b — the local half of the restart guard.
@@ -462,6 +680,13 @@ mod tests {
                  Check and dropped",
                 rule
             );
+            assert_eq!(
+                rt.parked_at(rule, "tm-test-1"),
+                None,
+                "{} kept a send parked against the DEAD shell: a leaf is reused, so it would be \
+                 typed into the new one — and with `submit: true`, run there",
+                rule
+            );
         }
         assert!(rt.echoes_for("tm-test-1", 0).is_empty(), "echo needles survived");
 
@@ -474,6 +699,7 @@ mod tests {
                 rt.last_decision(rule, "tm-test-2"),
                 Some(crate::automation_engine::eval::Decision::Held)
             );
+            assert_eq!(rt.parked_at(rule, "tm-test-2"), Some(50_000));
         }
         assert_eq!(rt.echoes_for("tm-test-2", 0), vec!["HANDOFF now".to_string()]);
 
@@ -534,8 +760,13 @@ mod tests {
         for tm in ["tm-test-1", "tm-test-2"] {
             assert_eq!(rt.arm_state("au-1", tm), ArmState::Unseen);
             assert_eq!(rt.last_eval("au-1", tm), None);
-            assert_eq!(rt.fire_record("au-1", tm), None, "all FOUR pair-keyed maps");
+            assert_eq!(rt.fire_record("au-1", tm), None, "every pair-keyed map");
             assert_eq!(rt.last_decision("au-1", tm), None);
+            assert_eq!(
+                rt.parked_at("au-1", tm),
+                None,
+                "a rule that was disabled, edited, deleted or completed left a send parked"
+            );
             assert_eq!(rt.arm_state("au-2", tm), ArmState::Fired { at_ms: 10 });
             assert_eq!(rt.last_eval("au-2", tm), Some(99));
             assert_eq!(rt.fire_record("au-2", tm), Some((1, 10)));
@@ -543,9 +774,76 @@ mod tests {
                 rt.last_decision("au-2", tm),
                 Some(crate::automation_engine::eval::Decision::Held)
             );
+            assert_eq!(rt.parked_at("au-2", tm), Some(50_000));
         }
         assert!(rt.watched_for("au-1").is_empty());
         assert_eq!(rt.watched_for("au-2").len(), 2);
+        // The rule-keyed map goes with the rest. A schedule left marked as fired-today across an
+        // edit is a rule that cannot fire again until tomorrow — and `reload` re-seeds the mark
+        // straight afterwards if the minute really has passed, so keeping it here would only make
+        // the two writers disagree.
+        assert_eq!(rt.last_fired_day("au-1"), None);
+        assert_eq!(rt.last_fired_day("au-2"), Some(739_866), "the other rule's day is untouched");
+    }
+
+    /// §2.4's per-pair teardown, for a leaf that has left one rule's watched set.
+    ///
+    /// `fires` is the one map this deliberately KEEPS — a terminal that drops out of a matched set
+    /// for a minute and comes back has not un-fired. A send still waiting out its delay is not in
+    /// that class: the rule is no longer watching the terminal the crossing was read from.
+    #[test]
+    fn forget_pair_drops_that_pairs_keys_including_a_send_still_waiting() {
+        let rt = populated();
+        rt.forget_pair("au-1", "tm-test-1");
+
+        assert_eq!(rt.arm_state("au-1", "tm-test-1"), ArmState::Unseen);
+        assert_eq!(rt.last_eval("au-1", "tm-test-1"), None);
+        assert_eq!(rt.last_decision("au-1", "tm-test-1"), None);
+        assert_eq!(
+            rt.parked_at("au-1", "tm-test-1"),
+            None,
+            "a send parked for a pairing that is over"
+        );
+        assert_eq!(
+            rt.fire_record("au-1", "tm-test-1"),
+            Some((1, 10)),
+            "the fire history is deliberately kept — §2.4's table is the ARM machine's"
+        );
+
+        // The other pairs of the same rule, and the same pair of the other rule, are untouched.
+        assert_eq!(rt.parked_at("au-1", "tm-test-2"), Some(50_000));
+        assert_eq!(rt.parked_at("au-2", "tm-test-1"), Some(50_000));
+    }
+
+    /// **A send that is not yet due must be left exactly where it was.**
+    ///
+    /// `take_parked_due` is asked for every watched pair on every 250 ms tick, so "not ripe" is by
+    /// far the common answer, and it has to be a pure read of the map: a read-then-remove that took
+    /// the entry out to look at it loses the send on any early return between the two.
+    #[test]
+    fn a_parked_send_is_taken_only_once_it_is_ripe_and_only_once() {
+        let rt = AutomationRuntime::new();
+        rt.park("au-1", "tm-1", a_parked_send(1_000));
+
+        assert!(rt.take_parked_due("au-1", "tm-1", 999).is_none(), "taken a millisecond early");
+        assert_eq!(
+            rt.parked_at("au-1", "tm-1"),
+            Some(1_000),
+            "a refusal must leave it parked, not consume it"
+        );
+
+        // `due_at_ms` is the moment it may go, not the moment after.
+        let taken = rt.take_parked_due("au-1", "tm-1", 1_000).expect("due at its own deadline");
+        assert_eq!(taken.prev, ArmState::armed(), "the crossing's arm state must ride along");
+        assert_eq!(taken.label.as_deref(), Some("codex · core"), "and the name it resolved");
+        assert_eq!(rt.parked_at("au-1", "tm-1"), None, "taking it must remove it");
+        assert!(
+            rt.take_parked_due("au-1", "tm-1", 9_999).is_none(),
+            "the same send went out twice"
+        );
+
+        // And a pair nobody parked for has nothing parked.
+        assert_eq!(rt.parked_at("au-ghost", "tm-ghost"), None);
     }
 
     /// **The single-run claim is taken once, and given back only by a purge.**

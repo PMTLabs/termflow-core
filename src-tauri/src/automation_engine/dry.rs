@@ -22,15 +22,24 @@
 
 use crate::automation_engine::eval::{self, Outcome, Read, Truth};
 use crate::automation_engine::host::{EngineHost, HostPort};
+use crate::automation_engine::schedule::clock_time;
+use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
-use crate::automation_store::{AutomationLogEntry, AutomationRule, CompareOp, LogKind};
+use crate::automation_store::{
+    AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
+    TimerMode, TimerStep,
+};
 
 /// One step of the graph, as the editor's Test panel draws it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepTrace {
-    /// `monitor` | `parse` | `cond` | `action` — the graph's own four steps, always all four and
-    /// always in this order, so the panel can draw the chain before it knows the answer.
+    /// `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+    /// count** (plan 032 §6–§7, corrected during task 25). A plain rule (no wait step) reports the
+    /// original four, in the graph's order. A DELAY rule (`AfterMatch`) inserts `timer` between
+    /// `cond` and `action` — five steps. A SCHEDULE rule (`DailyAt`) reads nothing at all (§6.3), so
+    /// its report carries only `timer` and `action` — no `monitor`, `parse` or `cond` row exists to
+    /// draw.
     pub kind: String,
     /// `ok` | `failed` | `skipped`. `skipped` is a step that never ran because an earlier one failed;
     /// it is not a pass, and the panel must not draw it as one.
@@ -62,7 +71,52 @@ pub const UNREADABLE: &str = "unreadable";
 const MONITOR: &str = "monitor";
 const PARSE: &str = "parse";
 const COND: &str = "cond";
+const TIMER: &str = "timer";
 const ACTION: &str = "action";
+
+/// An `AfterMatch` wait, in the pane's own terse style — `30 s`, `1.5 s`, `2 min` — never restating
+/// `MAX_DELAY_MS`/`MIN_DELAY_MS` as a bound, because this is naming a CONCRETE wait, not a range.
+/// Independent of `automationDerive.ts`'s `describeDelay`: the two sides of the wire already word a
+/// comparison differently (`63 > 25` here vs *"rises above 25"* there), and there is no §10.x test
+/// requiring this one to match it byte-for-byte the way substitution must (§1.1).
+fn describe_wait(delay_ms: i64) -> String {
+    if delay_ms >= 60_000 && delay_ms % 60_000 == 0 {
+        return format!("{} min", delay_ms / 60_000);
+    }
+    if delay_ms % 1_000 == 0 {
+        return format!("{} s", delay_ms / 1_000);
+    }
+    format!("{:.1} s", delay_ms as f64 / 1_000.0)
+}
+
+/// Bits 0–6 of a `dailyAt` mask are Mon..Sun (plan 032 §3.1). Bit 7 names no day.
+const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/// A weekday mask in words, matching `automationDerive.ts`'s `describeDays` in shape (`every day`,
+/// `weekdays`, `weekends`, or the days themselves) though not sharing its code across the wire.
+fn days_words(days: u8) -> String {
+    const WEEKDAY_MASK: u8 = 0b0001_1111;
+    const WEEKEND_MASK: u8 = 0b0110_0000;
+    const EVERY_DAY_MASK: u8 = 0b0111_1111;
+    let picked = days & EVERY_DAY_MASK;
+    if picked == 0 {
+        return "no days".to_string();
+    }
+    if picked == EVERY_DAY_MASK {
+        return "every day".to_string();
+    }
+    if picked == WEEKDAY_MASK {
+        return "weekdays".to_string();
+    }
+    if picked == WEEKEND_MASK {
+        return "weekends".to_string();
+    }
+    (0..7)
+        .filter(|i| picked & (1 << i) != 0)
+        .map(|i| DAY_NAMES[i as usize])
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn step(kind: &str, status: &str, detail: String) -> StepTrace {
     StepTrace { kind: kind.to_string(), status: status.to_string(), detail }
@@ -83,6 +137,67 @@ fn symbol(op: CompareOp) -> &'static str {
     }
 }
 
+/// One text clause's own comparator, in words — matching `TEXT_OP_LABELS` in
+/// `automationDerive.ts`'s node face, so a user reading this pane and the CondPanel row for the
+/// same clause never meets two different verbs for one operator.
+fn text_op_words(op: TextOp) -> &'static str {
+    match op {
+        TextOp::Is => "is",
+        TextOp::IsNot => "is not",
+        TextOp::Contains => "contains",
+        TextOp::NotContains => "does not contain",
+        TextOp::Matches => "matches",
+        TextOp::IsEmpty => "is empty",
+        TextOp::IsNotEmpty => "is not empty",
+    }
+}
+
+/// One clause, in words — `$1 > 400` or `$2 contains "fail"`. `source_text` is the same formatter
+/// `cond.unknownToken`'s own message uses, so a clause never gets two different names for its
+/// token across the two panes (§4.3/§5.3: one grammar). Numeric clauses keep `symbol`'s terser
+/// `>`/`>=` spelling — the v1 branch below already prints a comparison that way, and a clause is
+/// the same kind of comparison, just one of possibly several.
+fn clause_phrase(c: &Clause) -> String {
+    let token = crate::automation_validation::source_text(&c.source);
+    match &c.test {
+        // An unfilled threshold prints as the blank it is rather than as a made-up number: a
+        // numeric clause with no value is authorable (`CondPanel` mints one the moment a row turns
+        // numeric) and blocked by `cond.clauseNeedsValue`, so the Test pane has to be able to say
+        // it out loud.
+        Test::Number { op, value: Some(v) } => {
+            format!("{} {} {}", token, symbol(*op), eval::fmt_num(*v))
+        }
+        Test::Number { op, value: None } => format!("{} {} (no number yet)", token, symbol(*op)),
+        Test::Text { op, value } if matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty) => {
+            format!("{} {}", token, text_op_words(*op))
+        }
+        Test::Text { op, value } => format!("{} {} \"{}\"", token, text_op_words(*op), value),
+    }
+}
+
+/// The clause list under its one join — `$1 > 400 AND $2 contains "fail"` — plan §5.7's "one join
+/// for the whole list, not mixed precedence" written as a sentence. Upper-case `AND`/`OR`
+/// deliberately, the one word here that is not describing a single clause.
+fn clauses_sentence(clauses: &[Clause], join: Join) -> String {
+    let sep = match join {
+        Join::And => " AND ",
+        Join::Or => " OR ",
+    };
+    clauses.iter().map(clause_phrase).collect::<Vec<_>>().join(sep)
+}
+
+/// `finds` names WHICH question the rule asked — a reading that persists, or an event that
+/// happened (§5.2) — a fact the clause list's own types can no longer stand in for once `finds`
+/// and a clause's `Test` can disagree (the `API error … retry in 60s` example: an EVENT with a
+/// NUMERIC clause). Read depth already shows up one row up, in the monitor step's own wording; this
+/// is the same fact, named here because the condition it gates is decided on this row.
+fn finds_words(finds: Finds) -> &'static str {
+    match finds {
+        Finds::Reading => "a reading",
+        Finds::Event => "an event",
+    }
+}
+
 /// Run one rule against one terminal and report what each step did, **writing nothing anywhere except
 /// the activity log** (plan §6.5, decision 9).
 ///
@@ -97,7 +212,6 @@ pub fn evaluate_once(
     now_ms: i64,
 ) -> DryRunReport {
     let terminal_name = host.label_for(tm);
-    let pattern = rule.graph.parse.find.clone();
 
     let finish = |verdict: &str, steps: Vec<StepTrace>| -> DryRunReport {
         let report = DryRunReport {
@@ -124,6 +238,101 @@ pub fn evaluate_once(
         }
         report
     };
+
+    // 0. A schedule rule (§6.3) has no monitor, parse or cond step at all: nothing to read, and
+    //    therefore no condition this function could compute — but there IS a schedule and a send, so
+    //    task 25 reports those two instead of a blanket `unreadable` with three cards standing for
+    //    steps the rule does not have (the same reasoning `stepValues`' `NOT_IN_THIS_RULE` already
+    //    applies to the editor's cards, applied here to the Test pane's).
+    //
+    //    **Corrected (R7).** This used to say any OTHER missing subset (a monitor with no parse,
+    //    say) was "a malformed shape validation ALREADY refuses" — false when written: nothing
+    //    checked it, which is the defect R7 closes. `automation_validation::problems` now reports
+    //    `timer.neverRuns` for exactly that shape (any of `monitor`/`parse`/`cond` missing, with no
+    //    `dailyAt` schedule to excuse it), so a rule with it cannot be SAVED enabled any more — but
+    //    an unsaved draft still reaches this Test button freely, and a row that predates the guard
+    //    can still sit in the store, so the honest "nothing was read" answer below, on all four
+    //    original steps, stays the right one here regardless.
+    if rule.graph.monitor.is_none() && rule.graph.parse.is_none() && rule.graph.cond.is_none() {
+        let Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day, days } }) = &rule.graph.timer
+        else {
+            // **Corrected (R7).** Neither a monitor NOR a schedule — this branch is reached with an
+            // `AfterMatch` wait and nothing to cross it, which is R7's own oracle shape (`blank ->
+            // addStep 'timer' -> addStep 'action' -> type a message`). This comment used to claim
+            // "validation refuses this shape before it can be enabled", which was false: nothing did,
+            // until `timer.neverRuns` was added for exactly this. It is true now, for a SAVED rule;
+            // this branch still answers an unsaved draft or a row that predates the guard, so it
+            // stays the honest, non-panicking answer regardless of whether validation would also
+            // have refused it.
+            return finish(UNREADABLE, vec![skipped(TIMER), skipped(ACTION)]);
+        };
+        // **I1.** `schedule_due` refuses a `minute_of_day` outside `0..MINUTES_PER_DAY` and a
+        // `days` mask with no weekday bit set — and until this check existed, this branch asked
+        // neither, so unpicking all seven days in the Wait panel and pressing Test reported
+        // WOULD_FIRE with `"sends at 00:-5, no days"` or `"sends at 83:20, ..."` printed as though
+        // they were ordinary times. That is the "unfireable on one side, runnable on the other"
+        // disagreement `an_unfireable_rule_is_unfireable_on_both_sides` exists to forbid.
+        //
+        // Deliberately NOT `schedule_due` itself: that function also asks whether the mask excludes
+        // TODAY and whether `last_fired_day` already spent it, both of which are about "is it due
+        // this instant", a question this informational "sends at HH:MM, days" row was never
+        // answering (it reports the schedule's shape, not today's verdict). Only the two checks
+        // that make the schedule structurally unfireable — the same two `timer.badMinute` and
+        // `timer.noDays` block on — belong here.
+        //
+        // The garbage numbers above are also why the failure message does not format `minute_of_day`
+        // through `clock_time`: printing `83:20` back at the user as "this is what's broken" is the
+        // bug repeating itself in the error path.
+        let bad_minute = !(0..crate::automation_store::MINUTES_PER_DAY).contains(minute_of_day);
+        let no_days = days & crate::automation_store::WEEKDAY_BITS_MASK == 0;
+        if bad_minute || no_days {
+            let why = if bad_minute {
+                "its target is not a time of day"
+            } else {
+                "no day is ever picked"
+            };
+            return finish(
+                WOULD_NOT_FIRE,
+                vec![
+                    step(TIMER, "failed", format!("this schedule can never fire — {why}")),
+                    skipped(ACTION),
+                ],
+            );
+        }
+        let timer_step = step(
+            TIMER,
+            "ok",
+            format!("sends at {}, {} — nothing on screen is read", clock_time(*minute_of_day), days_words(*days)),
+        );
+        // §6.3/M4: `process_for_leaf` is still asked for a schedule rule — it is what ADDRESSES the
+        // send when the clock strikes — even though `host.tail` never is.
+        let Some(_pc) = host.process_for_leaf(tm) else {
+            return finish(
+                UNREADABLE,
+                vec![timer_step, step(ACTION, "failed", "that terminal is not open right now".to_string())],
+            );
+        };
+        let action_step = match preview_message(&rule.graph.action.message, rule.graph.action.substitute, None) {
+            Ok(body) => step(
+                ACTION,
+                "ok",
+                match &terminal_name {
+                    Some(name) => format!("would type `{}` into {}", body, name),
+                    None => format!("would type `{}`", body),
+                },
+            ),
+            Err(e) => step(ACTION, "failed", format!("nothing would be sent — `{}` had no value here", e)),
+        };
+        return finish(WOULD_FIRE, vec![timer_step, action_step]);
+    }
+
+    let Some(steps) = eval::InputSteps::of(&rule.graph) else {
+        return finish(
+            UNREADABLE,
+            vec![skipped(MONITOR), skipped(PARSE), skipped(COND), skipped(ACTION)],
+        );
+    };
+    let pattern = steps.parse.find.clone();
 
     // 1. Monitor. A terminal that is not live is not readable, and that is the whole answer.
     let Some(pc) = host.process_for_leaf(tm) else {
@@ -162,12 +371,33 @@ pub fn evaluate_once(
         }
     };
 
+    // 2b. Fold a v1 `op`/`threshold` rule into the clause list it means (§5.4), on a local copy.
+    //
+    //     `evaluate_text` reads the CLAUSE LIST and no longer looks at `op`/`threshold` at all
+    //     (§5.3 makes them load-only), and an empty clause list on a match is §5.5 step 4 — *the
+    //     match is the whole condition*. `reload` folds every rule it makes live; **this is the
+    //     other entry point into the same pure core**, and it takes a rule straight from the store
+    //     or an unsaved draft that never went near `reload`. Without this line the Test button
+    //     reports "would fire" for `ctx > 25` at `ctx:18%` — the dry run disagreeing with the
+    //     engine, which is the one thing it exists to rule out.
+    //
+    //     The same single fold implementation, on a clone so nothing the user can see is rewritten
+    //     (§3.2: a merely-loaded v1 rule is never promoted). Idempotent, so a v2 draft is untouched.
+    let mut graph = rule.graph.clone();
+    crate::automation_engine::fold_v1_clauses(&mut graph, &re);
+    // The same three steps, re-borrowed from the FOLDED copy — `steps` above still points at the
+    // stored rule, whose clause list the fold deliberately did not touch. `unwrap_or(steps)` and
+    // not an `unwrap`: `graph` is a clone of the graph `InputSteps::of` has already answered `Some`
+    // for and the fold only ever PUSHES a clause, so the fall-back is unreachable — and a Test
+    // button is the last thing that should be able to panic.
+    let folded = eval::InputSteps::of(&graph).unwrap_or(steps);
+
     // 3. The same pure core the evaluator runs, over the same needle list, at the same depth. The arm
     //    state is READ (§2.2c picks the depth from it) and never written.
     let prev = engine.runtime.arm_state(&rule.id, tm);
     let echoes = engine.runtime.echoes_for(tm, now_ms);
     let port = HostPort(host);
-    let Some(ev) = eval::evaluate(&rule.graph, &re, &echoes, prev, &port, &pc, now_ms) else {
+    let Some(ev) = eval::evaluate(folded, &re, &echoes, prev, &port, &pc, now_ms) else {
         return finish(
             UNREADABLE,
             vec![
@@ -207,10 +437,70 @@ pub fn evaluate_once(
         ),
     };
 
+    // Did the pattern actually capture anything? `Unknown` means two different things and this is
+    // what tells them apart. Before M2 they coincided: a `Reading` rule's `Unknown` always came
+    // WITH a failed parse row, because the only way to reach it was a read that produced no value.
+    // A clause can now answer `Unknown` on a perfectly successful match — a numeric clause on a
+    // non-numeric token, a group that did not participate, a `matches` clause whose own pattern
+    // will not compile — and so can a `Reading` rule with NO clauses, which `eval::evaluate`
+    // refuses to read as "the match is the whole condition". Calling any of those "not reached"
+    // describes a step that WAS evaluated as one that never ran, so BOTH arms below consult this.
+    let matched = ev.captures.is_some();
+
     let cond = match (ev.condition, &ev.outcome) {
+        // Task 14 made a clause list authorable (plan 032 §5.3, §5.9), and this rule is one: it
+        // describes ITSELF as the clause list under its join, plus `finds` — never as a v1
+        // `op`/`threshold` pair such a rule never carries (that pair reads `None`/`None` here,
+        // which is what the branch below's `"?" "?"` fallback exists for).
+        //
+        // **Ordered ABOVE the `Unknown` arm**, which used to swallow every three-valued answer a
+        // clause list can give and report `not reached` for it — the pane showing
+        // `parse ✓ matched` / `cond · not reached` / *Would not fire*, naming no clause and never
+        // mentioning the outcome this milestone exists to introduce.
+        //
+        // Read `steps.cond` — the STORED rule's condition — not `folded.cond` a few lines up:
+        // `fold_v1_clauses` gives even a v1 numeric rule exactly one clause on ITS copy, so keying
+        // on the folded graph would swallow the v1 branch's wording too. `op`/`join` and `finds`
+        // are identical on both copies; only `clauses` differs, so `steps.cond` alone is read for
+        // every field below.
+        (truth, _) if !steps.cond.clauses.is_empty() => {
+            let sentence = clauses_sentence(&steps.cond.clauses, steps.cond.join);
+            let finds = finds_words(steps.cond.finds);
+            match truth {
+                Truth::True => step(COND, "ok", format!("{}, as {}", sentence, finds)),
+                Truth::False => step(COND, "failed", format!("{} is false, as {}", sentence, finds)),
+                // Evaluated, and could not be answered. Neither `ok` nor `failed`: `Truth::Unknown`
+                // is a third answer and the pane says so rather than picking one of the two.
+                Truth::Unknown if matched => step(
+                    COND,
+                    "unknown",
+                    format!("could not tell whether {}, as {}", sentence, finds),
+                ),
+                // No match at all, so the clauses had nothing to read. Genuinely not reached — and
+                // the parse row directly above already says why.
+                Truth::Unknown => skipped(COND),
+            }
+        }
+        // **The same treatment, at the site the clause fix did not cover.** A `Reading` rule whose
+        // clause list is still empty AFTER the fold is the incomplete v1 shape `eval::evaluate`
+        // answers `Unknown` for on a perfectly successful match — and it is reachable from ordinary
+        // authoring, because choosing *A reading that stays true* seeds no clause. The clause arm
+        // above consults `matched`; this one did not, so the pane read `parse ✓ matched` /
+        // `cond · not reached` for a step that WAS evaluated. There is no clause to name, so the
+        // row says what is actually missing.
+        //
+        // **`folded`, not `steps`** — the one place this function reads the folded copy for
+        // anything but evaluation, and deliberately: an empty folded list is precisely the input
+        // `evaluate`'s own guard branches on, and it is what separates this shape from a COMPLETE
+        // v1 rule whose token would not coerce. That one folds to a real clause, its `Unknown`
+        // means "the comparison ran and the token was not a number", and the parse row above
+        // already says exactly that — so it keeps the `skipped` row it has always had.
+        (Truth::Unknown, _) if matched && folded.cond.clauses.is_empty() => {
+            step(COND, "unknown", "the comparison is not finished".to_string())
+        }
         (Truth::Unknown, _) => skipped(COND),
         (truth, Outcome::Numeric(Read::Value(v))) => {
-            let (sym, t) = match (rule.graph.cond.op, rule.graph.cond.threshold) {
+            let (sym, t) = match (steps.cond.op, steps.cond.threshold) {
                 (Some(op), Some(t)) => (symbol(op), eval::fmt_num(t)),
                 // Unreachable through the enable path — a numeric rule with no operator is a blocking
                 // validation problem — and `Unknown` above already caught it. Never a panic.
@@ -228,30 +518,78 @@ pub fn evaluate_once(
 
     let would_fire = ev.condition == Truth::True;
     let action = if would_fire {
-        step(
-            ACTION,
-            "ok",
-            match &terminal_name {
-                Some(name) => {
-                    format!("would type `{}` into {}", rule.graph.action.message, name)
-                }
-                None => format!("would type `{}`", rule.graph.action.message),
-            },
-        )
+        match preview_message(
+            &rule.graph.action.message,
+            rule.graph.action.substitute,
+            ev.captures.as_ref(),
+        ) {
+            Ok(body) => step(
+                ACTION,
+                "ok",
+                match &terminal_name {
+                    Some(name) => format!("would type `{}` into {}", body, name),
+                    None => format!("would type `{}`", body),
+                },
+            ),
+            // §4.4: the same refusal `run_send` would make, reported rather than typed. The
+            // verdict below still answers the CONDITION (it matched), and this row alone carries
+            // that the send itself would be refused.
+            Err(e) => step(
+                ACTION,
+                "failed",
+                format!("nothing would be sent — `{}` had no value here", e),
+            ),
+        }
     } else {
         step(ACTION, "skipped", "nothing would be sent".to_string())
     };
 
+    // A DELAY rule (`AfterMatch`) inserts a `timer` row here, between the comparison and the send —
+    // the same slot `run_evaluator`'s live walk parks a send in (§6.2). Only when the condition
+    // matched: with no crossing there is nothing that would be parked, and `skipped` says so, the
+    // same way `action` above is `skipped` rather than describing a send that would not happen.
+    // `DailyAt` never reaches this line — it is handled entirely in the schedule branch above, which
+    // returns before `InputSteps::of` is even asked for a verdict.
+    let timer_step = match &rule.graph.timer {
+        Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } }) if would_fire => {
+            Some(step(TIMER, "ok", format!("would wait {} before sending", describe_wait(*delay_ms))))
+        }
+        Some(TimerStep { mode: TimerMode::AfterMatch { .. } }) => {
+            Some(step(TIMER, "skipped", "nothing to wait for".to_string()))
+        }
+        _ => None,
+    };
+
     let verdict = if would_fire { WOULD_FIRE } else { WOULD_NOT_FIRE };
-    finish(verdict, vec![monitor, parse, cond, action])
+    let mut all_steps = vec![monitor, parse, cond];
+    if let Some(t) = timer_step {
+        all_steps.push(t);
+    }
+    all_steps.push(action);
+    finish(verdict, all_steps)
+}
+
+/// What the Test button says would be typed.
+///
+/// Delegates to `subst::substitute` rather than formatting the raw message, because the two
+/// were independent implementations of one behaviour and a preview that disagrees with the send
+/// is worse than no preview (§1.1).
+pub fn preview_message(
+    message: &str,
+    substitute: bool,
+    caps: Option<&eval::Captures>,
+) -> Result<String, subst::SubstError> {
+    if substitute { subst::substitute(message, caps) } else { Ok(message.to_string()) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation_engine::eval::ArmState;
+    use crate::automation_engine::eval::{ArmState, Captures};
     use crate::automation_engine::test_host::*;
-    use crate::automation_store::{CondKind, CondStep, Keep, LogOrder, LogScope};
+    use crate::automation_store::{
+        Clause, CondStep, Finds, Join, Keep, LogOrder, LogScope, Source, Test as ClauseTest, TextOp,
+    };
 
     fn kinds(report: &DryRunReport) -> Vec<&str> {
         report.steps.iter().map(|s| s.kind.as_str()).collect()
@@ -259,6 +597,16 @@ mod tests {
 
     fn statuses(report: &DryRunReport) -> Vec<&str> {
         report.steps.iter().map(|s| s.status.as_str()).collect()
+    }
+
+    fn status(report: &DryRunReport, kind: &str) -> String {
+        report
+            .steps
+            .iter()
+            .find(|s| s.kind == kind)
+            .unwrap_or_else(|| panic!("no `{}` step in {:?}", kind, report.steps))
+            .status
+            .clone()
     }
 
     fn detail(report: &DryRunReport, kind: &str) -> String {
@@ -385,7 +733,7 @@ mod tests {
         fake.say("pc-1", "ctx:63%\n");
 
         let mut draft = ctx_rule("au-draft-never-saved");
-        draft.graph.cond.threshold = Some(90.0);
+        draft.graph.cond_mut().threshold = Some(90.0);
 
         let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
 
@@ -411,7 +759,7 @@ mod tests {
     fn a_dry_run_surfaces_a_capture_that_is_not_a_number() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"ctx:(\d+%)".into();
+        rule.graph.parse_mut().find = r"ctx:(\d+%)".into();
         fake.say("pc-1", "ctx:63%\n");
 
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -436,11 +784,11 @@ mod tests {
     fn every_dry_run_reports_all_four_steps_in_the_graphs_own_order() {
         let (engine, fake, host) = wire(vec![]);
         let mut uncompilable = ctx_rule("au-1");
-        uncompilable.graph.parse.find = r"ctx:(\d+%".into();
+        uncompilable.graph.parse_mut().find = r"ctx:(\d+%".into();
         let mut presence = ctx_rule("au-1");
-        presence.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
-        presence.graph.parse.find = "HANDOFF".into();
-        presence.graph.parse.keep = Keep::Whole;
+        presence.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        presence.graph.parse_mut().find = "HANDOFF".into();
+        presence.graph.parse_mut().keep = Keep::Whole;
 
         // (what the terminal shows, the rule, the verdict, each step's status)
         let cases: Vec<(&str, AutomationRule, &str, Vec<&str>)> = vec![
@@ -524,9 +872,9 @@ mod tests {
     fn a_dry_run_strips_this_terminals_echo_needles() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
-        rule.graph.parse.find = "HANDOFF".into();
-        rule.graph.parse.keep = Keep::Whole;
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        rule.graph.parse_mut().find = "HANDOFF".into();
+        rule.graph.parse_mut().keep = Keep::Whole;
         fake.say("pc-1", "HANDOFF now\n");
 
         assert_eq!(
@@ -559,12 +907,194 @@ mod tests {
         ];
         for (op, threshold, verdict, words) in cases {
             let mut rule = ctx_rule("au-1");
-            rule.graph.cond.op = Some(op);
-            rule.graph.cond.threshold = Some(threshold);
+            rule.graph.cond_mut().op = Some(op);
+            rule.graph.cond_mut().threshold = Some(threshold);
             let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
             assert_eq!(report.verdict, verdict, "{:?}", op);
             assert_eq!(detail(&report, "cond"), words, "{:?}", op);
         }
+    }
+
+    /// **Task 14 made a clause list authorable, and the Test pane still described it as a v1
+    /// `op`/`threshold` rule.** A rule with a clause list must describe THAT — the clause list
+    /// under its join, and `finds` — never fall into the `op`/`threshold` wording, which such a
+    /// rule never carries at all (it reads `None`/`None`, the fallback `"?" "?"` pair the v1 branch
+    /// was written for).
+    #[test]
+    fn the_condition_step_describes_a_clause_list_under_its_join() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse_mut().find = r"code=(\d+) msg=(\S+)".into();
+        rule.graph.cond = Some(CondStep {
+            finds: Finds::Reading,
+            clauses: vec![
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(400.0) },
+                },
+                Clause {
+                    source: Source::Group(2),
+                    test: ClauseTest::Text { op: TextOp::Contains, value: "fail".into() },
+                },
+            ],
+            join: Join::And,
+            ..Default::default()
+        });
+
+        fake.say("pc-1", "code=500 msg=failure\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 400 AND $2 contains \"fail\", as a reading");
+
+        fake.say("pc-1", "code=100 msg=failure\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(
+            detail(&report, "cond"),
+            "$1 > 400 AND $2 contains \"fail\" is false, as a reading"
+        );
+    }
+
+    /// **The decoupling §5.2 exists for**: `API error … retry in 60s` is an EVENT containing a
+    /// NUMBER — `finds: Event` with a numeric clause. The v1 branch could never have produced this
+    /// combination (`kind: text` meant "the text is there", nothing numeric); the Test pane must
+    /// name both the clause's own comparison AND that this rule reads as an event, not derive one
+    /// from the other.
+    #[test]
+    fn an_event_rule_with_a_numeric_clause_names_both_the_clause_and_finds() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse_mut().find = r"API error .*retry in (\d+)s".into();
+        rule.graph.parse_mut().keep = Keep::Whole;
+        rule.graph.cond = Some(CondStep {
+            finds: Finds::Event,
+            clauses: vec![Clause {
+                source: Source::Group(1),
+                test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
+            }],
+            join: Join::And,
+            ..Default::default()
+        });
+
+        fake.say("pc-1", "API error 529, retry in 90s\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 60, as an event");
+
+        fake.say("pc-1", "API error 529, retry in 5s\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 60 is false, as an event");
+    }
+
+    /// **A clause that could not be answered is not a step that never ran.**
+    ///
+    /// `(Truth::Unknown, _) => skipped(COND)` sat ABOVE the clause branch and swallowed every
+    /// three-valued answer a clause list can give. Before M2 that was harmless: a `Reading` rule's
+    /// `Unknown` always came with a failed parse row that explained it. A clause can now answer
+    /// `Unknown` on a perfectly successful match, and the pane read `parse \u2713 matched` /
+    /// `cond \u00b7 not reached` / *Would not fire* \u2014 naming no clause, and never mentioning the
+    /// three-valued outcome this milestone exists to introduce.
+    ///
+    /// A table over all three ways one clause reaches `Unknown` on a match (\u00a75.5), because they are
+    /// three different causes that happen to agree, and a test built on one of them would let the
+    /// other two regress.
+    #[test]
+    fn a_clause_that_could_not_be_answered_says_so_rather_than_not_reached() {
+        let cases: [(&str, Clause, &str); 3] = [
+            (
+                "a numeric clause on a token that is not a number",
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
+                },
+                "could not tell whether $1 > 60, as an event",
+            ),
+            (
+                "a numeric clause on a group that did not participate",
+                Clause {
+                    source: Source::Group(2),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
+                },
+                "could not tell whether $2 > 60, as an event",
+            ),
+            (
+                "a `matches` clause whose own pattern will not compile",
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Text { op: TextOp::Matches, value: "(".into() },
+                },
+                "could not tell whether $1 matches \"(\", as an event",
+            ),
+        ];
+
+        for (label, clause, want) in cases {
+            let (engine, fake, host) = wire(vec![]);
+            let mut rule = ctx_rule("au-1");
+            // Two groups, the second of which cannot participate, so one pattern serves all three.
+            rule.graph.parse_mut().find = r"code=(\w+)(?: extra=(\d+))?".into();
+            rule.graph.parse_mut().keep = Keep::Whole;
+            rule.graph.cond = Some(CondStep {
+                finds: Finds::Event,
+                clauses: vec![clause],
+                join: Join::And,
+                ..Default::default()
+            });
+
+            fake.say("pc-1", "code=oops\n");
+            let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+            // The parse step SUCCEEDED \u2014 this is the whole point: the clause was reached.
+            assert_eq!(status(&report, "parse"), "ok", "{label}");
+            assert_eq!(detail(&report, "cond"), want, "{label}");
+            // Neither `ok` nor `failed`, and above all not `skipped`, whose words are "not reached".
+            assert_eq!(status(&report, "cond"), "unknown", "{label}");
+            assert_ne!(detail(&report, "cond"), "not reached", "{label}");
+            // `Unknown` still does not fire, and the action step is genuinely not reached.
+            assert_eq!(report.verdict, WOULD_NOT_FIRE, "{label}");
+            assert_eq!(status(&report, "action"), "skipped", "{label}");
+        }
+    }
+
+    /// The paired negative: with NO match there are no captures, the clauses truly had nothing to
+    /// read, and `not reached` is the honest word \u2014 the parse row directly above already says why.
+    /// Without this, "always say `could not tell`" would satisfy the table above.
+    #[test]
+    fn no_match_at_all_leaves_the_condition_genuinely_not_reached() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.cond = Some(CondStep {
+            finds: Finds::Reading,
+            clauses: vec![Clause {
+                source: Source::Group(1),
+                test: ClauseTest::Number { op: CompareOp::Gt, value: Some(25.0) },
+            }],
+            join: Join::And,
+            ..Default::default()
+        });
+
+        fake.say("pc-1", "nothing of interest here\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(status(&report, "parse"), "failed");
+        assert_eq!(status(&report, "cond"), "skipped");
+        assert_eq!(detail(&report, "cond"), "not reached");
+    }
+
+    /// The paired positive for both tests above: a rule that GENUINELY has no clauses (a v1 rule,
+    /// read straight off `rule.graph.cond_ref().op`/`.threshold`) must keep the old wording exactly —
+    /// `fold_v1_clauses` gives such a rule one clause on its OWN folded copy, and the new branch
+    /// must not be fooled into taking over that rule's wording too.
+    #[test]
+    fn a_rule_with_no_clauses_of_its_own_keeps_the_v1_wording() {
+        let (engine, fake, host) = wire(vec![]);
+        let rule = ctx_rule("au-1");
+        assert!(rule.graph.cond_ref().clauses.is_empty(), "premise: ctx_rule is a v1 rule");
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "63 > 25", "the v1 branch, not the clause-list one");
     }
 
     /// The action step names the message and the terminal, and says it **would** type — it is the
@@ -582,6 +1112,116 @@ mod tests {
             "would type `prepare to do context-hand-off` into codex · core"
         );
         assert_eq!(report.terminal_id, "tm-1");
+    }
+
+    // =============================================================================================
+    // §1.1 — the preview must not disagree with the send
+    // =============================================================================================
+
+    /// The whole point of the shared module. This asserts the RELATION, not two hard-coded strings —
+    /// a test that pins both to "Fix the 17 …" passes even if both are wrong in the same way.
+    #[test]
+    fn the_preview_and_the_send_resolve_identically() {
+        let caps = Captures {
+            groups: vec![
+                Some("FAILED 17 tests in a.ts".into()),
+                Some("17".into()),
+                Some("a.ts".into()),
+            ],
+            named: Default::default(),
+        };
+        let msg = "Fix the $1 failing tests in $2";
+        let sent = subst::substitute(msg, Some(&caps)).unwrap();
+        let previewed = preview_message(msg, true, Some(&caps)).unwrap();
+        assert_eq!(previewed, sent);
+    }
+
+    #[test]
+    fn the_preview_says_it_would_send_nothing_when_a_token_is_unresolvable() {
+        let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
+        assert!(preview_message("Fix $3", true, Some(&caps)).is_err());
+    }
+
+    /// The call site, not just the helper: with substitution on and every token resolvable, the
+    /// action row shows the RESOLVED text, exactly as `run_send` would type it — never the raw
+    /// template with `$1` still in it.
+    #[test]
+    fn the_action_step_resolves_tokens_through_the_shared_helper() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse_mut().find = r"FAILED (\d+) tests in (\S+)".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        rule.graph.action.message = "Fix the $1 failing tests in $2".into();
+        rule.graph.action.substitute = true;
+        fake.say("pc-1", "FAILED 17 tests in a.ts");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(
+            detail(&report, "action"),
+            "would type `Fix the 17 failing tests in a.ts` into codex · core"
+        );
+    }
+
+    /// §4.4's refusal, reported by the Test button rather than typed. **The verdict still answers the
+    /// CONDITION** (it matched — this is the row a user must see to press Enable in the first place),
+    /// while the action row alone carries that the send itself would be refused, exactly as
+    /// `run_send`'s own refusal is a log line rather than a change to whether the crossing fired.
+    #[test]
+    fn the_action_step_names_the_token_it_could_not_resolve() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse_mut().find = r"FAILED (\d+)".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        rule.graph.action.message = "Fix $3".into();
+        rule.graph.action.substitute = true;
+        fake.say("pc-1", "FAILED 17");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE, "the condition still matched");
+        assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "failed"]);
+        let action = detail(&report, "action");
+        assert!(action.contains("$3"), "the failure row must name the token: {action}");
+    }
+
+    /// **The same defect, at the site the clause fix did not cover.**
+    ///
+    /// A `Reading` rule with no clauses and no v1 pair answers `Truth::Unknown` on a SUCCESSFUL
+    /// match — `eval::evaluate`'s incomplete-v1 guard, which refuses to read an empty clause list
+    /// as *the match is the whole condition* for a reading. It is reachable from ordinary
+    /// authoring: choosing *A reading that stays true* seeds no clause. The clause arm consulted
+    /// `matched` and this path did not, so the pane read `parse ✓ matched` / `cond · not reached`
+    /// for a step that was evaluated — the identical sentence
+    /// `a_clause_that_could_not_be_answered_says_so_rather_than_not_reached` exists to forbid.
+    ///
+    /// The paired negative is `a_dry_run_surfaces_a_capture_that_is_not_a_number`: a COMPLETE v1
+    /// rule also answers `Unknown` on a match, its comparison IS finished, and it keeps the
+    /// `skipped` row — so this widening cannot have swallowed that case too.
+    #[test]
+    fn a_reading_rule_with_no_comparison_says_so_rather_than_not_reached() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        // The shape the editor mints for *A reading that stays true* before a clause is added:
+        // neither a clause list nor a v1 pair, so `fold_v1_clauses` has nothing to fold either.
+        rule.graph.cond = Some(CondStep {
+            finds: Finds::Reading,
+            op: None,
+            threshold: None,
+            ..Default::default()
+        });
+
+        fake.say("pc-1", "ctx:63%
+");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        // The parse step SUCCEEDED — this is the whole point: the condition was reached and could
+        // not be answered, which is not the same as never running.
+        assert_eq!(status(&report, "parse"), "ok");
+        assert_eq!(status(&report, "cond"), "unknown");
+        assert_eq!(detail(&report, "cond"), "the comparison is not finished");
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "it still cannot fire");
     }
 
     /// A `wire` with no rules keeps the engine's live set empty, so nothing here can accidentally be
@@ -620,4 +1260,164 @@ mod tests {
         assert!(body.contains("eval::evaluate("), "and it must go through the SAME pure core");
     }
 
+    // =============================================================================================
+    // Task 25 (plan 032 §7) — the wait step's own row
+    // =============================================================================================
+
+    /// **A DELAY rule inserts a fifth row, between the comparison and the send, only when it would
+    /// actually park.** `kinds` proves the row exists and sits where §6.2's live park does; `detail`
+    /// proves it names the wait, through `describe_wait` (never a literal restating `delay_ms`, the
+    /// same discipline `timer_problems`'s own bound messages follow).
+    #[test]
+    fn a_delay_rule_reports_a_timer_row_between_cond_and_action_when_it_would_fire() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "timer", "action"]);
+        assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "ok", "ok"]);
+        let timer = detail(&report, "timer");
+        assert!(timer.contains("30 s"), "{timer}");
+        assert!(timer.contains("wait"), "{timer}");
+        // The action row is untouched by the wait's presence — it still names what would be typed.
+        assert_eq!(
+            detail(&report, "action"),
+            "would type `prepare to do context-hand-off` into codex · core"
+        );
+    }
+
+    /// The paired negative: the condition did NOT cross, so nothing would be parked — the timer row
+    /// still exists (the rule DOES have a wait step) but says so is `skipped`, matching `action`'s own
+    /// `skipped` treatment for the same reason on the same run.
+    #[test]
+    fn a_delay_rules_timer_row_is_skipped_when_the_condition_does_not_cross() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        fake.say("pc-1", "ctx:18%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "timer", "action"]);
+        assert_eq!(status(&report, "timer"), "skipped");
+        assert_eq!(detail(&report, "timer"), "nothing to wait for");
+    }
+
+    /// The paired positive for the class above: a rule with NO wait step at all reports the original
+    /// four rows — no `timer` kind appears, ever, for the common case every template still is.
+    #[test]
+    fn a_rule_with_no_wait_step_reports_no_timer_row() {
+        let (engine, fake, host) = wire(vec![]);
+        fake.say("pc-1", "ctx:63%\n");
+        let report = evaluate_once(&engine, host.as_ref(), &ctx_rule("au-1"), "tm-1", 1_000);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "action"]);
+    }
+
+    /// **A SCHEDULE rule reads nothing, so its report has no `monitor`/`parse`/`cond` row to draw at
+    /// all** — just the schedule and the send, task 25's replacement for the old blanket
+    /// `unreadable` + four skipped rows this shape used to get (§6.3, corrected during
+    /// implementation: "task 25 owns the schedule-aware wording for the Test pane").
+    #[test]
+    fn a_schedule_rule_reports_only_its_timer_and_action_rows() {
+        let (engine, fake, host) = wire(vec![schedule_only_rule("au-sched")]);
+        let rule = schedule_only_rule("au-sched");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE, "{:?}", report.steps);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(statuses(&report), vec!["ok", "ok"]);
+        let timer = detail(&report, "timer");
+        assert!(timer.contains("09:00"), "{timer}");
+        assert!(timer.contains("weekdays"), "{timer}");
+        assert_eq!(detail(&report, "action"), "would type `stand-up notes?` into codex · core");
+        assert!(fake.written().is_empty(), "a schedule dry run must still type nothing");
+    }
+
+    /// The schedule branch still asks `process_for_leaf` (§6.3/M4: it is what ADDRESSES the eventual
+    /// send, even though `host.tail` is never asked) — so a terminal that is not open is `unreadable`,
+    /// the same distinction §10.17b's live-terminal test draws for the ordinary four-step path.
+    #[test]
+    fn a_schedule_rule_against_a_closed_terminal_is_unreadable() {
+        let (engine, fake, host) = wire(vec![]);
+        fake.leaves.lock().unwrap().clear();
+
+        let report = evaluate_once(&engine, host.as_ref(), &schedule_only_rule("au-sched"), "tm-1", 1_000);
+
+        assert_eq!(report.verdict, UNREADABLE);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(status(&report, "action"), "failed");
+        assert!(fake.written().is_empty());
+    }
+
+    // =============================================================================================
+    // I1 — the dry run said `would-fire` for a schedule that provably cannot
+    // =============================================================================================
+
+    /// **The oracle.** `days_words(0)` prints `"no days"`, and until this branch range/mask-checked
+    /// itself, an all-days-unpicked schedule still dry-ran as WOULD_FIRE — reachable in two clicks:
+    /// unpick all seven days in the Wait panel, press Test. `schedule_due` already refuses this on
+    /// the live side; this pins the Test pane to agree with it (`
+    /// an_unfireable_rule_is_unfireable_on_both_sides`).
+    ///
+    /// An unsaved DRAFT, not a saved rule: the enable gate would refuse to save this shape at all
+    /// (`timer.noDays`), and the whole point is that the Test button has to answer a draft that has
+    /// never been near that gate.
+    #[test]
+    fn an_all_days_unpicked_schedule_dry_runs_as_not_firing() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut draft = schedule_only_rule("au-draft");
+        draft.graph.timer =
+            Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0 } });
+
+        let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(status(&report, "timer"), "failed");
+        assert_eq!(status(&report, "action"), "skipped");
+        assert!(
+            detail(&report, "timer").contains("no day is ever picked"),
+            "{}",
+            detail(&report, "timer")
+        );
+        assert!(fake.written().is_empty(), "an unfireable schedule must still type nothing");
+    }
+
+    /// The paired half, for the other field the same guard checks: `clock_time(5000)` formats
+    /// `"83:20"`, and that string must never reach the user as though it were an ordinary time —
+    /// echoing the bug's own garbage back as the explanation would be the bug repeating itself in
+    /// the error path.
+    #[test]
+    fn an_out_of_range_minute_dry_runs_as_not_firing_and_does_not_echo_the_garbage() {
+        let (engine, _fake, host) = wire(vec![]);
+        let mut draft = schedule_only_rule("au-draft");
+        draft.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 5_000, days: 0b0001_1111 },
+        });
+
+        let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert_eq!(status(&report, "timer"), "failed");
+        let timer_detail = detail(&report, "timer");
+        assert!(
+            !timer_detail.contains("83:20"),
+            "the bad minute must not be echoed back as though it were a time: {timer_detail}"
+        );
+
+        // A negative minute is the other end, and the dangerous one: unguarded, `now >= target`
+        // would be true from midnight rather than never.
+        let mut negative = schedule_only_rule("au-draft");
+        negative.graph.timer =
+            Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day: -5, days: 0b0001_1111 } });
+        let report = evaluate_once(&engine, host.as_ref(), &negative, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert!(!detail(&report, "timer").contains("00:-5"), "{}", detail(&report, "timer"));
+    }
 }

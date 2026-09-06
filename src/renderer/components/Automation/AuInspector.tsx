@@ -12,13 +12,14 @@ import type { AutomationRuntimePairState } from '../../services/automationEvents
 import type { AutomationDraft, DraftAction } from './automationDraft';
 import type { PanelModel } from './automationDerive';
 import { panelFor } from './automationDerive';
-import type { Problem } from './automationValidation';
+import type { Problem, ProblemField } from './automationValidation';
 import type { StepKind } from './automationSteps';
 import { STEP_LABELS } from './automationSteps';
 import { STEP_GLYPHS } from './AuNode';
 import { MonitorPanel } from './panels/MonitorPanel';
 import { ParsePanel } from './panels/ParsePanel';
 import { CondPanel } from './panels/CondPanel';
+import { TimerPanel } from './panels/TimerPanel';
 import { ActionPanel } from './panels/ActionPanel';
 
 export interface AuInspectorProps {
@@ -37,11 +38,28 @@ export interface AuInspectorProps {
     dispatch: (action: DraftAction) => void;
 }
 
-const FIELD_STEPS: Record<string, StepKind> = {
+/**
+ * Which step's panel fixes a problem, keyed by the problem's own field.
+ *
+ * **`Record<ProblemField, StepKind>`, never `Record<string, …>`** — the index signature is what let
+ * `'timer'` be missing and still compile, and the two consumers below both dereference the result:
+ * `STEP_LABELS[FIELD_STEPS[p.field]]` renders `STEP_LABELS[undefined]` into the DOM and
+ * `onFocusStep(FIELD_STEPS[p.field])` hands `undefined` to a `(step: StepKind) => void`. So every
+ * `timer.*` problem — a wait too short, a schedule with no day picked — drew a blank label on a
+ * button that then focused nothing. The exhaustive type turns the next such omission into a `tsc`
+ * failure, which is the same protection `BADGES` already gives `ProblemCode`.
+ *
+ * **`timer` points at its own step**, since task 23 gave `StepKind` a `'timer'`. It pointed at
+ * `action` for one commit — a deliberate placeholder, because of the four kinds that existed
+ * `action` was the only one every rule has, and `monitor`/`parse`/`cond` are all absent on the
+ * schedule rule these problems belong to.
+ */
+const FIELD_STEPS: Record<ProblemField, StepKind> = {
     targets: 'monitor',
     monitor: 'monitor',
     parse: 'parse',
     cond: 'cond',
+    timer: 'timer',
     action: 'action',
 };
 
@@ -111,6 +129,9 @@ export const AuInspector: React.FC<AuInspectorProps> = (props) => {
                         onRearm={props.onRearm}
                         dispatch={props.dispatch}
                     />
+                )}
+                {step === 'timer' && (
+                    <TimerPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
                 {step === 'action' && (
                     <ActionPanel draft={draft} model={model} dispatch={props.dispatch} />

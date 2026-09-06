@@ -17,9 +17,19 @@ import {
     blankDraft,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import { DEFAULT_LAYOUT, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
+import {
+    AU_NODE_H,
+    DEFAULT_LAYOUT,
+    draftFromRule,
+    draftReducer,
+    isDirty,
+    ruleFromDraft,
+} from '../automationDraft';
 import { problems } from '../automationValidation';
-import { STEP_ORDER, defaultWires } from '../automationSteps';
+import { STEP_ORDER, canAddStep, defaultWires } from '../automationSteps';
+
+/** The steps an ordinary v1 rule has, and therefore the cards it opens with — the wait is opt-in. */
+const WITHOUT_TIMER = STEP_ORDER.filter((s) => s !== 'timer');
 import type { AutomationRule } from '../../../types/electron';
 
 /** The wire hop, exactly as `invoke` performs it. */
@@ -79,15 +89,93 @@ describe('draft ⇄ row', () => {
             // the wire rather than being quietly replaced by `DEFAULT_LAYOUT` on the way through.
             graph: {
                 ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph,
+                // `substitute` is a plan-032 field none of the templates set — pinning it `true`
+                // here is what makes a dropped mapping fail this test rather than pass vacuously.
+                action: { ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph.action, substitute: true },
+                // The plan-032 clause list and its join. Both are optional AND both have a default
+                // the backend omits from the wire, so a dropped mapping would pass vacuously unless
+                // this fixture sets them — and `join` is set to the NON-default `or` for that reason.
+                cond: {
+                    ...draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph.cond,
+                    clauses: [
+                        { source: { group: 1 }, test: { text: { op: 'is', value: '429' } } },
+                        { source: { group: 2 }, test: { number: { op: 'gt', value: 60 } } },
+                        { source: 'whole', test: { text: { op: 'isNotEmpty', value: '' } } },
+                        // **A numeric clause with no threshold yet** — the state `CondPanel` mints
+                        // the instant a row is switched to a numeric operator, and the one the wire
+                        // could not carry: `NaN` has no JSON spelling, so it arrived as `null` and
+                        // `Test::Number { value: f64 }` refused the rule. Every other clause here
+                        // holds a finite value, so without this row the mapping passes vacuously
+                        // over the only shape that ever failed.
+                        { source: { group: 1 }, test: { number: { op: 'lt', value: null } } },
+                    ],
+                    join: 'or',
+                },
+                // Plan 032 §3.1/§6 — the M3 timer field. A non-default `afterMatch` value, not
+                // `undefined`: a fixture carrying the default proves nothing about the mapping.
+                timer: { mode: { afterMatch: { delayMs: 30_000 } } },
                 layout: {
                     monitor: { x: 11, y: 12 },
                     parse: { x: 21, y: 22 },
                     cond: { x: 31, y: 32 },
+                    // Five, since task 23 gave `StepKind` its `'timer'`. Not decoration: `layoutOf`
+                    // walks `STEP_ORDER` and fills a missing card in from `DEFAULT_LAYOUT`, so a
+                    // four-key fixture would come back five-key and this identity would be
+                    // asserting the default rather than the carried value.
+                    timer: { x: 51, y: 52 },
                     action: { x: 41, y: 42 },
                 },
             },
         };
-        expect(ruleFromDraft(draftFromRule(overTheWire(full)))).toEqual(full);
+        // **One deliberate normalisation, and it is not a dropped field.** This fixture carries the
+        // v1 `op`/`threshold` pair AND a clause list, because it inherits the pair from template 0
+        // and sets clauses of its own — a shape §5.3 forbids on a saved row. `ruleFromDraft` drops
+        // the superseded pair from any row that carries clauses, so the round trip is identity
+        // everywhere except there. Stated as an explicit expectation rather than by softening the
+        // comparison, so a field that goes missing for any OTHER reason still fails here. The pair
+        // itself is still pinned as a carried field by the six-template case above, whose rules
+        // have no clauses.
+        expect(ruleFromDraft(draftFromRule(overTheWire(full)))).toEqual({
+            ...full,
+            graph: { ...full.graph, cond: { ...full.graph.cond, op: null, threshold: null } },
+        });
+    });
+
+    /**
+     * **A schedule rule, which has NO monitor, parse or cond step at all** (plan 032 §3.1, §6.3).
+     *
+     * The §7.7 four-places rule cuts both ways: a field that became optional has to survive the
+     * round trip while ABSENT, and the failure mode is the quiet one — `draftFromRule` or
+     * `ruleFromDraft` filling the hole in from a default would hand the store a rule with an empty
+     * pattern, which compiles and matches everything, and nothing in the shape would look wrong.
+     *
+     * Two halves. The keys must still be **missing** after the wire hop (`JSON.stringify` drops an
+     * `undefined` value, so a mapping that wrote `parse: undefined` would look identical to one
+     * that dropped it — `'parse' in graph` tells them apart), and the whole rule must come back
+     * equal, which is what catches a default being invented.
+     */
+    it('carries a SCHEDULE rule, which has no monitor, parse or cond step at all', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const { monitor: _m, parse: _p, cond: _c, ...graphWithoutInput } = base.graph;
+        const schedule: AutomationRule = {
+            ...base,
+            id: 'au-schedule',
+            graph: {
+                ...graphWithoutInput,
+                // A schedule rule is not merely a rule with holes in it — it fires on the clock.
+                timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } },
+            },
+        };
+
+        const there = ruleFromDraft(draftFromRule(overTheWire(schedule)));
+        expect('monitor' in there.graph).toBe(false);
+        expect('parse' in there.graph).toBe(false);
+        expect('cond' in there.graph).toBe(false);
+
+        const { layout: _added, ...graphWithoutLayout } = there.graph;
+        expect({ ...there, graph: graphWithoutLayout }).toEqual(schedule);
+        // And idempotent from there, the same property the templates above are held to.
+        expect(ruleFromDraft(draftFromRule(overTheWire(there)))).toEqual(there);
     });
 
     /**
@@ -118,6 +206,64 @@ describe('draft ⇄ row', () => {
     });
 });
 
+/**
+ * §5.3 — `op`/`threshold` are v1 only: read at load, folded into `clauses`, **never written
+ * again**. The clause list is the condition once there is one, and a row carrying both is a row
+ * with two contradictory conditions on it: this build runs the clause, while an older build
+ * ignores `clauses` entirely and runs `> 25`.
+ */
+describe('a v1 rule that gains a clause', () => {
+    /** The canonical v1 numeric rule, exactly as a pre-M2 build wrote it. */
+    const v1 = (): AutomationRule => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        return {
+            ...base,
+            graph: { ...base.graph, cond: { kind: 'number', op: 'gt', threshold: 25 } },
+        };
+    };
+
+    it('stops carrying the superseded op/threshold on the row a save writes', () => {
+        const before = ruleFromDraft(draftFromRule(v1())).graph.cond;
+        expect(before.op).toBe('gt');
+        expect(before.threshold).toBe(25);
+
+        const withClause = draftReducer(draftFromRule(v1()), {
+            type: 'clauses',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'lt', value: 90 } } }],
+        });
+        // What a SAVE writes — `ruleFromDraft`, not `draft.rule` — and after the wire hop, which
+        // is where `skip_serializing_if = "Option::is_none"` decides whether the pair is re-written.
+        const saved = overTheWire(ruleFromDraft(withClause)).graph.cond;
+        expect(saved.clauses).toHaveLength(1);
+        expect(saved.op ?? null).toBeNull();
+        expect(saved.threshold ?? null).toBeNull();
+    });
+
+    it('keeps them when the clause list goes back to empty', () => {
+        // The paired negative, and the reason the clearing is conditional: removing the last clause
+        // from a v1 rule must leave it the rule it was, not silently strip its only comparison and
+        // turn it into one that fires on every match.
+        //
+        // **Through the real ADD-then-REMOVE sequence.** This test used to dispatch `{ clauses: [] }`
+        // against a fresh draft, which never visits the state the defect lives in — a draft that
+        // HAS held clauses and no longer does. `+ Add a comparison` nulled the pair on the way in
+        // and `Remove comparison 1` could not put it back, so the rule was blocked and would have
+        // been saved with its only comparison gone.
+        const added = draftReducer(draftFromRule(v1()), {
+            type: 'clauses',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'lt', value: 90 } } }],
+        });
+        const emptied = draftReducer(added, { type: 'clauses', clauses: [] });
+        const saved = overTheWire(ruleFromDraft(emptied)).graph.cond;
+        expect(saved.clauses ?? []).toEqual([]);
+        expect(saved.op).toBe('gt');
+        expect(saved.threshold).toBe(25);
+        // The user-visible consequence, and the one that reaches the store: removing the final
+        // clause preserves the v1 comparison, so this row is not blocked as `cond.incomplete`.
+        expect(problems(ruleFromDraft(emptied)).map((p) => p.code)).not.toContain('cond.incomplete');
+    });
+});
+
 describe('draftFromRule', () => {
     /**
      * What `AutomationMenuSection`'s `newDraftFor` hands the host for "New automation for this
@@ -129,12 +275,155 @@ describe('draftFromRule', () => {
         targetIds: ['tm-9'],
     });
 
-    it('draws all four steps for a template or an existing rule', () => {
+    it('draws the four ordinary steps a template or an existing rule has', () => {
         const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
-        expect(draft.present).toEqual([...STEP_ORDER]);
-        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(draft.wires).toEqual(defaultWires(WITHOUT_TIMER));
         expect(draft.layout).toEqual(DEFAULT_LAYOUT);
         expect(draft.selected).toBe('monitor');
+    });
+
+    /**
+     * **Every step is drawn exactly when the rule HAS it, the wait included.**
+     *
+     * The wait used to be the sole exception to *"draw all four whatever the graph holds"*, and
+     * the reason it had to be is the reason the exception became the rule: `canAddStep` refuses a
+     * step that is already present, so a card drawn for an absent step closes the palette's only
+     * route to adding one. That was true of the wait on every rule ever written, and true of
+     * monitor/parse/cond on a schedule rule — which is the half task 29 fixed.
+     */
+    it('draws the wait step exactly when the rule has one', () => {
+        const withWait = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        withWait.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        const draft = draftFromRule(withWait);
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(canAddStep(draft.present, 'timer')).not.toBeNull();
+
+        // And without one, the palette can still offer it.
+        expect(canAddStep(draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0])).present, 'timer'))
+            .toBeNull();
+    });
+
+    /**
+     * A SCHEDULE rule draws its clock and its send, and the three steps it does not have (§6.3).
+     * The wires it draws are the one wire that shape runs on — a monitor → read → compare chain
+     * beside the clock would be a picture of three steps the engine skips on every tick.
+     */
+    it('draws a schedule rule with the one wire that shape runs on', () => {
+        const schedule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        schedule.graph.timer = { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } };
+        const draft = draftFromRule(schedule);
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires.map((w) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`))
+            .toEqual(['timer.out->action.in']);
+    });
+
+    /**
+     * **Task 29, the READ direction: `present` and the graph agree about which steps a rule has.**
+     *
+     * `draftFromRule` used to draw all four original steps for any saved rule whatever its graph
+     * held, on a premise written in `automationSteps.ts` — *"a rule's graph carries all four steps
+     * whatever is drawn"* — that §3.1 made false. Two reviewers reported the two halves of it
+     * separately: three dead cards whose panels return `null`, and a saved schedule rule that can
+     * never have `monitor`/`parse`/`cond` added back, because `canAddStep` refuses each one as
+     * *"already has"* while `graph.monitor` is absent.
+     *
+     * Mutation M-a: revert the `'saved'` arm to the unconditional
+     * `STEP_ORDER.filter((s) => s !== 'timer' || rule.graph.timer != null)` → this dies, and the
+     * ordinary-rule test below must not.
+     */
+    it('draws only the steps a saved schedule rule actually has', () => {
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = draftFromTemplate(
+            AUTOMATION_TEMPLATES[0],
+        ).graph;
+        const draft = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: { ...graph, timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } } },
+        });
+        expect(draft.present).toEqual(['timer', 'action']);
+        expect(draft.wires.map((w) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`))
+            .toEqual(['timer.out->action.in']);
+    });
+
+    /**
+     * **The case R1 must NOT move**, and it is every rule that exists today: an ordinary v1 rule
+     * has all four original steps in its graph, so it goes on opening with all four cards and no
+     * wait card. Without this the regression is invisible — the only rule whose behaviour the
+     * change touches is one that genuinely lacks a step.
+     */
+    it('still draws all four cards for an ordinary saved rule, and no wait card', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(canAddStep(draft.present, 'timer')).toBeNull();
+    });
+
+    /**
+     * **R2 — `addStep` materialises whatever it reveals, and the input steps materialise as a
+     * GROUP.** The reasoning written at the timer branch — *"revealing a card over nothing would
+     * give the panel no step to bind to and the save nothing to write"* — is a fact about absence,
+     * not about timers, and after R1 monitor/parse/cond can be absent too.
+     *
+     * The group half is the same all-or-nothing contract `ruleFromDraft` and `eval::InputSteps::of`
+     * keep: filling in only the card that was revealed writes an incomplete graph. It can remain a
+     * disabled draft while the user completes it, but `timer.neverRuns` blocks a new enabled write
+     * once the rule has a message.
+     *
+     * Mutation M-b: narrow the materialisation back to `action.step === 'timer'` → this dies.
+     */
+    it('fills in the graph for a revealed input step, all three of them', () => {
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = draftFromTemplate(
+            AUTOMATION_TEMPLATES[0],
+        ).graph;
+        const schedule = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: { ...graph, timer: { mode: { afterMatch: { delayMs: 30_000 } } } },
+        });
+        expect(schedule.rule.graph.parse).toBeUndefined();
+
+        const added = draftReducer(schedule, { type: 'addStep', step: 'parse' });
+        expect(added.rule.graph.parse).not.toBeNull();
+        expect(added.rule.graph.parse).toBeDefined();
+        expect(added.rule.graph.monitor).toBeDefined();
+        expect(added.rule.graph.cond).toBeDefined();
+        // The CARD the user asked for, and only that one — the graph is all-or-nothing, the canvas
+        // is not.
+        expect(added.present).toEqual(['parse', 'timer', 'action']);
+        // Sourced from `blankDraft()`, never from a second set of defaults written here.
+        expect(added.rule.graph.parse).toEqual(blankDraft().graph.parse);
+    });
+
+    /**
+     * **T4-c / M3: a click-added card must not land on top of one that is already there.**
+     *
+     * `addStep` never consulted `draft.layout`, so a new card took `DEFAULT_LAYOUT`'s slot whatever
+     * was standing in it. A template does not reproduce it — a template carries no persisted
+     * `graph.layout`, so `layoutOf` answers `DEFAULT_LAYOUT`, where `action` has already moved out
+     * of the wait's column. It takes a rule whose arrangement was SAVED with a card in that slot:
+     * either a layout persisted before `timer` was inserted at the fourth position, or — needing no
+     * upgrade at all — any card the user dragged there and saved.
+     *
+     * Asserted as *clear of the other card*, not merely *not equal*: two positions one pixel apart
+     * are two cards on top of each other.
+     */
+    it('places a new card clear of one already standing in its default slot', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        rule.graph.layout = { ...DEFAULT_LAYOUT, action: { ...DEFAULT_LAYOUT.timer } };
+        const draft = draftFromRule(rule);
+        // The premise: the send really is sitting where a wait card would be placed.
+        expect(draft.layout.action).toEqual(DEFAULT_LAYOUT.timer);
+
+        const added = draftReducer(draft, { type: 'addStep', step: 'timer' });
+        expect(added.layout.timer).not.toEqual(added.layout.action);
+        expect(Math.abs(added.layout.timer.y - added.layout.action.y))
+            .toBeGreaterThanOrEqual(AU_NODE_H);
+    });
+
+    /** And the case it must not move: nothing in the way, so the canonical slot is kept. */
+    it('leaves a new card in its default slot when nothing is standing there', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
+        const added = draftReducer(draft, { type: 'addStep', step: 'timer' });
+        expect(added.layout.timer).toEqual(DEFAULT_LAYOUT.timer);
     });
 
     it('draws NOTHING for a brand-new rule', () => {
@@ -277,11 +566,11 @@ describe('draftFromRule', () => {
         }
     });
 
-    it('a TEMPLATE draws all four steps, like the complete rule it is', () => {
+    it('a TEMPLATE draws the four ordinary steps it has, like the complete rule it is', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         const draft = draftFromRule(rule, 'template');
-        expect(draft.present).toEqual([...STEP_ORDER]);
-        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(draft.wires).toEqual(defaultWires(WITHOUT_TIMER));
         expect(draft.selected).toBe('monitor');
         // The RULE, absolutely — for the reason the seeded oracle is absolute: `present`/`wires`/
         // `selected` are all about the canvas, and none of them would notice this opening quietly
@@ -416,9 +705,83 @@ describe('the reducer', () => {
         for (const step of ['action', 'monitor', 'cond', 'parse'] as const) {
             d = draftReducer(d, { type: 'addStep', step });
         }
-        expect(d.present).toEqual([...STEP_ORDER]);
+        expect(d.present).toEqual(WITHOUT_TIMER);
         // And the wires follow, rather than being appended in drop order.
-        expect(d.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(d.wires).toEqual(defaultWires(WITHOUT_TIMER));
+
+        // The wait step drops in fifth wherever it is dropped, and re-draws the chain THROUGH it.
+        d = draftReducer(d, { type: 'addStep', step: 'timer' });
+        expect(d.present).toEqual([...STEP_ORDER]);
+        expect(d.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+    });
+
+    /**
+     * **The canvas follows the mode, and only the reducer can make it.**
+     *
+     * `wires` is re-derived on open and on `addStep`, and nowhere else — so before this case
+     * existed, switching a finished rule to a schedule left the canvas drawing the delay's whole
+     * chain over a rule that no longer reads anything. The picture and the rule are the one thing
+     * `defaultWires`' own header promises cannot disagree.
+     */
+    it('re-draws the wires when the wait switches mode', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        rule.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        const opened = draftFromRule(rule);
+        expect(opened.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+
+        const scheduled = draftReducer(opened, {
+            type: 'timer',
+            mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } },
+        });
+        expect(scheduled.rule.graph.timer).toEqual({
+            mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } },
+        });
+        expect(scheduled.wires).toEqual(defaultWires(STEP_ORDER, 'dailyAt'));
+
+        // And back, so this is a re-derivation rather than a one-way collapse.
+        const back = draftReducer(scheduled, { type: 'timer', mode: { afterMatch: { delayMs: 5_000 } } });
+        expect(back.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+    });
+
+    /**
+     * A patch to a step the rule does not have is a no-op, never a materialisation — the same
+     * discipline the monitor/parse/cond cases follow. The palette's `addStep` is the one route that
+     * adds a wait, and it is explicit about it.
+     */
+    it('ignores a mode change on a rule with no wait step', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const opened = draftFromRule(rule);
+        const after = draftReducer(opened, { type: 'timer', mode: { afterMatch: { delayMs: 5_000 } } });
+        expect(after).toBe(opened);
+        expect(after.rule.graph.timer).toBeUndefined();
+    });
+
+    /**
+     * **Adding the wait card writes the step into the rule.** Every other `addStep` is
+     * presentation-only, because `blankDraft()` already carries a monitor, a parse, a cond and an
+     * action — the card is revealed over a field that exists. `graph.timer` is absent by design on
+     * a rule that does not use one (§3.1), so a reveal with no write would give the panel no step
+     * to bind to, leave the save nothing to write, and put a card on the canvas that the rule does
+     * not have.
+     */
+    it('writes a wait step into the rule when its card is added, and leaves it alone after', () => {
+        const empty = draft();
+        expect(empty.rule.graph.timer).toBeUndefined();
+
+        const added = draftReducer(empty, { type: 'addStep', step: 'timer' });
+        expect(added.rule.graph.timer).toEqual({ mode: { afterMatch: { delayMs: 30_000 } } });
+        // A wait is only a wait if it is long enough to be one, and short enough to survive the
+        // session — the card must not be born blocked.
+        expect(problems(added.rule).some((p) => p.field === 'timer')).toBe(false);
+
+        // And a rule that already has one keeps ITS value: re-adding is a no-op, and so is adding
+        // the card back to a rule whose graph still carries the step.
+        const edited = {
+            ...added,
+            rule: { ...added.rule, graph: { ...added.rule.graph, timer: { mode: { afterMatch: { delayMs: 90_000 } } } } },
+        };
+        expect(draftReducer(edited, { type: 'addStep', step: 'timer' }).rule.graph.timer)
+            .toEqual({ mode: { afterMatch: { delayMs: 90_000 } } });
     });
 
     it('re-derives the wires as steps are added, rather than appending in drop order', () => {

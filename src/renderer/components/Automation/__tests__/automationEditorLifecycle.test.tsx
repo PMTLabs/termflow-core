@@ -347,6 +347,67 @@ describe('the editor, mounted', () => {
         expect(editor()!.querySelector('.au-tog')!.classList.contains('flash')).toBe(false);
     });
 
+    /**
+     * **Add a comparison, remove it again, and the v1 rule keeps the one it always had.**
+     *
+     * The clearing of the superseded `op`/`threshold` pair lived in the reducer's `clauses` case,
+     * so it fired on the way IN: *+ Add a comparison* nulled the pair, *Remove comparison 1* left
+     * an empty list, and the rule was then blocked (`cond.incomplete`) and written with its only
+     * comparison gone — a rule that had worked, saved switched off and unable to fire.
+     *
+     * Driven through the real panel rather than the reducer, because the reducer-level test can
+     * only pin what `ruleFromDraft` returns and the thing that reaches the store is whatever
+     * `save` decides to send. That was `draft.rule`, which `ruleFromDraft` never touched.
+     */
+    it('a comparison added and removed again leaves the v1 rule its own comparison', async () => {
+        const api = await openEditorOn(rule());
+        await selectStep('cond');
+
+        const add = [...document.querySelectorAll<HTMLButtonElement>('.au-editor button')].find(
+            (b) => b.textContent?.includes('Add a comparison'),
+        );
+        await act(async () => add!.click());
+        const remove = document.querySelector<HTMLButtonElement>(
+            '.au-editor [aria-label="Remove comparison 1"]',
+        );
+        await act(async () => remove!.click());
+
+        await pressCtrlS();
+        await settle();
+
+        const sent = api.saveAutomation.mock.calls[0][0] as AutomationRule;
+        expect(sent.graph.cond?.clauses ?? []).toEqual([]);
+        expect(sent.graph.cond?.op).toBe('gt');
+        expect(sent.graph.cond?.threshold).toBe(25);
+    });
+
+    /**
+     * **The paired positive, and the one that pins WHERE the clearing now happens.**
+     *
+     * A clause list supersedes `op`/`threshold` (§5.3), and a row carrying both is a row with two
+     * contradictory conditions — this build runs the clause, an older one ignores `clauses`
+     * entirely and runs `> 25`. Moving the clearing out of the reducer would silently reintroduce
+     * exactly that unless `save` sends `ruleFromDraft(draft)`, which it did not: it sent
+     * `draft.rule`, the one shape `ruleFromDraft` never touches.
+     */
+    it('drops the superseded v1 pair from the row a clause-carrying save writes', async () => {
+        const api = await openEditorOn(rule());
+        await selectStep('cond');
+
+        const add = [...document.querySelectorAll<HTMLButtonElement>('.au-editor button')].find(
+            (b) => b.textContent?.includes('Add a comparison'),
+        );
+        await act(async () => add!.click());
+
+        await pressCtrlS();
+        await settle();
+
+        const sent = api.saveAutomation.mock.calls[0][0] as AutomationRule;
+        expect(sent.graph.cond?.clauses).toHaveLength(1);
+        expect(sent.graph.cond?.op ?? null).toBeNull();
+        expect(sent.graph.cond?.threshold ?? null).toBeNull();
+    });
+
     /** A rule with no problems is saved exactly as it is — the paired positive. */
     it('leaves an enabled rule enabled when nothing blocks it', async () => {
         const api = await openEditorOn(rule({ enabled: true }));

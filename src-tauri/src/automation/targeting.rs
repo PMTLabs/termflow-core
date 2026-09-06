@@ -178,7 +178,7 @@ pub fn watched_set(
 mod tests {
     use super::*;
     use crate::automation_store::{
-        ActionStep, AutomationGraph, Cadence, CompareOp, CondKind, CondStep, Keep, MonitorStep,
+        ActionStep, AutomationGraph, Cadence, CompareOp, CondStep, Finds, Keep, MonitorStep,
         ParsePreset, ParseStep, ReadMode, SendTo,
     };
 
@@ -472,19 +472,21 @@ mod tests {
             schema_version: 1,
             graph: AutomationGraph {
                 layout: None,
-                monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-                parse: ParseStep {
+                timer: None,
+                monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+                parse: Some(ParseStep {
                     preset: ParsePreset::Custom,
                     literal: None,
                     find: r"ctx:(\d+)%".into(),
                     keep: Keep::Brackets,
-                },
-                cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+                }),
+                cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
                 action: ActionStep {
                     message: "m".into(),
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".into(),
+                    substitute: false,
                 },
             },
             created_at: 0,

@@ -11,7 +11,8 @@
 import React from 'react';
 import type { AutomationRule } from '../../../types/electron';
 import { AUTOMATION_TEMPLATES, AutomationTemplate, blankDraft, draftFromTemplate } from './automationTemplates';
-import { describeRule } from './automationState';
+import { describeRule } from '../../Automation/automationDerive';
+import { AuRuleSentence } from '../../Automation/AuRuleSentence';
 
 export interface TemplateGalleryProps {
     onBack: () => void;
@@ -50,13 +51,13 @@ export const TemplateGallery: React.FC<TemplateGalleryProps> = ({ onBack, onPick
                 </span>
                 <span className="au-tplbody">
                     <span className="au-tplwhy">
-                        An empty canvas. Drag the four steps in yourself — watch, read, compare,
+                        An empty canvas. Drag the steps in yourself — watch, read, compare, wait,
                         send. Everything a template does, you can do from here; it just takes longer.
                     </span>
                 </span>
                 <span className="au-tplfoot">
                     <span className="au-yc">You&apos;ll set</span>
-                    <span className="au-editchip">all four steps</span>
+                    <span className="au-editchip">every step</span>
                 </span>
             </button>
         </div>
@@ -74,7 +75,11 @@ export const TemplateGallery: React.FC<TemplateGalleryProps> = ({ onBack, onPick
     </div>
 );
 
-const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void }> = ({
+/**
+ * Exported for the both-surfaces test: the gallery's own cards are the six built-in templates, none
+ * of which carries a wait step, so the surface cannot otherwise be shown a rule that has one.
+ */
+export const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void }> = ({
     template,
     onPick,
 }) => {
@@ -90,17 +95,7 @@ const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void 
             </span>
             <span className="au-tplbody">
                 <span className="au-tplsay">
-                    {sentence.lead} <b>{sentence.subject}</b>
-                    {sentence.verb && (
-                        <>
-                            {' '}
-                            <span className="au-arrow">{sentence.verb}</span> <b>{sentence.threshold}</b>
-                        </>
-                    )}
-                    <br />
-                    <span className="au-arrow">→</span> {sentence.verbSend}{' '}
-                    <span className="au-msg">&quot;{sentence.message}&quot;</span>
-                    {sentence.sendNote && <span className="au-arrow">{sentence.sendNote}</span>}
+                    <AuRuleSentence sentence={sentence} stacked />
                 </span>
                 <span className="au-tplwhy">{template.why}</span>
             </span>

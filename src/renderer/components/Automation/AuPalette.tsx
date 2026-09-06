@@ -1,23 +1,35 @@
 /**
- * The left rail: the four steps you can drag on, and what this rule currently says (mockup §03).
+ * The left rail: the steps you can drag on, and what this rule currently says (mockup §03).
  *
  * The *This rule* summary is `ruleSummary(draft.rule)` — derived, like everything else — so the rail
  * cannot summarise a rule the canvas is not drawing.
  */
 import React from 'react';
-import type { StepKind } from './automationSteps';
+import type { StepKind, TimerShape } from './automationSteps';
 import { STEP_LABELS, STEP_ORDER, STEP_SUBTITLES, canAddStep } from './automationSteps';
 import { STEP_GLYPHS } from './AuNode';
 
 export interface AuPaletteProps {
     present: readonly StepKind[];
+    /**
+     * Which mode the rule's wait step is in, from `timerShapeOf` — the one thing `canAddStep` needs
+     * that the step NAMES cannot tell it. Passed rather than read here, so the palette keeps
+     * knowing nothing about the DTO and `canAddStep` stays testable as a table.
+     */
+    timerShape: TimerShape;
     summary: string;
     onBeginDrag: (step: StepKind, e: React.PointerEvent) => void;
     /** Keyboard equivalent of the drag — a palette that only answers to a pointer is unreachable. */
     onAdd: (step: StepKind) => void;
 }
 
-export const AuPalette: React.FC<AuPaletteProps> = ({ present, summary, onBeginDrag, onAdd }) => (
+export const AuPalette: React.FC<AuPaletteProps> = ({
+    present,
+    timerShape,
+    summary,
+    onBeginDrag,
+    onAdd,
+}) => (
     <div className="au-palette">
         <div className="au-palhead">Steps</div>
         <div className="au-palhint">
@@ -25,7 +37,7 @@ export const AuPalette: React.FC<AuPaletteProps> = ({ present, summary, onBeginD
         </div>
         <div className="au-palitems">
             {STEP_ORDER.map((step) => {
-                const refusal = canAddStep(present, step);
+                const refusal = canAddStep(present, step, timerShape);
                 return (
                     <button
                         type="button"

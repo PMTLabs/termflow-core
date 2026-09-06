@@ -1,8 +1,8 @@
 /**
  * The inspector's field primitives (mockup §04).
  *
- * Small on purpose: four panels drawing the same radio three different ways is how a surface starts
- * looking like four surfaces. Nothing here knows what an automation is.
+ * Small on purpose: five panels drawing the same radio three different ways is how a surface starts
+ * looking like five surfaces. Nothing here knows what an automation is.
  */
 import React from 'react';
 
@@ -38,17 +38,22 @@ export const AuRadio: React.FC<AuRadioProps> = ({ on, title, sub, warn, name, on
     </label>
 );
 
-export const AuCheck: React.FC<{ on: boolean; label: string; onToggle: () => void }> = ({
-    on,
-    label,
-    onToggle,
-}) => (
+export const AuCheck: React.FC<{
+    on: boolean;
+    label: string;
+    /** A second line under the label, `au-radio`'s `sub` carried over to the checkbox row. */
+    sub?: React.ReactNode;
+    onToggle: () => void;
+}> = ({ on, label, sub, onToggle }) => (
     <label className={`au-checkrow${on ? ' on' : ''}`}>
         <input type="checkbox" checked={on} onChange={onToggle} />
         <span className="au-cmark" aria-hidden="true">
             ✓
         </span>
-        <span>{label}</span>
+        <span>
+            {label}
+            {sub && <span className="au-rsub">{sub}</span>}
+        </span>
     </label>
 );
 

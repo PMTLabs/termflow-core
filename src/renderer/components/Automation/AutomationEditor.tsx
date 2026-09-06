@@ -53,12 +53,12 @@ import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { useDialogA11y } from '../UI/useDialogA11y';
 import { automationRowState } from '../Settings/Automations/automationState';
 import { blockingProblems, problems as validate } from './automationValidation';
-import { faceFor, ruleSummary, stateFor } from './automationDerive';
+import { WIRE_CHIPS, faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
-import type { StepKind } from './automationSteps';
+import type { OutPortKey, StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
 import type { CanvasOpening, NodePos } from './automationDraft';
-import { draftFromRule, draftReducer, isDirty } from './automationDraft';
+import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
@@ -175,7 +175,23 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
     const pairs = draft.rule.id.length > 0 ? runtime.rules[draft.rule.id] : undefined;
     const dirty = isDirty(draft);
-    const problems = useMemo(() => validate(draft.rule), [draft.rule]);
+    /**
+     * **The rule a save would WRITE, and the one object every judgement in this editor is made of.**
+     *
+     * There were three: the inspector list and the Enable gate validated `draft.rule`, the dry run
+     * ran `draft.rule`, and `save` validated `ruleFromDraft(current)` to decide whether to disarm
+     * the toggle. They agreed only because the one field the normalisation touches — the superseded
+     * v1 `op`/`threshold` pair a clause list drops (§5.3) — is read only when `clauses` is empty,
+     * which is an accident of the current rule set and is pinned by nothing. Three judgements about
+     * three different objects is how the toggle ends up dimmed for a problem the saved rule does
+     * not have, or armed for one it does.
+     *
+     * `ruleFromDraft` is documented as *"what a save sends"* and `isDirty` already asks it what a
+     * save would write, so it is the right object for all three. Pure, and a function of `draft`
+     * alone.
+     */
+    const writing = useMemo(() => ruleFromDraft(draft), [draft]);
+    const problems = useMemo(() => validate(writing), [writing]);
     const blocking = blockingProblems(problems);
 
     // --- the keyboard ----------------------------------------------------------------------------
@@ -250,13 +266,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // A ref, not the closure: the guard registered below is a stable object handed to a module-level
     // registry, and a `save` that closed over the first render's draft would persist whatever the
     // rule looked like when the editor opened.
-    const latest = useRef({ draft, api, origin, onChanged });
-    latest.current = { draft, api, origin, onChanged };
+    // `writing` rides along so the save writes the SAME object the inspector list, the Enable gate
+    // and the dry run were judging. Assigned in the render body beside the draft it is memoised
+    // from, so the two can never be a render apart.
+    const latest = useRef({ draft, writing, api, origin, onChanged });
+    latest.current = { draft, writing, api, origin, onChanged };
     /** True from the moment a save is decided to the moment it settles. See `save` below. */
     const inFlight = useRef(false);
 
     const save = useCallback(async (): Promise<boolean> => {
-        const { draft: current, api: bridge, origin: from, onChanged: changed } = latest.current;
+        const { writing, api: bridge, origin: from, onChanged: changed } = latest.current;
         if (!bridge?.saveAutomation) {
             toast('Automations are not available in this window.', 'error');
             return false;
@@ -275,9 +294,21 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // as the only exit. Clearing the Message on an enabled rule to retype it is enough to reach
         // it. So the rule the user drew is written whole, and the one thing that cannot survive the
         // trip — permission to RUN — is dropped, said out loud, and one click from being restored.
-        const blockingNow = blockingProblems(validate(current.rule));
-        const disarmed = current.rule.enabled && blockingNow.length > 0;
-        const outgoing = disarmed ? { ...current.rule, enabled: false } : current.rule;
+        //
+        // **`writing`, never `draft.rule`.** `ruleFromDraft` is documented as "what a save sends"
+        // and `isDirty` already asks it what a save would write — but nothing on this path called
+        // it, so the two disagreed: the canvas arrangement lived in `draft.layout` and was injected
+        // only by `ruleFromDraft`, which meant dragging a card marked the draft dirty and then
+        // saved the positions it opened with. It is also where the superseded v1 `op`/`threshold`
+        // pair is dropped from a clause-carrying row (§5.3), which used to happen in the reducer
+        // and cost a v1 rule its only comparison on add-then-remove.
+        //
+        // It now comes off the ref rather than being computed here, so this decision, the
+        // inspector's problem list, the Enable gate and the dry run are all made of ONE object —
+        // see `writing`'s own doc in the render body.
+        const blockingNow = blockingProblems(validate(writing));
+        const disarmed = writing.enabled && blockingNow.length > 0;
+        const outgoing = disarmed ? { ...writing, enabled: false } : writing;
 
         inFlight.current = true;
         setSaving(true);
@@ -393,14 +424,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         setTestError(null);
         try {
             if (!api?.dryRunAutomation) throw new Error('the desktop bridge is not available');
-            setReport(await api.dryRunAutomation(draft.rule, target));
+            // `writing`, not `draft.rule`: a dry run reports what the rule WOULD do, and the rule
+            // that would run is the one a save writes.
+            setReport(await api.dryRunAutomation(writing, target));
         } catch (e) {
             setReport(null);
             setTestError(e instanceof Error ? e.message : String(e));
         } finally {
             setRunning(false);
         }
-    }, [api, draft.rule, terminals, testTarget]);
+    }, [api, writing, terminals, testTarget]);
 
     const setEnabled = async (enabled: boolean) => {
         if (draft.rule.id.length === 0) {
@@ -449,32 +482,40 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     };
 
     // --- derived ---------------------------------------------------------------------------------------
+    //
+    // **`writing`, never `draft.rule` — the same one-object rule the enable gate and the dry run
+    // already follow.** Since C1, `ruleFromDraft` omits the three input steps when the canvas draws
+    // none of them, so `draft.rule` still carries `blankDraft()`'s scaffold for a rule that will be
+    // saved without it. Judged from the draft, a *Wait → Send* canvas summarised itself as a
+    // watching rule in the left rail, and `runtimeFootStep` found the scaffold's `cond` and put the
+    // runtime pill on a card that is not even drawn instead of on the Wait step it belongs to.
     const ctx = { pairs, now, problems };
     const faces = useMemo(() => {
         const out: Partial<Record<StepKind, NodeFace>> = {};
-        for (const step of STEP_ORDER) out[step] = faceFor(draft.rule, step, ctx);
+        for (const step of STEP_ORDER) out[step] = faceFor(writing, step, ctx);
         return out as Record<StepKind, NodeFace>;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft.rule, problems, pairs, now]);
+    }, [writing, problems, pairs, now]);
 
     const states = useMemo(() => {
         const out: Partial<Record<StepKind, NodeState>> = {};
-        for (const step of STEP_ORDER) out[step] = stateFor(draft.rule, step, ctx);
+        for (const step of STEP_ORDER) out[step] = stateFor(writing, step, ctx);
         return out as Record<StepKind, NodeState>;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft.rule, problems, pairs, now]);
+    }, [writing, problems, pairs, now]);
 
     // What each wire is carrying, from the draft — and from the last dry run when there is one,
     // because a real value beats a described one.
-    const chips = useMemo(() => {
+    const chips = useMemo<Record<OutPortKey, string>>(() => {
         const parseStep = report?.steps.find((s) => s.kind === 'parse');
         const condStep = report?.steps.find((s) => s.kind === 'cond');
+        // The words come from `WIRE_CHIPS`, which is keyed off the port table — this used to be four
+        // hardcoded keys, and the wait step's output was the fifth nobody added. Only the two a dry
+        // run can improve on are overlaid: a real matched value beats a described one.
         return {
-            'monitor.out': 'lines',
-            // A real matched value beats a described one, and only a dry run has ever seen one.
-            'parse.out': parseStep?.status === 'ok' ? parseStep.detail : 'value',
-            'cond.true': condStep?.status === 'ok' ? 'yes' : 'yes/no',
-            'cond.false': 'no',
+            ...WIRE_CHIPS,
+            'parse.out': parseStep?.status === 'ok' ? parseStep.detail : WIRE_CHIPS['parse.out'],
+            'cond.true': condStep?.status === 'ok' ? 'yes' : WIRE_CHIPS['cond.true'],
         };
     }, [report]);
 
@@ -487,7 +528,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
      * (`gate-in-the-caller-lets-new-callers-opt-out`).
      */
     const addStep = useCallback((step: StepKind, pos?: NodePos) => {
-        const refusal = canAddStep(latest.current.draft.present, step);
+        const { draft: current } = latest.current;
+        const refusal = canAddStep(current.present, step, timerShapeOf(current.rule));
         if (refusal) {
             toast(refusal.reason, 'error');
             return;
@@ -508,7 +550,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     });
 
     const rowState = pairs && Object.keys(pairs).length > 0
-        ? automationRowState(draft.rule, pairs, now)
+        ? automationRowState(writing, pairs, now)
         : null;
 
     return createPortal(
@@ -678,7 +720,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 <div className="au-mbody">
                     <AuPalette
                         present={draft.present}
-                        summary={ruleSummary(draft.rule)}
+                        timerShape={timerShapeOf(draft.rule)}
+                        summary={ruleSummary(writing)}
                         onBeginDrag={(step, e) => paletteDrag.begin(step, e)}
                         onAdd={(step) => addStep(step)}
                     />

@@ -16,9 +16,9 @@ use crate::automation_engine::eval::ReadDepth;
 use crate::automation_engine::host::EngineHost;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
-    ActionStep, AutomationGraph, AutomationRule, AutomationStore, Cadence, CompareOp, CondKind,
-    CondStep, Criterion, Keep, LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode,
-    SendTo, TargetMode, SUPPORTED_SCHEMA_VERSION,
+    ActionStep, AutomationGraph, AutomationRule, AutomationStore, Cadence, CompareOp, CondStep,
+    Criterion, Finds, Keep, LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode,
+    SendTo, TargetMode, TimerMode, TimerStep, SUPPORTED_SCHEMA_VERSION,
 };
 
 /// One fake for all three loops and the send.
@@ -32,6 +32,15 @@ pub(crate) struct FakeHost {
     pub(crate) leaves: Mutex<HashMap<String, String>>,
     pub(crate) roster: Mutex<Vec<RosterRow>>,
     pub(crate) text: Mutex<HashMap<String, String>>,
+    /// Every `tail` the engine asked for, in order — **the screen reads, recorded**.
+    ///
+    /// §6.3's schedule rule is specified by what it does NOT do, and "reads no screen" is not
+    /// observable from `written()` or the log: a rule that read the window and decided not to send
+    /// looks identical. `text` cannot answer it either, because a read leaves no trace there. So the
+    /// port records the call, and a test can assert the exact list — which is also what keeps the
+    /// assertion honest, since an empty list proves nothing unless some other pair in the same run
+    /// put something in it.
+    pub(crate) tails: Mutex<Vec<String>>,
     pub(crate) writes: Mutex<Vec<(String, Vec<u8>)>>,
     pub(crate) write_err: Mutex<Option<String>>,
     pub(crate) activity: AtomicUsize,
@@ -59,6 +68,7 @@ impl FakeHost {
             leaves: Mutex::new(HashMap::new()),
             roster: Mutex::new(Vec::new()),
             text: Mutex::new(HashMap::new()),
+            tails: Mutex::new(Vec::new()),
             writes: Mutex::new(Vec::new()),
             write_err: Mutex::new(None),
             activity: AtomicUsize::new(0),
@@ -117,6 +127,11 @@ impl FakeHost {
         self.writes.lock().unwrap().iter().map(|(pc, _)| pc.clone()).collect()
     }
 
+    /// Every process id whose screen was read, in order.
+    pub(crate) fn tailed(&self) -> Vec<String> {
+        self.tails.lock().unwrap().clone()
+    }
+
     /// Every rule id the engine told the windows to refetch, in order.
     pub(crate) fn announced(&self) -> Vec<String> {
         self.changed.lock().unwrap().iter().flatten().cloned().collect()
@@ -138,6 +153,9 @@ impl EngineHost for FakeHost {
         self.leaves.lock().unwrap().values().cloned().collect()
     }
     fn tail(&self, pc: &str, _depth: ReadDepth) -> Option<String> {
+        // Recorded BEFORE the lookup, so a process with no text still counts as a read attempt —
+        // §4.5's dormant terminal is a `None` here, and a path that reaches this port has read.
+        self.tails.lock().unwrap().push(pc.to_string());
         self.text.lock().unwrap().get(pc).cloned()
     }
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
@@ -193,19 +211,21 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
         schema_version: SUPPORTED_SCHEMA_VERSION,
         graph: AutomationGraph {
             layout: None,
-            monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-            parse: ParseStep {
+            timer: None,
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            parse: Some(ParseStep {
                 preset: ParsePreset::Custom,
                 literal: None,
                 find: r"ctx:(\d+)%".into(),
                 keep: Keep::Brackets,
-            },
-            cond: CondStep { kind: CondKind::Number, op: Some(CompareOp::Gt), threshold: Some(25.0) },
+            }),
+            cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
             action: ActionStep {
                 message: "prepare to do context-hand-off".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".into(),
+                substitute: false,
             },
         },
         created_at: 1_000,
@@ -236,6 +256,47 @@ pub(crate) fn wired() -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHo
     wire(vec![ctx_rule("au-1")])
 }
 
+/// The canonical rule, with its graph adjustable through a closure — for a test that needs to change
+/// more than the one or two fields `ctx_rule_saying`/`presence_rule` cover (§4.2/§4.4's substitution
+/// tests vary `parse.find`, `cond.finds`, `action.message` and `action.substitute` together).
+pub(crate) fn rig_with_rule(
+    f: impl FnOnce(&mut AutomationGraph),
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let mut rule = ctx_rule("au-1");
+    f(&mut rule.graph);
+    wire(vec![rule])
+}
+
+/// Like `wire`, but plants each rule with `save_rule_bypassing_the_enable_gate_for_tests` rather
+/// than `save_rule` — for a rule §7.8's enable gate would now refuse to create (Task 6's
+/// `action.unknownToken` and friends), simulating one written by a build OLDER than that
+/// validation. `reload`'s own `parse.*`-only exemption already establishes that such a row is
+/// real, not hypothetical, and still has to reach evaluate-and-send.
+pub(crate) fn wire_bypassing_the_enable_gate(
+    rules: Vec<AutomationRule>,
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let fake = Arc::new(FakeHost::new().with_terminal("tm-1", "pc-1", "codex · core"));
+    for rule in &rules {
+        fake.store.save_rule_bypassing_the_enable_gate_for_tests(rule).unwrap();
+    }
+    let engine = Arc::new(AutomationEngine::new(0));
+    engine.reload(&fake.store, 0).unwrap();
+    for rule in &rules {
+        engine.runtime.set_watched(&rule.id, ["tm-1".to_string()].into());
+    }
+    let host: Arc<dyn EngineHost> = fake.clone();
+    (engine, fake, host)
+}
+
+/// `rig_with_rule`'s counterpart for `wire_bypassing_the_enable_gate`.
+pub(crate) fn rig_with_rule_bypassing_the_enable_gate(
+    f: impl FnOnce(&mut AutomationGraph),
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let mut rule = ctx_rule("au-1");
+    f(&mut rule.graph);
+    wire_bypassing_the_enable_gate(vec![rule])
+}
+
 pub(crate) fn log_kinds(store: &AutomationStore) -> Vec<String> {
     store
         .load_automation_log(&LogScope::All, LogOrder::Asc, 100)
@@ -254,12 +315,32 @@ pub(crate) fn ctx_rule_saying(id: &str, message: &str, sort_order: i64) -> Autom
     rule
 }
 
+/// **A schedule rule (plan 032 §3.1, §6.3): no monitor, no parse, no cond — it reads NOTHING.**
+///
+/// The `DailyAt` timer is what makes this a rule rather than a rule with holes in it, and `action`
+/// stays required, so what it would eventually send is spelled out like any other rule's.
+///
+/// Targeting is untouched on purpose: §3.1 keeps `target_mode`/`criterion` as the rule's own
+/// columns, so a schedule rule still watches terminals — which is exactly what makes "it is walked
+/// by the tick and still does nothing" a thing that can be tested.
+pub(crate) fn schedule_only_rule(id: &str) -> AutomationRule {
+    let mut rule = ctx_rule(id);
+    rule.graph.monitor = None;
+    rule.graph.parse = None;
+    rule.graph.cond = None;
+    rule.graph.timer = Some(TimerStep {
+        mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+    });
+    rule.graph.action.message = "stand-up notes?".into();
+    rule
+}
+
 /// A presence rule: `find` is looked for as text and there is no threshold at all.
 pub(crate) fn presence_rule(id: &str, find: &str, message: &str, sort_order: i64) -> AutomationRule {
     let mut rule = ctx_rule_saying(id, message, sort_order);
-    rule.graph.parse.find = find.into();
-    rule.graph.parse.keep = Keep::Whole;
-    rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+    rule.graph.parse_mut().find = find.into();
+    rule.graph.parse_mut().keep = Keep::Whole;
+    rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
     rule
 }
 
@@ -288,6 +369,24 @@ pub(crate) fn log_details(store: &AutomationStore) -> Vec<(String, String)> {
 
 pub(crate) fn times_sent(fake: &FakeHost, message: &str) -> usize {
     fake.written().iter().filter(|w| w.contains(message)).count()
+}
+
+/// Which processes received one particular message, sorted.
+///
+/// `times_sent` counts and `written_to` lists ids — neither can say *this* message reached *these*
+/// terminals, which is the whole claim of a rule that fires on several targets at once. A count of
+/// three is satisfied by three messages into one terminal.
+pub(crate) fn sent_to(fake: &FakeHost, message: &str) -> Vec<String> {
+    let mut out: Vec<String> = fake
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, bytes)| String::from_utf8_lossy(bytes).contains(message))
+        .map(|(pc, _)| pc.clone())
+        .collect();
+    out.sort();
+    out
 }
 
 /// A Rust source file with its line comments removed and its line endings normalised. **Every

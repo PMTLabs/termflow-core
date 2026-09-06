@@ -28,6 +28,8 @@ pub mod dry;
 pub mod eval;
 pub mod host;
 pub mod loops;
+pub mod schedule;
+pub mod subst;
 #[cfg(test)]
 pub mod test_host;
 
@@ -37,7 +39,8 @@ use crate::automation::events::{RuntimePairState, StatePayload};
 use crate::automation::runtime::AutomationRuntime;
 use crate::automation_engine::eval::ArmState;
 use crate::automation_store::{
-    AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError, LogKind,
+    AutomationGraph, AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError,
+    Clause, Finds, Keep, LogKind, Source, Test, TimerMode, TimerStep,
 };
 
 /// Start the engine: load the rules, then the three tasks (plan §2.1, §2.3, §4.4).
@@ -112,7 +115,55 @@ pub const STATE_EMIT_MIN_INTERVAL_MS: i64 = 1_000;
 #[derive(Debug)]
 pub struct LiveRule {
     pub rule: AutomationRule,
-    pub re: Regex,
+    /// `None` on a **schedule rule** (plan 032 §6.3, §6.4), which has no `parse` step and therefore
+    /// no pattern to compile. Every consumer of this is on the OUTPUT path and already knows it is
+    /// on the output path.
+    ///
+    /// **Not a `Regex::new("")` stand-in, and this is the whole point of the `Option`.** An empty
+    /// pattern compiles and matches every position of every string — `pattern_refused_at_load`
+    /// exists because of exactly that — so a "harmless" default here would make a rule that reads
+    /// nothing fire on the first byte any watched terminal printed.
+    pub re: Option<Regex>,
+}
+
+/// Fold a v1 `op`/`threshold`/`keep` rule into the clause list it means.
+///
+/// Runs at load, on the in-memory copy only — the row is not rewritten, which is what keeps a
+/// merely-loaded v1 rule from being promoted to schema_version 2 (§3.2). Idempotent. Called from
+/// `reload`, immediately after the pattern compiles and before the `LiveRule` is built — folding a
+/// v1 comparison is meaningless without a pattern to have captured from.
+///
+/// **A schedule rule (§6.3) folds to nothing, and the guard is the first thing here rather than the
+/// caller's job.** It has no `parse` step to source from and no `cond` step to fold into, so there
+/// is no v1 pair to find; both call sites already sit inside their own pattern-present branch, and
+/// this makes the third one safe too.
+pub fn fold_v1_clauses(graph: &mut AutomationGraph, re: &Regex) {
+    let Some(keep) = graph.parse.as_ref().map(|p| p.keep) else {
+        return;
+    };
+    let Some(cond) = graph.cond.as_mut() else {
+        return;
+    };
+    if !cond.clauses.is_empty() {
+        return;
+    }
+    // A word rule folds to NOTHING. Today's text branch is `is_match`, and an empty clause list
+    // means exactly that (§5.5 step 4) — so this is not a special case, it is the existing
+    // behaviour written down.
+    if cond.finds == Finds::Event {
+        return;
+    }
+    let (Some(op), Some(threshold)) = (cond.op, cond.threshold) else {
+        return; // a numeric rule with no comparator is a blocking validation problem already
+    };
+    let source = match keep {
+        Keep::Whole => Source::Whole,
+        Keep::Brackets if re.capture_names().flatten().any(|n| n == "value") => {
+            Source::Named("value".into())
+        }
+        Keep::Brackets => Source::Group(1),
+    };
+    cond.clauses.push(Clause { source, test: Test::Number { op, value: Some(threshold) } });
 }
 
 /// The rule ids a `reload` should announce, or `None` if it wrote nothing worth announcing.
@@ -205,6 +256,18 @@ pub struct AutomationEngine {
     last_state_emit_ms: std::sync::Mutex<Option<i64>>,
     /// Something the payload shows has changed since the last emit.
     state_dirty: AtomicBool,
+}
+
+/// Whether this reload can have missed part of this daily target's window. The target's being past
+/// is a separate question owned by `seed_missed_schedules`.
+fn has_unobserved_daily_window(
+    newly_live: bool,
+    target_changed: bool,
+    invalidated_mark: bool,
+    last_fired_day: Option<i32>,
+    now_day: i32,
+) -> bool {
+    (newly_live || target_changed || invalidated_mark) && last_fired_day != Some(now_day)
 }
 
 impl AutomationEngine {
@@ -329,11 +392,65 @@ impl AutomationEngine {
         store: &AutomationStore,
         now_ms: i64,
     ) -> Result<ReloadReport, AutomationStoreError> {
+        self.reload_at(store, now_ms, schedule::local_now(now_ms))
+    }
+
+    /// `reload`, with the local wall-clock day handed in rather than read.
+    ///
+    /// **The seam exists for the seeding below and for nothing else.** What that seeding does
+    /// depends on the machine's time zone — "is 09:00 already past" has no answer without one — so a
+    /// test that could only pass `now_ms` would be asserting against wherever the runner happens to
+    /// be, and would be a coin flip near midnight. `reload` is the whole of production: it reads the
+    /// clock through `schedule::local_now`, automation's one conversion. (Not the crate's:
+    /// `commands.rs` and `pty_manager.rs` call `chrono::Local::now()` themselves. Same
+    /// narrowing as `schedule::local_now`'s own header, which is where the claim belongs.)
+    ///
+    /// **Private, because nothing binds `now_local` to `now_ms`.** They are one instant in two
+    /// spellings and the compiler cannot say so, so a caller that passed an inconsistent pair would
+    /// seed one day and log another with nothing to stop it. `reload` derives the second from the
+    /// first and is the only production caller; the tests that need the seam are in this module.
+    /// The resume path does not want this function — it wants [`Self::seed_missed_schedules`],
+    /// which takes the rules it is already holding.
+    fn reload_at(
+        &self,
+        store: &AutomationStore,
+        now_ms: i64,
+        now_local: schedule::LocalTime,
+    ) -> Result<ReloadReport, AutomationStoreError> {
         let rules = store.list_rules()?;
+        // Keep the store's current timer before disabled and completed rows are filtered from the
+        // live generation. A disabled rule is still the same saved schedule, while a deleted one
+        // has no entry here and must lose everything it owned.
+        let store_timers: HashMap<String, Option<TimerMode>> = rules
+            .iter()
+            .map(|rule| {
+                (
+                    rule.id.clone(),
+                    rule.graph.timer.as_ref().map(|timer| timer.mode.clone()),
+                )
+            })
+            .collect();
+        // A spent day belongs to a target minute, not to the live generation that happened to
+        // contain that rule. Disabled rules are deliberately absent from `next`, so validate every
+        // retained mark against the store before the live-set teardown can make it invisible.
+        let mut invalidated_marks = HashSet::new();
+        for (id, _, marked_minute) in self.runtime.last_fired_marks() {
+            let still_targets_marked_minute = matches!(
+                store_timers.get(&id).and_then(|timer| timer.as_ref()),
+                Some(TimerMode::DailyAt { minute_of_day, .. }) if *minute_of_day == marked_minute
+            );
+            if !still_targets_marked_minute {
+                self.runtime.forget_last_fired_day(&id);
+                invalidated_marks.insert(id);
+            }
+        }
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
         let mut report = ReloadReport::default();
+        // §3.3: rows the store could not decode. They never became `AutomationRule`s, so the
+        // loop below cannot see them — they are reported here or nowhere.
+        report.skipped.extend(store.take_skipped_rows());
 
-        for rule in rules {
+        for mut rule in rules {
             if !rule.enabled || rule.completed_at.is_some() {
                 continue;
             }
@@ -343,16 +460,68 @@ impl AutomationEngine {
                     .push((rule.id.clone(), "this rule needs a newer version of TermFlow".into()));
                 continue;
             }
+            // **A rule with nothing to watch and no schedule can never fire, so it is skipped with
+            // a reason** — beside the pattern refusal below, and for the same reasons.
+            //
+            // Since §3.1 made the monitor step optional, such a row could pass validation (nothing
+            // checked it), save *enabled*, count in `report.live`, and be walked four times a
+            // second only to fall out at the evaluator's monitor guard — live by every reading the
+            // user has, and unable to do anything at all. `AfterMatch` with no monitor is the same
+            // shape: a delay is parked at a crossing, and there is nothing here that can cross.
+            //
+            // **Corrected (R7): this is now ALSO a validation blocker, `timer.neverRuns`
+            // (`automation_validation::problems`), not merely a skip.** This paragraph used to say
+            // "the editor cannot produce this shape, so a blocker would only punish the API and the
+            // importer at write time" — false on both counts. It IS a property of a saved rule, and
+            // the editor CAN produce it: switching a saved schedule rule's Wait back to a delay
+            // reaches exactly this shape without touching `monitor`/`parse`/`cond` at all (the
+            // mode-switch path fixed alongside this comment). A validation rule holds for every
+            // producer — the editor, the REST API, an import, an older build — so the guard lives in
+            // `automation_validation.rs`, once, rather than in whichever producer happened to be
+            // caught reasoning about this shape.
+            //
+            // **This skip stays anyway**, as the second-line, at-load gate `is_runnable` and
+            // `pattern_refused_at_load` are beside it: it is what still catches a row that reached
+            // this shape before the guard existed, or by writing to the database directly, and it is
+            // what makes `report.live` an honest count for such a row. `watches` deliberately checks
+            // only `monitor` rather than the wider `InputSteps::of`-shaped predicate validation now
+            // uses — the editor writes the three input steps as one all-or-nothing group, so a
+            // monitor without a parse or a cond is not a shape either producer can leave enabled once
+            // §8's guard is in place, and widening this skip to match would be re-deriving a check
+            // validation already owns.
+            let watches = rule.graph.monitor.is_some();
+            let scheduled =
+                matches!(rule.graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
+            if !watches && !scheduled {
+                report.skipped.push((
+                    rule.id.clone(),
+                    "this rule has nothing to watch and no schedule, so it can never run".into(),
+                ));
+                continue;
+            }
+            // **Both pattern gates apply only to a rule that HAS a pattern** (§6.4). A schedule
+            // rule (§6.3) has no `parse` step at all — no pattern is not a broken pattern, and
+            // refusing it here would make the whole of milestone 4 unreachable.
+            //
+            // It is admitted with `re: None`, never with a compiled `""`. `compile("")` SUCCEEDS
+            // into an expression that matches every position of every string, which is why
+            // `pattern_refused_at_load` refuses a blank pattern rather than merely an uncompilable
+            // one — and the same reasoning forbids defaulting the absence here.
+            let Some(pattern) = rule.graph.parse.as_ref().map(|p| p.find.clone()) else {
+                next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re: None }));
+                continue;
+            };
             // §2.7, and it is the SAME predicate the store's save gate exempts — see
             // `pattern_refused_at_load`. An empty pattern compiles and matches everything, so
             // "did it compile" was never the question this needed to ask.
-            if let Some(why) = crate::automation_validation::pattern_refused_at_load(&rule.graph.parse.find) {
+            if let Some(why) = crate::automation_validation::pattern_refused_at_load(&pattern) {
                 report.skipped.push((rule.id.clone(), why));
                 continue;
             }
-            match crate::automation_validation::compile(&rule.graph.parse.find) {
+            match crate::automation_validation::compile(&pattern) {
                 Ok(re) => {
-                    next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re }));
+                    fold_v1_clauses(&mut rule.graph, &re);
+                    next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re: Some(re) }));
                 }
                 Err(e) => {
                     report.skipped.push((
@@ -364,16 +533,85 @@ impl AutomationEngine {
         }
 
         // Whose keys survive. Read the previous generation BEFORE swapping, so "unchanged" is a
-        // comparison and not a guess.
-        let previous: Vec<(String, i64)> = {
+        // comparison and not a guess. The previous timer comes with it, for the day mark below.
+        let previous: Vec<(String, i64, Option<TimerMode>)> = {
             let guard = self.live.read().unwrap_or_else(|e| e.into_inner());
-            guard.iter().map(|(id, l)| (id.clone(), l.rule.updated_at)).collect()
+            guard
+                .iter()
+                .map(|(id, l)| {
+                    (id.clone(), l.rule.updated_at, l.rule.graph.timer.as_ref().map(|t| t.mode.clone()))
+                })
+                .collect()
         };
-        for (id, was) in previous {
-            let unchanged = next.get(&id).is_some_and(|l| l.rule.updated_at == was);
-            if !unchanged {
-                self.runtime.forget_rule(&id);
+        let previously_live: HashSet<String> = previous.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut target_changed = HashSet::new();
+        for (id, was, timer_was) in previous {
+            let after = next.get(&id);
+            if after.is_some_and(|l| l.rule.updated_at == was) {
+                continue;
             }
+            // **Captured before the purge, because the purge is what destroys it** — and the
+            // re-seed below cannot reconstruct it: an absent mark and a target three hours past are
+            // spelled identically, so it would decide the day had been missed and write *"09:00 went
+            // by while nothing was watching the clock"* thirty minutes after the `Sent` row for that
+            // same run. `Held` is Decision-class, so the verbose gate cannot drop that row, and with
+            // `LOG_CAP` at 200 one editing session's worth of them evicts the rule's real history.
+            //
+            // Only for a rule that is still in the STORE with the same target minute: disabled and
+            // completed rules still own their spent day, but a deleted rule has no store entry and
+            // loses everything it owned. A moved minute is an instant today has not been spent on.
+            // `schedule::same_target_minute` owns that judgement, mask included.
+            let spent_mark = self.runtime.last_fired_mark(&id);
+            let same_minute = schedule::same_target_minute(
+                timer_was.as_ref(),
+                store_timers.get(&id).and_then(|timer| timer.as_ref()),
+            );
+            // The changed target belongs to the new daily schedule, whether or not the old one
+            // happened to have left a day mark. `same_target_minute` returns false for non-daily
+            // modes too, but `seed_missed_schedules` can only act on a new `DailyAt` target.
+            if !same_minute
+                && after.is_some_and(|live| {
+                    matches!(
+                        live.rule.graph.timer.as_ref().map(|timer| &timer.mode),
+                        Some(TimerMode::DailyAt { .. })
+                    )
+                })
+            {
+                target_changed.insert(id.clone());
+            }
+            self.runtime.forget_rule(&id);
+            if same_minute {
+                if let Some((day, minute)) = spent_mark {
+                    self.runtime.set_last_fired_day(&id, day, minute);
+                }
+            }
+        }
+
+        // **After the forget loop, deliberately.** `forget_rule` drops everything a changed rule
+        // owns, the day mark included, so a seed written before it would be wiped for a newly live
+        // schedule or one whose target minute just changed. `None` means this eligible rule has no
+        // last-observed instant: it joined the live set, so the whole of today up to `now_local` is
+        // the unobserved window. A rule live on both sides of this reload was already observed and
+        // must keep its pending occurrence for the evaluator tick.
+        let seedable: Vec<&Arc<LiveRule>> = next
+            .values()
+            .filter(|live| {
+                let id = &live.rule.id;
+                // A reload only has an unobserved clock window for a schedule entering the live
+                // set, for a changed daily target, or for a mark reconciliation that invalidated
+                // its target. A mark spends only its own day: an older mark is deliberately kept
+                // for the same minute, but cannot spend today's occurrence.
+                has_unobserved_daily_window(
+                    !previously_live.contains(id),
+                    target_changed.contains(id),
+                    invalidated_marks.contains(id),
+                    self.runtime.last_fired_day(id),
+                    now_local.day_ordinal,
+                )
+            })
+            .collect();
+        if !self.seed_missed_schedules(seedable, None, now_local, store, now_ms).is_empty() {
+            report.emit = true;
         }
 
         report.live = next.len();
@@ -394,6 +632,119 @@ impl AutomationEngine {
             }
         }
         Ok(report)
+    }
+
+    /// **A schedule whose minute has already passed is marked as fired today** (§6.3) — for every
+    /// rule handed in, and it is deliberately ONE function with two callers.
+    ///
+    /// `schedule_due` compares `now >= target`, so an absent day mark and a target three hours in
+    /// the past are *the process was not watching when the minute went by* and *the minute is going
+    /// by right now*, spelled identically. This seeding is the only thing that tells them apart:
+    /// an app STARTED at 14:00 does not deliver a 09:00 prompt on arrival, while an app RUNNING
+    /// across 09:00 has no seed for today and fires. Firing a missed prompt late is the "nagging on
+    /// arrival" behaviour plan 028 Q3 already ruled against for arm state, and without this the
+    /// `>=` that keeps a spring-forward schedule alive would also deliver every schedule the app
+    /// was closed for.
+    ///
+    /// **Two callers, one implementation.** `reload_at` runs it over the map it has just built, at
+    /// process start and after every store commit; [`loops::evaluator_step`] runs it over
+    /// `snapshot_live()` when the wall clock jumps, which is what a laptop lid closing at 18:00 and
+    /// opening at 10:00 the next morning looks like from inside the tick. Those are the same
+    /// premise — *nothing was observing the tick while the minute passed* — so a second copy of
+    /// "is this rule's target already past" would be two answers to one question.
+    ///
+    /// **`since_local` is what the two callers do NOT share, and it is why the question is
+    /// [`schedule::target_missed_since`] rather than "is the target in the past".** A load has no
+    /// last-observed instant — `None`, and the whole day up to now is unobserved. A resume has one,
+    /// exactly: `prev_tick_ms`, the iteration before the gap. A target that arrives at or after that
+    /// resume instant was missed by nobody, and suppressing it spends the day at the very instant the
+    /// rule came due.
+    ///
+    /// **It writes a log row for every day it actually spends** (§7). Suppressing the prompt is the
+    /// right behaviour and it is also completely invisible: the user set a 09:00 reminder, it did
+    /// not arrive, and until this row there was nothing anywhere that said why — the shape
+    /// `absence-is-invisible-derive-the-check` names, and the shape this crate already refuses for
+    /// a rule refused at load (`report.skipped`, a row each) and for a crossing that decided not to
+    /// send (`held`).
+    ///
+    /// **The row is narrower than the seed, and deliberately.** `target_already_past` ignores the
+    /// weekday mask, because seeding a day the rule was never going to run on costs nothing; saying
+    /// *"today's 09:00 went by"* about a Sunday on a weekdays-only rule would be a false sentence.
+    /// So the row is gated on [`schedule::schedule_due`] against the mark as it stands — *would
+    /// this rule have fired, right now, if nothing had spent the day* — which also bounds it:
+    /// once the mark is today the predicate is false, so a second pass over the same rule on the
+    /// same day writes nothing. At most one row per rule per suppression, and `seed_missed_schedules`
+    /// is never on the tick's own path — only a load, a commit, and a wake.
+    ///
+    /// Returns the ids `automation:activity` is due for; the caller emits, because this type holds
+    /// no `AppHandle` (the same split `append` makes in `loops.rs`).
+    pub(crate) fn seed_missed_schedules<'a>(
+        &self,
+        rules: impl IntoIterator<Item = &'a Arc<LiveRule>>,
+        since_local: Option<schedule::LocalTime>,
+        now_local: schedule::LocalTime,
+        store: &AutomationStore,
+        now_ms: i64,
+    ) -> Vec<String> {
+        let mut emit_for: Vec<String> = Vec::new();
+        for live in rules {
+            if let Some(TimerStep { mode: mode @ TimerMode::DailyAt { minute_of_day, .. } }) =
+                &live.rule.graph.timer
+            {
+                if !schedule::target_missed_since(mode, since_local, now_local) {
+                    continue;
+                }
+                let suppressing =
+                    schedule::schedule_due(mode, self.runtime.last_fired_day(&live.rule.id), now_local);
+                self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal, *minute_of_day);
+                if !suppressing {
+                    continue;
+                }
+                // `Held` and not `Failed`: nothing went wrong. This is the same class of answer as
+                // *"`FAILED` is still on screen"* — the rule was asked, and the rule declined —
+                // which is also what keeps it out of the verbose gate (`Held` is Decision-class), so
+                // the one row explaining a missing prompt cannot be dropped by a setting.
+                //
+                // Rule-level, so no `terminal_id` and no name: `schedule_due` takes no terminal, and
+                // a schedule's suppression is a fact about the clock rather than about any pane.
+                let entry = AutomationLogEntry {
+                    id: 0,
+                    rule_id: live.rule.id.clone(),
+                    terminal_id: None,
+                    terminal_name: None,
+                    kind: LogKind::Held,
+                    // **Neither "while TermFlow was closed" nor "next runs tomorrow".** The first
+                    // is false on the wake path — the app was running, the machine was not — and
+                    // the second is a claim this function cannot support: a weekdays rule
+                    // suppressed on a Friday next runs on Monday, and nothing here consults the
+                    // mask. What both callers share is exactly the premise the seeding is built
+                    // on, so that is what it says.
+                    detail: format!(
+                        "{} went by while nothing was watching the clock, so today's run was skipped",
+                        Self::schedule_target_words(mode)
+                    ),
+                    at: now_ms,
+                };
+                if let Ok(Some(outcome)) = store.append(&entry) {
+                    if outcome.emit {
+                        emit_for.extend(outcome.rule_ids);
+                    }
+                }
+            }
+        }
+        emit_for
+    }
+
+    /// The time of day a schedule aims at, in the words the suppression row uses.
+    ///
+    /// A `DailyAt` is the only mode that reaches the row — `target_already_past` is false for
+    /// `AfterMatch` — so the other arm is unreachable rather than meaningful, and it answers with
+    /// the neutral noun rather than inventing a clock time for a mode that has none.
+    fn schedule_target_words(mode: &TimerMode) -> String {
+        match mode {
+            TimerMode::DailyAt { minute_of_day, .. } => schedule::clock_time(*minute_of_day),
+            TimerMode::AfterMatch { .. } => "this rule's time".to_string(),
+        }
     }
 
     /// R6, as an in-memory event first and a row second (§7.8).
@@ -437,6 +788,10 @@ impl AutomationEngine {
                         last_fired_at,
                         fired_count,
                         missing: missing_for.contains(tm),
+                        // §7's `pending`. Read for EVERY pair rather than only for a rule whose
+                        // timer is `AfterMatch`: the map is the authority on what is parked, and a
+                        // second reading of the graph here would be a rule the drain does not make.
+                        parked_at: self.runtime.parked_at(id, tm),
                     },
                 );
             }
@@ -469,9 +824,9 @@ mod tests {
     use super::*;
     use crate::automation_engine::eval::ArmState;
     use crate::automation_store::{
-        ActionStep, AutomationGraph, Cadence, CompareOp, CondKind, CondStep, Criterion, Keep,
-        LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode, SendTo, TargetMode,
-        SUPPORTED_SCHEMA_VERSION,
+        ActionStep, AutomationGraph, Cadence, Clause, CompareOp, CondStep, Criterion, Finds, Keep,
+        LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode, SendTo, Source,
+        TargetMode, Test, TextOp, SUPPORTED_SCHEMA_VERSION,
     };
 
     fn rule(id: &str, find: &str) -> AutomationRule {
@@ -491,32 +846,94 @@ mod tests {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             graph: AutomationGraph {
                 layout: None,
-                monitor: MonitorStep {
+                timer: None,
+                monitor: Some(MonitorStep {
                     read: ReadMode::NewOutput,
                     cadence: Cadence::OnOutput,
                     every_ms: 0,
-                },
-                parse: ParseStep {
+                }),
+                parse: Some(ParseStep {
                     preset: ParsePreset::Custom,
                     literal: None,
                     find: find.to_string(),
                     keep: Keep::Brackets,
-                },
-                cond: CondStep {
-                    kind: CondKind::Number,
+                }),
+                cond: Some(CondStep {
+                    finds: Finds::Reading,
                     op: Some(CompareOp::Gt),
                     threshold: Some(25.0),
-                },
+                    ..Default::default()
+                }),
                 action: ActionStep {
                     message: "prepare to do context-hand-off".to_string(),
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".to_string(),
+                    substitute: false,
                 },
             },
             created_at: 1_000,
             updated_at: 1_000,
         }
+    }
+
+    /// A v1 rule's graph: `op`/`threshold` set, `clauses` empty — built on the existing `rule()`
+    /// fixture rather than a parallel one, varying only what the table test needs to vary.
+    fn v1_graph(finds: Finds, keep: Keep, pattern: &str) -> AutomationGraph {
+        let mut g = rule("au-v1", pattern).graph;
+        g.cond_mut().finds = finds;
+        g.parse_mut().keep = keep;
+        g
+    }
+
+    /// A v2 rule that already has clauses — folding must leave it alone.
+    fn v2_graph_with_two_clauses() -> AutomationGraph {
+        let mut g = rule("au-v2", "x").graph;
+        g.cond_mut().clauses = vec![
+            Clause {
+                source: Source::Whole,
+                test: Test::Text { op: TextOp::Contains, value: "err".into() },
+            },
+            Clause { source: Source::Group(1), test: Test::Number { op: CompareOp::Gt, value: Some(1.0) } },
+        ];
+        g
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §5.4 — folding a v1 rule into the clause list it always meant
+    // -----------------------------------------------------------------------------------------
+
+    /// The three branches of `extract()`'s `keep` handling, as a table — the mapping is the
+    /// whole point, and testing one row would leave two silently wrong.
+    #[test]
+    fn v1_rules_fold_into_the_clause_list_exactly_as_extract_chose() {
+        for (finds, keep, pattern, want) in [
+            (Finds::Reading, Keep::Brackets, r"ctx:(?P<value>\d+)%", Some(Source::Named("value".into()))),
+            (Finds::Reading, Keep::Brackets, r"ctx:(\d+)%", Some(Source::Group(1))),
+            (Finds::Reading, Keep::Whole, r"ctx:\d+%", Some(Source::Whole)),
+            (Finds::Event, Keep::Brackets, r"API error (\d+)", None),
+        ] {
+            let mut g = v1_graph(finds, keep, pattern);
+            fold_v1_clauses(&mut g, &Regex::new(pattern).unwrap());
+            match want {
+                Some(src) => {
+                    assert_eq!(g.cond_ref().clauses.len(), 1, "{pattern}");
+                    assert_eq!(g.cond_ref().clauses[0].source, src, "{pattern}");
+                }
+                None => assert!(
+                    g.cond_ref().clauses.is_empty(),
+                    "a word rule folds to ZERO clauses — the empty list IS 'fire on the match'"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn folding_does_not_touch_a_rule_that_already_has_clauses() {
+        let mut g = v2_graph_with_two_clauses();
+        let before = g.cond_ref().clauses.clone();
+        fold_v1_clauses(&mut g, &Regex::new("x").unwrap());
+        assert_eq!(g.cond_ref().clauses, before);
     }
 
     fn live_ids(engine: &AutomationEngine) -> Vec<String> {
@@ -572,6 +989,857 @@ mod tests {
         assert_eq!(rows.len(), 2, "a disabled or completed rule is normal, not a failure: {:?}", rows);
         assert!(rows[0].contains("could not be understood"), "{}", rows[0]);
         assert!(rows[1].contains("needs a newer version"), "{}", rows[1]);
+    }
+
+    /// **A schedule rule has no pattern, and no pattern is not a broken pattern** (plan 032 §6.4).
+    ///
+    /// `reload` used to ask `pattern_refused_at_load(&graph.parse.find)` of every rule, and a rule
+    /// with no parse step at all has no `find` to ask about — the first version of task 19 skipped
+    /// it with a refusal row, because `LiveRule.re` was a mandatory `Regex`. It is optional now, so
+    /// the two pattern gates apply only to a rule that HAS a pattern, and this rule runs.
+    #[test]
+    fn a_schedule_rule_with_no_pattern_is_admitted() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched")).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        // **`reload_at` at 08:00, not `reload` at epoch 0, and the seam is load-bearing here.**
+        // `reload` derives the local day from `now_ms`, and epoch 0 is 19:00 the previous evening
+        // west of UTC and midnight on it — so this rule's 09:00 target is "already past" on a
+        // CI runner in one zone and not in another, and the seeding then writes the §7 suppression
+        // row on exactly half the world's machines. The assertion below is about a PATTERN, so it
+        // is pinned to a morning where nothing is suppressed. `reload_at`'s own doc says this is
+        // what the seam is for.
+        let report = engine.reload_at(&store, 0, at(monday_2026_09_07(), 8 * 60)).unwrap();
+
+        assert_eq!(report.live, 1, "no pattern is not a broken pattern");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(log_rows(&store).is_empty(), "and nothing was written to the log about it");
+        assert_eq!(live_ids(&engine), vec!["au-sched"]);
+
+        // The absence reaches the live set as an ABSENCE, never as a defaulted match-everything
+        // pattern — which is what an `unwrap_or_default()` anywhere on this path would produce.
+        let live = engine.snapshot_live();
+        assert!(live[0].re.is_none(), "a rule with no pattern must carry no compiled regex");
+    }
+
+    /// **A rule with nothing to watch and no schedule is refused at load, and says so** — it must
+    /// not be live-and-inert.
+    ///
+    /// Since §3.1 made the monitor step optional this shape passed validation, saved *enabled*,
+    /// counted in `report.live` and was walked four times a second only to fall out at the
+    /// evaluator's monitor guard: running by every reading the user has, and unable to fire. The
+    /// same is true of `AfterMatch` with no monitor — a delay is parked at a crossing and there is
+    /// nothing here that can cross.
+    ///
+    /// **Three rules, and the third is the point.** A refusal keyed on "no monitor" alone would
+    /// take the whole of milestone 4 out with it, so the schedule rule is in the fixture to say
+    /// that a `DailyAt` timer IS something to run on. `au-live` is here for the same reason a
+    /// filter tested with one rule cannot show which rules it kept.
+    ///
+    /// **`inert` and `delayed` plant via the enable-gate bypass (R7 review).** `automation_validation`
+    /// now refuses to save either shape *enabled* at all (`timer.neverRuns`), which is R7 closing
+    /// this exact gap in the right layer — but this test is about `reload_at`'s OWN skip, the
+    /// second-line gate for a row that reached the shape some other way (an older build, or a
+    /// direct write), and that row has to exist in the store for the test to exercise it.
+    #[test]
+    fn a_rule_with_nothing_to_watch_and_no_schedule_is_skipped_with_a_reason() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-live", r"ctx:(\d+)%")).unwrap();
+        store.save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched")).unwrap();
+
+        let mut inert = rule("au-inert", r"ctx:(\d+)%");
+        inert.graph.monitor = None;
+        store.save_rule_bypassing_the_enable_gate_for_tests(&inert).unwrap();
+
+        let mut delayed = rule("au-delay", r"ctx:(\d+)%");
+        delayed.graph.monitor = None;
+        delayed.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        store.save_rule_bypassing_the_enable_gate_for_tests(&delayed).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        // 08:00, for `a_schedule_rule_with_no_pattern_is_admitted`'s reason: `au-sched` is a 09:00
+        // rule, and a row count is only an oracle for refusals while nothing else is writing rows.
+        let report = engine.reload_at(&store, 7_000, at(monday_2026_09_07(), 8 * 60)).unwrap();
+
+        assert_eq!(
+            live_ids(&engine),
+            vec!["au-live", "au-sched"],
+            "a schedule rule has no monitor either, and runs on the clock"
+        );
+        assert_eq!(report.live, 2, "`report.live` counts what can actually run");
+
+        // In `list_rules` order (`ORDER BY sort_order, id`), which is the order the log rows land in.
+        let skipped: Vec<String> = report.skipped.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(skipped, vec!["au-delay", "au-inert"]);
+        for (id, why) in &report.skipped {
+            assert_eq!(
+                why, "this rule has nothing to watch and no schedule, so it can never run",
+                "{id}"
+            );
+        }
+        assert_eq!(log_rows(&store).len(), 2, "one row per load, per refused rule");
+    }
+
+    /// A Monday, as a local ordinal day. `schedule_only_rule`'s mask is Mon–Fri, so the rule this
+    /// module seeds is one that genuinely could fire on the day the test names.
+    fn monday_2026_09_07() -> i32 {
+        use chrono::Datelike;
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).expect("a real date");
+        assert_eq!(date.weekday(), chrono::Weekday::Mon);
+        date.num_days_from_ce()
+    }
+
+    fn at(day_ordinal: i32, minute_of_day: i32) -> schedule::LocalTime {
+        schedule::LocalTime { day_ordinal, minute_of_day }
+    }
+
+    /// The reload seed has a two-part question: did the current daily target have an unobserved
+    /// window, and has *today* already spent it? This table covers the lifecycle combinations that
+    /// make those questions independent. The oracle is a `Held` row: a past target that is seeded
+    /// writes exactly one, while an unseeded target writes none.
+    #[test]
+    fn reload_seeds_only_unobserved_daily_target_windows_across_the_rule_lifecycle() {
+        #[derive(Clone, Copy)]
+        enum Presence {
+            Reenabled,
+            Live,
+        }
+        #[derive(Clone, Copy)]
+        enum Mark {
+            None,
+            Today,
+            EarlierDay,
+        }
+        #[derive(Clone, Copy)]
+        enum Target {
+            UnchangedAhead,
+            UnchangedPast,
+            MovedIntoPast,
+            MovedIntoFuture,
+        }
+        struct Case {
+            name: &'static str,
+            presence: Presence,
+            mark: Mark,
+            target: Target,
+            window: bool,
+            seeded: bool,
+            /// **The whole mark, day AND minute, for every row — not just the seeded ones.**
+            /// Row count alone accepts a seed that files `(today, 0)`, and a seeded-only mark
+            /// assertion accepts a reload that DROPS a retained mark, which would let the next
+            /// tick send again. Both are stated here instead.
+            mark_after: Option<(i32, i32)>,
+        }
+
+        let monday = monday_2026_09_07();
+        let cases = [
+            Case {
+                name: "re-enabled / no mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::None, target: Target::UnchangedPast,
+                window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
+            },
+            Case {
+                name: "re-enabled / earlier-day mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::EarlierDay, target: Target::UnchangedPast,
+                window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
+            },
+            Case {
+                name: "re-enabled / today's mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::Today, target: Target::UnchangedPast,
+                window: false, seeded: false,
+                mark_after: Some((monday, 9 * 60)),
+            },
+            Case {
+                name: "live / no mark / unchanged target still ahead",
+                presence: Presence::Live, mark: Mark::None, target: Target::UnchangedAhead,
+                window: false, seeded: false,
+                mark_after: None,
+            },
+            Case {
+                name: "live / no mark / unchanged target already past",
+                presence: Presence::Live, mark: Mark::None, target: Target::UnchangedPast,
+                window: false, seeded: false,
+                mark_after: None,
+            },
+            Case {
+                name: "live / no mark / target moved into the past",
+                presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoPast,
+                window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
+            },
+            Case {
+                name: "live / no mark / target moved into the future",
+                presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoFuture,
+                window: true, seeded: false,
+                mark_after: None,
+            },
+            Case {
+                name: "live / today's mark / target moved into the past",
+                presence: Presence::Live, mark: Mark::Today, target: Target::MovedIntoPast,
+                window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
+            },
+            Case {
+                name: "live / earlier-day mark / unchanged target",
+                presence: Presence::Live, mark: Mark::EarlierDay, target: Target::UnchangedPast,
+                window: false, seeded: false,
+                mark_after: Some((monday - 1, 9 * 60)),
+            },
+        ];
+
+        let now = at(monday, 14 * 60);
+        for case in cases {
+            let store = AutomationStore::new_in_memory();
+            let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+            let old_minute = match case.target {
+                Target::UnchangedAhead | Target::MovedIntoPast => 17 * 60,
+                Target::UnchangedPast | Target::MovedIntoFuture => 9 * 60,
+            };
+            sched.graph.timer = Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day: old_minute, days: 0b0001_1111 },
+            });
+            store.save_rule(&sched).unwrap();
+
+            let engine = AutomationEngine::new(0);
+            engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+            match case.mark {
+                Mark::None => {}
+                Mark::Today => engine.runtime.set_last_fired_day("au-sched", monday, old_minute),
+                Mark::EarlierDay => engine.runtime.set_last_fired_day("au-sched", monday - 1, old_minute),
+            }
+
+            if matches!(case.presence, Presence::Reenabled) {
+                store.set_enabled_checked("au-sched", false).unwrap();
+                engine.reload_at(&store, 1_000, at(monday, 8 * 60 + 30)).unwrap();
+                store.set_enabled_checked("au-sched", true).unwrap();
+            }
+
+            match case.target {
+                Target::MovedIntoPast | Target::MovedIntoFuture => {
+                    let new_minute = match case.target {
+                        Target::MovedIntoPast => 9 * 60,
+                        Target::MovedIntoFuture => 17 * 60,
+                        Target::UnchangedAhead | Target::UnchangedPast => unreachable!(),
+                    };
+                    sched.graph.timer = Some(TimerStep {
+                        mode: TimerMode::DailyAt { minute_of_day: new_minute, days: 0b0001_1111 },
+                    });
+                    sched.updated_at += 1;
+                    store.save_rule(&sched).unwrap();
+                }
+                Target::UnchangedAhead | Target::UnchangedPast => {}
+            }
+
+            // A moved target drops its old-minute mark in the forget loop before this predicate;
+            // unchanged and re-enabled rules retain the mark reconciliation kept.
+            let mark_at_filter = match case.target {
+                Target::MovedIntoPast | Target::MovedIntoFuture => None,
+                Target::UnchangedAhead | Target::UnchangedPast => match case.mark {
+                    Mark::None => None,
+                    Mark::Today => Some(monday),
+                    Mark::EarlierDay => Some(monday - 1),
+                },
+            };
+            assert_eq!(
+                has_unobserved_daily_window(
+                    matches!(case.presence, Presence::Reenabled),
+                    matches!(case.target, Target::MovedIntoPast | Target::MovedIntoFuture),
+                    false,
+                    mark_at_filter,
+                    monday,
+                ),
+                case.window,
+                "{}: the candidate predicate has the expected unobserved window",
+                case.name
+            );
+
+            engine.reload_at(&store, 2_000, now).unwrap();
+
+            let entries = store.load_automation_log(&LogScope::All, LogOrder::Asc, 100).unwrap();
+            assert_eq!(
+                entries.len(),
+                usize::from(case.seeded),
+                "{}: a past target is seeded exactly when it had an unobserved window and today was unspent",
+                case.name
+            );
+            if let Some(entry) = entries.first() {
+                // Which rule, which KIND, and which target minute the words name. A row count
+                // alone cannot tell a suppression apart from a failure, and every seeded row here
+                // aims at 09:00, so the words are what bind the row to the target.
+                assert_eq!(entry.rule_id, "au-sched", "{}: the row belongs to the rule", case.name);
+                assert_eq!(
+                    entry.kind,
+                    LogKind::Held,
+                    "{}: nothing went wrong, so the row is Held rather than Failed",
+                    case.name
+                );
+                assert!(
+                    entry.detail.contains("09:00"),
+                    "{}: the row names the target it skipped, got {:?}",
+                    case.name,
+                    entry.detail
+                );
+            }
+            assert_eq!(
+                engine.runtime.last_fired_mark("au-sched"),
+                case.mark_after,
+                "{}: the spent-day mark after the reload, minute included",
+                case.name
+            );
+        }
+    }
+
+    /// **The one window `invalidated_marks` catches and neither other term does.**
+    ///
+    /// The lifecycle table above passes `false` for that term in every row, so deleting
+    /// `|| invalidated_mark` from `has_unobserved_daily_window` leaves the whole suite green — it
+    /// was a live term with nothing naming the event only it catches, which is the definition of
+    /// dead code with a rationale.
+    ///
+    /// This is that event, and the other two terms provably cannot reach it. A rule that is live on
+    /// both sides of the reload is not `newly_live`. A rule whose `updated_at` did not change takes
+    /// the forget loop's early `continue`, so it is never `target_changed`. What is left is a mark
+    /// whose minute does not match the definition it is filed under: reconciliation drops it, and
+    /// the day it was standing for has not been observed by anything.
+    ///
+    /// Written through the runtime rather than through the editor on purpose. No GUI path is known
+    /// to produce it — the walk files a mark under the live rule's own minute, and a store edit
+    /// bumps `updated_at` — so the term is defence against a future writer that files one under a
+    /// different minute. **That is exactly why it needs a test instead of a comment**: if the state
+    /// is ever reachable, this pins what the engine owes it; if the term is ever deleted, this says
+    /// what was lost.
+    #[test]
+    fn a_mark_filed_under_a_stale_minute_leaves_todays_target_unobserved() {
+        let monday = monday_2026_09_07();
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+        });
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        // Live before and after, and never edited: `newly_live` and `target_changed` are both out.
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 17 * 60);
+
+        engine.reload_at(&store, 1_000, at(monday, 14 * 60)).unwrap();
+
+        assert_eq!(
+            log_rows(&store).len(),
+            1,
+            "the stale-minute mark is reconciled away, so 09:00 today was never observed and is held"
+        );
+        assert_eq!(
+            engine.runtime.last_fired_mark("au-sched"),
+            Some((monday, 9 * 60)),
+            "and the seed REFILES the mark under the minute the rule actually targets -- reading              only the day here would accept a seed that wrote (today, 0) and left the next reload              invalidating it all over again"
+        );
+    }
+
+    /// **The 09:00 prompt must not arrive at 14:00 because the app started late** (§6.3, plan 028 Q3).
+    ///
+    /// `schedule_due` compares `now >= target` — which is what keeps a spring-forward 02:30 schedule
+    /// alive on a day with no 02:30 — and an absent day mark plus a target three hours in the past is
+    /// spelled exactly like a crossing. The seeding in `reload` is the only thing that tells the two
+    /// apart, so this asserts the pair TOGETHER: what `reload` left behind, handed to the predicate.
+    /// Asserting `last_fired_day == Some(day)` alone would pass a seed the predicate ignored.
+    #[test]
+    fn a_schedule_missed_while_the_app_was_closed_does_not_fire_on_launch() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let launch = at(monday_2026_09_07(), 14 * 60);
+        engine.reload_at(&store, 0, launch).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(launch.day_ordinal),
+            "a 09:00 schedule loaded at 14:00 has already missed today"
+        );
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), launch),
+            "the prompt arrived on launch, five hours late"
+        );
+        // Tomorrow is a different day, and the rule is not broken — only today is spent.
+        let tuesday = at(launch.day_ordinal + 1, 9 * 60);
+        assert!(schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), tuesday));
+    }
+
+    /// The other direction, and it is the one the seeding must not break: a schedule whose minute is
+    /// still ahead at launch is left unmarked, and fires when the tick reaches it.
+    #[test]
+    fn a_schedule_still_ahead_at_launch_fires_when_its_minute_arrives() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "09:00 has not happened yet");
+        assert!(schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60)));
+    }
+
+    /// **The seeding runs AFTER the forget loop, and this is what says so.**
+    ///
+    /// Saving a rule moves its `updated_at`, and `reload` drops everything that rule owns — the day
+    /// mark included. Seeded before that loop, the mark would be wiped for exactly the rules that
+    /// need it, and a schedule edited at 14:00 would deliver its 09:00 message on the next tick.
+    #[test]
+    fn a_schedule_edited_after_its_minute_is_re_seeded_rather_than_unmarked() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let afternoon = at(monday_2026_09_07(), 14 * 60);
+        engine.reload_at(&store, 0, afternoon).unwrap();
+
+        // The user edits the rule's message and saves: `updated_at` moves, so `forget_rule` runs.
+        sched.name = "renamed".into();
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 1_000, afternoon).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), Some(afternoon.day_ordinal));
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), afternoon),
+            "an edit at 14:00 delivered the 09:00 message on the next tick"
+        );
+    }
+
+    /// **An edit made after the rule has already fired must not write "today's run was skipped"** —
+    /// that row is a lie, and it is written into the record the user consults to find out what the
+    /// rule did.
+    ///
+    /// `reload` purges a changed rule's `last_fired_day` (the store stamps `updated_at` on EVERY
+    /// save) and then re-seeds. The re-seed cannot tell *never fired today* from *fired today, the
+    /// mark was just deleted*, so it decided the day had been missed: the app runs across 09:00 and
+    /// sends, the user renames the rule at 09:30, and a `Held` row lands thirty minutes after the
+    /// `Sent` row for that same run saying nothing was watching the clock. Every subsequent save
+    /// wrote another one, and `Held` is Decision-class — the verbose gate cannot drop it — so with
+    /// `LOG_CAP` at 200 the duplicates evict the rule's real history.
+    ///
+    /// **This asserts the ROWS, and that is the whole point.**
+    /// `a_schedule_edited_after_its_minute_is_re_seeded_rather_than_unmarked` above asserts only the
+    /// mark, which is exactly how this got through: the re-seed restores the same mark the fire
+    /// left, so the mark is right and the log is wrong.
+    #[test]
+    fn a_schedule_renamed_after_it_fired_writes_no_suppression_row() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        // 08:00: the app is running BEFORE the minute, so nothing is seeded and nothing is said.
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "premise: 09:00 is still ahead");
+
+        // 09:00 arrives and the rule fires. `evaluate_tick` marks the day after the leaves and
+        // `run_send` writes the `Sent` row; both are reproduced here rather than driven through the
+        // loop, which needs a host this module has no business wiring for a `reload` test.
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+        store
+            .append(&AutomationLogEntry {
+                id: 0,
+                rule_id: "au-sched".into(),
+                terminal_id: Some("tm-1".into()),
+                terminal_name: Some("shell".into()),
+                kind: LogKind::Sent,
+                detail: "sent to shell".into(),
+                at: 1_000,
+            })
+            .unwrap();
+
+        // 09:30, and the user only renames it: same minute, same days.
+        sched.name = "morning stand-up".into();
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        let report = engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        let rows = store
+            .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the rename wrote a row about a run that happened: {rows:?}");
+        assert_eq!(rows[0].kind, LogKind::Sent, "the `Sent` row is still the last word: {rows:?}");
+        assert!(!report.emit, "no row was written, so no window has anything to refetch");
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(monday),
+            "and the day is still spent, so the rename cannot send a second message today"
+        );
+    }
+
+    /// Disabling stops the live rule but does not un-spend the schedule instant it already ran.
+    #[test]
+    fn a_schedule_re_enabled_after_it_fired_writes_no_suppression_row_or_second_send() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+        store
+            .append(&AutomationLogEntry {
+                id: 0,
+                rule_id: "au-sched".into(),
+                terminal_id: Some("tm-1".into()),
+                terminal_name: Some("shell".into()),
+                kind: LogKind::Sent,
+                detail: "sent to shell".into(),
+                at: 1_000,
+            })
+            .unwrap();
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        store.set_enabled_checked("au-sched", true).unwrap();
+        let report = engine.reload_at(&store, 3_000, at(monday, 9 * 60 + 35)).unwrap();
+
+        let rows = store
+            .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-enabling wrote a false suppression row: {rows:?}");
+        assert_eq!(rows[0].kind, LogKind::Sent, "the sent row is still the last word: {rows:?}");
+        assert!(!report.emit, "no row was written, so no window has anything to refetch");
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), Some(monday));
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60 + 35)),
+            "re-enabling allowed a second send today"
+        );
+    }
+
+    #[test]
+    fn a_disabled_schedule_moved_later_re_fires_at_its_new_minute_today() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        sched.enabled = false;
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 10 * 60)).unwrap();
+
+        store.set_enabled_checked("au-sched", true).unwrap();
+        engine.reload_at(&store, 3_000, at(monday, 10 * 60)).unwrap();
+
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "a mark spent at 09:00 must not suppress the new 17:00 occurrence"
+        );
+        assert!(
+            schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 17 * 60)),
+            "the disabled edit left today's 17:00 occurrence spent"
+        );
+    }
+
+    #[test]
+    fn a_schedule_deleted_while_disabled_loses_its_spent_day() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+        assert!(store.delete_rule("au-sched").unwrap());
+        engine.reload_at(&store, 2_000, at(monday, 10 * 60)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "a deleted disabled rule retained its spent-day mark"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_save_does_not_spend_a_live_schedule_that_the_next_tick_must_dispatch() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let mut other = crate::automation_engine::test_host::schedule_only_rule("au-other");
+        other.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        store.save_rule(&sched).unwrap();
+        store.save_rule(&other).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+
+        // 09:01: saving the unrelated evening rule reloads both live rules, but the engine was
+        // already watching the morning schedule when its minute passed.
+        other.name = "renamed evening schedule".into();
+        other.updated_at += 1;
+        store.save_rule(&other).unwrap();
+        let report = engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 1)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "an unrelated save spent the unchanged schedule before its next evaluator tick"
+        );
+        assert!(!report.emit, "the unrelated save wrote a false missed-schedule row");
+        assert!(log_rows(&store).is_empty(), "the unchanged schedule wrote a Held row: {:?}", log_rows(&store));
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert!(
+            schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60 + 1)),
+            "the next evaluator tick would not dispatch the 09:00 schedule"
+        );
+    }
+
+    #[test]
+    fn a_deleted_schedule_loses_its_spent_day() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        assert!(store.delete_rule("au-sched").unwrap());
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "a deleted rule retained engine state");
+    }
+
+    /// **Moving the schedule to a different minute is a NEW schedule, and it may fire today.**
+    ///
+    /// The discriminator for keeping the day mark is *did the target minute move*, not *did the rule
+    /// change*: a rename leaves today's target instant exactly where it was and therefore spent,
+    /// while a move puts it somewhere the day has not been spent on. This is the direction
+    /// "always preserve" gets wrong — a 09:00 rule moved to 17:00 at 09:30 must ring at 17:00.
+    #[test]
+    fn a_schedule_moved_to_a_later_minute_fires_at_the_new_time_today() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        // 09:30: the user drags the time to 17:00.
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "17:00 has not gone by today, so nothing has spent it"
+        );
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert!(
+            schedule::schedule_due(
+                &mode,
+                engine.runtime.last_fired_day("au-sched"),
+                at(monday, 17 * 60)
+            ),
+            "the rule was moved to 17:00 and then refused to ring at 17:00"
+        );
+    }
+
+    /// **Changing only the WEEKDAYS keeps the day mark** — and this is where the ruling this branch
+    /// shipped differs from the one it was handed.
+    ///
+    /// The brief's discriminator was *did the timer change*, which takes the mask with it. But
+    /// today's target instant is the `minute_of_day` alone: a Monday 09:00 that has already run is
+    /// spent whatever the mask is edited to at 09:30, so clearing the mark on a mask edit re-creates
+    /// the exact false row this fix exists to remove — *"09:00 went by while nothing was watching"*,
+    /// about a 09:00 that ran. The mask is consulted by `schedule_due` on every future day anyway,
+    /// so keeping the mark costs it nothing.
+    ///
+    /// The price is named rather than hidden: a user who adds TODAY's weekday to the mask after the
+    /// minute has passed gets silence rather than a row explaining it — the same silence a rule
+    /// whose day was seeded on a masked-out morning already gets, and the direction the brief itself
+    /// calls safe (a missed extra send beats a false row).
+    #[test]
+    fn a_schedule_whose_weekdays_changed_keeps_the_day_it_already_spent() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        // 09:30: Mon-Fri becomes every day. Same minute; today has still run.
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0111_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        let report = engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(monday),
+            "adding a weekday does not un-run this morning"
+        );
+        assert!(!report.emit);
+        assert!(
+            log_rows(&store).is_empty(),
+            "a mask edit said this morning was skipped: {:?}",
+            log_rows(&store)
+        );
+    }
+
+    /// **A spent day says so, once** (§7) — otherwise the suppression is a silent absence.
+    ///
+    /// The behaviour above is right and completely invisible: the user set a 09:00 reminder, it did
+    /// not arrive, and until this row there was nothing anywhere that named the reason. That is the
+    /// shape `absence-is-invisible-derive-the-check` is about, and the one this crate already
+    /// refuses for a rule refused at load and for a crossing that declined to send.
+    ///
+    /// **Three loads, one row.** The bound is the assertion, not a comment: the row is gated on
+    /// `schedule_due` against the mark as it stands, so once the day is spent the predicate is
+    /// false and a second load writes nothing. Without that gate every launch, and every
+    /// `reload_after_commit` a Settings edit makes, would add a row for the same spent day.
+    #[test]
+    fn a_schedule_missed_while_the_app_was_closed_says_so_in_the_log_exactly_once() {
+        let store = AutomationStore::new_in_memory();
+        store
+            .save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched"))
+            .unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let launch = at(monday_2026_09_07(), 14 * 60);
+        let report = engine.reload_at(&store, 5_000, launch).unwrap();
+        assert!(report.emit, "a row was written, so the windows must be told to refetch the log");
+
+        let rows = store
+            .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].kind, LogKind::Held, "nothing failed — the rule declined: {rows:?}");
+        assert_eq!(
+            rows[0].detail,
+            "09:00 went by while nothing was watching the clock, so today's run was skipped"
+        );
+        assert_eq!(rows[0].terminal_id, None, "a schedule's suppression names no terminal");
+        assert_eq!(rows[0].at, 5_000);
+
+        // Two more loads of the same spent day. `reload_after_commit` runs on every definition
+        // write, so an ungated row would make one Settings session a wall of identical lines.
+        engine.reload_at(&store, 6_000, launch).unwrap();
+        let later = engine.reload_at(&store, 7_000, at(launch.day_ordinal, 23 * 60)).unwrap();
+        assert!(!later.emit, "a day already spent was reported again");
+        assert_eq!(
+            store
+                .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+                .unwrap()
+                .len(),
+            1,
+            "one row per suppression, not one per load"
+        );
+    }
+
+    /// **The row is narrower than the seed, and this is the difference.**
+    ///
+    /// `target_already_past` ignores the weekday mask on purpose — marking a day the rule was never
+    /// going to run on costs nothing and keeps the seed a fact about the CLOCK. A row does not have
+    /// that freedom: *"09:00 went by, so today's run was skipped"* is simply false about a Sunday on
+    /// a weekdays-only rule, which never had a run today to skip. Gating the row on `schedule_due`
+    /// rather than on the seed's own predicate is what keeps the sentence true.
+    #[test]
+    fn a_day_the_schedule_never_ran_on_is_seeded_silently() {
+        let store = AutomationStore::new_in_memory();
+        store
+            .save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched"))
+            .unwrap();
+
+        let engine = AutomationEngine::new(0);
+        // `schedule_only_rule` is Mon–Fri; 2026-09-07 is a Monday, so +6 is the Sunday after it.
+        let sunday = at(monday_2026_09_07() + 6, 14 * 60);
+        let report = engine.reload_at(&store, 5_000, sunday).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(sunday.day_ordinal),
+            "premise: the seed still runs — the row is what is narrower, not the mark"
+        );
+        assert!(!report.emit);
+        assert!(
+            store
+                .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+                .unwrap()
+                .is_empty(),
+            "a weekdays rule was told it had missed a Sunday"
+        );
+    }
+
+    /// A schedule still ahead of the clock has missed nothing, and must not be told it has.
+    #[test]
+    fn a_schedule_still_ahead_at_launch_writes_no_row() {
+        let store = AutomationStore::new_in_memory();
+        store
+            .save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched"))
+            .unwrap();
+
+        let engine = AutomationEngine::new(0);
+        engine.reload_at(&store, 5_000, at(monday_2026_09_07(), 8 * 60)).unwrap();
+
+        assert!(
+            store
+                .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+                .unwrap()
+                .is_empty(),
+            "09:00 has not happened yet, and the log said it had been missed"
+        );
+    }
+
+    /// A delay rule has no day to seed: `AfterMatch` is parked at its crossing, not scheduled.
+    #[test]
+    fn an_after_match_rule_is_given_no_day() {
+        let store = AutomationStore::new_in_memory();
+        let mut delayed = rule("au-delay", r"ctx:(\d+)%");
+        delayed.graph.timer =
+            Some(TimerStep { mode: crate::automation_store::TimerMode::AfterMatch { delay_ms: 30_000 } });
+        store.save_rule(&delayed).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        engine.reload_at(&store, 0, at(monday_2026_09_07(), 23 * 60)).unwrap();
+
+        assert_eq!(engine.runtime.last_fired_day("au-delay"), None);
     }
 
     /// §2.7: an uncompilable pattern is reported once per LOAD. The evaluator runs four times a second
@@ -792,6 +2060,56 @@ mod tests {
         let gone = &pairs["tm-gone"];
         assert!(gone.missing, "a pinned id that is not live is dormant, and says so");
         assert_eq!(gone.fired_count, 0);
+    }
+
+    /// **§7's `pending`: the parked deadline reaches the wire, per pair.**
+    ///
+    /// `parked_at` had exactly one reader before this — `runtime.rs`'s own tests — so a park was a
+    /// fact the engine held and no window could see, and the row went on reading the ARM machine,
+    /// which says `Fired` from the moment the crossing is decided and knows nothing about the wait
+    /// that follows. That is the one-row-two-answers shape: *Fired · waiting to re-arm* over a
+    /// message that has not been typed.
+    ///
+    /// Two terminals, because the field is pair-keyed and a one-terminal fixture cannot tell a
+    /// per-pair deadline from a per-rule one.
+    #[test]
+    fn the_state_payload_carries_each_pair_s_parked_deadline() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-a", r"ctx:(\d+)%")).unwrap();
+        let engine = AutomationEngine::new(0);
+        engine.reload(&store, 1_000).unwrap();
+        engine
+            .runtime
+            .set_watched("au-a", ["tm-waiting".to_string(), "tm-idle".to_string()].into());
+
+        engine.runtime.park(
+            "au-a",
+            "tm-waiting",
+            crate::automation::runtime::ParkedSend {
+                due_at_ms: 31_000,
+                pc: "pc-1".to_string(),
+                captures: None,
+                prev: ArmState::Unseen,
+                label: None,
+            },
+        );
+
+        let pairs = &engine.state_payload(&HashMap::new()).rules["au-a"];
+        assert_eq!(
+            pairs["tm-waiting"].parked_at,
+            Some(31_000),
+            "the deadline the row counts down to never left the engine"
+        );
+        assert_eq!(
+            pairs["tm-idle"].parked_at, None,
+            "a pair with nothing parked must not inherit its sibling's countdown"
+        );
+
+        // And it goes away when the send is drained, rather than lingering as a countdown to a
+        // moment that has passed.
+        engine.runtime.take_parked_due("au-a", "tm-waiting", 31_000).expect("ripe");
+        let after = &engine.state_payload(&HashMap::new()).rules["au-a"];
+        assert_eq!(after["tm-waiting"].parked_at, None);
     }
 
     /// One function behind the event and behind first paint, so §10.18d's "they agree" is true by

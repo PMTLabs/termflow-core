@@ -339,8 +339,8 @@ describe('AutomationsPanel', () => {
         const api = installApi([frozen, pinned]);
         api.getAutomationRuntime.mockResolvedValue({
             rules: {
-                'au-frozen': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
-                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
+                'au-frozen': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true, parkedAt: null } },
+                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true, parkedAt: null } },
             },
         });
         await mount();
@@ -374,7 +374,7 @@ describe('AutomationsPanel', () => {
         const api = installApi([pinned]);
         api.getAutomationRuntime.mockResolvedValue({
             rules: {
-                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true } },
+                'au-pinned': { 'tm-gone': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: true, parkedAt: null } },
             },
         });
         api.removeAutomationTarget.mockResolvedValue(false);
@@ -434,6 +434,7 @@ describe('AutomationsPanel', () => {
                             lastFiredAt: Date.now() - 1000,
                             firedCount: 1,
                             missing: false,
+                            parkedAt: null,
                         },
                     },
                 },
@@ -457,6 +458,63 @@ describe('AutomationsPanel', () => {
     });
 
     /**
+     * **A countdown that only counts on an event is a stopped clock**, and `automation:state` is
+     * emitted on ARM TRANSITIONS — a parked send produces one when it is decided and one when it
+     * goes out, and nothing at all for the thirty seconds in between.
+     *
+     * The panel already owns exactly one `setTimeout`, armed at the earliest thing that would make
+     * a label stale, for the *Just fired* receipt. A `pending` row is the same problem sampled more
+     * often, so it arms the same timer rather than starting a second one: two clocks in one list is
+     * how two rows end up disagreeing about `now`.
+     *
+     * The last leg crosses the deadline itself, which is the other half — the row has to be able to
+     * LEAVE `pending` on the clock, since the tick that drains the send in the real engine is not
+     * something this panel hears about either.
+     */
+    it('keeps a parked countdown moving between events, and lets it run out', async () => {
+        jest.useFakeTimers();
+        try {
+            const api = installApi([rule()]);
+            api.getAutomationRuntime.mockResolvedValue({
+                rules: {
+                    'au-1': {
+                        'tm-a': {
+                            state: 'fired',
+                            lastFiredAt: null,
+                            firedCount: 0,
+                            missing: false,
+                            parkedAt: Date.now() + 30_000,
+                        },
+                    },
+                },
+            });
+            await act(async () => {
+                root.render(<AutomationsPanel />);
+            });
+            await act(async () => {
+                await Promise.resolve();
+            });
+            expect(container.querySelector('.au-pill')?.textContent)
+                .toBe('Waiting to send · in 30s');
+
+            await act(async () => {
+                jest.advanceTimersByTime(5_000);
+            });
+            expect(container.querySelector('.au-pill')?.textContent)
+                .toBe('Waiting to send · in 25s');
+
+            // Past the deadline, with no further payload: the row must stop claiming a countdown.
+            await act(async () => {
+                jest.advanceTimersByTime(26_000);
+            });
+            expect(container.querySelector('.au-pill')?.textContent)
+                .toBe('Waiting to send · in 0s');
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    /**
      * The footer counted a RUN and said it was a LIFETIME.
      *
      * `firedCount` and `lastFiredAt` come from the engine's in-memory map, which `forget_rule`
@@ -474,7 +532,7 @@ describe('AutomationsPanel', () => {
         api.getAutomationRuntime.mockResolvedValue({
             rules: {
                 'au-1': {
-                    'tm-a': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false },
+                    'tm-a': { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null },
                 },
             },
         });
@@ -497,6 +555,7 @@ describe('AutomationsPanel', () => {
                         lastFiredAt: Date.now() - 4 * 60_000,
                         firedCount: 2,
                         missing: false,
+                        parkedAt: null,
                     },
                 },
             },
