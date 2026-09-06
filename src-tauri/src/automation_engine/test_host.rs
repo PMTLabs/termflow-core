@@ -32,6 +32,15 @@ pub(crate) struct FakeHost {
     pub(crate) leaves: Mutex<HashMap<String, String>>,
     pub(crate) roster: Mutex<Vec<RosterRow>>,
     pub(crate) text: Mutex<HashMap<String, String>>,
+    /// Every `tail` the engine asked for, in order — **the screen reads, recorded**.
+    ///
+    /// §6.3's schedule rule is specified by what it does NOT do, and "reads no screen" is not
+    /// observable from `written()` or the log: a rule that read the window and decided not to send
+    /// looks identical. `text` cannot answer it either, because a read leaves no trace there. So the
+    /// port records the call, and a test can assert the exact list — which is also what keeps the
+    /// assertion honest, since an empty list proves nothing unless some other pair in the same run
+    /// put something in it.
+    pub(crate) tails: Mutex<Vec<String>>,
     pub(crate) writes: Mutex<Vec<(String, Vec<u8>)>>,
     pub(crate) write_err: Mutex<Option<String>>,
     pub(crate) activity: AtomicUsize,
@@ -59,6 +68,7 @@ impl FakeHost {
             leaves: Mutex::new(HashMap::new()),
             roster: Mutex::new(Vec::new()),
             text: Mutex::new(HashMap::new()),
+            tails: Mutex::new(Vec::new()),
             writes: Mutex::new(Vec::new()),
             write_err: Mutex::new(None),
             activity: AtomicUsize::new(0),
@@ -117,6 +127,11 @@ impl FakeHost {
         self.writes.lock().unwrap().iter().map(|(pc, _)| pc.clone()).collect()
     }
 
+    /// Every process id whose screen was read, in order.
+    pub(crate) fn tailed(&self) -> Vec<String> {
+        self.tails.lock().unwrap().clone()
+    }
+
     /// Every rule id the engine told the windows to refetch, in order.
     pub(crate) fn announced(&self) -> Vec<String> {
         self.changed.lock().unwrap().iter().flatten().cloned().collect()
@@ -138,6 +153,9 @@ impl EngineHost for FakeHost {
         self.leaves.lock().unwrap().values().cloned().collect()
     }
     fn tail(&self, pc: &str, _depth: ReadDepth) -> Option<String> {
+        // Recorded BEFORE the lookup, so a process with no text still counts as a read attempt —
+        // §4.5's dormant terminal is a `None` here, and a path that reaches this port has read.
+        self.tails.lock().unwrap().push(pc.to_string());
         self.text.lock().unwrap().get(pc).cloned()
     }
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
@@ -351,6 +369,24 @@ pub(crate) fn log_details(store: &AutomationStore) -> Vec<(String, String)> {
 
 pub(crate) fn times_sent(fake: &FakeHost, message: &str) -> usize {
     fake.written().iter().filter(|w| w.contains(message)).count()
+}
+
+/// Which processes received one particular message, sorted.
+///
+/// `times_sent` counts and `written_to` lists ids — neither can say *this* message reached *these*
+/// terminals, which is the whole claim of a rule that fires on several targets at once. A count of
+/// three is satisfied by three messages into one terminal.
+pub(crate) fn sent_to(fake: &FakeHost, message: &str) -> Vec<String> {
+    let mut out: Vec<String> = fake
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, bytes)| String::from_utf8_lossy(bytes).contains(message))
+        .map(|(pc, _)| pc.clone())
+        .collect();
+    out.sort();
+    out
 }
 
 /// A Rust source file with its line comments removed and its line endings normalised. **Every

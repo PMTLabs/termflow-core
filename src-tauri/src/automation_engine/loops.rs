@@ -26,6 +26,7 @@ use crate::automation_engine::due::{
 };
 use crate::automation_engine::eval::{self, ArmState, Captures, Decision, Evaluation, Outcome, Read};
 use crate::automation_engine::host::{EngineHost, HostPort};
+use crate::automation_engine::schedule;
 use crate::automation_engine::subst;
 use crate::automation_engine::{AutomationEngine, LiveRule};
 use crate::automation_store::{
@@ -108,9 +109,11 @@ pub struct PendingSend {
     /// This crossing's capture groups, for `run_send` to resolve `action.substitute` against.
     /// `Decision::Sent` only ever follows a `Truth::True`, and both `evaluate`'s branches only ever
     /// report that with a real match behind it — so `evaluate_pair` always hands this `Some`.
-    /// `None` exists for the fixtures (`pending()`) that build a `PendingSend` directly for a test
-    /// that is not about substitution at all; `subst::substitute` refuses a `None` the same way it
-    /// refuses an empty `Captures` — only if the message actually names a token.
+    ///
+    /// `None` is §6.3's schedule send, which has no pattern and no match and therefore no groups,
+    /// and the fixtures (`pending()`) that build a `PendingSend` directly for a test that is not
+    /// about substitution at all; `subst::substitute` refuses a `None` the same way it refuses an
+    /// empty `Captures` — only if the message actually names a token.
     pub captures: Option<Captures>,
 }
 
@@ -144,10 +147,49 @@ pub async fn evaluate_tick(
     // Declared before the walk because the walk itself fills it: §6.2's parked sends come due
     // inside it, alongside the crossings decided further down.
     let mut sends: Vec<PendingSend> = Vec::new();
+    // §6.3's clock, read ONCE for the whole tick and never per rule.
+    //
+    // Two rules asked on one tick must not see different minutes: a walk that straddled 08:59/09:00
+    // would fire the rules it reached after the boundary and hold the rest until the next tick, and
+    // near midnight the two halves would disagree about the DAY — which is `last_fired_day`'s key, so
+    // one of them would re-fire something already sent. This is also the only impure line the
+    // schedule path has; everything below it is a pure predicate over this value.
+    //
+    // Unconditional, including on the overwhelmingly common tick where no rule has a schedule at
+    // all. It is one `DateTime` conversion per 250 ms, and making it lazy would buy nothing while
+    // putting the "exactly one clock per tick" property behind a memo a future edit could break.
+    let now_local = schedule::local_now(now_ms);
     for live in engine.snapshot_live() {
         // Sorted, so which pairs the cap holds over is a property of the rule and not of hash order.
         let mut leaves: Vec<String> = engine.runtime.watched_for(&live.rule.id).into_iter().collect();
         leaves.sort();
+        // **§6.3's two rule-level facts, decided BEFORE the leaves.**
+        //
+        // `scheduled` is *"this rule is on the schedule path"* and `fires_now` is *"and its minute
+        // has come"*. Both are properties of the RULE — `schedule_due` takes no terminal at all, and
+        // `last_fired_day` is keyed by rule id — so asking them per leaf would be asking the same
+        // question N times and, worse, would invite the mark that answers it to be written N times.
+        //
+        // **The day is marked after the leaves loop, never inside it.** `set_last_fired_day` makes
+        // `schedule_due` answer false for the rest of the day; written on the first leaf it answers
+        // false for leaves two and three of the very same tick, so a rule with three targets sends to
+        // one and starves the others — with no log row, no arm change and nothing else in the engine
+        // that records a target it skipped.
+        //
+        // **Decided by the TIMER, not by the absence of a monitor.** §6.3: a rule whose Timer is in
+        // schedule mode *"takes a new evaluation path that never reads a screen"*. Nothing forbids a
+        // row from carrying both a monitor and a `DailyAt` — validation constrains neither against
+        // the other, and the API and the importer can both write one — and `monitor.is_none()` as the
+        // gate would leave such a rule reading the window four times a second and sending on a
+        // crossing as well as on the clock. `schedule_due` is deliberately false for `AfterMatch`, so
+        // it cannot double as the "is this a schedule rule" question: that is what `scheduled` is.
+        let scheduled = match &live.rule.graph.timer {
+            Some(TimerStep { mode: mode @ TimerMode::DailyAt { .. } }) => Some(mode),
+            _ => None,
+        };
+        let fires_now = scheduled.is_some_and(|mode| {
+            schedule::schedule_due(mode, engine.runtime.last_fired_day(&live.rule.id), now_local)
+        });
         for tm in leaves {
             // The ONE tm -> pc conversion. `None` is dormant (§4.5), not dead: no evaluation, no log
             // line, arm state untouched. Resolved BEFORE the settle check, because a pair skipped for
@@ -216,6 +258,57 @@ pub async fn evaluate_tick(
             if let Some(seq) = seq {
                 seen_seq.entry(pc.clone()).or_insert(seq);
             }
+            // **§6.3's dispatch, and the end of the road for a schedule rule.** No `due_now`, no
+            // `eval::evaluate`, no `host.tail`, no `set_last_eval` and no arm write: there is nothing
+            // to read and therefore nothing that could have been read.
+            //
+            // **Above the settle gate, for the parked drain's own reason one screen up.** Settling
+            // means *nothing READS this terminal*, and this reads nothing. Below it, a target that
+            // happened to be inside another rule's `ECHO_SETTLE_MS` window at 09:00 would be skipped
+            // — and because the day is marked after the leaves whether or not a leaf was reachable,
+            // skipped for the whole day.
+            //
+            // **Below the dirty bookkeeping, deliberately.** A monitor-less rule already reached
+            // `dirty_seq`/`seen_seq` before falling out at the monitor guard below, and keeping that
+            // unchanged is the conservative direction: `seen_seq` holds the EARLIEST generation seen,
+            // and an earliest that is too early can only refuse a clear (costing one re-read), while
+            // a later one throws away output no pair has seen. It joins neither `due` nor `owed`,
+            // which is what the monitor guard's own comment says of a pair that reads nothing.
+            //
+            // `process_for_leaf` returning `None` skipped this leaf several lines up (§4.5, dormant);
+            // the day is still marked for it, so a terminal asleep at 09:00 is not nagged at 14:00.
+            if scheduled.is_some() {
+                if fires_now {
+                    admit(
+                        engine,
+                        &mut sends,
+                        PendingSend {
+                            pair: Pair { rule: live.clone(), tm: tm.clone(), pc },
+                            // **Read, not assumed.** `prev` is what `run_send`'s three failure paths
+                            // roll back to, and a schedule rule has no crossing to roll back to — so
+                            // the only correct target is whatever is already there, which makes
+                            // `restore_arm` write back the value it just read. A constant `Unseen`
+                            // would be a no-op for a pure schedule rule and would DESTROY the arm
+                            // state of a rule that also carries a monitor.
+                            prev: engine.runtime.arm_state(&live.rule.id, &tm),
+                            // Resolved at DECIDE time like every other route (§2.8, R17): the
+                            // `failed — the terminal closed` row is written when there is no name
+                            // left to look up, and a schedule send waits on the same queue as any
+                            // other.
+                            label: host.label_for(&tm),
+                            // NOW, for the parked drain's reason: `run_send` measures the echo needle
+                            // and the settle window forward from this stamp.
+                            at_ms: now_ms,
+                            // No pattern, no match, no groups. `subst::substitute` refuses a `None`
+                            // only if the message actually names a token, so a schedule rule written
+                            // with a `$1` in it fails honestly and logs why, rather than typing a raw
+                            // template into a live agent.
+                            captures: None,
+                        },
+                    );
+                }
+                continue;
+            }
             // §2.6 layer 2: this terminal is still settling after a send, so nothing reads it. It does
             // not join `owed`: settling is keyed by the LEAF and a leaf has exactly one process, so
             // every pair on a settling terminal skips together and the process never reaches
@@ -223,12 +316,14 @@ pub async fn evaluate_tick(
             if engine.runtime.is_settling(&tm, now_ms) {
                 continue;
             }
-            // A schedule rule (§6.3) has no monitor step, so it has no cadence and is never due
-            // for a READ — there is nothing for it to read. It joins neither `due` nor `owed`:
-            // a pair that reads nothing cannot consume this terminal's dirty signal and must not
-            // hold its clear back either. Task 22's `schedule_due` branch goes in this same walk
-            // but ABOVE this line: it skips `due_now` and the whole evaluate path and pushes a
-            // `PendingSend` directly, so a rule whose minute has come never reaches here.
+            // A rule with no monitor step has no cadence and is never due for a READ — there is
+            // nothing for it to read. It joins neither `due` nor `owed`: a pair that reads nothing
+            // cannot consume this terminal's dirty signal and must not hold its clear back either.
+            //
+            // A §6.3 schedule rule left the walk at the branch above and never reaches this line,
+            // monitor or no monitor. What survives here is the shape this guard was written for: a
+            // row with neither a monitor nor a schedule, which is not constructible through the
+            // editor and does nothing if it arrives some other way.
             let Some(monitor) = live.rule.graph.monitor.as_ref() else {
                 continue;
             };
@@ -249,6 +344,18 @@ pub async fn evaluate_tick(
                 // same text every tick.
                 owed.insert(pc.clone());
             }
+        }
+        // **After the leaves, and unconditional once `schedule_due` said yes** — including when not
+        // one leaf was reachable and nothing was actually sent. The rule's turn for today has passed.
+        //
+        // The alternative, marking only when a send was pushed, means a 09:00 rule with no watched
+        // terminal at 09:00 delivers its prompt the moment one appears at 14:00: nagging on arrival,
+        // per terminal, which plan 028 Q3 ruled against for arm state and which §6.3's launch seeding
+        // exists to prevent for exactly this rule kind. The cost is the opposite edge — an app that
+        // starts at 08:59:59 with no leaf yet indexed silently skips that day — and a late prompt
+        // typed into a live agent is the worse of the two.
+        if fires_now {
+            engine.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
         }
     }
 
@@ -369,10 +476,10 @@ pub fn evaluate_pair(
     // failed. Neither half is removable — `evaluate` needs a `&Regex` and a `&CondStep`, and these
     // are `Option`s — so this is not a redundant guard to delete but one decision written once.
     //
-    // **Task 22 adds the schedule branch ABOVE this guard**, where a rule whose minute has come is
-    // dispatched. Until then a schedule-only rule is re-examined on every tick and does nothing,
-    // which costs one map lookup per pair per tick and is the interim price of landing §6.4 on its
-    // own; task 22 removes it.
+    // **A schedule rule no longer reaches this function at all**: `evaluate_tick`'s §6.3 branch
+    // takes every rule whose timer is `DailyAt` out of the walk before a pair is ever built. This
+    // guard stays because it is the one that makes the absence of the three input steps a fact the
+    // pure core never learns, and because `dry.rs` reaches `eval::evaluate` by another door.
     let (Some(steps), Some(re)) = (eval::InputSteps::of(&rule.graph), pair.rule.re.as_ref()) else {
         return Evaluated::Unread;
     };
@@ -917,7 +1024,8 @@ mod tests {
     // only ever be one of each.
     use crate::automation_engine::test_host::*;
     use crate::automation::roster::RosterRow;
-    use crate::automation_store::{Finds, Keep};
+    use crate::automation_store::{AutomationRule, Finds, Keep};
+    use chrono::{Datelike, Local, NaiveDate, TimeZone, Weekday};
 
     // =============================================================================================
     // §10.5 — the tap
@@ -1169,6 +1277,276 @@ mod tests {
             fake.written().iter().any(|w| w.contains("stand-up notes?")),
             "the rig cannot send at all, so the schedule rule's silence proves nothing: {:?}",
             fake.written()
+        );
+    }
+
+    // =============================================================================================
+    // 6.3 — the schedule dispatch branch (task 22)
+    // =============================================================================================
+
+    /// The tick's `now_ms` for a given LOCAL wall-clock minute, with the weekday asserted.
+    ///
+    /// **Built FROM local time, never a hard-coded epoch.** `evaluate_tick` converts `now_ms`
+    /// through `schedule::local_now`, which asks the machine's own zone — so a fixed timestamp is
+    /// 09:00 on one runner and 04:00 on another, and *"the tick crosses the minute"* would be a
+    /// claim about where the test happened to run. Going the other way pins the WALL CLOCK, which is
+    /// the only thing a schedule is written in. The weekday is asserted here for the same reason
+    /// `schedule.rs`'s own `day()` helper asserts it: a test that says "Monday" must not quietly be
+    /// about a Saturday, which the mask would refuse.
+    ///
+    /// `.earliest()` is the fall-back hour's answer and is never exercised: a September morning is
+    /// not a skipped or repeated hour in any zone, so `None` here would mean a broken date.
+    fn at_local(y: i32, m: u32, d: u32, weekday: Weekday, hour: u32, minute: u32) -> i64 {
+        let date = NaiveDate::from_ymd_opt(y, m, d).expect("a real date");
+        assert_eq!(date.weekday(), weekday, "{date} is not a {weekday:?}");
+        Local
+            .from_local_datetime(&date.and_hms_opt(hour, minute, 0).expect("a real time"))
+            .earliest()
+            .expect("a local instant that exists")
+            .timestamp_millis()
+    }
+
+    /// The local ordinal `at_local`'s day maps to — `last_fired_day`'s key.
+    fn day_ordinal(y: i32, m: u32, d: u32) -> i32 {
+        NaiveDate::from_ymd_opt(y, m, d).expect("a real date").num_days_from_ce()
+    }
+
+    /// A rig with several terminals and each rule's watched set given explicitly.
+    ///
+    /// `wire` mints exactly ONE terminal and points every rule at it, and that is precisely the
+    /// fixture a schedule rule can pass while broken: ask `schedule_due` per leaf, or mark the day on
+    /// the first one, and target one still fires. The standing lesson — *a fixture that varies only
+    /// the rule dimension cannot test a key with two* — at its fifth site.
+    ///
+    /// The rules go through `reload`, like `wire`'s, so a fixture cannot run a rule the real load
+    /// path would have refused. `reload` also seeds `last_fired_day` from the epoch's local day,
+    /// which is a different day from any tick below and therefore never the reason one fires.
+    fn wire_targets(
+        rules: Vec<AutomationRule>,
+        terminals: &[(&str, &str)],
+        watched: &[(&str, &[&str])],
+    ) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+        let fake = Arc::new(FakeHost::new());
+        for (tm, pc) in terminals {
+            open_terminal(&fake, tm, pc, tm);
+        }
+        for rule in &rules {
+            fake.store.save_rule(rule).unwrap();
+        }
+        let engine = Arc::new(AutomationEngine::new(0));
+        engine.reload(&fake.store, 0).unwrap();
+        for (id, leaves) in watched {
+            engine.runtime.set_watched(id, leaves.iter().map(|tm| tm.to_string()).collect());
+        }
+        let host: Arc<dyn EngineHost> = fake.clone();
+        (engine, fake, host)
+    }
+
+    /// **A schedule rule sends to EVERY target when the minute arrives, and reads no screen** —
+    /// plan 032 6.3, task 22's own gate.
+    ///
+    /// **Three targets, not one, and that is the whole point.** `last_fired_day` is keyed by the
+    /// RULE, so the question and the mark are rule-level while the sends are per leaf: ask once
+    /// before the leaves, push per leaf, mark after them. Asking per leaf, or marking on the first
+    /// one, fires target one and starves two and three — silently, because nothing in the engine
+    /// records a target it skipped, and no single-target fixture can see it.
+    ///
+    /// **`au-read` is what makes the no-screen-read assertion mean anything.** An empty `tailed()`
+    /// is satisfied completely by a recorder that never records; a sibling rule reading its own
+    /// terminal in the same run puts exactly one entry in the list, so one assertion proves both
+    /// that the schedule rule read nothing and that a read would have shown up.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_rule_sends_to_every_target_when_the_minute_arrives_and_reads_nothing() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched"), ctx_rule_saying("au-read", "a reader", 2)],
+            &[("tm-1", "pc-1"), ("tm-2", "pc-2"), ("tm-3", "pc-3"), ("tm-4", "pc-4")],
+            &[("au-sched", &["tm-1", "tm-2", "tm-3"]), ("au-read", &["tm-4"])],
+        );
+        // The reader has output and sits below its threshold, so it reads, arms, and sends nothing.
+        fake.say("pc-4", "ctx:5%\n");
+        engine.runtime.mark_dirty("pc-4");
+
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1", "pc-2", "pc-3"],
+            "every watched target gets the scheduled message, exactly once: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            fake.tailed(),
+            vec!["pc-4"],
+            "a schedule rule reads NO screen — and the reader proves a read would have been recorded"
+        );
+        let mut sent: Vec<String> = log_rows(&fake.store)
+            .into_iter()
+            .filter(|(kind, _, _)| kind == "Sent")
+            .map(|(_, detail, _)| detail)
+            .collect();
+        sent.sort();
+        assert_eq!(sent, vec!["sent to tm-1", "sent to tm-2", "sent to tm-3"]);
+
+        // 6.3: a schedule rule has no arm state and must not disturb one.
+        for tm in ["tm-1", "tm-2", "tm-3"] {
+            assert_eq!(engine.runtime.arm_state("au-sched", tm), ArmState::Unseen, "{tm} armed");
+            assert_eq!(engine.runtime.last_eval("au-sched", tm), None, "{tm} was evaluated");
+        }
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(day_ordinal(2026, 9, 7)),
+            "the day is marked once the leaves are done"
+        );
+    }
+
+    /// **Once a day.** The same minute again, and hours later the same day, send nothing more.
+    ///
+    /// The third tick is not decoration: `run_send` opens an `ECHO_SETTLE_MS` settle window on every
+    /// terminal it writes to, so a second tick inside that window is refused by the settle gate
+    /// whether or not `schedule_due` was ever asked. Five hours later that window is long gone and
+    /// the only thing standing between the rule and a second message is `last_fired_day`.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_rule_fires_once_a_day_and_not_again() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1"), ("tm-2", "pc-2")],
+            &[("au-sched", &["tm-1", "tm-2"])],
+        );
+        let nine = at_local(2026, 9, 7, Weekday::Mon, 9, 0);
+
+        evaluate_tick(&engine, &host, 0, nine).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1", "pc-2"],
+            "premise: it fired at all"
+        );
+
+        evaluate_tick(&engine, &host, 0, nine + BASE_TICK_MS as i64).await;
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 14, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "stand-up notes?"),
+            2,
+            "a schedule fires once a day, not once a tick: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **A dormant target does not stop the schedule reaching its siblings** (4.5).
+    ///
+    /// `tm-2` resolves to no process at all and sorts BETWEEN its two siblings, so a branch that
+    /// gave up on the rule at the first unreachable leaf — or that marked the day there — would
+    /// leave `tm-3` out while `tm-1` looked perfectly healthy.
+    #[tokio::test(start_paused = true)]
+    async fn a_dormant_target_does_not_stop_the_schedule_reaching_its_siblings() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1"), ("tm-3", "pc-3")],
+            &[("au-sched", &["tm-1", "tm-2", "tm-3"])],
+        );
+        assert!(host.process_for_leaf("tm-2").is_none(), "premise: tm-2 is dormant");
+
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1", "pc-3"],
+            "a leaf with no process skips itself and nothing else: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **R6 binds a schedule rule too.** The one `sends.push` in this module lives inside `admit`,
+    /// which is what applies the single-run claim; a schedule branch that pushed directly would opt
+    /// the whole rule kind out of `runs_once`, exactly as 6.2's parked route once did.
+    ///
+    /// Two targets, because the claim is per RULE and a one-terminal fixture cannot tell a per-rule
+    /// claim from a per-pair one.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_once_schedule_rule_sends_once_across_every_target() {
+        let mut once = schedule_only_rule("au-once");
+        once.runs_once = true;
+        let (engine, fake, host) = wire_targets(
+            vec![once],
+            &[("tm-1", "pc-1"), ("tm-2", "pc-2")],
+            &[("au-once", &["tm-1", "tm-2"])],
+        );
+
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "stand-up notes?"),
+            1,
+            "a runs-once schedule typed into every target it watches: {:?}",
+            fake.written()
+        );
+        assert!(!engine.is_live("au-once"), "and it never completed");
+    }
+
+    /// **The TIMER decides the path, not the absence of a monitor** — 6.3: *"a rule whose Timer is
+    /// in schedule mode takes a new evaluation path that never reads a screen"*.
+    ///
+    /// Nothing forbids a rule from carrying both: `timer_problems` and the monitor's own interval
+    /// check constrain neither against the other, and a monitor rule that gains a Wait step through
+    /// the API or an import is exactly this row. Gating the branch on `monitor.is_none()` would
+    /// leave it reading the window four times a second and firing on a crossing as well as on the
+    /// clock — two messages from one rule, on a path 6.3 says reads nothing.
+    ///
+    /// Both halves are needed. At 08:00 the monitor would cross (armed, dirty, over the threshold)
+    /// and must not; at 09:00 the schedule fires and still nothing is read. `au-read` is the live
+    /// control on both ticks.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_rule_that_also_has_a_monitor_reads_nothing_and_fires_on_the_clock() {
+        let mut hybrid = ctx_rule_saying("au-both", "stand-up notes?", 1);
+        hybrid.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+        });
+        let (engine, fake, host) = wire_targets(
+            vec![hybrid, ctx_rule_saying("au-read", "a reader", 2)],
+            &[("tm-1", "pc-1"), ("tm-4", "pc-4")],
+            &[("au-both", &["tm-1"]), ("au-read", &["tm-4"])],
+        );
+        // Everything the monitor path needs, so its silence is a refusal and not a missing input.
+        engine.runtime.set_arm("au-both", "tm-1", ArmState::armed());
+        fake.say("pc-1", "ctx:63%\n");
+        fake.say("pc-4", "ctx:5%\n");
+        engine.runtime.mark_dirty("pc-1");
+        engine.runtime.mark_dirty("pc-4");
+
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 8, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().is_empty(),
+            "the monitor crossed on a rule the clock has not reached: {:?}",
+            fake.written()
+        );
+        assert_eq!(fake.tailed(), vec!["pc-4"], "and the control read a window to prove it could");
+
+        engine.runtime.mark_dirty("pc-1");
+        engine.runtime.mark_dirty("pc-4");
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "the clock came and the rule did not fire: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            fake.tailed(),
+            vec!["pc-4", "pc-4"],
+            "only the control read a screen, on either tick"
+        );
+        assert_eq!(
+            engine.runtime.arm_state("au-both", "tm-1"),
+            ArmState::armed(),
+            "the schedule path must not move an arm state it does not own"
         );
     }
 
@@ -3094,17 +3472,24 @@ mod tests {
 
     /// A second live terminal, with ids that share no substring with the first (§7.4).
     fn open_second_terminal(fake: &Arc<FakeHost>) {
+        open_terminal(fake, "tm-2", "pc-2", "second");
+    }
+
+    /// One more terminal on a rig that is already built. `FakeHost::with_terminal` is the same thing
+    /// at construction time; this is the `&Arc<FakeHost>` form, and §6.3's fixtures need three and
+    /// four of them.
+    fn open_terminal(fake: &Arc<FakeHost>, tm: &str, pc: &str, label: &str) {
         fake.roster.lock().unwrap().push(RosterRow {
-            terminal_id: Some("tm-2".into()),
-            process_id: "pc-2".into(),
+            terminal_id: Some(tm.into()),
+            process_id: pc.into(),
             name: "Terminal-powershell".into(),
             shell: "powershell".into(),
             pid: 102,
-            display_label: Some("second".into()),
+            display_label: Some(label.into()),
             cwd: None,
             command_lines: Vec::new(),
         });
-        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
+        fake.leaves.lock().unwrap().insert(tm.into(), pc.into());
     }
 
     /// **B-3: the log records transitions.** A rule that is working sits `Fired` with its condition
