@@ -159,21 +159,30 @@ pub async fn evaluate_tick(
             // over the parked map. A separate sweep would have to re-derive the cancellation rules
             // itself and would rot silently the first time a fourth one is added.
             //
-            // **Two independent mechanisms, and only one of them is this placement.** A mutation
-            // experiment separates them:
+            // **The gate is `forget_rule`; this placement is a second one over part of the same
+            // ground.** Read the three functions rather than this comment's previous versions —
+            // two of them described a mechanism that is not there.
             //
-            // - **disabled** and **deleted** are true by construction, and specifically BECAUSE the
-            //   drain sits inside this walk: `snapshot_live()` filters `!enabled` and
-            //   `completed_at.is_some()`, so no `Arc<LiveRule>` exists for such a rule at any drain
-            //   location inside it. Move the drain out of the walk and both gates are gone.
-            // - **edited** is NOT. It is pinned by `reload`'s `forget_rule` purge, which drops the
-            //   parked keys for every rule whose `updated_at` moved — an edited rule is still live
-            //   and still walked here, so this placement does nothing for it. Move the drain and
-            //   the edited case stays closed; delete the purge and it opens, wherever the drain
-            //   sits.
+            // - `AutomationRuntime::forget_rule` runs `parked.retain(|(r, _), _| r != rule_id)`, so
+            //   it drops every parked send belonging to one rule.
+            // - `AutomationEngine::reload` calls it for every rule that is absent from the map it
+            //   just built or whose `updated_at` moved. **Disabled** and **deleted** are absent
+            //   (the `!enabled || completed_at.is_some()` filter is `reload`'s own, applied while
+            //   it BUILDS that map, and a deleted row never comes back from `list_rules` at all);
+            //   an **edit** moves `updated_at`. `complete_rule` calls it directly for the fourth
+            //   case, which is not a command and so never reaches `reload`.
+            // - Every command that changes a definition reloads, through `reload_after_commit` —
+            //   `automation_commands.rs` asserts that is the only call site.
             //
-            // The design is sound; the distinction is written down so a future refactor moving the
-            // drain does not believe it is carrying the edited case with it.
+            // So all three cancellations are closed wherever the drain sits, which is why Task 17's
+            // placement mutation killed none of the three tests. `snapshot_live()` filters NOTHING
+            // of its own: it clones the whole `live` map and sorts it.
+            //
+            // What the placement adds is a second, independent gate for **disabled** and **deleted**
+            // only — such a rule is not in `live`, so the walk never reaches any drain inside it —
+            // and an `Arc<LiveRule>` already in hand, which a future drain that has to resolve one
+            // to build its message would inherit. It does nothing for an edited rule, which is
+            // still live and still walked.
             //
             // Ahead of the settle window and the cadence gate, and both are deliberate: neither is
             // about this. Settling means *nothing READS this terminal*, and a drain reads nothing.
@@ -1408,18 +1417,18 @@ mod tests {
     // §6.1 — the three cancellation gates, as three tests, never one parametrised one
     // =============================================================================================
     //
-    // They close three DIFFERENT gates that happen to agree today. Disabled and deleted are cut off
-    // by `snapshot_live()` itself — `reload`'s loop drops a `!enabled` rule from `next` on that check
-    // alone, and a deleted row is simply absent from `store.list_rules()`, so neither rule is in the
-    // live set at all and the walk over it never visits the pair. Edited is different: the rule stays
-    // enabled and stays live, so `snapshot_live()` alone would still return it — what actually stops
-    // it is `reload`'s OWN diff (`automation_engine.rs`'s `previous`/`next` comparison), which calls
-    // `forget_rule` the moment `updated_at` moves, and `forget_rule` is one of the three places
-    // §6.1/Task 16 taught to purge `parked`. A single parametrised test could not tell these three
-    // mechanisms apart if one of them rotted while the other two kept the test green.
+    // They exercise three DIFFERENT routes into one purge. All three end at `forget_rule`, which
+    // `reload` calls for any rule absent from the map it just built or whose `updated_at` moved:
+    // disabled and deleted are absent (the `!enabled` filter is `reload`'s own, and a deleted row
+    // never comes back from `store.list_rules()`), while an edit keeps the rule live and moves
+    // `updated_at` instead. Disabled and deleted are additionally cut off by the walk in
+    // `evaluate_tick`, which visits only what is in `live`; an edited rule is still walked, so for
+    // it the purge is the whole of the gate. A single parametrised test could not tell the three
+    // routes apart if one of them rotted while the other two kept the test green.
 
-    /// **Disabled.** `set_enabled_checked` never touches `updated_at` — the rule drops out of
-    /// `snapshot_live()` on `!rule.enabled` alone.
+    /// **Disabled.** `set_enabled_checked` never touches `updated_at`, so the diff cannot be what
+    /// catches this one: `reload` drops the rule from the map it builds on `!rule.enabled` alone,
+    /// and an id that is absent from that map is one `forget_rule` is called for.
     #[tokio::test(start_paused = true)]
     async fn a_disabled_rule_does_not_fire_its_parked_send() {
         let (engine, fake, host) = rig_with_rule(|g| {
