@@ -25,6 +25,7 @@ use tauri::{Emitter, State};
 
 use crate::automation::events::{ChangedPayload, AUTOMATION_CHANGED};
 use crate::automation::roster::{TargetSnapshot, WatchableTerminal};
+use crate::automation::targeting::resolve_target_sets;
 use crate::automation_engine::dry::DryRunReport;
 use crate::automation_engine::host::EngineHost;
 use crate::automation_store::{
@@ -214,6 +215,48 @@ pub async fn list_watchable_terminals(
             &include_ids.unwrap_or_default(),
             &snapshots,
         ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The ids a draft targets right now, split into its unfiltered match, the part excluded, and what
+/// remains to watch. The renderer supplies the roster it is drawing so the preview and its picker
+/// describe one snapshot; matching itself remains in Rust alongside the evaluator.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationTargetPreview {
+    pub matched: Vec<String>,
+    pub excluded: Vec<String>,
+    pub watching: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn preview_automation_targets(
+    rule: AutomationRule,
+    terminals: Vec<WatchableTerminal>,
+) -> Result<AutomationTargetPreview, String> {
+    tokio::task::spawn_blocking(move || {
+        let rows = terminals
+            .into_iter()
+            .filter(|terminal| terminal.alive)
+            .map(|terminal| crate::automation::roster::RosterRow {
+                terminal_id: Some(terminal.terminal_id),
+                process_id: terminal.process_id.unwrap_or_default(),
+                name: String::new(),
+                shell: terminal.shell.unwrap_or_default(),
+                pid: terminal.pid.unwrap_or_default(),
+                display_label: terminal.display_label,
+                cwd: terminal.cwd,
+                command_lines: terminal.command_lines,
+            })
+            .collect::<Vec<_>>();
+        let resolved = resolve_target_sets(&rule, &rows, None);
+        Ok(AutomationTargetPreview {
+            matched: resolved.matched.into_iter().collect(),
+            excluded: resolved.excluded.into_iter().collect(),
+            watching: resolved.watching.into_iter().collect(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -890,7 +933,7 @@ mod source_tests {
     fn every_command_in_this_module_is_registered_in_lib() {
         let lib = crate::automation_engine::test_host::strip_comments(include_str!("lib.rs"));
         let names: Vec<String> = command_bodies().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names.len(), 14, "the command list changed: {:?}", names);
+        assert_eq!(names.len(), 15, "the command list changed: {:?}", names);
         for name in &names {
             assert!(
                 lib.contains(&format!("automation_commands::{},", name)),

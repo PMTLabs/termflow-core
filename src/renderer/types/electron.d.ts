@@ -385,8 +385,8 @@ export interface ElectronAPI {
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
 
-  // Terminal Automations (Plan 028) — the fourteen commands of `automation_commands.rs`.
-  // The first eleven are in the order that file declares them; the three id-only writers
+  // Terminal Automations (Plan 028) — the fifteen commands of `automation_commands.rs`.
+  // The first twelve are in the order that file declares them; the three id-only writers
   // that replaced a whole-rule `saveAutomation` — `addAutomationTarget`,
   // `removeAutomationTarget`, `setAutomationVerbose` — are listed last here as the newest
   // of them. All optional and all Tauri-only: the store is
@@ -404,6 +404,10 @@ export interface ElectronAPI {
     ruleId: string | null,
     includeIds: string[] | null,
   ) => Promise<WatchableTerminal[]>;
+  previewAutomationTargets?: (
+    rule: AutomationRule,
+    terminals: WatchableTerminal[],
+  ) => Promise<AutomationTargetPreview>;
   dryRunAutomation?: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
   saveAutomation?: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
   deleteAutomation?: (id: string, origin: string) => Promise<boolean>;
@@ -791,5 +795,16 @@ export interface WatchableTerminal {
   pid?: number | null;
   /** The working folder, from OSC or the process snapshot. `folder` in §7.8's prose. */
   cwd?: string | null;
+  /** The tab/pane label that `Tab name contains` resolves against. */
+  displayLabel?: string | null;
+  /** The foreground process chain that `Command contains` resolves against. */
+  commandLines?: string[];
   alive: boolean;
+}
+
+/** The backend-owned target resolution the editor renders; every field is an id list, never a count. */
+export interface AutomationTargetPreview {
+  matched: string[];
+  excluded: string[];
+  watching: string[];
 }

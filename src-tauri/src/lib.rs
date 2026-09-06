@@ -1499,6 +1499,7 @@ pub fn run() {
         automation_commands::get_automation_runtime,
         automation_commands::load_automation_log,
         automation_commands::list_watchable_terminals,
+        automation_commands::preview_automation_targets,
         automation_commands::dry_run_automation,
         automation_commands::save_automation,
         automation_commands::add_automation_target,

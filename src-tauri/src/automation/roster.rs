@@ -54,7 +54,7 @@ pub struct TargetSnapshot {
 }
 
 /// One picker row.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchableTerminal {
     pub terminal_id: String,
@@ -63,6 +63,17 @@ pub struct WatchableTerminal {
     pub shell: Option<String>,
     pub pid: Option<u32>,
     pub cwd: Option<String>,
+    /// The tab/pane label the targeting resolver reads for `Tab name contains`. This is not the
+    /// terminal's internal `name`: renderer-created terminals all share a `Terminal-{shell}` name,
+    /// so that would make a shell name look like a tab title.
+    pub display_label: Option<String>,
+    /// The foreground process chain the targeting resolver reads for `Command contains`.
+    ///
+    /// The editor sends its roster back to the preview command, rather than implementing a second
+    /// matcher in TypeScript. Keeping the chain on this DTO is what lets that command use the same
+    /// resolver as the evaluator.
+    #[serde(default)]
+    pub command_lines: Vec<String>,
     /// `false` means "not open right now" — **dormant, never dead**. Session restore re-registers the
     /// same `tm-` under a new `pc-`, so absence is not death.
     pub alive: bool,
@@ -101,6 +112,8 @@ pub fn build(
             shell: Some(row.shell.clone()),
             pid: Some(row.pid),
             cwd: row.cwd.clone().or_else(|| snap.and_then(|s| s.folder.clone())),
+            display_label: row.display_label.clone(),
+            command_lines: row.command_lines.clone(),
             alive: true,
         });
     }
@@ -117,6 +130,8 @@ pub fn build(
             shell: None,
             pid: None,
             cwd: snap.and_then(|s| s.folder.clone()),
+            display_label: None,
+            command_lines: Vec::new(),
             alive: false,
         });
     }

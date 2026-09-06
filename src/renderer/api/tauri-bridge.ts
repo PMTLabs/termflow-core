@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, DryRunReport } from '../types/electron';
+import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -222,6 +222,7 @@ interface ElectronAPI {
   getAutomationRuntime: () => Promise<AutomationStatePayload>;
   loadAutomationLog: (ruleId: string | null, newestFirst: boolean, limit: number) => Promise<AutomationLogEntry[]>;
   listWatchableTerminals: (ruleId: string | null, includeIds: string[] | null) => Promise<WatchableTerminal[]>;
+  previewAutomationTargets: (rule: AutomationRule, terminals: WatchableTerminal[]) => Promise<AutomationTargetPreview>;
   dryRunAutomation: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
   saveAutomation: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
   deleteAutomation: (id: string, origin: string) => Promise<boolean>;
@@ -893,7 +894,7 @@ const tauriBridge: ElectronAPI = {
   // --- Terminal Automations (Plan 028) ---
   //
   // Thin `invoke` wrappers over `automation_commands.rs`, one per command. The first
-  // eleven follow that file's declaration order; the three id-only writers that replaced a
+  // twelve follow that file's declaration order; the three id-only writers that replaced a
   // whole-rule `saveAutomation` are appended last here as the newest of them, wherever
   // they sit in the Rust module. Every argument name
   // here is the camelCase form Tauri derives from the Rust parameter — `rule_id` on the
@@ -906,6 +907,8 @@ const tauriBridge: ElectronAPI = {
     invoke<AutomationLogEntry[]>('load_automation_log', { ruleId, newestFirst, limit }),
   listWatchableTerminals: async (ruleId, includeIds) =>
     invoke<WatchableTerminal[]>('list_watchable_terminals', { ruleId, includeIds }),
+  previewAutomationTargets: async (rule, terminals) =>
+    invoke<AutomationTargetPreview>('preview_automation_targets', { rule, terminals }),
   dryRunAutomation: async (rule, terminalId) =>
     invoke<DryRunReport>('dry_run_automation', { rule, terminalId }),
   saveAutomation: async (rule, origin) =>
