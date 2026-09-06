@@ -58,7 +58,7 @@ import type { NodeFace, NodeState } from './automationDerive';
 import type { StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
 import type { CanvasOpening, NodePos } from './automationDraft';
-import { draftFromRule, draftReducer, isDirty } from './automationDraft';
+import { draftFromRule, draftReducer, isDirty, ruleFromDraft } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
@@ -275,9 +275,18 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // as the only exit. Clearing the Message on an enabled rule to retype it is enough to reach
         // it. So the rule the user drew is written whole, and the one thing that cannot survive the
         // trip — permission to RUN — is dropped, said out loud, and one click from being restored.
-        const blockingNow = blockingProblems(validate(current.rule));
-        const disarmed = current.rule.enabled && blockingNow.length > 0;
-        const outgoing = disarmed ? { ...current.rule, enabled: false } : current.rule;
+        //
+        // **`ruleFromDraft(current)`, never `current.rule`.** That function is documented as "what
+        // a save sends" and `isDirty` already asks it what a save would write — but nothing on this
+        // path called it, so the two disagreed: the canvas arrangement lived in `draft.layout` and
+        // was injected only by `ruleFromDraft`, which meant dragging a card marked the draft dirty
+        // and then saved the positions it opened with. It is also where the superseded v1
+        // `op`/`threshold` pair is dropped from a clause-carrying row (§5.3), which used to happen
+        // in the reducer and cost a v1 rule its only comparison on add-then-remove.
+        const writing = ruleFromDraft(current);
+        const blockingNow = blockingProblems(validate(writing));
+        const disarmed = writing.enabled && blockingNow.length > 0;
+        const outgoing = disarmed ? { ...writing, enabled: false } : writing;
 
         inFlight.current = true;
         setSaving(true);

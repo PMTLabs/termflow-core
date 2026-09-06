@@ -112,7 +112,18 @@ describe('draft ⇄ row', () => {
                 },
             },
         };
-        expect(ruleFromDraft(draftFromRule(overTheWire(full)))).toEqual(full);
+        // **One deliberate normalisation, and it is not a dropped field.** This fixture carries the
+        // v1 `op`/`threshold` pair AND a clause list, because it inherits the pair from template 0
+        // and sets clauses of its own — a shape §5.3 forbids on a saved row. `ruleFromDraft` drops
+        // the superseded pair from any row that carries clauses, so the round trip is identity
+        // everywhere except there. Stated as an explicit expectation rather than by softening the
+        // comparison, so a field that goes missing for any OTHER reason still fails here. The pair
+        // itself is still pinned as a carried field by the six-template case above, whose rules
+        // have no clauses.
+        expect(ruleFromDraft(draftFromRule(overTheWire(full)))).toEqual({
+            ...full,
+            graph: { ...full.graph, cond: { ...full.graph.cond, op: null, threshold: null } },
+        });
     });
 
     /**
@@ -217,11 +228,24 @@ describe('a v1 rule that gains a clause', () => {
         // The paired negative, and the reason the clearing is conditional: removing the last clause
         // from a v1 rule must leave it the rule it was, not silently strip its only comparison and
         // turn it into one that fires on every match.
-        const emptied = draftReducer(draftFromRule(v1()), { type: 'clauses', clauses: [] });
-        const saved = ruleFromDraft(emptied).graph.cond;
-        expect(saved.clauses).toEqual([]);
+        //
+        // **Through the real ADD-then-REMOVE sequence.** This test used to dispatch `{ clauses: [] }`
+        // against a fresh draft, which never visits the state the defect lives in — a draft that
+        // HAS held clauses and no longer does. `+ Add a comparison` nulled the pair on the way in
+        // and `Remove comparison 1` could not put it back, so the rule was blocked and would have
+        // been saved with its only comparison gone.
+        const added = draftReducer(draftFromRule(v1()), {
+            type: 'clauses',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'lt', value: 90 } } }],
+        });
+        const emptied = draftReducer(added, { type: 'clauses', clauses: [] });
+        const saved = overTheWire(ruleFromDraft(emptied)).graph.cond;
+        expect(saved.clauses ?? []).toEqual([]);
         expect(saved.op).toBe('gt');
         expect(saved.threshold).toBe(25);
+        // The user-visible consequence, and the one that reaches the store: a rule stripped of its
+        // only comparison blocks, and the editor saves a blocked draft with `enabled` cleared.
+        expect(problems(ruleFromDraft(emptied)).map((p) => p.code)).not.toContain('cond.incomplete');
     });
 });
 

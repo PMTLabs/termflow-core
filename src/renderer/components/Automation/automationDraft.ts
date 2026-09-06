@@ -422,9 +422,30 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  *
  * Injected HERE rather than mirrored into `draft.rule` on every drag, so `draft.layout` stays the
  * single owner of the arrangement and the two cannot disagree.
+ *
+ * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
+ * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
+ * again — and leaving it on a clause-carrying row writes two contradictory conditions, where THIS
+ * build runs the clause and an older one ignores `clauses` entirely and runs `> 25`.
+ *
+ * Asked HERE rather than in the reducer's `clauses` case, which is where it was: a gate in the
+ * caller is one every later path opts out of, and this one was already defeated by the shortest
+ * sequence there is. *+ Add a comparison* nulled the pair on the way in, *Remove comparison 1* left
+ * the list empty, and the rule was then blocked and saved with its only comparison gone. Asked of
+ * the row being WRITTEN, an empty list simply never reaches the clearing.
+ *
+ * **Only when the pair is actually there.** Writing `op: null` unconditionally would ADD two keys
+ * to every v2 rule, whose stored `cond` omits them (`skip_serializing_if = "Option::is_none"`) —
+ * and `isDirty` compares this against the rule as it came off the wire, so every clause rule would
+ * have opened reading dirty. The same both-sides rule `comparable` and `draftFromRule` follow.
  */
 export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
-    return { ...draft.rule, graph: { ...draft.rule.graph, layout: draft.layout } };
+    const graph = { ...draft.rule.graph, layout: draft.layout };
+    const cond = graph.cond;
+    if (cond && (cond.clauses ?? []).length > 0 && (cond.op != null || cond.threshold != null)) {
+        graph.cond = { ...cond, op: null, threshold: null };
+    }
+    return { ...draft.rule, graph };
 }
 
 /**
@@ -584,21 +605,14 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                 ? withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } })
                 : draft;
         case 'clauses':
-            // **A clause list SUPERSEDES `op`/`threshold`, so adding one has to clear the pair.**
-            // §5.3 makes them v1-only: read at load, folded into `clauses` by `fold_v1_clauses`,
-            // never written again. Merging `clauses` alone left them on the row, and
-            // `skip_serializing_if = "Option::is_none"` re-wrote them on the next save — a row
-            // carrying two contradictory conditions, where THIS build runs the clause and an older
-            // one ignores `clauses` entirely and runs `> 25`.
-            //
-            // Only when the resulting list is non-empty: removing the last clause from a v1 rule
-            // must leave it the rule it was, not silently strip its only comparison.
+            // **The clause list, and nothing else.** A clause list supersedes `op`/`threshold`
+            // (§5.3), but clearing the pair HERE is a gate in the caller: it fires on the way in,
+            // so `+ Add a comparison` followed by `Remove comparison 1` left a v1 rule with an
+            // empty list AND no pair — blocked, and saved with its only comparison gone. The
+            // clearing belongs to `ruleFromDraft`, which asks the question of the row actually
+            // being written rather than of a keystroke on the way to it.
             if (!rule.graph.cond) return draft;
-            return withGraph(draft, {
-                cond: action.clauses.length > 0
-                    ? { ...rule.graph.cond, clauses: action.clauses, op: null, threshold: null }
-                    : { ...rule.graph.cond, clauses: action.clauses },
-            });
+            return withGraph(draft, { cond: { ...rule.graph.cond, clauses: action.clauses } });
         case 'action':
             return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
         case 'select':
