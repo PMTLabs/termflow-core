@@ -130,7 +130,12 @@ describe('the inspector panels — rendered, per template', () => {
             // per-template loop above reads is the precise oracle for "the value this panel is
             // SHOWING", exactly as that loop's own comment already argues.
             await show(rule, 'action');
-            const shownMessage = container.querySelector('.au-cap')?.textContent ?? '';
+            // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
+            // below pass vacuously against an empty string whenever the preview was blocked and
+            // `.au-cap` was absent from the DOM altogether.
+            const capNode = container.querySelector('.au-cap');
+            expect(capNode).not.toBeNull();
+            const shownMessage = capNode!.textContent ?? '';
             for (const other of others) {
                 if (other.graph.action.message === rule.graph.action.message) continue;
                 expect(shownMessage).not.toContain(other.graph.action.message);
@@ -481,5 +486,91 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
             { sample: { 1: '17' } },
         );
         expect(preview()?.textContent).not.toContain('$1');
+    });
+
+    /**
+     * Milestone M1 review, Important 1. The plan's own flagship example: `\S` is not in
+     * `sayPattern`'s escape table, so its paraphrase — and with it `sampleFromPattern`'s worked
+     * example — is `null` for this pattern. Before this fix, `previewSubstitute`'s `sample[key] ??
+     * ''` rendered that identically to "this optional group did not match", so the preview showed
+     * `Fix the  failing tests in ` for a message that would actually type real captured text. Both
+     * tokens are IN RANGE (the pattern has two groups), so the preview must not be `blocked` —
+     * there is nothing wrong with the message, only nothing yet to show for it.
+     */
+    it('renders a placeholder — not nothing — for a token with no derivable sample, and says the preview is an example', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: 'FAILED (\\d+) tests in (\\S+)',
+                    keep: 'brackets',
+                },
+                action: { ...base.graph.action, message: 'Fix the $1 failing tests in $2', substitute: true },
+            },
+        };
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(<ActionPanel draft={draft} model={model} dispatch={noop} />);
+        });
+
+        const preview = container.querySelector('[data-testid="action-preview"]');
+        expect(preview?.classList.contains('blocked')).toBe(false);
+
+        const placeholders = [...container.querySelectorAll('.au-tok-ph')].map((el) => el.textContent);
+        expect(placeholders).toEqual(['⟨$1⟩', '⟨$2⟩']);
+
+        // The literal text around the placeholders is still shown — only the two tokens lack a
+        // sample.
+        expect(preview?.textContent).toContain('Fix the');
+        expect(preview?.textContent).toContain('failing tests in');
+
+        // And the panel says plainly that this is a guessed example, not a real capture.
+        expect(container.textContent).toContain('This preview uses an example');
+    });
+
+    /**
+     * The paired negative: once a real sample is supplied — a test pinning one, or in future a
+     * real dry-run capture — the SAME pattern resolves normally and carries no "this is an
+     * example" disclaimer, because it is no longer a guess.
+     */
+    it('does not call the preview an example once a real sample resolves every token', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: 'FAILED (\\d+) tests in (\\S+)',
+                    keep: 'brackets',
+                },
+                action: { ...base.graph.action, message: 'Fix the $1 failing tests in $2', substitute: true },
+            },
+        };
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(
+                <ActionPanel
+                    draft={draft}
+                    model={model}
+                    dispatch={noop}
+                    sample={{ 1: '17', 2: 'a.ts' }}
+                />,
+            );
+        });
+
+        expect(container.querySelector('.au-tok-ph')).toBeNull();
+        expect(container.querySelector('[data-testid="action-preview"]')?.textContent)
+            .toContain('Fix the 17 failing tests in a.ts');
+        expect(container.textContent).not.toContain('This preview uses an example');
     });
 });

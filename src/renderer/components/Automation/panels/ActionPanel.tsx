@@ -21,6 +21,7 @@ import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
 import { compilePattern, groupsOf } from '../automationValidation';
 import { previewSubstitute } from '../automationTokens';
+import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
 
@@ -45,13 +46,22 @@ type ChipInfo = { text: string; dead: boolean };
  * A default sample, when the caller does not supply one: run the pattern's OWN worked example back
  * through the SAME pattern. Never invents a value beyond what `ParsePanel` already shows the user
  * for this rule, so the two panels cannot disagree about what a match here would look like.
+ *
+ * **Returns `null`, not `{}`, when there is nothing to derive from** — `sayPattern` is a
+ * best-effort paraphraser over a fixed vocabulary and returns `null` for anything outside it
+ * (`\S` is not on that list; `\s` is), so a pattern like the plan's own flagship example,
+ * `FAILED (\d+) tests in (\S+)`, has no worked example at all. `null` here is what lets
+ * `previewSubstitute` tell "I have no sample" apart from "this group is declared and legitimately
+ * empty" — collapsing the two into `{}` is exactly the M1 review bug this return type exists to
+ * rule out. Exported for a direct test: this is the ONLY sample source in production
+ * (`AuInspector.tsx` passes no `sample`), so it runs for every real user.
  */
-function sampleFromPattern(find: string, keep: AutomationKeep): Record<string, string> {
+export function sampleFromPattern(find: string, keep: AutomationKeep): Record<string, string> | null {
     const re = compilePattern(find);
-    if (!re) return {};
+    if (!re) return null;
     const worked = sayPattern(find, keep)?.example ?? null;
     const m = worked ? re.exec(worked) : null;
-    if (!m) return {};
+    if (!m) return null;
     const out: Record<string, string> = {};
     m.forEach((g, i) => {
         if (g !== undefined) out[String(i)] = g;
@@ -71,11 +81,22 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const compiled = compilePattern(parse.find);
     const patternReady = compiled !== null && parse.find.trim().length > 0;
     const groups = patternReady ? groupsOf(parse.find) : { count: 0, names: new Set<string>() };
+    // `sample === undefined` means the CALLER supplied nothing — every real caller today
+    // (`AuInspector.tsx`), so this is a guessed example, not a captured value. A caller that DOES
+    // pass one (a test pinning exact values, or a future dry-run capture) is measured, even when
+    // the object it passes is `{}`.
+    const sampleIsDerived = sample === undefined;
     const effectiveSample = sample ?? sampleFromPattern(parse.find, parse.keep);
     const substitute = action.substitute === true;
 
     const preview = !substitute
-        ? { blocked: false as const, text: action.message }
+        ? {
+            blocked: false as const,
+            // From the MODEL (`stepValues(rule,'action').message`), so an empty message previews
+            // as the same "nothing to send" placeholder the node face and problem list use —
+            // not a bare `> ⏎` a second source of truth would draw.
+            parts: [{ kind: 'text', text: model.values.message.text }] as PreviewPart[],
+        }
         : !patternReady
             ? {
                 blocked: true as const,
@@ -84,12 +105,16 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
             : (() => {
                 const result = previewSubstitute(action.message, groups, effectiveSample);
                 return result.ok
-                    ? { blocked: false as const, text: result.text }
+                    ? { blocked: false as const, parts: result.parts }
                     : {
                         blocked: true as const,
                         text: `Nothing would be sent — ${result.badToken} has nothing to stand for.`,
                     };
             })();
+
+    // Only true while an actually-resolved, guessed preview is on screen — a blocked preview
+    // already explains itself, and a caller-supplied sample is not a guess.
+    const showsGuessedExample = substitute && sampleIsDerived && !preview.blocked;
 
     // One chip per group the pattern declares, plus $0 (the whole match) and $$ (the escape), plus
     // ONE extra chip past the last real group — marked `.dead` — so the boundary itself is visible
@@ -146,7 +171,17 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                     ))}
                 </div>
                 <AuHelp>
-                    Click a token to insert it. <code>$$</code> types a real dollar sign.
+                    {substitute ? (
+                        <>
+                            Click a token to insert it. <code>$$</code> types a real dollar sign.
+                        </>
+                    ) : (
+                        <>
+                            Click a token to insert it. With <b>Insert captured values</b> off,
+                            below, it types as the literal characters shown — turn that on to
+                            substitute a captured value instead.
+                        </>
+                    )}
                 </AuHelp>
             </AuField>
 
@@ -204,17 +239,41 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                         <span>{preview.text}</span>
                     ) : (
                         <>
-                            &gt; <span className="au-cap">{preview.text}</span>
-                            {/* From the MODEL, like the message beside it. `stepValues(rule,'action').send`
-                                exists for exactly this fact, and a panel reading `action.submit` directly
-                                for something it draws is the shape `automationDerive` is here to keep out —
-                                one renderer describing the rule from a second source. */}
+                            &gt;{' '}
+                            <span className="au-cap">
+                                {preview.parts.map((part, i) =>
+                                    part.kind === 'placeholder' ? (
+                                        <span
+                                            key={i}
+                                            className="au-tok-ph"
+                                            title={`${part.token} has no example value to show here yet`}
+                                        >
+                                            {`⟨${part.token}⟩`}
+                                        </span>
+                                    ) : (
+                                        <React.Fragment key={i}>{part.text}</React.Fragment>
+                                    ),
+                                )}
+                            </span>
+                            {/* This ⏎ badge reads the MODEL (`stepValues(rule,'action').send`) — a
+                                panel reading `action.submit` directly for something it draws is the
+                                shape `automationDerive` is here to keep out. The message text beside
+                                it does the same when substitution is off (`model.values.message.text`,
+                                above); with substitution on, `previewSubstitute` computes a NEW string
+                                from `action.message`, `groups` and the sample instead — substitution
+                                has no model field to read in its place. */}
                             {model.values.send.text === SEND_PHRASES.submit && (
                                 <span className="au-enter">⏎</span>
                             )}
                         </>
                     )}
                 </div>
+                {showsGuessedExample && (
+                    <AuHelp>
+                        This preview uses an example value made up from your pattern, not real
+                        captured output.
+                    </AuHelp>
+                )}
             </AuField>
         </>
     );

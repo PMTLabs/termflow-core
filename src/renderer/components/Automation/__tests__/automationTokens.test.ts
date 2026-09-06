@@ -9,8 +9,8 @@
  * both languages, is what a future edit to one side's `scan` has to also break here to go
  * unnoticed.
  */
-import { tokensUsed } from '../automationTokens';
-import type { Token } from '../automationTokens';
+import { previewSubstitute, tokensUsed } from '../automationTokens';
+import type { PreviewPart, Token } from '../automationTokens';
 
 const group = (n: number): Token => ({ kind: 'group', n, text: `$${n}` });
 const named = (name: string): Token => ({ kind: 'named', name, text: `\${${name}}` });
@@ -37,5 +37,55 @@ describe('tokensUsed — the shared grammar table', () => {
 
     it.each(table)('%s', (input, want) => {
         expect(tokensUsed(input)).toEqual(want);
+    });
+});
+
+/**
+ * Milestone M1 review, Important 1: `sample === null` (no example to read at all) and
+ * `sample = {}` (a real match where every declared group legitimately did not participate) are
+ * two different facts, and `previewSubstitute` used to render them identically — `sample[key] ??
+ * ''` turned "I have nothing" and "this optional group is empty" into the same empty string.
+ * These pin the two apart, by the `parts` shape rather than a flattened string.
+ */
+describe('previewSubstitute — a null sample is not the same fact as an empty one', () => {
+    const groups = { count: 1, names: new Set<string>() };
+    const text = (s: string): PreviewPart => ({ kind: 'text', text: s });
+    const placeholder = (token: string): PreviewPart => ({ kind: 'placeholder', token });
+
+    it('resolves a declared group from a real (possibly empty) sample', () => {
+        expect(previewSubstitute('fix $1', groups, { '1': '17' })).toEqual({
+            ok: true,
+            parts: [text('fix 17')],
+        });
+    });
+
+    it('a declared group ABSENT from a real sample resolves to an empty string, not a placeholder', () => {
+        // `{}` IS a real sample — group 1 exists in the pattern but did not participate in this
+        // particular match, which plan 032 §4.4 says substitutes to the empty string.
+        expect(previewSubstitute('fix $1 tests', groups, {})).toEqual({
+            ok: true,
+            parts: [text('fix  tests')],
+        });
+    });
+
+    it('a null sample marks every in-range token as a PLACEHOLDER instead of resolving it', () => {
+        expect(previewSubstitute('fix $1 tests', groups, null)).toEqual({
+            ok: true,
+            parts: [text('fix '), placeholder('$1'), text(' tests')],
+        });
+    });
+
+    it('a null sample still refuses a token beyond the pattern, exactly like a real one', () => {
+        expect(previewSubstitute('fix $9', groups, null)).toEqual({
+            ok: false,
+            badToken: '$9',
+        });
+    });
+
+    it('a bare token with a null sample is a single placeholder part, with no empty text either side', () => {
+        expect(previewSubstitute('$1', groups, null)).toEqual({
+            ok: true,
+            parts: [placeholder('$1')],
+        });
     });
 });

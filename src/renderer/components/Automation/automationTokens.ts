@@ -106,8 +106,18 @@ export function tokensUsed(message: string): Token[] {
     return out;
 }
 
+export type PreviewPart =
+    | { kind: 'text'; text: string }
+    /**
+     * A token the pattern declares, and that is in range, but this call has NO sample value to
+     * show for it — as opposed to a declared group that legitimately did not participate in a
+     * real match, which resolves to an empty `text` part, not this. Only appears when `sample`
+     * itself is `null`; see `previewSubstitute`'s own doc.
+     */
+    | { kind: 'placeholder'; token: string };
+
 export type PreviewResult =
-    | { ok: true; text: string }
+    | { ok: true; parts: PreviewPart[] }
     | { ok: false; badToken: string };
 
 /**
@@ -120,27 +130,52 @@ export type PreviewResult =
  * what that send would look like before the user saves, the same way `ParsePanel`'s worked example
  * shows a match before a dry run has ever been made.
  *
- * `groups` is `automationValidation.groupsOf`'s own return shape, and `sample` stands in for a real
- * capture: keyed the way `groups` reports them — a numbered group by its number as a string
- * (`'0'`, `'1'`, …), a named one by its name. A group the pattern DECLARES but `sample` has no
- * entry for resolves to an empty string, exactly like an optional group that did not match on this
- * particular line (mockup §05); a token the pattern does not declare at all is refused, exactly
- * like the real send — reported here as the first such token, in the message's own order.
+ * `groups` is `automationValidation.groupsOf`'s own return shape. `sample` stands in for a real
+ * capture, keyed the way `groups` reports them — a numbered group by its number as a string
+ * (`'0'`, `'1'`, …), a named one by its name — and its two possible shapes are two different
+ * facts, which plan 032 §4.4 tells apart and this function must not collapse into one:
+ *
+ * - **`sample` is an object** (even `{}`): a REAL match happened. A group the pattern DECLARES
+ *   but the object has no entry for resolves to an empty `text` part, exactly like an optional
+ *   group that legitimately did not participate on this particular line.
+ * - **`sample` is `null`**: there is no match to read AT ALL (`ActionPanel.sampleFromPattern`
+ *   could not derive a worked example for this pattern). Every in-range token then becomes a
+ *   `{ kind: 'placeholder' }` part instead of resolving to a value, so the caller can render an
+ *   honest "no example yet" marker. Collapsing this into `sample[key] ?? ''` — this function's
+ *   own bug before this fix — renders "I have no sample value" identically to "the pattern
+ *   declares this group but it did not participate", which is true only for a real match.
+ *
+ * A token the pattern does not declare at all is refused, exactly like the real send — reported
+ * here as the first such token, in the message's own order.
  */
 export function previewSubstitute(
     message: string,
     groups: { count: number; names: Set<string> },
-    sample: Record<string, string>,
+    sample: Record<string, string> | null,
 ): PreviewResult {
-    let out = '';
+    const parts: PreviewPart[] = [];
+    let text = '';
+    const flushText = () => {
+        if (text.length > 0) {
+            parts.push({ kind: 'text', text });
+            text = '';
+        }
+    };
     for (const seg of scan(message)) {
-        out += seg.lit;
+        text += seg.lit;
         const { token } = seg;
         if (!token) continue;
         const inRange = token.kind === 'group' ? token.n <= groups.count : groups.names.has(token.name);
         if (!inRange) return { ok: false, badToken: token.text };
+        if (sample === null) {
+            flushText();
+            parts.push({ kind: 'placeholder', token: token.text });
+            continue;
+        }
         const key = token.kind === 'group' ? String(token.n) : token.name;
-        out += sample[key] ?? '';
+        text += sample[key] ?? '';
     }
-    return { ok: true, text: out };
+    flushText();
+    if (parts.length === 0) parts.push({ kind: 'text', text: '' });
+    return { ok: true, parts };
 }
