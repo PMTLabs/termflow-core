@@ -73,6 +73,8 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
 }) => {
     const state = automationRowState(rule, pairs, now);
     const sentence = describeRule(rule);
+    // Schedules target terminals to send a message; only event rules watch those terminals' output.
+    const targetVerb = rule.graph.timer && 'dailyAt' in rule.graph.timer.mode ? 'Sending to' : 'Watching';
     const missing = Object.entries(pairs ?? {})
         .filter(([, p]) => p.missing)
         .map(([tm]) => tm);
@@ -115,7 +117,7 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
 
                 <div className="au-meta">
                     <span className="au-k">
-                        ◉ Watching <span className="au-term">{describeWatching(rule, pairs)}</span>
+                        ◉ {targetVerb} <span className="au-term">{describeWatching(rule, pairs)}</span>
                     </span>
                     {watched.length > 0 && (
                         <span className="au-k">

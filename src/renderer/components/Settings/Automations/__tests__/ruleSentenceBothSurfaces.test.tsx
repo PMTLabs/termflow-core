@@ -132,4 +132,37 @@ describe('the rule sentence, on both surfaces that draw it', () => {
             expect(textOf(surface)).toContain('prepare to do context-hand-off');
         }
     });
+
+    it('sends to schedule targets but keeps watching event-rule targets', async () => {
+        const { monitor: _monitor, parse: _parse, cond: _cond, ...scheduleGraph } = WAITING_RULE.graph;
+        const schedule: AutomationRule = {
+            ...WAITING_RULE,
+            graph: {
+                ...scheduleGraph,
+                timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } },
+            },
+        };
+        const row = (rule: AutomationRule) => (
+            <AutomationRow
+                rule={rule}
+                pairs={undefined}
+                now={1_700_000_000_000}
+                onToggle={() => {}}
+                onEdit={() => {}}
+                onDuplicate={() => {}}
+                onLog={() => {}}
+                onDelete={() => {}}
+                onReset={() => {}}
+                onForget={() => {}}
+            />
+        );
+
+        await act(async () => root.render(row(schedule)));
+        expect(textOf('.au-meta')).not.toContain('Watching');
+        expect(textOf('.au-meta')).toContain('Sending to');
+        expect(textOf('.au-meta')).toContain('command contains "claude"');
+
+        await act(async () => root.render(row(WAITING_RULE)));
+        expect(textOf('.au-meta')).toContain('Watching');
+    });
 });
