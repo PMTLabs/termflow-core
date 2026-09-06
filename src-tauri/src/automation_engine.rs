@@ -1258,6 +1258,54 @@ mod tests {
         }
     }
 
+    /// **The one window `invalidated_marks` catches and neither other term does.**
+    ///
+    /// The lifecycle table above passes `false` for that term in every row, so deleting
+    /// `|| invalidated_mark` from `has_unobserved_daily_window` leaves the whole suite green — it
+    /// was a live term with nothing naming the event only it catches, which is the definition of
+    /// dead code with a rationale.
+    ///
+    /// This is that event, and the other two terms provably cannot reach it. A rule that is live on
+    /// both sides of the reload is not `newly_live`. A rule whose `updated_at` did not change takes
+    /// the forget loop's early `continue`, so it is never `target_changed`. What is left is a mark
+    /// whose minute does not match the definition it is filed under: reconciliation drops it, and
+    /// the day it was standing for has not been observed by anything.
+    ///
+    /// Written through the runtime rather than through the editor on purpose. No GUI path is known
+    /// to produce it — the walk files a mark under the live rule's own minute, and a store edit
+    /// bumps `updated_at` — so the term is defence against a future writer that files one under a
+    /// different minute. **That is exactly why it needs a test instead of a comment**: if the state
+    /// is ever reachable, this pins what the engine owes it; if the term is ever deleted, this says
+    /// what was lost.
+    #[test]
+    fn a_mark_filed_under_a_stale_minute_leaves_todays_target_unobserved() {
+        let monday = monday_2026_09_07();
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+        });
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        // Live before and after, and never edited: `newly_live` and `target_changed` are both out.
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 17 * 60);
+
+        engine.reload_at(&store, 1_000, at(monday, 14 * 60)).unwrap();
+
+        assert_eq!(
+            log_rows(&store).len(),
+            1,
+            "the stale-minute mark is reconciled away, so 09:00 today was never observed and is held"
+        );
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(monday),
+            "and the seed spends today against the minute the rule actually targets"
+        );
+    }
+
     /// **The 09:00 prompt must not arrive at 14:00 because the app started late** (§6.3, plan 028 Q3).
     ///
     /// `schedule_due` compares `now >= target` — which is what keeps a spring-forward 02:30 schedule
