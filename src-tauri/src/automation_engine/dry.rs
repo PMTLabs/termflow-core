@@ -24,7 +24,9 @@ use crate::automation_engine::eval::{self, Outcome, Read, Truth};
 use crate::automation_engine::host::{EngineHost, HostPort};
 use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
-use crate::automation_store::{AutomationLogEntry, AutomationRule, CompareOp, LogKind};
+use crate::automation_store::{
+    AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
+};
 
 /// One step of the graph, as the editor's Test panel draws it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -81,6 +83,60 @@ fn symbol(op: CompareOp) -> &'static str {
         CompareOp::Lte => "<=",
         CompareOp::Eq => "=",
         CompareOp::Neq => "!=",
+    }
+}
+
+/// One text clause's own comparator, in words — matching `TEXT_OP_LABELS` in
+/// `automationDerive.ts`'s node face, so a user reading this pane and the CondPanel row for the
+/// same clause never meets two different verbs for one operator.
+fn text_op_words(op: TextOp) -> &'static str {
+    match op {
+        TextOp::Is => "is",
+        TextOp::IsNot => "is not",
+        TextOp::Contains => "contains",
+        TextOp::NotContains => "does not contain",
+        TextOp::Matches => "matches",
+        TextOp::IsEmpty => "is empty",
+        TextOp::IsNotEmpty => "is not empty",
+    }
+}
+
+/// One clause, in words — `$1 > 400` or `$2 contains "fail"`. `source_text` is the same formatter
+/// `cond.unknownToken`'s own message uses, so a clause never gets two different names for its
+/// token across the two panes (§4.3/§5.3: one grammar). Numeric clauses keep `symbol`'s terser
+/// `>`/`>=` spelling — the v1 branch below already prints a comparison that way, and a clause is
+/// the same kind of comparison, just one of possibly several.
+fn clause_phrase(c: &Clause) -> String {
+    let token = crate::automation_validation::source_text(&c.source);
+    match &c.test {
+        Test::Number { op, value } => format!("{} {} {}", token, symbol(*op), eval::fmt_num(*value)),
+        Test::Text { op, value } if matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty) => {
+            format!("{} {}", token, text_op_words(*op))
+        }
+        Test::Text { op, value } => format!("{} {} \"{}\"", token, text_op_words(*op), value),
+    }
+}
+
+/// The clause list under its one join — `$1 > 400 AND $2 contains "fail"` — plan §5.7's "one join
+/// for the whole list, not mixed precedence" written as a sentence. Upper-case `AND`/`OR`
+/// deliberately, the one word here that is not describing a single clause.
+fn clauses_sentence(clauses: &[Clause], join: Join) -> String {
+    let sep = match join {
+        Join::And => " AND ",
+        Join::Or => " OR ",
+    };
+    clauses.iter().map(clause_phrase).collect::<Vec<_>>().join(sep)
+}
+
+/// `finds` names WHICH question the rule asked — a reading that persists, or an event that
+/// happened (§5.2) — a fact the clause list's own types can no longer stand in for once `finds`
+/// and a clause's `Test` can disagree (the `API error … retry in 60s` example: an EVENT with a
+/// NUMERIC clause). Read depth already shows up one row up, in the monitor step's own wording; this
+/// is the same fact, named here because the condition it gates is decided on this row.
+fn finds_words(finds: Finds) -> &'static str {
+    match finds {
+        Finds::Reading => "a reading",
+        Finds::Event => "an event",
     }
 }
 
@@ -225,6 +281,24 @@ pub fn evaluate_once(
 
     let cond = match (ev.condition, &ev.outcome) {
         (Truth::Unknown, _) => skipped(COND),
+        // Task 14 made a clause list authorable (plan 032 §5.3, §5.9), and this rule is one: it
+        // describes ITSELF as the clause list under its join, plus `finds` — never as a v1
+        // `op`/`threshold` pair such a rule never carries (that pair reads `None`/`None` here,
+        // which is what the branch below's `"?" "?"` fallback exists for).
+        //
+        // Read `rule.graph.cond.clauses` — the STORED rule — not the local `graph` a few lines up:
+        // `fold_v1_clauses` gives even a v1 numeric rule exactly one clause on ITS copy, so keying
+        // on the folded graph would swallow the v1 branch's wording too. `op`/`join` and `finds`
+        // are identical on both copies; only `clauses` differs, so `rule.graph.cond` alone is read
+        // for every field below.
+        (truth, _) if !rule.graph.cond.clauses.is_empty() => {
+            let sentence = clauses_sentence(&rule.graph.cond.clauses, rule.graph.cond.join);
+            let finds = finds_words(rule.graph.cond.finds);
+            match truth {
+                Truth::True => step(COND, "ok", format!("{}, as {}", sentence, finds)),
+                _ => step(COND, "failed", format!("{} is false, as {}", sentence, finds)),
+            }
+        }
         (truth, Outcome::Numeric(Read::Value(v))) => {
             let (sym, t) = match (rule.graph.cond.op, rule.graph.cond.threshold) {
                 (Some(op), Some(t)) => (symbol(op), eval::fmt_num(t)),
@@ -292,7 +366,9 @@ mod tests {
     use super::*;
     use crate::automation_engine::eval::{ArmState, Captures};
     use crate::automation_engine::test_host::*;
-    use crate::automation_store::{CondStep, Finds, Keep, LogOrder, LogScope};
+    use crate::automation_store::{
+        Clause, CondStep, Finds, Join, Keep, LogOrder, LogScope, Source, Test as ClauseTest, TextOp,
+    };
 
     fn kinds(report: &DryRunReport) -> Vec<&str> {
         report.steps.iter().map(|s| s.kind.as_str()).collect()
@@ -606,6 +682,94 @@ mod tests {
             assert_eq!(report.verdict, verdict, "{:?}", op);
             assert_eq!(detail(&report, "cond"), words, "{:?}", op);
         }
+    }
+
+    /// **Task 14 made a clause list authorable, and the Test pane still described it as a v1
+    /// `op`/`threshold` rule.** A rule with a clause list must describe THAT — the clause list
+    /// under its join, and `finds` — never fall into the `op`/`threshold` wording, which such a
+    /// rule never carries at all (it reads `None`/`None`, the fallback `"?" "?"` pair the v1 branch
+    /// was written for).
+    #[test]
+    fn the_condition_step_describes_a_clause_list_under_its_join() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse.find = r"code=(\d+) msg=(\S+)".into();
+        rule.graph.cond = CondStep {
+            finds: Finds::Reading,
+            clauses: vec![
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: 400.0 },
+                },
+                Clause {
+                    source: Source::Group(2),
+                    test: ClauseTest::Text { op: TextOp::Contains, value: "fail".into() },
+                },
+            ],
+            join: Join::And,
+            ..Default::default()
+        };
+
+        fake.say("pc-1", "code=500 msg=failure\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 400 AND $2 contains \"fail\", as a reading");
+
+        fake.say("pc-1", "code=100 msg=failure\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(
+            detail(&report, "cond"),
+            "$1 > 400 AND $2 contains \"fail\" is false, as a reading"
+        );
+    }
+
+    /// **The decoupling §5.2 exists for**: `API error … retry in 60s` is an EVENT containing a
+    /// NUMBER — `finds: Event` with a numeric clause. The v1 branch could never have produced this
+    /// combination (`kind: text` meant "the text is there", nothing numeric); the Test pane must
+    /// name both the clause's own comparison AND that this rule reads as an event, not derive one
+    /// from the other.
+    #[test]
+    fn an_event_rule_with_a_numeric_clause_names_both_the_clause_and_finds() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse.find = r"API error .*retry in (\d+)s".into();
+        rule.graph.parse.keep = Keep::Whole;
+        rule.graph.cond = CondStep {
+            finds: Finds::Event,
+            clauses: vec![Clause {
+                source: Source::Group(1),
+                test: ClauseTest::Number { op: CompareOp::Gt, value: 60.0 },
+            }],
+            join: Join::And,
+            ..Default::default()
+        };
+
+        fake.say("pc-1", "API error 529, retry in 90s\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 60, as an event");
+
+        fake.say("pc-1", "API error 529, retry in 5s\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(detail(&report, "cond"), "$1 > 60 is false, as an event");
+    }
+
+    /// The paired positive for both tests above: a rule that GENUINELY has no clauses (a v1 rule,
+    /// read straight off `rule.graph.cond.op`/`.threshold`) must keep the old wording exactly —
+    /// `fold_v1_clauses` gives such a rule one clause on its OWN folded copy, and the new branch
+    /// must not be fooled into taking over that rule's wording too.
+    #[test]
+    fn a_rule_with_no_clauses_of_its_own_keeps_the_v1_wording() {
+        let (engine, fake, host) = wire(vec![]);
+        let rule = ctx_rule("au-1");
+        assert!(rule.graph.cond.clauses.is_empty(), "premise: ctx_rule is a v1 rule");
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(detail(&report, "cond"), "63 > 25", "the v1 branch, not the clause-list one");
     }
 
     /// The action step names the message and the terminal, and says it **would** type — it is the

@@ -130,7 +130,10 @@ fn token_supplied(compiled: &Regex, group: Option<usize>, name: Option<&str>) ->
 }
 
 /// `$0` / `$2` / `${name}`, for a clause's own problem message.
-fn source_text(source: &Source) -> String {
+///
+/// `pub(crate)` rather than a second copy: `dry.rs`'s Test-pane wording for a clause list needs the
+/// same token spelling this validator's own messages use — `two-implementations-one-fix`.
+pub(crate) fn source_text(source: &Source) -> String {
     match source {
         Source::Whole => "$0".to_string(),
         Source::Group(n) => format!("${n}"),
