@@ -401,7 +401,9 @@ impl AutomationEngine {
     /// depends on the machine's time zone — "is 09:00 already past" has no answer without one — so a
     /// test that could only pass `now_ms` would be asserting against wherever the runner happens to
     /// be, and would be a coin flip near midnight. `reload` is the whole of production: it reads the
-    /// clock through `schedule::local_now`, the one conversion in the crate.
+    /// clock through `schedule::local_now`, automation's one conversion. (Not the crate's:
+    /// `commands.rs` and `pty_manager.rs` call `chrono::Local::now()` themselves. Same
+    /// narrowing as `schedule::local_now`'s own header, which is where the claim belongs.)
     ///
     /// **Private, because nothing binds `now_local` to `now_ms`.** They are one instant in two
     /// spellings and the compiler cannot say so, so a caller that passed an inconsistent pair would
@@ -1123,57 +1125,71 @@ mod tests {
             target: Target,
             window: bool,
             seeded: bool,
+            /// **The whole mark, day AND minute, for every row — not just the seeded ones.**
+            /// Row count alone accepts a seed that files `(today, 0)`, and a seeded-only mark
+            /// assertion accepts a reload that DROPS a retained mark, which would let the next
+            /// tick send again. Both are stated here instead.
+            mark_after: Option<(i32, i32)>,
         }
 
+        let monday = monday_2026_09_07();
         let cases = [
             Case {
                 name: "re-enabled / no mark / target already past",
                 presence: Presence::Reenabled, mark: Mark::None, target: Target::UnchangedPast,
                 window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
             },
             Case {
                 name: "re-enabled / earlier-day mark / target already past",
                 presence: Presence::Reenabled, mark: Mark::EarlierDay, target: Target::UnchangedPast,
                 window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
             },
             Case {
                 name: "re-enabled / today's mark / target already past",
                 presence: Presence::Reenabled, mark: Mark::Today, target: Target::UnchangedPast,
                 window: false, seeded: false,
+                mark_after: Some((monday, 9 * 60)),
             },
             Case {
                 name: "live / no mark / unchanged target still ahead",
                 presence: Presence::Live, mark: Mark::None, target: Target::UnchangedAhead,
                 window: false, seeded: false,
+                mark_after: None,
             },
             Case {
                 name: "live / no mark / unchanged target already past",
                 presence: Presence::Live, mark: Mark::None, target: Target::UnchangedPast,
                 window: false, seeded: false,
+                mark_after: None,
             },
             Case {
                 name: "live / no mark / target moved into the past",
                 presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoPast,
                 window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
             },
             Case {
                 name: "live / no mark / target moved into the future",
                 presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoFuture,
                 window: true, seeded: false,
+                mark_after: None,
             },
             Case {
                 name: "live / today's mark / target moved into the past",
                 presence: Presence::Live, mark: Mark::Today, target: Target::MovedIntoPast,
                 window: true, seeded: true,
+                mark_after: Some((monday, 9 * 60)),
             },
             Case {
                 name: "live / earlier-day mark / unchanged target",
                 presence: Presence::Live, mark: Mark::EarlierDay, target: Target::UnchangedPast,
                 window: false, seeded: false,
+                mark_after: Some((monday - 1, 9 * 60)),
             },
         ];
 
-        let monday = monday_2026_09_07();
         let now = at(monday, 14 * 60);
         for case in cases {
             let store = AutomationStore::new_in_memory();
@@ -1241,20 +1257,38 @@ mod tests {
             );
 
             engine.reload_at(&store, 2_000, now).unwrap();
+
+            let entries = store.load_automation_log(&LogScope::All, LogOrder::Asc, 100).unwrap();
             assert_eq!(
-                log_rows(&store).len(),
-                if case.seeded { 1 } else { 0 },
+                entries.len(),
+                usize::from(case.seeded),
                 "{}: a past target is seeded exactly when it had an unobserved window and today was unspent",
                 case.name
             );
-            if case.seeded {
+            if let Some(entry) = entries.first() {
+                // Which rule, which KIND, and which target minute the words name. A row count
+                // alone cannot tell a suppression apart from a failure, and every seeded row here
+                // aims at 09:00, so the words are what bind the row to the target.
+                assert_eq!(entry.rule_id, "au-sched", "{}: the row belongs to the rule", case.name);
                 assert_eq!(
-                    engine.runtime.last_fired_day("au-sched"),
-                    Some(monday),
-                    "{}: the seed must spend today's target",
+                    entry.kind,
+                    LogKind::Held,
+                    "{}: nothing went wrong, so the row is Held rather than Failed",
                     case.name
                 );
+                assert!(
+                    entry.detail.contains("09:00"),
+                    "{}: the row names the target it skipped, got {:?}",
+                    case.name,
+                    entry.detail
+                );
             }
+            assert_eq!(
+                engine.runtime.last_fired_mark("au-sched"),
+                case.mark_after,
+                "{}: the spent-day mark after the reload, minute included",
+                case.name
+            );
         }
     }
 
@@ -1300,9 +1334,9 @@ mod tests {
             "the stale-minute mark is reconciled away, so 09:00 today was never observed and is held"
         );
         assert_eq!(
-            engine.runtime.last_fired_day("au-sched"),
-            Some(monday),
-            "and the seed spends today against the minute the rule actually targets"
+            engine.runtime.last_fired_mark("au-sched"),
+            Some((monday, 9 * 60)),
+            "and the seed REFILES the mark under the minute the rule actually targets -- reading              only the day here would accept a seed that wrote (today, 0) and left the next reload              invalidating it all over again"
         );
     }
 
