@@ -23,7 +23,9 @@
 
 use regex::Regex;
 
-use crate::automation_store::{AutomationGraph, CompareOp, Finds, Keep, ReadMode};
+use crate::automation_store::{
+    AutomationGraph, Clause, CompareOp, Finds, Keep, ReadMode, Source, Test, TextOp,
+};
 
 /// How many lines back a "new output as it appears" read looks.
 ///
@@ -398,6 +400,72 @@ pub fn compare(op: CompareOp, value: f64, threshold: f64) -> bool {
         CompareOp::Lte => value <= threshold,
         CompareOp::Eq => (value - threshold).abs() < EPS,
         CompareOp::Neq => (value - threshold).abs() >= EPS,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Clause evaluation (§5.5, §5.6)
+// ---------------------------------------------------------------------------------------------
+
+/// One clause's answer, per §5.5's table.
+///
+/// **A `Number` test cannot be answered from thin air.** A token that did not participate, or one
+/// that participated but is not a number, taught the read nothing — `Unknown`, never `False` — the
+/// same asymmetry `Truth`'s own doc comment states for the whole rule. **A `Text` test sees a
+/// non-participating token as `""`** — a known absence per §4.4, not a failed read — so
+/// `IsEmpty`/`Contains`/etc. get a real, known answer from the same slot a number test could not
+/// read at all.
+///
+/// A `Matches` clause whose own pattern will not compile is `Unknown` too: a broken clause must not
+/// read as "no".
+///
+/// `Source::Named` is resolved with `caps.name(k)` alone, deliberately not `has_name(k)` first —
+/// mirroring the positional branch, which reads `caps.group(n)` directly rather than checking
+/// `n <= caps.count()`. §4.4's declared-vs-undeclared distinction exists for message substitution,
+/// where an undeclared token must refuse the send rather than silently substitute `""`. §5.5's
+/// table draws no such row: a clause naming a group the pattern does not declare is a validation
+/// problem (§8), not a case this function is asked to tell apart from "declared but did not
+/// participate" — both read as `None`/`""` here, exactly as an out-of-range `Group(n)` does.
+pub fn test_clause(c: &Clause, caps: &Captures) -> Truth {
+    match &c.test {
+        Test::Number { op, value } => {
+            let token = match &c.source {
+                Source::Whole => caps.group(0),
+                Source::Group(n) => caps.group(*n as usize),
+                Source::Named(k) => caps.name(k),
+            };
+            match token.and_then(coerce) {
+                Some(v) => Truth::from_compare(compare(*op, v, *value)),
+                None => Truth::Unknown,
+            }
+        }
+        Test::Text { op, value } => {
+            let token = match &c.source {
+                Source::Whole => caps.group(0).unwrap_or_default(),
+                Source::Group(n) => caps.group(*n as usize).unwrap_or_default(),
+                Source::Named(k) => caps.name(k).unwrap_or_default(),
+            };
+            test_text(*op, token, value)
+        }
+    }
+}
+
+/// The text side of `test_clause`'s table, split out because `Number`'s match arm above has nothing
+/// in common with it — a token, an operator, and a value to compare against.
+fn test_text(op: TextOp, token: &str, value: &str) -> Truth {
+    match op {
+        TextOp::Is => Truth::from_compare(token == value),
+        TextOp::IsNot => Truth::from_compare(token != value),
+        TextOp::Contains => Truth::from_compare(token.contains(value)),
+        TextOp::NotContains => Truth::from_compare(!token.contains(value)),
+        TextOp::IsEmpty => Truth::from_compare(token.is_empty()),
+        TextOp::IsNotEmpty => Truth::from_compare(!token.is_empty()),
+        // A pattern that will not compile teaches nothing — `Unknown`, never `False` — the same
+        // asymmetry a non-participating `Number` token gets above.
+        TextOp::Matches => match Regex::new(value) {
+            Ok(re) => Truth::from_compare(re.is_match(token)),
+            Err(_) => Truth::Unknown,
+        },
     }
 }
 
@@ -1128,6 +1196,39 @@ mod tests {
         assert!(!(0.1f64 * 3.0 == 0.3), "premise: `==` fails here");
         assert!(compare(CompareOp::Eq, typed, 0.3));
         assert!(!compare(CompareOp::Neq, from_text, 0.3));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §5.5 — one clause
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn one_clause_against_every_row_of_the_table() {
+        let caps = Captures {
+            groups: vec![Some("code 529 x".into()), Some("529".into()), None],
+            named: Default::default(),
+        };
+        let num = |n, op, v| Clause { source: Source::Group(n), test: Test::Number { op, value: v } };
+        let txt = |n, op, v: &str| Clause { source: Source::Group(n), test: Test::Text { op, value: v.into() } };
+
+        assert_eq!(test_clause(&num(1, CompareOp::Gt, 500.0), &caps), Truth::True);
+        assert_eq!(test_clause(&num(1, CompareOp::Lt, 500.0), &caps), Truth::False);
+        // group 2 did not participate: a NUMBER read learned nothing
+        assert_eq!(test_clause(&num(2, CompareOp::Gt, 1.0), &caps), Truth::Unknown);
+        // group 0 is text, not a number
+        assert_eq!(test_clause(&num(0, CompareOp::Gt, 1.0), &caps), Truth::Unknown);
+        // a TEXT test on a non-participating group sees "" — a known absence, §4.4's rule
+        assert_eq!(test_clause(&txt(2, TextOp::IsEmpty, ""), &caps), Truth::True);
+        assert_eq!(test_clause(&txt(2, TextOp::Contains, "x"), &caps), Truth::False);
+        assert_eq!(test_clause(&txt(1, TextOp::Is, "529"), &caps), Truth::True);
+        assert_eq!(test_clause(&txt(0, TextOp::Contains, "529"), &caps), Truth::True);
+    }
+
+    #[test]
+    fn a_clause_pattern_that_will_not_compile_is_unknown_not_false() {
+        let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
+        let c = Clause { source: Source::Whole, test: Test::Text { op: TextOp::Matches, value: "(".into() } };
+        assert_eq!(test_clause(&c, &caps), Truth::Unknown, "a broken clause must not read as 'no'");
     }
 
     // -----------------------------------------------------------------------------------------
