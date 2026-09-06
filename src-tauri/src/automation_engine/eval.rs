@@ -735,6 +735,22 @@ pub fn evaluate_text(
         // it is not this one. Both callers of this core apply it — `reload` before it builds the
         // `LiveRule`, `dry::evaluate_once` on its own copy — and a third caller must too, or its
         // v1 rules will read every match as "the match is the whole condition".
+        //
+        // **`Reading` with no clauses is ALWAYS the incomplete v1 case, so it never fires.**
+        // §5.4's table gives "no clauses" to the `Finds::Event` row only: a complete v1 pair folds
+        // to exactly one clause, and a `Reading` rule authored with zero clauses is refused by
+        // `cond.incomplete`. So the only shape that reaches here is a rule whose comparison was
+        // never finished — and §5.5 step 4 would read its empty list as *the match is the whole
+        // condition* and fire on EVERY match, flipping "runs, logs, never fires" into "types into
+        // a live terminal every time the pattern appears".
+        //
+        // Validation gates both write paths, but `reload`'s re-validation exemption is scoped to
+        // `parse.*` and deliberately does not re-check `cond.*`, so a hand-edited row reaches
+        // evaluation. Neither `op` nor `threshold` is read to decide this, and the `Event` path
+        // cannot be touched by it.
+        Some(_) if graph.cond.finds == Finds::Reading && graph.cond.clauses.is_empty() => {
+            Truth::Unknown
+        }
         Some(caps) => fold_clauses(
             &graph.cond.clauses.iter().map(|c| test_clause(c, caps)).collect::<Vec<_>>(),
             graph.cond.join,
@@ -1938,43 +1954,71 @@ mod tests {
         );
     }
 
-    /// **This test changed meaning in M2, and the change is the point of writing it down.**
+    /// **An incomplete v1 numeric rule runs, logs, and never fires — and this test is what holds
+    /// that.**
     ///
-    /// A v1 `Finds::Reading` rule with no `op` used to read `Truth::Unknown` here — "runs, logs,
-    /// never fires" — because `evaluate_text` compared `op`/`threshold` itself and had a `_` arm for
-    /// the incomplete pair. It no longer reads either field: §5.3 makes them load-only, and
-    /// `fold_v1_clauses` is the one place they are consulted. That fold deliberately **refuses** an
-    /// incomplete pair (`"a numeric rule with no comparator is a blocking validation problem
-    /// already"`), leaving the clause list empty — and §5.5 step 4 reads an empty list on a match as
-    /// *the match is the whole condition*. So this shape now reads `True`: not "never fires" but
-    /// "fires on every match", which is the opposite direction.
+    /// A `Finds::Reading` rule missing `op` or `threshold` cannot be true of anything. It used to
+    /// read `Truth::Unknown` here because `evaluate_text` compared `op`/`threshold` itself and had
+    /// a `_` arm for the incomplete pair. §5.3 made both fields load-only, `fold_v1_clauses` became
+    /// the one place they are consulted, and that fold deliberately REFUSES an incomplete pair
+    /// ("a numeric rule with no comparator is a blocking validation problem already") — which left
+    /// the clause list empty, and §5.5 step 4 reads an empty list on a match as *the match is the
+    /// whole condition*. The rule's behaviour flipped from "never fires" to "fires on every match":
+    /// it would type into a live terminal every time the pattern appeared.
     ///
-    /// It is unreachable through the product. `cond.incomplete` (`automation_validation.rs`, severity
-    /// **blocks**, pinned by that file's own mutation table for BOTH `op: None` and
-    /// `threshold: None`) is refused by the store's enable gate and by any save with `enabled = true`,
-    /// and `reload` only builds a `LiveRule` for an enabled rule. Only a hand-edited row reaches here.
+    /// The guard restoring it does not read `op`/`threshold` at all, because it does not need to.
+    /// **`Reading` + no clauses is ALWAYS this case**: §5.4's table gives "no clauses" to the
+    /// `Finds::Event` row only, a complete v1 pair folds to exactly one clause, and a `Reading`
+    /// rule authored with zero clauses is blocked by `cond.incomplete`.
     ///
-    /// The assertions below are therefore a **tripwire, not an endorsement**: they fail the moment
-    /// either half of that story moves — if the fold starts translating an incomplete pair, or if a
-    /// guard is put back into `evaluate_text`. Whoever trips it should re-read §5.4's table, which
-    /// gives "no clauses" to the `Finds::Event` row only, and decide deliberately.
+    /// Validation is not enough on its own: `reload`'s re-validation exemption is scoped to
+    /// `parse.*` and does not re-check `cond.*`, so a hand-edited row reaches evaluation.
     #[test]
-    fn an_incomplete_v1_numeric_rule_is_refused_by_the_fold_not_by_evaluate_text() {
+    fn an_incomplete_v1_numeric_rule_never_fires() {
         let g = graph(r"ctx:(\d+)%", Finds::Reading, None, Some(25.0));
         assert!(
             g.cond.clauses.is_empty(),
-            "the fold must not invent a comparison the stored rule never carried"
+            "premise: the fold must not invent a comparison the stored rule never carried"
         );
         let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), NO_ECHOES, ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
             .unwrap();
         assert_eq!(
             ev.condition,
-            Truth::True,
-            "an empty clause list on a match is §5.5 step 4 — validation, not this function, is what \
-             keeps an incomplete v1 rule from reaching it"
+            Truth::Unknown,
+            "an unfinished comparison learned nothing, so it must neither fire nor re-arm"
         );
-        // And the numeric OUTCOME is untouched by any of that: the log still says what was read.
+        assert_ne!(ev.decision, Decision::Sent, "and above all it must not send");
+        // The numeric OUTCOME is untouched by any of that: the log still says what was read.
         assert_eq!(ev.outcome, Outcome::Numeric(Read::Value(99.0)));
+
+        // The other half of the incomplete pair, so the guard cannot be keyed on `op` alone.
+        let no_threshold = graph(r"ctx:(\d+)%", Finds::Reading, Some(CompareOp::Gt), None);
+        let ev = evaluate_text(
+            &no_threshold,
+            &re(r"ctx:(\d+)%"),
+            NO_ECHOES,
+            ArmState::armed(),
+            &|_| Some("ctx:99%".into()),
+            1,
+        )
+        .unwrap();
+        assert_eq!(ev.condition, Truth::Unknown);
+
+        // **The paired positives, or the guard is just "a Reading rule never fires".** A COMPLETE
+        // v1 pair folds to one clause and still crosses, and an `Event` rule with no clauses still
+        // fires on the match — §5.4's last row, which the guard must not touch.
+        let complete = graph(r"ctx:(\d+)%", Finds::Reading, Some(CompareOp::Gt), Some(25.0));
+        assert_eq!(complete.cond.clauses.len(), 1, "premise: a complete pair folds to one clause");
+        let ev =
+            evaluate_text(&complete, &re(r"ctx:(\d+)%"), NO_ECHOES, ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
+                .unwrap();
+        assert_eq!(ev.condition, Truth::True);
+
+        let event = graph(r"FAILED", Finds::Event, None, None);
+        assert!(event.cond.clauses.is_empty(), "premise: a word rule folds to nothing");
+        let ev = evaluate_text(&event, &re("FAILED"), NO_ECHOES, ArmState::armed(), &|_| Some("FAILED\n".into()), 1)
+            .unwrap();
+        assert_eq!(ev.condition, Truth::True, "§5.4's last row: the match IS the whole condition");
     }
 
     /// "Still" is a claim about a match this pair had ALREADY acted on, so the crossing itself — the
