@@ -737,7 +737,21 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parse_step` is what makes the two
     // spellings indistinguishable to this check.
-    if let Some(action) = rule.graph.action.as_ref().filter(|action| action.substitute) {
+    for (field, message) in [
+        rule.graph
+            .action
+            .as_ref()
+            .filter(|action| action.substitute)
+            .map(|action| ("action", action.message.as_str())),
+        rule.graph
+            .webhook
+            .as_ref()
+            .filter(|webhook| webhook.substitute)
+            .map(|webhook| ("webhook", webhook.body.as_str())),
+    ]
+    .into_iter()
+    .flatten()
+    {
         match parse_step(&rule.graph) {
             // The toggle itself claims the message inserts a capture, which nothing can be true
             // of before a pattern exists — asked regardless of whether a token has actually been
@@ -745,14 +759,14 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             // clause would compare against.
             None => out.push(Problem::new(
                 Severity::Blocks,
-                "action",
+                field,
                 "action.tokenWithoutParse",
                 "This message inserts captured values, but the rule has no pattern to capture them from.",
             )),
             Some(parse) => {
                 if let Ok(compiled) = compile(&parse.find) {
                     let count = compiled.captures_len().saturating_sub(1);
-                    for token in subst::tokens_used(&action.message) {
+                    for token in subst::tokens_used(message) {
                         let bad = match &token {
                             subst::Token::Whole => false,
                             subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
@@ -765,7 +779,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                         }
                         out.push(Problem::new(
                             Severity::Blocks,
-                            "action",
+                            field,
                             "action.unknownToken",
                             format!(
                                 "{token} has nothing to stand for. The pattern in Read a value has \
@@ -784,7 +798,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         if webhook.url.trim().is_empty() {
             out.push(Problem::new(
                 Severity::Blocks,
-                "action",
+                "webhook",
                 "webhook.urlEmpty",
                 "Provide a webhook URL.",
             ));
@@ -792,7 +806,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             if url.scheme() != "https" {
                 out.push(Problem::new(
                     Severity::Blocks,
-                    "action",
+                    "webhook",
                     "webhook.urlNotHttps",
                     "Provide an https webhook URL.",
                 ));
@@ -800,7 +814,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         } else {
             out.push(Problem::new(
                 Severity::Blocks,
-                "action",
+                "webhook",
                 "webhook.urlMalformed",
                 "Provide a well-formed webhook URL.",
             ));
@@ -809,7 +823,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         if webhook.body.trim().is_empty() {
             out.push(Problem::new(
                 Severity::Blocks,
-                "action",
+                "webhook",
                 "webhook.bodyEmpty",
                 "Enter a webhook body.",
             ));
@@ -818,7 +832,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             if serde_json::from_str::<serde_json::Value>(&rendered_body).is_err() {
                 out.push(Problem::new(
                     Severity::Blocks,
-                    "action",
+                    "webhook",
                     "webhook.bodyNotJson",
                     "The webhook body must be valid JSON.",
                 ));

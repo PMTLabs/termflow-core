@@ -1728,8 +1728,8 @@
       "expected": []
     },
     {
-      "name": "action.unknownToken — $3 with two groups",
-      "why": "Two groups exist, but the message asks for a third. `substitute` is opt-in (plan 032 §4.2), so a text rule can carry this pattern and message with the toggle off with nothing wrong — the case right after this one.",
+      "name": "action.unknownToken — each destination rejects $3 with two groups",
+      "why": "Two groups exist, but both destination messages ask for a third. The terminal action and webhook reuse the same token rule, while retaining their own inspector ownership.",
       "rule": {
         "id": "au-fix",
         "name": "r",
@@ -1769,6 +1769,12 @@
             "submit": true,
             "cliType": "default",
             "substitute": true
+          },
+          "webhook": {
+            "provider": "discord",
+            "url": "https://example.invalid/hook",
+            "body": "post $3",
+            "substitute": true
           }
         }
       },
@@ -1776,6 +1782,11 @@
         {
           "severity": "blocks",
           "field": "action",
+          "code": "action.unknownToken"
+        },
+        {
+          "severity": "blocks",
+          "field": "webhook",
           "code": "action.unknownToken"
         }
       ]
@@ -3408,7 +3419,7 @@
       "expected": [
         {
           "severity": "blocks",
-          "field": "action",
+          "field": "webhook",
           "code": "webhook.urlEmpty"
         }
       ]
@@ -3443,7 +3454,7 @@
       "expected": [
         {
           "severity": "blocks",
-          "field": "action",
+          "field": "webhook",
           "code": "webhook.urlMalformed"
         }
       ]
@@ -3478,7 +3489,7 @@
       "expected": [
         {
           "severity": "blocks",
-          "field": "action",
+          "field": "webhook",
           "code": "webhook.urlNotHttps"
         }
       ]
@@ -3513,7 +3524,7 @@
       "expected": [
         {
           "severity": "blocks",
-          "field": "action",
+          "field": "webhook",
           "code": "webhook.bodyEmpty"
         }
       ]
@@ -3555,7 +3566,7 @@
       "expected": [
         {
           "severity": "blocks",
-          "field": "action",
+          "field": "webhook",
           "code": "webhook.bodyNotJson"
         }
       ]

@@ -658,6 +658,7 @@ export type DraftAction =
      */
     | { type: 'timer'; mode: AutomationTimerMode }
     | { type: 'action'; patch: Partial<NonNullable<AutomationRule['graph']['action']>> }
+    | { type: 'webhook'; patch: Partial<NonNullable<AutomationRule['graph']['webhook']>> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
@@ -859,6 +860,12 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         case 'action':
             return rule.graph.action
                 ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                : draft;
+        case 'webhook':
+            // A panel patch cannot materialise a destination. In particular, it must never make
+            // an ActionStep: an empty action can still submit Enter to a live terminal.
+            return rule.graph.webhook
+                ? withGraph(draft, { webhook: { ...rule.graph.webhook, ...action.patch } })
                 : draft;
         case 'select':
             return { ...draft, selected: action.step };

@@ -21,6 +21,7 @@ import { ParsePanel } from './panels/ParsePanel';
 import { CondPanel } from './panels/CondPanel';
 import { TimerPanel } from './panels/TimerPanel';
 import { ActionPanel } from './panels/ActionPanel';
+import { WebhookPanel } from './panels/WebhookPanel';
 import { redactWebhookText } from './webhookRedaction';
 
 export interface AuInspectorProps {
@@ -62,6 +63,7 @@ const FIELD_STEPS: Record<ProblemField, StepKind> = {
     cond: 'cond',
     timer: 'timer',
     action: 'action',
+    webhook: 'webhook',
 };
 
 export const AuInspector: React.FC<AuInspectorProps> = (props) => {
@@ -137,6 +139,9 @@ export const AuInspector: React.FC<AuInspectorProps> = (props) => {
                 {step === 'action' && draft.rule.graph.action && (
                     <ActionPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
+                {step === 'webhook' && draft.rule.graph.webhook && (
+                    <WebhookPanel key={draft.rule.id} draft={draft} dispatch={props.dispatch} />
+                )}
             </div>
         </aside>
     );
@@ -159,7 +164,7 @@ const ProblemList: React.FC<{ problems: Problem[]; onFocusStep: (step: StepKind)
             </div>
             <ul>
                 {problems.map((p) => (
-                    <li key={`${p.code}-${p.message}`} className={p.severity}>
+                    <li key={`${p.field}-${p.code}-${p.message}`} className={p.severity}>
                         <button type="button" onClick={() => onFocusStep(FIELD_STEPS[p.field])}>
                             <b>{STEP_LABELS[FIELD_STEPS[p.field]]}</b> — {redactWebhookText(p.message)}
                         </button>

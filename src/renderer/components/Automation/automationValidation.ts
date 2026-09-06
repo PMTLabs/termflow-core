@@ -38,7 +38,7 @@ import { previewSubstitute, tokensUsed } from './automationTokens';
 export type Severity = 'blocks' | 'warns';
 
 /** Which step owns a problem, so the editor can point at the panel that fixes it. */
-export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
 
 /**
  * A stable identity for the RULE that fired.
@@ -807,7 +807,7 @@ export function problems(rule: AutomationRule): Problem[] {
             out.push(
                 problem(
                     'blocks',
-                    'action',
+                    'webhook',
                     'webhook.urlEmpty',
                     'Provide a webhook URL.',
                 ),
@@ -819,7 +819,7 @@ export function problems(rule: AutomationRule): Problem[] {
                     out.push(
                         problem(
                             'blocks',
-                            'action',
+                            'webhook',
                             'webhook.urlNotHttps',
                             'Provide an https webhook URL.',
                         ),
@@ -829,7 +829,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 out.push(
                     problem(
                         'blocks',
-                        'action',
+                        'webhook',
                         'webhook.urlMalformed',
                         'Provide a well-formed webhook URL.',
                     ),
@@ -841,7 +841,7 @@ export function problems(rule: AutomationRule): Problem[] {
             out.push(
                 problem(
                     'blocks',
-                    'action',
+                    'webhook',
                     'webhook.bodyEmpty',
                     'Enter a webhook body.',
                 ),
@@ -854,7 +854,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 out.push(
                     problem(
                         'blocks',
-                        'action',
+                        'webhook',
                         'webhook.bodyNotJson',
                         'The webhook body must be valid JSON.',
                     ),
@@ -876,7 +876,11 @@ export function problems(rule: AutomationRule): Problem[] {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parseStep` is what makes the two
     // spellings indistinguishable to this check.
-    if (action?.substitute) {
+    for (const destination of [
+        action?.substitute ? { field: 'action' as const, message: action.message } : null,
+        webhook?.substitute ? { field: 'webhook' as const, message: webhook.body } : null,
+    ]) {
+        if (!destination) continue;
         const sourcing = parseStep(rule.graph);
         if (!sourcing) {
             // The toggle itself claims the message inserts a capture, which nothing can be true of
@@ -886,14 +890,14 @@ export function problems(rule: AutomationRule): Problem[] {
             out.push(
                 problem(
                     'blocks',
-                    'action',
+                    destination.field,
                     'action.tokenWithoutParse',
                     'This message inserts captured values, but the rule has no pattern to capture them from.',
                 ),
             );
         } else if (compilePattern(sourcing.find) !== null) {
             const groups = groupsOf(sourcing.find);
-            for (const t of tokensUsed(action.message)) {
+            for (const t of tokensUsed(destination.message)) {
                 const bad = t.kind === 'group'
                     ? !tokenSupplied(groups, t.n, null)
                     : !tokenSupplied(groups, null, t.name);
@@ -901,7 +905,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 out.push(
                     problem(
                         'blocks',
-                        'action',
+                        destination.field,
                         'action.unknownToken',
                         `${t.text} has nothing to stand for. The pattern in Read a value has `
                             + `${groups.count} bracketed group${groups.count === 1 ? '' : 's'}, so the highest you can use is $${groups.count}.`,
