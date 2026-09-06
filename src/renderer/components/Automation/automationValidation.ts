@@ -429,9 +429,10 @@ export const MINUTES_PER_DAY = 24 * 60;
 function neverRunsProblem(graph: AutomationGraph): Problem | null {
     const hasInputSteps = Boolean(graph.monitor) && Boolean(graph.parse) && Boolean(graph.cond);
     const scheduled = Boolean(graph.timer && 'dailyAt' in graph.timer.mode);
-    // A blank message defers to `action.empty` alone — see the Rust mirror's doc for why (a brand
-    // new draft with nothing drawn is not a claim about an undrawn Wait card).
-    if (hasInputSteps || scheduled || graph.action.message.trim().length === 0) return null;
+    // A blank terminal message defers to `action.empty` alone; an absent terminal destination is
+    // valid when a webhook is present, and must not be made into an action to satisfy this guard.
+    const hasTerminalDestination = (graph.action?.message.trim().length ?? 0) !== 0;
+    if (hasInputSteps || scheduled || graph.webhook || !hasTerminalDestination) return null;
     const message = graph.timer
         ? 'This rule waits, but nothing will ever start the wait: it has no Watch output step to '
             + 'match against. Add one, or switch this Wait to run at a time of day instead.'
@@ -718,7 +719,7 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
-    if (action.message.trim().length === 0) {
+    if ((!action && !rule.graph.webhook) || action?.message.trim().length === 0) {
         out.push(
             problem(
                 'blocks',
@@ -727,7 +728,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 'Enter the message this rule should type.',
             ),
         );
-    } else if (parse && parse.find.trim().length > 0) {
+    } else if (action && parse && parse.find.trim().length > 0) {
         // §2.6's failure, told to the user before it happens. The emptiness guard above is
         // load-bearing: an empty regex matches every position of every string, so without it every
         // draft with a message and no pattern yet is told its message matches a pattern it does not
@@ -764,7 +765,7 @@ export function problems(rule: AutomationRule): Problem[] {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parseStep` is what makes the two
     // spellings indistinguishable to this check.
-    if (action.substitute) {
+    if (action?.substitute) {
         const sourcing = parseStep(rule.graph);
         if (!sourcing) {
             // The toggle itself claims the message inserts a capture, which nothing can be true of

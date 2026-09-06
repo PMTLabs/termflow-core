@@ -497,6 +497,11 @@ pub async fn evaluate_tick(
     // sends in one tick would freeze evaluation for two seconds. Serialisation is unaffected: it was
     // never the tick that provided it, it was the per-terminal lock.
     for send in sends {
+        // A webhook-only rule has no terminal destination. Never dispatch `run_send` for it: an
+        // invented empty action can submit a bare Enter to a live terminal.
+        if send.pair.rule.rule.graph.action.is_none() {
+            continue;
+        }
         let engine = engine.clone();
         let host = host.clone();
         tokio::spawn(async move { run_send(engine, host, send).await });
@@ -741,6 +746,10 @@ pub async fn run_send(
 ) {
     let rule = &send.pair.rule.rule;
     let tm = send.pair.tm.clone();
+    // Belt and braces for future callers that bypass the dispatch guard.
+    let Some(action) = rule.graph.action.as_ref() else {
+        return;
+    };
     // **Before the queue.** §2.6 layer 2 runs for `ECHO_SETTLE_MS` after the WRITE, and the wait for
     // this terminal's lock is up to `SEND_QUEUE_TIMEOUT_MS` of the distance between the decision and
     // that write. Started after the lock, this measured only `deliver` — so the second and later
@@ -810,7 +819,6 @@ pub async fn run_send(
         return;
     }
 
-    let action = &rule.graph.action;
     let body = if action.substitute {
         match subst::substitute(&action.message, send.captures.as_ref()) {
             Ok(s) => s,
@@ -1319,8 +1327,8 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = r"FAILED (\d+) tests in (\S+)".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "Fix the $1 failing tests in $2".into();
-            g.action.substitute = true;
+            g.action_mut().message = "Fix the $1 failing tests in $2".into();
+            g.action_mut().substitute = true;
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -1403,7 +1411,7 @@ mod tests {
             g.parse_mut().find = "FAILED".into();
             g.parse_mut().keep = Keep::Whole;
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "stand-up notes?".into();
+            g.action_mut().message = "stand-up notes?".into();
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
 
@@ -2092,8 +2100,8 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = r"FAILED (\d+)".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "awk '{print $1}'".into();
-            g.action.substitute = false;
+            g.action_mut().message = "awk '{print $1}'".into();
+            g.action_mut().substitute = false;
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2123,8 +2131,8 @@ mod tests {
         let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|g| {
             g.parse_mut().find = r"FAILED (\d+)".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "Fix $3".into();
-            g.action.substitute = true;
+            g.action_mut().message = "Fix $3".into();
+            g.action_mut().substitute = true;
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2162,7 +2170,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2204,7 +2212,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2264,7 +2272,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2313,7 +2321,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2364,7 +2372,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2409,7 +2417,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2459,8 +2467,8 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = r"API error (\d+)".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume after $1".into();
-            g.action.substitute = true;
+            g.action_mut().message = "resume after $1".into();
+            g.action_mut().substitute = true;
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2505,7 +2513,7 @@ mod tests {
             let (engine, fake, host) = rig_with_rule(|g| {
                 g.parse_mut().find = "API error".into();
                 g.cond_mut().finds = Finds::Event;
-                g.action.message = "resume".into();
+                g.action_mut().message = "resume".into();
                 g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
             });
             engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2567,7 +2575,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2599,7 +2607,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
@@ -2630,7 +2638,7 @@ mod tests {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
-            g.action.message = "resume".into();
+            g.action_mut().message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());

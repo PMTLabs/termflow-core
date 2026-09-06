@@ -397,15 +397,11 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
     // whose whole point is that it is empty. The two new-rule openings are saying something the
     // graph cannot.
     //
-    // `action` is drawn unconditionally because §3.1 keeps it required — there is no absence to
-    // detect — and the wait is drawn on the same rule as the other three now, rather than as the
-    // exception it used to be: a rule that has one gets its card, a rule that does not can be
-    // offered one by the palette.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : STEP_ORDER.filter((s) => s === 'action' || rule.graph[s] != null);
+            : STEP_ORDER.filter((s) => rule.graph[s] != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -440,11 +436,17 @@ function graphAsWritten(
     graph: AutomationRule['graph'],
     present: readonly StepKind[],
 ): AutomationRule['graph'] {
-    if (INPUT_STEPS.some((s) => present.includes(s))) return graph;
-    // The KEYS go, not `undefined` values: §3.1's own note says the backend omits an absent step
-    // rather than sending `null`, so an absent step must not decode as a present-but-empty one.
-    const { monitor: _m, parse: _p, cond: _c, ...rest } = graph;
-    return rest;
+    const keepInput = INPUT_STEPS.some((s) => present.includes(s));
+    const keepAction = present.includes('action');
+    if (keepInput && keepAction) return graph;
+    // The KEYS go, not `undefined` values. In particular, an action scaffold hidden by the canvas
+    // must not survive serialisation and submit an Enter in a supposedly webhook-only rule.
+    const { monitor, parse, cond, action, ...rest } = graph;
+    return {
+        ...rest,
+        ...(keepInput ? { monitor, parse, cond } : {}),
+        ...(keepAction ? { action } : {}),
+    };
 }
 
 /**
@@ -645,7 +647,7 @@ export type DraftAction =
      * expressible-but-refused is the shape that saves clean and comes back broken.
      */
     | { type: 'timer'; mode: AutomationTimerMode }
-    | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
+    | { type: 'action'; patch: Partial<NonNullable<AutomationRule['graph']['action']>> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
@@ -725,7 +727,11 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
             ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
             : rule;
     }
-    if (step === 'action' || INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
+    if (step === 'action') {
+        const action = rule.graph.action ?? blankDraft().graph.action;
+        return action ? { ...rule, graph: { ...rule.graph, action } } : rule;
+    }
+    if (INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
     const blank = blankDraft().graph;
     return {
         ...rule,
@@ -836,7 +842,9 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return { ...draft, rule: next, wires: defaultWires(draft.present, timerShapeOf(next)) };
         }
         case 'action':
-            return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
+            return rule.graph.action
+                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                : draft;
         case 'select':
             return { ...draft, selected: action.step };
         case 'addStep': {

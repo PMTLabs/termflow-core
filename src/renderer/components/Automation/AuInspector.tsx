@@ -133,7 +133,7 @@ export const AuInspector: React.FC<AuInspectorProps> = (props) => {
                 {step === 'timer' && (
                     <TimerPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
-                {step === 'action' && (
+                {step === 'action' && draft.rule.graph.action && (
                     <ActionPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
             </div>

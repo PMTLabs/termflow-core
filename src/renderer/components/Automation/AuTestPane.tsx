@@ -39,8 +39,8 @@ const VERDICTS: Record<DryRunReport['verdict'], { label: string; tone: string }>
 function pillFor(report: DryRunReport): { label: string; tone: string } {
     const base = VERDICTS[report.verdict];
     if (report.verdict !== 'would-fire') return base;
-    const actionFailed = report.steps.find((s) => s.kind === 'action')?.status === 'failed';
-    if (!actionFailed) return base;
+    const destinationFailed = report.steps.find((s) => s.kind === 'action' || s.kind === 'webhook')?.status === 'failed';
+    if (!destinationFailed) return base;
     return { label: 'Would fire — but nothing would be sent', tone: base.tone };
 }
 

@@ -522,13 +522,14 @@ mod tests {
                     keep: Keep::Brackets,
                 }),
                 cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-                action: ActionStep {
+                action: Some(ActionStep {
                     message: "m".into(),
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".into(),
                     substitute: false,
-                },
+                }),
+                webhook: None,
             },
             created_at: 0,
             updated_at: 0,

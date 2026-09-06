@@ -495,7 +495,10 @@ describe('draftFromRule', () => {
             ...blankDraft(),
             targetMode: 'pinned',
             targetIds: [],
-            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+            graph: (() => {
+                const { action: _action, ...graph } = blankDraft().graph;
+                return { ...graph, layout: DEFAULT_LAYOUT };
+            })(),
         });
     });
 

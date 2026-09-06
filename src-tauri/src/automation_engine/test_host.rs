@@ -248,13 +248,14 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
                 keep: Keep::Brackets,
             }),
             cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "prepare to do context-hand-off".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".into(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         },
         created_at: 1_000,
         updated_at: 1_000,
@@ -338,7 +339,7 @@ pub(crate) fn log_kinds(store: &AutomationStore) -> Vec<String> {
 /// the write log by their contents rather than by the order they happen to arrive in.
 pub(crate) fn ctx_rule_saying(id: &str, message: &str, sort_order: i64) -> AutomationRule {
     let mut rule = ctx_rule(id);
-    rule.graph.action.message = message.into();
+    rule.graph.action_mut().message = message.into();
     rule.sort_order = sort_order;
     rule
 }
@@ -359,7 +360,7 @@ pub(crate) fn schedule_only_rule(id: &str) -> AutomationRule {
     rule.graph.timer = Some(TimerStep {
         mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
     });
-    rule.graph.action.message = "stand-up notes?".into();
+    rule.graph.action_mut().message = "stand-up notes?".into();
     rule
 }
 

@@ -612,6 +612,17 @@ export interface AutomationActionStep {
   substitute?: boolean;
 }
 
+export type AutomationWebhookProvider = 'discord' | 'teams' | 'slack' | 'custom';
+
+export interface AutomationWebhookStep {
+  provider: AutomationWebhookProvider;
+  /** Secret credential: carried over persistence and IPC, never rendered, logged, errored, or exported. */
+  url: string;
+  /** Plain message for preset providers; raw request body for `custom`. */
+  body: string;
+  substitute?: boolean;
+}
+
 /**
  * Optional fifth step — "Wait" in every user-facing string. **Never write the bare word "Timer" in
  * UI copy** — `AutomationCadence`'s `'timer'` already means the monitor's poll interval, a
@@ -650,7 +661,10 @@ export interface AutomationGraph {
   cond?: AutomationCondStep;
   /** Absent on every rule saved before this milestone and on every rule that does not use it. */
   timer?: AutomationTimerStep;
-  action: AutomationActionStep;
+  /** Optional terminal destination. Absence must stay absence: an empty action can submit Enter. */
+  action?: AutomationActionStep;
+  /** Optional webhook destination. Its URL is a secret and must never be used as display text. */
+  webhook?: AutomationWebhookStep;
   /**
    * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —
    * it rides in the rule so that ONE save writes the whole document. Absent on any rule written
@@ -724,7 +738,7 @@ export interface AutomationLogEntry {
  */
 export interface DryRunStep {
   /**
-   * `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+   * `monitor` | `parse` | `cond` | `timer` | `action` | `webhook` — **not always all five, and not one fixed
    * count.** A plain rule (no wait step) reports the original four, in the graph's order. A DELAY
    * rule (`timer.mode.afterMatch`) inserts `timer` between `cond` and `action`, five steps. A
    * SCHEDULE rule (`timer.mode.dailyAt`) has no `monitor`, `parse` or `cond` at all — it reads
@@ -734,7 +748,7 @@ export interface DryRunStep {
    * graph's order": that was already only true for a rule with no wait step, and plan 032 §6–§7 is
    * what made it stop being true for the other two shapes.
    */
-  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
   /**
    * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
    * not be drawn as one.

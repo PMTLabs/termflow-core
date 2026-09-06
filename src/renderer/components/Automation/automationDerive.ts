@@ -346,7 +346,13 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
             return { mode: value(WAIT_MODE_PHRASES.dailyAt), when: value(`${at}, ${when}`) };
         }
         case 'action':
-        default:
+            if (!action) {
+                return {
+                    message: NOT_IN_THIS_RULE,
+                    send: NOT_IN_THIS_RULE,
+                    sendTo: NOT_IN_THIS_RULE,
+                };
+            }
             return {
                 message:
                     action.message.trim().length === 0
@@ -482,7 +488,7 @@ export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
  * the store by some other route.
  */
 function hasStep(rule: AutomationRule, step: StepKind): boolean {
-    return step === 'action' || rule.graph[step] != null;
+    return rule.graph[step] != null;
 }
 
 export interface NodeState {
@@ -633,6 +639,7 @@ function whenPhrase(rule: AutomationRule, pattern: string, cond: Record<string, 
 export function ruleSummary(rule: AutomationRule): string {
     const timer = rule.graph.timer;
     const action = stepValues(rule, 'action');
+    const terminalVerb = rule.graph.action?.submit ? 'send' : 'type';
     // A schedule fires on its clock even when it carries monitor/parse/cond steps (the validator
     // reports that shape separately), so it takes the same precedence as `describeRule` below.
     // The rail omits targets: the list row has no room for them and saying it is “watching” would
@@ -642,14 +649,14 @@ export function ruleSummary(rule: AutomationRule): string {
         const at = clockTime(minuteOfDay);
         const when = describeDays(days);
         if (at !== null && when !== '') {
-            return `At ${at} on ${when} · ${rule.graph.action.submit ? 'send' : 'type'} ${action.message.text}`;
+            return `At ${at} on ${when} · ${terminalVerb} ${action.message.text}`;
         }
     }
     const monitor = stepValues(rule, 'monitor');
     const parse = stepValues(rule, 'parse');
     const cond = stepValues(rule, 'cond');
     return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)} · ${
-        rule.graph.action.submit ? 'send' : 'type'
+        terminalVerb
     } ${action.message.text}`;
 }
 
@@ -760,10 +767,16 @@ function delayClause(timer: AutomationTimerStep | undefined): string | null {
 
 export function describeRule(rule: AutomationRule): RuleSentence {
     const { parse, cond, timer, action } = rule.graph;
-    const send = {
+    const send = action
+        ? {
         verbSend: action.submit ? 'send' : 'type',
         message: action.message,
         sendNote: action.submit ? null : ' — no Enter',
+        }
+        : {
+            verbSend: 'post',
+            message: rule.graph.webhook?.provider ?? 'no destination',
+            sendNote: null,
     };
 
     // **Schedule mode leads with the clock and never with the output.** §6.3: the walk skips

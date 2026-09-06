@@ -330,7 +330,8 @@ function structuredCloneRule(rule: TemplateRule): TemplateRule {
     if (graph.parse) graph.parse = deep(graph.parse);
     if (graph.cond) graph.cond = deep(graph.cond);
     if (graph.timer) graph.timer = deep(graph.timer);
-    graph.action = deep(graph.action);
+    if (graph.action) graph.action = deep(graph.action);
+    if (graph.webhook) graph.webhook = deep(graph.webhook);
     if (graph.layout) graph.layout = deep(graph.layout);
     return { ...rule, targetIds: [...rule.targetIds], graph };
 }

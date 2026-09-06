@@ -26,7 +26,7 @@ use crate::automation_engine::schedule::clock_time;
 use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
-    AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
+    ActionStep, AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
     TimerMode, TimerStep,
 };
 
@@ -124,6 +124,21 @@ fn step(kind: &str, status: &str, detail: String) -> StepTrace {
 
 fn skipped(kind: &str) -> StepTrace {
     step(kind, "skipped", "not reached".to_string())
+}
+
+fn action_trace(action: Option<&ActionStep>, caps: Option<&eval::Captures>, terminal_name: Option<&str>) -> Option<StepTrace> {
+    let action = action?;
+    Some(match preview_message(&action.message, action.substitute, caps) {
+        Ok(body) => step(ACTION, "ok", match terminal_name {
+            Some(name) => format!("would type `{}` into {}", body, name),
+            None => format!("would type `{}`", body),
+        }),
+        Err(e) => step(ACTION, "failed", format!("nothing would be sent — `{}` had no value here", e)),
+    })
+}
+
+fn push_skipped_action(steps: &mut Vec<StepTrace>, action: Option<&ActionStep>) {
+    if action.is_some() { steps.push(skipped(ACTION)); }
 }
 
 fn symbol(op: CompareOp) -> &'static str {
@@ -264,7 +279,9 @@ pub fn evaluate_once(
             // this branch still answers an unsaved draft or a row that predates the guard, so it
             // stays the honest, non-panicking answer regardless of whether validation would also
             // have refused it.
-            return finish(UNREADABLE, vec![skipped(TIMER), skipped(ACTION)]);
+            let mut steps = vec![skipped(TIMER)];
+            push_skipped_action(&mut steps, rule.graph.action.as_ref());
+            return finish(UNREADABLE, steps);
         };
         // **I1.** `schedule_due` refuses a `minute_of_day` outside `0..MINUTES_PER_DAY` and a
         // `days` mask with no weekday bit set — and until this check existed, this branch asked
@@ -293,10 +310,7 @@ pub fn evaluate_once(
             };
             return finish(
                 WOULD_NOT_FIRE,
-                vec![
-                    step(TIMER, "failed", format!("this schedule can never fire — {why}")),
-                    skipped(ACTION),
-                ],
+                { let mut steps = vec![step(TIMER, "failed", format!("this schedule can never fire — {why}"))]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); steps },
             );
         }
         let timer_step = step(
@@ -309,42 +323,27 @@ pub fn evaluate_once(
         let Some(_pc) = host.process_for_leaf(tm) else {
             return finish(
                 UNREADABLE,
-                vec![timer_step, step(ACTION, "failed", "that terminal is not open right now".to_string())],
+                { let mut steps = vec![timer_step]; if rule.graph.action.is_some() { steps.push(step(ACTION, "failed", "that terminal is not open right now".to_string())); } steps },
             );
         };
-        let action_step = match preview_message(&rule.graph.action.message, rule.graph.action.substitute, None) {
-            Ok(body) => step(
-                ACTION,
-                "ok",
-                match &terminal_name {
-                    Some(name) => format!("would type `{}` into {}", body, name),
-                    None => format!("would type `{}`", body),
-                },
-            ),
-            Err(e) => step(ACTION, "failed", format!("nothing would be sent — `{}` had no value here", e)),
-        };
-        return finish(WOULD_FIRE, vec![timer_step, action_step]);
+        let mut steps = vec![timer_step];
+        if let Some(action_step) = action_trace(rule.graph.action.as_ref(), None, terminal_name.as_deref()) { steps.push(action_step); }
+        return finish(WOULD_FIRE, steps);
     }
 
     let Some(steps) = eval::InputSteps::of(&rule.graph) else {
         return finish(
             UNREADABLE,
-            vec![skipped(MONITOR), skipped(PARSE), skipped(COND), skipped(ACTION)],
+            { let mut steps = vec![skipped(MONITOR), skipped(PARSE), skipped(COND)]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); steps },
         );
     };
     let pattern = steps.parse.find.clone();
 
     // 1. Monitor. A terminal that is not live is not readable, and that is the whole answer.
     let Some(pc) = host.process_for_leaf(tm) else {
-        return finish(
-            UNREADABLE,
-            vec![
-                step(MONITOR, "failed", "that terminal is not open right now".to_string()),
-                skipped(PARSE),
-                skipped(COND),
-                skipped(ACTION),
-            ],
-        );
+        let mut steps = vec![step(MONITOR, "failed", "that terminal is not open right now".to_string()), skipped(PARSE), skipped(COND)];
+        push_skipped_action(&mut steps, rule.graph.action.as_ref());
+        return finish(UNREADABLE, steps);
     };
 
     // 2. The pattern has to compile before anything can be read for it. The editor's validation says
@@ -352,9 +351,7 @@ pub fn evaluate_once(
     let re = match crate::automation_validation::compile(&pattern) {
         Ok(re) => re,
         Err(e) => {
-            return finish(
-                WOULD_NOT_FIRE,
-                vec![
+            let mut steps = vec![
                     step(MONITOR, "ok", "the terminal is open".to_string()),
                     step(
                         PARSE,
@@ -365,9 +362,9 @@ pub fn evaluate_once(
                         ),
                     ),
                     skipped(COND),
-                    skipped(ACTION),
-                ],
-            );
+                ];
+            push_skipped_action(&mut steps, rule.graph.action.as_ref());
+            return finish(WOULD_NOT_FIRE, steps);
         }
     };
 
@@ -398,15 +395,9 @@ pub fn evaluate_once(
     let echoes = engine.runtime.echoes_for(tm, now_ms);
     let port = HostPort(host);
     let Some(ev) = eval::evaluate(folded, &re, &echoes, prev, &port, &pc, now_ms) else {
-        return finish(
-            UNREADABLE,
-            vec![
-                step(MONITOR, "failed", "there is nothing to read from that terminal yet".to_string()),
-                skipped(PARSE),
-                skipped(COND),
-                skipped(ACTION),
-            ],
-        );
+        let mut steps = vec![step(MONITOR, "failed", "there is nothing to read from that terminal yet".to_string()), skipped(PARSE), skipped(COND)];
+        push_skipped_action(&mut steps, rule.graph.action.as_ref());
+        return finish(UNREADABLE, steps);
     };
 
     let monitor = step(MONITOR, "ok", format!("read {}", eval::depth_words(ev.depth)));
@@ -518,30 +509,9 @@ pub fn evaluate_once(
 
     let would_fire = ev.condition == Truth::True;
     let action = if would_fire {
-        match preview_message(
-            &rule.graph.action.message,
-            rule.graph.action.substitute,
-            ev.captures.as_ref(),
-        ) {
-            Ok(body) => step(
-                ACTION,
-                "ok",
-                match &terminal_name {
-                    Some(name) => format!("would type `{}` into {}", body, name),
-                    None => format!("would type `{}`", body),
-                },
-            ),
-            // §4.4: the same refusal `run_send` would make, reported rather than typed. The
-            // verdict below still answers the CONDITION (it matched), and this row alone carries
-            // that the send itself would be refused.
-            Err(e) => step(
-                ACTION,
-                "failed",
-                format!("nothing would be sent — `{}` had no value here", e),
-            ),
-        }
+        action_trace(rule.graph.action.as_ref(), ev.captures.as_ref(), terminal_name.as_deref())
     } else {
-        step(ACTION, "skipped", "nothing would be sent".to_string())
+        rule.graph.action.as_ref().map(|_| step(ACTION, "skipped", "nothing would be sent".to_string()))
     };
 
     // A DELAY rule (`AfterMatch`) inserts a `timer` row here, between the comparison and the send —
@@ -565,7 +535,7 @@ pub fn evaluate_once(
     if let Some(t) = timer_step {
         all_steps.push(t);
     }
-    all_steps.push(action);
+    if let Some(action) = action { all_steps.push(action); }
     finish(verdict, all_steps)
 }
 
@@ -1151,8 +1121,8 @@ mod tests {
         let mut rule = ctx_rule("au-1");
         rule.graph.parse_mut().find = r"FAILED (\d+) tests in (\S+)".into();
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "Fix the $1 failing tests in $2".into();
-        rule.graph.action.substitute = true;
+        rule.graph.action_mut().message = "Fix the $1 failing tests in $2".into();
+        rule.graph.action_mut().substitute = true;
         fake.say("pc-1", "FAILED 17 tests in a.ts");
 
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -1174,8 +1144,8 @@ mod tests {
         let mut rule = ctx_rule("au-1");
         rule.graph.parse_mut().find = r"FAILED (\d+)".into();
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "Fix $3".into();
-        rule.graph.action.substitute = true;
+        rule.graph.action_mut().message = "Fix $3".into();
+        rule.graph.action_mut().substitute = true;
         fake.say("pc-1", "FAILED 17");
 
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);

@@ -28,9 +28,9 @@ use rusqlite::Connection;
 /// silently reinterpreting a graph we do not understand is how a rule starts typing the wrong thing
 /// into a terminal. `reload` logs exactly one entry per skipped rule per load. Plan §7.3.
 ///
-/// `2` as of plan 032 §3.2 (task 27): a rule is stamped `2` only when [`schema_version_for`] finds it
-/// actually uses a v2 feature, never merely because this build can write one.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+/// `3` as of the webhook milestone: a rule is stamped only for the newest feature it actually uses,
+/// never merely because this build can write one.
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 // ---------------------------------------------------------------------------------------------
 // The DTO. These serde names are THE AUTHORITY for the whole feature (plan §7.7): the renderer's
@@ -358,6 +358,29 @@ pub struct ActionStep {
     pub substitute: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WebhookProvider { Discord, Teams, Slack, Custom }
+
+/// An optional destination outside the terminal. Its URL is persisted and sent over IPC in the
+/// clear by design, but is never displayed, logged, exported, or put in an error.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookStep {
+    pub provider: WebhookProvider,
+    pub url: String,
+    pub body: String,
+    #[serde(default)]
+    pub substitute: bool,
+}
+
+impl std::fmt::Debug for WebhookStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookStep").field("provider", &self.provider).field("url", &"<redacted>")
+            .field("body", &self.body).field("substitute", &self.substitute).finish()
+    }
+}
+
 fn default_send_to() -> SendTo {
     SendTo::Matched
 }
@@ -468,7 +491,10 @@ pub struct AutomationGraph {
     /// shape and this attribute becomes load-bearing rather than decorative.
     #[serde(default)]
     pub timer: Option<TimerStep>,
-    pub action: ActionStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookStep>,
     /// Where the editor's four cards sit on its canvas.
     ///
     /// **View state, deliberately inside the rule's blob.** The plan originally kept the layout out
@@ -503,14 +529,18 @@ pub struct AutomationGraph {
 /// opposite (monotonic, "once v2 always v2") is the more obvious thing to write by accident, which
 /// is why `schema_version_is_stamped_from_what_the_rule_actually_uses` pins the non-sticky case
 /// explicitly rather than leaving it to be implied by the others (task 27 ruling R4).
-pub fn schema_version_for(graph: &AutomationGraph) -> i64 {
+pub fn schema_version_for(rule: &AutomationRule) -> i64 {
+    let graph = &rule.graph;
     let uses_a_v2_feature = graph.timer.is_some()
         || graph.monitor.is_none()
         || graph.parse.is_none()
         || graph.cond.is_none()
         || graph.cond.as_ref().is_some_and(|c| !c.clauses.is_empty())
-        || graph.action.substitute;
-    if uses_a_v2_feature {
+        || graph.action.as_ref().is_some_and(|action| action.substitute);
+    let uses_a_v3_feature = graph.webhook.is_some() || graph.action.is_none()
+        || !rule.excluded_ids.is_empty() || rule.exclude_criterion.is_some()
+        || !rule.exclude_criterion_value.is_empty();
+    if uses_a_v3_feature { 3 } else if uses_a_v2_feature {
         2
     } else {
         1
@@ -540,6 +570,10 @@ impl AutomationGraph {
     #[track_caller]
     pub fn cond_mut(&mut self) -> &mut CondStep {
         self.cond.as_mut().expect("this fixture's rule has a cond step")
+    }
+    #[track_caller]
+    pub fn action_mut(&mut self) -> &mut ActionStep {
+        self.action.as_mut().expect("this fixture's rule has an action step")
     }
     #[track_caller]
     pub fn monitor_ref(&self) -> &MonitorStep {
@@ -1653,7 +1687,7 @@ impl AutomationStore {
         let criterion = enum_to_db(&rule.criterion)?;
         let exclude_criterion = rule.exclude_criterion.as_ref().map(enum_to_db).transpose()?;
         let schema_version = if rule.schema_version <= SUPPORTED_SCHEMA_VERSION {
-            schema_version_for(&rule.graph)
+            schema_version_for(rule)
         } else {
             rule.schema_version
         };
@@ -2376,13 +2410,14 @@ mod tests {
                 threshold: Some(25.0),
                 ..Default::default()
             }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".to_string(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         }
     }
 
@@ -2719,8 +2754,14 @@ mod tests {
 
     fn graph_with_substitute() -> AutomationGraph {
         let mut g = graph();
-        g.action.substitute = true;
+        g.action_mut().substitute = true;
         g
+    }
+
+    fn stamped(graph: AutomationGraph) -> i64 {
+        let mut rule = rule("au-stamp");
+        rule.graph = graph;
+        schema_version_for(&rule)
     }
 
     /// One row per term of the predicate, plus the plain rule that must STAY v1. A single row would
@@ -2729,26 +2770,48 @@ mod tests {
     #[test]
     fn schema_version_is_stamped_from_what_the_rule_actually_uses() {
         assert_eq!(
-            schema_version_for(&graph()),
+            stamped(graph()),
             1,
             "a plain four-step rule must still load on an older build"
         );
-        assert_eq!(schema_version_for(&graph_with_timer()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_monitor()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_parse()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_cond()), 2);
-        assert_eq!(schema_version_for(&graph_with_one_clause()), 2);
-        assert_eq!(schema_version_for(&graph_with_substitute()), 2);
+        assert_eq!(stamped(graph_with_timer()), 2);
+        assert_eq!(stamped(graph_with_no_monitor()), 2);
+        assert_eq!(stamped(graph_with_no_parse()), 2);
+        assert_eq!(stamped(graph_with_no_cond()), 2);
+        assert_eq!(stamped(graph_with_one_clause()), 2);
+        assert_eq!(stamped(graph_with_substitute()), 2);
+        let mut webhook = graph();
+        webhook.webhook = Some(WebhookStep { provider: WebhookProvider::Discord, url: "https://example.invalid/hook".into(), body: "build failed".into(), substitute: false });
+        assert_eq!(stamped(webhook.clone()), 3);
+        webhook.webhook = None;
+        assert_eq!(stamped(webhook), 1, "removing the last webhook drops the stamp back");
+        let mut no_action = graph();
+        no_action.action = None;
+        assert_eq!(stamped(no_action), 3);
 
         // R4: not sticky. Dropping the last clause must not leave the rule permanently v2 — the
         // opposite (monotonic) behaviour is the more obvious thing to write by accident.
         let mut g = graph_with_one_clause();
         g.cond.as_mut().unwrap().clauses.clear();
         assert_eq!(
-            schema_version_for(&g),
+            stamped(g),
             1,
             "dropping the last clause makes the rule v1-compatible again"
         );
+    }
+
+    #[test]
+    fn a_rule_with_exclusions_is_stamped_v3_even_on_a_v1_graph() {
+        let mut excluded = rule("au-excluded");
+        excluded.schema_version = 1;
+        excluded.excluded_ids = vec!["tm-secret".into()];
+        assert_eq!(schema_version_for(&excluded), 3);
+        excluded.excluded_ids.clear();
+        assert_eq!(schema_version_for(&excluded), 1);
+        excluded.exclude_criterion_value = "scratch".into();
+        assert_eq!(schema_version_for(&excluded), 3);
+        excluded.exclude_criterion_value.clear();
+        assert_eq!(schema_version_for(&excluded), 1);
     }
 
     /// §3.2's whole point: merely loading and re-saving an old rule must not brick it for a
@@ -2789,7 +2852,26 @@ mod tests {
         }"#;
         let decoded: AutomationGraph =
             serde_json::from_str(raw).expect("a graph missing only a newer optional field must still decode");
-        assert!(!decoded.action.substitute, "a rule from before this field existed must load with it off");
+        assert!(!decoded.action.as_ref().unwrap().substitute, "a rule from before this field existed must load with it off");
+    }
+
+    #[test]
+    fn a_webhook_only_rule_writes_no_action_key() {
+        let mut graph = graph();
+        graph.action = None;
+        graph.webhook = Some(WebhookStep { provider: WebhookProvider::Slack, url: "https://example.invalid/hook".into(), body: "build failed".into(), substitute: false });
+        assert!(!serde_json::to_string(&graph).unwrap().contains("\"action\""));
+    }
+
+    #[test]
+    fn a_graph_with_no_webhook_writes_no_webhook_key() {
+        assert!(!serde_json::to_string(&graph()).unwrap().contains("\"webhook\""));
+    }
+
+    #[test]
+    fn a_v1_rule_still_round_trips_byte_for_byte() {
+        let v1 = r#"{"kind":"number","op":"gt","threshold":25.0}"#;
+        assert_eq!(serde_json::to_string(&serde_json::from_str::<CondStep>(v1).unwrap()).unwrap(), v1);
     }
 
     // -- §10.14b ------------------------------------------------------------------------------
@@ -3108,7 +3190,7 @@ mod tests {
         let store = AutomationStore::new_in_memory();
         let mut bad = rule("au-1");
         bad.enabled = true;
-        bad.graph.action.message = String::new();
+        bad.graph.action_mut().message = String::new();
 
         assert!(store.save_rule_as_of(&bad, 1_000).is_err(), "an enabled rule with no message");
         assert!(store.get_rule("au-1").unwrap().is_none(), "and nothing was written");
@@ -3574,7 +3656,7 @@ mod tests {
         let mut rule = enableable("au-bad");
         rule.enabled = false;
         rule.target_ids.clear();
-        rule.graph.action.message = String::new();
+        rule.graph.action_mut().message = String::new();
         store.save_rule(&rule).unwrap();
 
         let refused = store.set_enabled_checked("au-bad", true);
@@ -3615,7 +3697,7 @@ mod tests {
         let mut empty = enableable("au-empty");
         empty.enabled = false;
         empty.target_ids.clear();
-        empty.graph.action.message = String::new();
+        empty.graph.action_mut().message = String::new();
         store.save_rule(&empty).unwrap();
 
         store.set_enabled_checked("au-empty", false).unwrap();
@@ -3636,7 +3718,7 @@ mod tests {
 
         let mut broken = enableable("au-1");
         broken.enabled = true;
-        broken.graph.action.message = String::new();
+        broken.graph.action_mut().message = String::new();
         let refused = store.save_rule(&broken);
         assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
         assert!(store.get_rule("au-1").unwrap().is_none(), "refused, and yet the row was written");
@@ -4479,13 +4561,14 @@ mod tests {
             timer: Some(TimerStep {
                 mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
             }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "stand-up notes?".to_string(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".to_string(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
             layout: None,
         };
 

@@ -316,7 +316,8 @@ pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 fn never_runs_problem(graph: &AutomationGraph) -> Option<Problem> {
     let has_input_steps = graph.monitor.is_some() && graph.parse.is_some() && graph.cond.is_some();
     let scheduled = matches!(graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
-    if has_input_steps || scheduled || graph.action.message.trim().is_empty() {
+    let has_terminal_destination = graph.action.as_ref().is_some_and(|action| !action.message.trim().is_empty());
+    if has_input_steps || scheduled || graph.webhook.is_some() || !has_terminal_destination {
         return None;
     }
     let message = if graph.timer.is_some() {
@@ -642,14 +643,16 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
-    if rule.graph.action.message.trim().is_empty() {
+    if (rule.graph.action.is_none() && rule.graph.webhook.is_none())
+        || rule.graph.action.as_ref().is_some_and(|action| action.message.trim().is_empty())
+    {
         out.push(Problem::new(
             Severity::Blocks,
             "action",
             "action.empty",
             "Enter the message this rule should type.",
         ));
-    } else if let Some(parse) = parse_step(&rule.graph) {
+    } else if let (Some(action), Some(parse)) = (rule.graph.action.as_ref(), parse_step(&rule.graph)) {
         // §2.6's failure, told to the user before it happens: a rule whose own message matches its
         // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
         // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
@@ -667,7 +670,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
         // bug, so the shared fixture agreed with itself and could not see it.
         if let Ok(re) = compile(&parse.find) {
-            if re.is_match(&rule.graph.action.message) {
+            if re.is_match(&action.message) {
                 out.push(Problem::new(
                     Severity::Warns,
                     "action",
@@ -692,7 +695,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parse_step` is what makes the two
     // spellings indistinguishable to this check.
-    if rule.graph.action.substitute {
+    if let Some(action) = rule.graph.action.as_ref().filter(|action| action.substitute) {
         match parse_step(&rule.graph) {
             // The toggle itself claims the message inserts a capture, which nothing can be true
             // of before a pattern exists — asked regardless of whether a token has actually been
@@ -707,7 +710,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             Some(parse) => {
                 if let Ok(compiled) = compile(&parse.find) {
                     let count = compiled.captures_len().saturating_sub(1);
-                    for token in subst::tokens_used(&rule.graph.action.message) {
+                    for token in subst::tokens_used(&action.message) {
                         let bad = match &token {
                             subst::Token::Whole => false,
                             subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
@@ -768,13 +771,14 @@ mod tests {
             monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
             parse: Some(ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep }),
             cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "m".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".into(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         }
     }
 
@@ -957,7 +961,7 @@ mod tests {
             ),
             (
                 "nothing to type",
-                Box::new(|r: &mut AutomationRule| r.graph.action.message = "   ".into()),
+                Box::new(|r: &mut AutomationRule| r.graph.action_mut().message = "   ".into()),
                 "action",
             ),
         ];
@@ -1005,7 +1009,7 @@ mod tests {
         let mut rule = valid_rule();
         rule.graph.parse_mut().find = "HANDOFF".into();
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "HANDOFF now".into();
+        rule.graph.action_mut().message = "HANDOFF now".into();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 1, "{:?}", found);
@@ -1025,7 +1029,7 @@ mod tests {
     fn blocking_problems_come_before_warnings() {
         let mut rule = valid_rule();
         rule.graph.parse_mut().find = r"ctx:(\d+)(%)".into();
-        rule.graph.action.message = String::new();
+        rule.graph.action_mut().message = String::new();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 2, "{:?}", found);
@@ -1272,7 +1276,7 @@ mod tests {
         rule.graph.parse = None;
         rule.graph.cond = None;
         rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
-        rule.graph.action.message = "resume".into();
+        rule.graph.action_mut().message = "resume".into();
 
         let found = problems(&rule);
         assert_eq!(
@@ -1476,7 +1480,7 @@ mod tests {
             updated_at: 0,
         };
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "anything at all".into();
+        rule.graph.action_mut().message = "anything at all".into();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 1, "only the empty pattern, no echo warning: {found:?}");
