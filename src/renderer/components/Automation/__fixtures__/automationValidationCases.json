@@ -1727,6 +1727,106 @@
           "code": "action.tokenWithoutParse"
         }
       ]
+    },
+    {
+      "name": "action.unknownToken — ${bogus} when the pattern has no such name",
+      "why": "The named branch of the token check (`!names.has(t.name)`) had no case of its own — only the positional `$3` case above did. A named lookup for a group the pattern never declares must block exactly like an out-of-range number does.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "(?<value>\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix ${bogus}",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "substitute is on, the pattern exists, and the message names no token",
+      "why": "The one shape neither validator's fixture pinned: `substitute` true with a real pattern, but a message that never asks for a capture. There is nothing for `tokensUsed` to walk, so nothing should block.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "go now",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": []
     }
   ]
 }
