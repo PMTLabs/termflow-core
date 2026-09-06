@@ -65,6 +65,17 @@ export interface StepValue {
 const value = (text: string): StepValue => ({ text, missing: false });
 const absent = (text: string): StepValue => ({ text, missing: true });
 
+/**
+ * A step the rule does not HAVE, as distinct from a field it has not filled in.
+ *
+ * Plan 032 §3.1 lets a schedule rule (§6.3) carry no monitor, parse or cond step at all. Every
+ * other `absent(...)` here names a value the user still has to supply — *no number yet* — and that
+ * is the wrong thing to say about a step that is not part of the rule and never will be. One
+ * placeholder for all of them, deliberately plain: tasks 23-25 own the editor and the copy for
+ * authoring and describing a schedule rule.
+ */
+const NOT_IN_THIS_RULE: StepValue = absent('not in this rule');
+
 export const OP_PHRASES: Record<string, string> = {
     gt: 'greater than',
     gte: 'greater than or equal to',
@@ -188,14 +199,20 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
     switch (step) {
         case 'monitor':
             return {
+                // **Targeting survives an absent monitor step** (plan 032 §3.1): `targetMode` and
+                // `targetIds` are the rule's own columns, not fields of the step, so a schedule
+                // rule still watches its terminals and this row still says which.
                 terminals:
                     rule.targetMode === 'pinned' && rule.targetIds.length === 0
                         ? absent('no terminals chosen')
                         : value(describeCriterion(rule)),
-                read: value(READ_PHRASES[monitor.read]),
-                cadence: value(describeCadence(rule)),
+                read: monitor ? value(READ_PHRASES[monitor.read]) : NOT_IN_THIS_RULE,
+                cadence: monitor ? value(describeCadence(rule)) : NOT_IN_THIS_RULE,
             };
         case 'parse': {
+            if (!parse) {
+                return { preset: NOT_IN_THIS_RULE, find: NOT_IN_THIS_RULE, keep: NOT_IN_THIS_RULE };
+            }
             const shown = displayedPattern(parse);
             return {
                 preset: value(presetById(parse.preset).label),
@@ -204,6 +221,13 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
             };
         }
         case 'cond': {
+            if (!cond) {
+                return {
+                    compare: NOT_IN_THIS_RULE,
+                    threshold: NOT_IN_THIS_RULE,
+                    fires: NOT_IN_THIS_RULE,
+                };
+            }
             // `fires` is the Task-14 field — the clause-list sentence (or its legacy fallback),
             // read by the node face via `FACE_ROWS`. `compare`/`threshold` are kept exactly as
             // they were: the pre-clause single-comparison summary, still true for a v1 rule and
@@ -367,7 +391,10 @@ export function panelFor(rule: AutomationRule, step: StepKind, ctx: DeriveContex
                 : `Step ${index} · ${STEP_SUBTITLES[step]}`,
         values: stepValues(rule, step),
         problems: mine,
-        saying: step === 'parse' ? sayPattern(rule.graph.parse.find, rule.graph.parse.keep) : null,
+        // No parse step, nothing to say about a pattern that does not exist.
+        saying: step === 'parse' && rule.graph.parse
+            ? sayPattern(rule.graph.parse.find, rule.graph.parse.keep)
+            : null,
     };
 }
 
@@ -386,10 +413,14 @@ export function panelFor(rule: AutomationRule, step: StepKind, ctx: DeriveContex
  * one screen must not make opposite claims about one rule.
  */
 function whenPhrase(rule: AutomationRule, pattern: string, cond: Record<string, StepValue>): string {
-    if ((rule.graph.cond.clauses ?? []).length > 0) {
-        return `when ${pattern} matches and ${condSentence(rule.graph.cond)}`;
+    const step = rule.graph.cond;
+    // A rule with no condition step is not waiting on anything this sentence can name — a schedule
+    // rule fires on the clock (§6.3), which is a Timer clause the rail does not have yet (§7, M5).
+    if (!step) return 'with nothing to watch for';
+    if ((step.clauses ?? []).length > 0) {
+        return `when ${pattern} matches and ${condSentence(step)}`;
     }
-    if (rule.graph.cond.kind === 'text') return `when ${pattern} appears`;
+    if (step.kind === 'text') return `when ${pattern} appears`;
     // A v1 reading rule, or one whose comparison is not authored yet — `compare`/`threshold` carry
     // the missing-value placeholders that tell the user what is still to fill in.
     return `when the value in ${pattern} is ${cond.compare.text} ${cond.threshold.text}`;
@@ -468,6 +499,12 @@ export function describeRule(rule: AutomationRule): RuleSentence {
         message: action.message,
         sendNote: action.submit ? null : ' — no Enter',
     };
+    // **A rule with no parse or cond step says only what it sends.** Plan 032 §7 gives this
+    // sentence a Timer clause (*"at 09:00, …"*) in milestone 5; until then the honest answer is to
+    // name no trigger at all rather than describe one the rule does not have.
+    if (!parse || !cond) {
+        return { lead: '', subject: '', verb: null, detail: null, ...send };
+    }
     const subject = parse.literal && parse.literal.length > 0 ? parse.literal : parse.find;
 
     // A clause list supersedes `op`/`threshold` (§5.3), so it is asked FIRST and for BOTH `finds`:

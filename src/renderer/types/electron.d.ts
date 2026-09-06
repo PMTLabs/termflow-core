@@ -626,9 +626,23 @@ export interface AutomationTimerStep {
 
 /** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */
 export interface AutomationGraph {
-  monitor: AutomationMonitorStep;
-  parse: AutomationParseStep;
-  cond: AutomationCondStep;
+  /**
+   * Absent on a **schedule rule** (plan 032 §3.1, §6.3) — one that fires at a wall-clock time and
+   * reads nothing at all. The first three steps are the rule's INPUT and travel together: a rule
+   * either has all three or none.
+   *
+   * Targeting is unaffected: `targetMode`, `criterion`, `criterionValue`, `followNew` and
+   * `targetIds` are columns on the rule, not fields of the monitor step, so a schedule rule still
+   * has its terminals.
+   *
+   * The backend omits the key entirely rather than sending `null` — an absent step must not decode
+   * as a present-but-empty one on an older build.
+   */
+  monitor?: AutomationMonitorStep;
+  /** Absent on a schedule rule: there is no pattern, which is not the same as a blank one. */
+  parse?: AutomationParseStep;
+  /** Absent on a schedule rule: nothing was read, so there is nothing to compare. */
+  cond?: AutomationCondStep;
   /** Absent on every rule saved before this milestone and on every rule that does not use it. */
   timer?: AutomationTimerStep;
   action: AutomationActionStep;

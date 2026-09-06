@@ -27,8 +27,8 @@ use regex::{Regex, RegexBuilder};
 use crate::automation::runtime::ECHO_TTL_MS;
 use crate::automation_engine::subst;
 use crate::automation_store::{
-    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, Source, TargetMode, Test,
-    TextOp, TimerMode,
+    AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
+    Test, TextOp, TimerMode,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -142,16 +142,17 @@ pub(crate) fn source_text(source: &Source) -> String {
     }
 }
 
-/// Whether this rule has a working PARSE step to source clause tokens from.
+/// The rule's PARSE step, when it has one that can source clause tokens.
 ///
-/// **`parse` is not yet `Option`** — every rule carries a [`crate::automation_store::ParseStep`]
-/// — so today "no parse step" means the declared pattern is blank, exactly what `parse.empty`
-/// already reports on the `parse` field. When `parse` becomes optional (a later milestone's
-/// schedule rule, plan 032 §6.3), this becomes
-/// `graph.parse.as_ref().is_some_and(|p| !p.find.trim().is_empty())`, and every caller stays
-/// correct because there is only this one call site to update.
-fn has_parse_step(graph: &AutomationGraph) -> bool {
-    !graph.parse.find.trim().is_empty()
+/// **Two different absences, one answer.** A *schedule* rule (plan 032 §6.3) has no parse step at
+/// all; an ordinary rule can have one whose declared pattern is blank, which `parse.empty` already
+/// reports on the `parse` field. Neither can supply a token, so both read `None` here — and every
+/// caller stays correct because this is the one place that decides it.
+///
+/// Returns the step rather than a bool so a caller that has proved presence does not have to ask
+/// again: a second `graph.parse.as_ref()` below this would be a redundant guard masking this one.
+fn parse_step(graph: &AutomationGraph) -> Option<&ParseStep> {
+    graph.parse.as_ref().filter(|p| !p.find.trim().is_empty())
 }
 
 /// Everything wrong with the COND step's clause list — §8's four `cond.*` codes (plan 032 §5.3,
@@ -162,12 +163,18 @@ fn has_parse_step(graph: &AutomationGraph) -> bool {
 /// behaviour written down (§5.4).
 fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let mut out = Vec::new();
-    let clauses = &graph.cond.clauses;
+    // No cond step at all is no clauses at all — a schedule rule (§6.3) reports nothing here.
+    // Absence is a no-op for this check, never a substitute check invented for it (§8's table
+    // already anticipates it, in `cond.clauseWithoutParse` below).
+    let Some(cond) = graph.cond.as_ref() else {
+        return out;
+    };
+    let clauses = &cond.clauses;
     if clauses.is_empty() {
         return out;
     }
 
-    if !has_parse_step(graph) {
+    let Some(parse) = parse_step(graph) else {
         out.push(Problem::new(
             Severity::Blocks,
             "cond",
@@ -175,11 +182,11 @@ fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
             "This condition compares a captured value, but the rule has no pattern to capture it from.",
         ));
         return out;
-    }
+    };
 
     // Only ask the pattern for its groups once it can compile — an uncompilable pattern is
     // already `parse.uncompilable`'s problem, not this one's, exactly like `action.unknownToken`.
-    let compiled = compile(&graph.parse.find).ok();
+    let compiled = compile(&parse.find).ok();
 
     for clause in clauses {
         if let Some(re) = &compiled {
@@ -319,7 +326,14 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
 pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     let mut out = Vec::new();
 
-    if graph.parse.find.trim().is_empty() {
+    // A schedule rule (§6.3) has no parse step at all, which is NOT the same thing as a blank
+    // pattern: there is no field here to be empty, so `parse.empty` would be describing a step the
+    // rule does not have. Nothing to report — §8's table adds no code for this.
+    let Some(parse) = graph.parse.as_ref() else {
+        return out;
+    };
+
+    if parse.find.trim().is_empty() {
         out.push(Problem::new(Severity::Blocks, "parse", "parse.empty", "Enter something to look for."));
         return out;
     }
@@ -329,7 +343,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     // checked as one expression and executed as another — three treatments of one field, across
     // `pattern_problems`, `reload` and `pattern_refused_at_load`. Now there is one: trimmed for the
     // emptiness question, verbatim for every other.
-    let compiled = match compile(&graph.parse.find) {
+    let compiled = match compile(&parse.find) {
         Ok(re) => re,
         Err(e) => {
             out.push(Problem::new(
@@ -353,9 +367,10 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
     // every test stayed green, because no test ran this against a text rule at all. That is the
     // `validation-rule-strands-a-scoped-default` class: a rule written for the step that READS a
     // field, applied to every rule that merely HAS it.
-    let numeric = graph.cond.finds == Finds::Reading;
+    // No cond step is no comparison, so `keep` — a NUMERIC-only concern — has nothing to answer to.
+    let numeric = graph.cond.as_ref().is_some_and(|c| c.finds == Finds::Reading);
 
-    if numeric && graph.parse.keep == Keep::Brackets && groups == 0 {
+    if numeric && parse.keep == Keep::Brackets && groups == 0 {
         // Never a silent fall-back to the whole match: the user asked for the bracketed part, and
         // comparing something else is how a rule types the wrong thing into a terminal.
         out.push(Problem::new(
@@ -367,7 +382,7 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
         ));
     }
 
-    if numeric && graph.parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
+    if numeric && parse.keep == Keep::Brackets && groups > 1 && !has_named_value {
         out.push(Problem::new(
             Severity::Warns,
             "parse",
@@ -431,7 +446,13 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     }
 
     // --- interval -------------------------------------------------------------------------------
-    if rule.graph.monitor.cadence == Cadence::Timer && rule.graph.monitor.every_ms < MIN_TIMER_MS {
+    // A schedule rule (§6.3) has no monitor step, so it has no poll interval to be too fast.
+    if rule
+        .graph
+        .monitor
+        .as_ref()
+        .is_some_and(|m| m.cadence == Cadence::Timer && m.every_ms < MIN_TIMER_MS)
+    {
         out.push(Problem::new(
             Severity::Blocks,
             "monitor",
@@ -449,10 +470,13 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // `op` / `threshold` are v1-only (§5.3): a rule built in the clause-list editor leaves both
     // `None` and expresses its comparison as a clause instead, so an empty clause list is what
     // actually makes this incomplete, not a bare absence of `op`/`threshold`.
-    if rule.graph.cond.finds == Finds::Reading
-        && rule.graph.cond.clauses.is_empty()
-        && (rule.graph.cond.op.is_none() || rule.graph.cond.threshold.is_none())
-    {
+    // A rule with no cond step reads no value and has nothing to compare it with, so there is no
+    // incomplete comparison to report — the check is a no-op for it, not a substitute check.
+    if rule.graph.cond.as_ref().is_some_and(|c| {
+        c.finds == Finds::Reading
+            && c.clauses.is_empty()
+            && (c.op.is_none() || c.threshold.is_none())
+    }) {
         out.push(Problem::new(
             Severity::Blocks,
             "cond",
@@ -480,7 +504,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             "action.empty",
             "Enter the message this rule should type.",
         ));
-    } else if !rule.graph.parse.find.trim().is_empty() {
+    } else if let Some(parse) = parse_step(&rule.graph) {
         // §2.6's failure, told to the user before it happens: a rule whose own message matches its
         // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
         // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
@@ -497,7 +521,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         // can only widen the match, so ` HANDOFF` — which the engine will never match against the
         // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
         // bug, so the shared fixture agreed with itself and could not see it.
-        if let Ok(re) = compile(&rule.graph.parse.find) {
+        if let Ok(re) = compile(&parse.find) {
             if re.is_match(&rule.graph.action.message) {
                 out.push(Problem::new(
                     Severity::Warns,
@@ -519,41 +543,48 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // `subst::tokens_used` is the SAME scanner `substitute` reads (see that module's doc): a
     // second scanner here could recognise a different grammar and let a message pass that the
     // send then refuses anyway.
+    // **Absent and blank are one answer here**, and it is the one §8's table already names: the
+    // toggle claims the message inserts a capture, and a rule with no parse step at all captures
+    // nothing, exactly like one whose pattern is still empty. `parse_step` is what makes the two
+    // spellings indistinguishable to this check.
     if rule.graph.action.substitute {
-        if rule.graph.parse.find.trim().is_empty() {
+        match parse_step(&rule.graph) {
             // The toggle itself claims the message inserts a capture, which nothing can be true
             // of before a pattern exists — asked regardless of whether a token has actually been
             // typed yet, the same way the threshold check above is asked regardless of what a
             // clause would compare against.
-            out.push(Problem::new(
+            None => out.push(Problem::new(
                 Severity::Blocks,
                 "action",
                 "action.tokenWithoutParse",
                 "This message inserts captured values, but the rule has no pattern to capture them from.",
-            ));
-        } else if let Ok(compiled) = compile(&rule.graph.parse.find) {
-            let count = compiled.captures_len().saturating_sub(1);
-            for token in subst::tokens_used(&rule.graph.action.message) {
-                let bad = match &token {
-                    subst::Token::Whole => false,
-                    subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
-                    subst::Token::Named(name) => {
-                        !token_supplied(&compiled, None, Some(name.as_str()))
+            )),
+            Some(parse) => {
+                if let Ok(compiled) = compile(&parse.find) {
+                    let count = compiled.captures_len().saturating_sub(1);
+                    for token in subst::tokens_used(&rule.graph.action.message) {
+                        let bad = match &token {
+                            subst::Token::Whole => false,
+                            subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
+                            subst::Token::Named(name) => {
+                                !token_supplied(&compiled, None, Some(name.as_str()))
+                            }
+                        };
+                        if !bad {
+                            continue;
+                        }
+                        out.push(Problem::new(
+                            Severity::Blocks,
+                            "action",
+                            "action.unknownToken",
+                            format!(
+                                "{token} has nothing to stand for. The pattern in Read a value has \
+                                 {count} bracketed group{}, so the highest you can use is ${count}.",
+                                if count == 1 { "" } else { "s" }
+                            ),
+                        ));
                     }
-                };
-                if !bad {
-                    continue;
                 }
-                out.push(Problem::new(
-                    Severity::Blocks,
-                    "action",
-                    "action.unknownToken",
-                    format!(
-                        "{token} has nothing to stand for. The pattern in Read a value has \
-                         {count} bracketed group{}, so the highest you can use is ${count}.",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                ));
             }
         }
     }
@@ -581,7 +612,7 @@ mod tests {
     /// the point is that a text rule carries the field and never reads it.
     fn text_graph(find: &str, keep: Keep) -> AutomationGraph {
         let mut g = graph(find, keep);
-        g.cond = CondStep { finds: Finds::Event, ..Default::default() };
+        g.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         g
     }
 
@@ -589,9 +620,9 @@ mod tests {
         AutomationGraph {
             layout: None,
             timer: None,
-            monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-            parse: ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep },
-            cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            parse: Some(ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep }),
+            cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
             action: ActionStep {
                 message: "m".into(),
                 send_to: SendTo::Matched,
@@ -756,24 +787,24 @@ mod tests {
             (
                 "a timer faster than the engine can tick",
                 Box::new(|r: &mut AutomationRule| {
-                    r.graph.monitor.cadence = Cadence::Timer;
-                    r.graph.monitor.every_ms = MIN_TIMER_MS - 1;
+                    r.graph.monitor_mut().cadence = Cadence::Timer;
+                    r.graph.monitor_mut().every_ms = MIN_TIMER_MS - 1;
                 }),
                 "monitor",
             ),
             (
                 "a pattern that will not compile",
-                Box::new(|r: &mut AutomationRule| r.graph.parse.find = r"ctx:(\d+%".into()),
+                Box::new(|r: &mut AutomationRule| r.graph.parse_mut().find = r"ctx:(\d+%".into()),
                 "parse",
             ),
             (
                 "a numeric rule with no threshold",
-                Box::new(|r: &mut AutomationRule| r.graph.cond.threshold = None),
+                Box::new(|r: &mut AutomationRule| r.graph.cond_mut().threshold = None),
                 "cond",
             ),
             (
                 "a numeric rule with no operator",
-                Box::new(|r: &mut AutomationRule| r.graph.cond.op = None),
+                Box::new(|r: &mut AutomationRule| r.graph.cond_mut().op = None),
                 "cond",
             ),
             (
@@ -807,15 +838,15 @@ mod tests {
     #[test]
     fn a_timer_exactly_at_the_floor_is_allowed() {
         let mut rule = valid_rule();
-        rule.graph.monitor.cadence = Cadence::Timer;
-        rule.graph.monitor.every_ms = MIN_TIMER_MS;
+        rule.graph.monitor_mut().cadence = Cadence::Timer;
+        rule.graph.monitor_mut().every_ms = MIN_TIMER_MS;
         assert_eq!(problems(&rule), vec![]);
 
         // And `every_ms` is meaningless for an output-driven rule, so it must not be judged there —
         // the struct carries the field whatever the cadence says.
         let mut on_output = valid_rule();
-        on_output.graph.monitor.cadence = Cadence::OnOutput;
-        on_output.graph.monitor.every_ms = 0;
+        on_output.graph.monitor_mut().cadence = Cadence::OnOutput;
+        on_output.graph.monitor_mut().every_ms = 0;
         assert_eq!(problems(&on_output), vec![], "a field is judged by the step that READS it");
     }
 
@@ -824,8 +855,8 @@ mod tests {
     #[test]
     fn a_message_matching_its_own_pattern_warns_and_never_blocks() {
         let mut rule = valid_rule();
-        rule.graph.parse.find = "HANDOFF".into();
-        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
+        rule.graph.parse_mut().find = "HANDOFF".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "HANDOFF now".into();
 
         let found = problems(&rule);
@@ -845,7 +876,7 @@ mod tests {
     #[test]
     fn blocking_problems_come_before_warnings() {
         let mut rule = valid_rule();
-        rule.graph.parse.find = r"ctx:(\d+)(%)".into();
+        rule.graph.parse_mut().find = r"ctx:(\d+)(%)".into();
         rule.graph.action.message = String::new();
 
         let found = problems(&rule);
@@ -958,7 +989,7 @@ mod tests {
     #[test]
     fn cond_incomplete_names_a_control_that_is_on_screen() {
         let mut rule = valid_rule();
-        rule.graph.cond = CondStep { finds: Finds::Reading, ..Default::default() };
+        rule.graph.cond = Some(CondStep { finds: Finds::Reading, ..Default::default() });
 
         let found = problems(&rule);
         let incomplete = found
@@ -993,7 +1024,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "anything at all".into();
 
         let found = problems(&rule);
@@ -1014,14 +1045,14 @@ mod tests {
     #[test]
     fn a_numeric_clause_with_no_usable_value_needs_a_value() {
         let mut g = graph(r"ctx:(\d+)%", Keep::Brackets);
-        g.cond = CondStep {
+        g.cond = Some(CondStep {
             finds: Finds::Event,
             clauses: vec![Clause {
                 source: Source::Whole,
                 test: Test::Number { op: CompareOp::Gt, value: None },
             }],
             ..Default::default()
-        };
+        });
 
         // The reachable one first: nothing entered yet.
         assert_eq!(
@@ -1030,7 +1061,7 @@ mod tests {
             "a numeric clause with no threshold is §8's own wording for this code"
         );
 
-        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::NAN) };
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::NAN) };
         let found = clause_problems(&g);
         assert_eq!(
             found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
@@ -1039,12 +1070,12 @@ mod tests {
         );
 
         // Paired: `f64::INFINITY` is also non-finite and must trip the same guard, not merely NaN.
-        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::INFINITY) };
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(f64::INFINITY) };
         let found = clause_problems(&g);
         assert_eq!(found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(), vec!["cond.clauseNeedsValue"]);
 
         // And the paired positive: an ordinary finite value reports nothing at all.
-        g.cond.clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(25.0) };
+        g.cond_mut().clauses[0].test = Test::Number { op: CompareOp::Gt, value: Some(25.0) };
         assert!(clause_problems(&g).is_empty(), "a finite value must not be flagged");
     }
 }

@@ -161,7 +161,6 @@ pub fn evaluate_once(
     now_ms: i64,
 ) -> DryRunReport {
     let terminal_name = host.label_for(tm);
-    let pattern = rule.graph.parse.find.clone();
 
     let finish = |verdict: &str, steps: Vec<StepTrace>| -> DryRunReport {
         let report = DryRunReport {
@@ -188,6 +187,19 @@ pub fn evaluate_once(
         }
         report
     };
+
+    // 0. A schedule rule (§6.3) has no monitor, parse or cond step at all: nothing to read, and
+    //    therefore no condition this function could compute. `unreadable` — the verdict whose whole
+    //    meaning is *"the rule was never judged at all"* — rather than `would-not-fire`, which would
+    //    claim a verdict that was never reached. This is the minimum that does not lie; task 25 owns
+    //    the schedule-aware wording for the Test pane.
+    let Some(steps) = eval::InputSteps::of(&rule.graph) else {
+        return finish(
+            UNREADABLE,
+            vec![skipped(MONITOR), skipped(PARSE), skipped(COND), skipped(ACTION)],
+        );
+    };
+    let pattern = steps.parse.find.clone();
 
     // 1. Monitor. A terminal that is not live is not readable, and that is the whole answer.
     let Some(pc) = host.process_for_leaf(tm) else {
@@ -240,13 +252,19 @@ pub fn evaluate_once(
     //     (§3.2: a merely-loaded v1 rule is never promoted). Idempotent, so a v2 draft is untouched.
     let mut graph = rule.graph.clone();
     crate::automation_engine::fold_v1_clauses(&mut graph, &re);
+    // The same three steps, re-borrowed from the FOLDED copy — `steps` above still points at the
+    // stored rule, whose clause list the fold deliberately did not touch. `unwrap_or(steps)` and
+    // not an `unwrap`: `graph` is a clone of the graph `InputSteps::of` has already answered `Some`
+    // for and the fold only ever PUSHES a clause, so the fall-back is unreachable — and a Test
+    // button is the last thing that should be able to panic.
+    let folded = eval::InputSteps::of(&graph).unwrap_or(steps);
 
     // 3. The same pure core the evaluator runs, over the same needle list, at the same depth. The arm
     //    state is READ (§2.2c picks the depth from it) and never written.
     let prev = engine.runtime.arm_state(&rule.id, tm);
     let echoes = engine.runtime.echoes_for(tm, now_ms);
     let port = HostPort(host);
-    let Some(ev) = eval::evaluate(&graph, &re, &echoes, prev, &port, &pc, now_ms) else {
+    let Some(ev) = eval::evaluate(folded, &re, &echoes, prev, &port, &pc, now_ms) else {
         return finish(
             UNREADABLE,
             vec![
@@ -306,14 +324,14 @@ pub fn evaluate_once(
         // `parse ✓ matched` / `cond · not reached` / *Would not fire*, naming no clause and never
         // mentioning the outcome this milestone exists to introduce.
         //
-        // Read `rule.graph.cond.clauses` — the STORED rule — not the local `graph` a few lines up:
+        // Read `steps.cond` — the STORED rule's condition — not `folded.cond` a few lines up:
         // `fold_v1_clauses` gives even a v1 numeric rule exactly one clause on ITS copy, so keying
         // on the folded graph would swallow the v1 branch's wording too. `op`/`join` and `finds`
-        // are identical on both copies; only `clauses` differs, so `rule.graph.cond` alone is read
-        // for every field below.
-        (truth, _) if !rule.graph.cond.clauses.is_empty() => {
-            let sentence = clauses_sentence(&rule.graph.cond.clauses, rule.graph.cond.join);
-            let finds = finds_words(rule.graph.cond.finds);
+        // are identical on both copies; only `clauses` differs, so `steps.cond` alone is read for
+        // every field below.
+        (truth, _) if !steps.cond.clauses.is_empty() => {
+            let sentence = clauses_sentence(&steps.cond.clauses, steps.cond.join);
+            let finds = finds_words(steps.cond.finds);
             match truth {
                 Truth::True => step(COND, "ok", format!("{}, as {}", sentence, finds)),
                 Truth::False => step(COND, "failed", format!("{} is false, as {}", sentence, finds)),
@@ -331,7 +349,7 @@ pub fn evaluate_once(
         }
         (Truth::Unknown, _) => skipped(COND),
         (truth, Outcome::Numeric(Read::Value(v))) => {
-            let (sym, t) = match (rule.graph.cond.op, rule.graph.cond.threshold) {
+            let (sym, t) = match (steps.cond.op, steps.cond.threshold) {
                 (Some(op), Some(t)) => (symbol(op), eval::fmt_num(t)),
                 // Unreachable through the enable path — a numeric rule with no operator is a blocking
                 // validation problem — and `Unknown` above already caught it. Never a panic.
@@ -543,7 +561,7 @@ mod tests {
         fake.say("pc-1", "ctx:63%\n");
 
         let mut draft = ctx_rule("au-draft-never-saved");
-        draft.graph.cond.threshold = Some(90.0);
+        draft.graph.cond_mut().threshold = Some(90.0);
 
         let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
 
@@ -569,7 +587,7 @@ mod tests {
     fn a_dry_run_surfaces_a_capture_that_is_not_a_number() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"ctx:(\d+%)".into();
+        rule.graph.parse_mut().find = r"ctx:(\d+%)".into();
         fake.say("pc-1", "ctx:63%\n");
 
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -594,11 +612,11 @@ mod tests {
     fn every_dry_run_reports_all_four_steps_in_the_graphs_own_order() {
         let (engine, fake, host) = wire(vec![]);
         let mut uncompilable = ctx_rule("au-1");
-        uncompilable.graph.parse.find = r"ctx:(\d+%".into();
+        uncompilable.graph.parse_mut().find = r"ctx:(\d+%".into();
         let mut presence = ctx_rule("au-1");
-        presence.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
-        presence.graph.parse.find = "HANDOFF".into();
-        presence.graph.parse.keep = Keep::Whole;
+        presence.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        presence.graph.parse_mut().find = "HANDOFF".into();
+        presence.graph.parse_mut().keep = Keep::Whole;
 
         // (what the terminal shows, the rule, the verdict, each step's status)
         let cases: Vec<(&str, AutomationRule, &str, Vec<&str>)> = vec![
@@ -682,9 +700,9 @@ mod tests {
     fn a_dry_run_strips_this_terminals_echo_needles() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
-        rule.graph.parse.find = "HANDOFF".into();
-        rule.graph.parse.keep = Keep::Whole;
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
+        rule.graph.parse_mut().find = "HANDOFF".into();
+        rule.graph.parse_mut().keep = Keep::Whole;
         fake.say("pc-1", "HANDOFF now\n");
 
         assert_eq!(
@@ -717,8 +735,8 @@ mod tests {
         ];
         for (op, threshold, verdict, words) in cases {
             let mut rule = ctx_rule("au-1");
-            rule.graph.cond.op = Some(op);
-            rule.graph.cond.threshold = Some(threshold);
+            rule.graph.cond_mut().op = Some(op);
+            rule.graph.cond_mut().threshold = Some(threshold);
             let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
             assert_eq!(report.verdict, verdict, "{:?}", op);
             assert_eq!(detail(&report, "cond"), words, "{:?}", op);
@@ -734,8 +752,8 @@ mod tests {
     fn the_condition_step_describes_a_clause_list_under_its_join() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"code=(\d+) msg=(\S+)".into();
-        rule.graph.cond = CondStep {
+        rule.graph.parse_mut().find = r"code=(\d+) msg=(\S+)".into();
+        rule.graph.cond = Some(CondStep {
             finds: Finds::Reading,
             clauses: vec![
                 Clause {
@@ -749,7 +767,7 @@ mod tests {
             ],
             join: Join::And,
             ..Default::default()
-        };
+        });
 
         fake.say("pc-1", "code=500 msg=failure\n");
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -774,9 +792,9 @@ mod tests {
     fn an_event_rule_with_a_numeric_clause_names_both_the_clause_and_finds() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"API error .*retry in (\d+)s".into();
-        rule.graph.parse.keep = Keep::Whole;
-        rule.graph.cond = CondStep {
+        rule.graph.parse_mut().find = r"API error .*retry in (\d+)s".into();
+        rule.graph.parse_mut().keep = Keep::Whole;
+        rule.graph.cond = Some(CondStep {
             finds: Finds::Event,
             clauses: vec![Clause {
                 source: Source::Group(1),
@@ -784,7 +802,7 @@ mod tests {
             }],
             join: Join::And,
             ..Default::default()
-        };
+        });
 
         fake.say("pc-1", "API error 529, retry in 90s\n");
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -842,14 +860,14 @@ mod tests {
             let (engine, fake, host) = wire(vec![]);
             let mut rule = ctx_rule("au-1");
             // Two groups, the second of which cannot participate, so one pattern serves all three.
-            rule.graph.parse.find = r"code=(\w+)(?: extra=(\d+))?".into();
-            rule.graph.parse.keep = Keep::Whole;
-            rule.graph.cond = CondStep {
+            rule.graph.parse_mut().find = r"code=(\w+)(?: extra=(\d+))?".into();
+            rule.graph.parse_mut().keep = Keep::Whole;
+            rule.graph.cond = Some(CondStep {
                 finds: Finds::Event,
                 clauses: vec![clause],
                 join: Join::And,
                 ..Default::default()
-            };
+            });
 
             fake.say("pc-1", "code=oops\n");
             let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -873,7 +891,7 @@ mod tests {
     fn no_match_at_all_leaves_the_condition_genuinely_not_reached() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.cond = CondStep {
+        rule.graph.cond = Some(CondStep {
             finds: Finds::Reading,
             clauses: vec![Clause {
                 source: Source::Group(1),
@@ -881,7 +899,7 @@ mod tests {
             }],
             join: Join::And,
             ..Default::default()
-        };
+        });
 
         fake.say("pc-1", "nothing of interest here\n");
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -892,14 +910,14 @@ mod tests {
     }
 
     /// The paired positive for both tests above: a rule that GENUINELY has no clauses (a v1 rule,
-    /// read straight off `rule.graph.cond.op`/`.threshold`) must keep the old wording exactly —
+    /// read straight off `rule.graph.cond_ref().op`/`.threshold`) must keep the old wording exactly —
     /// `fold_v1_clauses` gives such a rule one clause on its OWN folded copy, and the new branch
     /// must not be fooled into taking over that rule's wording too.
     #[test]
     fn a_rule_with_no_clauses_of_its_own_keeps_the_v1_wording() {
         let (engine, fake, host) = wire(vec![]);
         let rule = ctx_rule("au-1");
-        assert!(rule.graph.cond.clauses.is_empty(), "premise: ctx_rule is a v1 rule");
+        assert!(rule.graph.cond_ref().clauses.is_empty(), "premise: ctx_rule is a v1 rule");
         fake.say("pc-1", "ctx:63%\n");
 
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
@@ -959,8 +977,8 @@ mod tests {
     fn the_action_step_resolves_tokens_through_the_shared_helper() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"FAILED (\d+) tests in (\S+)".into();
-        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
+        rule.graph.parse_mut().find = r"FAILED (\d+) tests in (\S+)".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "Fix the $1 failing tests in $2".into();
         rule.graph.action.substitute = true;
         fake.say("pc-1", "FAILED 17 tests in a.ts");
@@ -982,8 +1000,8 @@ mod tests {
     fn the_action_step_names_the_token_it_could_not_resolve() {
         let (engine, fake, host) = wire(vec![]);
         let mut rule = ctx_rule("au-1");
-        rule.graph.parse.find = r"FAILED (\d+)".into();
-        rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
+        rule.graph.parse_mut().find = r"FAILED (\d+)".into();
+        rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
         rule.graph.action.message = "Fix $3".into();
         rule.graph.action.substitute = true;
         fake.say("pc-1", "FAILED 17");

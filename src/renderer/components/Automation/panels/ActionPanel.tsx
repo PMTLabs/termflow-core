@@ -78,15 +78,21 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const { parse, action } = draft.rule.graph;
     const messageRef = React.useRef<HTMLInputElement | null>(null);
 
-    const compiled = compilePattern(parse.find);
-    const patternReady = compiled !== null && parse.find.trim().length > 0;
-    const groups = patternReady ? groupsOf(parse.find) : { count: 0, names: new Set<string>() };
+    // **This panel survives an absent parse step, and must**: `action` is the one step every rule
+    // has (plan 032 §3.1), so a schedule rule reaches here with no pattern behind it. No pattern is
+    // no groups — which is exactly what `patternReady === false` already means for a rule whose
+    // pattern is still blank, and the whole substitution half of this panel is already written for
+    // that case.
+    const find = parse?.find ?? '';
+    const compiled = compilePattern(find);
+    const patternReady = compiled !== null && find.trim().length > 0;
+    const groups = patternReady ? groupsOf(find) : { count: 0, names: new Set<string>() };
     // `sample === undefined` means the CALLER supplied nothing — every real caller today
     // (`AuInspector.tsx`), so this is a guessed example, not a captured value. A caller that DOES
     // pass one (a test pinning exact values, or a future dry-run capture) is measured, even when
     // the object it passes is `{}`.
     const sampleIsDerived = sample === undefined;
-    const effectiveSample = sample ?? sampleFromPattern(parse.find, parse.keep);
+    const effectiveSample = sample ?? (parse ? sampleFromPattern(parse.find, parse.keep) : {});
     const substitute = action.substitute === true;
 
     const preview = !substitute

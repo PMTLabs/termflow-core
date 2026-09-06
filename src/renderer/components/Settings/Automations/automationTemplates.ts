@@ -315,9 +315,9 @@ function structuredCloneRule(rule: TemplateRule): TemplateRule {
         ...rule,
         targetIds: [...rule.targetIds],
         graph: {
-            monitor: { ...rule.graph.monitor },
-            parse: { ...rule.graph.parse },
-            cond: { ...rule.graph.cond },
+            monitor: rule.graph.monitor && { ...rule.graph.monitor },
+            parse: rule.graph.parse && { ...rule.graph.parse },
+            cond: rule.graph.cond && { ...rule.graph.cond },
             action: { ...rule.graph.action },
         },
     };

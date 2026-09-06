@@ -24,7 +24,13 @@
  * shape meet (§7.7), and the round-trip test asserts draft → wire → row → wire → draft is identity
  * for all six templates.
  */
-import type { AutomationClause, AutomationRule } from '../../types/electron';
+import type {
+    AutomationClause,
+    AutomationCondStep,
+    AutomationMonitorStep,
+    AutomationParseStep,
+    AutomationRule,
+} from '../../types/electron';
 import type { StepKind, Wire } from './automationSteps';
 import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
@@ -484,12 +490,12 @@ export type DraftAction =
     | { type: 'followNew'; followNew: boolean }
     | { type: 'targets'; ids: string[] }
     | { type: 'toggleTarget'; id: string }
-    | { type: 'monitor'; patch: Partial<AutomationRule['graph']['monitor']> }
-    | { type: 'preset'; preset: AutomationRule['graph']['parse']['preset'] }
+    | { type: 'monitor'; patch: Partial<AutomationMonitorStep> }
+    | { type: 'preset'; preset: AutomationParseStep['preset'] }
     | { type: 'literal'; literal: string }
     | { type: 'find'; find: string }
-    | { type: 'keep'; keep: AutomationRule['graph']['parse']['keep'] }
-    | { type: 'cond'; patch: Partial<AutomationRule['graph']['cond']> }
+    | { type: 'keep'; keep: AutomationParseStep['keep'] }
+    | { type: 'cond'; patch: Partial<AutomationCondStep> }
     /**
      * The whole clause list, replaced — the same shape `targets` already uses for `targetIds`
      * (plan 032 §5.9), rather than `CondPanel` reaching for the generic `cond` patch to smuggle an
@@ -547,18 +553,36 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                     ? rule.targetIds.filter((id) => id !== action.id)
                     : [...rule.targetIds, action.id],
             });
+        // **A patch to a step the rule does not have is a no-op, never a materialisation.** Plan
+        // 032 §3.1 lets a schedule rule carry no monitor/parse/cond at all, and these six actions
+        // come from panels that are only mounted for a step the rule HAS. Filling the gap in from
+        // a default here would mint the step behind the user's back — and for `parse` that default
+        // is an EMPTY pattern, which matches everything. Authoring a step that is absent belongs to
+        // the palette (tasks 23-25), which adds it explicitly.
         case 'monitor':
-            return withGraph(draft, { monitor: { ...rule.graph.monitor, ...action.patch } });
+            return rule.graph.monitor
+                ? withGraph(draft, { monitor: { ...rule.graph.monitor, ...action.patch } })
+                : draft;
         case 'preset':
-            return withGraph(draft, { parse: applyPreset(rule.graph.parse, action.preset) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: applyPreset(rule.graph.parse, action.preset) })
+                : draft;
         case 'literal':
-            return withGraph(draft, { parse: setLiteral(rule.graph.parse, action.literal) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: setLiteral(rule.graph.parse, action.literal) })
+                : draft;
         case 'find':
-            return withGraph(draft, { parse: setFind(rule.graph.parse, action.find) });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: setFind(rule.graph.parse, action.find) })
+                : draft;
         case 'keep':
-            return withGraph(draft, { parse: { ...rule.graph.parse, keep: action.keep } });
+            return rule.graph.parse
+                ? withGraph(draft, { parse: { ...rule.graph.parse, keep: action.keep } })
+                : draft;
         case 'cond':
-            return withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } });
+            return rule.graph.cond
+                ? withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } })
+                : draft;
         case 'clauses':
             // **A clause list SUPERSEDES `op`/`threshold`, so adding one has to clear the pair.**
             // §5.3 makes them v1-only: read at load, folded into `clauses` by `fold_v1_clauses`,
@@ -569,6 +593,7 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             //
             // Only when the resulting list is non-empty: removing the last clause from a v1 rule
             // must leave it the rule it was, not silently strip its only comparison.
+            if (!rule.graph.cond) return draft;
             return withGraph(draft, {
                 cond: action.clauses.length > 0
                     ? { ...rule.graph.cond, clauses: action.clauses, op: null, threshold: null }

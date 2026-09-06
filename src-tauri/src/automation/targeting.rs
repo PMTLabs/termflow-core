@@ -473,14 +473,14 @@ mod tests {
             graph: AutomationGraph {
                 layout: None,
                 timer: None,
-                monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-                parse: ParseStep {
+                monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+                parse: Some(ParseStep {
                     preset: ParsePreset::Custom,
                     literal: None,
                     find: r"ctx:(\d+)%".into(),
                     keep: Keep::Brackets,
-                },
-                cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
+                }),
+                cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
                 action: ActionStep {
                     message: "m".into(),
                     send_to: SendTo::Matched,

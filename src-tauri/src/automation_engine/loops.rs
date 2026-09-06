@@ -210,7 +210,14 @@ pub async fn evaluate_tick(
             if engine.runtime.is_settling(&tm, now_ms) {
                 continue;
             }
-            let monitor = &live.rule.graph.monitor;
+            // A schedule rule (§6.3) has no monitor step, so it has no cadence and is never due
+            // for a READ — there is nothing for it to read. It joins neither `due` nor `owed`:
+            // a pair that reads nothing cannot consume this terminal's dirty signal and must not
+            // hold its clear back either. Task 22's `schedule_due` branch is what makes such a
+            // rule fire, and it sits above this walk rather than inside it.
+            let Some(monitor) = live.rule.graph.monitor.as_ref() else {
+                continue;
+            };
             if due_now(
                 monitor.cadence,
                 monitor.every_ms,
@@ -330,8 +337,17 @@ pub fn evaluate_pair(
     let echoes = engine.runtime.echoes_for(&pair.tm, now_ms);
     let port = HostPort(host.as_ref());
 
+    // §3.1's three input steps, proved present ONCE — the pure core keeps concrete references and
+    // never learns that a step can be absent. `Unread` for a rule that has none, and `Unread` is
+    // literally true of it: nothing was read, so nothing may be spent — no arm move, no log row, no
+    // `set_last_eval`. Task 22 adds the schedule branch ABOVE this guard, which is what stops such
+    // a rule being re-examined for nothing on every tick.
+    let Some(steps) = eval::InputSteps::of(&rule.graph) else {
+        return Evaluated::Unread;
+    };
+
     let Some(ev): Option<Evaluation> = eval::evaluate(
-        &rule.graph,
+        steps,
         &pair.rule.re,
         &echoes,
         prev,
@@ -1023,8 +1039,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_crossing_types_the_resolved_message() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = r"FAILED (\d+) tests in (\S+)".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = r"FAILED (\d+) tests in (\S+)".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "Fix the $1 failing tests in $2".into();
             g.action.substitute = true;
         });
@@ -1047,8 +1063,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn substitution_off_types_the_message_verbatim() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = r"FAILED (\d+)".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = r"FAILED (\d+)".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "awk '{print $1}'".into();
             g.action.substitute = false;
         });
@@ -1078,8 +1094,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_unresolvable_token_refuses_the_send_and_logs_it() {
         let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|g| {
-            g.parse.find = r"FAILED (\d+)".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = r"FAILED (\d+)".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "Fix $3".into();
             g.action.substitute = true;
         });
@@ -1117,8 +1133,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_delay_holds_the_send_then_fires_it() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1159,8 +1175,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_parked_send_is_not_re_parked_by_the_crossing_it_already_spent() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1219,8 +1235,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_parked_send_that_fails_rolls_the_arm_back_to_the_crossing_it_came_from() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1269,8 +1285,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_parked_send_resolves_its_tokens_against_the_crossing_not_the_later_screen() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = r"API error (\d+)".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = r"API error (\d+)".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume after $1".into();
             g.action.substitute = true;
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
@@ -1314,8 +1330,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_disabled_rule_does_not_fire_its_parked_send() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1346,8 +1362,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_deleted_rule_does_not_fire_its_parked_send() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1377,8 +1393,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_edited_rule_does_not_fire_its_parked_send() {
         let (engine, fake, host) = rig_with_rule(|g| {
-            g.parse.find = "API error".into();
-            g.cond.finds = Finds::Event;
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
             g.action.message = "resume".into();
             g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         });
@@ -1423,8 +1439,8 @@ mod tests {
     async fn a_runs_once_rule_that_parked_on_two_terminals_still_sends_once() {
         let mut once = ctx_rule_saying("au-once", "once only", 1);
         once.runs_once = true;
-        once.graph.parse.find = "API error".into();
-        once.graph.cond.finds = Finds::Event;
+        once.graph.parse_mut().find = "API error".into();
+        once.graph.cond_mut().finds = Finds::Event;
         once.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
         let (engine, fake, host) = wire(vec![once]);
         open_second_terminal(&fake);
@@ -1691,7 +1707,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_uncompilable_pattern_is_reported_once_at_load_and_never_by_a_tick() {
         let mut bad = ctx_rule("au-bad");
-        bad.graph.parse.find = r"ctx:(\d+%".into();
+        bad.graph.parse_mut().find = r"ctx:(\d+%".into();
         let (engine, fake, host) = wire(vec![bad]);
 
         assert_eq!(log_kinds(&fake.store), vec!["Failed".to_string()], "one row, written at load");
@@ -2832,8 +2848,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_timer_rule_waiting_out_its_interval_does_not_pin_the_terminal_dirty() {
         let mut timer = ctx_rule_saying("au-timer", "on the minute", 2);
-        timer.graph.monitor.cadence = Cadence::Timer;
-        timer.graph.monitor.every_ms = 60_000;
+        timer.graph.monitor_mut().cadence = Cadence::Timer;
+        timer.graph.monitor_mut().every_ms = 60_000;
         let (engine, fake, host) = wire(vec![ctx_rule_saying("au-out", "on output", 1), timer]);
         for id in ["au-out", "au-timer"] {
             engine.runtime.set_watched(id, ["tm-1".to_string()].into());

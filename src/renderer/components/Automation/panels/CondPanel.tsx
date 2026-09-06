@@ -176,8 +176,9 @@ export const CondPanel: React.FC<CondPanelProps> = ({
     dispatch,
 }) => {
     const { cond, parse } = draft.rule.graph;
-    const clauses = cond.clauses ?? [];
-    const tokens = tokenOptions(parse.find);
+    const clauses = cond?.clauses ?? [];
+    // The token dropdown offers the PATTERN's groups; a rule with no parse step offers none.
+    const tokens = tokenOptions(parse?.find ?? '');
     const live = pairs && Object.keys(pairs).length > 0 ? automationRowState(draft.rule, pairs, now) : null;
     const lastFired = pairs
         ? Object.values(pairs).reduce<number | null>(
@@ -185,6 +186,12 @@ export const CondPanel: React.FC<CondPanelProps> = ({
             null,
         )
         : null;
+
+    // Every control below is bound to the cond step, so there is nothing to draw without one.
+    // A rule with no condition (plan 032 §3.1's schedule rule) should not reach this panel at all;
+    // which step cards are drawn is tasks 23-25's decision, and this is only the guard. No hooks
+    // run above this line, so the early return cannot change hook order.
+    if (!cond) return null;
 
     const setClauses = (next: AutomationClause[]) => dispatch({ type: 'clauses', clauses: next });
     const updateClause = (i: number, patch: Partial<AutomationClause>) =>

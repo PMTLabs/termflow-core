@@ -194,14 +194,14 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
         graph: AutomationGraph {
             layout: None,
             timer: None,
-            monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
-            parse: ParseStep {
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            parse: Some(ParseStep {
                 preset: ParsePreset::Custom,
                 literal: None,
                 find: r"ctx:(\d+)%".into(),
                 keep: Keep::Brackets,
-            },
-            cond: CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() },
+            }),
+            cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
             action: ActionStep {
                 message: "prepare to do context-hand-off".into(),
                 send_to: SendTo::Matched,
@@ -300,9 +300,9 @@ pub(crate) fn ctx_rule_saying(id: &str, message: &str, sort_order: i64) -> Autom
 /// A presence rule: `find` is looked for as text and there is no threshold at all.
 pub(crate) fn presence_rule(id: &str, find: &str, message: &str, sort_order: i64) -> AutomationRule {
     let mut rule = ctx_rule_saying(id, message, sort_order);
-    rule.graph.parse.find = find.into();
-    rule.graph.parse.keep = Keep::Whole;
-    rule.graph.cond = CondStep { finds: Finds::Event, ..Default::default() };
+    rule.graph.parse_mut().find = find.into();
+    rule.graph.parse_mut().keep = Keep::Whole;
+    rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
     rule
 }
 

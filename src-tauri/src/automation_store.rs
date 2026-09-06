@@ -407,9 +407,35 @@ pub enum TimerMode {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutomationGraph {
-    pub monitor: MonitorStep,
-    pub parse: ParseStep,
-    pub cond: CondStep,
+    /// `None` on a **schedule rule** (§3.1, §6.3) — one that fires at a wall-clock time and reads
+    /// nothing at all. The first three steps are the rule's INPUT: they exist together or not at
+    /// all, which is what [`crate::automation_engine::eval::InputSteps`] names.
+    ///
+    /// **Targeting is unaffected by this being absent** (§3.1): `target_mode`, `criterion`,
+    /// `criterion_value`, `follow_new` and `target_ids` are columns on `AutomationRule`, not fields
+    /// of `MonitorStep`, so a schedule rule still has its terminals and `watched_for` still works.
+    ///
+    /// **`skip_serializing_if`, matching `timer` and `layout` below, and it is load-bearing**: an
+    /// absent step must produce no key at all, never `"monitor": null`. A `null` makes an older
+    /// build fail the row at DECODE — §3.3's whole-list loss — instead of at the friendlier
+    /// `is_runnable()` gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<MonitorStep>,
+    /// `None` on a schedule rule — there is no pattern, which is a different thing from a pattern
+    /// that is blank. See `monitor` above for why the key is omitted rather than written `null`.
+    ///
+    /// **Never `unwrap_or_default()` this.** `ParseStep::default()` would give an EMPTY pattern, and
+    /// an empty pattern compiles and matches everything (see `reload`), so a defaulted schedule rule
+    /// would fire on every tick against every terminal it watches and type into live agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse: Option<ParseStep>,
+    /// `None` on a schedule rule — nothing was read, so there is nothing to compare.
+    ///
+    /// **Never `unwrap_or_default()` this either.** `CondStep::default()` is `Finds::Reading` with
+    /// an empty clause list, which `evaluate_text` answers `Truth::Unknown` for on purpose (the
+    /// incomplete-v1 guard) — so a defaulted condition is a rule that can never fire, silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cond: Option<CondStep>,
     /// Optional fifth step — "Wait" (§6). `None` on every rule saved before this milestone and on
     /// every rule that does not use it.
     ///
@@ -439,6 +465,44 @@ pub struct AutomationGraph {
     /// random. `Option` + `serde(default)` so every row written before this field still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<std::collections::BTreeMap<String, NodePos>>,
+}
+
+/// Fixture accessors for the three input steps — **test-only, and deliberately so**.
+///
+/// The ~40 fixtures that tweak one field of one step (`rule.graph.parse_mut().find = …`) all know
+/// their own rule has that step, because they built it. Spelling `.as_mut().unwrap()` at every one
+/// of them would bury the field being set in noise.
+///
+/// It is `#[cfg(test)]` because the same convenience in production is exactly the escape hatch that
+/// stops absence getting an explicit branch (§3.1) — and for `parse`/`cond` an `unwrap` is not the
+/// worst of it: `unwrap_or_default()` would give a schedule rule an EMPTY pattern, which compiles
+/// and matches everything.
+#[cfg(test)]
+impl AutomationGraph {
+    #[track_caller]
+    pub fn monitor_mut(&mut self) -> &mut MonitorStep {
+        self.monitor.as_mut().expect("this fixture's rule has a monitor step")
+    }
+    #[track_caller]
+    pub fn parse_mut(&mut self) -> &mut ParseStep {
+        self.parse.as_mut().expect("this fixture's rule has a parse step")
+    }
+    #[track_caller]
+    pub fn cond_mut(&mut self) -> &mut CondStep {
+        self.cond.as_mut().expect("this fixture's rule has a cond step")
+    }
+    #[track_caller]
+    pub fn monitor_ref(&self) -> &MonitorStep {
+        self.monitor.as_ref().expect("this fixture's rule has a monitor step")
+    }
+    #[track_caller]
+    pub fn parse_ref(&self) -> &ParseStep {
+        self.parse.as_ref().expect("this fixture's rule has a parse step")
+    }
+    #[track_caller]
+    pub fn cond_ref(&self) -> &CondStep {
+        self.cond.as_ref().expect("this fixture's rule has a cond step")
+    }
 }
 
 /// One card's position on the editor canvas. Pure view data; see `AutomationGraph::layout`.
@@ -1656,8 +1720,13 @@ impl AutomationStore {
     /// the single answer to *"will the engine refuse this?"*, asked here and by `reload`, so the two
     /// cannot drift apart again.
     fn refuse_if_it_would_run_wrong(rule: &AutomationRule) -> Result<(), AutomationStoreError> {
-        let engine_will_refuse =
-            crate::automation_validation::pattern_refused_at_load(&rule.graph.parse.find).is_some();
+        // A rule with no parse step has no pattern for the engine to refuse, so nothing on the
+        // `parse` field is exempted for it — `pattern_problems` reports nothing there either.
+        let engine_will_refuse = rule
+            .graph
+            .parse
+            .as_ref()
+            .is_some_and(|p| crate::automation_validation::pattern_refused_at_load(&p.find).is_some());
         Self::refuse(
             crate::automation_validation::problems(rule)
                 .into_iter()
@@ -2148,23 +2217,23 @@ mod tests {
         AutomationGraph {
             layout: None,
             timer: None,
-            monitor: MonitorStep {
+            monitor: Some(MonitorStep {
                 read: ReadMode::NewOutput,
                 cadence: Cadence::OnOutput,
                 every_ms: 30_000,
-            },
-            parse: ParseStep {
+            }),
+            parse: Some(ParseStep {
                 preset: ParsePreset::Percentage,
                 literal: Some("ctx:".to_string()),
                 find: r"ctx:\s*(\d+)%".to_string(),
                 keep: Keep::Brackets,
-            },
-            cond: CondStep {
+            }),
+            cond: Some(CondStep {
                 finds: Finds::Reading,
                 op: Some(CompareOp::Gt),
                 threshold: Some(25.0),
                 ..Default::default()
-            },
+            }),
             action: ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
                 send_to: SendTo::Matched,
@@ -3212,7 +3281,7 @@ mod tests {
         // state is what a user meets after an upgrade changes what compiles.
         let mut bad = enableable("au-bad");
         bad.enabled = true;
-        bad.graph.parse.find = "ctx:(\\d+".into();
+        bad.graph.parse_mut().find = "ctx:(\\d+".into();
         store.save_rule(&bad).unwrap();
         assert!(enabled_flag(&store, "au-bad"), "the premise: it is on, and it cannot run");
 
@@ -3258,7 +3327,7 @@ mod tests {
         // A pattern this build cannot compile is the exemption, enabled or not.
         let mut bad_pattern = enableable("au-2");
         bad_pattern.enabled = true;
-        bad_pattern.graph.parse.find = "ctx:(\\d+".into();
+        bad_pattern.graph.parse_mut().find = "ctx:(\\d+".into();
         store.save_rule(&bad_pattern).unwrap();
         assert!(enabled_flag(&store, "au-2"), "the engine refuses this one, at load, once");
 
@@ -3271,7 +3340,7 @@ mod tests {
         // engine refuses an unusable pattern, and the exemption is derived from that same answer.
         let mut empty_pattern = enableable("au-3");
         empty_pattern.enabled = true;
-        empty_pattern.graph.parse.find = "   ".into();
+        empty_pattern.graph.parse_mut().find = "   ".into();
         store.save_rule(&empty_pattern).unwrap();
         assert!(
             crate::automation_validation::pattern_refused_at_load("   ").is_some(),
@@ -3285,9 +3354,9 @@ mod tests {
         // firing. Under `p.field != "parse"` this rule stored ENABLED and the whole suite passed.
         let mut no_group = enableable("au-4");
         no_group.enabled = true;
-        no_group.graph.parse.find = r"ctx:\d+%".into();
+        no_group.graph.parse_mut().find = r"ctx:\d+%".into();
         assert!(
-            crate::automation_validation::pattern_refused_at_load(&no_group.graph.parse.find)
+            crate::automation_validation::pattern_refused_at_load(&no_group.graph.parse_ref().find)
                 .is_none(),
             "the premise: the engine will happily run this pattern"
         );
@@ -4062,5 +4131,64 @@ mod tests {
         let decoded: AutomationGraph =
             serde_json::from_str(raw).expect("a graph missing only the new optional `timer` field must still decode");
         assert_eq!(decoded.timer, None, "an older rule has no timer, and must not gain one from a default value");
+    }
+
+    /// §3.1 — an absent input step writes **no key at all**, never `"monitor": null`.
+    ///
+    /// **The distinction is not cosmetic, and this is why the assertion is on the KEY SET.** A
+    /// `null` in a `monitor` position is a value an older build must decode into a NON-optional
+    /// `MonitorStep`, which fails — and §3.3 says a row that will not decode takes the whole rule
+    /// list with it, so one v2 rule would empty the Automations page. With the key simply absent,
+    /// the older build's own `#[serde(default)]`-less required field still fails, but the same
+    /// shape on a build that has this change decodes cleanly and is refused, if at all, at the
+    /// friendlier `is_runnable()` gate. `assert_eq!(v["monitor"], Value::Null)` would pass for both
+    /// spellings and pin neither.
+    #[test]
+    fn a_schedule_rule_writes_no_monitor_parse_or_cond_key() {
+        let schedule = AutomationGraph {
+            monitor: None,
+            parse: None,
+            cond: None,
+            timer: Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+            }),
+            action: ActionStep {
+                message: "stand-up notes?".to_string(),
+                send_to: SendTo::Matched,
+                submit: true,
+                cli_type: "default".to_string(),
+                substitute: false,
+            },
+            layout: None,
+        };
+
+        let v = serde_json::to_value(&schedule).unwrap();
+        let obj = v.as_object().expect("a graph serialises as an object");
+        for step in ["monitor", "parse", "cond"] {
+            assert!(
+                !obj.contains_key(step),
+                "an absent `{step}` must write NO key, not a null — got {v}"
+            );
+        }
+        // And what it DOES write, so this cannot pass by serialising nothing at all.
+        assert!(obj.contains_key("timer"), "the schedule itself must survive: {v}");
+        assert!(obj.contains_key("action"), "`action` stays required (§3.1): {v}");
+
+        // Round trip: absence decodes back as absence, not as a defaulted step. `ParseStep`'s
+        // default would be an EMPTY pattern, which compiles and matches everything.
+        let back: AutomationGraph = serde_json::from_value(v).unwrap();
+        assert_eq!(back, schedule);
+    }
+
+    /// The paired negative: a rule that HAS the three steps still writes all three.
+    ///
+    /// Without this, the test above is satisfied by a `skip_serializing_if` that always skips.
+    #[test]
+    fn an_ordinary_rule_still_writes_all_three_input_steps() {
+        let v = serde_json::to_value(graph()).unwrap();
+        let obj = v.as_object().unwrap();
+        for step in ["monitor", "parse", "cond", "action"] {
+            assert!(obj.contains_key(step), "`{step}` must still cross the wire: {v}");
+        }
     }
 }

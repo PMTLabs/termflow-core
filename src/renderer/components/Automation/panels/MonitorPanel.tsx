@@ -146,6 +146,12 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 </span>
             </div>
 
+            {/* **Only the step-bound half is conditional.** Targeting above is the rule's own
+                columns, not fields of the monitor step (plan 032 §3.1), so a rule with no monitor
+                step still picks its terminals here — it simply has no read mode or cadence to
+                choose. Authoring the step onto such a rule belongs to the palette (tasks 23-25). */}
+            {monitor && (
+            <>
             <AuField label="What to read">
                 <AuRadio
                     name="au-read"
@@ -206,6 +212,8 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                     </div>
                 )}
             </AuField>
+            </>
+            )}
         </>
     );
 };

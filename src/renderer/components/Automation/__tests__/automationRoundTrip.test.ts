@@ -116,6 +116,43 @@ describe('draft ⇄ row', () => {
     });
 
     /**
+     * **A schedule rule, which has NO monitor, parse or cond step at all** (plan 032 §3.1, §6.3).
+     *
+     * The §7.7 four-places rule cuts both ways: a field that became optional has to survive the
+     * round trip while ABSENT, and the failure mode is the quiet one — `draftFromRule` or
+     * `ruleFromDraft` filling the hole in from a default would hand the store a rule with an empty
+     * pattern, which compiles and matches everything, and nothing in the shape would look wrong.
+     *
+     * Two halves. The keys must still be **missing** after the wire hop (`JSON.stringify` drops an
+     * `undefined` value, so a mapping that wrote `parse: undefined` would look identical to one
+     * that dropped it — `'parse' in graph` tells them apart), and the whole rule must come back
+     * equal, which is what catches a default being invented.
+     */
+    it('carries a SCHEDULE rule, which has no monitor, parse or cond step at all', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const { monitor: _m, parse: _p, cond: _c, ...graphWithoutInput } = base.graph;
+        const schedule: AutomationRule = {
+            ...base,
+            id: 'au-schedule',
+            graph: {
+                ...graphWithoutInput,
+                // A schedule rule is not merely a rule with holes in it — it fires on the clock.
+                timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } },
+            },
+        };
+
+        const there = ruleFromDraft(draftFromRule(overTheWire(schedule)));
+        expect('monitor' in there.graph).toBe(false);
+        expect('parse' in there.graph).toBe(false);
+        expect('cond' in there.graph).toBe(false);
+
+        const { layout: _added, ...graphWithoutLayout } = there.graph;
+        expect({ ...there, graph: graphWithoutLayout }).toEqual(schedule);
+        // And idempotent from there, the same property the templates above are held to.
+        expect(ruleFromDraft(draftFromRule(overTheWire(there)))).toEqual(there);
+    });
+
+    /**
      * **The arrangement is saved; which cards are drawn is not.** The two used to travel together as
      * "session-only canvas state" and they no longer do, so the line between them is asserted rather
      * than described: `present`/`wires` are re-derived from the four steps and carry no user choice,

@@ -27,6 +27,7 @@
  */
 import type {
     AutomationGraph,
+    AutomationParseStep,
     AutomationRule,
     AutomationSource,
 } from '../../types/electron';
@@ -205,16 +206,18 @@ export function sourceText(source: AutomationSource): string {
 }
 
 /**
- * Whether the rule has a working PARSE step to source clause tokens from.
+ * The rule's PARSE step, when it has one that can source clause tokens.
  *
- * **`parse` is not yet optional** — every rule carries an `AutomationParseStep` — so today "no
- * parse step" means the declared pattern is blank, exactly what `parse.empty` already reports on
- * the `parse` field. When `parse` becomes optional (a later milestone's schedule rule, plan 032
- * §6.3), this becomes `graph.parse == null || graph.parse.find.trim().length === 0`, and every
- * caller stays correct because there is only this one call site to update.
+ * **Two different absences, one answer.** A schedule rule (plan 032 §6.3) has no parse step at
+ * all; an ordinary rule can have one whose declared pattern is blank, which `parse.empty` already
+ * reports on the `parse` field. Neither can supply a token, so both read `null` here.
+ *
+ * Returns the step rather than a boolean so a caller that has proved presence does not have to ask
+ * again — the Rust mirror's `parse_step` does exactly the same.
  */
-function hasParseStep(graph: AutomationGraph): boolean {
-    return graph.parse.find.trim().length > 0;
+function parseStep(graph: AutomationGraph): AutomationParseStep | null {
+    const parse = graph.parse;
+    return parse && parse.find.trim().length > 0 ? parse : null;
 }
 
 /**
@@ -227,10 +230,13 @@ function hasParseStep(graph: AutomationGraph): boolean {
  */
 function clauseProblems(graph: AutomationGraph): Problem[] {
     const out: Problem[] = [];
-    const clauses = graph.cond.clauses ?? [];
+    // No cond step at all is no clauses at all — a schedule rule (§6.3) reports nothing here.
+    // Absence is a no-op for this check, never a substitute check invented for it.
+    const clauses = graph.cond?.clauses ?? [];
     if (clauses.length === 0) return out;
 
-    if (!hasParseStep(graph)) {
+    const parse = parseStep(graph);
+    if (!parse) {
         out.push(
             problem(
                 'blocks',
@@ -244,7 +250,7 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
 
     // Only ask the pattern for its groups once it can compile — an uncompilable pattern is
     // already `parse.uncompilable`'s problem, not this one's, exactly like `action.unknownToken`.
-    const groups = compilePattern(graph.parse.find) !== null ? groupsOf(graph.parse.find) : null;
+    const groups = compilePattern(parse.find) !== null ? groupsOf(parse.find) : null;
 
     for (const clause of clauses) {
         if (groups) {
@@ -384,6 +390,11 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
     const out: Problem[] = [];
     const { parse, cond } = graph;
 
+    // A schedule rule (§6.3) has no parse step at all, which is NOT the same as a blank pattern:
+    // there is no field here to be empty, so `parse.empty` would describe a step the rule does not
+    // have. Nothing to report.
+    if (!parse) return out;
+
     if (parse.find.trim().length === 0) {
         out.push(problem('blocks', 'parse', 'parse.empty', 'Enter something to look for.'));
         return out;
@@ -410,7 +421,8 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
     // coercion, no `keep` — and `brackets` is the default a text rule carries around without ever
     // consulting it. Blocking on it refuses R8's own canonical rule (`FAILED \d+ test`) and makes
     // the whole word-matching half of the feature un-enableable.
-    const numeric = cond.kind === 'number';
+    // No cond step is no comparison, so `keep` — a NUMERIC-only concern — has nothing to answer to.
+    const numeric = cond?.kind === 'number';
 
     if (numeric && parse.keep === 'brackets' && count === 0) {
         out.push(
@@ -475,7 +487,8 @@ export function problems(rule: AutomationRule): Problem[] {
     }
 
     // --- interval --------------------------------------------------------------------------------
-    if (monitor.cadence === 'timer' && monitor.everyMs < MIN_TIMER_MS) {
+    // A schedule rule (§6.3) has no monitor step, so it has no poll interval to be too fast.
+    if (monitor && monitor.cadence === 'timer' && monitor.everyMs < MIN_TIMER_MS) {
         out.push(
             problem(
                 'blocks',
@@ -495,8 +508,10 @@ export function problems(rule: AutomationRule): Problem[] {
     // `threshold` are v1-only (§5.3): a rule built in the clause-list editor leaves both null and
     // expresses its comparison as a clause instead, so an empty clause list is what actually makes
     // this incomplete, not a bare absence of `op`/`threshold`.
+    // A rule with no cond step reads no value and has nothing to compare it with, so there is no
+    // incomplete comparison to report — the check is a no-op for it, not a substitute check.
     if (
-        cond.kind === 'number'
+        cond?.kind === 'number'
         && (cond.clauses ?? []).length === 0
         && (cond.op === null || cond.op === undefined
             || cond.threshold === null || cond.threshold === undefined)
@@ -532,7 +547,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 'Enter the message this rule should type.',
             ),
         );
-    } else if (parse.find.trim().length > 0) {
+    } else if (parse && parse.find.trim().length > 0) {
         // §2.6's failure, told to the user before it happens. The emptiness guard above is
         // load-bearing: an empty regex matches every position of every string, so without it every
         // draft with a message and no pattern yet is told its message matches a pattern it does not
@@ -565,8 +580,13 @@ export function problems(rule: AutomationRule): Problem[] {
     // `tokensUsed` is the validation-side scanner ported from `subst::tokens_used` — the SAME
     // grammar `substitute` reads, so a message this lets through cannot be one the send then
     // refuses anyway.
+    // **Absent and blank are one answer here**, and it is the one §8's table already names: the
+    // toggle claims the message inserts a capture, and a rule with no parse step at all captures
+    // nothing, exactly like one whose pattern is still empty. `parseStep` is what makes the two
+    // spellings indistinguishable to this check.
     if (action.substitute) {
-        if (!parse.find.trim()) {
+        const sourcing = parseStep(rule.graph);
+        if (!sourcing) {
             // The toggle itself claims the message inserts a capture, which nothing can be true of
             // before a pattern exists — asked regardless of whether a token has actually been typed
             // yet, the same way `cond.incomplete` above is asked regardless of what a clause would
@@ -579,8 +599,8 @@ export function problems(rule: AutomationRule): Problem[] {
                     'This message inserts captured values, but the rule has no pattern to capture them from.',
                 ),
             );
-        } else if (compilePattern(parse.find) !== null) {
-            const groups = groupsOf(parse.find);
+        } else if (compilePattern(sourcing.find) !== null) {
+            const groups = groupsOf(sourcing.find);
             for (const t of tokensUsed(action.message)) {
                 const bad = t.kind === 'group'
                     ? !tokenSupplied(groups, t.n, null)

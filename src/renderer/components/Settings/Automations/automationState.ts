@@ -255,6 +255,10 @@ export function describeCriterion(rule: AutomationRule): string {
 /** *Checks every 30s* / *On every new line*. */
 export function describeCadence(rule: AutomationRule): string {
     const { monitor } = rule.graph;
+    // A rule with no monitor step does not poll at all (plan 032 §3.1). It has no cadence to
+    // describe — a schedule rule's *"at 09:00 on weekdays"* is a Timer sentence, which §7 gives
+    // this module in milestone 5. Until then, say nothing rather than invent a check interval.
+    if (!monitor) return '—';
     if (monitor.cadence === 'onOutput') return 'On every new line';
     const ms = monitor.everyMs;
     if (ms % 60000 === 0) {
