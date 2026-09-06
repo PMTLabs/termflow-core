@@ -202,3 +202,37 @@ describe('automationValidation — the scoped-default lesson', () => {
         ]);
     });
 });
+
+describe('automationValidation — a branch no JSON literal can reach', () => {
+    // `AutomationTest`'s numeric `value` is a mandatory `number`, never absent, so no fixture case
+    // (parsed from JSON) can ever hand `clauseNeedsValue` a non-finite one — `JSON.parse` has no
+    // spelling for `NaN` or `Infinity`. The check is still promised by `clauseProblems`'s own
+    // comment, so it is pinned here by constructing the clause directly in code rather than through
+    // the shared fixture — a branch that is promised but never exercised is a coverage hole with a
+    // rationale, not proof the branch does what it claims.
+    const clauseRule = (value: number): AutomationRule => ({
+        ...cases[0].rule,
+        graph: {
+            ...cases[0].rule.graph,
+            parse: { preset: 'custom', literal: null, find: 'ctx:(\\d+)%', keep: 'brackets' },
+            cond: {
+                kind: 'text',
+                op: null,
+                threshold: null,
+                clauses: [{ source: 'whole', test: { number: { op: 'gt', value } } }],
+            },
+        },
+    });
+
+    it('a non-finite clause value needs a value, the same code an empty text value gets', () => {
+        expect(problems(clauseRule(Number.NaN)).map((p) => p.code)).toEqual(['cond.clauseNeedsValue']);
+        // Paired: Infinity is also non-finite and must trip the same guard, not merely NaN.
+        expect(problems(clauseRule(Number.POSITIVE_INFINITY)).map((p) => p.code)).toEqual([
+            'cond.clauseNeedsValue',
+        ]);
+    });
+
+    it('the paired positive: an ordinary finite value reports nothing', () => {
+        expect(problems(clauseRule(25))).toEqual([]);
+    });
+});
