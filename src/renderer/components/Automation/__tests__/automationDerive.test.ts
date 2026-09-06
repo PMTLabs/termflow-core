@@ -505,6 +505,22 @@ describe('automationDerive — missing values are marked, not blank', () => {
 });
 
 describe('automationDerive — the palette summary', () => {
+    it('describes a webhook-only rule as a post, never a terminal send', () => {
+        const { action: _action, ...graph } = draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph;
+        const rule = {
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: {
+                ...graph,
+                webhook: { provider: 'discord' as const, url: 'https://secret.invalid/hook', body: 'done' },
+            },
+        };
+
+        expect(ruleSummary(rule)).toBe(
+            'Watching command contains "claude" · when the value in ctx:(\\d+)% is greater than 25 · post discord',
+        );
+        expect(describeRule(rule).verbSend).toBe('post');
+    });
+
     it('describes each template differently, from the same values', () => {
         const summaries = AUTOMATION_TEMPLATES.map((t) => ruleSummary(draftFromTemplate(t)));
         expect(new Set(summaries).size).toBe(AUTOMATION_TEMPLATES.length);

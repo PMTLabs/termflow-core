@@ -27,6 +27,24 @@ const blockingCodes = (draft: AutomationDraft): string[] =>
     blockingProblems(problems(ruleFromDraft(draft))).map((p) => p.code);
 
 describe('the editor writes the steps the canvas draws', () => {
+    it('omits a hidden action scaffold from the graph a save serializes', () => {
+        const draft = draftFromRule(blankDraft(), 'blank');
+        expect(draft.rule.graph.action).toBeDefined();
+        expect(draft.present).not.toContain('action');
+
+        const written = JSON.parse(JSON.stringify(ruleFromDraft(draft)));
+        expect(written.graph).not.toHaveProperty('action');
+    });
+
+    it('ignores an action edit when the draft has no action', () => {
+        const { action: _action, ...graph } = blankDraft().graph;
+        const draft = draftFromRule({ ...blankDraft(), graph }, 'blank');
+
+        const after = draftReducer(draft, { type: 'action', patch: { message: 'do not send' } });
+        expect(after).toBe(draft);
+        expect(after.rule.graph).not.toHaveProperty('action');
+    });
+
     /**
      * **C1, and the one assertion whose absence hid it.** Built the way the palette builds it —
      * `addStep` for each card, then the Wait panel's own mode dispatch — and asked of

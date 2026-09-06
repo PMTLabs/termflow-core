@@ -99,6 +99,17 @@ describe('AUTOMATION_TEMPLATES', () => {
         expect(second.targetIds).toEqual([]);
     });
 
+    it('clones a template with no action without creating one', () => {
+        const { action: _action, ...graph } = AUTOMATION_TEMPLATES[0].rule.graph;
+        const withoutAction: AutomationTemplate = {
+            ...AUTOMATION_TEMPLATES[0],
+            rule: { ...AUTOMATION_TEMPLATES[0].rule, graph },
+        };
+
+        expect(() => draftFromTemplate(withoutAction)).not.toThrow();
+        expect(draftFromTemplate(withoutAction).graph).not.toHaveProperty('action');
+    });
+
     /**
      * **A hand-rolled copy that rebuilds a shape field by field drops the next field silently.**
      *

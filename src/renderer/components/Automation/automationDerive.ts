@@ -638,8 +638,15 @@ function whenPhrase(rule: AutomationRule, pattern: string, cond: Record<string, 
  */
 export function ruleSummary(rule: AutomationRule): string {
     const timer = rule.graph.timer;
-    const action = stepValues(rule, 'action');
-    const terminalVerb = rule.graph.action?.submit ? 'send' : 'type';
+    const destination = rule.graph.action
+        ? {
+            verb: rule.graph.action.submit ? 'send' : 'type',
+            message: rule.graph.action.message,
+        }
+        : {
+            verb: 'post',
+            message: rule.graph.webhook?.provider ?? 'no destination',
+        };
     // A schedule fires on its clock even when it carries monitor/parse/cond steps (the validator
     // reports that shape separately), so it takes the same precedence as `describeRule` below.
     // The rail omits targets: the list row has no room for them and saying it is “watching” would
@@ -649,15 +656,15 @@ export function ruleSummary(rule: AutomationRule): string {
         const at = clockTime(minuteOfDay);
         const when = describeDays(days);
         if (at !== null && when !== '') {
-            return `At ${at} on ${when} · ${terminalVerb} ${action.message.text}`;
+            return `At ${at} on ${when} · ${destination.verb} ${destination.message}`;
         }
     }
     const monitor = stepValues(rule, 'monitor');
     const parse = stepValues(rule, 'parse');
     const cond = stepValues(rule, 'cond');
     return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)} · ${
-        terminalVerb
-    } ${action.message.text}`;
+        destination.verb
+    } ${destination.message}`;
 }
 
 /**
