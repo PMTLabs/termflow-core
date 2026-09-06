@@ -20,6 +20,7 @@ pub mod automation_commands;
 pub mod automation_engine;
 pub mod automation_store;
 pub mod automation_validation;
+pub mod automation_webhook;
 pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
