@@ -260,6 +260,161 @@
       "expected": []
     },
     {
+      "name": "an exclusion criterion with no value blocks",
+      "why": "The exclusion is another criterion, so selectors that need a value cannot silently match everything.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "excludedIds": [],
+        "excludeCriterion": "commandContains",
+        "excludeCriterionValue": "   ",
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "targets",
+          "code": "targets.excludeValueEmpty"
+        }
+      ]
+    },
+    {
+      "name": "an all-terminals exclusion needs no criterion value",
+      "why": "AllTerminals is the selector without a companion value, for the exclusion just as for the watched set.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "excludedIds": [],
+        "excludeCriterion": "allTerminals",
+        "excludeCriterionValue": "",
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "a pinned rule ignores its hidden exclusion criterion",
+      "why": "Pinned-mode state may retain a rule exclusion, but no rule criterion participates until the user switches modes.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "pinned",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [
+          "tm-a71f3c92k"
+        ],
+        "excludedIds": [],
+        "excludeCriterion": "commandContains",
+        "excludeCriterionValue": "   ",
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "action": {
+            "message": "go",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
       "name": "a timer faster than the engine's floor blocks",
       "why": "`due_now` clamps to 250 ms, so a rule asking for 100 would silently get 250.",
       "rule": {

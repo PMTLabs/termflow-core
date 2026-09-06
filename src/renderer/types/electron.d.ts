@@ -672,6 +672,12 @@ export interface AutomationRule {
   followNew: boolean;
   /** Durable `tm-` leaves. Never `pc-` process ids, which are per-run. */
   targetIds: string[];
+  /** Rule-mode terminal ids removed after the criterion resolves. */
+  excludedIds?: string[];
+  /** An optional rule-mode selector whose matches are removed from the watched set. */
+  excludeCriterion?: AutomationCriterion | null;
+  /** The optional selector's value; `allTerminals` deliberately leaves it blank. */
+  excludeCriterionValue?: string;
 
   completedAt?: number | null;
   verboseUntil?: number | null;

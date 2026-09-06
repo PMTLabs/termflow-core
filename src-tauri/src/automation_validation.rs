@@ -517,6 +517,14 @@ in the message, as $2, $3 and so on.",
 /// worse than one that says so.
 pub const MIN_TIMER_MS: i64 = crate::automation_engine::due::EVENT_MIN_INTERVAL_MS;
 
+/// Which terminal criteria have a companion value field to fill in.
+///
+/// `AllTerminals` is the one selector that deliberately needs no value. Both the watched-set
+/// criterion and its optional exclusion use this same predicate so the two controls cannot drift.
+fn criterion_needs_value(criterion: Criterion) -> bool {
+    !matches!(criterion, Criterion::AllTerminals)
+}
+
 /// Everything wrong with a WHOLE rule — §6.5's five categories: **target, interval, pattern,
 /// threshold, message**.
 ///
@@ -547,13 +555,25 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             }
         }
         TargetMode::Rule => {
-            let needs_value = !matches!(rule.criterion, Criterion::AllTerminals);
-            if needs_value && rule.criterion_value.trim().is_empty() {
+            if criterion_needs_value(rule.criterion) && rule.criterion_value.trim().is_empty() {
                 out.push(Problem::new(
                     Severity::Blocks,
                     "targets",
                     "targets.criterion",
                     "Fill in what the terminals must match, or watch all terminals instead.",
+                ));
+            }
+
+            if rule
+                .exclude_criterion
+                .is_some_and(criterion_needs_value)
+                && rule.exclude_criterion_value.trim().is_empty()
+            {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "targets",
+                    "targets.excludeValueEmpty",
+                    "Fill in what the exclusion must match, or exclude all terminals instead.",
                 ));
             }
         }
@@ -1058,7 +1078,7 @@ mod tests {
         // about. The count is a floor, not the exact number, so adding a case is not a two-file
         // edit.
         assert!(
-            fixture.cases.len() >= 20,
+            fixture.cases.len() >= 66,
             "the shared fixture has shrunk to {} cases",
             fixture.cases.len()
         );
@@ -1092,6 +1112,7 @@ mod tests {
         for code in [
             "targets.empty",
             "targets.criterion",
+            "targets.excludeValueEmpty",
             "monitor.interval",
             "parse.empty",
             "parse.uncompilable",

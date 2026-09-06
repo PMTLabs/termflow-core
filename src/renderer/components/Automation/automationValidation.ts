@@ -27,6 +27,7 @@
  */
 import type {
     AutomationClause,
+    AutomationCriterion,
     AutomationGraph,
     AutomationParseStep,
     AutomationRule,
@@ -50,6 +51,7 @@ export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 
 export type ProblemCode =
     | 'targets.empty'
     | 'targets.criterion'
+    | 'targets.excludeValueEmpty'
     | 'monitor.interval'
     | 'parse.empty'
     | 'parse.uncompilable'
@@ -94,6 +96,10 @@ const problem = (
     code: ProblemCode,
     message: string,
 ): Problem => ({ severity, field, code, message });
+
+/** `allTerminals` is the one selector that deliberately has no companion value field. */
+const criterionNeedsValue = (criterion: AutomationCriterion): boolean =>
+    criterion !== 'allTerminals';
 
 /**
  * Compile a user pattern the way the browser will run it for the live preview.
@@ -620,15 +626,33 @@ export function problems(rule: AutomationRule): Problem[] {
                 ),
             );
         }
-    } else if (rule.criterion !== 'allTerminals' && rule.criterionValue.trim().length === 0) {
-        out.push(
-            problem(
-                'blocks',
-                'targets',
-                'targets.criterion',
-                'Fill in what the terminals must match, or watch all terminals instead.',
-            ),
-        );
+    } else {
+        if (criterionNeedsValue(rule.criterion) && rule.criterionValue.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'targets',
+                    'targets.criterion',
+                    'Fill in what the terminals must match, or watch all terminals instead.',
+                ),
+            );
+        }
+
+        if (
+            rule.excludeCriterion !== null
+            && rule.excludeCriterion !== undefined
+            && criterionNeedsValue(rule.excludeCriterion)
+            && (rule.excludeCriterionValue ?? '').trim().length === 0
+        ) {
+            out.push(
+                problem(
+                    'blocks',
+                    'targets',
+                    'targets.excludeValueEmpty',
+                    'Fill in what the exclusion must match, or exclude all terminals instead.',
+                ),
+            );
+        }
     }
 
     // --- interval --------------------------------------------------------------------------------
@@ -804,6 +828,7 @@ export function problemsFor(list: Problem[], field: ProblemField): Problem[] {
 export const BADGES: Record<ProblemCode, string> = {
     'targets.empty': 'needs terminals',
     'targets.criterion': 'needs something to match',
+    'targets.excludeValueEmpty': 'needs something to exclude',
     'monitor.interval': 'checks too often',
     'parse.empty': 'needs a pattern',
     'parse.uncompilable': 'pattern not understood',

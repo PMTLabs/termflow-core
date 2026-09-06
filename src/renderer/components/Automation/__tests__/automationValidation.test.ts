@@ -67,7 +67,7 @@ describe('automationValidation — the shared fixture', () => {
         // "at least 20" and this test would stay green. `all.length` is DERIVED from `BADGES`
         // (never hand-typed), so bumping this number is the one place a new code cannot be added
         // silently — it forces a look at whether the fixture actually covers it.
-        expect(all.length).toBe(22);
+        expect(all.length).toBe(23);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });
 });
@@ -82,6 +82,18 @@ describe('automationValidation — the words the user reads', () => {
         const noTerminals: AutomationRule = { ...base(), targetMode: 'pinned', targetIds: [] };
         expect(find(noTerminals, 'targets.empty')?.message).toBe(
             'Pick at least one terminal for this rule to watch.',
+        );
+
+        const noExclusionValue: AutomationRule = {
+            ...base(),
+            targetMode: 'rule',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            excludeCriterion: 'commandContains',
+            excludeCriterionValue: '   ',
+        };
+        expect(find(noExclusionValue, 'targets.excludeValueEmpty')?.message).toBe(
+            'Fill in what the exclusion must match, or exclude all terminals instead.',
         );
 
         const noPattern: AutomationRule = {
