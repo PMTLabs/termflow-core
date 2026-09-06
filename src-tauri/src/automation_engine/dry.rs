@@ -22,6 +22,7 @@
 
 use crate::automation_engine::eval::{self, Outcome, Read, Truth};
 use crate::automation_engine::host::{EngineHost, HostPort};
+use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{AutomationLogEntry, AutomationRule, CompareOp, LogKind};
 
@@ -228,16 +229,28 @@ pub fn evaluate_once(
 
     let would_fire = ev.condition == Truth::True;
     let action = if would_fire {
-        step(
-            ACTION,
-            "ok",
-            match &terminal_name {
-                Some(name) => {
-                    format!("would type `{}` into {}", rule.graph.action.message, name)
-                }
-                None => format!("would type `{}`", rule.graph.action.message),
-            },
-        )
+        match preview_message(
+            &rule.graph.action.message,
+            rule.graph.action.substitute,
+            ev.captures.as_ref(),
+        ) {
+            Ok(body) => step(
+                ACTION,
+                "ok",
+                match &terminal_name {
+                    Some(name) => format!("would type `{}` into {}", body, name),
+                    None => format!("would type `{}`", body),
+                },
+            ),
+            // §4.4: the same refusal `run_send` would make, reported rather than typed. The
+            // verdict below still answers the CONDITION (it matched), and this row alone carries
+            // that the send itself would be refused.
+            Err(e) => step(
+                ACTION,
+                "failed",
+                format!("nothing would be sent — `{}` had no value here", e),
+            ),
+        }
     } else {
         step(ACTION, "skipped", "nothing would be sent".to_string())
     };
@@ -246,10 +259,23 @@ pub fn evaluate_once(
     finish(verdict, vec![monitor, parse, cond, action])
 }
 
+/// What the Test button says would be typed.
+///
+/// Delegates to `subst::substitute` rather than formatting the raw message, because the two
+/// were independent implementations of one behaviour and a preview that disagrees with the send
+/// is worse than no preview (§1.1).
+pub fn preview_message(
+    message: &str,
+    substitute: bool,
+    caps: Option<&eval::Captures>,
+) -> Result<String, subst::SubstError> {
+    if substitute { subst::substitute(message, caps) } else { Ok(message.to_string()) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automation_engine::eval::ArmState;
+    use crate::automation_engine::eval::{ArmState, Captures};
     use crate::automation_engine::test_host::*;
     use crate::automation_store::{CondKind, CondStep, Keep, LogOrder, LogScope};
 
@@ -582,6 +608,78 @@ mod tests {
             "would type `prepare to do context-hand-off` into codex · core"
         );
         assert_eq!(report.terminal_id, "tm-1");
+    }
+
+    // =============================================================================================
+    // §1.1 — the preview must not disagree with the send
+    // =============================================================================================
+
+    /// The whole point of the shared module. This asserts the RELATION, not two hard-coded strings —
+    /// a test that pins both to "Fix the 17 …" passes even if both are wrong in the same way.
+    #[test]
+    fn the_preview_and_the_send_resolve_identically() {
+        let caps = Captures {
+            groups: vec![
+                Some("FAILED 17 tests in a.ts".into()),
+                Some("17".into()),
+                Some("a.ts".into()),
+            ],
+            named: Default::default(),
+        };
+        let msg = "Fix the $1 failing tests in $2";
+        let sent = subst::substitute(msg, Some(&caps)).unwrap();
+        let previewed = preview_message(msg, true, Some(&caps)).unwrap();
+        assert_eq!(previewed, sent);
+    }
+
+    #[test]
+    fn the_preview_says_it_would_send_nothing_when_a_token_is_unresolvable() {
+        let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
+        assert!(preview_message("Fix $3", true, Some(&caps)).is_err());
+    }
+
+    /// The call site, not just the helper: with substitution on and every token resolvable, the
+    /// action row shows the RESOLVED text, exactly as `run_send` would type it — never the raw
+    /// template with `$1` still in it.
+    #[test]
+    fn the_action_step_resolves_tokens_through_the_shared_helper() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse.find = r"FAILED (\d+) tests in (\S+)".into();
+        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.action.message = "Fix the $1 failing tests in $2".into();
+        rule.graph.action.substitute = true;
+        fake.say("pc-1", "FAILED 17 tests in a.ts");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(
+            detail(&report, "action"),
+            "would type `Fix the 17 failing tests in a.ts` into codex · core"
+        );
+    }
+
+    /// §4.4's refusal, reported by the Test button rather than typed. **The verdict still answers the
+    /// CONDITION** (it matched — this is the row a user must see to press Enable in the first place),
+    /// while the action row alone carries that the send itself would be refused, exactly as
+    /// `run_send`'s own refusal is a log line rather than a change to whether the crossing fired.
+    #[test]
+    fn the_action_step_names_the_token_it_could_not_resolve() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.parse.find = r"FAILED (\d+)".into();
+        rule.graph.cond = CondStep { kind: CondKind::Text, op: None, threshold: None };
+        rule.graph.action.message = "Fix $3".into();
+        rule.graph.action.substitute = true;
+        fake.say("pc-1", "FAILED 17");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE, "the condition still matched");
+        assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "failed"]);
+        let action = detail(&report, "action");
+        assert!(action.contains("$3"), "the failure row must name the token: {action}");
     }
 
     /// A `wire` with no rules keeps the engine's live set empty, so nothing here can accidentally be
