@@ -1222,6 +1222,66 @@
     border-color: #6e2b28;
 }
 
+/* Task 28 — §5.9's live reading. `.au-clause` wraps the controls and the reading beneath them, so
+   `.au-crow` keeps the flex layout its three controls were written for rather than becoming a
+   column that has to re-state all of it. */
+
+.au-editor .au-clause {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.au-editor .au-cread {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 9px;
+    font-size: 0.8rem;
+}
+
+.au-editor .au-cheld {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-family: var(--font-mono, monospace);
+    color: #8b8f98;
+}
+
+.au-editor .au-cv {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 7px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+}
+
+/* Three values, three treatments. `unknown` is deliberately NOT the failing colour: an OR chain can
+   still be carried by a row nothing could answer, and a red cross there claims the rule will not
+   fire when it may well. */
+.au-editor .au-cv.pass {
+    color: #7ee2a8;
+    background: rgba(63, 185, 80, 0.10);
+    border-color: #2c5c3a;
+}
+
+.au-editor .au-cv.fail {
+    color: #ffaea8;
+    background: rgba(248, 81, 73, 0.10);
+    border-color: #6e2b28;
+}
+
+.au-editor .au-cv.unknown {
+    color: #a9adb6;
+    background: #23242a;
+    border-color: #3a3c44;
+    border-style: dashed;
+}
+
 .au-editor .au-plainsay {
     margin-top: 7px;
     padding: 7px 9px;

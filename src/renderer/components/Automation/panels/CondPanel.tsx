@@ -16,6 +16,16 @@
  * The *Right now* block is the only place in the editor that draws live engine state, and it draws
  * it through `automationRowState` — the same module the list row uses — so the pill in the editor
  * and the pill in the list can never say different things about one rule.
+ *
+ * **The live reading (§5.9's own two bullets, task 28).** Every token option carries the value it
+ * holds, and every row says what its token holds and whether that row passes — otherwise a user
+ * picks `$2` blind and reads an AND / OR chain abstractly, which is the failure §1.1 names. Both
+ * halves read ONE sampler, `ActionPanel`'s `sampleFromPattern`, so *Compare it* and *Send to
+ * terminal* cannot disagree about what a match looks like; and the verdict comes from
+ * `automationClauseTruth`, which is pinned case for case to the engine's own `test_clause` by a
+ * shared fixture both jest and `cargo test` read. Two surfaces describing one rule is the defect
+ * this milestone kept having to repair, and the fixture is the only thing that makes a second
+ * implementation of Kleene logic survivable.
  */
 import React from 'react';
 import type {
@@ -31,8 +41,11 @@ import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { NUM_OP_LABELS, TEXT_OP_LABELS, condSentence } from '../automationDerive';
 import { compilePattern, groupsOf, sourceText } from '../automationValidation';
+import { clauseTruth, tokenOf } from '../automationClauseTruth';
+import type { ClauseCaptures, Truth } from '../automationClauseTruth';
 import { automationRowState, describeLastFired } from '../../Settings/Automations/automationState';
 import { AuField, AuHelp, AuRadio } from './AuFields';
+import { sampleFromPattern } from './ActionPanel';
 
 export interface CondPanelProps {
     draft: AutomationDraft;
@@ -76,6 +89,19 @@ function sourceFromKey(key: string): AutomationSource {
 }
 
 /**
+ * A token's label: the spelling, and **the value it holds in the live preview** (§5.9), so `$2` is
+ * never picked blind.
+ *
+ * `held === undefined` covers both "there is no reading at all" and "this group did not
+ * participate", and neither may be drawn as a value — `fallback` is `$0`'s own explanatory words,
+ * which are worth keeping only while there is no actual whole match to show instead.
+ */
+function optionLabel(base: string, held: string | undefined, fallback?: string): string {
+    if (held !== undefined) return `${base} — "${held}"`;
+    return fallback === undefined ? base : `${base} — ${fallback}`;
+}
+
+/**
  * Only the tokens the pattern actually PRODUCES (§5.9) — `$0`, its numbered groups and its NAMED
  * ones, never a free-text field a user could point at a group the pattern does not have. Bound to
  * `groupsOf` rather than re-deriving the group count.
@@ -86,21 +112,58 @@ function sourceFromKey(key: string): AutomationSource {
  * fallback `<option>` below, and never be creatable. A named group also occupies a numbered slot,
  * so both spellings appear: they are two names for one capture, and `${name}` is the one that
  * survives an edit to the pattern that renumbers the brackets.
+ *
+ * `caps` is `sampleFromPattern`'s reading, and `null` is a real answer from it — no worked example
+ * to run, so nothing to show. The labels then say only what they always said.
  */
-function tokenOptions(find: string): Array<{ key: string; label: string }> {
-    const out: Array<{ key: string; label: string }> = [{ key: 'whole', label: '$0 — the whole match' }];
+function tokenOptions(find: string, caps: ClauseCaptures | null): Array<{ key: string; label: string }> {
+    const held = (k: string) => (caps === null ? undefined : caps[k]);
+    const out: Array<{ key: string; label: string }> = [
+        { key: 'whole', label: optionLabel('$0', held('0'), 'the whole match') },
+    ];
     if (compilePattern(find) === null) return out;
     const { count, names } = groupsOf(find);
     for (let i = 1; i <= count; i += 1) {
-        out.push({ key: `group:${i}`, label: `$${i}` });
+        out.push({ key: `group:${i}`, label: optionLabel(`$${i}`, held(String(i))) });
     }
     // After the numbered ones, in the pattern's own declaration order — `groupsOf` reads them off
     // `exec('').groups`, which JavaScript builds left to right.
     for (const name of names) {
-        out.push({ key: `named:${name}`, label: `\${${name}}` });
+        out.push({ key: `named:${name}`, label: optionLabel(`\${${name}}`, held(name)) });
     }
     return out;
 }
+
+/**
+ * How one row's answer is drawn. **Three treatments, because `Truth` has three values.**
+ *
+ * Rendering `unknown` as the failing treatment is the mistake this table exists to make hard: a row
+ * the read could not answer is not a row that failed, an OR chain may still carry it, and a red ✕
+ * beside it tells the user the rule will not fire when it may well. The marks are `AuTestPane`'s
+ * own (`✓` / `✕` / `?`), so a verdict here and a verdict in the dry run read alike.
+ */
+const VERDICT: Record<Truth, { cls: string; mark: string; word: string; why: string }> = {
+    true: {
+        cls: 'pass',
+        mark: '✓',
+        word: 'passes',
+        why: 'This comparison holds for the example above.',
+    },
+    false: {
+        cls: 'fail',
+        mark: '✕',
+        word: 'fails',
+        why: 'This comparison does not hold for the example above.',
+    },
+    unknown: {
+        cls: 'unknown',
+        mark: '?',
+        word: 'unknown',
+        why: 'This comparison could not be answered — the token is missing, is not a number, or '
+            + 'the clause is unfinished. It does not count as a failure: with OR, another row can '
+            + 'still carry the rule.',
+    },
+};
 
 /** The operator select's value — `kind:op`, so one list can hold both groups. */
 const opKeyOf = (test: AutomationTest): string =>
@@ -177,8 +240,20 @@ export const CondPanel: React.FC<CondPanelProps> = ({
 }) => {
     const { cond, parse } = draft.rule.graph;
     const clauses = cond?.clauses ?? [];
+    /**
+     * The live preview every row below reads — the SAME sampler *Send to terminal* previews its
+     * message with, never a second one, so the two panels cannot disagree about what a match here
+     * looks like.
+     *
+     * **`null` is a real answer and is not `{}`.** It means there is nothing to read at all: the
+     * pattern will not compile, or it compiles and `sayPattern`'s vocabulary has no worked example
+     * for it (`\S` is not on that list). Every consumer below treats `null` as *no verdict*, never
+     * as an empty capture set — collapsing the two is the M1 review's Important 1, and here it
+     * would put a confident ✕ on every row of a rule nobody has been able to read yet.
+     */
+    const caps = parse ? sampleFromPattern(parse.find, parse.keep) : null;
     // The token dropdown offers the PATTERN's groups; a rule with no parse step offers none.
-    const tokens = tokenOptions(parse?.find ?? '');
+    const tokens = tokenOptions(parse?.find ?? '', caps);
     const live = pairs && Object.keys(pairs).length > 0 ? automationRowState(draft.rule, pairs, now) : null;
     const lastFired = pairs
         ? Object.values(pairs).reduce<number | null>(
@@ -227,75 +302,101 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                 <div className="au-clauses">
                     {clauses.map((clause, i) => {
                         const valueNeeded = needsValue(clause.test);
+                        const held = caps === null ? undefined : tokenOf(clause.source, caps);
+                        const verdict = caps === null ? null : VERDICT[clauseTruth(clause, caps)];
                         return (
                             // eslint-disable-next-line react/no-array-index-key
-                            <div className="au-crow" key={i}>
-                                <select
-                                    className="au-finput"
-                                    aria-label="Which captured value"
-                                    value={sourceKey(clause.source)}
-                                    onChange={(e) =>
-                                        updateClause(i, { source: sourceFromKey(e.target.value) })}
-                                >
-                                    {tokens.map((t) => (
-                                        <option key={t.key} value={t.key}>
-                                            {t.label}
-                                        </option>
-                                    ))}
-                                    {/* A clause can carry a token the pattern no longer produces — a
-                                        group removed after the clause was written. It stays selected
-                                        (never silently swapped for `$0`) so the pattern-vs-clause
-                                        mismatch is what `cond.unknownToken` reports, not something
-                                        this dropdown quietly hid. */}
-                                    {!tokens.some((t) => t.key === sourceKey(clause.source)) && (
-                                        <option value={sourceKey(clause.source)}>
-                                            {sourceText(clause.source)}
-                                        </option>
-                                    )}
-                                </select>
-                                <select
-                                    className="au-finput"
-                                    aria-label="How to compare"
-                                    value={opKeyOf(clause.test)}
-                                    onChange={(e) =>
-                                        updateClause(i, { test: withOp(clause.test, e.target.value) })}
-                                >
-                                    <optgroup label="Text">
-                                        {TEXT_OPS.map((op) => (
-                                            <option key={op} value={`text:${op}`}>
-                                                {TEXT_OP_LABELS[op]}
-                                            </option>
-                                        ))}
-                                    </optgroup>
-                                    <optgroup label="Number">
-                                        {NUM_OPS.map((op) => (
-                                            <option key={op} value={`number:${op}`}>
-                                                {NUM_OP_LABELS[op]}
-                                            </option>
-                                        ))}
-                                    </optgroup>
-                                </select>
-                                {valueNeeded ? (
-                                    <input
+                            <div className="au-clause" key={i}>
+                                <div className="au-crow">
+                                    <select
                                         className="au-finput"
-                                        aria-label="Compare against"
-                                        placeholder={isNumTest(clause.test) ? 'number' : 'text'}
-                                        inputMode={isNumTest(clause.test) ? 'decimal' : undefined}
-                                        value={valueOf(clause.test)}
+                                        aria-label="Which captured value"
+                                        value={sourceKey(clause.source)}
                                         onChange={(e) =>
-                                            updateClause(i, { test: withValue(clause.test, e.target.value) })}
-                                    />
-                                ) : (
-                                    <span className="au-novalue">no value needed</span>
+                                            updateClause(i, { source: sourceFromKey(e.target.value) })}
+                                    >
+                                        {tokens.map((t) => (
+                                            <option key={t.key} value={t.key}>
+                                                {t.label}
+                                            </option>
+                                        ))}
+                                        {/* A clause can carry a token the pattern no longer produces — a
+                                            group removed after the clause was written. It stays selected
+                                            (never silently swapped for `$0`) so the pattern-vs-clause
+                                            mismatch is what `cond.unknownToken` reports, not something
+                                            this dropdown quietly hid. */}
+                                        {!tokens.some((t) => t.key === sourceKey(clause.source)) && (
+                                            <option value={sourceKey(clause.source)}>
+                                                {sourceText(clause.source)}
+                                            </option>
+                                        )}
+                                    </select>
+                                    <select
+                                        className="au-finput"
+                                        aria-label="How to compare"
+                                        value={opKeyOf(clause.test)}
+                                        onChange={(e) =>
+                                            updateClause(i, { test: withOp(clause.test, e.target.value) })}
+                                    >
+                                        <optgroup label="Text">
+                                            {TEXT_OPS.map((op) => (
+                                                <option key={op} value={`text:${op}`}>
+                                                    {TEXT_OP_LABELS[op]}
+                                                </option>
+                                            ))}
+                                        </optgroup>
+                                        <optgroup label="Number">
+                                            {NUM_OPS.map((op) => (
+                                                <option key={op} value={`number:${op}`}>
+                                                    {NUM_OP_LABELS[op]}
+                                                </option>
+                                            ))}
+                                        </optgroup>
+                                    </select>
+                                    {valueNeeded ? (
+                                        <input
+                                            className="au-finput"
+                                            aria-label="Compare against"
+                                            placeholder={isNumTest(clause.test) ? 'number' : 'text'}
+                                            inputMode={isNumTest(clause.test) ? 'decimal' : undefined}
+                                            value={valueOf(clause.test)}
+                                            onChange={(e) =>
+                                                updateClause(i, { test: withValue(clause.test, e.target.value) })}
+                                        />
+                                    ) : (
+                                        <span className="au-novalue">no value needed</span>
+                                    )}
+                                    <button
+                                        type="button"
+                                        className="au-crow-del"
+                                        aria-label={`Remove comparison ${i + 1}`}
+                                        onClick={() => setClauses(clauses.filter((_, idx) => idx !== i))}
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                                {/* §5.9's second bullet — what this token holds now, and whether this
+                                    row passes, so AND / OR is concrete rather than abstract.
+
+                                    Drawn only when there is a reading to judge against: with
+                                    `caps === null` the row shows nothing rather than a default, because
+                                    a wrong verdict is worse than no verdict. `held === undefined` is the
+                                    token that did not participate — said as an absence, never as an
+                                    empty value, since that absence is the whole reason a number test
+                                    above it reads `unknown`. */}
+                                {verdict !== null && (
+                                    <div className="au-cread">
+                                        <span className="au-cheld">
+                                            {held === undefined
+                                                ? `${sourceText(clause.source)} did not match`
+                                                : `${sourceText(clause.source)} holds "${held}"`}
+                                        </span>
+                                        <span className={`au-cv ${verdict.cls}`} title={verdict.why}>
+                                            <span aria-hidden="true">{verdict.mark}</span>
+                                            {verdict.word}
+                                        </span>
+                                    </div>
                                 )}
-                                <button
-                                    type="button"
-                                    className="au-crow-del"
-                                    aria-label={`Remove comparison ${i + 1}`}
-                                    onClick={() => setClauses(clauses.filter((_, idx) => idx !== i))}
-                                >
-                                    ✕
-                                </button>
                             </div>
                         );
                     })}

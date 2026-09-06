@@ -762,12 +762,14 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         await renderCond([clause('$1', 'is', 'x')], { find: 'err (?<code>\\d+) (?<why>\\w+)' });
         const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
         const opts = [...select.options].map((o) => o.textContent ?? '');
+        // Each option carries the value it holds in the live preview (§5.9), so `${why}` is never
+        // picked blind — `sayPattern`'s own worked example for this pattern is `err 63 abc`.
         expect(opts).toEqual([
             expect.stringContaining('$0'),
-            '$1',
-            '$2',
-            '${code}',
-            '${why}',
+            '$1 — "63"',
+            '$2 — "abc"',
+            '${code} — "63"',
+            '${why} — "abc"',
         ]);
         // And the VALUES are the keys `sourceFromKey` round-trips, not the labels.
         expect([...select.options].map((o) => o.value)).toEqual([
@@ -785,5 +787,86 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
         const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
         expect([...select.options].map((o) => o.value)).toEqual(['whole', 'group:1']);
+    });
+
+    /* ------------------------------------------------------ task 28: §5.9's other two bullets --- */
+
+    /** Every row's verdict chip, in order. */
+    const verdicts = () => [...container.querySelectorAll('.au-cv')].map((el) => ({
+        text: (el.textContent ?? '').trim(),
+        cls: el.className,
+    }));
+
+    it('shows what $0 holds, and keeps its words when there is nothing to show', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'ctx:(\\d+)%' });
+        const opts = [...container.querySelectorAll<HTMLOptionElement>(
+            '[aria-label="Which captured value"] option',
+        )].map((o) => o.textContent ?? '');
+        expect(opts).toEqual(['$0 — "ctx:63%"', '$1 — "63"']);
+
+        // …and a pattern with no worked example to read falls back to the words, never to a blank
+        // or an invented value.
+        await renderCond([clause('$1', 'is', 'x')], { find: 'FAILED (\\d+) tests in (\\S+)' });
+        const bare = [...container.querySelectorAll<HTMLOptionElement>(
+            '[aria-label="Which captured value"] option',
+        )].map((o) => o.textContent ?? '');
+        expect(bare).toEqual(['$0 — the whole match', '$1', '$2']);
+    });
+
+    /**
+     * **The three answers must READ as three answers.** §5.9's second bullet is what makes AND/OR
+     * concrete, and it is only concrete if a row that could not be answered is visibly not a row
+     * that failed: an OR chain carries an unknown, and a red ✕ beside it tells the user the rule
+     * will not fire when it may well.
+     *
+     * The default fixture pattern is `(\d+):(\d+)`, whose worked example is `63:63` — so `$1` holds
+     * `63`, and `$3` is a group the pattern does not have (a clause written before the brackets were
+     * edited), which a NUMBER test can be told nothing about.
+     */
+    it('draws a passing row, a failing row and an unknown row as three different things', async () => {
+        await renderCond([
+            clause('$1', 'is over', '25'),
+            clause('$1', 'is over', '100'),
+            clause('$3', 'is over', '25'),
+        ]);
+        const [pass, fail, unknown] = verdicts();
+        expect(pass.text).toContain('passes');
+        expect(fail.text).toContain('fails');
+        expect(unknown.text).toContain('unknown');
+        // The assertion that the mutation in step 5 has to break: unknown is not the failing
+        // treatment, in either the words or the class that colours them.
+        expect(unknown.text).not.toBe(fail.text);
+        expect(unknown.cls).not.toBe(fail.cls);
+        expect(pass.cls).not.toBe(fail.cls);
+    });
+
+    it('says what each row\'s token holds, and says plainly when it holds nothing', async () => {
+        await renderCond([clause('$1', 'is over', '25'), clause('$3', 'is over', '25')]);
+        const held = [...container.querySelectorAll('.au-cheld')].map((el) => (el.textContent ?? '').trim());
+        expect(held[0]).toBe('$1 holds "63"');
+        // Not `holds ""` — a token that did not participate is a different fact from one that
+        // captured an empty string, and it is the reason the row above it is unknown.
+        expect(held[1]).toBe('$3 did not match');
+    });
+
+    /**
+     * **No verdict at all is better than a wrong one.** Two different absences, one answer: a
+     * pattern that will not compile, and one that compiles but has no worked example to read
+     * (`sampleFromPattern` returns `null`, never `{}`). Neither may default to pass or fail.
+     */
+    it('draws no verdict when there is no reading to judge against, and does not throw', async () => {
+        await renderCond([clause('$1', 'is over', '25')], { find: '(unclosed' });
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelectorAll('.au-cheld')).toHaveLength(0);
+
+        await renderCond([clause('$1', 'is over', '25')], { find: 'FAILED (\\d+) tests in (\\S+)' });
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+
+        // **The positive control**, without which both assertions above pass on a panel that draws
+        // no verdicts at all — which is exactly what this panel did before this task.
+        await renderCond([clause('$1', 'is over', '25')], { find: 'ctx:(\\d+)%' });
+        expect(verdicts()).toHaveLength(1);
     });
 });

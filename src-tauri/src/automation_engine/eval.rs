@@ -2112,4 +2112,102 @@ mod tests {
         assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.0)), "p", w, d), "last value 63");
         assert_eq!(read_detail(&Outcome::Numeric(Read::Value(63.5)), "p", w, d), "last value 63.5");
     }
+    // -----------------------------------------------------------------------------------------
+    // The shared clause-truth fixture (task 28)
+    // -----------------------------------------------------------------------------------------
+
+    /// **The renderer's `automationClauseTruth.ts` answers the same cases, or one of us is red.**
+    ///
+    /// `CondPanel` now draws a per-clause verdict beside each row (§5.9) and this function decides
+    /// whether the rule actually fires — two implementations of one three-valued rule set, which
+    /// diverge the first time only one of them is edited. The divergence is silent and it is the
+    /// worst kind: a green tick beside a comparison the engine reads as `Unknown` tells a user the
+    /// rule will fire when it will not. `two-implementations-one-fix`.
+    ///
+    /// `caps` in the fixture is the RENDERER's shape — a flat `Record<string, string>`, what
+    /// `sampleFromPattern` returns — so this side rebuilds a `Captures` from it. Nothing is lost in
+    /// that rebuild: an absent key and a `None` slot both read as `None` through `Captures::group`
+    /// and `Captures::name`, which is exactly the participation fact the map carries by omission.
+    #[test]
+    fn the_shared_clause_fixture_agrees_case_for_case() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            caps: std::collections::BTreeMap<String, String>,
+            clause: Clause,
+            expected: String,
+        }
+
+        /// The renderer's flat capture map as a `Captures`.
+        ///
+        /// A key that parses as a number is a positional group; anything else is a name. The
+        /// positional vector is sized to the highest number present and the gaps are `None`, which
+        /// is the same answer an out-of-range index gives — `test_clause`'s own doc says the two
+        /// are deliberately not told apart.
+        fn caps_from(map: &std::collections::BTreeMap<String, String>) -> Captures {
+            let top = map.keys().filter_map(|k| k.parse::<usize>().ok()).max().unwrap_or(0);
+            Captures {
+                groups: (0..=top).map(|i| map.get(&i.to_string()).cloned()).collect(),
+                named: map
+                    .iter()
+                    .filter(|(k, _)| k.parse::<usize>().is_err())
+                    .map(|(k, v)| (k.clone(), Some(v.clone())))
+                    .collect(),
+            }
+        }
+
+        let raw = include_str!(
+            "../../../src/renderer/components/Automation/__fixtures__/automationClauseCases.json"
+        );
+        let fixture: Fixture = serde_json::from_str(raw).expect("the shared clause fixture parses");
+
+        // A fixture that shrank to nothing would pass by having nothing to disagree about. A floor,
+        // not the exact number, so adding a case is not a two-file edit.
+        assert!(
+            fixture.cases.len() >= 40,
+            "the shared clause fixture has shrunk to {} cases",
+            fixture.cases.len()
+        );
+
+        let mut seen_truths = std::collections::HashSet::new();
+        let mut seen_ops = std::collections::HashSet::new();
+        for case in &fixture.cases {
+            let want = match case.expected.as_str() {
+                "true" => Truth::True,
+                "false" => Truth::False,
+                "unknown" => Truth::Unknown,
+                other => panic!("fixture case `{}` wants `{}`, which is not a Truth", case.name, other),
+            };
+            let got = test_clause(&case.clause, &caps_from(&case.caps));
+            assert_eq!(got, want, "fixture case: {}", case.name);
+            seen_truths.insert(case.expected.clone());
+            seen_ops.insert(match &case.clause.test {
+                Test::Number { op, .. } => format!("{:?}", op),
+                Test::Text { op, .. } => format!("{:?}", op),
+            });
+        }
+
+        // **Both lists are HAND-TYPED and this side cannot derive either**, exactly as
+        // `automation_validation.rs`'s code list cannot: `CompareOp` and `TextOp` have no
+        // enumeration a test can walk. The TypeScript mirror DOES derive its equivalent, from
+        // `NUM_OP_LABELS`/`TEXT_OP_LABELS` (`Record<Op, string>`, which fails `tsc` on a missing
+        // key), so a fourteenth operator added to both implementations with no fixture case stays
+        // green HERE until someone adds it below and goes red THERE. Said out loud rather than left
+        // to look symmetrical.
+        for op in [
+            "Gt", "Gte", "Lt", "Lte", "Eq", "Neq", "Is", "IsNot", "Contains", "NotContains",
+            "Matches", "IsEmpty", "IsNotEmpty",
+        ] {
+            assert!(seen_ops.contains(op), "no fixture case uses `{op}`");
+        }
+        // `Unknown` is the answer a reader gets wrong, so a fixture with no `unknown` case would
+        // pin the two implementations everywhere except where they differ.
+        for t in ["true", "false", "unknown"] {
+            assert!(seen_truths.contains(t), "no fixture case expects `{t}`");
+        }
+    }
 }

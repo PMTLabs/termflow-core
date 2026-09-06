@@ -1,0 +1,326 @@
+{
+  "$comment": [
+    "THE SHARED CLAUSE-TRUTH FIXTURE (plan 032 §5.5, §5.9; task 28).",
+    "",
+    "One list of cases, read by BOTH implementations of `test_clause`: `automationClauseTruth.ts`",
+    "(jest) and `automation_engine/eval.rs` (cargo, via include_str!). The editor now draws a",
+    "per-clause verdict beside each row, and the engine decides whether the rule fires — two surfaces",
+    "describing one rule, which is the defect this milestone kept having to repair. Kleene's third",
+    "value, `f64` coercion and the comparison epsilon are exactly the things that drift silently, so",
+    "they are pinned case for case rather than trusted. `two-implementations-one-fix`.",
+    "",
+    "`clause` is a COMPLETE `Clause` in the wire DTO's own spelling, so Rust reads it with",
+    "`serde_json::from_str` and no adapter, exactly as `automationValidationCases.json` does.",
+    "",
+    "`caps` is the RENDERER's capture shape — `Record<string, string>`, what `sampleFromPattern`",
+    "returns — because that is what production feeds the TypeScript side. A key is present if and",
+    "only if the group PARTICIPATED, which is the same fact Rust's `Captures` carries as the",
+    "`Option` inside each slot: an absent key and a `None` slot read identically through",
+    "`Captures::group`/`name`, so the Rust side rebuilds a `Captures` from this map and nothing is",
+    "lost. `\"1\": \"\"` (present, empty) and a missing `\"1\"` (did not participate) are DIFFERENT",
+    "cases and both appear below — collapsing them is the M1 review's Important 1.",
+    "",
+    "`expected` is `true` / `false` / `unknown` — `Truth`, three-valued. `unknown` is never `false`:",
+    "a clause that taught the read nothing must not decide the rule, and an OR chain may still carry",
+    "a row this one could not answer.",
+    "",
+    "**The one divergence this fixture cannot close, said out loud.** A `matches` clause compiles its",
+    "own operand as a regex, with V8 in the renderer and the `regex` crate in the engine, and the two",
+    "accept different syntax — `(?<=a)b` compiles in V8 and not in `regex`. That gap is not new here:",
+    "`cond.badClausePattern` has it already (`compilePattern` on one side, `Regex::new` on the other)",
+    "and the validation fixture lives with it the same way. So no case below uses syntax only one",
+    "engine accepts; the `(?P<…>)` case is the opposite direction and IS pinned, because",
+    "`compilePattern`'s rescue exists to close that one."
+  ],
+  "cases": [
+    {
+      "name": "$0 contains the words it matched",
+      "caps": { "0": "ctx:63%", "1": "63" },
+      "clause": { "source": "whole", "test": { "text": { "op": "contains", "value": "ctx" } } },
+      "expected": "true"
+    },
+    {
+      "name": "$0 does not contain something else",
+      "caps": { "0": "ctx:63%", "1": "63" },
+      "clause": { "source": "whole", "test": { "text": { "op": "contains", "value": "err" } } },
+      "expected": "false"
+    },
+    {
+      "name": "an empty needle is contained by everything",
+      "why": "Rust's `str::contains(\"\")` and JavaScript's `String.includes('')` are both true; a port that special-cased the empty operand would diverge here.",
+      "caps": { "0": "ctx:63%" },
+      "clause": { "source": "whole", "test": { "text": { "op": "contains", "value": "" } } },
+      "expected": "true"
+    },
+    {
+      "name": "notContains is the negation, not a second reading",
+      "caps": { "0": "ctx:63%" },
+      "clause": { "source": "whole", "test": { "text": { "op": "notContains", "value": "err" } } },
+      "expected": "true"
+    },
+    {
+      "name": "notContains is false when it does contain it",
+      "caps": { "0": "ctx:63%" },
+      "clause": { "source": "whole", "test": { "text": { "op": "notContains", "value": "ctx" } } },
+      "expected": "false"
+    },
+    {
+      "name": "is compares the whole token, not a prefix",
+      "caps": { "0": "429 Too Many Requests", "1": "429" },
+      "clause": { "source": { "group": 1 }, "test": { "text": { "op": "is", "value": "429" } } },
+      "expected": "true"
+    },
+    {
+      "name": "is is false for a token that merely starts with the value",
+      "caps": { "0": "4291" },
+      "clause": { "source": "whole", "test": { "text": { "op": "is", "value": "429" } } },
+      "expected": "false"
+    },
+    {
+      "name": "isNot is the negation of is",
+      "caps": { "0": "429" },
+      "clause": { "source": "whole", "test": { "text": { "op": "isNot", "value": "529" } } },
+      "expected": "true"
+    },
+    {
+      "name": "isNot is false when they are equal",
+      "caps": { "0": "429" },
+      "clause": { "source": "whole", "test": { "text": { "op": "isNot", "value": "429" } } },
+      "expected": "false"
+    },
+    {
+      "name": "a named group is read by its name",
+      "caps": { "0": "err 500 timeout", "1": "500", "2": "timeout", "code": "500", "why": "timeout" },
+      "clause": { "source": { "named": "why" }, "test": { "text": { "op": "is", "value": "timeout" } } },
+      "expected": "true"
+    },
+    {
+      "name": "a text clause on a group that did not participate reads the empty string",
+      "why": "§5.5's asymmetry: a non-participating token is a KNOWN absence to a text test (§4.4), so isEmpty gets a real answer — `true`, not `unknown`.",
+      "caps": { "0": "err", "1": "err" },
+      "clause": { "source": { "group": 2 }, "test": { "text": { "op": "isEmpty", "value": "" } } },
+      "expected": "true"
+    },
+    {
+      "name": "isNotEmpty on that same absent group is a known false",
+      "caps": { "0": "err", "1": "err" },
+      "clause": { "source": { "group": 2 }, "test": { "text": { "op": "isNotEmpty", "value": "" } } },
+      "expected": "false"
+    },
+    {
+      "name": "a name the pattern never declared reads the empty string too",
+      "why": "§5.5 draws no declared-vs-undeclared row: that is a validation problem (`cond.unknownToken`), not a case this function tells apart.",
+      "caps": { "0": "err", "code": "500" },
+      "clause": { "source": { "named": "nope" }, "test": { "text": { "op": "isEmpty", "value": "" } } },
+      "expected": "true"
+    },
+    {
+      "name": "a group that participated and captured nothing is empty, and that is not the same fact",
+      "caps": { "0": "err ", "1": "" },
+      "clause": { "source": { "group": 1 }, "test": { "text": { "op": "isEmpty", "value": "" } } },
+      "expected": "true"
+    },
+    {
+      "name": "isNotEmpty on a token that holds something",
+      "caps": { "0": "err 500", "1": "500" },
+      "clause": { "source": { "group": 1 }, "test": { "text": { "op": "isNotEmpty", "value": "" } } },
+      "expected": "true"
+    },
+    {
+      "name": "matches runs the clause's own pattern against the token",
+      "caps": { "0": "build 12 failed", "1": "12" },
+      "clause": { "source": "whole", "test": { "text": { "op": "matches", "value": "^build \\d+" } } },
+      "expected": "true"
+    },
+    {
+      "name": "matches is unanchored on both sides",
+      "caps": { "0": "build 12 failed" },
+      "clause": { "source": "whole", "test": { "text": { "op": "matches", "value": "\\d+ failed" } } },
+      "expected": "true"
+    },
+    {
+      "name": "matches is false when the clause pattern does not find anything",
+      "caps": { "0": "build 12 failed" },
+      "clause": { "source": "whole", "test": { "text": { "op": "matches", "value": "^passed" } } },
+      "expected": "false"
+    },
+    {
+      "name": "a matches clause whose own pattern will not compile is unknown, never false",
+      "why": "A broken clause must not read as \"no\" — the same asymmetry a non-numeric token gets below.",
+      "caps": { "0": "build 12 failed" },
+      "clause": { "source": "whole", "test": { "text": { "op": "matches", "value": "(unclosed" } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "the `(?P<name>…)` spelling runs on both engines",
+      "why": "`regex` keeps it as its own historical spelling; V8 throws `Invalid group`. `compilePattern`'s rescue exists for exactly this, and this case is what holds the rescue in place.",
+      "caps": { "0": "build 12 failed" },
+      "clause": { "source": "whole", "test": { "text": { "op": "matches", "value": "(?P<n>\\d+) failed" } } },
+      "expected": "true"
+    },
+    {
+      "name": "gt on a number the token holds",
+      "caps": { "0": "ctx:63%", "1": "63" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 25 } } },
+      "expected": "true"
+    },
+    {
+      "name": "gt is false below the threshold",
+      "caps": { "0": "ctx:12%", "1": "12" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 25 } } },
+      "expected": "false"
+    },
+    {
+      "name": "gte includes the boundary and gt does not",
+      "caps": { "0": "25", "1": "25" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gte", "value": 25 } } },
+      "expected": "true"
+    },
+    {
+      "name": "gt excludes that same boundary",
+      "caps": { "0": "25", "1": "25" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 25 } } },
+      "expected": "false"
+    },
+    {
+      "name": "lt below the threshold",
+      "caps": { "0": "12", "1": "12" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "lt", "value": 25 } } },
+      "expected": "true"
+    },
+    {
+      "name": "lte includes the boundary",
+      "caps": { "0": "25", "1": "25" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "lte", "value": 25 } } },
+      "expected": "true"
+    },
+    {
+      "name": "eq compares with an epsilon, never with ==",
+      "why": "0.1 + 0.2 printed by a program and 0.3 typed by a user are two different f64s. An exact comparison reads `false` here, which is the silent failure the epsilon exists to prevent.",
+      "caps": { "0": "0.30000000000000004", "1": "0.30000000000000004" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "eq", "value": 0.3 } } },
+      "expected": "true"
+    },
+    {
+      "name": "neq is the epsilon's negation, so the same pair is not unequal",
+      "caps": { "0": "0.30000000000000004", "1": "0.30000000000000004" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "neq", "value": 0.3 } } },
+      "expected": "false"
+    },
+    {
+      "name": "eq is false for numbers further apart than the epsilon",
+      "caps": { "0": "5", "1": "5" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "eq", "value": 6 } } },
+      "expected": "false"
+    },
+    {
+      "name": "neq is true for those same two",
+      "caps": { "0": "5", "1": "5" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "neq", "value": 6 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a numeric clause with no threshold yet asks nothing and is told nothing",
+      "why": "`cond.clauseNeedsValue` blocks it, so only a hand-edited rule reaches here; reading it as `false` would let an unfinished comparison decide the rule.",
+      "caps": { "0": "63", "1": "63" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": null } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "a numeric clause on a token that is not a number is unknown",
+      "caps": { "0": "ctx:none%", "1": "none" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 25 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "a numeric clause on a group that did not participate is unknown",
+      "why": "This is the row the editor must NOT draw as a red cross: an OR chain may still carry it.",
+      "caps": { "0": "err", "1": "err" },
+      "clause": { "source": { "group": 2 }, "test": { "number": { "op": "gt", "value": 25 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "surrounding whitespace is trimmed before coercion",
+      "caps": { "0": "  42  ", "1": "  42  " },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 41 } } },
+      "expected": "true"
+    },
+    {
+      "name": "an empty token is not the number zero",
+      "why": "`Number('')` is `0` in JavaScript and `\"\".parse::<f64>()` is an error in Rust. A port written with a bare `Number()` reads this `true` and fires a rule on a capture that holds nothing.",
+      "caps": { "0": "x", "1": "" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "lt", "value": 1 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "hexadecimal is not a number here",
+      "why": "`Number('0x10')` is 16 in JavaScript; `\"0x10\".parse::<f64>()` is an error. The engine would never fire this and the editor must not say it would.",
+      "caps": { "0": "0x10", "1": "0x10" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 10 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "a digit separator is not a number here",
+      "caps": { "0": "1_000", "1": "1_000" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 10 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "a value too large for f64 is not finite, so it is unknown",
+      "why": "Rust parses `1e400` to infinity and `is_finite` throws it out; JavaScript's `Number` gives `Infinity` and `Number.isFinite` throws it out. Both must refuse, or a runaway reading looks like a passing threshold.",
+      "caps": { "0": "1e400", "1": "1e400" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 10 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "the word infinity is not a number here either",
+      "why": "`\"Infinity\".parse::<f64>()` succeeds in Rust and is then filtered by `is_finite`. The filter is what makes the two sides agree.",
+      "caps": { "0": "Infinity", "1": "Infinity" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "gt", "value": 10 } } },
+      "expected": "unknown"
+    },
+    {
+      "name": "a leading sign and an exponent are numbers on both sides",
+      "caps": { "0": "+1.5e2", "1": "+1.5e2" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "eq", "value": 150 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a trailing decimal point is a number on both sides",
+      "caps": { "0": "5.", "1": "5." },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "eq", "value": 5 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a leading decimal point is a number on both sides",
+      "caps": { "0": ".5", "1": ".5" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "lt", "value": 1 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a negative reading compares as a negative number",
+      "caps": { "0": "-4", "1": "-4" },
+      "clause": { "source": { "group": 1 }, "test": { "number": { "op": "lt", "value": 0 } } },
+      "expected": "true"
+    },
+    {
+      "name": "$0 can be compared numerically too",
+      "caps": { "0": "63" },
+      "clause": { "source": "whole", "test": { "number": { "op": "gte", "value": 63 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a named group can be compared numerically",
+      "caps": { "0": "err 500", "1": "500", "code": "500" },
+      "clause": { "source": { "named": "code" }, "test": { "number": { "op": "gte", "value": 500 } } },
+      "expected": "true"
+    },
+    {
+      "name": "a whole match that did not participate at all is unknown to a number test",
+      "why": "`sampleFromPattern` returning `{}` and returning `null` are different facts; this is the `{}` one, and it must not read as a comparison against zero.",
+      "caps": {},
+      "clause": { "source": "whole", "test": { "number": { "op": "gt", "value": 0 } } },
+      "expected": "unknown"
+    }
+  ]
+}
