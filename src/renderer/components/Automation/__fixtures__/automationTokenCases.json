@@ -2,20 +2,20 @@
   "cases": [
     { "input": "plain text", "tokens": [], "rendered": "plain text" },
     { "input": "$0", "tokens": [{ "kind": "group", "n": 0 }], "rendered": "whole" },
-    { "input": "$1", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "g1" },
-    { "input": "fix $1 in $2", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "group", "n": 2 }], "rendered": "fix g1 in g2" },
+    { "input": "$1", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "[g1]" },
+    { "input": "fix $1 in $2", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "group", "n": 2 }], "rendered": "fix [g1] in [g2]" },
     { "input": "${file}", "tokens": [{ "kind": "named", "name": "file" }], "rendered": "file" },
     { "input": "$$1", "tokens": [], "rendered": "$1" },
     { "input": "$$", "tokens": [], "rendered": "$" },
-    { "input": "cost $5", "tokens": [{ "kind": "group", "n": 5 }], "rendered": "cost g5" },
+    { "input": "cost $5", "tokens": [{ "kind": "group", "n": 5 }], "rendered": "cost [g5]" },
     { "input": "$x", "tokens": [], "rendered": "$x" },
     { "input": "$", "tokens": [], "rendered": "$" },
-    { "input": "$3", "tokens": [{ "kind": "group", "n": 3 }], "rendered": "g3" },
-    { "input": "a$1b", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "ag1b" },
+    { "input": "$3", "tokens": [{ "kind": "group", "n": 3 }], "rendered": "[g3]" },
+    { "input": "a$1b", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "a[g1]b" },
     { "input": "cost ${} here", "tokens": [], "rendered": "cost ${} here" },
     { "input": "${1x}", "tokens": [{ "kind": "named", "name": "1x" }], "rendered": "one-x" },
-    { "input": "$12", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "g12" },
-    { "input": "${12}", "tokens": [{ "kind": "group", "n": 12 }], "rendered": "g12" },
-    { "input": "fix $1 in ${file}, not $$1 and not $x", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "file" }], "rendered": "fix g1 in file, not $1 and not $x" }
+    { "input": "$12", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "[g1]2" },
+    { "input": "${12}", "tokens": [{ "kind": "group", "n": 12 }], "rendered": "[g12]" },
+    { "input": "fix $1 in ${file}, not $$1 and not $x", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "file" }], "rendered": "fix [g1] in file, not $1 and not $x" }
   ]
 }

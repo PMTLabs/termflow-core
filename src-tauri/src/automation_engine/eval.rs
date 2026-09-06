@@ -1384,8 +1384,10 @@ mod tests {
         }
     }
 
-    /// The epsilon is not decoration: `0.1` reconstructed from text and `0.1` typed by a user are two
-    /// different `f64`s, and `==` says so.
+    /// The epsilon is not decoration, but the reason is ARITHMETIC, not parsing: parsing the same
+    /// decimal literal twice yields the same `f64`. What this test shows is the real case — `0.1`
+    /// parsed and then multiplied by three lands a few ulps from the `0.3` a user would type, and
+    /// `==` says so.
     #[test]
     fn eq_uses_an_epsilon_for_independently_computed_or_rounded_values() {
         let from_text: f64 = "0.1".parse::<f64>().unwrap() * 3.0;

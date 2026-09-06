@@ -1,8 +1,9 @@
 /**
  * The grammar table, ported from `src-tauri/src/automation_engine/subst.rs`'s own tests
  * (`the_grammar_table`, `tokens_used_reports_what_validation_must_check`, and the dedicated rows
- * for `${}`, `${1x}`, `$12` vs `${12}`) — restated here as "what tokens does the scanner find",
- * since this side never resolves a token, only reports it.
+ * for `${}`, `${1x}`, `$12` vs `${12}`) — restated here as "what tokens does the scanner find"
+ * and, since the `rendered` column was added, what the editor's `previewSubstitute` makes of them.
+ * Only the backend's `substitute` ever reaches a pty; this side previews.
  *
  * `automationTokenCases.json` is read by both this suite and Rust's `subst.rs`, so a future edit
  * to only one scanner goes red on the side that changed.
@@ -22,9 +23,12 @@ interface FixtureCase {
 
 const cases = (fixture as unknown as { cases: FixtureCase[] }).cases;
 const fixtureGroups = { count: 12, names: new Set(['file', '1x']) };
+// Bracketed deliberately, and Rust's `fixture_caps` says why: a bare `g${n}` makes group 12 and
+// "group 1 then a literal 2" the same string, which is exactly the pair `$12` vs `${12}` exists to
+// distinguish.
 const fixtureSample: Record<string, string> = {
     '0': 'whole',
-    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [String(i + 1), `g${i + 1}`])),
+    ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [String(i + 1), `[g${i + 1}]`])),
     file: 'file',
     '1x': 'one-x',
 };

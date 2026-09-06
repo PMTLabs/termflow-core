@@ -157,10 +157,15 @@ mod tests {
     /// The shared grammar fixture's declared capture universe: enough numbered slots to exercise
     /// `${12}`, plus both names it uses. Values are deliberately mechanical so a rendered row
     /// exposes scanner/literal drift rather than depending on the production-shaped `caps()`.
+    /// The group values are BRACKETED deliberately. With a bare `g{n}`, group 12 renders `g12`
+    /// and so does group 1 followed by a literal `2` — so `$12` and `${12}`, the one pair the
+    /// fixture exists to tell apart, produced the same string and a resolver that read `Group(12)`
+    /// as group 1 plus `"2"` passed every row. The brackets make a multi-digit group unforgeable by
+    /// concatenation, for every such pair rather than only for 12.
     fn fixture_caps() -> Captures {
         Captures {
             groups: std::iter::once(Some("whole".to_string()))
-                .chain((1..=12).map(|n| Some(format!("g{n}"))))
+                .chain((1..=12).map(|n| Some(format!("[g{n}]"))))
                 .collect(),
             named: BTreeMap::from([
                 ("file".to_string(), Some("file".to_string())),

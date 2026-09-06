@@ -3,7 +3,9 @@
  *
  * `blankDraft()` scaffolds `monitor`, `parse` and `cond` into the graph, while `ruleFromDraft`
  * omits them when a canvas draws none. A user who drags **Wait** and **Send to terminal** onto an
- * empty canvas therefore writes a schedule rule without an input chain to silence.
+ * empty canvas and then sets the Wait to *At a time of day* therefore writes a schedule rule
+ * without an input chain to silence. The mode switch is required: dragging Wait in materialises
+ * `DEFAULT_TIMER_MODE`, which is an `afterMatch` delay.
  *
  * **The three input steps are omitted AS A GROUP, never individually**, which is
  * `eval::InputSteps::of`'s own all-or-nothing contract rather than a second one invented here. Per

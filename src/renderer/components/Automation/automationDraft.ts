@@ -509,7 +509,9 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  *
  * **`monitor`, `parse` and `cond` are omitted when the canvas draws none of them — as a GROUP,
  * never one at a time.** `blankDraft()` scaffolds all three into the graph, while a *Wait* and
- * *Send to terminal* canvas writes a schedule rule without an input chain to silence.
+ * *Send to terminal* canvas whose Wait has been set to *At a time of day* writes a schedule rule
+ * without an input chain to silence — the switch matters, since a dragged-in Wait starts as
+ * `DEFAULT_TIMER_MODE`, an `afterMatch` delay.
  *
  * **Per step it would open a worse hole than it closes**, which is why the group is the unit.
  * *Watch → Wait → Send* would then write a monitor with no parse and no cond. That incomplete

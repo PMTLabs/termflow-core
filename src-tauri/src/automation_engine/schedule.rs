@@ -32,7 +32,9 @@ pub struct LocalTime {
 
 /// The tick's `now_ms` as a local wall-clock time.
 ///
-/// **The one impure line in this module, and the only local-time conversion in the crate.** Both
+/// **The one impure line in this module, and automation's only local-time conversion.** (Not the
+/// crate's — `commands.rs` and `pty_manager.rs` have their own `Local::now()` calls, which is why
+/// this claim is scoped to automation rather than stated crate-wide.) Both
 /// callers — the evaluator tick and `AutomationEngine::reload`'s seeding — go through here, so
 /// "which day is it" is answered once. `with_timezone(&Local)` is what makes a DST change behave:
 /// chrono asks the platform's own zone rules for the offset *at that instant*, so 09:00 stays nine in
