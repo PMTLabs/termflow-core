@@ -404,6 +404,18 @@ impl AutomationEngine {
         now_local: schedule::LocalTime,
     ) -> Result<ReloadReport, AutomationStoreError> {
         let rules = store.list_rules()?;
+        // Keep the store's current timer before disabled and completed rows are filtered from the
+        // live generation. A disabled rule is still the same saved schedule, while a deleted one
+        // has no entry here and must lose everything it owned.
+        let store_timers: HashMap<String, Option<TimerMode>> = rules
+            .iter()
+            .map(|rule| {
+                (
+                    rule.id.clone(),
+                    rule.graph.timer.as_ref().map(|timer| timer.mode.clone()),
+                )
+            })
+            .collect();
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
         let mut report = ReloadReport::default();
         // §3.3: rows the store could not decode. They never became `AutomationRule`s, so the
@@ -515,14 +527,14 @@ impl AutomationEngine {
             // same run. `Held` is Decision-class, so the verbose gate cannot drop that row, and with
             // `LOG_CAP` at 200 one editing session's worth of them evicts the rule's real history.
             //
-            // Only for a rule that is still HERE with the same target minute: a rule that left the
-            // live set (disabled, deleted, completed) is meant to lose everything it owns, and a
-            // moved minute is an instant today has not been spent on. `schedule::same_target_minute`
-            // owns that judgement, mask included.
+            // Only for a rule that is still in the STORE with the same target minute: disabled and
+            // completed rules still own their spent day, but a deleted rule has no store entry and
+            // loses everything it owned. A moved minute is an instant today has not been spent on.
+            // `schedule::same_target_minute` owns that judgement, mask included.
             let spent_day = self.runtime.last_fired_day(&id);
             let same_minute = schedule::same_target_minute(
                 timer_was.as_ref(),
-                after.and_then(|l| l.rule.graph.timer.as_ref()).map(|t| &t.mode),
+                store_timers.get(&id).and_then(|timer| timer.as_ref()),
             );
             self.runtime.forget_rule(&id);
             if same_minute {
@@ -1160,6 +1172,65 @@ mod tests {
             Some(monday),
             "and the day is still spent, so the rename cannot send a second message today"
         );
+    }
+
+    /// Disabling stops the live rule but does not un-spend the schedule instant it already ran.
+    #[test]
+    fn a_schedule_re_enabled_after_it_fired_writes_no_suppression_row_or_second_send() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday);
+        store
+            .append(&AutomationLogEntry {
+                id: 0,
+                rule_id: "au-sched".into(),
+                terminal_id: Some("tm-1".into()),
+                terminal_name: Some("shell".into()),
+                kind: LogKind::Sent,
+                detail: "sent to shell".into(),
+                at: 1_000,
+            })
+            .unwrap();
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        store.set_enabled_checked("au-sched", true).unwrap();
+        let report = engine.reload_at(&store, 3_000, at(monday, 9 * 60 + 35)).unwrap();
+
+        let rows = store
+            .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-enabling wrote a false suppression row: {rows:?}");
+        assert_eq!(rows[0].kind, LogKind::Sent, "the sent row is still the last word: {rows:?}");
+        assert!(!report.emit, "no row was written, so no window has anything to refetch");
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), Some(monday));
+        assert!(
+            !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 9 * 60 + 35)),
+            "re-enabling allowed a second send today"
+        );
+    }
+
+    #[test]
+    fn a_deleted_schedule_loses_its_spent_day() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday);
+
+        assert!(store.delete_rule("au-sched").unwrap());
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "a deleted rule retained engine state");
     }
 
     /// **Moving the schedule to a different minute is a NEW schedule, and it may fire today.**
