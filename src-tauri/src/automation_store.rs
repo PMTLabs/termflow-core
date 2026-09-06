@@ -3911,6 +3911,98 @@ mod tests {
         assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"kind":"text"}"#);
     }
 
+    /// **Every clause spelling on the wire, decoded from literal JSON.**
+    ///
+    /// The renderer's shared fixture is a strong pin, but it only happens to exercise
+    /// `TextOp::{Is, Contains, IsEmpty, Matches}` and `CompareOp::Gt` \u2014 `TextOp::{IsNot,
+    /// NotContains, IsNotEmpty}`, five of the six `CompareOp`s and `Join` ENTIRELY were decoded by
+    /// no Rust test at all. These are permanent contracts: the first rule saved with one of them
+    /// fixes its spelling forever, and `#[serde(rename_all = "camelCase")]` producing `notContains`
+    /// rather than `not_contains` is a fact about the derive, not something to assume.
+    ///
+    /// Written as literal JSON on purpose \u2014 a serialise-then-deserialise round trip agrees with
+    /// itself whatever the derive renames things to.
+    #[test]
+    fn every_clause_spelling_decodes_from_its_wire_form() {
+        let text_ops: [(&str, TextOp); 7] = [
+            (r#"{"source":"whole","test":{"text":{"op":"is","value":"x"}}}"#, TextOp::Is),
+            (r#"{"source":"whole","test":{"text":{"op":"isNot","value":"x"}}}"#, TextOp::IsNot),
+            (r#"{"source":"whole","test":{"text":{"op":"contains","value":"x"}}}"#, TextOp::Contains),
+            (
+                r#"{"source":"whole","test":{"text":{"op":"notContains","value":"x"}}}"#,
+                TextOp::NotContains,
+            ),
+            (r#"{"source":"whole","test":{"text":{"op":"matches","value":"x"}}}"#, TextOp::Matches),
+            (r#"{"source":"whole","test":{"text":{"op":"isEmpty","value":""}}}"#, TextOp::IsEmpty),
+            (
+                r#"{"source":"whole","test":{"text":{"op":"isNotEmpty","value":""}}}"#,
+                TextOp::IsNotEmpty,
+            ),
+        ];
+        for (json, want) in text_ops {
+            let c: Clause = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            match c.test {
+                Test::Text { op, .. } => assert_eq!(op, want, "{json}"),
+                other => panic!("{json} decoded as {other:?}"),
+            }
+            // And back out again, byte for byte: the spelling is a contract in both directions.
+            assert_eq!(serde_json::to_string(&c).unwrap(), json);
+        }
+
+        let num_ops: [(&str, CompareOp); 6] = [
+            (r#"{"source":{"group":1},"test":{"number":{"op":"gt","value":1.0}}}"#, CompareOp::Gt),
+            (r#"{"source":{"group":1},"test":{"number":{"op":"gte","value":1.0}}}"#, CompareOp::Gte),
+            (r#"{"source":{"group":1},"test":{"number":{"op":"lt","value":1.0}}}"#, CompareOp::Lt),
+            (r#"{"source":{"group":1},"test":{"number":{"op":"lte","value":1.0}}}"#, CompareOp::Lte),
+            (r#"{"source":{"group":1},"test":{"number":{"op":"eq","value":1.0}}}"#, CompareOp::Eq),
+            (r#"{"source":{"group":1},"test":{"number":{"op":"neq","value":1.0}}}"#, CompareOp::Neq),
+        ];
+        for (json, want) in num_ops {
+            let c: Clause = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json}: {e}"));
+            match c.test {
+                Test::Number { op, value } => {
+                    assert_eq!(op, want, "{json}");
+                    assert_eq!(value, Some(1.0), "{json}");
+                }
+                other => panic!("{json} decoded as {other:?}"),
+            }
+            assert_eq!(serde_json::to_string(&c).unwrap(), json);
+        }
+
+        // The third `Source` spelling, which neither list above uses.
+        let named: Clause =
+            serde_json::from_str(r#"{"source":{"named":"code"},"test":{"text":{"op":"is","value":"x"}}}"#)
+                .unwrap();
+        assert_eq!(named.source, Source::Named("code".into()));
+
+        // A numeric clause with NO threshold \u2014 `null`, which is what `CondPanel` puts on the wire
+        // the moment a row turns numeric, and what a bare `f64` refused outright.
+        let empty: Clause =
+            serde_json::from_str(r#"{"source":"whole","test":{"number":{"op":"gt","value":null}}}"#)
+                .unwrap();
+        assert!(matches!(empty.test, Test::Number { value: None, .. }));
+        // And a MISSING key decodes the same way, which is what `#[serde(default)]` is there for.
+        let absent: Clause =
+            serde_json::from_str(r#"{"source":"whole","test":{"number":{"op":"gt"}}}"#).unwrap();
+        assert_eq!(absent, empty);
+    }
+
+    /// `Join` is decoded by no other test in either suite \u2014 the renderer fixture never sets it, and
+    /// `And` is skipped on serialise, so only `"or"` ever appears on the wire at all.
+    #[test]
+    fn the_join_spellings_decode_from_their_wire_form() {
+        let or: CondStep = serde_json::from_str(r#"{"kind":"number","join":"or"}"#).unwrap();
+        assert_eq!(or.join, Join::Or);
+        let and: CondStep = serde_json::from_str(r#"{"kind":"number","join":"and"}"#).unwrap();
+        assert_eq!(and.join, Join::And);
+        // Absent means `And` \u2014 the default, which is why it is never written.
+        let absent: CondStep = serde_json::from_str(r#"{"kind":"number"}"#).unwrap();
+        assert_eq!(absent.join, Join::And);
+        // Out again: `Or` is written, `And` is not.
+        assert_eq!(serde_json::to_string(&or).unwrap(), r#"{"kind":"number","join":"or"}"#);
+        assert_eq!(serde_json::to_string(&and).unwrap(), r#"{"kind":"number"}"#);
+    }
+
     #[test]
     fn a_clause_round_trips() {
         let c = Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: Some(60.0) } };

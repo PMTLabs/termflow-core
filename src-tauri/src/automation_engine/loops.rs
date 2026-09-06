@@ -156,12 +156,24 @@ pub async fn evaluate_tick(
                 continue;
             };
             // §6.1: drained HERE, inside the walk over `snapshot_live()`, and never by a sweep
-            // over the parked map. `snapshot_live()` already filters `!enabled` and
-            // `completed_at.is_some()`, and `reload` already drops keys for a rule that vanished
-            // or whose `updated_at` moved — so "a disabled, invalid or deleted rule's timer does
-            // not fire" is true by construction, through gates that already exist and are already
-            // tested. A separate sweep would have to re-derive all three and would rot silently
-            // the first time a fourth is added.
+            // over the parked map. A separate sweep would have to re-derive the cancellation rules
+            // itself and would rot silently the first time a fourth one is added.
+            //
+            // **Two independent mechanisms, and only one of them is this placement.** A mutation
+            // experiment separates them:
+            //
+            // - **disabled** and **deleted** are true by construction, and specifically BECAUSE the
+            //   drain sits inside this walk: `snapshot_live()` filters `!enabled` and
+            //   `completed_at.is_some()`, so no `Arc<LiveRule>` exists for such a rule at any drain
+            //   location inside it. Move the drain out of the walk and both gates are gone.
+            // - **edited** is NOT. It is pinned by `reload`'s `forget_rule` purge, which drops the
+            //   parked keys for every rule whose `updated_at` moved — an edited rule is still live
+            //   and still walked here, so this placement does nothing for it. Move the drain and
+            //   the edited case stays closed; delete the purge and it opens, wherever the drain
+            //   sits.
+            //
+            // The design is sound; the distinction is written down so a future refactor moving the
+            // drain does not believe it is carrying the edited case with it.
             //
             // Ahead of the settle window and the cadence gate, and both are deliberate: neither is
             // about this. Settling means *nothing READS this terminal*, and a drain reads nothing.
