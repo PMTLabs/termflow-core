@@ -27,7 +27,10 @@ use rusqlite::Connection;
 /// **skipped, never deleted and never coerced** — multi-instance profiles make a downgrade real, and
 /// silently reinterpreting a graph we do not understand is how a rule starts typing the wrong thing
 /// into a terminal. `reload` logs exactly one entry per skipped rule per load. Plan §7.3.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
+///
+/// `2` as of plan 032 §3.2 (task 27): a rule is stamped `2` only when [`schema_version_for`] finds it
+/// actually uses a v2 feature, never merely because this build can write one.
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
 
 // ---------------------------------------------------------------------------------------------
 // The DTO. These serde names are THE AUTHORITY for the whole feature (plan §7.7): the renderer's
@@ -484,6 +487,36 @@ pub struct AutomationGraph {
     /// random. `Option` + `serde(default)` so every row written before this field still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<std::collections::BTreeMap<String, NodePos>>,
+}
+
+/// The schema version a graph's own shape requires — pure, and the only thing that decides the
+/// stamp `write_rule` writes (plan 032 §3.2, task 27). Never trust a caller's existing
+/// `schema_version` instead of this: a rule that gains a clause must not keep the `1` the renderer
+/// echoed back, which is what would happen if the stamp were merely carried through.
+///
+/// **Wider than §3.2's literal text.** The spec's predicate is `monitor.is_none()`, written in
+/// §3.1's world where all three input steps go optional together, so `monitor.is_none()` stood in
+/// for the whole class. An older build's `AutomationGraph` has `monitor`, `parse` **and** `cond` as
+/// required, non-`Option` fields — so any one of the three being absent is what actually breaks an
+/// older build's decode, not the monitor specifically. This checks all three (task 27 ruling R1).
+///
+/// **Not sticky.** A rule that drops its last clause reads back `1` on its very next save — the
+/// literal reading of "actually uses", chosen because it maximises downgrade compatibility. The
+/// opposite (monotonic, "once v2 always v2") is the more obvious thing to write by accident, which
+/// is why `schema_version_is_stamped_from_what_the_rule_actually_uses` pins the non-sticky case
+/// explicitly rather than leaving it to be implied by the others (task 27 ruling R4).
+pub fn schema_version_for(graph: &AutomationGraph) -> i64 {
+    let uses_a_v2_feature = graph.timer.is_some()
+        || graph.monitor.is_none()
+        || graph.parse.is_none()
+        || graph.cond.is_none()
+        || graph.cond.as_ref().is_some_and(|c| !c.clauses.is_empty())
+        || graph.action.substitute;
+    if uses_a_v2_feature {
+        2
+    } else {
+        1
+    }
 }
 
 /// Fixture accessors for the three input steps — **test-only, and deliberately so**.
@@ -1543,6 +1576,15 @@ impl AutomationStore {
     /// transaction. It used to reorder in its own autocommit statement and then call `save_rule`; a
     /// failure in between left the order permanently mutated, with a gap where the copy should have
     /// been and nothing to notice it.
+    ///
+    /// **Every save-ish method funnels through here**, which is why plan 032 §3.2's stamp is computed
+    /// here rather than in `write_rule_committed` (which only `save_rule` and the test-only bypass
+    /// reach) — `add_target_to_rule`, `remove_target_from_rule`, `save_rule_as_of` and
+    /// `duplicate_automation` all call this directly. Stamping anywhere else would let a future
+    /// caller of one of those opt out of it (the `gate-in-the-caller-lets-new-callers-opt-out` shape).
+    /// A row from a NEWER build (`rule.schema_version > SUPPORTED_SCHEMA_VERSION`) is written back
+    /// with its own number **unchanged**: this build cannot know which v3+ feature such a graph
+    /// uses, and recomputing would silently relabel it (task 27 ruling R3).
     fn write_rule(
         tx: &rusqlite::Transaction<'_>,
         rule: &AutomationRule,
@@ -1551,6 +1593,11 @@ impl AutomationStore {
             .map_err(|e| AutomationStoreError::Invalid(format!("graph is not serialisable: {e}")))?;
         let target_mode = enum_to_db(&rule.target_mode)?;
         let criterion = enum_to_db(&rule.criterion)?;
+        let schema_version = if rule.schema_version <= SUPPORTED_SCHEMA_VERSION {
+            schema_version_for(&rule.graph)
+        } else {
+            rule.schema_version
+        };
 
         let previous: Option<i64> = optional_row(tx.query_row(
             "SELECT updated_at FROM automation_rules WHERE id = ?1",
@@ -1589,7 +1636,7 @@ impl AutomationStore {
                 rule.completed_at,
                 rule.verbose_until,
                 rule.sort_order,
-                rule.schema_version,
+                schema_version,
                 graph,
                 rule.created_at,
                 rule.updated_at,
@@ -2385,6 +2432,12 @@ mod tests {
         original.sort_order = 7;
         original.created_at = 111;
         original.updated_at = 222;
+        // The `rule()` fixture's own `schema_version` is a stamp value (`SUPPORTED_SCHEMA_VERSION`),
+        // not something this write path echoes back: `write_rule` recomputes it from the graph
+        // (task 27 / plan 032 §3.2), and `graph()`'s plain four-step shape recomputes to `1`
+        // regardless of what the fixture set here. Setting it explicitly documents what the round
+        // trip actually asserts, rather than leaning on the fixture's number staying in sync with it.
+        original.schema_version = 1;
 
         store.save_rule(&original).unwrap();
         let loaded = store.get_rule("au-1").unwrap().expect("rule");
@@ -2488,6 +2541,97 @@ mod tests {
         assert!(!loaded.is_runnable(), "and the engine is told to skip it");
         assert!(listed.iter().find(|r| r.id == "au-ok").unwrap().is_runnable());
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Task 27 / Plan 032 §3.2 — `schema_version` is stamped per rule, only when the graph needs it.
+    // -----------------------------------------------------------------------------------------
+
+    fn graph_with_timer() -> AutomationGraph {
+        let mut g = graph();
+        g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        g
+    }
+
+    fn graph_with_no_monitor() -> AutomationGraph {
+        let mut g = graph();
+        g.monitor = None;
+        g
+    }
+
+    fn graph_with_no_parse() -> AutomationGraph {
+        let mut g = graph();
+        g.parse = None;
+        g
+    }
+
+    fn graph_with_no_cond() -> AutomationGraph {
+        let mut g = graph();
+        g.cond = None;
+        g
+    }
+
+    fn graph_with_one_clause() -> AutomationGraph {
+        let mut g = graph();
+        g.cond.as_mut().unwrap().clauses.push(Clause {
+            source: Source::Group(1),
+            test: Test::Number { op: CompareOp::Gt, value: Some(25.0) },
+        });
+        g
+    }
+
+    fn graph_with_substitute() -> AutomationGraph {
+        let mut g = graph();
+        g.action.substitute = true;
+        g
+    }
+
+    /// One row per term of the predicate, plus the plain rule that must STAY v1. A single row would
+    /// leave the other six silently wrong — `schema_version_for` folds seven conditions into one
+    /// bool, and a table is the only shape that shows a wrong term rather than just a wrong result.
+    #[test]
+    fn schema_version_is_stamped_from_what_the_rule_actually_uses() {
+        assert_eq!(
+            schema_version_for(&graph()),
+            1,
+            "a plain four-step rule must still load on an older build"
+        );
+        assert_eq!(schema_version_for(&graph_with_timer()), 2);
+        assert_eq!(schema_version_for(&graph_with_no_monitor()), 2);
+        assert_eq!(schema_version_for(&graph_with_no_parse()), 2);
+        assert_eq!(schema_version_for(&graph_with_no_cond()), 2);
+        assert_eq!(schema_version_for(&graph_with_one_clause()), 2);
+        assert_eq!(schema_version_for(&graph_with_substitute()), 2);
+
+        // R4: not sticky. Dropping the last clause must not leave the rule permanently v2 — the
+        // opposite (monotonic) behaviour is the more obvious thing to write by accident.
+        let mut g = graph_with_one_clause();
+        g.cond.as_mut().unwrap().clauses.clear();
+        assert_eq!(
+            schema_version_for(&g),
+            1,
+            "dropping the last clause makes the rule v1-compatible again"
+        );
+    }
+
+    /// §3.2's whole point: merely loading and re-saving an old rule must not brick it for a
+    /// downgrade. The in-memory fold (§5.4, `fold_v1_clauses`) gives a v1 numeric rule one clause
+    /// at LOAD, in the engine, on a copy that is never written back — so the row this test reads
+    /// back through the STORE (which never runs that fold) must still show zero clauses and `1`.
+    #[test]
+    fn saving_a_v1_rule_does_not_promote_it() {
+        let store = AutomationStore::new_in_memory();
+        let mut v1 = rule("au-v1"); // op/threshold, no clauses — exactly what a v1 build wrote
+        v1.schema_version = 1;
+        store.save_rule(&v1).unwrap();
+
+        let loaded = store.list_rules().unwrap().pop().unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        assert!(loaded.graph.cond.as_ref().unwrap().clauses.is_empty());
+    }
+
+    // R3 — a row from a newer build is written back unchanged — is already pinned by
+    // `a_future_schema_version_rule_is_skipped_not_deleted` above, via `save_rule`, which is one of
+    // `write_rule`'s five callers. No separate test is added here for the same claim.
 
     /// Plan 032 §4.2: a graph blob written by a build before `substitute` existed has no such key at
     /// all — decoding it must not fail, and must not turn substitution on behind the user's back.
