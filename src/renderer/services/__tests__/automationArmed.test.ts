@@ -49,7 +49,7 @@ function rule(id: string, over: Partial<AutomationRule> = {}): AutomationRule {
 }
 
 function pair(over: Partial<AutomationRuntimePairState> = {}): AutomationRuntimePairState {
-    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, ...over };
+    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null, ...over };
 }
 
 function runtime(rules: Record<string, Record<string, AutomationRuntimePairState>>): AutomationStatePayload {
@@ -146,6 +146,37 @@ describe('snapshot identity — what stops the once-a-second re-render of everyt
         expect(getArmedAutomations('tm-1')).not.toBe(first);
         expect(getArmedAutomations('tm-1')[0].pair.state).toBe('fired');
     });
+
+    /**
+     * **`sameArmed` is an ALLOWLIST, so every new DTO field is a decision made in it.**
+     *
+     * A field the comparison does not name cannot wake a badge. `parkedAt` arrived for plan 032
+     * section 7 and nothing else on the pair moves when a send parks — the arm state was already
+     * `fired`, written in the same statement — so left off the list, a pane that had started
+     * counting down would have gone on rendering *Armed - waiting* until some unrelated field
+     * happened to change. Same shape as `a-tolerance-is-a-per-call-site-decision`: a list omits by
+     * default, silently.
+     *
+     * This is a surface the task 26 dispatch grep could not name: it consumes no
+     * `AutomationRowStateId` and no `armedSummary`, it just gates whether the four surfaces that do
+     * ever see the new value.
+     */
+    it('notices a send parking, though nothing else on the pair moved', () => {
+        const rules = [rule('r1')];
+        const armed = pair({ state: 'fired', lastFiredAt: null, firedCount: 0 });
+        __seedAutomationArmedForTest(rules, runtime({ r1: { 'tm-1': armed } }));
+        const first = getArmedAutomations('tm-1');
+        expect(armedEntryViews(first, NOW)[0].stateLabel).toBe('Waiting to re-arm');
+
+        __seedAutomationArmedForTest(
+            rules,
+            runtime({ r1: { 'tm-1': { ...armed, parkedAt: NOW + 30_000 } } }),
+        );
+
+        expect(getArmedAutomations('tm-1')).not.toBe(first);
+        expect(armedEntryViews(getArmedAutomations('tm-1'), NOW)[0].stateLabel)
+            .toBe('Waiting to send · in 30s');
+    });
 });
 
 describe('the words each surface prints', () => {
@@ -155,7 +186,7 @@ describe('the words each surface prints', () => {
         // the bucket — the defect `automationState.ts` records one level down.
         __seedAutomationArmedForTest(
             [rule('r1')],
-            runtime({ r1: { 'tm-1': pair(), 'tm-2': pair({ missing: true }) } }),
+            runtime({ r1: { 'tm-1': pair(), 'tm-2': pair({ missing: true, parkedAt: null }) } }),
         );
 
         expect(armedEntryViews(getArmedAutomations('tm-1'), NOW)[0].stateLabel)

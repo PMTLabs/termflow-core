@@ -51,7 +51,7 @@ function rule(over: Partial<AutomationRule> = {}): AutomationRule {
 }
 
 function pair(over: Partial<AutomationRuntimePairState> = {}): AutomationRuntimePairState {
-    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, ...over };
+    return { state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null, ...over };
 }
 
 describe('automationRowState — the state table', () => {
@@ -60,7 +60,7 @@ describe('automationRowState — the state table', () => {
         // say, and a disabled rule's runtime state is stale by definition.
         const state = automationRowState(
             rule({ enabled: false }),
-            { 'tm-1': pair({ missing: true }) },
+            { 'tm-1': pair({ missing: true, parkedAt: null }) },
             NOW,
         );
         expect(state.id).toBe('off');
@@ -89,7 +89,7 @@ describe('automationRowState — the state table', () => {
     });
 
     it('reports error for a missing pinned terminal', () => {
-        const state = automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW);
+        const state = automationRowState(rule(), { 'tm-1': pair({ missing: true, parkedAt: null }) }, NOW);
         expect(state.id).toBe('error');
     });
 
@@ -211,6 +211,133 @@ describe('automationRowState — the state table', () => {
     });
 
     /**
+     * **A parked send is a `pending` pair, and the pill counts it down** (plan 032 §6.2, §7).
+     *
+     * The arm machine says `Fired` from the moment a crossing is DECIDED — deliberately, so a second
+     * tick mid-send cannot queue a duplicate — and a Wait step then holds the message for up to ten
+     * minutes. Reading `state` alone, the row said *Fired · waiting to re-arm* about a message
+     * nothing had typed: a receipt for something that has not happened.
+     *
+     * The pair here carries BOTH, because that is the only shape the engine actually produces —
+     * `parked` is written in the same statement that writes `Fired`. A test that parked without
+     * arming would pass on an implementation that read `parkedAt` only in the `unseen` branch.
+     */
+    it('counts down a parked send, ahead of the arm state written beside it', () => {
+        const state = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({
+                    state: 'fired',
+                    lastFiredAt: null,
+                    firedCount: 0,
+                    parkedAt: NOW + 28_400,
+                }),
+            },
+            NOW,
+        );
+        expect(state.id).toBe('pending');
+        expect(state.label).toBe('Waiting to send · in 29s');
+        expect(state.pillText).toBe('Waiting to send · in 29s');
+        // **Not "Timer".** `Cadence`'s `'timer'` is the monitor's poll interval and this is the Wait
+        // step; two controls called Timer on one screen is how the two get confused.
+        expect(state.pillText).not.toMatch(/timer/i);
+    });
+
+    it('words the countdown in minutes once a second count would be unreadable', () => {
+        const state = automationRowState(
+            rule(),
+            { 'tm-1': pair({ parkedAt: NOW + 4 * 60_000 }) },
+            NOW,
+        );
+        expect(state.label).toBe('Waiting to send · in 4 min');
+    });
+
+    /**
+     * Rounded UP, and the final second is why.
+     *
+     * `Math.floor` reads *in 0s* for the whole last second — a stalled countdown at exactly the
+     * moment the feature is working — and a deadline already in the past (the tick that drains it
+     * has not run yet) would read as a negative.
+     */
+    it('never counts below one second while a send is still parked', () => {
+        expect(automationRowState(rule(), { 'tm-1': pair({ parkedAt: NOW + 1 }) }, NOW).label)
+            .toBe('Waiting to send · in 1s');
+        expect(automationRowState(rule(), { 'tm-1': pair({ parkedAt: NOW - 500 }) }, NOW).label)
+            .toBe('Waiting to send · in 0s');
+    });
+
+    /** Two waits, one pill: the number has to be the one about to come true. */
+    it('counts down the SOONEST parked send across the terminals it watches', () => {
+        const state = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({ parkedAt: NOW + 90_000 }),
+                'tm-2': pair({ parkedAt: NOW + 12_000 }),
+            },
+            NOW,
+        );
+        expect(state.label).toBe('Waiting to send · in 12s');
+    });
+
+    /**
+     * **A schedule rule that has fired must not read *Armed · waiting*** (plan 032 §6.3, §7).
+     *
+     * The schedule path reads no screen and writes NO arm state — that is the property that lets a
+     * `dailyAt` timer share a rule with a monitor without perturbing its machine once a day — but
+     * `run_send` still calls `record_fire`. So a 09:00 rule that had just typed into a terminal
+     * reported `state: 'unseen'` with a fresh `lastFiredAt`, and the row painted *Armed · waiting*
+     * in the pill directly above *Fired 1 time, 2 minutes ago* in its own footer. One row, two
+     * answers — the defect `everFired` exists to prevent, arriving from the other direction.
+     *
+     * Folded HERE rather than by making `run_send` write an arm state, which would give a rule that
+     * reads no screen a position in a machine about reading screens.
+     */
+    it('reads a fired schedule rule as fired, though its arm state never moved', () => {
+        const justSent = automationRowState(
+            rule(),
+            { 'tm-1': pair({ state: 'unseen', lastFiredAt: NOW - 1_000, firedCount: 1 }) },
+            NOW,
+        );
+        expect(justSent.id).toBe('fired');
+        expect(justSent.label).toBe('Just fired');
+
+        // And it settles on the SAME clock the monitor route uses, so a schedule row and a monitor
+        // row beside it cannot stop saying "Just fired" at different moments.
+        const settled = automationRowState(
+            rule(),
+            {
+                'tm-1': pair({
+                    state: 'unseen',
+                    lastFiredAt: NOW - JUST_FIRED_MS - 1,
+                    firedCount: 1,
+                }),
+            },
+            NOW,
+        );
+        expect(settled.id).toBe('rearm');
+        expect(settled.label).toBe('Fired · waiting to re-arm');
+    });
+
+    /**
+     * The negative half, and it is what keeps the fold above narrow.
+     *
+     * `armed` after a fire is an ordinary monitor rule that has genuinely re-armed — its condition
+     * went false and it is watching again — and *Armed · waiting* is the correct answer for it.
+     * Widening the fold to any `lastFiredAt` reclassifies every re-armed monitor pair as `rearm`,
+     * which is what `does not borrow a fire from a pair outside the winning state` above catches
+     * from the other side.
+     */
+    it('leaves a re-armed monitor pair armed and waiting, fire history and all', () => {
+        expect(
+            automationRowState(
+                rule(),
+                { 'tm-1': pair({ state: 'armed', lastFiredAt: NOW - 1_000, firedCount: 4 }) },
+                NOW,
+            ).id,
+        ).toBe('waiting');
+    });
+
+    /**
      * `matched` is in the union because mockup §09 teaches the word and M5's editor uses the same
      * seven ids — but **nothing produces it**, and this test says so in a way that goes red the
      * moment that stops being true. The evaluator advances the arm to `Fired` in the same statement
@@ -226,13 +353,17 @@ describe('automationRowState — the state table', () => {
             for (const missing of [false, true]) {
                 for (const lastFiredAt of [null, NOW, NOW - JUST_FIRED_MS - 1]) {
                     for (const firedCount of [0, 3]) {
-                        seen.add(
-                            automationRowState(
-                                rule(),
-                                { 'tm-1': { state, lastFiredAt, firedCount, missing } },
-                                NOW,
-                            ).id,
-                        );
+                        // The fifth dimension, added with `pending`: the sweep is only exhaustive
+                        // while it covers every FIELD, and a new one silently narrows it otherwise.
+                        for (const parkedAt of [null, NOW + 30_000]) {
+                            seen.add(
+                                automationRowState(
+                                    rule(),
+                                    { 'tm-1': { state, lastFiredAt, firedCount, missing, parkedAt } },
+                                    NOW,
+                                ).id,
+                            );
+                        }
                     }
                 }
             }
@@ -240,7 +371,7 @@ describe('automationRowState — the state table', () => {
         expect(seen.has('matched')).toBe(false);
         // The premise: the sweep really did reach the other states, so the assertion above is not
         // passing because nothing ran.
-        expect([...seen].sort()).toEqual(['error', 'fired', 'rearm', 'waiting']);
+        expect([...seen].sort()).toEqual(['error', 'fired', 'pending', 'rearm', 'waiting']);
     });
 });
 
@@ -248,7 +379,7 @@ describe('automationRowState — the qualifier', () => {
     it("says '1 of 2' when the pairs disagree, and names the state's own noun", () => {
         const state = automationRowState(
             rule(),
-            { 'tm-1': pair({ missing: true }), 'tm-2': pair() },
+            { 'tm-1': pair({ missing: true, parkedAt: null }), 'tm-2': pair() },
             NOW,
         );
         expect(state.id).toBe('error');
@@ -260,7 +391,7 @@ describe('automationRowState — the qualifier', () => {
         // *Error · 2 of 2 missing* says nothing *Error* did not.
         const state = automationRowState(
             rule(),
-            { 'tm-1': pair({ missing: true }), 'tm-2': pair({ missing: true }) },
+            { 'tm-1': pair({ missing: true, parkedAt: null }), 'tm-2': pair({ missing: true, parkedAt: null }) },
             NOW,
         );
         expect(state.qualifier).toBeNull();
@@ -268,7 +399,7 @@ describe('automationRowState — the qualifier', () => {
     });
 
     it('says nothing for a single watched terminal', () => {
-        expect(automationRowState(rule(), { 'tm-1': pair({ missing: true }) }, NOW).qualifier)
+        expect(automationRowState(rule(), { 'tm-1': pair({ missing: true, parkedAt: null }) }, NOW).qualifier)
             .toBeNull();
     });
 });
@@ -283,15 +414,29 @@ describe('automationRowState — severity, pair by pair', () => {
     const CASES: Array<[string, AutomationRuntimePairState, AutomationRuntimePairState, string]> = [
         [
             'error beats just-fired',
-            pair({ missing: true }),
+            pair({ missing: true, parkedAt: null }),
             pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
             'error',
         ],
         [
             'error beats waiting-to-re-arm',
-            pair({ missing: true }),
+            pair({ missing: true, parkedAt: null }),
             pair({ state: 'fired', lastFiredAt: NOW - JUST_FIRED_MS - 1, firedCount: 1 }),
             'error',
+        ],
+        [
+            // The Part-1 mutation's oracle: rank `pending` anywhere below `fired` and this row goes
+            // red, because the receipt would hide the message that has not been typed yet.
+            'error beats a countdown',
+            pair({ missing: true }),
+            pair({ parkedAt: NOW + 30_000 }),
+            'error',
+        ],
+        [
+            'a countdown beats just-fired',
+            pair({ parkedAt: NOW + 30_000 }),
+            pair({ state: 'fired', lastFiredAt: NOW, firedCount: 1 }),
+            'pending',
         ],
         [
             'just-fired beats waiting-to-re-arm',
@@ -512,7 +657,7 @@ describe('the row reads as a sentence', () => {
             targetIds: ['tm-1', 'tm-2'],
         });
         expect(describeCriterion(pinned)).toBe('2 picked terminals');
-        expect(describeWatching(pinned, { 'tm-1': pair(), 'tm-2': pair({ missing: true }) }))
+        expect(describeWatching(pinned, { 'tm-1': pair(), 'tm-2': pair({ missing: true, parkedAt: null }) }))
             .toBe('2 picked terminals · 1 open');
 
         const one = rule({ targetMode: 'pinned', targetIds: ['tm-1'] });

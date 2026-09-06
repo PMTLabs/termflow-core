@@ -22,6 +22,7 @@
 
 use crate::automation_engine::eval::{self, Outcome, Read, Truth};
 use crate::automation_engine::host::{EngineHost, HostPort};
+use crate::automation_engine::schedule::clock_time;
 use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
@@ -86,12 +87,6 @@ fn describe_wait(delay_ms: i64) -> String {
         return format!("{} s", delay_ms / 1_000);
     }
     format!("{:.1} s", delay_ms as f64 / 1_000.0)
-}
-
-/// `minuteOfDay` as `HH:MM` — the schedule dry run's own formatter, not shared with the TS side for
-/// the same reason `describe_wait` is not (see its own doc).
-fn clock_time(minute_of_day: i32) -> String {
-    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
 }
 
 /// Bits 0–6 of a `dailyAt` mask are Mon..Sun (plan 032 §3.1). Bit 7 names no day.

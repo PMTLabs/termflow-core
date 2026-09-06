@@ -179,7 +179,21 @@ pub async fn evaluator_step(
         // `local_now` is a pure function of `now_ms`, which was read once by the caller, so asking
         // it here and again inside the walk cannot produce two different days — the "exactly one
         // clock per tick" property is about the timestamp, and there is still exactly one.
-        engine.seed_missed_schedules(&engine.snapshot_live(), schedule::local_now(now_ms));
+        //
+        // The seeding writes one `held` row per day it actually spends (§7) and hands back the ids
+        // an `automation:activity` is due for, because it holds no `AppHandle`. Emitted here rather
+        // than folded into the state emit at the end of `evaluate_tick`: that one announces ARM
+        // transitions, and a suppressed schedule changes no arm state at all — it is a log row and
+        // nothing else, so the log's own event is the one that has to carry it.
+        let emit_for = engine.seed_missed_schedules(
+            &engine.snapshot_live(),
+            schedule::local_now(now_ms),
+            host.store(),
+            now_ms,
+        );
+        if !emit_for.is_empty() {
+            host.emit_activity(emit_for);
+        }
     }
     evaluate_tick(engine, host, cursor, now_ms).await
 }
@@ -1286,6 +1300,12 @@ mod tests {
 
         fake.say("pc-1", "ctx:99% FAILED 3 tests
 ");
+        // **What `wire` already wrote, before the ticks run.** `wire` reloads at epoch 0 and §7's
+        // seeding writes one `held` row for a schedule whose minute is already past *in the
+        // runner's own zone* — 19:00 the previous evening west of UTC, midnight on it. So an
+        // `is_empty()` oracle here asserts the runner's time zone, not the tick's behaviour. The
+        // question this test asks is whether THE TICK logs, and a delta answers it in every zone.
+        let before = log_rows(&fake.store);
         for tick in 0..8 {
             engine.runtime.mark_dirty("pc-1");
             evaluate_tick(&engine, &host, 0, 1_000 + tick * 250).await;
@@ -1293,7 +1313,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         assert!(fake.written().is_empty(), "a rule with no pattern typed something: {:?}", fake.written());
-        assert!(log_rows(&fake.store).is_empty(), "and it wrote a log row: {:?}", log_rows(&fake.store));
+        assert_eq!(
+            log_rows(&fake.store),
+            before,
+            "the tick wrote a log row: {:?}",
+            log_rows(&fake.store)
+        );
         assert_eq!(
             engine.runtime.arm_state("au-sched", "tm-1"),
             ArmState::Unseen,
@@ -1654,6 +1679,91 @@ mod tests {
         );
     }
 
+    /// **A morning the wake spent must say so in the log** (§7), and the activity event must carry
+    /// it.
+    ///
+    /// The suppression itself is right and it is completely silent: the user set a 09:00 reminder,
+    /// the lid was shut at 09:00, and the only trace of the decision was a `DashMap` entry. The row
+    /// is the only thing that can answer *"why didn't it run?"*.
+    ///
+    /// **`emit_activity`, not `emit_state`.** Nothing about a suppressed schedule moves an arm
+    /// state, so the state event this loop already sends at the end of `evaluate_tick` cannot carry
+    /// it — a window would repaint identical pills and never refetch the log.
+    ///
+    /// The negative half is the same assertion the sibling test above makes about firing: an
+    /// ordinary 250 ms step across 09:00 must produce a SEND and no suppression row, because it was
+    /// not a wake.
+    #[tokio::test(start_paused = true)]
+    async fn a_morning_the_wake_spent_is_written_to_the_log() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1")],
+            &[("au-sched", &["tm-1"])],
+        );
+        let slept_at = at_local(2026, 9, 7, Weekday::Mon, 18, 0);
+        let woke_at = at_local(2026, 9, 8, Weekday::Tue, 10, 0);
+        // `wire` reloads at epoch 0, whose LOCAL time is past 09:00 west of UTC and not on it, so
+        // what it left behind is the runner's time zone rather than this test's premise.
+        let before = log_rows(&fake.store).len();
+        let emits_before = fake.activity.load(std::sync::atomic::Ordering::Relaxed);
+
+        evaluator_step(&engine, &host, 0, Some(slept_at), woke_at).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        let rows: Vec<_> = log_rows(&fake.store).split_off(before);
+        assert_eq!(rows.len(), 1, "the wake spent Tuesday and said nothing: {rows:?}");
+        assert_eq!(rows[0].0, "Held", "{rows:?}");
+        assert_eq!(
+            rows[0].1,
+            "09:00 went by while nothing was watching the clock, so today's run was skipped",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0].2, None, "a schedule's suppression names no terminal: {rows:?}");
+        assert!(
+            fake.activity.load(std::sync::atomic::Ordering::Relaxed) > emits_before,
+            "the row was written and no window was told to refetch the log"
+        );
+
+        // Four hours later, still the same spent day: the bound is one row per suppression.
+        let tuesday_afternoon = at_local(2026, 9, 8, Weekday::Tue, 14, 0);
+        evaluator_step(&engine, &host, 0, Some(woke_at), tuesday_afternoon).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(
+            log_rows(&fake.store).len(),
+            before + 1,
+            "a second wake on a day already spent wrote it up again: {:?}",
+            log_rows(&fake.store)
+        );
+    }
+
+    /// **A schedule that FIRES writes no suppression row**, which is the half that stops the row
+    /// becoming a lie.
+    ///
+    /// The gate is `schedule_due` against the mark as it stands, and `evaluate_tick` marks the day
+    /// *after* the leaves — so a tick that sends and a wake that suppresses both leave
+    /// `last_fired_day` at today, and only one of them may have written a row. Asserting the send
+    /// alone cannot see a spurious row; asserting the row count alone cannot see a lost send.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_that_fires_on_the_tick_writes_no_suppression_row() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1")],
+            &[("au-sched", &["tm-1"])],
+        );
+        let nine = at_local(2026, 9, 7, Weekday::Mon, 9, 0);
+        let before = log_rows(&fake.store).len();
+
+        evaluator_step(&engine, &host, 0, Some(nine - BASE_TICK_MS as i64), nine).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(sent_to(&fake, "stand-up notes?"), vec!["pc-1"], "{:?}", fake.written());
+        let rows: Vec<_> = log_rows(&fake.store).split_off(before);
+        assert!(
+            rows.iter().all(|(kind, _, _)| kind != "Held"),
+            "a rule that fired was also told it had missed its minute: {rows:?}"
+        );
+    }
+
     /// **An ordinary tick does not re-seed, and this is the half that stops the fix eating the
     /// feature.**
     ///
@@ -1740,6 +1850,10 @@ mod tests {
             &[("au-both", &["tm-1"])],
         );
         engine.runtime.set_arm("au-both", "tm-1", ArmState::Fired { at_ms: 5 });
+        // `wire`'s own reload may have written §7's suppression row already, depending on the
+        // runner's zone — see `a_schedule_rule_reads_nothing_sends_nothing_and_logs_nothing`. The
+        // rows this test is about are the ones the tick adds.
+        let before = log_rows(&fake.store).len();
 
         // Decided while the terminal is open; it closes before the spawned send takes its turn.
         evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
@@ -1752,7 +1866,7 @@ mod tests {
             ArmState::Fired { at_ms: 5 },
             "the rollback wrote something other than what the decision found"
         );
-        let rows = log_rows(&fake.store);
+        let rows: Vec<_> = log_rows(&fake.store).split_off(before);
         assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
         assert_eq!(rows[0].0, "Failed", "{rows:?}");
         assert!(

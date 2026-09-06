@@ -135,24 +135,53 @@ export const AutomationsPanel: React.FC = () => {
     // One timer for the whole list, at the EARLIEST expiry, rather than one per row: the rows
     // share a clock, so they share a deadline. Re-armed on every render, which is what makes a
     // newly-arrived fire reset it.
+    //
+    // **Two kinds of deadline now, one mechanism.** A *Just fired* receipt expires once, six
+    // seconds after the fire. A `pending` row's countdown expires every second it is displayed —
+    // *Waiting to send · in 28s* is only true for a second — so its next deadline is the instant
+    // that number would change, which is at most a second away and is DERIVED from the parked
+    // stamp rather than being a bare 1 Hz interval. Same `setTimeout`, one more reason to arm it:
+    // a second clock for the same job is how two rows end up disagreeing about `now`.
     const nextExpiry = useMemo(() => {
         let soonest = Infinity;
+        const consider = (left: number) => {
+            if (left > 0 && left < soonest) soonest = left;
+        };
         for (const rule of rules) {
             for (const pair of Object.values(runtime.rules[rule.id] ?? {})) {
-                if (pair.lastFiredAt === null) continue;
-                const left = pair.lastFiredAt + JUST_FIRED_MS - now;
-                if (left > 0 && left < soonest) soonest = left;
+                if (pair.lastFiredAt !== null) consider(pair.lastFiredAt + JUST_FIRED_MS - now);
+                if (pair.parkedAt !== null) {
+                    const left = pair.parkedAt - now;
+                    // **Only while the deadline is still ahead.** Past it the pill reads *in 0s*
+                    // and there is nothing left to count: the send is due and the tick that drains
+                    // it will announce itself. Re-arming here anyway would leave a 1 Hz render loop
+                    // running against a stamp that can no longer change.
+                    if (left > 0) {
+                        // The whole second the countdown is about to tick off. `left % 1000` is 0
+                        // at an exact boundary, where the next change is a full second away.
+                        consider(left % 1000 === 0 ? 1000 : left % 1000);
+                        // And the deadline itself, so the row leaves `pending` on the clock rather
+                        // than waiting for an event the engine may not send.
+                        consider(left);
+                    }
+                }
             }
         }
         return soonest;
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [rules, runtime, tick]);
 
+    // **`tick` is in the deps, and it is what makes a repeating deadline repeat.** A *Just fired*
+    // receipt expires once, so its `nextExpiry` shrinks with every render and the effect re-runs on
+    // its own. A countdown's does not: it is *"the next whole second"*, which is 1000 again after
+    // every tick — so keyed on `nextExpiry` alone the effect fired exactly once and the pill froze
+    // one second in. Measured: the second `advanceTimersByTime` in this component's own test moved
+    // nothing at all.
     useEffect(() => {
         if (!Number.isFinite(nextExpiry)) return undefined;
         const id = setTimeout(() => setTick((n) => n + 1), nextExpiry + 50);
         return () => clearTimeout(id);
-    }, [nextExpiry]);
+    }, [nextExpiry, tick]);
 
     const openEditor = (draft: AutomationRule, opening: CanvasOpening = 'saved') =>
         setView({ kind: 'editor', draft, opening });

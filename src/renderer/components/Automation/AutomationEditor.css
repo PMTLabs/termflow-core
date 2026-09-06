@@ -1485,6 +1485,11 @@
     border-color: #5b4a25;
 }
 
+.au-editor .au-pill.pending {
+    color: #7fdde4;
+    border-color: #1f5f66;
+}
+
 .au-editor .au-pill.error {
     color: #ffaea8;
     border-color: #6e2b28;

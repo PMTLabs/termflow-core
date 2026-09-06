@@ -123,7 +123,7 @@ describe('automationDerive — a fresh draft claims no runtime state', () => {
         const ctx: DeriveContext = {
             now: NOW,
             problems: [],
-            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1, missing: false } },
+            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1, missing: false, parkedAt: null } },
         };
         expect(faceFor(rule, 'cond', ctx).foot).toMatch(/fired/i);
         expect(stateFor(rule, 'cond', ctx).tone).toBe('live');
@@ -146,7 +146,7 @@ describe('automationDerive — a fresh draft claims no runtime state', () => {
         const ctx: DeriveContext = {
             now: NOW,
             problems: [],
-            pairs: { 'tm-a': { state: 'unseen', lastFiredAt: null, firedCount: 0, missing: false } },
+            pairs: { 'tm-a': { state: 'unseen', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null } },
         };
 
         const face = faceFor(rule, 'cond', ctx);
@@ -173,7 +173,7 @@ describe('automationDerive — a fresh draft claims no runtime state', () => {
         const ctx: DeriveContext = {
             now: NOW,
             problems: problems(broken),
-            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW, firedCount: 1, missing: false } },
+            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW, firedCount: 1, missing: false, parkedAt: null } },
         };
         expect(stateFor(broken, 'cond', ctx).tone).toBe('error');
         expect(faceFor(broken, 'cond', ctx).footTone).toBe('warn');
@@ -281,9 +281,107 @@ describe('automationDerive — a step the rule does not have', () => {
         const ctx: DeriveContext = {
             now: NOW,
             problems: [],
-            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1, missing: false } },
+            pairs: { 'tm-a': { state: 'fired', lastFiredAt: NOW - 1000, firedCount: 1, missing: false, parkedAt: null } },
         };
         expect(stateFor(scheduleRule(), 'cond', ctx).tone).toBe('absent');
+    });
+
+    /**
+     * **A rule's runtime goes on the card that DRIVES it, and a schedule rule's is the Wait card.**
+     *
+     * The dot was fixed for the absent Compare-it card (`and a live pair does not make an absent
+     * compare step live`, above) and the FOOT was deliberately left, on the argument that the pill
+     * it draws — *Armed · waiting* — is true of the rule even when the card is not the rule's. That
+     * argument rested on a convention: rule-level runtime lives on the comparison, because every
+     * rule has one and the arm machine is there. Plan 032 §3.1 made `cond` optional and §6.3 gave
+     * the rule a Wait card that is its step ONE, so the convention expired — a schedule rule was
+     * printing its runtime across a card whose own rows say *not in this rule*.
+     *
+     * Both halves are asserted, because they are the foot and the dot of one card: `faceFor` and
+     * `stateFor` now ask the same function which card is live, and a test that checked only one
+     * would pass on a fix applied to only one.
+     */
+    it('draws a schedule rule runtime on its Wait card, not on the compare card it lacks', () => {
+        const rule = scheduleRule();
+        const ctx: DeriveContext = {
+            now: NOW,
+            problems: [],
+            pairs: { 'tm-a': { state: 'unseen', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null } },
+        };
+
+        const cond = faceFor(rule, 'cond', ctx);
+        expect(cond.foot).toBeNull();
+        expect(cond.footTone).toBeNull();
+        expect(stateFor(rule, 'cond', ctx).tone).toBe('absent');
+
+        const timer = faceFor(rule, 'timer', ctx);
+        expect(timer.foot).toBe('Armed · waiting');
+        expect(timer.footTone).toBe('live');
+        expect(stateFor(rule, 'timer', ctx)).toEqual({ tone: 'live', title: 'Armed · waiting' });
+    });
+
+    /**
+     * The other half of that decision, and the one that stops it becoming a rewrite.
+     *
+     * A rule that HAS a comparison keeps its pill there, where the arm machine it reports actually
+     * lives — including a §6.2 rule whose Wait card is a middle box between the comparison and the
+     * send. Without this, `runtimeFootStep` could have been written as "the Wait card whenever there
+     * is one" and every delay rule would have moved its runtime onto a step that only holds a
+     * number.
+     */
+    it('leaves a rule that HAS a comparison reporting on its compare card', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const delayed = {
+            ...base,
+            id: 'au-delay',
+            enabled: true,
+            graph: { ...base.graph, timer: { mode: { afterMatch: { delayMs: 30_000 } } } },
+        };
+        const ctx: DeriveContext = {
+            now: NOW,
+            problems: [],
+            pairs: { 'tm-a': { state: 'unseen', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null } },
+        };
+
+        expect(delayed.graph.cond).toBeDefined();
+        expect(faceFor(delayed, 'cond', ctx).footTone).toBe('live');
+        expect(stateFor(delayed, 'cond', ctx).tone).toBe('live');
+        // And the Wait card stays an ordinary configured step: two live cards would be the same
+        // two-answers defect wearing the opposite sign.
+        expect(faceFor(delayed, 'timer', ctx).footTone).toBeNull();
+        expect(stateFor(delayed, 'timer', ctx).tone).toBe('ready');
+    });
+
+    /**
+     * A parked send reaches the card, in the same words the Settings row uses.
+     *
+     * `faceFor` renders `automationRowState().pillText` verbatim, so the countdown arrives here for
+     * free — which is the property worth pinning: the editor and the list must not word one runtime
+     * two ways, which is the failure `automationState.ts`'s own header describes from rev 1.
+     */
+    it('carries a parked send countdown onto the live card', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const delayed = {
+            ...base,
+            id: 'au-delay',
+            enabled: true,
+            graph: { ...base.graph, timer: { mode: { afterMatch: { delayMs: 30_000 } } } },
+        };
+        const ctx: DeriveContext = {
+            now: NOW,
+            problems: [],
+            pairs: {
+                'tm-a': {
+                    state: 'fired',
+                    lastFiredAt: null,
+                    firedCount: 0,
+                    missing: false,
+                    parkedAt: NOW + 30_000,
+                },
+            },
+        };
+        expect(faceFor(delayed, 'cond', ctx).foot).toBe('Waiting to send · in 30s');
+        expect(stateFor(delayed, 'cond', ctx).title).toBe('Waiting to send · in 30s');
     });
 
     it('but a real problem on an absent step still outranks it', () => {

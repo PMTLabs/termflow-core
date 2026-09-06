@@ -120,6 +120,22 @@ pub fn target_already_past(mode: &TimerMode, now_local: LocalTime) -> bool {
     (0..MINUTES_PER_DAY).contains(minute_of_day) && now_local.minute_of_day >= *minute_of_day
 }
 
+/// A `minute_of_day` as a 24-hour `HH:MM`.
+///
+/// **Here rather than in `dry.rs`, where it started, because it now has two readers.** The dry run
+/// prints a schedule's target minute and so does the suppression row `seed_missed_schedules` writes
+/// — one rule's one time of day, and two spellings of it is `two-implementations-one-fix` waiting
+/// to happen the first time either is padded differently.
+///
+/// Still not shared with the TypeScript `clockTime`, for `describe_wait`'s reason: nothing sends
+/// these strings across the wire, and a shared formatter would be a coupling with no call path.
+/// An out-of-range minute is `timer.badMinute`'s business, not this function's: it formats whatever
+/// arithmetic gives, and every caller here has already been through `target_already_past` or
+/// `schedule_due`, both of which refuse the range first.
+pub fn clock_time(minute_of_day: i32) -> String {
+    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
+}
+
 /// Which weekday bit `day_ordinal` names, `1 << 0` = Monday.
 ///
 /// Derived through `chrono` rather than `(ordinal - 1) % 7`: the modulus is right only because

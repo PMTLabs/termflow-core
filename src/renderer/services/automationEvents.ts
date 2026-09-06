@@ -80,6 +80,18 @@ export interface AutomationRuntimePairState {
    * live set is empty and restore has not run.
    */
   missing: boolean;
+  /**
+   * When this pair's parked send comes due, in epoch ms — plan 032 §6.2, §7.
+   *
+   * **The only counting-down fact the runtime reports, and the reason `AutomationRowStateId` gained
+   * `pending`.** `state` is the ARM machine, which writes `Fired` at the moment a crossing is
+   * DECIDED — so between a Wait step's crossing and its send the row read *Fired · waiting to
+   * re-arm* about a message that had not been typed.
+   *
+   * `null` for every schedule rule: a `dailyAt` timer never parks, it is decided by the clock on
+   * the tick it fires. A countdown is an `afterMatch` fact only.
+   */
+  parkedAt: number | null;
 }
 
 /** `rules[ruleId][terminalId]`. */

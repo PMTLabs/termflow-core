@@ -76,6 +76,19 @@ pub struct RuntimePairState {
     /// has been absent continuously AND the engine has been up longer than `MISSING_GRACE_MS`, because
     /// at t=0 the live set is empty and restore has not run. Plan §4.5.
     pub missing: bool,
+    /// When this pair's parked send comes due, in epoch ms — plan 032 §6.2, §7.
+    ///
+    /// **The only counting-down fact the runtime holds, and it is why the row gained a `pending`
+    /// state.** `state` is the ARM machine, and the arm machine has nothing to say about a wait: a
+    /// crossing writes `Fired` at decide time and the message then sits in `parked` for up to
+    /// `MAX_DELAY_MS` with no send behind it, so a row reading only `state` said *Fired · waiting to
+    /// re-arm* about a message that had not been typed yet.
+    ///
+    /// Pair-keyed like `parked` itself, so a rule waiting on one terminal and resting on another
+    /// says so per terminal rather than folding to whichever answer the rule-level view preferred.
+    /// `None` for every schedule rule: `DailyAt` never parks — it is decided by the clock on the
+    /// tick it fires — so a countdown is a `AfterMatch` fact only.
+    pub parked_at: Option<i64>,
 }
 
 /// Payload of [`AUTOMATION_STATE`]: `rules[ruleId][terminalId]`.

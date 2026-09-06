@@ -186,6 +186,9 @@
 }
 
 .au-row[data-state='waiting'] .au-stripe { background: #8b95a1; }
+/* plan 032 section 7: a decided send that has not been typed yet. Its own hue, because it is a
+   different fact from `matched` (the condition is true) and from `rearm` (it already fired). */
+.au-row[data-state='pending'] .au-stripe { background: #56d4dd; }
 .au-row[data-state='matched'] .au-stripe { background: #58a6ff; }
 .au-row[data-state='fired'] .au-stripe { background: #3fb950; }
 .au-row[data-state='rearm'] .au-stripe { background: #d29922; }
@@ -334,6 +337,7 @@
 }
 
 .au-pill.waiting { color: #8b95a1; border-color: #3d444c; }
+.au-pill.pending { color: #56d4dd; border-color: #1f5f66; }
 .au-pill.matched { color: #58a6ff; border-color: #244a76; }
 .au-pill.fired { color: #3fb950; border-color: #245c33; }
 .au-pill.rearm { color: #d29922; border-color: #6b4d13; }

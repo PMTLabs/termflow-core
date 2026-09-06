@@ -416,11 +416,11 @@ export function faceFor(rule: AutomationRule, step: StepKind, ctx: DeriveContext
         return { title: STEP_LABELS[step], rows, foot: `⚠ ${badgeFor(blocking)}`, footTone: 'warn' };
     }
 
-    // The COMPARE step is the only one with a runtime story to tell — the arm machine lives on it —
-    // and it tells that story only when there is one. A fresh draft has no pairs, so its foot is
-    // empty rather than optimistic; §10.20 asserts it never reads "fired" or "completed", because a
-    // node claiming a state its rule has never been in is how the mockup's rev 1 lied.
-    if (step === 'cond' && ctx.pairs && Object.keys(ctx.pairs).length > 0) {
+    // The rule's runtime pill goes on the card that DRIVES the rule, and only when there is a
+    // runtime to report. A fresh draft has no pairs, so its foot is empty rather than optimistic;
+    // §10.20 asserts it never reads "fired" or "completed", because a node claiming a state its
+    // rule has never been in is how the mockup's rev 1 lied.
+    if (step === runtimeFootStep(rule) && ctx.pairs && Object.keys(ctx.pairs).length > 0) {
         return {
             title: STEP_LABELS[step],
             rows,
@@ -430,6 +430,42 @@ export function faceFor(rule: AutomationRule, step: StepKind, ctx: DeriveContext
     }
 
     return { title: STEP_LABELS[step], rows, foot: null, footTone: null };
+}
+
+/**
+ * Which card carries the rule's runtime — its live pill and its live dot — or `null` for a rule
+ * that has no card to carry it.
+ *
+ * **The convention it replaces was "always the Compare-it card", and that convention expired.** It
+ * was right while `cond` was mandatory: the arm machine lives on the comparison, every rule had
+ * one, and rule-level runtime drawn there read as the rule's own. Plan 032 §3.1 made the step
+ * optional and §6.3 gave the rule a Wait card that is its step ONE — so a schedule rule's
+ * Compare-it card, whose own rows say *not in this rule*, was printing *Armed · waiting* about the
+ * rule underneath them. `stateFor`'s dot had already been fixed for exactly that (`430a6d3`); the
+ * foot was left because the pill it draws is TRUE of the rule, which is a different defect from a
+ * false claim and a real one all the same: the card it is drawn on is not the rule's.
+ *
+ * So the answer is not "hide it" but "move it". The Wait card is where a schedule rule's runtime
+ * belongs, because the clock is what drives that rule — the same relationship the comparison has to
+ * a monitor rule, which is why `stepPosition` already numbers a `dailyAt` Wait card as step 1.
+ *
+ * **`cond` first, so nothing about a monitor rule moves.** A rule with both a comparison and a Wait
+ * step (§6.2's *detect → wait 30 s → send*) keeps its pill on the comparison, where the arm machine
+ * it reports actually lives; the Wait card there is a middle box, not a start.
+ *
+ * `null` for a rule with neither — `reload` refuses such a row as having "nothing to watch and no
+ * schedule", so it has no runtime to report and the honest foot is no foot. `action` is deliberately
+ * not the fallback: it is the only always-present card, which makes it the tempting answer and the
+ * wrong one — a send is what the rule DOES, never what it is waiting on.
+ *
+ * One function and not two branches eight lines apart, because `faceFor` and `stateFor` are the
+ * foot and the dot of the same card and a card whose two halves disagree about whether it is live
+ * is the failure this module exists to prevent.
+ */
+function runtimeFootStep(rule: AutomationRule): StepKind | null {
+    if (rule.graph.cond) return 'cond';
+    if (rule.graph.timer && 'dailyAt' in rule.graph.timer.mode) return 'timer';
+    return null;
 }
 
 export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
@@ -476,7 +512,9 @@ export function stateFor(rule: AutomationRule, step: StepKind, ctx: DeriveContex
     if (!hasStep(rule, step)) {
         return { tone: 'absent', title: `This step is ${NOT_IN_THIS_RULE.text}.` };
     }
-    if (step === 'cond' && ctx.pairs && Object.keys(ctx.pairs).length > 0) {
+    // The same card `faceFor`'s foot goes on, through the same function — see `runtimeFootStep`.
+    // It can only name a step the rule HAS, so the absent-step guard above cannot be reached past.
+    if (step === runtimeFootStep(rule) && ctx.pairs && Object.keys(ctx.pairs).length > 0) {
         const state = automationRowState(rule, ctx.pairs, ctx.now);
         return { tone: 'live', title: state.pillText };
     }

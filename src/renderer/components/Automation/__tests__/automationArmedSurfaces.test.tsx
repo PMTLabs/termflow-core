@@ -85,7 +85,7 @@ function rule(id: string, name: string, sortOrder = 0): AutomationRule {
 }
 
 const PAIR: AutomationRuntimePairState = {
-    state: 'armed', lastFiredAt: null, firedCount: 0, missing: false,
+    state: 'armed', lastFiredAt: null, firedCount: 0, missing: false, parkedAt: null,
 };
 
 /** The submenu's rows, in the shape the flyout would ask for them with an empty query. */

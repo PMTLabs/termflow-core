@@ -17,13 +17,19 @@ import type { AutomationRuntimePairState } from '../../../services/automationEve
 import { clockTime, describeDays } from '../../Automation/automationTimerWords';
 
 /**
- * The shared state vocabulary of mockup §09. The same seven ids name the list pill, and in M5 the
- * editor header and each node's dot, so a word learned in one place keeps its meaning everywhere.
+ * The shared state vocabulary of mockup §09, plus the one plan 032 §7 adds. The same ids name the
+ * list pill, the editor header, each node's dot and every armed surface outside Settings, so a word
+ * learned in one place keeps its meaning everywhere.
+ *
+ * `pending` is the eighth, and it is the first that says something about the FUTURE: mockup §09's
+ * seven all describe a rule's relationship to output it has already read. A rule can now hold a
+ * decided send for up to `MAX_DELAY_MS` without having typed it, and none of the seven can say so.
  */
 export type AutomationRowStateId =
     | 'off'
     | 'completed'
     | 'error'
+    | 'pending'
     | 'fired'
     | 'rearm'
     | 'matched'
@@ -40,6 +46,12 @@ const SEVERITY: AutomationRowStateId[] = [
     'off',
     'completed',
     'error',
+    // **Above `fired`, because it is the only state that is about the FUTURE.** Everything below
+    // `error` is a report on something that has already happened, and `fired` in particular is a
+    // receipt that expires on its own after `JUST_FIRED_MS`. A pending pair is a message that has
+    // not been typed yet — the one thing on this list a user might still want to act on — so a
+    // sibling's six-second receipt must not hide it for the first six seconds of its life.
+    'pending',
     'fired',
     'rearm',
     'matched',
@@ -51,6 +63,10 @@ const LABELS: Record<AutomationRowStateId, string> = {
     off: 'Off',
     completed: 'Completed',
     error: 'Error',
+    // The word alone; `automationRowState` appends the countdown, the way it already rewrites
+    // `rearm`'s label when nothing actually fired. **Not "Timer"** — `Cadence`'s `'timer'` is the
+    // monitor's poll interval, and this is the Wait step.
+    pending: 'Waiting to send',
     fired: 'Just fired',
     rearm: 'Fired · waiting to re-arm',
     matched: 'Matched',
@@ -102,13 +118,50 @@ const QUALIFIER_NOUN: Partial<Record<AutomationRowStateId, string>> = {
  */
 function pairState(pair: AutomationRuntimePairState, now: number): AutomationRowStateId {
     if (pair.missing) return 'error';
-    if (pair.state === 'fired') {
-        const at = pair.lastFiredAt;
-        return at !== null && now - at <= JUST_FIRED_MS ? 'fired' : 'rearm';
+    // **Ahead of the arm machine, because the arm machine is already wrong by the time it gets
+    // here.** `loops.rs` writes `Fired` at DECIDE time — before the message is typed, deliberately,
+    // so a second tick mid-send cannot queue a duplicate — and a Wait step then parks the send for
+    // up to `MAX_DELAY_MS`. Reading `state` first, the row said *Fired · waiting to re-arm* about a
+    // message nothing had sent. A parked deadline is the strongest thing the engine can say about a
+    // pair: the decision is taken and only the clock is left.
+    if (pair.parkedAt !== null) return 'pending';
+    if (pair.state === 'fired') return firedOrRearm(pair.lastFiredAt, now);
+    // **A fire with no arm state behind it is a SCHEDULE rule's fire** (plan 032 §6.3).
+    //
+    // The schedule path reads no screen and writes no arm state — that is the property that lets it
+    // share a rule with a monitor without perturbing its machine once a day — but `run_send` still
+    // calls `record_fire`, because a send is a send. So a 09:00 rule that had just typed into a
+    // terminal read *Armed · waiting* in the pill with *Fired 1 time, 2 minutes ago* in the footer
+    // directly beneath it: the same one-row-two-answers defect `everFired` below exists to prevent,
+    // arriving from the opposite direction.
+    //
+    // **`unseen` and not `armed`, and the narrowness is the point.** `armed` after a fire is a
+    // monitor rule that has genuinely re-armed — its condition went false and it is watching again —
+    // and *Armed · waiting* is the correct answer for it. `unseen` after a fire is a combination the
+    // arm machine cannot produce (`next_state` re-arms to `Armed`, never back to `Unseen`), so this
+    // branch names the event only IT catches.
+    //
+    // **Folded here, not written by `run_send`.** The engine alternative — have the schedule send
+    // set an arm state — would give a rule that reads no screen a position in a machine about
+    // reading screens, and would destroy the real arm state of a rule carrying both a monitor and a
+    // schedule. The row is derived; this is where a derivation belongs.
+    if (pair.state === 'unseen' && pair.lastFiredAt !== null) {
+        return firedOrRearm(pair.lastFiredAt, now);
     }
     // `unseen` and `armed` are both resting states: the rule is watching and the condition is not
     // true. They differ only in read depth (§2.2c), which is not something a row can usefully say.
     return 'waiting';
+}
+
+/**
+ * *Just fired* while the receipt is fresh, *waiting to re-arm* after.
+ *
+ * One function because there are two routes to a fire — the arm machine's `Fired`, and a schedule
+ * rule's bare `lastFiredAt` — and the age rule must be the same for both. Written twice, the
+ * schedule row would settle at a different moment from the monitor row beside it.
+ */
+function firedOrRearm(lastFiredAt: number | null, now: number): AutomationRowStateId {
+    return lastFiredAt !== null && now - lastFiredAt <= JUST_FIRED_MS ? 'fired' : 'rearm';
 }
 
 /**
@@ -128,7 +181,7 @@ export function automationRowState(
     const id = winningState(rule, pairs, now);
     const qualifier = qualifierFor(id, pairs, now);
     const noun = QUALIFIER_NOUN[id];
-    const label = id === 'rearm' && !everFired(pairs, now) ? 'Waiting to re-arm' : LABELS[id];
+    const label = labelFor(id, pairs, now);
     return {
         id,
         label,
@@ -140,6 +193,66 @@ export function automationRowState(
         // stops responding, and Reset is what makes the rule eligible again.
         toggleDisabled: id === 'completed',
     };
+}
+
+/**
+ * The pill's words for the winning state — the two ids whose label is not a constant.
+ *
+ * `rearm` drops the word that would be false (see `everFired`); `pending` gains the countdown,
+ * because a state that says only *Waiting to send* is a state a user cannot tell from a stuck one.
+ * Both are the same move: the LABEL is where a state's constant word meets this rule's own facts,
+ * so neither belongs in `LABELS`, which is a table over ids alone.
+ */
+function labelFor(
+    id: AutomationRowStateId,
+    pairs: Record<string, AutomationRuntimePairState> | undefined,
+    now: number,
+): string {
+    if (id === 'rearm' && !everFired(pairs, now)) return 'Waiting to re-arm';
+    if (id === 'pending') {
+        const due = soonestParked(pairs);
+        // The state can only win because some pair carries a deadline, so `null` is unreachable —
+        // and it answers with the bare word rather than a `0s` that would be a lie if it ever were.
+        if (due !== null) return `${LABELS.pending} · ${describeCountdown(due - now)}`;
+    }
+    return LABELS[id];
+}
+
+/**
+ * The next parked send across every watched terminal, or `null` when nothing is parked.
+ *
+ * **The SOONEST, because that is the next thing that will happen.** A rule waiting 30 s on one
+ * terminal and 4 min on another has one pill, and the number in it has to be the one that is about
+ * to come true — the same choice `AutomationsPanel` makes when it arms its clock.
+ */
+function soonestParked(
+    pairs: Record<string, AutomationRuntimePairState> | undefined,
+): number | null {
+    if (!pairs) return null;
+    let soonest: number | null = null;
+    for (const pair of Object.values(pairs)) {
+        if (pair.parkedAt === null) continue;
+        if (soonest === null || pair.parkedAt < soonest) soonest = pair.parkedAt;
+    }
+    return soonest;
+}
+
+/**
+ * *in 28s* / *in 2 min* — how long until a parked send goes out.
+ *
+ * The forward-facing counterpart of `describeLastFired`, and deliberately its own vocabulary rather
+ * than a reuse of `automationDerive`'s `describeDelay`: that one words the delay a rule is
+ * CONFIGURED with (*"Waits 30 seconds after the rule matches"*) and this one words what is LEFT of
+ * it, exactly as *4 min ago* is not a second spelling of the same thing either. Three quantities,
+ * three sentences.
+ *
+ * **Rounded up, never down.** `Math.floor` shows *in 0s* for the whole final second, which reads as
+ * a stalled countdown at precisely the moment the feature is working.
+ */
+function describeCountdown(ms: number): string {
+    const secs = Math.max(0, Math.ceil(ms / 1000));
+    if (secs < 60) return `in ${secs}s`;
+    return `in ${Math.ceil(secs / 60)} min`;
 }
 
 /**
