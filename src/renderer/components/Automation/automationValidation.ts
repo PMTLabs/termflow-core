@@ -188,8 +188,14 @@ function tokenSupplied(
     return true; // $0 / Source::Whole is always the whole match.
 }
 
-/** `$0` / `$2` / `${name}`, for a clause's own problem message. */
-function sourceText(source: AutomationSource): string {
+/**
+ * `$0` / `$2` / `${name}`, for a clause's own problem message.
+ *
+ * Exported so `CondPanel`'s token dropdown and `automationDerive`'s clause sentence spell a token
+ * exactly the way a validation message about that same token does — one formatter, so a problem
+ * and the row it names can never disagree about what `$2` prints as.
+ */
+export function sourceText(source: AutomationSource): string {
     if (source === 'whole') return '$0';
     if ('group' in source) return `$${source.group}`;
     return `\${${source.named}}`;

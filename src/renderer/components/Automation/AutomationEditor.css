@@ -1143,6 +1143,60 @@
     color: #6a6e77;
 }
 
+/* ------------------------------------------------------------- cond clauses --- */
+/* Task 14 — the clause list (plan 032 §5.9, mockup §06). `.au-crow`'s three controls follow
+   `.au-frow`'s flex layout rather than reusing it directly, because a row also carries the delete
+   button `.au-frow`'s two-field layout never needed. */
+
+.au-editor .au-clauses {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.au-editor .au-crow {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 8px;
+    background: #1c1d22;
+    border: 1px solid #2b2d33;
+    border-radius: 7px;
+}
+
+.au-editor .au-crow .au-finput {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+}
+
+.au-editor .au-novalue {
+    flex: 1;
+    font-size: 0.85rem;
+    font-style: italic;
+    color: #6a6e77;
+}
+
+.au-editor .au-crow-del {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    font-size: 0.8rem;
+    color: #ffaea8;
+    background: transparent;
+    border: 1px solid #3a3c44;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.au-editor .au-crow-del:hover {
+    background: rgba(248, 81, 73, 0.09);
+    border-color: #6e2b28;
+}
+
 .au-editor .au-plainsay {
     margin-top: 7px;
     padding: 7px 9px;
@@ -1233,29 +1287,6 @@
 
 .au-editor .au-termcount .au-as {
     color: #6a6e77;
-}
-
-.au-editor .au-rearmnote {
-    margin-bottom: 16px;
-    padding: 9px 10px;
-    font-size: 0.85rem;
-    line-height: 1.6;
-    color: #a9adb6;
-    background: rgba(236, 203, 119, 0.06);
-    border: 1px solid #4a4022;
-    border-radius: 8px;
-}
-
-.au-editor .au-rearmnote .au-rt {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 5px;
-    color: #eccb77;
-}
-
-.au-editor .au-rearmnote p {
-    margin: 0;
 }
 
 .au-editor .au-rightnow {

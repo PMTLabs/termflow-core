@@ -1,20 +1,38 @@
 /**
- * *Compare it* — the comparison, and the once-per-crossing explanation (mockup §04, §08).
+ * *Compare it* — the `finds` radio, the clause list, and the join (plan 032 §5.9, mockup §06).
+ *
+ * **`finds` is not "text or number".** Each clause row picks its own comparison independently; the
+ * radio above the list answers a different question — is this pattern a reading that PERSISTS
+ * (re-arms when the value changes) or an event that HAPPENED (re-arms when it leaves the visible
+ * screen)? Plan 032 §5.2 is the authority for why the two cannot be derived from each other:
+ * `API error 529 … retry in 60s` is an *event* that contains a *number*.
+ *
+ * **Nothing here re-derives validation.** `cond.unknownToken` / `cond.clauseNeedsValue` /
+ * `cond.badClausePattern` / `cond.clauseWithoutParse` already decide whether a clause is legal —
+ * `AuInspector`'s own problem list (fed by `automationValidation.problems`) surfaces them exactly
+ * like every other step's problems, so this panel only needs to bind controls to `cond.clauses` and
+ * ask `groupsOf` which tokens the pattern actually declares.
  *
  * The *Right now* block is the only place in the editor that draws live engine state, and it draws
  * it through `automationRowState` — the same module the list row uses — so the pill in the editor
  * and the pill in the list can never say different things about one rule.
  */
 import React from 'react';
-import type { AutomationCompareOp, AutomationFinds } from '../../../types/electron';
+import type {
+    AutomationClause,
+    AutomationCompareOp,
+    AutomationFinds,
+    AutomationSource,
+    AutomationTest,
+    AutomationTextOp,
+} from '../../../types/electron';
 import type { AutomationRuntimePairState } from '../../../services/automationEvents';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
-import { OP_PHRASES } from '../automationDerive';
+import { NUM_OP_LABELS, TEXT_OP_LABELS, condSentence } from '../automationDerive';
+import { compilePattern, groupsOf, sourceText } from '../automationValidation';
 import { automationRowState, describeLastFired } from '../../Settings/Automations/automationState';
 import { AuField, AuHelp, AuRadio } from './AuFields';
-
-const OPS: AutomationCompareOp[] = ['gt', 'gte', 'lt', 'lte', 'eq', 'neq'];
 
 export interface CondPanelProps {
     draft: AutomationDraft;
@@ -26,15 +44,119 @@ export interface CondPanelProps {
     dispatch: (action: DraftAction) => void;
 }
 
+const TEXT_OPS: AutomationTextOp[] = [
+    'is',
+    'isNot',
+    'contains',
+    'notContains',
+    'matches',
+    'isEmpty',
+    'isNotEmpty',
+];
+const NUM_OPS: AutomationCompareOp[] = ['gt', 'gte', 'lt', 'lte', 'eq', 'neq'];
+
+/** The two text operators that take no operand at all. */
+const NO_VALUE_OPS = new Set<AutomationTextOp>(['isEmpty', 'isNotEmpty']);
+
+const isNumTest = (test: AutomationTest): test is { number: { op: AutomationCompareOp; value: number } } =>
+    'number' in test;
+
+/** The `<select>` value for a source — a stable string key, not the source object itself. */
+function sourceKey(source: AutomationSource): string {
+    if (source === 'whole') return 'whole';
+    if ('group' in source) return `group:${source.group}`;
+    return `named:${source.named}`;
+}
+
+function sourceFromKey(key: string): AutomationSource {
+    if (key === 'whole') return 'whole';
+    if (key.startsWith('group:')) return { group: Number(key.slice('group:'.length)) };
+    return { named: key.slice('named:'.length) };
+}
+
+/**
+ * Only the tokens the pattern actually PRODUCES (§5.9) — `$0` plus its declared groups, never a
+ * free-text field a user could point at a group the pattern does not have. Bound to `groupsOf`
+ * rather than re-deriving the group count.
+ */
+function tokenOptions(find: string): Array<{ key: string; label: string }> {
+    const out: Array<{ key: string; label: string }> = [{ key: 'whole', label: '$0 — the whole match' }];
+    if (compilePattern(find) === null) return out;
+    const { count } = groupsOf(find);
+    for (let i = 1; i <= count; i += 1) {
+        out.push({ key: `group:${i}`, label: `$${i}` });
+    }
+    return out;
+}
+
+/** The operator select's value — `kind:op`, so one list can hold both groups. */
+const opKeyOf = (test: AutomationTest): string =>
+    isNumTest(test) ? `number:${test.number.op}` : `text:${test.text.op}`;
+
+function needsValue(test: AutomationTest): boolean {
+    return isNumTest(test) ? true : !NO_VALUE_OPS.has(test.text.op);
+}
+
+function valueOf(test: AutomationTest): string {
+    return isNumTest(test) ? String(test.number.value) : test.text.value;
+}
+
+/**
+ * Applying a NEW operator to a clause. **Switching between text and number CLEARS the operand** —
+ * otherwise `"529"` silently becomes a numeric threshold, which is the one behaviour this task's
+ * own brief names as the easiest thing to get wrong here. The operator IS the type: there is no
+ * separate type control that could disagree with it.
+ */
+function withOp(test: AutomationTest, key: string): AutomationTest {
+    const sep = key.indexOf(':');
+    const kindKey = key.slice(0, sep);
+    const op = key.slice(sep + 1);
+    const wasNum = isNumTest(test);
+    if (kindKey === 'number') {
+        return {
+            number: {
+                op: op as AutomationCompareOp,
+                // Same-kind (number -> a different number op): keep the value. Cross-kind
+                // (text -> number): NaN, the same "nothing entered yet" a save already blocks on
+                // (`automationValidation.ts`'s own `!Number.isFinite` guard) — never the old text
+                // coerced into a number.
+                value: wasNum ? test.number.value : NaN,
+            },
+        };
+    }
+    return {
+        text: {
+            op: op as AutomationTextOp,
+            value: wasNum ? '' : test.text.value,
+        },
+    };
+}
+
+function withValue(test: AutomationTest, raw: string): AutomationTest {
+    if (isNumTest(test)) {
+        const trimmed = raw.trim();
+        return { number: { ...test.number, value: trimmed.length === 0 ? NaN : Number(trimmed) } };
+    }
+    return { text: { ...test.text, value: raw } };
+}
+
+const DEFAULT_CLAUSE: AutomationClause = { source: 'whole', test: { text: { op: 'contains', value: '' } } };
+
+// `model` is not read here: every problem this panel would otherwise announce (`cond.unknownToken`,
+// `cond.clauseNeedsValue`, `cond.badClausePattern`, `cond.clauseWithoutParse`) already surfaces
+// through `AuInspector`'s own generic problem list, fed by `model.problems` one level up — this
+// panel binds its controls straight to `groupsOf` and `cond.clauses` rather than re-deriving any
+// of it. Kept in `CondPanelProps` anyway, so every panel `AuInspector` mounts takes the same shape.
 export const CondPanel: React.FC<CondPanelProps> = ({
     draft,
-    model,
     pairs,
     now,
     onRearm,
     dispatch,
 }) => {
-    const { cond } = draft.rule.graph;
+    const { cond, parse } = draft.rule.graph;
+    const clauses = cond.clauses ?? [];
+    const tokens = tokenOptions(parse.find);
     const live = pairs && Object.keys(pairs).length > 0 ? automationRowState(draft.rule, pairs, now) : null;
     const lastFired = pairs
         ? Object.values(pairs).reduce<number | null>(
@@ -43,109 +165,174 @@ export const CondPanel: React.FC<CondPanelProps> = ({
         )
         : null;
 
+    const setClauses = (next: AutomationClause[]) => dispatch({ type: 'clauses', clauses: next });
+    const updateClause = (i: number, patch: Partial<AutomationClause>) =>
+        setClauses(clauses.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
+
     return (
         <>
-            <AuField label="What kind of check">
+            <AuField label="What this pattern finds">
                 <AuRadio
-                    name="au-condkind"
+                    name="au-condfinds"
                     on={cond.kind === 'number'}
-                    title="Compare a number"
-                    sub="Fires when the value crosses a threshold, and re-arms when it comes back"
+                    title="A reading that stays true"
+                    sub="A number that is still current even when nothing reprints it. Re-arms when the printed value changes."
                     onPick={() =>
-                        dispatch({
-                            type: 'cond',
-                            // The operator and threshold are restored to a usable pair rather than
-                            // left null: switching to "compare a number" and immediately reporting
-                            // two problems would be the editor creating the problem it reports.
-                            patch: {
-                                kind: 'number' as AutomationFinds,
-                                op: cond.op ?? 'gt',
-                                threshold: cond.threshold ?? 25,
-                            },
-                        })}
+                        dispatch({ type: 'cond', patch: { kind: 'number' as AutomationFinds } })}
                 />
                 <AuRadio
-                    name="au-condkind"
+                    name="au-condfinds"
                     on={cond.kind === 'text'}
-                    title="The text simply appears"
-                    sub="Fires the first time the pattern matches, and re-arms when it stops matching"
+                    title="Something that happened"
+                    sub="An event. Re-arms when it leaves the visible screen — not when it scrolls out of 200 lines."
                     onPick={() =>
-                        dispatch({
-                            type: 'cond',
-                            patch: { kind: 'text' as AutomationFinds, op: null, threshold: null },
-                        })}
+                        dispatch({ type: 'cond', patch: { kind: 'text' as AutomationFinds } })}
                 />
+                <AuHelp>
+                    This is not the same question as &ldquo;text or number&rdquo;. It chooses{' '}
+                    <b>how far back the rule reads</b>, and each row below picks its own comparison
+                    independently.
+                </AuHelp>
             </AuField>
 
-            {cond.kind === 'number' && (
-                <AuField label="Fire when the value is">
-                    <div className="au-frow">
-                        <select
-                            className="au-finput"
-                            style={{ flex: 1.4 }}
-                            aria-label="How to compare"
-                            value={cond.op ?? ''}
-                            onChange={(e) =>
-                                dispatch({
-                                    type: 'cond',
-                                    patch: { op: (e.target.value || null) as AutomationCompareOp | null },
-                                })}
+            <AuField label="Comparisons">
+                <div className="au-clauses">
+                    {clauses.map((clause, i) => {
+                        const valueNeeded = needsValue(clause.test);
+                        return (
+                            // eslint-disable-next-line react/no-array-index-key
+                            <div className="au-crow" key={i}>
+                                <select
+                                    className="au-finput"
+                                    aria-label="Which captured value"
+                                    value={sourceKey(clause.source)}
+                                    onChange={(e) =>
+                                        updateClause(i, { source: sourceFromKey(e.target.value) })}
+                                >
+                                    {tokens.map((t) => (
+                                        <option key={t.key} value={t.key}>
+                                            {t.label}
+                                        </option>
+                                    ))}
+                                    {/* A clause can carry a token the pattern no longer produces — a
+                                        group removed after the clause was written. It stays selected
+                                        (never silently swapped for `$0`) so the pattern-vs-clause
+                                        mismatch is what `cond.unknownToken` reports, not something
+                                        this dropdown quietly hid. */}
+                                    {!tokens.some((t) => t.key === sourceKey(clause.source)) && (
+                                        <option value={sourceKey(clause.source)}>
+                                            {sourceText(clause.source)}
+                                        </option>
+                                    )}
+                                </select>
+                                <select
+                                    className="au-finput"
+                                    aria-label="How to compare"
+                                    value={opKeyOf(clause.test)}
+                                    onChange={(e) =>
+                                        updateClause(i, { test: withOp(clause.test, e.target.value) })}
+                                >
+                                    <optgroup label="Text">
+                                        {TEXT_OPS.map((op) => (
+                                            <option key={op} value={`text:${op}`}>
+                                                {TEXT_OP_LABELS[op]}
+                                            </option>
+                                        ))}
+                                    </optgroup>
+                                    <optgroup label="Number">
+                                        {NUM_OPS.map((op) => (
+                                            <option key={op} value={`number:${op}`}>
+                                                {NUM_OP_LABELS[op]}
+                                            </option>
+                                        ))}
+                                    </optgroup>
+                                </select>
+                                {valueNeeded ? (
+                                    <input
+                                        className="au-finput"
+                                        aria-label="Compare against"
+                                        placeholder={isNumTest(clause.test) ? 'number' : 'text'}
+                                        inputMode={isNumTest(clause.test) ? 'decimal' : undefined}
+                                        value={isNumTest(clause.test) && Number.isNaN(clause.test.number.value)
+                                            ? ''
+                                            : valueOf(clause.test)}
+                                        onChange={(e) =>
+                                            updateClause(i, { test: withValue(clause.test, e.target.value) })}
+                                    />
+                                ) : (
+                                    <span className="au-novalue">no value needed</span>
+                                )}
+                                <button
+                                    type="button"
+                                    className="au-crow-del"
+                                    aria-label={`Remove comparison ${i + 1}`}
+                                    onClick={() => setClauses(clauses.filter((_, idx) => idx !== i))}
+                                >
+                                    ✕
+                                </button>
+                            </div>
+                        );
+                    })}
+                </div>
+                <button
+                    type="button"
+                    className="au-btn sm"
+                    style={{ marginTop: 9 }}
+                    onClick={() => setClauses([...clauses, DEFAULT_CLAUSE])}
+                >
+                    + Add a comparison
+                </button>
+                {clauses.length === 0 && (
+                    <AuHelp>
+                        {/* `condSentence` covers BOTH readings of "no clauses": a plain
+                            word-matching rule (fires whenever the pattern matches, exactly what one
+                            does today), and a v1 rule that predates the clause list and still has
+                            its own number comparison to show — the same fallback the node face
+                            reads, so the two never disagree about what an empty list means here. */}
+                        No comparisons — this rule fires when {condSentence(cond)}.
+                    </AuHelp>
+                )}
+            </AuField>
+
+            {/* A join over ONE row is meaningless — hidden until there is something to combine. */}
+            {clauses.length >= 2 && (
+                <AuField label="How they combine">
+                    <div className="au-seg" role="group" aria-label="How the comparisons combine">
+                        <button
+                            type="button"
+                            className={cond.join !== 'or' ? 'on' : undefined}
+                            onClick={() => dispatch({ type: 'cond', patch: { join: 'and' } })}
                         >
-                            <option value="">choose…</option>
-                            {OPS.map((op) => (
-                                <option key={op} value={op}>
-                                    {OP_PHRASES[op]}
-                                </option>
-                            ))}
-                        </select>
-                        <input
-                            className="au-finput"
-                            style={{ flex: 0.7 }}
-                            aria-label="Value to compare against"
-                            inputMode="decimal"
-                            value={cond.threshold ?? ''}
-                            onChange={(e) => {
-                                const raw = e.target.value.trim();
-                                // An empty box is "no threshold yet", not zero — and validation
-                                // says so. Coercing '' to 0 would make an unfinished rule look
-                                // finished and fire on the first value below nothing.
-                                const parsed = raw.length === 0 ? null : Number(raw);
-                                dispatch({
-                                    type: 'cond',
-                                    patch: {
-                                        threshold: parsed !== null && Number.isFinite(parsed) ? parsed : null,
-                                    },
-                                });
-                            }}
-                        />
+                            AND
+                        </button>
+                        <button
+                            type="button"
+                            className={cond.join === 'or' ? 'on' : undefined}
+                            onClick={() => dispatch({ type: 'cond', patch: { join: 'or' } })}
+                        >
+                            OR
+                        </button>
+                    </div>
+                    <AuHelp>
+                        {cond.join === 'or'
+                            ? (
+                                <>
+                                    <b>OR</b> — any one passing is enough. All failing stops it; none
+                                    passing but one unknown holds it.
+                                </>
+                            )
+                            : (
+                                <>
+                                    <b>AND</b> — every comparison must pass. One that fails stops the
+                                    rule; one that is unknown holds it.
+                                </>
+                            )}
+                    </AuHelp>
+                    <div className="au-plainsay">
+                        Fires when <b>{condSentence(cond)}</b>.
                     </div>
                 </AuField>
             )}
-
-            <div className="au-rearmnote">
-                <div className="au-rt">
-                    <span aria-hidden="true">⚠</span>Fires once per crossing
-                </div>
-                {cond.kind === 'number' ? (
-                    <>
-                        <p>
-                            The first time the value goes {model.values.compare.text}{' '}
-                            <code>{model.values.threshold.text}</code>, this fires. It will{' '}
-                            <b>not</b> fire again while the value stays there — no matter how many
-                            checks happen.
-                        </p>
-                        <p>
-                            It re-arms as soon as the value comes back, and can fire again the next
-                            time it crosses.
-                        </p>
-                    </>
-                ) : (
-                    <p>
-                        This fires the first time the pattern matches. It will <b>not</b> fire again
-                        while it keeps matching, and re-arms once the text stops appearing.
-                    </p>
-                )}
-            </div>
 
             {live && (
                 <AuField label="Right now">

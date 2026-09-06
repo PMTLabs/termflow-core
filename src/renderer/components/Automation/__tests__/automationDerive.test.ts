@@ -15,12 +15,21 @@ import {
     AUTOMATION_TEMPLATES,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import { faceFor, panelFor, ruleSummary, stateFor, stepValues } from '../automationDerive';
+import {
+    condFaceText,
+    condSentence,
+    faceFor,
+    panelFor,
+    ruleSummary,
+    stateFor,
+    stepValues,
+} from '../automationDerive';
 import type { DeriveContext } from '../automationDerive';
 import { problems } from '../automationValidation';
 import { STEP_ORDER } from '../automationSteps';
 import type { StepKind } from '../automationSteps';
 import { displayedPattern } from '../automationPresets';
+import type { AutomationClause, AutomationCondStep } from '../../../types/electron';
 
 const NOW = 1_700_000_000_000;
 
@@ -248,5 +257,129 @@ describe('automationDerive — the palette summary', () => {
         for (const template of AUTOMATION_TEMPLATES) {
             expect(ruleSummary(draftFromTemplate(template))).toContain(template.rule.graph.action.message);
         }
+    });
+});
+
+/**
+ * Task 14 — `condSentence` (the full, untruncated sentence `CondPanel`'s `.au-plainsay` shows) and
+ * `condFaceText` (the node face's own rendering of it: the sentence while it fits in 34 characters,
+ * else a count). Plan 032 §5.9: **a clipped `AND` reads as a different rule**, so the face is never
+ * shown half — this is what pins the 34-character cutoff as an exact boundary, not a rough guide.
+ */
+describe('automationDerive — condSentence / condFaceText (plan 032 §5.9)', () => {
+    const clause = (
+        source: AutomationClause['source'],
+        test: AutomationClause['test'],
+    ): AutomationClause => ({ source, test });
+
+    it('joins clauses in words, AND lowercase, exactly like the mockup', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause({ group: 1 }, { text: { op: 'is', value: '429' } }),
+                clause({ group: 2 }, { number: { op: 'gt', value: 60 } }),
+            ],
+            join: 'and',
+        };
+        expect(condSentence(cond)).toBe('$1 is 429 and $2 is over 60');
+    });
+
+    it('joins with OR, lowercase, when the join is OR', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause('whole', { text: { op: 'contains', value: 'quota' } }),
+                clause({ group: 1 }, { text: { op: 'isNotEmpty', value: '' } }),
+            ],
+            join: 'or',
+        };
+        expect(condSentence(cond)).toBe('$0 contains quota or $1 is not empty');
+    });
+
+    /** The boundary itself: 27 characters, comfortably under the cutoff, shown in full. */
+    it('shows the sentence in full on the face when it is 34 characters or fewer', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause({ group: 1 }, { text: { op: 'is', value: '429' } }),
+                clause({ group: 2 }, { number: { op: 'gt', value: 60 } }),
+            ],
+            join: 'and',
+        };
+        expect(condSentence(cond)).toHaveLength(27);
+        expect(condFaceText(cond)).toBe(condSentence(cond));
+    });
+
+    /**
+     * One character past the cutoff — the mutation this pins is `<=` becoming `<` (or vice versa),
+     * which a boundary test one character EITHER side of 34 is what actually catches; a sentence
+     * that is merely "long" would not.
+     */
+    it('switches to the count form once the sentence exceeds 34 characters', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause({ group: 1 }, { text: { op: 'is', value: '429' } }),
+                clause({ group: 2 }, { number: { op: 'gt', value: 60 } }),
+                clause('whole', { text: { op: 'contains', value: 'quota' } }),
+            ],
+            join: 'and',
+        };
+        expect(condSentence(cond).length).toBeGreaterThan(34);
+        expect(condFaceText(cond)).toBe('3 comparisons · all must pass');
+    });
+
+    it('says "any may pass" for the count form under OR', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause({ group: 1 }, { text: { op: 'is', value: '429' } }),
+                clause({ group: 2 }, { number: { op: 'gt', value: 60 } }),
+                clause('whole', { text: { op: 'contains', value: 'quota' } }),
+            ],
+            join: 'or',
+        };
+        expect(condFaceText(cond)).toBe('3 comparisons · any may pass');
+    });
+
+    it('pluralises the count form correctly for exactly one long clause', () => {
+        const cond: AutomationCondStep = {
+            kind: 'text',
+            clauses: [
+                clause('whole', { text: { op: 'matches', value: 'this-is-a-very-long-pattern-value' } }),
+            ],
+            join: 'and',
+        };
+        expect(condSentence(cond).length).toBeGreaterThan(34);
+        expect(condFaceText(cond)).toBe('1 comparison · all must pass');
+    });
+
+    /**
+     * The legacy fallback (plan 032 §5.4): a v1 rule that predates the clause list has no clauses
+     * at all, but still has its own comparison to show — read from `op`/`threshold`, never written
+     * back. This is also what keeps the two "High memory"/"Compact when low" templates' thresholds
+     * visible on the face after Task 14's rewrite (`automationPanelsRender.test.tsx`).
+     */
+    it('falls back to the legacy op/threshold sentence when there are no clauses', () => {
+        const cond: AutomationCondStep = { kind: 'number', op: 'gt', threshold: 25 };
+        expect(condSentence(cond)).toBe('the value is greater than 25');
+        expect(condFaceText(cond)).toBe(condSentence(cond));
+    });
+
+    /**
+     * The legacy fallback is exempted from the 34-character cutoff — there is no clause COUNT to
+     * fall back to for a rule with zero clauses that would not be actively wrong (`0 comparisons`
+     * for a rule that is, in fact, comparing something).
+     */
+    it('never collapses the legacy fallback to a count form, even past 34 characters', () => {
+        const cond: AutomationCondStep = { kind: 'number', op: 'gte', threshold: 100_000 };
+        expect(condSentence(cond).length).toBeGreaterThan(34);
+        expect(condFaceText(cond)).toBe(condSentence(cond));
+    });
+
+    it('says the pattern simply matches when there is no clause and no legacy comparison', () => {
+        const cond: AutomationCondStep = { kind: 'text', op: null, threshold: null };
+        expect(condSentence(cond)).toBe('the pattern matches at all');
+        expect(condFaceText(cond)).toBe('the pattern matches at all');
     });
 });

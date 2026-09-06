@@ -24,6 +24,7 @@ import { createRoot, Root } from 'react-dom/client';
 
 import { AuInspector } from '../AuInspector';
 import { ActionPanel } from '../panels/ActionPanel';
+import { CondPanel } from '../panels/CondPanel';
 import { draftFromRule } from '../automationDraft';
 import type { AutomationDraft } from '../automationDraft';
 import { faceFor, panelFor } from '../automationDerive';
@@ -35,7 +36,14 @@ import {
     AUTOMATION_TEMPLATES,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import type { AutomationActionStep, AutomationRule } from '../../../types/electron';
+import type {
+    AutomationActionStep,
+    AutomationClause,
+    AutomationCompareOp,
+    AutomationRule,
+    AutomationSource,
+    AutomationTextOp,
+} from '../../../types/electron';
 
 describe('the inspector panels — rendered, per template', () => {
     let container: HTMLDivElement;
@@ -165,7 +173,9 @@ describe('the inspector panels — rendered, per template', () => {
         const SAID: Record<StepKind, string[]> = {
             monitor: ['terminals'],
             parse: ['find'],
-            cond: ['compare', 'threshold'],
+            // Task 14: the face's single `fires` row (the clause sentence, or its legacy
+            // fallback) replaced the old two-row `compare`/`threshold` layout — see `FACE_ROWS`.
+            cond: ['fires'],
             action: ['message', 'send'],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
@@ -572,5 +582,152 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(container.querySelector('[data-testid="action-preview"]')?.textContent)
             .toContain('Fix the 17 failing tests in a.ts');
         expect(container.textContent).not.toContain('This preview uses an example');
+    });
+});
+
+/**
+ * Task 14 — CondPanel becomes a clause list with an explicit join (plan 032 §5.9, mockup §06).
+ *
+ * Mounts `CondPanel` directly, for the same reason the ActionPanel block above does: the behaviour
+ * under test — adding/removing rows, the join's visibility, clearing an operand on a type switch,
+ * and the token dropdown's contents — is entirely this panel's own.
+ *
+ * Adapted from the task brief's illustrative (vitest/testing-library) snippets to this project's
+ * actual jest + raw-DOM (`react-dom/client` + `act`) conventions — there is no `@testing-library/*`
+ * dependency here, and the real `CondPanel` is dispatch-based (`dispatch`), not `onChange`-based.
+ */
+describe('CondPanel — the finds radio, the clause list, the join (mockup §06)', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(async () => {
+        await act(async () => root.unmount());
+        container.remove();
+    });
+
+    const noop = () => {};
+
+    const TEXT_OP_BY_LABEL: Record<string, AutomationTextOp> = {
+        is: 'is',
+        'is not': 'isNot',
+        contains: 'contains',
+        'does not contain': 'notContains',
+        matches: 'matches',
+        'is empty': 'isEmpty',
+        'is not empty': 'isNotEmpty',
+    };
+    const NUM_OP_BY_LABEL: Record<string, AutomationCompareOp> = {
+        'is over': 'gt',
+        'is at least': 'gte',
+        'is under': 'lt',
+        'is at most': 'lte',
+        equals: 'eq',
+        'does not equal': 'neq',
+    };
+
+    /** A clause from the mockup's own shorthand — `clause('$1', 'is over', '30')`. */
+    function clause(token: string, opLabel: string, value: string): AutomationClause {
+        const source: AutomationSource = token === '$0' ? 'whole' : { group: Number(token.slice(1)) };
+        if (opLabel in NUM_OP_BY_LABEL) {
+            return { source, test: { number: { op: NUM_OP_BY_LABEL[opLabel], value: Number(value) } } };
+        }
+        return { source, test: { text: { op: TEXT_OP_BY_LABEL[opLabel], value } } };
+    }
+
+    /** Two declared groups by default, so `$1`/`$2` are always in range unless a test overrides `find`. */
+    function draftWithClauses(clauses: AutomationClause[], find = '(\\d+):(\\d+)'): AutomationDraft {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: { ...base.graph.parse, preset: 'custom', literal: null, find, keep: 'brackets' },
+                cond: { ...base.graph.cond, kind: 'text', clauses, join: 'and' },
+            },
+        };
+        return { ...draftFromRule(rule), selected: 'cond' };
+    }
+
+    async function renderCond(
+        clauses: AutomationClause[],
+        opts: { find?: string; dispatch?: (a: unknown) => void } = {},
+    ) {
+        const draft = draftWithClauses(clauses, opts.find);
+        const model = panelFor(draft.rule, 'cond', { problems: [] });
+        await act(async () => {
+            root.render(
+                <CondPanel
+                    draft={draft}
+                    model={model}
+                    now={1_700_000_000_000}
+                    onRearm={null}
+                    dispatch={(opts.dispatch ?? noop) as never}
+                />,
+            );
+        });
+    }
+
+    it('adds and removes clause rows', async () => {
+        const dispatch = jest.fn();
+        await renderCond([clause('$1', 'is', '529')], { dispatch });
+        const addBtn = [...container.querySelectorAll('button')]
+            .find((b) => /add a comparison/i.test(b.textContent ?? '')) as HTMLButtonElement;
+        expect(addBtn).toBeTruthy();
+        await act(async () => addBtn.click());
+        expect(dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({
+                type: 'clauses',
+                clauses: expect.arrayContaining([expect.anything(), expect.anything()]),
+            }),
+        );
+    });
+
+    it('hides the join control until there are two clauses', async () => {
+        await renderCond([clause('$1', 'is', '529')]);
+        expect(container.querySelector('[role="group"]')).toBeNull();
+
+        await renderCond([clause('$1', 'is', '529'), clause('$2', 'is over', '30')]);
+        const group = container.querySelector('[role="group"]');
+        expect(group).not.toBeNull();
+        expect(group!.getAttribute('aria-label')).toMatch(/combine/i);
+    });
+
+    it('clears the operand when a row switches between text and number', async () => {
+        const dispatch = jest.fn();
+        await renderCond([clause('$1', 'is', '529')], { dispatch });
+        const opSelect = container.querySelector<HTMLSelectElement>('[aria-label="How to compare"]')!;
+        const overOption = [...opSelect.options].find((o) => /is over/i.test(o.textContent ?? ''))!;
+        expect(overOption).toBeTruthy();
+        await act(async () => {
+            opSelect.value = overOption.value;
+            opSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        const action = dispatch.mock.calls[0][0] as { type: string; clauses: AutomationClause[] };
+        expect(action.type).toBe('clauses');
+        expect(action.clauses).toHaveLength(1);
+        const { test } = action.clauses[0];
+        expect('number' in test).toBe(true);
+        if ('number' in test) {
+            expect(test.number.op).toBe('gt');
+            // Otherwise "529" silently becomes a numeric threshold — the clause's own operand must
+            // be cleared, never coerced, on a text-to-number switch.
+            expect(Number.isNaN(test.number.value)).toBe(true);
+        }
+    });
+
+    it('offers only tokens the pattern actually produces', async () => {
+        await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
+        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
+        const opts = [...select.options].map((o) => o.textContent ?? '');
+        expect(opts).toHaveLength(2);
+        expect(opts[0]).toContain('$0');
+        expect(opts[1]).toContain('$1');
     });
 });

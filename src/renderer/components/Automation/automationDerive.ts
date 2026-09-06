@@ -14,7 +14,13 @@
  * Nothing here is stored. Faces, rows, feet, state dots, the palette summary and the header's
  * blocked-reason text are all computed in render from `draft` + `problems` + the runtime payload.
  */
-import type { AutomationRule } from '../../types/electron';
+import type {
+    AutomationClause,
+    AutomationCompareOp,
+    AutomationCondStep,
+    AutomationRule,
+    AutomationTextOp,
+} from '../../types/electron';
 import type { AutomationRuntimePairState } from '../../services/automationEvents';
 import {
     automationRowState,
@@ -24,7 +30,7 @@ import {
 import { displayedPattern, presetById, sayPattern } from './automationPresets';
 import type { PatternSaying } from './automationPresets';
 import type { Problem, ProblemField } from './automationValidation';
-import { badgeFor } from './automationValidation';
+import { badgeFor, sourceText } from './automationValidation';
 import type { StepKind } from './automationSteps';
 import { STEP_LABELS, STEP_ORDER, STEP_SUBTITLES } from './automationSteps';
 
@@ -67,6 +73,86 @@ export const OP_PHRASES: Record<string, string> = {
     eq: 'equal to',
     neq: 'not equal to',
 };
+
+/**
+ * A clause row's own SHORT operator phrasing (plan 032 §5.9, mockup §06) — distinct from
+ * `OP_PHRASES`'s longer prose above, which the legacy single-comparison fallback in `condSentence`
+ * still uses. One clause row, one wording, read by `CondPanel`'s operator dropdown and by
+ * `condSentence`'s clause phrasing, so the row and the sentence built from it never disagree.
+ */
+export const NUM_OP_LABELS: Record<AutomationCompareOp, string> = {
+    gt: 'is over',
+    gte: 'is at least',
+    lt: 'is under',
+    lte: 'is at most',
+    eq: 'equals',
+    neq: 'does not equal',
+};
+
+export const TEXT_OP_LABELS: Record<AutomationTextOp, string> = {
+    is: 'is',
+    isNot: 'is not',
+    contains: 'contains',
+    notContains: 'does not contain',
+    matches: 'matches',
+    isEmpty: 'is empty',
+    isNotEmpty: 'is not empty',
+};
+
+/** A text operator that takes no operand — `isEmpty`/`isNotEmpty` ask nothing of a value. */
+const TEXT_OPS_WITHOUT_VALUE = new Set<AutomationTextOp>(['isEmpty', 'isNotEmpty']);
+
+/** One clause, in words — `$1 is over 30`. */
+function clauseSentence(clause: AutomationClause): string {
+    const token = sourceText(clause.source);
+    if ('number' in clause.test) {
+        return `${token} ${NUM_OP_LABELS[clause.test.number.op]} ${clause.test.number.value}`;
+    }
+    const { op, value } = clause.test.text;
+    const operand = TEXT_OPS_WITHOUT_VALUE.has(op) ? '' : ` ${value || '…'}`;
+    return `${token} ${TEXT_OP_LABELS[op]}${operand}`;
+}
+
+/**
+ * The plain-English sentence a `CondStep` fires on (plan 032 §5.9) — the FULL sentence, exactly as
+ * `CondPanel`'s own `.au-plainsay` shows it. `condFaceText` below is the node face's own rendering
+ * of this same sentence, truncated-or-counted rather than clipped.
+ *
+ * **One extraction, two consumers**: the panel and the face read this one function, so they cannot
+ * describe two different rules the way the mockup's rev-1 panels did (this file's own header).
+ */
+export function condSentence(cond: AutomationCondStep): string {
+    const clauses = cond.clauses ?? [];
+    if (clauses.length > 0) {
+        return clauses.map(clauseSentence).join(cond.join === 'or' ? ' or ' : ' and ');
+    }
+    // A v1 rule that predates the clause list still has its own comparison to show — the same
+    // fields `automation_engine`'s own load-time fold reads (plan 032 §5.4), read here for DISPLAY
+    // only: this never writes `op`/`threshold` back, and a save from `CondPanel` never sets them.
+    if (cond.kind === 'number' && cond.op != null && cond.threshold != null) {
+        return `the value is ${OP_PHRASES[cond.op]} ${cond.threshold}`;
+    }
+    return 'the pattern matches at all';
+}
+
+/**
+ * The node face's rendering of `condSentence` — the sentence while it fits in 34 characters, else a
+ * count (plan 032 §5.9). **A clipped `AND` reads as a different rule, so it is never shown half** —
+ * `FACE_ROWS`' truncate-with-ellipsis treatment (see `AU_NODE_W`'s own comment) is deliberately not
+ * used for this row.
+ *
+ * The empty-clause case (a legacy rule, or a bare "fires on match") is exempted from the length
+ * cap: there is no clause COUNT to fall back to that would not be actively wrong (`0 comparisons`
+ * for a rule that is, in fact, comparing something).
+ */
+export function condFaceText(cond: AutomationCondStep): string {
+    const clauses = cond.clauses ?? [];
+    const sentence = condSentence(cond);
+    if (clauses.length === 0 || sentence.length <= 34) return sentence;
+    return `${clauses.length} comparison${clauses.length === 1 ? '' : 's'} · ${
+        cond.join === 'or' ? 'any may pass' : 'all must pass'
+    }`;
+}
 
 export const READ_PHRASES = {
     newOutput: 'New output as it appears',
@@ -114,11 +200,17 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
                 keep: value(KEEP_PHRASES[parse.keep]),
             };
         }
-        case 'cond':
+        case 'cond': {
+            // `fires` is the Task-14 field — the clause-list sentence (or its legacy fallback),
+            // read by the node face via `FACE_ROWS`. `compare`/`threshold` are kept exactly as
+            // they were: the pre-clause single-comparison summary, still true for a v1 rule and
+            // still what `ruleSummary`'s own `cond.compare`/`cond.threshold` reads.
+            const fires = value(condFaceText(cond));
             if (cond.kind === 'text') {
                 return {
                     compare: value('the text appears'),
                     threshold: value('—'),
+                    fires,
                 };
             }
             return {
@@ -127,7 +219,9 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
                     cond.threshold === null || cond.threshold === undefined
                         ? absent('no number yet')
                         : value(String(cond.threshold)),
+                fires,
             };
+        }
         case 'action':
         default:
             return {
@@ -167,9 +261,10 @@ const FACE_ROWS: Record<StepKind, Array<{ label: string; key: string }>> = {
         { label: 'Find', key: 'find' },
         { label: 'Keep', key: 'keep' },
     ],
+    // Task 14: one row, `condFaceText`'s sentence-or-count text — the two-row `compare`/`threshold`
+    // layout described a SINGLE comparison and has nothing to say about a clause list or its join.
     cond: [
-        { label: 'Fire when', key: 'compare' },
-        { label: 'Value', key: 'threshold' },
+        { label: 'Fires when', key: 'fires' },
     ],
     action: [
         { label: 'Send', key: 'message' },

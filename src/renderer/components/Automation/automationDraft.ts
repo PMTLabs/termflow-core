@@ -24,7 +24,7 @@
  * shape meet (§7.7), and the round-trip test asserts draft → wire → row → wire → draft is identity
  * for all six templates.
  */
-import type { AutomationRule } from '../../types/electron';
+import type { AutomationClause, AutomationRule } from '../../types/electron';
 import type { StepKind, Wire } from './automationSteps';
 import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
@@ -490,6 +490,14 @@ export type DraftAction =
     | { type: 'find'; find: string }
     | { type: 'keep'; keep: AutomationRule['graph']['parse']['keep'] }
     | { type: 'cond'; patch: Partial<AutomationRule['graph']['cond']> }
+    /**
+     * The whole clause list, replaced — the same shape `targets` already uses for `targetIds`
+     * (plan 032 §5.9), rather than `CondPanel` reaching for the generic `cond` patch to smuggle an
+     * array through `Partial<AutomationRule['graph']['cond']>`. `CondPanel` computes the next
+     * array itself (add/remove/edit a row) and dispatches the whole thing; the reducer only merges
+     * it into `cond`, exactly like every other field there.
+     */
+    | { type: 'clauses'; clauses: AutomationClause[] }
     | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
@@ -551,6 +559,8 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return withGraph(draft, { parse: { ...rule.graph.parse, keep: action.keep } });
         case 'cond':
             return withGraph(draft, { cond: { ...rule.graph.cond, ...action.patch } });
+        case 'clauses':
+            return withGraph(draft, { cond: { ...rule.graph.cond, clauses: action.clauses } });
         case 'action':
             return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
         case 'select':
