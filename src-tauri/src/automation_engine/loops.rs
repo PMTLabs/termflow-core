@@ -333,6 +333,7 @@ pub async fn evaluate_tick(
             if let Some(parked) = engine.runtime.take_parked_due(&live.rule.id, &tm, now_ms) {
                 admit(
                     engine,
+                    host,
                     &mut sends,
                     PendingSend {
                         // **`parked.pc`, never the `pc` this tick just resolved.** The restart
@@ -345,6 +346,7 @@ pub async fn evaluate_tick(
                         at_ms: now_ms,
                         captures: parked.captures,
                     },
+                    now_ms,
                 );
             }
             let seq = engine.runtime.dirty_seq(&pc);
@@ -375,6 +377,7 @@ pub async fn evaluate_tick(
                 if fires_now {
                     admit(
                         engine,
+                        host,
                         &mut sends,
                         PendingSend {
                             pair: Pair { rule: live.clone(), tm: tm.clone(), pc },
@@ -399,6 +402,7 @@ pub async fn evaluate_tick(
                             // template into a live agent.
                             captures: None,
                         },
+                        now_ms,
                     );
                 }
                 continue;
@@ -465,7 +469,7 @@ pub async fn evaluate_tick(
 
     for i in &picked {
         match evaluate_pair(engine, host, &due[*i], now_ms) {
-            Evaluated::Read(Some(send)) => admit(engine, &mut sends, send),
+            Evaluated::Read(Some(send)) => admit(engine, host, &mut sends, send, now_ms),
             // Read, decided, nothing to send: this pair has consumed the output and may spend it.
             Evaluated::Read(None) => {}
             // **The third door.** `settled_processes`'s enumeration named two and this was neither:
@@ -520,11 +524,41 @@ pub async fn evaluate_tick(
 /// need it more than the first: a `runs_once` rule with a delay parks on every terminal that
 /// crosses *during* the wait — the arm machine cannot stop that, because those are different pairs —
 /// and all of them come ripe on the same tick, where without this they would be three sends.
-fn admit(engine: &Arc<AutomationEngine>, sends: &mut Vec<PendingSend>, send: PendingSend) {
+fn admit(
+    engine: &Arc<AutomationEngine>,
+    host: &Arc<dyn EngineHost>,
+    sends: &mut Vec<PendingSend>,
+    send: PendingSend,
+    now_ms: i64,
+) {
     let rule_id = &send.pair.rule.rule.id;
     if !send.pair.rule.rule.runs_once || engine.runtime.claim_once(rule_id) {
         sends.push(send);
+        return;
     }
+    // **A dropped crossing that says nothing is a crossing the user cannot account for.** The arm
+    // state advanced at decide time and the parked entry was taken out of the map by
+    // `take_parked_due`, so this pair is finished either way — and on the delay route it had been
+    // visibly *"Waiting to send"* for up to ten minutes first. Without a row the only trace of it is
+    // a countdown that stopped.
+    //
+    // `Held` and not `Failed`, for the seeding row's reason: nothing went wrong. The rule was asked
+    // and the rule declined, which is also what keeps it out of the verbose gate. It is bounded by
+    // the claim itself — one row per losing pair per crossing, and a claimed `runs_once` rule
+    // leaves the live set as soon as its send lands.
+    //
+    // Written HERE rather than at the parked drain that found it, because `admit` is the one gate
+    // all three routes go through and a row written at one caller is a row the next caller opts out
+    // of — the same reasoning that put the claim itself in this function.
+    append(
+        host,
+        rule_id,
+        Some(&send.pair.tm),
+        send.label.clone(),
+        LogKind::Held,
+        "not sent — this rule runs once, and another terminal had already claimed its one send",
+        now_ms,
+    );
 }
 
 /// What one pair's evaluation leaves for the tick to do.
@@ -2666,6 +2700,77 @@ mod tests {
             fake.written()
         );
         assert!(!engine.is_live("au-once"));
+    }
+
+    /// **A parked send dropped for losing the single-run claim must say so.**
+    ///
+    /// Three terminals cross, three park, all ripe on one tick: `admit` claims for the first and
+    /// drops the rest. That is R6 working — the sibling test above is the proof — but it was
+    /// entirely silent. The pair had been visibly *"Waiting to send"* for up to ten minutes, the
+    /// countdown reached zero, and nothing anywhere said why no message arrived. And if the admitted
+    /// one then times out, `fail` gives the claim back while the others are already gone, so the rule
+    /// sends nothing at all and still says nothing.
+    ///
+    /// **The rollback is deliberately not fixed here.** What `runs_once` should mean across
+    /// simultaneous crossings is a design question, not a defect with an obvious answer; the SILENCE
+    /// is the defect, and it is the whole of this test.
+    ///
+    /// Which of the two loses is not fixed — the walk reads a `HashSet` of leaves — so the
+    /// assertion is the RELATION: exactly one row, naming the terminal that did not receive the
+    /// message. Asserting a fixed name would pin the iteration order instead of the behaviour.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_send_dropped_for_losing_the_claim_says_so() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        once.graph.parse_mut().find = "API error".into();
+        once.graph.cond_mut().finds = Finds::Event;
+        once.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        let (engine, fake, host) = wire(vec![once]);
+        open_second_terminal(&fake);
+        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-once", tm, ArmState::armed());
+        }
+
+        fake.say("pc-1", "API error");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        fake.say("pc-2", "API error");
+        engine.runtime.mark_dirty("pc-2");
+        evaluate_tick(&engine, &host, 0, 1_250).await;
+        assert_eq!(engine.runtime.parked_at("au-once", "tm-1"), Some(31_000));
+        assert_eq!(engine.runtime.parked_at("au-once", "tm-2"), Some(31_250), "premise: both parked");
+
+        evaluate_tick(&engine, &host, 0, 31_250).await;
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+
+        let sent = sent_to(&fake, "once only");
+        assert_eq!(sent.len(), 1, "premise: R6 still lets exactly one through: {:?}", fake.written());
+        let loser = if sent[0] == "pc-1" { "second" } else { "codex · core" };
+
+        let dropped: Vec<_> = log_rows(&fake.store)
+            .into_iter()
+            .filter(|(_, detail, _)| detail.starts_with("not sent"))
+            .collect();
+        assert_eq!(
+            dropped.len(),
+            1,
+            "a parked send was dropped for losing the claim and nothing was written: {:?}",
+            log_rows(&fake.store)
+        );
+        assert_eq!(
+            dropped[0].0, "Held",
+            "nothing failed — the rule was asked and the rule declined: {dropped:?}"
+        );
+        assert_eq!(
+            dropped[0].1,
+            "not sent — this rule runs once, and another terminal had already claimed its one send"
+        );
+        assert_eq!(
+            dropped[0].2.as_deref(),
+            Some(loser),
+            "the row must name the terminal that did NOT receive the message: {dropped:?}"
+        );
     }
 
     /// A terminal that is not live is DORMANT, not dead: no evaluation, no log line, no state change.
