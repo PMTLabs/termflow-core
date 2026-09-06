@@ -500,7 +500,7 @@ function timerProblems(graph: AutomationGraph): Problem[] {
                     'timer',
                     'timer.scheduleWithMonitor',
                     'A schedule fires on the clock, so this rule will not read its terminals. '
-                        + 'Remove the schedule, or remove the steps that read them.',
+                        + 'Switch the Wait step back to after a match.',
                 ),
             );
         }

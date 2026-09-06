@@ -134,7 +134,7 @@ describe('automationValidation — the words the user reads', () => {
      * `automation_validation.rs` asserts this sentence character for character — the shared fixture
      * compares `code`, so prose is pinned once per implementation.
      */
-    it('names both ways out of a schedule that would silence the monitor', () => {
+    it('names the workable Wait mode switch for a schedule that would silence the monitor', () => {
         const both: AutomationRule = {
             ...base(),
             graph: {
@@ -145,7 +145,7 @@ describe('automationValidation — the words the user reads', () => {
         };
         expect(find(both, 'timer.scheduleWithMonitor')?.message).toBe(
             'A schedule fires on the clock, so this rule will not read its terminals. '
-            + 'Remove the schedule, or remove the steps that read them.',
+            + 'Switch the Wait step back to after a match.',
         );
 
         // And the complement, which is the half that makes this a rule about `DailyAt` and not

@@ -398,7 +398,7 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
                     "timer",
                     "timer.scheduleWithMonitor",
                     "A schedule fires on the clock, so this rule will not read its terminals. \
-                     Remove the schedule, or remove the steps that read them.",
+                     Switch the Wait step back to after a match.",
                 ));
             }
             // **`minute_of_day` is a bare `i32` and nothing else checks it.** An out-of-range target
@@ -1139,17 +1139,13 @@ mod tests {
         );
     }
 
-    /// **The message names both ways out, and names the card rather than the field.**
-    ///
-    /// `Watch output` is what the palette item and the node face are labelled — the same reason
-    /// `cond.incomplete` says *Add a comparison* rather than naming `cond`. Both remedies are
-    /// offered because either is right depending on what the user meant.
+    /// **The message names the Wait mode switch the editor actually offers.**
     ///
     /// The complement is asserted in the same test, and it is what makes this a rule about
     /// `DailyAt` rather than about timers: a DELAY on a watching rule is exactly what a delay is
     /// for. `automationValidation.ts` asserts the same sentence, character for character.
     #[test]
-    fn the_schedule_with_monitor_message_names_both_ways_out() {
+    fn the_schedule_with_monitor_message_names_the_workable_mode_switch() {
         let mut scheduled = valid_rule();
         scheduled.graph.timer = Some(TimerStep {
             mode: TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK },
@@ -1164,7 +1160,7 @@ mod tests {
         assert_eq!(
             clash.message,
             "A schedule fires on the clock, so this rule will not read its terminals. \
-             Remove the schedule, or remove the steps that read them."
+             Switch the Wait step back to after a match."
         );
         assert!(clash.blocks(), "a monitor that silently never runs must not be saveable enabled");
 
