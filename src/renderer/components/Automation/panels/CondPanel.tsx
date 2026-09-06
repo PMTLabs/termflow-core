@@ -40,6 +40,7 @@ import type { AutomationRuntimePairState } from '../../../services/automationEve
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { NUM_OP_LABELS, TEXT_OP_LABELS, condSentence } from '../automationDerive';
+import { captureText } from '../automationCaptures';
 import { clauseVerdictBlocker, compilePattern, groupsOf, sourceText } from '../automationValidation';
 import { clauseTruth, tokenOf } from '../automationClauseTruth';
 import type { ClauseCaptures, Truth } from '../automationClauseTruth';
@@ -117,7 +118,7 @@ function optionLabel(base: string, held: string | undefined, fallback?: string):
  * to run, so nothing to show. The labels then say only what they always said.
  */
 function tokenOptions(find: string, caps: ClauseCaptures | null): Array<{ key: string; label: string }> {
-    const held = (k: string) => (caps === null ? undefined : caps[k]);
+    const held = (k: string) => (caps === null ? undefined : captureText(caps, k));
     const out: Array<{ key: string; label: string }> = [
         { key: 'whole', label: optionLabel('$0', held('0'), 'the whole match') },
     ];

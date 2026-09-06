@@ -31,6 +31,7 @@ import type {
     AutomationTest,
     AutomationTextOp,
 } from '../../types/electron';
+import { captureText } from './automationCaptures';
 import { compilePattern } from './automationValidation';
 
 /** `Truth` — three-valued, and the third value is never collapsed into the second. */
@@ -108,12 +109,9 @@ const truthOf = (held: boolean): Truth => (held ? 'true' : 'false');
  * telling them apart is `cond.unknownToken`'s job, not this one's.
  */
 export function tokenOf(source: AutomationSource, caps: ClauseCaptures): string | undefined {
-    if (source === 'whole') return caps['0'];
-    if ('group' in source) return caps[String(source.group)];
-    // Capture records are ordinary objects. A named capture must be an OWN key: otherwise a stale
-    // clause named after Object.prototype (for example `toString`) reads a function as capture
-    // text after that group is removed, and numeric coercion crashes trying to trim it.
-    return Object.prototype.hasOwnProperty.call(caps, source.named) ? caps[source.named] : undefined;
+    if (source === 'whole') return captureText(caps, '0');
+    if ('group' in source) return captureText(caps, String(source.group));
+    return captureText(caps, source.named);
 }
 
 /** The text side of the table. Split out for the same reason `test_text` is: it shares nothing. */

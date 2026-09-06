@@ -24,6 +24,8 @@
  * spellings as `{ kind: 'group', n: 0 }`.
  */
 
+import { captureText } from './automationCaptures';
+
 export type Token =
     | { kind: 'group'; n: number; text: string }
     | { kind: 'named'; name: string; text: string };
@@ -173,7 +175,7 @@ export function previewSubstitute(
             continue;
         }
         const key = token.kind === 'group' ? String(token.n) : token.name;
-        text += sample[key] ?? '';
+        text += captureText(sample, key) ?? '';
     }
     flushText();
     if (parts.length === 0) parts.push({ kind: 'text', text: '' });

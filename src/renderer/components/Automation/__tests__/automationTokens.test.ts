@@ -98,3 +98,15 @@ describe('previewSubstitute — a null sample is not the same fact as an empty o
         });
     });
 });
+
+describe('previewSubstitute — absent prototype-named captures', () => {
+    it('renders an optional declared toString capture that did not participate as empty text', () => {
+        // This is a real sample from `(?<toString>\\d+)?`: the capture is declared (so the token
+        // is legal) but optional and absent. Direct indexing would concatenate Object.prototype's
+        // inherited function instead of the backend's empty substitution.
+        expect(previewSubstitute('send ${toString}', { count: 1, names: new Set(['toString']) }, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: 'send ' }],
+        });
+    });
+});
