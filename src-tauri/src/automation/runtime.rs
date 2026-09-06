@@ -184,7 +184,7 @@ pub struct AutomationRuntime {
     /// half an hour after the `sent` row for that same run. The other maps here want the purge: an
     /// edit resetting a rule's arm state is Q11, and settled decision 7 wants the next crossing to be
     /// a real one. A day that was spent stays spent.
-    last_fired_day: DashMap<String, i32>,
+    last_fired_day: DashMap<String, (i32, i32)>,
 }
 
 impl AutomationRuntime {
@@ -515,7 +515,26 @@ impl AutomationRuntime {
     /// The local ordinal day this schedule rule last fired on, or `None` if it has not fired since
     /// the rule was loaded. Handed straight to `schedule_due` as its double-fire guard.
     pub fn last_fired_day(&self, rule_id: &str) -> Option<i32> {
+        self.last_fired_day.get(rule_id).map(|e| e.value().0)
+    }
+
+    /// The complete spent-day mark, including the target minute it was spent under.
+    pub fn last_fired_mark(&self, rule_id: &str) -> Option<(i32, i32)> {
         self.last_fired_day.get(rule_id).map(|e| *e.value())
+    }
+
+    /// A snapshot for reload's store-backed mark reconciliation.
+    pub fn last_fired_marks(&self) -> Vec<(String, i32, i32)> {
+        self.last_fired_day
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().0, entry.value().1))
+            .collect()
+    }
+
+    /// Drop only a spent-day mark. Unlike `forget_rule`, reconciliation has established that the
+    /// schedule instant changed or disappeared, not that every other runtime key is stale.
+    pub fn forget_last_fired_day(&self, rule_id: &str) {
+        self.last_fired_day.remove(rule_id);
     }
 
     /// Mark this schedule rule as done for `day_ordinal`.
@@ -525,8 +544,8 @@ impl AutomationRuntime {
     /// loaded. Overwrites, because a later day always supersedes an earlier one and the only writer
     /// of an earlier one is a clock that moved backwards — which `schedule_due` reads as "not today"
     /// and fires once more, the same direction `due_now` takes for a negative age.
-    pub fn set_last_fired_day(&self, rule_id: &str, day_ordinal: i32) {
-        self.last_fired_day.insert(rule_id.to_string(), day_ordinal);
+    pub fn set_last_fired_day(&self, rule_id: &str, day_ordinal: i32, minute_of_day: i32) {
+        self.last_fired_day.insert(rule_id.to_string(), (day_ordinal, minute_of_day));
     }
 
     pub fn last_decision(&self, rule_id: &str, tm: &str) -> Option<crate::automation_engine::eval::Decision> {
@@ -606,7 +625,7 @@ mod tests {
         // The one RULE-keyed map with a value in it (§6.3): a schedule's day is a fact about the
         // rule, not about any pair, so it is populated here and asserted by `forget_rule`'s test.
         for rule in ["au-1", "au-2"] {
-            rt.set_last_fired_day(rule, 739_866);
+            rt.set_last_fired_day(rule, 739_866, 9 * 60);
         }
         // `dirty` is PROCESS-keyed; the two ids are deliberately different strings.
         rt.mark_dirty("pc-test-1");

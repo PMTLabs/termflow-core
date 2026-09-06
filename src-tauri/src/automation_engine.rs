@@ -416,6 +416,18 @@ impl AutomationEngine {
                 )
             })
             .collect();
+        // A spent day belongs to a target minute, not to the live generation that happened to
+        // contain that rule. Disabled rules are deliberately absent from `next`, so validate every
+        // retained mark against the store before the live-set teardown can make it invisible.
+        for (id, _, marked_minute) in self.runtime.last_fired_marks() {
+            let still_targets_marked_minute = matches!(
+                store_timers.get(&id).and_then(|timer| timer.as_ref()),
+                Some(TimerMode::DailyAt { minute_of_day, .. }) if *minute_of_day == marked_minute
+            );
+            if !still_targets_marked_minute {
+                self.runtime.forget_last_fired_day(&id);
+            }
+        }
         let mut next: HashMap<String, Arc<LiveRule>> = HashMap::new();
         let mut report = ReloadReport::default();
         // §3.3: rows the store could not decode. They never became `AutomationRule`s, so the
@@ -531,15 +543,15 @@ impl AutomationEngine {
             // completed rules still own their spent day, but a deleted rule has no store entry and
             // loses everything it owned. A moved minute is an instant today has not been spent on.
             // `schedule::same_target_minute` owns that judgement, mask included.
-            let spent_day = self.runtime.last_fired_day(&id);
+            let spent_mark = self.runtime.last_fired_mark(&id);
             let same_minute = schedule::same_target_minute(
                 timer_was.as_ref(),
                 store_timers.get(&id).and_then(|timer| timer.as_ref()),
             );
             self.runtime.forget_rule(&id);
             if same_minute {
-                if let Some(day) = spent_day {
-                    self.runtime.set_last_fired_day(&id, day);
+                if let Some((day, minute)) = spent_mark {
+                    self.runtime.set_last_fired_day(&id, day, minute);
                 }
             }
         }
@@ -629,13 +641,15 @@ impl AutomationEngine {
     ) -> Vec<String> {
         let mut emit_for: Vec<String> = Vec::new();
         for live in rules {
-            if let Some(TimerStep { mode }) = &live.rule.graph.timer {
+            if let Some(TimerStep { mode: mode @ TimerMode::DailyAt { minute_of_day, .. } }) =
+                &live.rule.graph.timer
+            {
                 if !schedule::target_missed_since(mode, since_local, now_local) {
                     continue;
                 }
                 let suppressing =
                     schedule::schedule_due(mode, self.runtime.last_fired_day(&live.rule.id), now_local);
-                self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
+                self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal, *minute_of_day);
                 if !suppressing {
                     continue;
                 }
@@ -1142,7 +1156,7 @@ mod tests {
         // 09:00 arrives and the rule fires. `evaluate_tick` marks the day after the leaves and
         // `run_send` writes the `Sent` row; both are reproduced here rather than driven through the
         // loop, which needs a host this module has no business wiring for a `reload` test.
-        engine.runtime.set_last_fired_day("au-sched", monday);
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
         store
             .append(&AutomationLogEntry {
                 id: 0,
@@ -1185,7 +1199,7 @@ mod tests {
         let engine = AutomationEngine::new(0);
         let monday = monday_2026_09_07();
         engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
-        engine.runtime.set_last_fired_day("au-sched", monday);
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
         store
             .append(&AutomationLogEntry {
                 id: 0,
@@ -1218,6 +1232,66 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_schedule_moved_later_re_fires_at_its_new_minute_today() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        sched.enabled = false;
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 10 * 60)).unwrap();
+
+        store.set_enabled_checked("au-sched", true).unwrap();
+        engine.reload_at(&store, 3_000, at(monday, 10 * 60)).unwrap();
+
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "a mark spent at 09:00 must not suppress the new 17:00 occurrence"
+        );
+        assert!(
+            schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), at(monday, 17 * 60)),
+            "the disabled edit left today's 17:00 occurrence spent"
+        );
+    }
+
+    #[test]
+    fn a_schedule_deleted_while_disabled_loses_its_spent_day() {
+        let store = AutomationStore::new_in_memory();
+        let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
+
+        store.set_enabled_checked("au-sched", false).unwrap();
+        engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
+        assert!(store.delete_rule("au-sched").unwrap());
+        engine.reload_at(&store, 2_000, at(monday, 10 * 60)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "a deleted disabled rule retained its spent-day mark"
+        );
+    }
+
+    #[test]
     fn a_deleted_schedule_loses_its_spent_day() {
         let store = AutomationStore::new_in_memory();
         let sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
@@ -1226,7 +1300,7 @@ mod tests {
         let engine = AutomationEngine::new(0);
         let monday = monday_2026_09_07();
         engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
-        engine.runtime.set_last_fired_day("au-sched", monday);
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
 
         assert!(store.delete_rule("au-sched").unwrap());
         engine.reload_at(&store, 1_000, at(monday, 9 * 60 + 30)).unwrap();
@@ -1248,7 +1322,7 @@ mod tests {
         let engine = AutomationEngine::new(0);
         let monday = monday_2026_09_07();
         engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
-        engine.runtime.set_last_fired_day("au-sched", monday);
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
 
         // 09:30: the user drags the time to 17:00.
         sched.graph.timer = Some(TimerStep {
@@ -1297,7 +1371,7 @@ mod tests {
         let engine = AutomationEngine::new(0);
         let monday = monday_2026_09_07();
         engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
-        engine.runtime.set_last_fired_day("au-sched", monday);
+        engine.runtime.set_last_fired_day("au-sched", monday, 9 * 60);
 
         // 09:30: Mon-Fri becomes every day. Same minute; today has still run.
         sched.graph.timer = Some(TimerStep {

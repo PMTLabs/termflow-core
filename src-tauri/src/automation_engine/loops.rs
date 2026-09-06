@@ -453,7 +453,10 @@ pub async fn evaluate_tick(
         // starts at 08:59:59 with no leaf yet indexed silently skips that day — and a late prompt
         // typed into a live agent is the worse of the two.
         if fires_now {
-            engine.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
+            let Some(TimerMode::DailyAt { minute_of_day, .. }) = scheduled else {
+                unreachable!("fires_now requires a daily schedule");
+            };
+            engine.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal, *minute_of_day);
         }
     }
 
