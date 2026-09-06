@@ -1,0 +1,21 @@
+{
+  "cases": [
+    { "input": "plain text", "tokens": [] },
+    { "input": "$0", "tokens": [{ "kind": "group", "n": 0 }] },
+    { "input": "$1", "tokens": [{ "kind": "group", "n": 1 }] },
+    { "input": "fix $1 in $2", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "group", "n": 2 }] },
+    { "input": "${file}", "tokens": [{ "kind": "named", "name": "file" }] },
+    { "input": "$$1", "tokens": [] },
+    { "input": "$$", "tokens": [] },
+    { "input": "cost $5", "tokens": [{ "kind": "group", "n": 5 }] },
+    { "input": "$x", "tokens": [] },
+    { "input": "$", "tokens": [] },
+    { "input": "$3", "tokens": [{ "kind": "group", "n": 3 }] },
+    { "input": "a$1b", "tokens": [{ "kind": "group", "n": 1 }] },
+    { "input": "cost ${} here", "tokens": [] },
+    { "input": "${1x}", "tokens": [{ "kind": "named", "name": "1x" }] },
+    { "input": "$12", "tokens": [{ "kind": "group", "n": 1 }] },
+    { "input": "${12}", "tokens": [{ "kind": "group", "n": 12 }] },
+    { "input": "fix $1 in ${file}, not $$1 and not $x", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "file" }] }
+  ]
+}

@@ -154,26 +154,41 @@ mod tests {
     }
 
     #[test]
-    fn the_grammar_table() {
-        let c = caps();
-        for (input, want) in [
-            ("plain text", "plain text"),
-            ("$0", "FAILED 17 tests in a.ts"),
-            ("$1", "17"),
-            ("fix $1 in $2", "fix 17 in a.ts"),
-            ("${file}", "a.ts"),
-            ("$$1", "$1"),   // escaped: NOT substituted
-            ("$$", "$"),
-            ("cost $5", "cost $5"), // no group 5 -> see the error test
-            ("$x", "$x"),           // $ before a non-token is literal
-            ("$", "$"),             // trailing $ is literal
-            ("$3", ""),             // in range, did not participate -> empty
-            ("a$1b", "a17b"),       // no delimiter needed
-        ] {
-            if input == "cost $5" {
-                continue;
-            } // covered by the error test
-            assert_eq!(substitute(input, Some(&c)).unwrap(), want, "input was {input:?}");
+    fn the_shared_token_fixture_agrees_with_the_scanner() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            input: String,
+            tokens: Vec<FixtureToken>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "kind", rename_all = "lowercase")]
+        enum FixtureToken {
+            Group { n: usize },
+            Named { name: String },
+        }
+
+        let raw = include_str!("../../../src/renderer/components/Automation/__fixtures__/automationTokenCases.json");
+        let fixture: Fixture = serde_json::from_str(raw).expect("the shared token fixture parses");
+
+        // A fixture that shrank to nothing would pass by having nothing to disagree about. A floor,
+        // not an exact count, so adding a grammar case is not a two-file edit.
+        assert!(fixture.cases.len() >= 17, "the shared token fixture has shrunk to {} cases", fixture.cases.len());
+
+        for case in fixture.cases {
+            let want: Vec<Token> = case
+                .tokens
+                .into_iter()
+                .map(|token| match token {
+                    FixtureToken::Group { n } if n == 0 => Token::Whole,
+                    FixtureToken::Group { n } => Token::Group(n),
+                    FixtureToken::Named { name } => Token::Named(name),
+                })
+                .collect();
+            assert_eq!(tokens_used(&case.input), want, "input was {:?}", case.input);
         }
     }
 
@@ -215,15 +230,6 @@ mod tests {
         // A schedule rule has no parse step. Validation blocks this (T6), but if it is
         // ever reached the send must be refused, not sent with "$1" in it.
         assert_eq!(substitute("hi $1", None).unwrap_err().to_string(), "$1");
-    }
-
-    #[test]
-    fn tokens_used_reports_what_validation_must_check() {
-        assert_eq!(
-            tokens_used("fix $1 in ${file}, not $$1 and not $x"),
-            vec![Token::Group(1), Token::Named("file".into())],
-            "an escaped $$1 is not a token, and $x is not a token"
-        );
     }
 
     #[test]

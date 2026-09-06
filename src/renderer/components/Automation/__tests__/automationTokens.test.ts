@@ -4,39 +4,33 @@
  * for `${}`, `${1x}`, `$12` vs `${12}`) — restated here as "what tokens does the scanner find",
  * since this side never resolves a token, only reports it.
  *
- * This is the mechanism that keeps the two scanners agreeing: there is no shared JSON fixture for
- * the grammar itself (unlike `automationValidationCases.json`), so the same table, hand-copied to
- * both languages, is what a future edit to one side's `scan` has to also break here to go
- * unnoticed.
+ * `automationTokenCases.json` is read by both this suite and Rust's `subst.rs`, so a future edit
+ * to only one scanner goes red on the side that changed.
  */
+import fixture from '../__fixtures__/automationTokenCases.json';
 import { previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart, Token } from '../automationTokens';
 
 const group = (n: number): Token => ({ kind: 'group', n, text: `$${n}` });
 const named = (name: string): Token => ({ kind: 'named', name, text: `\${${name}}` });
 
-describe('tokensUsed — the shared grammar table', () => {
-    const table: Array<[string, Token[]]> = [
-        ['plain text', []],
-        ['$0', [group(0)]],
-        ['$1', [group(1)]],
-        ['fix $1 in $2', [group(1), group(2)]],
-        ['${file}', [named('file')]],
-        ['$$1', []], // escaped: NOT a token
-        ['$$', []],
-        ['cost $5', [group(5)]],
-        ['$x', []], // `$` before a non-token is literal
-        ['$', []], // trailing `$` is literal
-        ['a$1b', [group(1)]], // no delimiter needed
-        ['cost ${} here', []], // empty braces name nothing: literal text
-        ['${1x}', [named('1x')]], // not purely digits -> a named lookup
-        ['$12', [group(1)]], // ONE digit; the `2` is a literal, not part of the token
-        ['${12}', [group(12)]], // braces -> two-digit group
-        ['fix $1 in ${file}, not $$1 and not $x', [group(1), named('file')]],
-    ];
+interface FixtureCase {
+    input: string;
+    tokens: Array<{ kind: 'group'; n: number } | { kind: 'named'; name: string }>;
+}
 
-    it.each(table)('%s', (input, want) => {
-        expect(tokensUsed(input)).toEqual(want);
+const cases = (fixture as unknown as { cases: FixtureCase[] }).cases;
+
+describe('tokensUsed — the shared grammar fixture', () => {
+    it('has not shrunk to nothing', () => {
+        // Rust asserts the same floor. It is not exact, so adding a grammar case is one-file work.
+        expect(cases.length).toBeGreaterThanOrEqual(17);
+    });
+
+    it.each(cases.map((testCase) => [testCase.input, testCase] as const))('%s', (_input, testCase) => {
+        const want = testCase.tokens.map((token) =>
+            token.kind === 'group' ? group(token.n) : named(token.name));
+        expect(tokensUsed(testCase.input)).toEqual(want);
     });
 });
 

@@ -10,9 +10,8 @@
  * uses this to decide whether a message can be SAVED, and `subst::substitute` is what decides
  * whether it can be SENT; if the two scanners ever recognised a different grammar, a message could
  * pass validation here and still be refused at send time — the exact failure `two-implementations-
- * one-fix` warns about, just one module over. There is no shared-fixture mechanism for the scanner
- * itself (unlike the `Problem` list), so the discipline is: port `scan` faithfully, and pin it with
- * the SAME grammar table `subst.rs`'s tests use, in `automationTokens.test.ts`.
+ * one-fix` warns about, just one module over. `automationTokenCases.json` is read by this side and
+ * by `subst.rs`, so an edit to either scanner has one grammar table to disagree with.
  *
  * **One simplification from the Rust `Token` enum: no separate `Whole` variant.** Rust keeps `$0`
  * (`Token::Whole`) and `${0}` (`Token::Group(0)`) as distinct enum cases only because `substitute`
