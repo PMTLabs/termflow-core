@@ -513,7 +513,15 @@ fn test_text(op: TextOp, token: &str, value: &str) -> Truth {
         TextOp::IsNotEmpty => Truth::from_compare(!token.is_empty()),
         // A pattern that will not compile teaches nothing — `Unknown`, never `False` — the same
         // asymmetry a non-participating `Number` token gets above.
-        TextOp::Matches => match Regex::new(value) {
+        //
+        // **`automation_validation::compile`, never bare `Regex::new`.** The rule's OWN pattern is
+        // compiled through that function at load, and `cond.badClausePattern` refuses a clause's
+        // pattern through it at save; it bounds the compiled program at 1 MB, where the bare
+        // constructor carries the regex crate's own 10 MB ceiling. Between the two sits a band of
+        // patterns — `(?:[0-9a-z]{200}){200}` is twenty-two characters of it — that the editor
+        // blocks and that this ran anyway: a pattern validated under one limit and then evaluated
+        // under another. Two answers to one question, which is the drift §8 keeps having to fix.
+        TextOp::Matches => match crate::automation_validation::compile(value) {
             Ok(re) => Truth::from_compare(re.is_match(token)),
             Err(_) => Truth::Unknown,
         },
@@ -1440,6 +1448,53 @@ mod tests {
         let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
         let c = Clause { source: Source::Whole, test: Test::Text { op: TextOp::Matches, value: "(".into() } };
         assert_eq!(test_clause(&c, &caps), Truth::Unknown, "a broken clause must not read as 'no'");
+    }
+
+    /// **A clause pattern is refused at evaluation under the SAME limit it was validated under.**
+    ///
+    /// "Will not compile" is not one question: `automation_validation::compile` bounds the compiled
+    /// program at 1 MB and is what the rule's own pattern is built through at load and what
+    /// `cond.badClausePattern` refuses a clause through at save, while bare `Regex::new` carries the
+    /// regex crate's own 10 MB ceiling. Between them sits a band of patterns the editor blocks and
+    /// the engine ran happily — accepted under one limit, evaluated under another.
+    ///
+    /// Twenty-two characters is the whole of the fixture: what crosses the ceiling is the size of
+    /// the compiled program, not the length of what was typed, which is why a length check
+    /// somewhere else would not have been the same guard.
+    #[test]
+    fn a_clause_pattern_too_big_to_validate_is_too_big_to_evaluate() {
+        let pattern = "(?:[0-9a-z]{200}){200}";
+        assert!(
+            regex::Regex::new(pattern).is_ok(),
+            "premise: the bare constructor takes it, so this is a limit question and not a syntax one"
+        );
+
+        // Validation's answer, through the validator itself rather than through the function it
+        // happens to call: the editor blocks this clause and names it.
+        let mut rule = crate::automation_engine::test_host::ctx_rule("au-1");
+        rule.graph.cond_mut().clauses = vec![Clause {
+            source: Source::Whole,
+            test: Test::Text { op: TextOp::Matches, value: pattern.into() },
+        }];
+        assert!(
+            crate::automation_validation::problems(&rule)
+                .iter()
+                .any(|p| p.code == "cond.badClausePattern"),
+            "premise: this is a clause the user cannot save"
+        );
+
+        // The engine's answer, which must be the same one. `Unknown` and not `False`: a clause that
+        // could not be read teaches nothing, exactly as an uncompilable one does above.
+        let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
+        let c = Clause {
+            source: Source::Whole,
+            test: Test::Text { op: TextOp::Matches, value: pattern.into() },
+        };
+        assert_eq!(
+            test_clause(&c, &caps),
+            Truth::Unknown,
+            "a clause the editor refuses to save decided a rule at evaluation"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
