@@ -40,7 +40,7 @@ use crate::automation::runtime::AutomationRuntime;
 use crate::automation_engine::eval::ArmState;
 use crate::automation_store::{
     AutomationGraph, AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError,
-    Clause, Finds, Keep, LogKind, Source, Test, TimerStep,
+    Clause, Finds, Keep, LogKind, Source, Test, TimerMode, TimerStep,
 };
 
 /// Start the engine: load the rules, then the three tasks (plan §2.1, §2.3, §4.4).
@@ -390,7 +390,14 @@ impl AutomationEngine {
     /// test that could only pass `now_ms` would be asserting against wherever the runner happens to
     /// be, and would be a coin flip near midnight. `reload` is the whole of production: it reads the
     /// clock through `schedule::local_now`, the one conversion in the crate.
-    pub fn reload_at(
+    ///
+    /// **Private, because nothing binds `now_local` to `now_ms`.** They are one instant in two
+    /// spellings and the compiler cannot say so, so a caller that passed an inconsistent pair would
+    /// seed one day and log another with nothing to stop it. `reload` derives the second from the
+    /// first and is the only production caller; the tests that need the seam are in this module.
+    /// The resume path does not want this function — it wants [`Self::seed_missed_schedules`],
+    /// which takes the rules it is already holding.
+    fn reload_at(
         &self,
         store: &AutomationStore,
         now_ms: i64,
@@ -411,6 +418,30 @@ impl AutomationEngine {
                 report
                     .skipped
                     .push((rule.id.clone(), "this rule needs a newer version of TermFlow".into()));
+                continue;
+            }
+            // **A rule with nothing to watch and no schedule can never fire, so it is skipped with
+            // a reason** — beside the pattern refusal below, and for the same reasons.
+            //
+            // Since §3.1 made the monitor step optional, such a row passed validation (nothing
+            // checks it), saved *enabled*, counted in `report.live`, and was walked four times a
+            // second only to fall out at the evaluator's monitor guard — live by every reading the
+            // user has, and unable to do anything at all. `AfterMatch` with no monitor is the same
+            // shape: a delay is parked at a crossing, and there is nothing here that can cross.
+            //
+            // **A skip, not a validation blocker.** §7.8 deliberately lets the save gate through
+            // what the engine independently refuses, and the editor cannot produce this shape, so a
+            // blocker would only punish the API and the importer at write time. A skip is *visible*
+            // — one log row per load, the mechanism `is_runnable` and `pattern_refused_at_load`
+            // already use — and it is what makes `report.live` an honest count.
+            let watches = rule.graph.monitor.is_some();
+            let scheduled =
+                matches!(rule.graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
+            if !watches && !scheduled {
+                report.skipped.push((
+                    rule.id.clone(),
+                    "this rule has nothing to watch and no schedule, so it can never run".into(),
+                ));
                 continue;
             }
             // **Both pattern gates apply only to a rule that HAS a pattern** (§6.4). A schedule
@@ -780,6 +811,56 @@ mod tests {
         // pattern — which is what an `unwrap_or_default()` anywhere on this path would produce.
         let live = engine.snapshot_live();
         assert!(live[0].re.is_none(), "a rule with no pattern must carry no compiled regex");
+    }
+
+    /// **A rule with nothing to watch and no schedule is refused at load, and says so** — it must
+    /// not be live-and-inert.
+    ///
+    /// Since §3.1 made the monitor step optional this shape passed validation, saved *enabled*,
+    /// counted in `report.live` and was walked four times a second only to fall out at the
+    /// evaluator's monitor guard: running by every reading the user has, and unable to fire. The
+    /// same is true of `AfterMatch` with no monitor — a delay is parked at a crossing and there is
+    /// nothing here that can cross.
+    ///
+    /// **Three rules, and the third is the point.** A refusal keyed on "no monitor" alone would
+    /// take the whole of milestone 4 out with it, so the schedule rule is in the fixture to say
+    /// that a `DailyAt` timer IS something to run on. `au-live` is here for the same reason a
+    /// filter tested with one rule cannot show which rules it kept.
+    #[test]
+    fn a_rule_with_nothing_to_watch_and_no_schedule_is_skipped_with_a_reason() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-live", r"ctx:(\d+)%")).unwrap();
+        store.save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched")).unwrap();
+
+        let mut inert = rule("au-inert", r"ctx:(\d+)%");
+        inert.graph.monitor = None;
+        store.save_rule(&inert).unwrap();
+
+        let mut delayed = rule("au-delay", r"ctx:(\d+)%");
+        delayed.graph.monitor = None;
+        delayed.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        store.save_rule(&delayed).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let report = engine.reload(&store, 7_000).unwrap();
+
+        assert_eq!(
+            live_ids(&engine),
+            vec!["au-live", "au-sched"],
+            "a schedule rule has no monitor either, and runs on the clock"
+        );
+        assert_eq!(report.live, 2, "`report.live` counts what can actually run");
+
+        // In `list_rules` order (`ORDER BY sort_order, id`), which is the order the log rows land in.
+        let skipped: Vec<String> = report.skipped.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(skipped, vec!["au-delay", "au-inert"]);
+        for (id, why) in &report.skipped {
+            assert_eq!(
+                why, "this rule has nothing to watch and no schedule, so it can never run",
+                "{id}"
+            );
+        }
+        assert_eq!(log_rows(&store).len(), 2, "one row per load, per refused rule");
     }
 
     /// A Monday, as a local ordinal day. `schedule_only_rule`'s mask is Mon–Fri, so the rule this
