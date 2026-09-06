@@ -118,6 +118,33 @@ describe('AuTestPane — the pill when a would-fire condition cannot actually be
     });
 
     /**
+     * **`unknown` is a third answer and must be drawn as one.** `MARKS` had three entries and fell
+     * back to `·` — `skipped`'s own mark — for anything else, so a clause the engine evaluated and
+     * could not answer would have looked exactly like a step that never ran.
+     */
+    it('draws an evaluated-but-unanswerable step as neither a pass nor a skip', async () => {
+        await show(
+            baseReport({
+                verdict: 'would-not-fire',
+                steps: [
+                    step('monitor', 'ok'),
+                    step('parse', 'ok', '`code=(\\w+)` matched on screen'),
+                    step('cond', 'unknown', 'could not tell whether $1 > 60, as an event'),
+                    step('action', 'skipped', 'not reached'),
+                ],
+            }),
+        );
+        const rows = [...container.querySelectorAll('.au-dstep')];
+        const condRow = rows.find((r) => r.textContent?.includes('could not tell'))!;
+        expect(condRow).toBeTruthy();
+        expect(condRow.className).toContain('unknown');
+        expect(condRow.querySelector('.au-mk')?.textContent).toBe('?');
+        // Not the skipped mark, and not the pass mark.
+        expect(condRow.querySelector('.au-mk')?.textContent).not.toBe('·');
+        expect(condRow.querySelector('.au-mk')?.textContent).not.toBe('✓');
+    });
+
+    /**
      * A `failed` step that is NOT the action must not trigger the special label — e.g. a `parse`
      * failure cannot coexist with a `would-fire` verdict in practice, but the label is keyed
      * specifically on `kind === 'action'`, not on "any step failed", and this pins that.

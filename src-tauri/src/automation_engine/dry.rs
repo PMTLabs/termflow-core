@@ -286,12 +286,25 @@ pub fn evaluate_once(
         ),
     };
 
+    // Did the pattern actually capture anything? `Unknown` means two different things and this is
+    // what tells them apart. Before M2 they coincided: a `Reading` rule's `Unknown` always came
+    // WITH a failed parse row, because the only way to reach it was a read that produced no value.
+    // A clause can now answer `Unknown` on a perfectly successful match — a numeric clause on a
+    // non-numeric token, a group that did not participate, a `matches` clause whose own pattern
+    // will not compile — and calling that "not reached" describes a step that WAS evaluated as one
+    // that never ran.
+    let matched = ev.captures.is_some();
+
     let cond = match (ev.condition, &ev.outcome) {
-        (Truth::Unknown, _) => skipped(COND),
         // Task 14 made a clause list authorable (plan 032 §5.3, §5.9), and this rule is one: it
         // describes ITSELF as the clause list under its join, plus `finds` — never as a v1
         // `op`/`threshold` pair such a rule never carries (that pair reads `None`/`None` here,
         // which is what the branch below's `"?" "?"` fallback exists for).
+        //
+        // **Ordered ABOVE the `Unknown` arm**, which used to swallow every three-valued answer a
+        // clause list can give and report `not reached` for it — the pane showing
+        // `parse ✓ matched` / `cond · not reached` / *Would not fire*, naming no clause and never
+        // mentioning the outcome this milestone exists to introduce.
         //
         // Read `rule.graph.cond.clauses` — the STORED rule — not the local `graph` a few lines up:
         // `fold_v1_clauses` gives even a v1 numeric rule exactly one clause on ITS copy, so keying
@@ -303,9 +316,20 @@ pub fn evaluate_once(
             let finds = finds_words(rule.graph.cond.finds);
             match truth {
                 Truth::True => step(COND, "ok", format!("{}, as {}", sentence, finds)),
-                _ => step(COND, "failed", format!("{} is false, as {}", sentence, finds)),
+                Truth::False => step(COND, "failed", format!("{} is false, as {}", sentence, finds)),
+                // Evaluated, and could not be answered. Neither `ok` nor `failed`: `Truth::Unknown`
+                // is a third answer and the pane says so rather than picking one of the two.
+                Truth::Unknown if matched => step(
+                    COND,
+                    "unknown",
+                    format!("could not tell whether {}, as {}", sentence, finds),
+                ),
+                // No match at all, so the clauses had nothing to read. Genuinely not reached — and
+                // the parse row directly above already says why.
+                Truth::Unknown => skipped(COND),
             }
         }
+        (Truth::Unknown, _) => skipped(COND),
         (truth, Outcome::Numeric(Read::Value(v))) => {
             let (sym, t) = match (rule.graph.cond.op, rule.graph.cond.threshold) {
                 (Some(op), Some(t)) => (symbol(op), eval::fmt_num(t)),
@@ -383,6 +407,16 @@ mod tests {
 
     fn statuses(report: &DryRunReport) -> Vec<&str> {
         report.steps.iter().map(|s| s.status.as_str()).collect()
+    }
+
+    fn status(report: &DryRunReport, kind: &str) -> String {
+        report
+            .steps
+            .iter()
+            .find(|s| s.kind == kind)
+            .unwrap_or_else(|| panic!("no `{}` step in {:?}", kind, report.steps))
+            .status
+            .clone()
     }
 
     fn detail(report: &DryRunReport, kind: &str) -> String {
@@ -761,6 +795,100 @@ mod tests {
         let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
         assert_eq!(report.verdict, WOULD_NOT_FIRE);
         assert_eq!(detail(&report, "cond"), "$1 > 60 is false, as an event");
+    }
+
+    /// **A clause that could not be answered is not a step that never ran.**
+    ///
+    /// `(Truth::Unknown, _) => skipped(COND)` sat ABOVE the clause branch and swallowed every
+    /// three-valued answer a clause list can give. Before M2 that was harmless: a `Reading` rule's
+    /// `Unknown` always came with a failed parse row that explained it. A clause can now answer
+    /// `Unknown` on a perfectly successful match, and the pane read `parse \u2713 matched` /
+    /// `cond \u00b7 not reached` / *Would not fire* \u2014 naming no clause, and never mentioning the
+    /// three-valued outcome this milestone exists to introduce.
+    ///
+    /// A table over all three ways one clause reaches `Unknown` on a match (\u00a75.5), because they are
+    /// three different causes that happen to agree, and a test built on one of them would let the
+    /// other two regress.
+    #[test]
+    fn a_clause_that_could_not_be_answered_says_so_rather_than_not_reached() {
+        let cases: [(&str, Clause, &str); 3] = [
+            (
+                "a numeric clause on a token that is not a number",
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
+                },
+                "could not tell whether $1 > 60, as an event",
+            ),
+            (
+                "a numeric clause on a group that did not participate",
+                Clause {
+                    source: Source::Group(2),
+                    test: ClauseTest::Number { op: CompareOp::Gt, value: Some(60.0) },
+                },
+                "could not tell whether $2 > 60, as an event",
+            ),
+            (
+                "a `matches` clause whose own pattern will not compile",
+                Clause {
+                    source: Source::Group(1),
+                    test: ClauseTest::Text { op: TextOp::Matches, value: "(".into() },
+                },
+                "could not tell whether $1 matches \"(\", as an event",
+            ),
+        ];
+
+        for (label, clause, want) in cases {
+            let (engine, fake, host) = wire(vec![]);
+            let mut rule = ctx_rule("au-1");
+            // Two groups, the second of which cannot participate, so one pattern serves all three.
+            rule.graph.parse.find = r"code=(\w+)(?: extra=(\d+))?".into();
+            rule.graph.parse.keep = Keep::Whole;
+            rule.graph.cond = CondStep {
+                finds: Finds::Event,
+                clauses: vec![clause],
+                join: Join::And,
+                ..Default::default()
+            };
+
+            fake.say("pc-1", "code=oops\n");
+            let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+            // The parse step SUCCEEDED \u2014 this is the whole point: the clause was reached.
+            assert_eq!(status(&report, "parse"), "ok", "{label}");
+            assert_eq!(detail(&report, "cond"), want, "{label}");
+            // Neither `ok` nor `failed`, and above all not `skipped`, whose words are "not reached".
+            assert_eq!(status(&report, "cond"), "unknown", "{label}");
+            assert_ne!(detail(&report, "cond"), "not reached", "{label}");
+            // `Unknown` still does not fire, and the action step is genuinely not reached.
+            assert_eq!(report.verdict, WOULD_NOT_FIRE, "{label}");
+            assert_eq!(status(&report, "action"), "skipped", "{label}");
+        }
+    }
+
+    /// The paired negative: with NO match there are no captures, the clauses truly had nothing to
+    /// read, and `not reached` is the honest word \u2014 the parse row directly above already says why.
+    /// Without this, "always say `could not tell`" would satisfy the table above.
+    #[test]
+    fn no_match_at_all_leaves_the_condition_genuinely_not_reached() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.cond = CondStep {
+            finds: Finds::Reading,
+            clauses: vec![Clause {
+                source: Source::Group(1),
+                test: ClauseTest::Number { op: CompareOp::Gt, value: Some(25.0) },
+            }],
+            join: Join::And,
+            ..Default::default()
+        };
+
+        fake.say("pc-1", "nothing of interest here\n");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(status(&report, "parse"), "failed");
+        assert_eq!(status(&report, "cond"), "skipped");
+        assert_eq!(detail(&report, "cond"), "not reached");
     }
 
     /// The paired positive for both tests above: a rule that GENUINELY has no clauses (a v1 rule,

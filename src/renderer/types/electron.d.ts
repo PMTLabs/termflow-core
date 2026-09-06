@@ -703,8 +703,13 @@ export interface DryRunStep {
   /**
    * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
    * not be drawn as one.
+   *
+   * `unknown` is `Truth::Unknown` — the step DID run and could not be answered. A clause can reach
+   * it on a perfectly successful match: a numeric clause on a non-numeric token, a group that did
+   * not participate, a `matches` clause whose own pattern will not compile (plan 032 §5.5). It is
+   * neither a pass nor a failure, and it is not `skipped`, whose words are *"not reached"*.
    */
-  status: 'ok' | 'failed' | 'skipped';
+  status: 'ok' | 'failed' | 'skipped' | 'unknown';
   detail: string;
 }
 

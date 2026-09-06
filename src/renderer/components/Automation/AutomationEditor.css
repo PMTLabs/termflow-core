@@ -848,6 +848,17 @@
     opacity: 0.5;
 }
 
+/* A step that DID run and could not be answered — `Truth::Unknown`. Neither a pass nor a failure,
+   so it is neither green nor red, and full-opacity rather than dimmed like `skipped`: the step ran.
+   Amber, the same tone the problem list uses for a warning. */
+.au-editor .au-dstep.unknown {
+    border-color: #6b5320;
+}
+
+.au-editor .au-dstep.unknown .au-mk {
+    color: #d29922;
+}
+
 .au-editor .au-dstep .au-nm {
     flex: 0 0 132px;
     color: #cfd2d8;

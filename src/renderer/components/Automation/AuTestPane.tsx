@@ -44,7 +44,9 @@ function pillFor(report: DryRunReport): { label: string; tone: string } {
     return { label: 'Would fire — but nothing would be sent', tone: base.tone };
 }
 
-const MARKS: Record<string, string> = { ok: '✓', failed: '✕', skipped: '·' };
+// `unknown` is `Truth::Unknown` — the step RAN and could not be answered, which is neither a pass
+// nor a failure and must not be drawn as either. `·` belongs to `skipped`, the step that never ran.
+const MARKS: Record<string, string> = { ok: '✓', failed: '✕', skipped: '·', unknown: '?' };
 
 export interface AuTestPaneProps {
     report: DryRunReport | null;
