@@ -472,6 +472,7 @@ mod tests {
             schema_version: 1,
             graph: AutomationGraph {
                 layout: None,
+                timer: None,
                 monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
                 parse: ParseStep {
                     preset: ParsePreset::Custom,

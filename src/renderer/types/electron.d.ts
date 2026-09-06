@@ -600,11 +600,31 @@ export interface AutomationActionStep {
   substitute?: boolean;
 }
 
+/**
+ * Optional fifth step — "Wait" in every user-facing string. **Never write the bare word "Timer" in
+ * UI copy** — `AutomationCadence`'s `'timer'` already means the monitor's poll interval, a
+ * different thing entirely. `AutomationTimerStep`/`AutomationTimerMode` mirror the Rust names
+ * (spec §3.1) and are fine as identifiers; the constraint is on strings a user reads.
+ *
+ * M3 stores `afterMatch` only; §6.2 parks the send `delayMs` later. M4 adds the `dailyAt` schedule
+ * (§6.3). Neither mode's behaviour is implemented yet — this is the schema only, and there is no
+ * canvas node for it yet either (that lands in M5).
+ */
+export type AutomationTimerMode =
+  | { afterMatch: { delayMs: number } }
+  | { dailyAt: { minuteOfDay: number; days: number } };
+
+export interface AutomationTimerStep {
+  mode: AutomationTimerMode;
+}
+
 /** The four steps, stored whole as JSON in `automation_rules.graph`. Targeting is columns, not blob. */
 export interface AutomationGraph {
   monitor: AutomationMonitorStep;
   parse: AutomationParseStep;
   cond: AutomationCondStep;
+  /** Absent on every rule saved before this milestone and on every rule that does not use it. */
+  timer?: AutomationTimerStep;
   action: AutomationActionStep;
   /**
    * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —

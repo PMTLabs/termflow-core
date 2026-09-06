@@ -94,6 +94,9 @@ describe('draft ⇄ row', () => {
                     ],
                     join: 'or',
                 },
+                // Plan 032 §3.1/§6 — the M3 timer field. A non-default `afterMatch` value, not
+                // `undefined`: a fixture carrying the default proves nothing about the mapping.
+                timer: { mode: { afterMatch: { delayMs: 30_000 } } },
                 layout: {
                     monitor: { x: 11, y: 12 },
                     parse: { x: 21, y: 22 },

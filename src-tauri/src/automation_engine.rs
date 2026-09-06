@@ -526,6 +526,7 @@ mod tests {
             schema_version: SUPPORTED_SCHEMA_VERSION,
             graph: AutomationGraph {
                 layout: None,
+                timer: None,
                 monitor: MonitorStep {
                     read: ReadMode::NewOutput,
                     cadence: Cadence::OnOutput,

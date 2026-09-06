@@ -349,6 +349,37 @@ fn default_cli_type() -> String {
     "default".to_string()
 }
 
+/// Step 5 (optional) — "Wait" in the panel and every other user-facing string. **Never call this
+/// "Timer" where a user reads it**: `Cadence::Timer` already owns that word and means the monitor's
+/// poll interval, a different thing entirely. `TimerStep`/`TimerMode` and the `timer` field are the
+/// spec's own Rust names (§3.1) and stay as-is — the constraint is on UI copy, not identifiers.
+///
+/// M3 (this milestone) only stores `AfterMatch`; §6.2 parks the send `delay_ms` later. M4 adds
+/// `schedule_due` for `DailyAt` (§6.3). Neither mode's behaviour is implemented yet — this is the
+/// schema only.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimerStep {
+    pub mode: TimerMode,
+}
+
+/// Plan §3.1, §6.
+///
+/// **The container's `rename_all` does not reach a struct variant's own fields** — only the variant
+/// NAME (`AfterMatch` → `afterMatch`). Confirmed by writing the failing wire-shape test first: it
+/// serialised `{"mode":{"afterMatch":{"delay_ms":30000}}}`, snake_case field intact. Each struct
+/// variant repeats `rename_all` for its fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TimerMode {
+    /// Scenario 2 (§6.2). Parked when the condition crosses; fires `delay_ms` later.
+    #[serde(rename_all = "camelCase")]
+    AfterMatch { delay_ms: i64 },
+    /// Scenario 1 (§6.3). Local wall-clock. `days` is a weekday bitmask, Mon = bit 0.
+    #[serde(rename_all = "camelCase")]
+    DailyAt { minute_of_day: i32, days: u8 },
+}
+
 /// The four steps, stored whole as a JSON blob in `automation_rules.graph`.
 ///
 /// Blob rather than normalised because it is never queried and never written at a different cadence
@@ -362,6 +393,18 @@ pub struct AutomationGraph {
     pub monitor: MonitorStep,
     pub parse: ParseStep,
     pub cond: CondStep,
+    /// Optional fifth step — "Wait" (§6). `None` on every rule saved before this milestone and on
+    /// every rule that does not use it.
+    ///
+    /// **`#[serde(default)]` is redundant here today** — serde's derive already treats a field
+    /// whose type is syntactically `Option<…>` as absent-ok, decoding a missing key to `None` with
+    /// or without this attribute (`a_graph_with_no_timer_key_still_decodes_as_none`'s mutation
+    /// check: removing it left the test green). Kept anyway, matching `literal`/`layout` above: it
+    /// documents intent, and it is the only thing that keeps this field optional the day someone
+    /// hides `Option<TimerStep>` behind a type alias, at which point serde stops recognising the
+    /// shape and this attribute becomes load-bearing rather than decorative.
+    #[serde(default)]
+    pub timer: Option<TimerStep>,
     pub action: ActionStep,
     /// Where the editor's four cards sit on its canvas.
     ///
@@ -2087,6 +2130,7 @@ mod tests {
     fn graph() -> AutomationGraph {
         AutomationGraph {
             layout: None,
+            timer: None,
             monitor: MonitorStep {
                 read: ReadMode::NewOutput,
                 cadence: Cadence::OnOutput,
@@ -3855,5 +3899,59 @@ mod tests {
         let c = Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: 60.0 } };
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Clause>(&s).unwrap(), c);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Plan 032 §3.1/§6 — `TimerStep`/`TimerMode`. M3 lands the schema only; §6.2's park/drain and
+    // §6.3's `schedule_due` are later tasks. The wire shape is a PERMANENT contract the moment a
+    // rule with a timer is saved, so it is pinned here before the type exists.
+    // -----------------------------------------------------------------------------------------
+
+    /// `AfterMatch` is a single-field struct variant. `#[serde(rename_all = "camelCase")]` on the
+    /// enum must reach the FIELD inside the variant, not just the variant name itself — that is the
+    /// thing worth not assuming about a struct-variant enum.
+    #[test]
+    fn after_match_serialises_to_the_wire_shape_spec_gives() {
+        let t = TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } };
+        assert_eq!(serde_json::to_string(&t).unwrap(), r#"{"mode":{"afterMatch":{"delayMs":30000}}}"#);
+    }
+
+    /// `DailyAt` has two fields; both must come out camelCase.
+    #[test]
+    fn daily_at_serialises_to_the_wire_shape_spec_gives() {
+        // Mon+Tue+Wed+Thu+Fri, bit 0 = Monday, per the spec's doc comment.
+        let t = TimerStep { mode: TimerMode::DailyAt { minute_of_day: 540, days: 0b0001_1111 } };
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"mode":{"dailyAt":{"minuteOfDay":540,"days":31}}}"#
+        );
+    }
+
+    #[test]
+    fn timer_step_round_trips_both_modes() {
+        for t in [
+            TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } },
+            TimerStep { mode: TimerMode::DailyAt { minute_of_day: 540, days: 31 } },
+        ] {
+            let s = serde_json::to_string(&t).unwrap();
+            assert_eq!(serde_json::from_str::<TimerStep>(&s).unwrap(), t, "round trip of {s}");
+        }
+    }
+
+    /// The whole reason `timer` is `#[serde(default)]`: a rule saved by a build before this
+    /// milestone has no `timer` key in its graph blob at all, and that older JSON must still
+    /// decode — with `timer: None`, not a decode failure. Mirrors
+    /// `a_graph_with_no_substitute_key_decodes_with_it_off` above.
+    #[test]
+    fn a_graph_with_no_timer_key_still_decodes_as_none() {
+        let raw = r#"{
+            "monitor": {"read": "newOutput", "cadence": "onOutput", "everyMs": 0},
+            "parse": {"preset": "custom", "find": "x", "keep": "whole"},
+            "cond": {"kind": "text"},
+            "action": {"message": "m"}
+        }"#;
+        let decoded: AutomationGraph =
+            serde_json::from_str(raw).expect("a graph missing only the new optional `timer` field must still decode");
+        assert_eq!(decoded.timer, None, "an older rule has no timer, and must not gain one from a default value");
     }
 }
