@@ -194,6 +194,15 @@ pub async fn evaluator_step(
         if !emit_for.is_empty() {
             host.emit_activity(emit_for);
         }
+        // I3, alongside the seeding above: the same premise ("nobody was observing the tick")
+        // applies to a parked `AfterMatch` send. A suspend does not quit TermFlow, so a send parked
+        // at 17:59:50 with a 30 s delay is still in `runtime.parked` at 10:00 the next morning and,
+        // unguarded, fires on the first tick after wake into whatever is now in that terminal —
+        // exactly the promise `MAX_DELAY_MS`'s own doc says a suspend breaks ("a parked send lives
+        // only in memory ... an unbounded wait promises something the feature cannot keep"). Reusing
+        // this branch rather than a second sweep is the point: one clock, `BASE_TICK_MS`, no
+        // `interval`, no new task.
+        engine.runtime.drop_stale_parked(now_ms, crate::automation_validation::MAX_DELAY_MS);
     }
     evaluate_tick(engine, host, cursor, now_ms).await
 }
@@ -2138,6 +2147,97 @@ mod tests {
             engine.runtime.parked_at("au-1", "tm-1"),
             None,
             "a drained send must leave no entry behind"
+        );
+    }
+
+    // =============================================================================================
+    // I3 — a suspend leaves stale parked delays to fire hours late
+    // =============================================================================================
+
+    /// **Oracle (a).** A parked send whose `due_at_ms` is already more than `MAX_DELAY_MS` in the
+    /// past when the resume branch runs must be dropped, not merely left to fire on the very next
+    /// tick into whatever is now in that terminal.
+    #[tokio::test(start_paused = true)]
+    async fn a_resume_drops_a_parked_send_stale_beyond_max_delay_ms() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        // The crossing, at the ordinary per-tick entry point, parks a send due at 31_000.
+        evaluator_step(&engine, &host, 0, None, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "premise: the crossing must park its send"
+        );
+
+        // A suspend that outlasts `MAX_DELAY_MS` past the send's own due time.
+        let woke_at = 31_000 + crate::automation_validation::MAX_DELAY_MS + 1;
+        evaluator_step(&engine, &host, 0, Some(1_000), woke_at).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(
+            engine.runtime.parked_at("au-1", "tm-1").is_none(),
+            "a stale parked send must be dropped on resume, not merely left to fire"
+        );
+        assert!(
+            fake.written().is_empty(),
+            "a stale parked send fired into whatever is now in the terminal: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **Oracle (b), in the opposite direction.** This fix can eat the feature it protects: a
+    /// parked send that is NOT yet stale must survive a resume unharmed, and an ordinary tick after
+    /// that resume must still deliver it once it is actually due.
+    ///
+    /// The window is deliberately still inside `MAX_DELAY_MS` at the moment of resume — proving the
+    /// staleness bound is genuinely conditional on age, not merely on "was this a resume". Mutating
+    /// the bound to unconditional (drop on any resume, regardless of age) kills this test: the
+    /// still-waiting send would vanish at the `assert_eq!` right after the resume, before the
+    /// ordinary tick ever gets a chance to deliver it.
+    #[tokio::test(start_paused = true)]
+    async fn an_ordinary_tick_still_delivers_a_send_that_survived_a_resume() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse_mut().find = "API error".into();
+            g.cond_mut().finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        // The crossing parks a send due at 301_000 (five minutes out).
+        evaluator_step(&engine, &host, 0, None, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(301_000));
+
+        // A brief suspend at the two-minute mark: long enough to be a resume (> RESUME_GAP_MS),
+        // and nowhere near `MAX_DELAY_MS` past the send's due time — indeed still before it.
+        evaluator_step(&engine, &host, 0, Some(1_000), 120_000).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(301_000),
+            "a resume dropped a send that was not yet stale"
+        );
+        assert!(fake.written().is_empty(), "the send is not due yet: {:?}", fake.written());
+
+        // An ordinary tick, once the wait is genuinely over, must still deliver it.
+        evaluator_step(&engine, &host, 0, Some(120_000), 301_001).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            fake.written().iter().any(|w| w.contains("resume")),
+            "an ordinary tick failed to deliver a send that survived an earlier resume: {:?}",
+            fake.written()
         );
     }
 

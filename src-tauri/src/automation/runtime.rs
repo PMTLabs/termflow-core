@@ -453,6 +453,24 @@ impl AutomationRuntime {
             .map(|(_, p)| p)
     }
 
+    /// Drop any parked send whose wait has been stale for longer than `max_age_ms` (I3).
+    ///
+    /// **A suspend is not a quit, and `MAX_DELAY_MS` only promises the second one.** `parked` is
+    /// in-memory only and not persisted, so §12's promise is "a wait cannot outlive the process" —
+    /// but a laptop lid closing does not end the process, so a send parked at 17:59:50 with a 30 s
+    /// delay is still in this map at 10:00 the next morning and, unguarded, fires on the first tick
+    /// after wake into whatever is now in that terminal. This is the same premise as the schedule
+    /// gap detector (`AutomationEngine::seed_missed_schedules`): *"nobody was observing the tick."*
+    ///
+    /// **Called only from the resume branch, alongside `seed_missed_schedules` — never on an
+    /// ordinary tick.** Reusing that one gap detector is the point (`loops.rs`'s standing rule: one
+    /// clock, `BASE_TICK_MS`, no second sweep, no new task) — this is not a second gap detector of
+    /// its own, it is one more thing the existing one does once it has already decided nobody was
+    /// watching.
+    pub fn drop_stale_parked(&self, now_ms: i64, max_age_ms: i64) {
+        self.parked.retain(|_, p| now_ms - p.due_at_ms <= max_age_ms);
+    }
+
     /// When this pair's parked send comes due, or `None` if nothing is parked for it.
     ///
     /// A read, for the *"scheduled, counting down"* row state §7 threads through to the five armed
