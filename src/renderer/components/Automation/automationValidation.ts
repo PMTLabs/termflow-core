@@ -305,7 +305,10 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
             }
         }
 
-        const blocker = clauseVerdictBlocker(clause, groups);
+        // The source dimension was reported above as `cond.unknownToken`; pass no groups here so
+        // it cannot suppress this independent operand diagnostic. CondPanel deliberately passes
+        // groups because a live verdict requires both dimensions to be usable.
+        const blocker = clauseVerdictBlocker(clause);
         if (blocker === 'needsValue' && 'number' in clause.test) {
             // **Reached by the ordinary path.** `value` is `number | null`, and `null` is what
             // `CondPanel` writes the moment a row is switched from a text operator to a numeric

@@ -12,7 +12,7 @@
  * differently. The words are what the user actually reads, so they are pinned here.
  */
 import fixture from '../__fixtures__/automationValidationCases.json';
-import type { AutomationRule } from '../../../types/electron';
+import type { AutomationClause, AutomationRule } from '../../../types/electron';
 import {
     BADGES,
     MAX_DELAY_MS,
@@ -485,5 +485,37 @@ describe('automationValidation — a branch no JSON literal can reach', () => {
 
     it('the paired positive: an ordinary finite value reports nothing', () => {
         expect(problems(clauseRule(25))).toEqual([]);
+    });
+});
+
+describe('automationValidation — invalid sources do not hide unfinished operands', () => {
+    const ruleWith = (clause: AutomationClause): AutomationRule => ({
+        ...cases[0].rule,
+        graph: {
+            ...cases[0].rule.graph,
+            parse: { preset: 'custom', literal: null, find: 'ctx:(\\d+)%', keep: 'brackets' },
+            cond: {
+                kind: 'text',
+                op: null,
+                threshold: null,
+                clauses: [clause],
+            },
+        },
+    });
+
+    const codes = (rule: AutomationRule) => new Set(problems(rule).map((p) => p.code));
+
+    it('reports both an invalid source and a missing numeric threshold', () => {
+        expect(codes(ruleWith({
+            source: { group: 2 },
+            test: { number: { op: 'gt', value: null } },
+        }))).toEqual(new Set(['cond.unknownToken', 'cond.clauseNeedsValue']));
+    });
+
+    it('reports both an invalid source and an invalid matches operand', () => {
+        expect(codes(ruleWith({
+            source: { group: 2 },
+            test: { text: { op: 'matches', value: '(' } },
+        }))).toEqual(new Set(['cond.unknownToken', 'cond.badClausePattern']));
     });
 });
