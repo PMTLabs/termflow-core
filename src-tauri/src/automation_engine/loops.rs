@@ -117,15 +117,71 @@ pub struct PendingSend {
     pub captures: Option<Captures>,
 }
 
+/// How far the wall clock may jump between two iterations before the loop treats the gap as *this
+/// process was not observing the tick* rather than as an ordinary slow tick.
+///
+/// 60 s against a [`BASE_TICK_MS`] of 250: two orders of magnitude of headroom over scheduler
+/// jitter, a `spawn_blocking` that overran, or a machine under so much load that a quarter-second
+/// sleep took twenty. Nothing short of a suspend, a hibernate or an NTP step crosses it, and the
+/// cost of crossing it wrongly is one schedule that does not fire on the day it was crossed.
+pub const RESUME_GAP_MS: i64 = 60_000;
+
 pub async fn run_evaluator(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>) {
     let mut cursor = 0usize;
+    // The previous iteration's `now_ms`, and the whole of the sleep/resume story. It is state
+    // carried across iterations of the loop that already exists — no second task, no second timer,
+    // no `interval`, and therefore nothing new to cancel at shutdown.
+    let mut prev_tick_ms: Option<i64> = None;
     loop {
         if engine.stopping.load(Ordering::Relaxed) {
             return;
         }
-        cursor = evaluate_tick(&engine, &host, cursor, now_ms()).await;
+        // Read ONCE and handed down, so the gap check and the walk cannot disagree about now.
+        let now = now_ms();
+        cursor = evaluator_step(&engine, &host, cursor, prev_tick_ms, now).await;
+        prev_tick_ms = Some(now);
         tokio::time::sleep(Duration::from_millis(BASE_TICK_MS)).await;
     }
+}
+
+/// One iteration of the evaluator loop: **catch up on a clock gap, then evaluate.**
+///
+/// **The wake path `reload` never had.** `reload` seeds `last_fired_day` for any schedule whose
+/// minute has already passed, so an app started at 14:00 does not type a 09:00 prompt into a live
+/// agent — but it runs only at spawn and from `reload_after_commit`. A laptop that slept at 18:00
+/// on Monday and opened at 10:00 on Tuesday reaches this loop with Monday's mark against a Tuesday
+/// `now`, and `10:00 >= 09:00` fires the prompt five hours after the fact, every morning. A cold
+/// start at 10:00 was suppressed and a lid-open at 10:00 was not — two spellings of the same
+/// situation, opposite behaviour.
+///
+/// The seeding's own premise is *the process was not observing the tick when the minute passed*,
+/// and a suspend satisfies it exactly, so the fix is to re-run **that same seeding** ([`
+/// AutomationEngine::seed_missed_schedules`], one function, two callers) when the gap between two
+/// iterations says nobody was watching.
+///
+/// **Platform-independent on purpose.** Windows emits `system:resume` from `session_notify.rs` on
+/// `PBT_APMRESUMEAUTOMATIC`, which is the more precise signal and is available on exactly one of
+/// the three platforms this ships to; the gap covers all of them, including a hibernate that the
+/// power broadcast misses and an NTP step forward, which is the same problem wearing a different
+/// hat. If anyone ever wants the precision, `system:resume` is where to get it.
+///
+/// `None` is the first iteration, and it needs nothing: `reload` seeded moments earlier at spawn.
+/// A gap that runs BACKWARDS is deliberately not a resume — nothing was missed, and re-seeding on a
+/// clock stepped back would spend a day whose minute has not arrived.
+pub async fn evaluator_step(
+    engine: &Arc<AutomationEngine>,
+    host: &Arc<dyn EngineHost>,
+    cursor: usize,
+    prev_tick_ms: Option<i64>,
+    now_ms: i64,
+) -> usize {
+    if prev_tick_ms.is_some_and(|prev| now_ms - prev > RESUME_GAP_MS) {
+        // `local_now` is a pure function of `now_ms`, which was read once by the caller, so asking
+        // it here and again inside the walk cannot produce two different days — the "exactly one
+        // clock per tick" property is about the timestamp, and there is still exactly one.
+        engine.seed_missed_schedules(&engine.snapshot_live(), schedule::local_now(now_ms));
+    }
+    evaluate_tick(engine, host, cursor, now_ms).await
 }
 
 /// One pass: work out what is due, run at most [`MAX_EVALS_PER_TICK`] of it, spend the dirty flags
@@ -1509,6 +1565,94 @@ mod tests {
             vec!["pc-1"],
             "a skipped day must not retire the rule: {:?}",
             fake.written()
+        );
+    }
+
+    /// **A lid that opens at 10:00 must behave like an app STARTED at 10:00** — the wake path
+    /// `reload` never had.
+    ///
+    /// `reload` seeds `last_fired_day` for a schedule whose minute has already gone by, and it runs
+    /// at spawn and from `reload_after_commit` and nowhere else. So a machine that slept at 18:00
+    /// on Monday and woke at 10:00 on Tuesday came back with MONDAY's mark against a Tuesday `now`,
+    /// and `10:00 >= 09:00` typed the stand-up prompt into a live agent an hour late — every
+    /// morning. A cold start at 10:00 was suppressed and a lid-open at 10:00 was not, which is one
+    /// situation with two answers.
+    ///
+    /// The second tick is not decoration: it says the day was SPENT rather than merely deferred
+    /// past the wake, which is the difference between the seeding and a one-tick suppression. The
+    /// third says the rule is not retired — Wednesday still fires, driven by an ordinary 250 ms
+    /// step so the gap detector is not what is being asked.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_missed_while_the_machine_slept_does_not_fire_on_wake() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1")],
+            &[("au-sched", &["tm-1"])],
+        );
+        let slept_at = at_local(2026, 9, 7, Weekday::Mon, 18, 0);
+        let woke_at = at_local(2026, 9, 8, Weekday::Tue, 10, 0);
+
+        evaluator_step(&engine, &host, 0, Some(slept_at), woke_at).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert!(
+            fake.written().is_empty(),
+            "the 09:00 prompt was typed into a live agent at 10:00 on the lid opening: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(day_ordinal(2026, 9, 8)),
+            "the wake spends today, exactly as a cold start at 10:00 would"
+        );
+
+        // Still spent four hours later — the day was marked, not the tick skipped.
+        let tuesday_afternoon = at_local(2026, 9, 8, Weekday::Tue, 14, 0);
+        evaluator_step(&engine, &host, 0, Some(woke_at), tuesday_afternoon).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(fake.written().is_empty(), "delivered later the same day: {:?}", fake.written());
+
+        // Wednesday, with the app genuinely awake across the minute.
+        let wednesday = at_local(2026, 9, 9, Weekday::Wed, 9, 0);
+        evaluator_step(&engine, &host, 0, Some(wednesday - BASE_TICK_MS as i64), wednesday).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "a suppressed morning must not retire the rule: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **An ordinary tick does not re-seed, and this is the half that stops the fix eating the
+    /// feature.**
+    ///
+    /// The gap check is what makes the re-seed conditional; run unconditionally it would mark every
+    /// schedule the instant its minute arrived — `target_already_past` is `now >= target`, the same
+    /// comparison `schedule_due` makes — and no schedule would ever fire again, on any machine, with
+    /// nothing in the log to say why. One 250 ms step across 09:00 is the whole assertion.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_whose_minute_arrives_while_the_app_is_running_still_fires() {
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[("tm-1", "pc-1")],
+            &[("au-sched", &["tm-1"])],
+        );
+        let nine = at_local(2026, 9, 7, Weekday::Mon, 9, 0);
+
+        evaluator_step(&engine, &host, 0, Some(nine - BASE_TICK_MS as i64), nine).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "a quarter-second tick was read as a resume and spent the day: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(day_ordinal(2026, 9, 7)),
+            "premise: it is the SEND that marked the day, not a re-seed"
         );
     }
 

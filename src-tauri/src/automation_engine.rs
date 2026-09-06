@@ -459,27 +459,11 @@ impl AutomationEngine {
             }
         }
 
-        // **A schedule whose minute has already passed today is marked as fired today** (§6.3).
-        //
-        // `schedule_due` compares `now >= target`, so an absent day mark and a target three hours
-        // in the past are the launch case and a crossing spelled the same way. Seeding here is what
-        // tells them apart: an app STARTED at 14:00 does not deliver a 09:00 prompt on arrival,
-        // while an app RUNNING across 09:00 has no seed for today and fires. Firing a missed prompt
-        // late is the "nagging on arrival" behaviour plan 028 Q3 already ruled against for arm
-        // state. Without this the `>=` that keeps a spring-forward schedule alive would also
-        // deliver every schedule the app was closed for.
-        //
         // **After the forget loop, deliberately.** `forget_rule` drops everything a changed rule
-        // owns, this map included, so a seed written before it would be wiped for exactly the rules
-        // that need it most — a rule saved at 14:00 is re-seeded here and does not fire on the next
-        // tick. Reading `next` rather than the live map keeps it one pass, before the swap.
-        for live in next.values() {
-            if let Some(TimerStep { mode }) = &live.rule.graph.timer {
-                if schedule::target_already_past(mode, now_local) {
-                    self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
-                }
-            }
-        }
+        // owns, the day mark included, so a seed written before it would be wiped for exactly the
+        // rules that need it most — a rule saved at 14:00 is re-seeded here and does not fire on
+        // the next tick. Reading `next` rather than the live map keeps it one pass, before the swap.
+        self.seed_missed_schedules(next.values(), now_local);
 
         report.live = next.len();
         *self.live.write().unwrap_or_else(|e| e.into_inner()) = next;
@@ -499,6 +483,38 @@ impl AutomationEngine {
             }
         }
         Ok(report)
+    }
+
+    /// **A schedule whose minute has already passed is marked as fired today** (§6.3) — for every
+    /// rule handed in, and it is deliberately ONE function with two callers.
+    ///
+    /// `schedule_due` compares `now >= target`, so an absent day mark and a target three hours in
+    /// the past are *the process was not watching when the minute went by* and *the minute is going
+    /// by right now*, spelled identically. This seeding is the only thing that tells them apart:
+    /// an app STARTED at 14:00 does not deliver a 09:00 prompt on arrival, while an app RUNNING
+    /// across 09:00 has no seed for today and fires. Firing a missed prompt late is the "nagging on
+    /// arrival" behaviour plan 028 Q3 already ruled against for arm state, and without this the
+    /// `>=` that keeps a spring-forward schedule alive would also deliver every schedule the app
+    /// was closed for.
+    ///
+    /// **Two callers, one implementation.** `reload_at` runs it over the map it has just built, at
+    /// process start and after every store commit; [`loops::evaluator_step`] runs it over
+    /// `snapshot_live()` when the wall clock jumps, which is what a laptop lid closing at 18:00 and
+    /// opening at 10:00 the next morning looks like from inside the tick. Those are the same
+    /// premise — *nothing was observing the tick while the minute passed* — so a second copy of
+    /// "is this rule's target already past" would be two answers to one question.
+    pub(crate) fn seed_missed_schedules<'a>(
+        &self,
+        rules: impl IntoIterator<Item = &'a Arc<LiveRule>>,
+        now_local: schedule::LocalTime,
+    ) {
+        for live in rules {
+            if let Some(TimerStep { mode }) = &live.rule.graph.timer {
+                if schedule::target_already_past(mode, now_local) {
+                    self.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal);
+                }
+            }
+        }
     }
 
     /// R6, as an in-memory event first and a row second (§7.8).
