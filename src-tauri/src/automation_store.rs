@@ -1241,14 +1241,43 @@ impl AutomationStore {
             Self::refuse_if_it_would_run_wrong(rule)?;
         }
 
+        let previous = self.write_rule_committed(rule)?;
+        // Write through rather than invalidate: the new value is right here, and a rule saved with
+        // verbose just switched on must not wait for a cache miss to start logging.
+        self.verbose_cache.insert(rule.id.clone(), rule.verbose_until);
+        Ok(previous)
+    }
+
+    /// `write_rule`, opening and committing its own transaction. The half of `save_rule` that has
+    /// nothing to do with the enable gate, so a caller that needs the write WITHOUT the gate (only
+    /// `save_rule_bypassing_the_enable_gate_for_tests` does) has something to call that is not a
+    /// second copy of the lock/transaction/commit dance.
+    fn write_rule_committed(&self, rule: &AutomationRule) -> Result<Option<i64>, AutomationStoreError> {
         let mut guard = self.conn.lock().unwrap();
         let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
         let tx = conn.transaction()?;
         let previous = Self::write_rule(&tx, rule)?;
         tx.commit()?;
-        drop(guard);
-        // Write through rather than invalidate: the new value is right here, and a rule saved with
-        // verbose just switched on must not wait for a cache miss to start logging.
+        Ok(previous)
+    }
+
+    /// `save_rule`, without §7.8's enable gate.
+    ///
+    /// **Test-only, and deliberately so.** Every path a running app can reach — `save_rule` here,
+    /// and `set_enabled_checked`'s own re-validation — now refuses to CREATE the row this writes.
+    /// But `save_rule`'s own doc above already establishes that such a row is not hypothetical: a
+    /// rule enabled by a build OLDER than a validation rule the current build has can still be
+    /// sitting in `automation_rules`, is still loaded by `reload` (whose exemption is scoped to
+    /// `parse.*`, on purpose — the ENABLE path is what re-checks the rest), and still reaches the
+    /// engine's evaluate-and-send loop. This is the one way left to construct that row in a test,
+    /// mirroring `write_raw_graph`'s reason for existing: an old build could still write it, so a
+    /// test still has to be able to.
+    #[cfg(test)]
+    pub(crate) fn save_rule_bypassing_the_enable_gate_for_tests(
+        &self,
+        rule: &AutomationRule,
+    ) -> Result<Option<i64>, AutomationStoreError> {
+        let previous = self.write_rule_committed(rule)?;
         self.verbose_cache.insert(rule.id.clone(), rule.verbose_until);
         Ok(previous)
     }

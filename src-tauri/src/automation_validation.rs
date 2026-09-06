@@ -24,6 +24,7 @@
 
 use regex::{Regex, RegexBuilder};
 
+use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, CondKind, Criterion, Keep, TargetMode,
 };
@@ -171,8 +172,9 @@ pub fn pattern_problems(graph: &AutomationGraph) -> Vec<Problem> {
             Severity::Warns,
             "parse",
             "parse.manyGroups",
-            "This pattern has more than one bracketed group. The first one is used; \
-             name one of them `value` to choose a different one.",
+            "This pattern has more than one bracketed group. The comparison uses the first one; \
+name one of them `value` to use a different one instead. The rest are still available \
+in the message, as $2, $3 and so on.",
         ));
     }
 
@@ -288,6 +290,54 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                     "action.echo",
                     "This message matches the rule's own pattern, so the rule can see what it types. \
                      TermFlow ignores its own message, but a shorter pattern is safer.",
+                ));
+            }
+        }
+    }
+
+    // --- token substitution -----------------------------------------------------------------
+    // §4.4, opt-in via `ActionStep.substitute` (plan 032 §4.2). Without this, a message naming a
+    // token the pattern cannot supply reaches `subst::substitute` only at SEND time, where §4.4's
+    // own table refuses the send — silently, from the rule's own log, well after the user who
+    // wrote "fix $3" believed they were done. This stops it at save/enable time instead.
+    //
+    // `subst::tokens_used` is the SAME scanner `substitute` reads (see that module's doc): a
+    // second scanner here could recognise a different grammar and let a message pass that the
+    // send then refuses anyway.
+    if rule.graph.action.substitute {
+        if rule.graph.parse.find.trim().is_empty() {
+            // The toggle itself claims the message inserts a capture, which nothing can be true
+            // of before a pattern exists — asked regardless of whether a token has actually been
+            // typed yet, the same way the threshold check above is asked regardless of what a
+            // clause would compare against.
+            out.push(Problem::new(
+                Severity::Blocks,
+                "action",
+                "action.tokenWithoutParse",
+                "This message inserts captured values, but the rule has no pattern to capture them from.",
+            ));
+        } else if let Ok(compiled) = compile(&rule.graph.parse.find) {
+            let count = compiled.captures_len().saturating_sub(1);
+            for token in subst::tokens_used(&rule.graph.action.message) {
+                let bad = match &token {
+                    subst::Token::Whole => false,
+                    subst::Token::Group(n) => *n > count,
+                    subst::Token::Named(name) => {
+                        !compiled.capture_names().any(|cn| cn == Some(name.as_str()))
+                    }
+                };
+                if !bad {
+                    continue;
+                }
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "action",
+                    "action.unknownToken",
+                    format!(
+                        "{token} has nothing to stand for. The pattern in Read a value has \
+                         {count} bracketed group{}, so the highest you can use is ${count}.",
+                        if count == 1 { "" } else { "s" }
+                    ),
                 ));
             }
         }
@@ -666,6 +716,8 @@ mod tests {
             "cond.incomplete",
             "action.empty",
             "action.echo",
+            "action.tokenWithoutParse",
+            "action.unknownToken",
         ] {
             assert!(codes.contains(code), "no fixture case produces `{code}`");
         }

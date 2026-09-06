@@ -248,6 +248,36 @@ pub(crate) fn rig_with_rule(
     wire(vec![rule])
 }
 
+/// Like `wire`, but plants each rule with `save_rule_bypassing_the_enable_gate_for_tests` rather
+/// than `save_rule` — for a rule §7.8's enable gate would now refuse to create (Task 6's
+/// `action.unknownToken` and friends), simulating one written by a build OLDER than that
+/// validation. `reload`'s own `parse.*`-only exemption already establishes that such a row is
+/// real, not hypothetical, and still has to reach evaluate-and-send.
+pub(crate) fn wire_bypassing_the_enable_gate(
+    rules: Vec<AutomationRule>,
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let fake = Arc::new(FakeHost::new().with_terminal("tm-1", "pc-1", "codex · core"));
+    for rule in &rules {
+        fake.store.save_rule_bypassing_the_enable_gate_for_tests(rule).unwrap();
+    }
+    let engine = Arc::new(AutomationEngine::new(0));
+    engine.reload(&fake.store, 0).unwrap();
+    for rule in &rules {
+        engine.runtime.set_watched(&rule.id, ["tm-1".to_string()].into());
+    }
+    let host: Arc<dyn EngineHost> = fake.clone();
+    (engine, fake, host)
+}
+
+/// `rig_with_rule`'s counterpart for `wire_bypassing_the_enable_gate`.
+pub(crate) fn rig_with_rule_bypassing_the_enable_gate(
+    f: impl FnOnce(&mut AutomationGraph),
+) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+    let mut rule = ctx_rule("au-1");
+    f(&mut rule.graph);
+    wire_bypassing_the_enable_gate(vec![rule])
+}
+
 pub(crate) fn log_kinds(store: &AutomationStore) -> Vec<String> {
     store
         .load_automation_log(&LogScope::All, LogOrder::Asc, 100)

@@ -61,6 +61,8 @@ describe('automationValidation — the shared fixture', () => {
             'cond.incomplete',
             'action.empty',
             'action.echo',
+            'action.tokenWithoutParse',
+            'action.unknownToken',
         ];
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });

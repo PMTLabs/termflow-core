@@ -441,8 +441,9 @@ export function sayPattern(find: string, keep: AutomationKeep): PatternSaying | 
     // `eval.rs`: `caps.name("value").or_else(|| caps.get(1))` — the group called `value`, else group
     // ONE. This used to be a single flag set by any digit inside ANY group, so `(\w+):(\d+)` was
     // paraphrased *"and keep the number"* directly under the same panel's `parse.manyGroups`
-    // warning — *"This pattern has more than one bracketed group. The first one is used"* — while
-    // the first one is the word. Two surfaces, one rule, contradictory, eight pixels apart: the
+    // warning — *"This pattern has more than one bracketed group. The comparison uses the first
+    // one"* — while the first one is the word. Two surfaces, one rule, contradictory, eight pixels
+    // apart: the
     // failure `automationDerive` exists to prevent, at the one displayed string that does not go
     // through `stepValues`.
     const inside: FlatTok[][] = [];

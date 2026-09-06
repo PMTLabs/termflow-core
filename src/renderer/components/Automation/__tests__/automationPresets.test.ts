@@ -163,8 +163,8 @@ describe('sayPattern — the plain-words paraphrase', () => {
      * `eval.rs`: `caps.name("value").or_else(|| caps.get(1))` — the group called `value`, else group
      * ONE. The flag was set by any digit inside ANY group, so the first row below said *"keep the
      * number"* directly under the same panel's `parse.manyGroups` warning: *"This pattern has more
-     * than one bracketed group. The first one is used."* Two surfaces, one rule, contradictory,
-     * eight pixels apart.
+     * than one bracketed group. The comparison uses the first one."* Two surfaces, one rule,
+     * contradictory, eight pixels apart.
      */
     it('says which value is kept by asking the group the engine would take', () => {
         // Group 1 is the WORD. Not "the number", whatever else is in brackets.

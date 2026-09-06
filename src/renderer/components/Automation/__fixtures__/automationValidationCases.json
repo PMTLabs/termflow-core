@@ -1522,6 +1522,211 @@
         }
       },
       "expected": []
+    },
+    {
+      "name": "action.unknownToken — $3 with two groups",
+      "why": "Two groups exist, but the message asks for a third. `substitute` is opt-in (plan 032 §4.2), so a text rule can carry this pattern and message with the toggle off with nothing wrong — the case right after this one.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+) in (\\S+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix $3",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.unknownToken"
+        }
+      ]
+    },
+    {
+      "name": "no problem when substitution is off",
+      "why": "The same $1 that would be a token with `substitute` on is the literal `awk '{print $1}'` people already write — opt-in is what keeps it working.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "FAILED (\\d+)",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "awk '{print $1}'",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": false
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "$$1 is escaped, not a token",
+      "why": "The scanner shared with `subst.rs` treats `$$` as an escaped literal dollar, so `$$1` never reaches the token check at all, whatever the pattern can supply.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "x",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "cost $$1",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "action.tokenWithoutParse — substitute is on but there is no pattern",
+      "why": "The toggle says the message means to insert a capture, which nothing can be true of before a pattern exists — asked regardless of whether a token has actually been typed yet, the same way `cond.incomplete` is asked regardless of what a clause would compare against.",
+      "rule": {
+        "id": "au-fix",
+        "name": "r",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "text",
+            "op": null,
+            "threshold": null
+          },
+          "action": {
+            "message": "fix $1",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "parse",
+          "code": "parse.empty"
+        },
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.tokenWithoutParse"
+        }
+      ]
     }
   ]
 }

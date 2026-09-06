@@ -988,9 +988,15 @@ mod tests {
     /// §4.4's last row. Validation should have caught this, so reaching it means a rule got here
     /// another way — and the answer is still "type nothing": refuse the send and log the token
     /// rather than type a live `$3` into a running agent.
+    ///
+    /// **"Another way" is now named, not hypothetical.** Task 6's `action.unknownToken` refuses to
+    /// let `save_rule` create this exact row enabled, so the rig plants it directly, bypassing
+    /// that gate — standing in for a rule a build older than the validation already enabled. This
+    /// is the send-time defense that row still needs; `reload` does not re-run the check that
+    /// would have caught it, on purpose (its own exemption is scoped to `parse.*`).
     #[tokio::test(start_paused = true)]
     async fn an_unresolvable_token_refuses_the_send_and_logs_it() {
-        let (engine, fake, host) = rig_with_rule(|g| {
+        let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|g| {
             g.parse.find = r"FAILED (\d+)".into();
             g.cond.kind = CondKind::Text;
             g.action.message = "Fix $3".into();

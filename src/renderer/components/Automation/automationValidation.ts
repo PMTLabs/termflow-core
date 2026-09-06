@@ -29,6 +29,7 @@ import type {
     AutomationGraph,
     AutomationRule,
 } from '../../types/electron';
+import { tokensUsed } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
@@ -53,7 +54,9 @@ export type ProblemCode =
     | 'parse.manyGroups'
     | 'cond.incomplete'
     | 'action.empty'
-    | 'action.echo';
+    | 'action.echo'
+    | 'action.tokenWithoutParse'
+    | 'action.unknownToken';
 
 export interface Problem {
     severity: Severity;
@@ -132,27 +135,33 @@ function compileError(find: string): string {
 }
 
 /**
- * How many capture groups a pattern has, and whether one of them is named `value`.
+ * How many capture groups a pattern has, and the names it declares.
  *
  * `find + '|'` is the standard trick: the alternation with an empty branch makes the expression
  * match the empty string, so `exec('')` always returns a result whose `length - 1` is the group
  * count and whose `.groups` carries every named group. Counting brackets by hand would be a second
  * regex parser, and it would be wrong about `\(`, `(?:` and character classes on its first day.
  *
+ * **`names` is what the pattern DECLARES, not what matched** — there is no match at validation
+ * time, only a probe against the empty string, so a name is either declared by the pattern or it
+ * is not. `hasNamedValue` used to collapse this to one boolean question (`value`, or not); §5's
+ * token check needs the full set, to ask of an arbitrary `${name}` whether the pattern could ever
+ * supply it.
+ *
  * Only ever called on a pattern that has already compiled.
  */
-function groupsOf(find: string): { count: number; hasNamedValue: boolean } {
+function groupsOf(find: string): { count: number; names: Set<string> } {
     try {
         const probe = new RegExp(`${browserSource(find)}|`);
         const m = probe.exec('');
-        if (!m) return { count: 0, hasNamedValue: false };
+        if (!m) return { count: 0, names: new Set() };
         const groups = m.groups as Record<string, unknown> | undefined;
         return {
             count: m.length - 1,
-            hasNamedValue: !!groups && Object.prototype.hasOwnProperty.call(groups, 'value'),
+            names: new Set(groups ? Object.keys(groups) : []),
         };
     } catch {
-        return { count: 0, hasNamedValue: false };
+        return { count: 0, names: new Set() };
     }
 }
 
@@ -184,7 +193,7 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
         return out;
     }
 
-    const { count, hasNamedValue } = groupsOf(parse.find);
+    const { count, names } = groupsOf(parse.find);
 
     // `keep` is a NUMERIC-only concern. §2.2b's presence branch is `is_match` — no group, no
     // coercion, no `keep` — and `brackets` is the default a text rule carries around without ever
@@ -204,14 +213,15 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
         );
     }
 
-    if (numeric && parse.keep === 'brackets' && count > 1 && !hasNamedValue) {
+    if (numeric && parse.keep === 'brackets' && count > 1 && !names.has('value')) {
         out.push(
             problem(
                 'warns',
                 'parse',
                 'parse.manyGroups',
-                'This pattern has more than one bracketed group. The first one is used; '
-                    + 'name one of them `value` to choose a different one.',
+                'This pattern has more than one bracketed group. The comparison uses the first one; '
+                    + 'name one of them `value` to use a different one instead. The rest are still available '
+                    + 'in the message, as $2, $3 and so on.',
             ),
         );
     }
@@ -320,6 +330,47 @@ export function problems(rule: AutomationRule): Problem[] {
         }
     }
 
+    // --- token substitution ----------------------------------------------------------------------
+    // §4.4, opt-in via `ActionStep.substitute` (plan 032 §4.2). Without this, a message naming a
+    // token the pattern cannot supply reaches `subst::substitute` only at SEND time, where §4.4's
+    // own table refuses the send — silently, from the rule's own log, well after the user who
+    // wrote "fix $3" believed they were done. This stops it at save/enable time instead.
+    //
+    // `tokensUsed` is the validation-side scanner ported from `subst::tokens_used` — the SAME
+    // grammar `substitute` reads, so a message this lets through cannot be one the send then
+    // refuses anyway.
+    if (action.substitute) {
+        if (!parse.find.trim()) {
+            // The toggle itself claims the message inserts a capture, which nothing can be true of
+            // before a pattern exists — asked regardless of whether a token has actually been typed
+            // yet, the same way `cond.incomplete` above is asked regardless of what a clause would
+            // compare against.
+            out.push(
+                problem(
+                    'blocks',
+                    'action',
+                    'action.tokenWithoutParse',
+                    'This message inserts captured values, but the rule has no pattern to capture them from.',
+                ),
+            );
+        } else if (compilePattern(parse.find) !== null) {
+            const { count, names } = groupsOf(parse.find);
+            for (const t of tokensUsed(action.message)) {
+                const bad = t.kind === 'group' ? t.n > count : !names.has(t.name);
+                if (!bad) continue;
+                out.push(
+                    problem(
+                        'blocks',
+                        'action',
+                        'action.unknownToken',
+                        `${t.text} has nothing to stand for. The pattern in Read a value has `
+                            + `${count} bracketed group${count === 1 ? '' : 's'}, so the highest you can use is $${count}.`,
+                    ),
+                );
+            }
+        }
+    }
+
     // STABLE, so within each severity the problems stay in step order — targets, monitor, parse,
     // cond, action — which is the order the inspector's problem list draws them in.
     return [...out.filter((p) => p.severity === 'blocks'), ...out.filter((p) => p.severity !== 'blocks')];
@@ -352,6 +403,8 @@ const BADGES: Record<ProblemCode, string> = {
     'cond.incomplete': 'needs a comparison',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',
+    'action.tokenWithoutParse': 'needs a pattern to capture from',
+    'action.unknownToken': 'names a value the pattern has not got',
 };
 
 export function badgeFor(p: Problem): string {
