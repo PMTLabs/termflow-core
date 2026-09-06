@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::automation::runtime::ECHO_SETTLE_MS;
+use crate::automation::runtime::{ParkedSend, ECHO_SETTLE_MS};
 use crate::automation::targeting::watched_set;
 use crate::automation_engine::due::{
     due_now, select_due, settled_processes, BASE_TICK_MS, MAX_EVALS_PER_TICK, TARGETING_TICK_MS,
@@ -28,7 +28,9 @@ use crate::automation_engine::eval::{self, ArmState, Captures, Decision, Evaluat
 use crate::automation_engine::host::{EngineHost, HostPort};
 use crate::automation_engine::subst;
 use crate::automation_engine::{AutomationEngine, LiveRule};
-use crate::automation_store::{AutomationLogEntry, Cadence, Criterion, LogKind, TargetMode};
+use crate::automation_store::{
+    AutomationLogEntry, Cadence, Criterion, LogKind, TargetMode, TimerMode, TimerStep,
+};
 use crate::state::ChannelPayload;
 
 /// How long a send waits for the terminal's queue before giving up and rolling back (§2.5).
@@ -139,6 +141,9 @@ pub async fn evaluate_tick(
     // goes quiet.
     let mut seen_seq: HashMap<String, u64> = HashMap::new();
     let mut owed: HashSet<String> = HashSet::new();
+    // Declared before the walk because the walk itself fills it: §6.2's parked sends come due
+    // inside it, alongside the crossings decided further down.
+    let mut sends: Vec<PendingSend> = Vec::new();
     for live in engine.snapshot_live() {
         // Sorted, so which pairs the cap holds over is a property of the rule and not of hash order.
         let mut leaves: Vec<String> = engine.runtime.watched_for(&live.rule.id).into_iter().collect();
@@ -150,6 +155,37 @@ pub async fn evaluate_tick(
             let Some(pc) = host.process_for_leaf(&tm) else {
                 continue;
             };
+            // §6.1: drained HERE, inside the walk over `snapshot_live()`, and never by a sweep
+            // over the parked map. `snapshot_live()` already filters `!enabled` and
+            // `completed_at.is_some()`, and `reload` already drops keys for a rule that vanished
+            // or whose `updated_at` moved — so "a disabled, invalid or deleted rule's timer does
+            // not fire" is true by construction, through gates that already exist and are already
+            // tested. A separate sweep would have to re-derive all three and would rot silently
+            // the first time a fourth is added.
+            //
+            // Ahead of the settle window and the cadence gate, and both are deliberate: neither is
+            // about this. Settling means *nothing READS this terminal*, and a drain reads nothing.
+            // The cadence gate asks whether the pair is due for an EVALUATION — and the terminal
+            // this feature exists for is the one that printed `API error` and then went quiet, so
+            // it is never due again and a drain behind that gate would never run at all.
+            //
+            // `at_ms` is NOW, not the crossing's stamp. `run_send` measures the echo needle and the
+            // settle window forward from it (`landed = at + began.elapsed()`), so a stamp 30 s in
+            // the past would open a window that had already closed and expire the needle for the
+            // message it is about to type.
+            if let Some(parked) = engine.runtime.take_parked_due(&live.rule.id, &tm, now_ms) {
+                admit(
+                    engine,
+                    &mut sends,
+                    PendingSend {
+                        pair: Pair { rule: live.clone(), tm: tm.clone(), pc: pc.clone() },
+                        prev: parked.prev,
+                        label: parked.label,
+                        at_ms: now_ms,
+                        captures: parked.captures,
+                    },
+                );
+            }
             let seq = engine.runtime.dirty_seq(&pc);
             // The EARLIEST read wins: anything the tap adds later must survive this tick's clear.
             if let Some(seq) = seq {
@@ -193,25 +229,9 @@ pub async fn evaluate_tick(
         );
     }
 
-    let mut sends: Vec<PendingSend> = Vec::new();
     for i in &picked {
         match evaluate_pair(engine, host, &due[*i], now_ms) {
-            // **R6 is per RULE — not per pair, and not per TICK.** A `runs_once` rule watching three
-            // terminals crosses on all three, and the send lock is per LEAF, so three tasks take
-            // three different locks and three messages go out on a rule the user asked to run once.
-            //
-            // The claim is taken HERE, where the crossing is decided. The first version of this
-            // scanned the current tick's `sends` vector, which covers the three-in-one-tick case and
-            // nothing else: two terminals crossing on consecutive ticks are two separate vectors, and
-            // the only cross-tick guard was `is_live`, which does not go false until `complete_rule`
-            // runs — after `deliver` returns, two ticks later. The arm states advance either way;
-            // only the send is dropped, so a pair that did not send stays `Fired` and never sends.
-            Evaluated::Read(Some(send)) => {
-                let rule_id = &send.pair.rule.rule.id;
-                if !send.pair.rule.rule.runs_once || engine.runtime.claim_once(rule_id) {
-                    sends.push(send);
-                }
-            }
+            Evaluated::Read(Some(send)) => admit(engine, &mut sends, send),
             // Read, decided, nothing to send: this pair has consumed the output and may spend it.
             Evaluated::Read(None) => {}
             // **The third door.** `settled_processes`'s enumeration named two and this was neither:
@@ -246,6 +266,31 @@ pub async fn evaluate_tick(
     }
 
     next_cursor
+}
+
+/// Put one decided send on this tick's dispatch list, if R6 lets it through.
+///
+/// **R6 is per RULE — not per pair, and not per TICK.** A `runs_once` rule watching three terminals
+/// crosses on all three, and the send lock is per LEAF, so three tasks take three different locks
+/// and three messages go out on a rule the user asked to run once.
+///
+/// The claim is taken HERE, where the crossing is decided. The first version of this scanned the
+/// current tick's `sends` vector, which covers the three-in-one-tick case and nothing else: two
+/// terminals crossing on consecutive ticks are two separate vectors, and the only cross-tick guard
+/// was `is_live`, which does not go false until `complete_rule` runs — after `deliver` returns, two
+/// ticks later. The arm states advance either way; only the send is dropped, so a pair that did not
+/// send stays `Fired` and never sends.
+///
+/// **It is a function because there are now two routes onto that list**, and a gate written at one
+/// caller is a gate the next caller opts out of. §6.2's parked sends are the second route, and they
+/// need it more than the first: a `runs_once` rule with a delay parks on every terminal that
+/// crosses *during* the wait — the arm machine cannot stop that, because those are different pairs —
+/// and all of them come ripe on the same tick, where without this they would be three sends.
+fn admit(engine: &Arc<AutomationEngine>, sends: &mut Vec<PendingSend>, send: PendingSend) {
+    let rule_id = &send.pair.rule.rule.id;
+    if !send.pair.rule.rule.runs_once || engine.runtime.claim_once(rule_id) {
+        sends.push(send);
+    }
 }
 
 /// What one pair's evaluation leaves for the tick to do.
@@ -308,6 +353,30 @@ pub fn evaluate_pair(
         // Live by construction: `evaluate_pair` only runs for a pair whose leaf just resolved.
         let name = host.label_for(&pair.tm);
         append(host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
+        return Evaluated::Read(None);
+    }
+
+    // §6.2: the Wait step. The crossing has HAPPENED — `set_arm` wrote `Fired` above, the decision
+    // is `Sent` and the log will say so when the message goes out — but the message itself waits.
+    // It is parked, not slept on: `run_send` is never spawned here, no task exists between now and
+    // the drain, and the thing that eventually dispatches it is the same 250 ms tick that decided
+    // it. `Read(None)` and not `Unread`, because this pair genuinely READ the terminal's output —
+    // that read is how it found the match — so the dirty flag is spent exactly as it would have
+    // been by a send.
+    if let Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } }) = &rule.graph.timer {
+        engine.runtime.park(
+            &rule.id,
+            &pair.tm,
+            ParkedSend {
+                due_at_ms: now_ms + delay_ms,
+                // The crossing's own captures and the crossing's own `prev`, for the same reasons
+                // `PendingSend` carries them — and more sharply here, because by the time this
+                // fires the terminal has scrolled on and there is nothing left to re-read.
+                captures: ev.captures,
+                prev,
+                label: host.label_for(&pair.tm),
+            },
+        );
         return Evaluated::Read(None);
     }
 
@@ -1016,6 +1085,242 @@ mod tests {
             "the failure row must name the token, got: {log:?}"
         );
         assert!(log.iter().any(|(kind, _)| kind == "Failed"), "and it must be a Failed row: {log:?}");
+    }
+
+    // =============================================================================================
+    // §6.1, §6.2 — the Wait step, on the tick that already runs
+    // =============================================================================================
+
+    /// *Detect `API error` → wait 30 s → send `resume`.* The crossing types NOTHING; the send is
+    /// parked and drained by a later pass of the same 250 ms tick.
+    ///
+    /// Pre-armed, so the single crossing is the first `evaluate_tick` below rather than a first
+    /// sight — `Unseen` + true arms and never sends (settled decision 7), and the shape matches
+    /// `a_crossing_types_the_resolved_message`.
+    ///
+    /// The two later ticks are deliberately NOT dirty and NOT due: the pair's dirty flag was spent
+    /// by the crossing, so `due_now` is false for both. A drain placed behind the cadence gate
+    /// would never run at all on the terminal this feature is for — one that goes quiet after the
+    /// error it printed.
+    #[tokio::test(start_paused = true)]
+    async fn a_delay_holds_the_send_then_fires_it() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(
+            fake.written().is_empty(),
+            "nothing may be typed at the crossing: {:?}",
+            fake.written()
+        );
+
+        evaluate_tick(&engine, &host, 0, 20_000).await;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        assert!(fake.written().is_empty(), "still holding at 19s: {:?}", fake.written());
+
+        evaluate_tick(&engine, &host, 0, 31_001).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().iter().any(|w| w.contains("resume")),
+            "the parked message never fired: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **The crossing is SPENT at decide time, and the park does not give it back.**
+    ///
+    /// `set_arm` writes `Fired` before the park, which is the whole of "no double-park" (§6.2). The
+    /// tempting wrong move is to roll the arm back to `prev` on the grounds that nothing was sent
+    /// yet — and then the pair crosses again on the very next tick, parks a *new* send, and the
+    /// deadline runs away from the message for as long as the condition stays true.
+    ///
+    /// The oracle is the DEADLINE, not the send count: a re-park keeps the count at one and only
+    /// moves `due_at_ms`, so a test that only counted messages would pass a rule that never fires.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_send_is_not_re_parked_by_the_crossing_it_already_spent() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "the crossing must park its send"
+        );
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::Fired { at_ms: 1_000 },
+            "the crossing has happened even though nothing was sent"
+        );
+
+        // The error is still on screen and the terminal keeps printing, so the pair is due over and
+        // over for the whole of the wait.
+        for t in [1_500i64, 2_000, 5_000, 20_000] {
+            engine.runtime.mark_dirty("pc-1");
+            evaluate_tick(&engine, &host, 0, t).await;
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+            assert_eq!(
+                engine.runtime.parked_at("au-1", "tm-1"),
+                Some(31_000),
+                "the deadline moved at {t}: the pair crossed a second time while its send waited"
+            );
+            assert!(
+                fake.written().is_empty(),
+                "nothing may be typed before the deadline: {:?}",
+                fake.written()
+            );
+        }
+
+        // `due_at_ms` is the moment it may go, not the moment after.
+        evaluate_tick(&engine, &host, 0, 31_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(times_sent(&fake, "resume"), 1, "exactly one message: {:?}", fake.written());
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            None,
+            "a drained send must leave no entry behind"
+        );
+    }
+
+    /// **`prev` rides along for thirty seconds so a failure can still roll back to it.**
+    ///
+    /// `fail` restores the arm state to *exactly* where the crossing found it. For a parked send the
+    /// crossing was 30 s ago, so the only record of that state is the one `ParkedSend` carries — and
+    /// the two plausible substitutes are both wrong in a way that costs sends: `Unseen` + true only
+    /// ARMS (settled decision 7), so this pair would need two more crossings, and `Fired` would
+    /// leave it stuck holding forever.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_send_that_fails_rolls_the_arm_back_to_the_crossing_it_came_from() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = "API error".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume".into();
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "the premise: it parked"
+        );
+
+        *fake.write_err.lock().unwrap() = Some("no writer".into());
+        evaluate_tick(&engine, &host, 0, 31_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        let rows = log_rows(&fake.store);
+        assert!(
+            rows.iter().any(|(k, _, _)| k == "Failed"),
+            "the premise: the write was refused — {rows:?}"
+        );
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::armed(),
+            "a failed parked send must roll back to the state the CROSSING found"
+        );
+
+        // And it is a real rollback: the next crossing parks again.
+        *fake.write_err.lock().unwrap() = None;
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 32_000).await;
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(62_000),
+            "the pair could not cross again after its send failed"
+        );
+    }
+
+    /// **The captures are the crossing's, not the screen's.**
+    ///
+    /// Thirty seconds is a long time in a terminal. By the time the message goes out the matched
+    /// line has scrolled away entirely, so a send that resolved `$1` by re-reading would find
+    /// nothing at all — and §4.4 makes that a refusal, not a guess. `ParkedSend` carries them for
+    /// exactly this reason.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_send_resolves_its_tokens_against_the_crossing_not_the_later_screen() {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse.find = r"API error (\d+)".into();
+            g.cond.finds = Finds::Event;
+            g.action.message = "resume after $1".into();
+            g.action.substitute = true;
+            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+        engine.runtime.mark_dirty("pc-1");
+        fake.say("pc-1", "API error 529");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        assert!(fake.written().is_empty(), "the premise: the crossing parked rather than sending");
+
+        // Half a minute of build output later, nothing of the match is left anywhere.
+        fake.say("pc-1", "all clear\n");
+        evaluate_tick(&engine, &host, 0, 31_000).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        assert!(
+            fake.written().iter().any(|w| w.contains("resume after 529")),
+            "the token was resolved against the screen it fired into, not the match that fired it: \
+             {:?} / {:?}",
+            fake.written(),
+            log_details(&fake.store)
+        );
+    }
+
+    /// **R6 survives the delay.** A `runs_once` rule with a Wait step parks on every terminal that
+    /// crosses during the wait — the arm machine cannot stop that, because those are different
+    /// pairs — and they all come ripe on the same tick. The claim is what makes it one message, and
+    /// the parked route reaches it only because `admit` is shared: a gate written at one caller is a
+    /// gate the next caller opts out of.
+    #[tokio::test(start_paused = true)]
+    async fn a_runs_once_rule_that_parked_on_two_terminals_still_sends_once() {
+        let mut once = ctx_rule_saying("au-once", "once only", 1);
+        once.runs_once = true;
+        once.graph.parse.find = "API error".into();
+        once.graph.cond.finds = Finds::Event;
+        once.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        let (engine, fake, host) = wire(vec![once]);
+        open_second_terminal(&fake);
+        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        for tm in ["tm-1", "tm-2"] {
+            engine.runtime.set_arm("au-once", tm, ArmState::armed());
+        }
+
+        fake.say("pc-1", "API error");
+        engine.runtime.mark_dirty("pc-1");
+        evaluate_tick(&engine, &host, 0, 1_000).await;
+        fake.say("pc-2", "API error");
+        engine.runtime.mark_dirty("pc-2");
+        evaluate_tick(&engine, &host, 0, 1_250).await;
+        assert_eq!(engine.runtime.parked_at("au-once", "tm-1"), Some(31_000));
+        assert_eq!(engine.runtime.parked_at("au-once", "tm-2"), Some(31_250), "both parked");
+
+        evaluate_tick(&engine, &host, 0, 31_250).await;
+        tokio::time::sleep(Duration::from_millis(4_000)).await;
+
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "two parked sends came ripe together and both went out: {:?}",
+            fake.written()
+        );
+        assert!(!engine.is_live("au-once"));
     }
 
     /// A terminal that is not live is DORMANT, not dead: no evaluation, no log line, no state change.
