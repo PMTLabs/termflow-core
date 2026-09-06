@@ -11,6 +11,7 @@
  * place.)*
  */
 import { AUTOMATION_TEMPLATES, blankDraft, draftFromTemplate } from '../automationTemplates';
+import type { AutomationTemplate } from '../automationTemplates';
 
 describe('AUTOMATION_TEMPLATES', () => {
     it('has exactly six, with unique ids and unique titles', () => {
@@ -96,6 +97,61 @@ describe('AUTOMATION_TEMPLATES', () => {
         const second = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         expect(second.graph.action.message).not.toBe('mutated');
         expect(second.targetIds).toEqual([]);
+    });
+
+    /**
+     * **A hand-rolled copy that rebuilds a shape field by field drops the next field silently.**
+     *
+     * `structuredCloneRule` listed `monitor`/`parse`/`cond`/`action` and justified it as *"the
+     * shape is small and known"*. That justification expired the moment the graph gained `timer`
+     * this milestone: a template with a Wait step handed out a draft with none, and `layout` had
+     * been going the same way since it was added. It now spreads the graph first and replaces the
+     * nested members, so a field added later rides through by construction.
+     *
+     * Two oracles, and the SECOND is the one that turns the next silent drop into a red test: a
+     * deep-equal alone would still pass a clone that had lost a key holding `undefined`, and it
+     * says nothing about a key the source has and the copy never mentions.
+     */
+    it('carries every graph field a rule can have, not just the four a template happens to set', () => {
+        const base = AUTOMATION_TEMPLATES[0];
+        const full: AutomationTemplate = {
+            ...base,
+            rule: {
+                ...base.rule,
+                graph: {
+                    ...base.rule.graph,
+                    cond: {
+                        kind: 'number',
+                        op: 'gt',
+                        threshold: 25,
+                        join: 'or',
+                        clauses: [{ source: { group: 1 }, test: { number: { op: 'lt', value: 90 } } }],
+                    },
+                    // The two the field-by-field rebuild dropped.
+                    timer: { mode: { afterMatch: { delayMs: 30_000 } } },
+                    layout: {
+                        monitor: { x: 11, y: 12 },
+                        parse: { x: 21, y: 22 },
+                        cond: { x: 31, y: 32 },
+                        action: { x: 41, y: 42 },
+                    },
+                },
+            },
+        };
+
+        const clone = draftFromTemplate(full);
+        expect(clone.graph).toEqual(full.rule.graph);
+        expect(Object.keys(clone.graph).sort()).toEqual(Object.keys(full.rule.graph).sort());
+
+        // **And it is a COPY, which deep equality cannot see.** A nested member left shared with
+        // the frozen module-level template satisfies both assertions above and still lets an
+        // editor reach back into it — which is the entire reason this function exists.
+        clone.graph.timer!.mode = { afterMatch: { delayMs: 1 } };
+        clone.graph.layout!.monitor.x = 999;
+        clone.graph.cond!.clauses![0].test = { number: { op: 'gt', value: 1 } };
+        expect(full.rule.graph.timer).toEqual({ mode: { afterMatch: { delayMs: 30_000 } } });
+        expect(full.rule.graph.layout!.monitor).toEqual({ x: 11, y: 12 });
+        expect(full.rule.graph.cond!.clauses![0].test).toEqual({ number: { op: 'lt', value: 90 } });
     });
 });
 

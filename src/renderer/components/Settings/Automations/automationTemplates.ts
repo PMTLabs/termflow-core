@@ -305,20 +305,32 @@ export function blankDraft(): AutomationRule {
     };
 }
 
+/** A structural copy of one plain-data value. Every graph step is JSON and nothing here is not. */
+const deep = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
 /**
  * A deep copy of the frozen template, so an editor that mutates its draft cannot reach back into
  * the module and change what every later user of that template gets. `structuredClone` is not
- * available in every environment this bundle runs in, and the shape is small and known.
+ * available in every environment this bundle runs in.
+ *
+ * **The graph is SPREAD first, then its nested members are replaced by copies.** It used to be
+ * rebuilt field by field, justified as *"the shape is small and known"* — a justification that
+ * expired the moment the graph gained `timer` this milestone, which the rebuild silently dropped
+ * along with `layout`, and one that would expire again at the next field. Spread-first is the same
+ * mechanism that makes `draftFromRule`/`ruleFromDraft` safe: a field added later rides through by
+ * construction, and the worst a new NESTED member can cost is a shallower copy than intended
+ * rather than a missing key.
  */
 function structuredCloneRule(rule: TemplateRule): TemplateRule {
-    return {
-        ...rule,
-        targetIds: [...rule.targetIds],
-        graph: {
-            monitor: rule.graph.monitor && { ...rule.graph.monitor },
-            parse: rule.graph.parse && { ...rule.graph.parse },
-            cond: rule.graph.cond && { ...rule.graph.cond },
-            action: { ...rule.graph.action },
-        },
-    };
+    const graph = { ...rule.graph };
+    // `deep` rather than a spread per member, because several of them are more than one level
+    // down — a timer's `mode` payload, a clause's `test`, every position in `layout` — and a
+    // spread would leave those shared with the frozen module-level template.
+    if (graph.monitor) graph.monitor = deep(graph.monitor);
+    if (graph.parse) graph.parse = deep(graph.parse);
+    if (graph.cond) graph.cond = deep(graph.cond);
+    if (graph.timer) graph.timer = deep(graph.timer);
+    graph.action = deep(graph.action);
+    if (graph.layout) graph.layout = deep(graph.layout);
+    return { ...rule, targetIds: [...rule.targetIds], graph };
 }
