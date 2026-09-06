@@ -258,6 +258,18 @@ pub struct AutomationEngine {
     state_dirty: AtomicBool,
 }
 
+/// Whether this reload can have missed part of this daily target's window. The target's being past
+/// is a separate question owned by `seed_missed_schedules`.
+fn has_unobserved_daily_window(
+    newly_live: bool,
+    target_changed: bool,
+    invalidated_mark: bool,
+    last_fired_day: Option<i32>,
+    now_day: i32,
+) -> bool {
+    (newly_live || target_changed || invalidated_mark) && last_fired_day != Some(now_day)
+}
+
 impl AutomationEngine {
     pub fn new(started_at_ms: i64) -> Self {
         Self {
@@ -530,6 +542,7 @@ impl AutomationEngine {
                 .collect()
         };
         let previously_live: HashSet<String> = previous.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut target_changed = HashSet::new();
         for (id, was, timer_was) in previous {
             let after = next.get(&id);
             if after.is_some_and(|l| l.rule.updated_at == was) {
@@ -551,6 +564,19 @@ impl AutomationEngine {
                 timer_was.as_ref(),
                 store_timers.get(&id).and_then(|timer| timer.as_ref()),
             );
+            // The changed target belongs to the new daily schedule, whether or not the old one
+            // happened to have left a day mark. `same_target_minute` returns false for non-daily
+            // modes too, but `seed_missed_schedules` can only act on a new `DailyAt` target.
+            if !same_minute
+                && after.is_some_and(|live| {
+                    matches!(
+                        live.rule.graph.timer.as_ref().map(|timer| &timer.mode),
+                        Some(TimerMode::DailyAt { .. })
+                    )
+                })
+            {
+                target_changed.insert(id.clone());
+            }
             self.runtime.forget_rule(&id);
             if same_minute {
                 if let Some((day, minute)) = spent_mark {
@@ -570,10 +596,16 @@ impl AutomationEngine {
             .filter(|live| {
                 let id = &live.rule.id;
                 // A reload only has an unobserved clock window for a schedule entering the live
-                // set, or for the new target of a mark reconciliation just invalidated. A valid
-                // mark carried across disable/re-enable is already spent and must not be reseeded.
-                (!previously_live.contains(id) || invalidated_marks.contains(id))
-                    && self.runtime.last_fired_day(id).is_none()
+                // set, for a changed daily target, or for a mark reconciliation that invalidated
+                // its target. A mark spends only its own day: an older mark is deliberately kept
+                // for the same minute, but cannot spend today's occurrence.
+                has_unobserved_daily_window(
+                    !previously_live.contains(id),
+                    target_changed.contains(id),
+                    invalidated_marks.contains(id),
+                    self.runtime.last_fired_day(id),
+                    now_local.day_ordinal,
+                )
             })
             .collect();
         if !self.seed_missed_schedules(seedable, None, now_local, store, now_ms).is_empty() {
@@ -1058,6 +1090,172 @@ mod tests {
 
     fn at(day_ordinal: i32, minute_of_day: i32) -> schedule::LocalTime {
         schedule::LocalTime { day_ordinal, minute_of_day }
+    }
+
+    /// The reload seed has a two-part question: did the current daily target have an unobserved
+    /// window, and has *today* already spent it? This table covers the lifecycle combinations that
+    /// make those questions independent. The oracle is a `Held` row: a past target that is seeded
+    /// writes exactly one, while an unseeded target writes none.
+    #[test]
+    fn reload_seeds_only_unobserved_daily_target_windows_across_the_rule_lifecycle() {
+        #[derive(Clone, Copy)]
+        enum Presence {
+            Reenabled,
+            Live,
+        }
+        #[derive(Clone, Copy)]
+        enum Mark {
+            None,
+            Today,
+            EarlierDay,
+        }
+        #[derive(Clone, Copy)]
+        enum Target {
+            UnchangedAhead,
+            UnchangedPast,
+            MovedIntoPast,
+            MovedIntoFuture,
+        }
+        struct Case {
+            name: &'static str,
+            presence: Presence,
+            mark: Mark,
+            target: Target,
+            window: bool,
+            seeded: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "re-enabled / no mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::None, target: Target::UnchangedPast,
+                window: true, seeded: true,
+            },
+            Case {
+                name: "re-enabled / earlier-day mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::EarlierDay, target: Target::UnchangedPast,
+                window: true, seeded: true,
+            },
+            Case {
+                name: "re-enabled / today's mark / target already past",
+                presence: Presence::Reenabled, mark: Mark::Today, target: Target::UnchangedPast,
+                window: false, seeded: false,
+            },
+            Case {
+                name: "live / no mark / unchanged target still ahead",
+                presence: Presence::Live, mark: Mark::None, target: Target::UnchangedAhead,
+                window: false, seeded: false,
+            },
+            Case {
+                name: "live / no mark / unchanged target already past",
+                presence: Presence::Live, mark: Mark::None, target: Target::UnchangedPast,
+                window: false, seeded: false,
+            },
+            Case {
+                name: "live / no mark / target moved into the past",
+                presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoPast,
+                window: true, seeded: true,
+            },
+            Case {
+                name: "live / no mark / target moved into the future",
+                presence: Presence::Live, mark: Mark::None, target: Target::MovedIntoFuture,
+                window: true, seeded: false,
+            },
+            Case {
+                name: "live / today's mark / target moved into the past",
+                presence: Presence::Live, mark: Mark::Today, target: Target::MovedIntoPast,
+                window: true, seeded: true,
+            },
+            Case {
+                name: "live / earlier-day mark / unchanged target",
+                presence: Presence::Live, mark: Mark::EarlierDay, target: Target::UnchangedPast,
+                window: false, seeded: false,
+            },
+        ];
+
+        let monday = monday_2026_09_07();
+        let now = at(monday, 14 * 60);
+        for case in cases {
+            let store = AutomationStore::new_in_memory();
+            let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+            let old_minute = match case.target {
+                Target::UnchangedAhead | Target::MovedIntoPast => 17 * 60,
+                Target::UnchangedPast | Target::MovedIntoFuture => 9 * 60,
+            };
+            sched.graph.timer = Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day: old_minute, days: 0b0001_1111 },
+            });
+            store.save_rule(&sched).unwrap();
+
+            let engine = AutomationEngine::new(0);
+            engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+            match case.mark {
+                Mark::None => {}
+                Mark::Today => engine.runtime.set_last_fired_day("au-sched", monday, old_minute),
+                Mark::EarlierDay => engine.runtime.set_last_fired_day("au-sched", monday - 1, old_minute),
+            }
+
+            if matches!(case.presence, Presence::Reenabled) {
+                store.set_enabled_checked("au-sched", false).unwrap();
+                engine.reload_at(&store, 1_000, at(monday, 8 * 60 + 30)).unwrap();
+                store.set_enabled_checked("au-sched", true).unwrap();
+            }
+
+            match case.target {
+                Target::MovedIntoPast | Target::MovedIntoFuture => {
+                    let new_minute = match case.target {
+                        Target::MovedIntoPast => 9 * 60,
+                        Target::MovedIntoFuture => 17 * 60,
+                        Target::UnchangedAhead | Target::UnchangedPast => unreachable!(),
+                    };
+                    sched.graph.timer = Some(TimerStep {
+                        mode: TimerMode::DailyAt { minute_of_day: new_minute, days: 0b0001_1111 },
+                    });
+                    sched.updated_at += 1;
+                    store.save_rule(&sched).unwrap();
+                }
+                Target::UnchangedAhead | Target::UnchangedPast => {}
+            }
+
+            // A moved target drops its old-minute mark in the forget loop before this predicate;
+            // unchanged and re-enabled rules retain the mark reconciliation kept.
+            let mark_at_filter = match case.target {
+                Target::MovedIntoPast | Target::MovedIntoFuture => None,
+                Target::UnchangedAhead | Target::UnchangedPast => match case.mark {
+                    Mark::None => None,
+                    Mark::Today => Some(monday),
+                    Mark::EarlierDay => Some(monday - 1),
+                },
+            };
+            assert_eq!(
+                has_unobserved_daily_window(
+                    matches!(case.presence, Presence::Reenabled),
+                    matches!(case.target, Target::MovedIntoPast | Target::MovedIntoFuture),
+                    false,
+                    mark_at_filter,
+                    monday,
+                ),
+                case.window,
+                "{}: the candidate predicate has the expected unobserved window",
+                case.name
+            );
+
+            engine.reload_at(&store, 2_000, now).unwrap();
+            assert_eq!(
+                log_rows(&store).len(),
+                if case.seeded { 1 } else { 0 },
+                "{}: a past target is seeded exactly when it had an unobserved window and today was unspent",
+                case.name
+            );
+            if case.seeded {
+                assert_eq!(
+                    engine.runtime.last_fired_day("au-sched"),
+                    Some(monday),
+                    "{}: the seed must spend today's target",
+                    case.name
+                );
+            }
+        }
     }
 
     /// **The 09:00 prompt must not arrive at 14:00 because the app started late** (§6.3, plan 028 Q3).
