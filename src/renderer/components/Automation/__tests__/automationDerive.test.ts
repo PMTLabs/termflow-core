@@ -258,6 +258,56 @@ describe('automationDerive — the palette summary', () => {
             expect(ruleSummary(draftFromTemplate(template))).toContain(template.rule.graph.action.message);
         }
     });
+
+    /**
+     * **The left rail and the node face beside it must not describe two different rules** (§1.1).
+     *
+     * Three shapes, each of which the rail got wrong in its own direction before it read
+     * `condSentence`, so a single case would have caught one of them:
+     *
+     * - a reading authored in the clause panel leaves `op`/`threshold` null, and the rail read
+     *   *"when the value in … is no comparison yet no number yet"* while the face read the clause;
+     * - a v1 rule someone added a clause to still carries `op: 'gt'`, and the rail showed the
+     *   SUPERSEDED `> 25`;
+     * - an event rule with clauses read *"when … appears"* and dropped the clauses entirely.
+     *
+     * The oracle is `condSentence`'s own output, not a re-spelled copy: the property is that BOTH
+     * surfaces read one function, so hard-coding the words here would let them drift while this
+     * test stayed green.
+     */
+    it.each([
+        ['a reading authored in the clause panel', 'number' as const, null, null],
+        ['a v1 rule that has GAINED a clause', 'number' as const, 'gt' as const, 25],
+        ['an event rule with clauses', 'text' as const, null, null],
+    ])('summarises %s by its clauses, never by op/threshold', (_label, kind, op, threshold) => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const cond: AutomationCondStep = {
+            kind,
+            op,
+            threshold,
+            join: 'and',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'gt', value: 30 } } }],
+        };
+        const withClause = { ...rule, graph: { ...rule.graph, cond } };
+        const summary = ruleSummary(withClause);
+        expect(summary).toContain(condSentence(cond));
+        expect(summary).toContain('$1 is over 30');
+        // None of the three wrong renderings survives: no empty-pair placeholder, no superseded
+        // threshold, and the clause is not dropped for an "appears" sentence.
+        expect(summary).not.toContain('no comparison yet');
+        expect(summary).not.toContain('no number yet');
+        expect(summary).not.toContain('25');
+        expect(summary).not.toContain('appears');
+    });
+
+    it('still summarises a v1 rule with NO clauses by its own comparison', () => {
+        // The paired negative: routing every rule through the clause branch would satisfy the
+        // table above and break this.
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const cond: AutomationCondStep = { kind: 'number', op: 'lt', threshold: 5, clauses: [] };
+        const summary = ruleSummary({ ...rule, graph: { ...rule.graph, cond } });
+        expect(summary).toContain('is less than 5');
+    });
 });
 
 /**

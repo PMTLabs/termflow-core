@@ -17,9 +17,9 @@ import {
     describeCadence,
     describeCriterion,
     describeLastFired,
-    describeRule,
     describeWatching,
 } from './automationState';
+import { describeRule } from '../../Automation/automationDerive';
 
 /**
  * The footer's fire history is the ENGINE'S LIVE STATE, and it is not the rule's lifetime.
@@ -113,7 +113,7 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                     {sentence.verb && (
                         <>
                             {' '}<span className="au-arrow">{sentence.verb}</span>{' '}
-                            <b>{sentence.threshold}</b>
+                            <b>{sentence.detail}</b>
                         </>
                     )}{' '}
                     <span className="au-arrow">→</span> {sentence.verbSend}{' '}

@@ -13,10 +13,13 @@ import {
     describeCadence,
     describeCriterion,
     describeLastFired,
-    describeRule,
     describeWatching,
     JUST_FIRED_MS,
 } from '../automationState';
+// `describeRule` moved to `automationDerive` so it and `ruleSummary` — the Settings row and the
+// editor's left rail, one rule in two renderings — read one `condSentence`. Its tests stay here,
+// with the rest of the row's own sentence.
+import { condSentence, describeRule } from '../../../Automation/automationDerive';
 
 const NOW = 1_700_000_000_000;
 
@@ -319,9 +322,57 @@ describe('the row reads as a sentence', () => {
         expect(s.lead).toBe('when the number in');
         expect(s.subject).toBe('ctx:(\\d+)%');
         expect(s.verb).toBe('rises above');
-        expect(s.threshold).toBe('25');
+        expect(s.detail).toBe('25');
         expect(s.verbSend).toBe('send');
         expect(s.sendNote).toBeNull();
+    });
+
+    /**
+     * **A clause list supersedes `op`/`threshold`, and the row has to say so.**
+     *
+     * All three shapes in one table, because the bug was that each was wrong in its own direction
+     * and a single-case test would have caught one of them:
+     *
+     * - a rule authored in the clause panel leaves `op`/`threshold` null, and the row used to read
+     *   the empty pair — *"rises above"* with no number at all, beside a node face reading the
+     *   clause;
+     * - a v1 rule someone added a clause to still carries `op: 'gt'`, and the row showed the
+     *   SUPERSEDED `> 25` while the engine ran the clause;
+     * - an event rule with clauses got `verb: null` and dropped its comparisons entirely.
+     *
+     * Asserted against `condSentence`'s own output rather than a re-spelled copy of it: the
+     * property is that the row and the node face read ONE function (§1.1), so hard-coding the words
+     * here would let the two drift apart again while this test stayed green.
+     */
+    it.each([
+        ['a reading authored in the clause panel', 'number' as const, null, null],
+        ['a v1 rule that has GAINED a clause', 'number' as const, 'gt' as const, 25],
+        ['an event rule with clauses', 'text' as const, null, null],
+    ])('describes %s by its clauses, never by op/threshold', (_label, kind, op, threshold) => {
+        const r = rule();
+        r.graph.cond = {
+            kind,
+            op,
+            threshold,
+            join: 'and',
+            clauses: [{ source: { group: 1 }, test: { number: { op: 'gt', value: 30 } } }],
+        };
+        const s = describeRule(r);
+        expect(s.detail).toBe(condSentence(r.graph.cond));
+        expect(s.detail).toBe('$1 is over 30');
+        // Neither the superseded v1 pair nor the empty-pair placeholder survives anywhere in it.
+        expect(`${s.lead} ${s.subject} ${s.verb} ${s.detail}`).not.toContain('25');
+        expect(s.verb).not.toBeNull();
+    });
+
+    it('still reads a v1 rule with NO clauses by its own comparison', () => {
+        // The paired negative for the table above: clearing `op`/`threshold` from every rule, or
+        // routing the no-clause case through the clause branch, would satisfy it and break this.
+        const r = rule();
+        r.graph.cond = { kind: 'number', op: 'lt', threshold: 5, clauses: [] };
+        const s = describeRule(r);
+        expect(s.verb).toBe('falls below');
+        expect(s.detail).toBe('5');
     });
 
     it('says "type … — no Enter" for an action that deliberately does not submit', () => {

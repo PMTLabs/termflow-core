@@ -11,7 +11,7 @@
 import React from 'react';
 import type { AutomationRule } from '../../../types/electron';
 import { AUTOMATION_TEMPLATES, AutomationTemplate, blankDraft, draftFromTemplate } from './automationTemplates';
-import { describeRule } from './automationState';
+import { describeRule } from '../../Automation/automationDerive';
 
 export interface TemplateGalleryProps {
     onBack: () => void;
@@ -94,7 +94,7 @@ const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void 
                     {sentence.verb && (
                         <>
                             {' '}
-                            <span className="au-arrow">{sentence.verb}</span> <b>{sentence.threshold}</b>
+                            <span className="au-arrow">{sentence.verb}</span> <b>{sentence.detail}</b>
                         </>
                     )}
                     <br />

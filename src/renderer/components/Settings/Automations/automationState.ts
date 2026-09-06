@@ -216,61 +216,6 @@ function qualifierFor(
 // The row's sentence
 // =================================================================================================
 
-/**
- * The comparison, in the words the mockup uses on the row: *"rises above"*, never *">"*.
- *
- * The crossing **is** the semantics, and a user who reads the row has already been told it will not
- * nag (mockup §01). Every operator gets a crossing verb for that reason.
- */
-const OP_WORDS: Record<string, string> = {
-    gt: 'rises above',
-    gte: 'reaches',
-    lt: 'falls below',
-    lte: 'drops to',
-    eq: 'reaches exactly',
-    neq: 'stops being',
-};
-
-/**
- * The rule as one sentence: `when ctx % rises above 25 → send "…"`.
- *
- * Derived from the rule itself so it can never describe a rule the engine is not running. The
- * pieces are returned separately rather than as one string because the row emphasises the pattern
- * and the message differently, and a component that has to re-split a sentence will split it wrong.
- */
-export interface RuleSentence {
-    /** `when the number in` / `when output starts matching` — never carries the pattern. */
-    lead: string;
-    /** The pattern, or the literal the user typed when there is one. Emphasised by the row. */
-    subject: string;
-    /** The comparison verb, or null for a text rule (its verb is already in `lead`). */
-    verb: string | null;
-    /** The threshold, as text, or null for a text rule. */
-    threshold: string | null;
-    /** `send` or `type` — *Answer a confirmation* deliberately does not press Enter. */
-    verbSend: string;
-    message: string;
-    /** ` — no Enter` when the action leaves the text in the composer, else null. */
-    sendNote: string | null;
-}
-
-export function describeRule(rule: AutomationRule): RuleSentence {
-    const { parse, cond, action } = rule.graph;
-    const numeric = cond.kind === 'number';
-    const subject = parse.literal && parse.literal.length > 0 ? parse.literal : parse.find;
-    return {
-        lead: numeric ? 'when the number in' : 'when output starts matching',
-        subject,
-        verb: numeric ? (OP_WORDS[cond.op ?? 'gt'] ?? 'reaches') : null,
-        threshold: numeric && cond.threshold !== null && cond.threshold !== undefined
-            ? String(cond.threshold)
-            : null,
-        verbSend: action.submit ? 'send' : 'type',
-        message: action.message,
-        sendNote: action.submit ? null : ' — no Enter',
-    };
-}
-
 // =================================================================================================
 // The rest of the row's meta line
 // =================================================================================================
