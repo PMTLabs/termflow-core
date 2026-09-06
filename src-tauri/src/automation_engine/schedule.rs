@@ -130,8 +130,15 @@ pub fn target_already_past(mode: &TimerMode, now_local: LocalTime) -> bool {
 /// Still not shared with the TypeScript `clockTime`, for `describe_wait`'s reason: nothing sends
 /// these strings across the wire, and a shared formatter would be a coupling with no call path.
 /// An out-of-range minute is `timer.badMinute`'s business, not this function's: it formats whatever
-/// arithmetic gives, and every caller here has already been through `target_already_past` or
-/// `schedule_due`, both of which refuse the range first.
+/// arithmetic gives, and every caller refuses the range before calling it — `target_already_past`
+/// and `schedule_due` refuse it internally, and `dry.rs`'s schedule branch refuses it explicitly
+/// before formatting the "sends at" row.
+///
+/// **Corrected (I1).** This used to claim `dry.rs` had "already been through `target_already_past`
+/// or `schedule_due`", which was false: it called this function directly, unguarded, so unpicking
+/// every weekday and pressing Test formatted `-5` into `"00:-5"` and reported it as an ordinary,
+/// would-fire time. `dry.rs` now range-checks before calling this, matching the other two callers
+/// rather than being named alongside them without doing what they do.
 pub fn clock_time(minute_of_day: i32) -> String {
     format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
 }

@@ -423,17 +423,32 @@ impl AutomationEngine {
             // **A rule with nothing to watch and no schedule can never fire, so it is skipped with
             // a reason** — beside the pattern refusal below, and for the same reasons.
             //
-            // Since §3.1 made the monitor step optional, such a row passed validation (nothing
-            // checks it), saved *enabled*, counted in `report.live`, and was walked four times a
+            // Since §3.1 made the monitor step optional, such a row could pass validation (nothing
+            // checked it), save *enabled*, count in `report.live`, and be walked four times a
             // second only to fall out at the evaluator's monitor guard — live by every reading the
             // user has, and unable to do anything at all. `AfterMatch` with no monitor is the same
             // shape: a delay is parked at a crossing, and there is nothing here that can cross.
             //
-            // **A skip, not a validation blocker.** §7.8 deliberately lets the save gate through
-            // what the engine independently refuses, and the editor cannot produce this shape, so a
-            // blocker would only punish the API and the importer at write time. A skip is *visible*
-            // — one log row per load, the mechanism `is_runnable` and `pattern_refused_at_load`
-            // already use — and it is what makes `report.live` an honest count.
+            // **Corrected (R7): this is now ALSO a validation blocker, `timer.neverRuns`
+            // (`automation_validation::problems`), not merely a skip.** This paragraph used to say
+            // "the editor cannot produce this shape, so a blocker would only punish the API and the
+            // importer at write time" — false on both counts. It IS a property of a saved rule, and
+            // the editor CAN produce it: switching a saved schedule rule's Wait back to a delay
+            // reaches exactly this shape without touching `monitor`/`parse`/`cond` at all (the
+            // mode-switch path fixed alongside this comment). A validation rule holds for every
+            // producer — the editor, the REST API, an import, an older build — so the guard lives in
+            // `automation_validation.rs`, once, rather than in whichever producer happened to be
+            // caught reasoning about this shape.
+            //
+            // **This skip stays anyway**, as the second-line, at-load gate `is_runnable` and
+            // `pattern_refused_at_load` are beside it: it is what still catches a row that reached
+            // this shape before the guard existed, or by writing to the database directly, and it is
+            // what makes `report.live` an honest count for such a row. `watches` deliberately checks
+            // only `monitor` rather than the wider `InputSteps::of`-shaped predicate validation now
+            // uses — the editor writes the three input steps as one all-or-nothing group, so a
+            // monitor without a parse or a cond is not a shape either producer can leave enabled once
+            // §8's guard is in place, and widening this skip to match would be re-deriving a check
+            // validation already owns.
             let watches = rule.graph.monitor.is_some();
             let scheduled =
                 matches!(rule.graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
@@ -910,6 +925,12 @@ mod tests {
     /// take the whole of milestone 4 out with it, so the schedule rule is in the fixture to say
     /// that a `DailyAt` timer IS something to run on. `au-live` is here for the same reason a
     /// filter tested with one rule cannot show which rules it kept.
+    ///
+    /// **`inert` and `delayed` plant via the enable-gate bypass (R7 review).** `automation_validation`
+    /// now refuses to save either shape *enabled* at all (`timer.neverRuns`), which is R7 closing
+    /// this exact gap in the right layer — but this test is about `reload_at`'s OWN skip, the
+    /// second-line gate for a row that reached the shape some other way (an older build, or a
+    /// direct write), and that row has to exist in the store for the test to exercise it.
     #[test]
     fn a_rule_with_nothing_to_watch_and_no_schedule_is_skipped_with_a_reason() {
         let store = AutomationStore::new_in_memory();
@@ -918,12 +939,12 @@ mod tests {
 
         let mut inert = rule("au-inert", r"ctx:(\d+)%");
         inert.graph.monitor = None;
-        store.save_rule(&inert).unwrap();
+        store.save_rule_bypassing_the_enable_gate_for_tests(&inert).unwrap();
 
         let mut delayed = rule("au-delay", r"ctx:(\d+)%");
         delayed.graph.monitor = None;
         delayed.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
-        store.save_rule(&delayed).unwrap();
+        store.save_rule_bypassing_the_enable_gate_for_tests(&delayed).unwrap();
 
         let engine = AutomationEngine::new(0);
         // 08:00, for `a_schedule_rule_with_no_pattern_is_admitted`'s reason: `au-sched` is a 09:00

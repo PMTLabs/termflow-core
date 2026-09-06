@@ -245,16 +245,60 @@ pub fn evaluate_once(
     //    steps the rule does not have (the same reasoning `stepValues`' `NOT_IN_THIS_RULE` already
     //    applies to the editor's cards, applied here to the Test pane's).
     //
-    //    Any OTHER missing subset (a monitor with no parse, say) is a malformed shape validation
-    //    already refuses before a rule can be enabled; that keeps the old, honest "nothing was read"
-    //    answer below, on all four original steps.
+    //    **Corrected (R7).** This used to say any OTHER missing subset (a monitor with no parse,
+    //    say) was "a malformed shape validation ALREADY refuses" — false when written: nothing
+    //    checked it, which is the defect R7 closes. `automation_validation::problems` now reports
+    //    `timer.neverRuns` for exactly that shape (any of `monitor`/`parse`/`cond` missing, with no
+    //    `dailyAt` schedule to excuse it), so a rule with it cannot be SAVED enabled any more — but
+    //    an unsaved draft still reaches this Test button freely, and a row that predates the guard
+    //    can still sit in the store, so the honest "nothing was read" answer below, on all four
+    //    original steps, stays the right one here regardless.
     if rule.graph.monitor.is_none() && rule.graph.parse.is_none() && rule.graph.cond.is_none() {
         let Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day, days } }) = &rule.graph.timer
         else {
-            // Neither a monitor NOR a schedule: nothing this rule could ever fire on. Validation
-            // refuses this shape before it can be enabled; still the honest, non-panicking answer.
+            // **Corrected (R7).** Neither a monitor NOR a schedule — this branch is reached with an
+            // `AfterMatch` wait and nothing to cross it, which is R7's own oracle shape (`blank ->
+            // addStep 'timer' -> addStep 'action' -> type a message`). This comment used to claim
+            // "validation refuses this shape before it can be enabled", which was false: nothing did,
+            // until `timer.neverRuns` was added for exactly this. It is true now, for a SAVED rule;
+            // this branch still answers an unsaved draft or a row that predates the guard, so it
+            // stays the honest, non-panicking answer regardless of whether validation would also
+            // have refused it.
             return finish(UNREADABLE, vec![skipped(TIMER), skipped(ACTION)]);
         };
+        // **I1.** `schedule_due` refuses a `minute_of_day` outside `0..MINUTES_PER_DAY` and a
+        // `days` mask with no weekday bit set — and until this check existed, this branch asked
+        // neither, so unpicking all seven days in the Wait panel and pressing Test reported
+        // WOULD_FIRE with `"sends at 00:-5, no days"` or `"sends at 83:20, ..."` printed as though
+        // they were ordinary times. That is the "unfireable on one side, runnable on the other"
+        // disagreement `an_unfireable_rule_is_unfireable_on_both_sides` exists to forbid.
+        //
+        // Deliberately NOT `schedule_due` itself: that function also asks whether the mask excludes
+        // TODAY and whether `last_fired_day` already spent it, both of which are about "is it due
+        // this instant", a question this informational "sends at HH:MM, days" row was never
+        // answering (it reports the schedule's shape, not today's verdict). Only the two checks
+        // that make the schedule structurally unfireable — the same two `timer.badMinute` and
+        // `timer.noDays` block on — belong here.
+        //
+        // The garbage numbers above are also why the failure message does not format `minute_of_day`
+        // through `clock_time`: printing `83:20` back at the user as "this is what's broken" is the
+        // bug repeating itself in the error path.
+        let bad_minute = !(0..crate::automation_store::MINUTES_PER_DAY).contains(minute_of_day);
+        let no_days = days & crate::automation_store::WEEKDAY_BITS_MASK == 0;
+        if bad_minute || no_days {
+            let why = if bad_minute {
+                "its target is not a time of day"
+            } else {
+                "no day is ever picked"
+            };
+            return finish(
+                WOULD_NOT_FIRE,
+                vec![
+                    step(TIMER, "failed", format!("this schedule can never fire — {why}")),
+                    skipped(ACTION),
+                ],
+            );
+        }
         let timer_step = step(
             TIMER,
             "ok",
@@ -1309,5 +1353,71 @@ mod tests {
         assert_eq!(kinds(&report), vec!["timer", "action"]);
         assert_eq!(status(&report, "action"), "failed");
         assert!(fake.written().is_empty());
+    }
+
+    // =============================================================================================
+    // I1 — the dry run said `would-fire` for a schedule that provably cannot
+    // =============================================================================================
+
+    /// **The oracle.** `days_words(0)` prints `"no days"`, and until this branch range/mask-checked
+    /// itself, an all-days-unpicked schedule still dry-ran as WOULD_FIRE — reachable in two clicks:
+    /// unpick all seven days in the Wait panel, press Test. `schedule_due` already refuses this on
+    /// the live side; this pins the Test pane to agree with it (`
+    /// an_unfireable_rule_is_unfireable_on_both_sides`).
+    ///
+    /// An unsaved DRAFT, not a saved rule: the enable gate would refuse to save this shape at all
+    /// (`timer.noDays`), and the whole point is that the Test button has to answer a draft that has
+    /// never been near that gate.
+    #[test]
+    fn an_all_days_unpicked_schedule_dry_runs_as_not_firing() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut draft = schedule_only_rule("au-draft");
+        draft.graph.timer =
+            Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0 } });
+
+        let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(status(&report, "timer"), "failed");
+        assert_eq!(status(&report, "action"), "skipped");
+        assert!(
+            detail(&report, "timer").contains("no day is ever picked"),
+            "{}",
+            detail(&report, "timer")
+        );
+        assert!(fake.written().is_empty(), "an unfireable schedule must still type nothing");
+    }
+
+    /// The paired half, for the other field the same guard checks: `clock_time(5000)` formats
+    /// `"83:20"`, and that string must never reach the user as though it were an ordinary time —
+    /// echoing the bug's own garbage back as the explanation would be the bug repeating itself in
+    /// the error path.
+    #[test]
+    fn an_out_of_range_minute_dry_runs_as_not_firing_and_does_not_echo_the_garbage() {
+        let (engine, _fake, host) = wire(vec![]);
+        let mut draft = schedule_only_rule("au-draft");
+        draft.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 5_000, days: 0b0001_1111 },
+        });
+
+        let report = evaluate_once(&engine, host.as_ref(), &draft, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert_eq!(status(&report, "timer"), "failed");
+        let timer_detail = detail(&report, "timer");
+        assert!(
+            !timer_detail.contains("83:20"),
+            "the bad minute must not be echoed back as though it were a time: {timer_detail}"
+        );
+
+        // A negative minute is the other end, and the dangerous one: unguarded, `now >= target`
+        // would be true from midnight rather than never.
+        let mut negative = schedule_only_rule("au-draft");
+        negative.graph.timer =
+            Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day: -5, days: 0b0001_1111 } });
+        let report = evaluate_once(&engine, host.as_ref(), &negative, "tm-1", 1_000);
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "{:?}", report.steps);
+        assert!(!detail(&report, "timer").contains("00:-5"), "{}", detail(&report, "timer"));
     }
 }
