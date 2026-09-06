@@ -175,7 +175,23 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
     const pairs = draft.rule.id.length > 0 ? runtime.rules[draft.rule.id] : undefined;
     const dirty = isDirty(draft);
-    const problems = useMemo(() => validate(draft.rule), [draft.rule]);
+    /**
+     * **The rule a save would WRITE, and the one object every judgement in this editor is made of.**
+     *
+     * There were three: the inspector list and the Enable gate validated `draft.rule`, the dry run
+     * ran `draft.rule`, and `save` validated `ruleFromDraft(current)` to decide whether to disarm
+     * the toggle. They agreed only because the one field the normalisation touches — the superseded
+     * v1 `op`/`threshold` pair a clause list drops (§5.3) — is read only when `clauses` is empty,
+     * which is an accident of the current rule set and is pinned by nothing. Three judgements about
+     * three different objects is how the toggle ends up dimmed for a problem the saved rule does
+     * not have, or armed for one it does.
+     *
+     * `ruleFromDraft` is documented as *"what a save sends"* and `isDirty` already asks it what a
+     * save would write, so it is the right object for all three. Pure, and a function of `draft`
+     * alone.
+     */
+    const writing = useMemo(() => ruleFromDraft(draft), [draft]);
+    const problems = useMemo(() => validate(writing), [writing]);
     const blocking = blockingProblems(problems);
 
     // --- the keyboard ----------------------------------------------------------------------------
@@ -250,13 +266,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // A ref, not the closure: the guard registered below is a stable object handed to a module-level
     // registry, and a `save` that closed over the first render's draft would persist whatever the
     // rule looked like when the editor opened.
-    const latest = useRef({ draft, api, origin, onChanged });
-    latest.current = { draft, api, origin, onChanged };
+    // `writing` rides along so the save writes the SAME object the inspector list, the Enable gate
+    // and the dry run were judging. Assigned in the render body beside the draft it is memoised
+    // from, so the two can never be a render apart.
+    const latest = useRef({ draft, writing, api, origin, onChanged });
+    latest.current = { draft, writing, api, origin, onChanged };
     /** True from the moment a save is decided to the moment it settles. See `save` below. */
     const inFlight = useRef(false);
 
     const save = useCallback(async (): Promise<boolean> => {
-        const { draft: current, api: bridge, origin: from, onChanged: changed } = latest.current;
+        const { writing, api: bridge, origin: from, onChanged: changed } = latest.current;
         if (!bridge?.saveAutomation) {
             toast('Automations are not available in this window.', 'error');
             return false;
@@ -276,14 +295,17 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         // it. So the rule the user drew is written whole, and the one thing that cannot survive the
         // trip — permission to RUN — is dropped, said out loud, and one click from being restored.
         //
-        // **`ruleFromDraft(current)`, never `current.rule`.** That function is documented as "what
-        // a save sends" and `isDirty` already asks it what a save would write — but nothing on this
-        // path called it, so the two disagreed: the canvas arrangement lived in `draft.layout` and
-        // was injected only by `ruleFromDraft`, which meant dragging a card marked the draft dirty
-        // and then saved the positions it opened with. It is also where the superseded v1
-        // `op`/`threshold` pair is dropped from a clause-carrying row (§5.3), which used to happen
-        // in the reducer and cost a v1 rule its only comparison on add-then-remove.
-        const writing = ruleFromDraft(current);
+        // **`writing`, never `draft.rule`.** `ruleFromDraft` is documented as "what a save sends"
+        // and `isDirty` already asks it what a save would write — but nothing on this path called
+        // it, so the two disagreed: the canvas arrangement lived in `draft.layout` and was injected
+        // only by `ruleFromDraft`, which meant dragging a card marked the draft dirty and then
+        // saved the positions it opened with. It is also where the superseded v1 `op`/`threshold`
+        // pair is dropped from a clause-carrying row (§5.3), which used to happen in the reducer
+        // and cost a v1 rule its only comparison on add-then-remove.
+        //
+        // It now comes off the ref rather than being computed here, so this decision, the
+        // inspector's problem list, the Enable gate and the dry run are all made of ONE object —
+        // see `writing`'s own doc in the render body.
         const blockingNow = blockingProblems(validate(writing));
         const disarmed = writing.enabled && blockingNow.length > 0;
         const outgoing = disarmed ? { ...writing, enabled: false } : writing;
@@ -402,14 +424,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         setTestError(null);
         try {
             if (!api?.dryRunAutomation) throw new Error('the desktop bridge is not available');
-            setReport(await api.dryRunAutomation(draft.rule, target));
+            // `writing`, not `draft.rule`: a dry run reports what the rule WOULD do, and the rule
+            // that would run is the one a save writes.
+            setReport(await api.dryRunAutomation(writing, target));
         } catch (e) {
             setReport(null);
             setTestError(e instanceof Error ? e.message : String(e));
         } finally {
             setRunning(false);
         }
-    }, [api, draft.rule, terminals, testTarget]);
+    }, [api, writing, terminals, testTarget]);
 
     const setEnabled = async (enabled: boolean) => {
         if (draft.rule.id.length === 0) {
