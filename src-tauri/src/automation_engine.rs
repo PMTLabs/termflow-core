@@ -38,7 +38,8 @@ use crate::automation::events::{RuntimePairState, StatePayload};
 use crate::automation::runtime::AutomationRuntime;
 use crate::automation_engine::eval::ArmState;
 use crate::automation_store::{
-    AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError, LogKind,
+    AutomationGraph, AutomationLogEntry, AutomationRule, AutomationStore, AutomationStoreError,
+    Clause, Finds, Keep, LogKind, Source, Test,
 };
 
 /// Start the engine: load the rules, then the three tasks (plan §2.1, §2.3, §4.4).
@@ -114,6 +115,35 @@ pub const STATE_EMIT_MIN_INTERVAL_MS: i64 = 1_000;
 pub struct LiveRule {
     pub rule: AutomationRule,
     pub re: Regex,
+}
+
+/// Fold a v1 `op`/`threshold`/`keep` rule into the clause list it means.
+///
+/// Runs at load, on the in-memory copy only — the row is not rewritten, which is what keeps a
+/// merely-loaded v1 rule from being promoted to schema_version 2 (§3.2). Idempotent. Called from
+/// `reload`, immediately after the pattern compiles and before the `LiveRule` is built — folding a
+/// v1 comparison is meaningless without a pattern to have captured from.
+pub fn fold_v1_clauses(graph: &mut AutomationGraph, re: &Regex) {
+    if !graph.cond.clauses.is_empty() {
+        return;
+    }
+    // A word rule folds to NOTHING. Today's text branch is `is_match`, and an empty clause list
+    // means exactly that (§5.5 step 4) — so this is not a special case, it is the existing
+    // behaviour written down.
+    if graph.cond.finds == Finds::Event {
+        return;
+    }
+    let (Some(op), Some(threshold)) = (graph.cond.op, graph.cond.threshold) else {
+        return; // a numeric rule with no comparator is a blocking validation problem already
+    };
+    let source = match graph.parse.keep {
+        Keep::Whole => Source::Whole,
+        Keep::Brackets if re.capture_names().flatten().any(|n| n == "value") => {
+            Source::Named("value".into())
+        }
+        Keep::Brackets => Source::Group(1),
+    };
+    graph.cond.clauses.push(Clause { source, test: Test::Number { op, value: threshold } });
 }
 
 /// The rule ids a `reload` should announce, or `None` if it wrote nothing worth announcing.
@@ -337,7 +367,7 @@ impl AutomationEngine {
         // loop below cannot see them — they are reported here or nowhere.
         report.skipped.extend(store.take_skipped_rows());
 
-        for rule in rules {
+        for mut rule in rules {
             if !rule.enabled || rule.completed_at.is_some() {
                 continue;
             }
@@ -356,6 +386,7 @@ impl AutomationEngine {
             }
             match crate::automation_validation::compile(&rule.graph.parse.find) {
                 Ok(re) => {
+                    fold_v1_clauses(&mut rule.graph, &re);
                     next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re }));
                 }
                 Err(e) => {
@@ -473,9 +504,9 @@ mod tests {
     use super::*;
     use crate::automation_engine::eval::ArmState;
     use crate::automation_store::{
-        ActionStep, AutomationGraph, Cadence, CompareOp, CondStep, Criterion, Finds, Keep,
-        LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode, SendTo, TargetMode,
-        SUPPORTED_SCHEMA_VERSION,
+        ActionStep, AutomationGraph, Cadence, Clause, CompareOp, CondStep, Criterion, Finds, Keep,
+        LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode, SendTo, Source,
+        TargetMode, Test, TextOp, SUPPORTED_SCHEMA_VERSION,
     };
 
     fn rule(id: &str, find: &str) -> AutomationRule {
@@ -523,6 +554,65 @@ mod tests {
             created_at: 1_000,
             updated_at: 1_000,
         }
+    }
+
+    /// A v1 rule's graph: `op`/`threshold` set, `clauses` empty — built on the existing `rule()`
+    /// fixture rather than a parallel one, varying only what the table test needs to vary.
+    fn v1_graph(finds: Finds, keep: Keep, pattern: &str) -> AutomationGraph {
+        let mut g = rule("au-v1", pattern).graph;
+        g.cond.finds = finds;
+        g.parse.keep = keep;
+        g
+    }
+
+    /// A v2 rule that already has clauses — folding must leave it alone.
+    fn v2_graph_with_two_clauses() -> AutomationGraph {
+        let mut g = rule("au-v2", "x").graph;
+        g.cond.clauses = vec![
+            Clause {
+                source: Source::Whole,
+                test: Test::Text { op: TextOp::Contains, value: "err".into() },
+            },
+            Clause { source: Source::Group(1), test: Test::Number { op: CompareOp::Gt, value: 1.0 } },
+        ];
+        g
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §5.4 — folding a v1 rule into the clause list it always meant
+    // -----------------------------------------------------------------------------------------
+
+    /// The three branches of `extract()`'s `keep` handling, as a table — the mapping is the
+    /// whole point, and testing one row would leave two silently wrong.
+    #[test]
+    fn v1_rules_fold_into_the_clause_list_exactly_as_extract_chose() {
+        for (finds, keep, pattern, want) in [
+            (Finds::Reading, Keep::Brackets, r"ctx:(?P<value>\d+)%", Some(Source::Named("value".into()))),
+            (Finds::Reading, Keep::Brackets, r"ctx:(\d+)%", Some(Source::Group(1))),
+            (Finds::Reading, Keep::Whole, r"ctx:\d+%", Some(Source::Whole)),
+            (Finds::Event, Keep::Brackets, r"API error (\d+)", None),
+        ] {
+            let mut g = v1_graph(finds, keep, pattern);
+            fold_v1_clauses(&mut g, &Regex::new(pattern).unwrap());
+            match want {
+                Some(src) => {
+                    assert_eq!(g.cond.clauses.len(), 1, "{pattern}");
+                    assert_eq!(g.cond.clauses[0].source, src, "{pattern}");
+                }
+                None => assert!(
+                    g.cond.clauses.is_empty(),
+                    "a word rule folds to ZERO clauses — the empty list IS 'fire on the match'"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn folding_does_not_touch_a_rule_that_already_has_clauses() {
+        let mut g = v2_graph_with_two_clauses();
+        let before = g.cond.clauses.clone();
+        fold_v1_clauses(&mut g, &Regex::new("x").unwrap());
+        assert_eq!(g.cond.clauses, before);
     }
 
     fn live_ids(engine: &AutomationEngine) -> Vec<String> {
