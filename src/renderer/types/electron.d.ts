@@ -612,9 +612,8 @@ export interface AutomationActionStep {
  * different thing entirely. `AutomationTimerStep`/`AutomationTimerMode` mirror the Rust names
  * (spec §3.1) and are fine as identifiers; the constraint is on strings a user reads.
  *
- * M3 stores `afterMatch` only; §6.2 parks the send `delayMs` later. M4 adds the `dailyAt` schedule
- * (§6.3). Neither mode's behaviour is implemented yet — this is the schema only, and there is no
- * canvas node for it yet either (that lands in M5).
+ * `afterMatch` parks a send for `delayMs` (§6.2), and `dailyAt` schedules it (§6.3). This type
+ * records the persisted schema for those implemented modes.
  */
 export type AutomationTimerMode =
   | { afterMatch: { delayMs: number } }

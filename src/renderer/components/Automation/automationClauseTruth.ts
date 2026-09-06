@@ -80,9 +80,10 @@ const isNumTest = (
 /**
  * The six comparators, with an epsilon on `eq`/`neq` and never `===`.
  *
- * A threshold of `0.1` typed by a user and a `0.1` parsed out of terminal text are two different
- * doubles, and an exact comparison that is almost always false is the worst kind of silent failure.
- * `EPS` is `eval.rs`'s own constant.
+ * `EPS` makes equality tolerant of small differences introduced by independent computation or
+ * rounding, such as a program printing `0.30000000000000004` for a value compared with `0.3`.
+ * Parsing the same decimal literal on both sides yields the same binary double. `EPS` is
+ * `eval.rs`'s own constant.
  */
 const EPS = 1e-9;
 

@@ -11,8 +11,7 @@
 //! [`local_now`] does the one impure thing (ask the OS what "local" means) and is the only place that
 //! does it, so the tick and `reload`'s seeding cannot disagree about which day it is.
 //!
-//! **Local wall-clock, and this is the first local time in the crate.** Every other clock here is
-//! `Utc::now()`. "09:00" means nine in the morning where the user is, and it has to keep meaning
+//! **Automation scheduling uses a local wall-clock.** "09:00" means nine in the morning where the user is, and it has to keep meaning
 //! that across a DST change, which is exactly what `with_timezone(&Local)` does and what an offset
 //! added by hand does not.
 
@@ -563,8 +562,7 @@ mod tests {
         assert!(!schedule_due(&mode, None, local(monday, MINUTES_PER_DAY - 1)));
     }
 
-    /// **`local_now` reads the wall clock, not UTC** — the crate's other sixteen clocks are
-    /// `Utc::now()` and this is the one place that must not be.
+    /// **`local_now` reads the wall clock for automation scheduling, not UTC.**
     ///
     /// The expectation is built by ARITHMETIC (the zone's offset at that instant, added to the UTC
     /// instant), not by a second `with_timezone(&Local)` call, so it is an independent derivation

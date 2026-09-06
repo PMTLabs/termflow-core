@@ -508,19 +508,14 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  * single owner of the arrangement and the two cannot disagree.
  *
  * **`monitor`, `parse` and `cond` are omitted when the canvas draws none of them — as a GROUP,
- * never one at a time (C1).** `blankDraft()` scaffolds all three into the graph and there is no
- * remove gesture, so a user who dragged *Wait* and *Send to terminal* onto an empty canvas and
- * picked *At a time of day* produced a rule carrying a monitor: `timer.scheduleWithMonitor` blocked
- * it, the header refused to enable it, `set_enabled_checked` refused it independently, and the
- * blocking message told them to *"remove the Watch output step"* — a control that does not exist.
- * The milestone's headline feature could not be authored in the product at all.
+ * never one at a time.** `blankDraft()` scaffolds all three into the graph, while a *Wait* and
+ * *Send to terminal* canvas writes a schedule rule without an input chain to silence.
  *
  * **Per step it would open a worse hole than it closes**, which is why the group is the unit.
- * *Watch → Wait → Send* would then write a monitor with no parse and no cond, and NOTHING reports
- * that: `patternProblems` returns nothing for an absent parse and `clauseProblems` nothing for an
- * absent cond, both deliberately, and there is no `ProblemCode` for *"this rule can never run"*.
- * The rule would save, enable, count as live and never evaluate — where today the scaffold's blank
- * `find` at least blocks it visibly with `parse.empty`. All-or-nothing is also
+ * *Watch → Wait → Send* would then write a monitor with no parse and no cond. That incomplete
+ * draft can remain disabled while it is being built, but once it has a message `timer.neverRuns`
+ * blocks an enabled write; it cannot become a live, non-runnable rule. The scaffold's blank `find`
+ * also makes the partial state visible with `parse.empty`. All-or-nothing is also
  * `eval::InputSteps::of`'s own contract, so this follows the runtime's rule rather than inventing a
  * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
  * the partial cases.
@@ -833,10 +828,9 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             //
             // **The three input steps materialise as a GROUP**, the same all-or-nothing contract
             // `ruleFromDraft` writes them under and `eval::InputSteps::of` reads them under. Filling
-            // in only the revealed card would put a monitor with no parse into the graph, and
-            // nothing reports that shape: `reload` admits it (it has something to watch),
-            // `InputSteps::of` then answers `None`, and `evaluate_pair` declines it on every tick
-            // for the life of the rule, silently.
+            // in only the revealed card would put a monitor with no parse into an incomplete graph.
+            // It may remain disabled while the editor fills it in, but `timer.neverRuns` blocks an
+            // enabled write once the rule has a message, before it could be live and non-runnable.
             //
             // Shapes come from `blankDraft()`, never from a second set of defaults written here —
             // two answers to *"what does an empty Watch step look like"* would drift.

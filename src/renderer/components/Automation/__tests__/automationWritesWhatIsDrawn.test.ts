@@ -1,22 +1,17 @@
 /**
  * **What a save WRITES, for a canvas that is missing the three input steps** (plan 032 §3.1, §6.3).
  *
- * Every link in *"can a schedule rule be built in the editor"* had a test of its own and the chain's
- * OUTPUT had none — which is how C1 survived a whole milestone. `blankDraft()` scaffolds `monitor`,
- * `parse` and `cond` into the graph, nothing in the editor ever removes them (there is no remove
- * gesture and no undo), and `ruleFromDraft` used to spread the graph through unchanged. So the rule
- * a user built by dragging **Wait** and **Send to terminal** onto an empty canvas carried a monitor,
- * `timer.scheduleWithMonitor` blocked it, and the blocking message told them to *"remove the Watch
- * output step"* — a control that does not exist. The milestone's headline feature was unreachable
- * in the product.
+ * `blankDraft()` scaffolds `monitor`, `parse` and `cond` into the graph, while `ruleFromDraft`
+ * omits them when a canvas draws none. A user who drags **Wait** and **Send to terminal** onto an
+ * empty canvas therefore writes a schedule rule without an input chain to silence.
  *
  * **The three input steps are omitted AS A GROUP, never individually**, which is
  * `eval::InputSteps::of`'s own all-or-nothing contract rather than a second one invented here. Per
  * step it would open a worse hole than the one it closes: a *Watch → Wait → Send* canvas would write
- * a monitor with no parse and no cond, which nothing reports — `patternProblems` returns nothing for
- * an absent parse and `clauseProblems` nothing for an absent cond, both deliberately — so the rule
- * would enable, count as live, and never evaluate. As a group, any canvas keeping one input step
- * keeps all three, and `parse.empty` goes on catching the partial cases.
+ * a monitor with no parse and no cond. That is a possible disabled incomplete draft; after a message
+ * is entered, `timer.neverRuns` blocks enabling it, so it cannot count as a live non-runnable rule.
+ * As a group, any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
+ * the partial cases.
  */
 import { blankDraft } from '../../Settings/Automations/automationTemplates';
 import { draftFromRule, draftReducer, ruleFromDraft } from '../automationDraft';

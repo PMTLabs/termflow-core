@@ -258,8 +258,8 @@ describe('a v1 rule that gains a clause', () => {
         expect(saved.clauses ?? []).toEqual([]);
         expect(saved.op).toBe('gt');
         expect(saved.threshold).toBe(25);
-        // The user-visible consequence, and the one that reaches the store: a rule stripped of its
-        // only comparison blocks, and the editor saves a blocked draft with `enabled` cleared.
+        // The user-visible consequence, and the one that reaches the store: removing the final
+        // clause preserves the v1 comparison, so this row is not blocked as `cond.incomplete`.
         expect(problems(ruleFromDraft(emptied)).map((p) => p.code)).not.toContain('cond.incomplete');
     });
 });
@@ -365,9 +365,9 @@ describe('draftFromRule', () => {
      * not about timers, and after R1 monitor/parse/cond can be absent too.
      *
      * The group half is the same all-or-nothing contract `ruleFromDraft` and `eval::InputSteps::of`
-     * keep: filling in only the card that was revealed writes a monitor with no parse and no cond,
-     * which no validation rule reports and which `reload` then admits and `evaluate_pair` silently
-     * declines forever.
+     * keep: filling in only the card that was revealed writes an incomplete graph. It can remain a
+     * disabled draft while the user completes it, but `timer.neverRuns` blocks a new enabled write
+     * once the rule has a message.
      *
      * Mutation M-b: narrow the materialisation back to `action.step === 'timer'` → this dies.
      */

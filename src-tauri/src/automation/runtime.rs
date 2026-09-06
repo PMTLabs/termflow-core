@@ -153,9 +153,10 @@ pub struct AutomationRuntime {
     /// 250 ms tick takes it when it is ripe. Keyed like `arm`, so the pair is the unit — one rule
     /// crossing on three terminals parks three sends, exactly as it would have dispatched three.
     ///
-    /// Purged by all three teardowns. That is hygiene rather than the fire gate — the gate is
-    /// `snapshot_live()`, which the drain runs inside (§6.1) — but a map with no purge is a leak,
-    /// and this one holds a `Captures` per entry.
+    /// Purged by all three teardowns. On an edit that keeps a rule live, purging its old entry is
+    /// what cancels the old action: `snapshot_live()` still contains that rule's identity and does
+    /// not reject a parked send merely because its definition changed. The map also holds a
+    /// `Captures` per entry, so an unpurged entry is a leak.
     parked: DashMap<(String, String), ParkedSend>,
     /// `rule_id` -> the local ordinal day this schedule rule last fired on (§6.3).
     ///
@@ -442,7 +443,7 @@ impl AutomationRuntime {
     /// Hold this crossing's message until `p.due_at_ms`.
     ///
     /// **Overwrites**, and there is nothing to protect: `set_arm` writes `Fired` at decide time,
-    /// before the park, so the pair cannot cross again while it waits. A second park for one pair
+    /// before the park, so the pair cannot cross again until it is rearmed. A second park for one pair
     /// therefore means the condition went false, re-armed and crossed again inside the delay — a
     /// genuinely newer crossing, whose captures are the ones the message should resolve against.
     pub fn park(&self, rule_id: &str, tm: &str, p: ParkedSend) {

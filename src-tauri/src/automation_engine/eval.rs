@@ -435,9 +435,8 @@ fn read_kept(caps: &regex::Captures<'_>, keep: Keep) -> Read {
 
 /// The six comparators the mockup's drop-down draws.
 ///
-/// `Eq`/`Neq` use an epsilon, never `==`: a threshold of `0.1` typed by a user and a `0.1` parsed out
-/// of terminal text are two different `f64`s, and an exact float comparison that is almost always
-/// false is the worst kind of silent failure.
+/// `Eq`/`Neq` use an epsilon, never `==`, to tolerate small differences from independent computation
+/// or rounding. Parsing the same decimal literal yields the same `f64`.
 pub fn compare(op: CompareOp, value: f64, threshold: f64) -> bool {
     const EPS: f64 = 1e-9;
     match op {
@@ -1388,7 +1387,7 @@ mod tests {
     /// The epsilon is not decoration: `0.1` reconstructed from text and `0.1` typed by a user are two
     /// different `f64`s, and `==` says so.
     #[test]
-    fn eq_uses_an_epsilon_because_exact_float_equality_is_almost_always_false() {
+    fn eq_uses_an_epsilon_for_independently_computed_or_rounded_values() {
         let from_text: f64 = "0.1".parse::<f64>().unwrap() * 3.0;
         let typed = 0.30000000000000004_f64;
         assert!(compare(CompareOp::Eq, from_text, 0.3), "0.1*3 must compare equal to 0.3");

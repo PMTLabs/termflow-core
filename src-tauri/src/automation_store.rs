@@ -240,9 +240,8 @@ pub enum CompareOp {
     Gte,
     Lt,
     Lte,
-    /// `eq`/`neq` compare with an epsilon, never `==`. A threshold of `0.1` typed by a user and a
-    /// `0.1` parsed out of terminal text are two different `f64`s, and an exact float comparison that
-    /// is almost always false is the worst kind of silent failure.
+    /// `eq`/`neq` compare with an epsilon, never `==`. It tolerates small differences from
+    /// independent computation or rounding; parsing the same decimal literal yields the same `f64`.
     ///
     /// This is also why coercion rejects non-finite values: `"NaN"` parses to `Ok(f64::NAN)`, and
     /// `(NaN - t).abs() < 1e-9` is `false`, so `Neq` would be **true** — a terminal printing `NaN%`
@@ -374,9 +373,8 @@ fn default_cli_type() -> String {
 /// poll interval, a different thing entirely. `TimerStep`/`TimerMode` and the `timer` field are the
 /// spec's own Rust names (§3.1) and stay as-is — the constraint is on UI copy, not identifiers.
 ///
-/// M3 (this milestone) only stores `AfterMatch`; §6.2 parks the send `delay_ms` later. M4 adds
-/// `schedule_due` for `DailyAt` (§6.3). Neither mode's behaviour is implemented yet — this is the
-/// schema only.
+/// `AfterMatch` parks a send for `delay_ms` (§6.2), and `DailyAt` uses `schedule_due` (§6.3).
+/// This type is the persisted schema for those implemented modes.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimerStep {
@@ -4257,9 +4255,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
-    // Plan 032 §3.1/§6 — `TimerStep`/`TimerMode`. M3 lands the schema only; §6.2's park/drain and
-    // §6.3's `schedule_due` are later tasks. The wire shape is a PERMANENT contract the moment a
-    // rule with a timer is saved, so it is pinned here before the type exists.
+    // Plan 032 §3.1/§6 — `TimerStep`/`TimerMode`. `AfterMatch` drives park/drain (§6.2), and
+    // `DailyAt` drives `schedule_due` (§6.3). The wire shape is a permanent contract once a rule
+    // with a timer is saved, so these serde tests pin it.
     // -----------------------------------------------------------------------------------------
 
     /// `AfterMatch` is a single-field struct variant. `#[serde(rename_all = "camelCase")]` on the

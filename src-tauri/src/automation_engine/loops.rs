@@ -120,10 +120,10 @@ pub struct PendingSend {
 /// How far the wall clock may jump between two iterations before the loop treats the gap as *this
 /// process was not observing the tick* rather than as an ordinary slow tick.
 ///
-/// 60 s against a [`BASE_TICK_MS`] of 250: two orders of magnitude of headroom over scheduler
-/// jitter, a `spawn_blocking` that overran, or a machine under so much load that a quarter-second
-/// sleep took twenty. Nothing short of a suspend, a hibernate or an NTP step crosses it, and the
-/// cost of crossing it wrongly is one schedule that does not fire on the day it was crossed.
+/// 60 s against a [`BASE_TICK_MS`] of 250: two orders of magnitude of headroom over ordinary
+/// jitter. Crossing it is a heuristic for a long evaluation gap, not proof of its cause: suspend,
+/// clock adjustment, scheduler delay, or slow synchronous work can all produce such a gap. The cost
+/// of treating an ordinary gap as a resume is one schedule that does not fire on the day it crossed.
 pub const RESUME_GAP_MS: i64 = 60_000;
 
 pub async fn run_evaluator(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>) {
