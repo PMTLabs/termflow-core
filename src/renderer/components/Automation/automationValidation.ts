@@ -26,6 +26,7 @@
  * `AutomationEditor.tsx`'s header, point 4.
  */
 import type {
+    AutomationClause,
     AutomationGraph,
     AutomationParseStep,
     AutomationRule,
@@ -231,6 +232,23 @@ function parseStep(graph: AutomationGraph): AutomationParseStep | null {
  * exactly today's text rule — not a special case invented for this check, the existing behaviour
  * written down (§5.4).
  */
+/**
+ * The reason a clause cannot yet be judged from a capture.
+ *
+ * The validator owns this predicate and `CondPanel` reads it before drawing a verdict, so a row
+ * cannot show a green or red answer beside the blocking problem that says its operand is unfinished.
+ */
+export function clauseVerdictBlocker(clause: AutomationClause): 'needsValue' | 'badPattern' | null {
+    if ('number' in clause.test) {
+        const { value } = clause.test.number;
+        return value === null || !Number.isFinite(value) ? 'needsValue' : null;
+    }
+
+    const { op, value } = clause.test.text;
+    if (op !== 'isEmpty' && op !== 'isNotEmpty' && value.trim().length === 0) return 'needsValue';
+    return op === 'matches' && compilePattern(value) === null ? 'badPattern' : null;
+}
+
 function clauseProblems(graph: AutomationGraph): Problem[] {
     const out: Problem[] = [];
     // No cond step at all is no clauses at all — a schedule rule (§6.3) reports nothing here.
@@ -275,28 +293,25 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
             }
         }
 
-        if ('number' in clause.test) {
+        const blocker = clauseVerdictBlocker(clause);
+        if (blocker === 'needsValue' && 'number' in clause.test) {
             // **Reached by the ordinary path.** `value` is `number | null`, and `null` is what
             // `CondPanel` writes the moment a row is switched from a text operator to a numeric
             // one, or a number is half-typed — §8's *"a numeric clause with no threshold"*. The
             // finiteness half stays for a value that arrives by computation rather than by typing:
             // comparing against NaN/Infinity is exactly the silent-failure shape `CompareOp::Neq`'s
             // own doc warns about for a COERCED token.
-            const { value } = clause.test.number;
-            if (value === null || !Number.isFinite(value)) {
-                out.push(
-                    problem(
-                        'blocks',
-                        'cond',
-                        'cond.clauseNeedsValue',
-                        'Enter a number to compare this value with.',
-                    ),
-                );
-            }
-        } else {
-            const { op, value } = clause.test.text;
-            const needsValue = op !== 'isEmpty' && op !== 'isNotEmpty';
-            if (needsValue && value.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'cond',
+                    'cond.clauseNeedsValue',
+                    'Enter a number to compare this value with.',
+                ),
+            );
+        } else if ('text' in clause.test) {
+            const { value } = clause.test.text;
+            if (blocker === 'needsValue') {
                 out.push(
                     problem(
                         'blocks',
@@ -305,7 +320,7 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
                         'Enter some text to compare this value with.',
                     ),
                 );
-            } else if (op === 'matches' && compilePattern(value) === null) {
+            } else if (blocker === 'badPattern') {
                 out.push(
                     problem(
                         'blocks',

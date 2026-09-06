@@ -840,6 +840,16 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(pass.cls).not.toBe(fail.cls);
     });
 
+    it('draws no verdict for a clause with a blocking operand or pattern', async () => {
+        await renderCond([clause('$1', 'contains', '')]);
+        expect(verdicts()).toEqual([]);
+        expect(container.textContent).not.toMatch(/passes|fails|unknown/);
+
+        await renderCond([clause('$1', 'matches', '(')]);
+        expect(verdicts()).toEqual([]);
+        expect(container.textContent).not.toMatch(/passes|fails|unknown/);
+    });
+
     it('says what each row\'s token holds, and says plainly when it holds nothing', async () => {
         await renderCond([clause('$1', 'is over', '25'), clause('$3', 'is over', '25')]);
         const held = [...container.querySelectorAll('.au-cheld')].map((el) => (el.textContent ?? '').trim());

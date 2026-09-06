@@ -40,7 +40,7 @@ import type { AutomationRuntimePairState } from '../../../services/automationEve
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { NUM_OP_LABELS, TEXT_OP_LABELS, condSentence } from '../automationDerive';
-import { compilePattern, groupsOf, sourceText } from '../automationValidation';
+import { clauseVerdictBlocker, compilePattern, groupsOf, sourceText } from '../automationValidation';
 import { clauseTruth, tokenOf } from '../automationClauseTruth';
 import type { ClauseCaptures, Truth } from '../automationClauseTruth';
 import { automationRowState, describeLastFired } from '../../Settings/Automations/automationState';
@@ -303,7 +303,9 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                     {clauses.map((clause, i) => {
                         const valueNeeded = needsValue(clause.test);
                         const held = caps === null ? undefined : tokenOf(clause.source, caps);
-                        const verdict = caps === null ? null : VERDICT[clauseTruth(clause, caps)];
+                        const verdict = caps === null || clauseVerdictBlocker(clause) !== null
+                            ? null
+                            : VERDICT[clauseTruth(clause, caps)];
                         return (
                             // eslint-disable-next-line react/no-array-index-key
                             <div className="au-clause" key={i}>
