@@ -165,13 +165,21 @@ pub fn watched_set(
     rows: &[RosterRow],
     previous: Option<&BTreeSet<String>>,
 ) -> BTreeSet<String> {
-    match rule.target_mode {
+    let mut watched = match rule.target_mode {
         TargetMode::Pinned => rule.target_ids.iter().cloned().collect(),
         TargetMode::Rule => match (rule.follow_new, previous) {
             (false, Some(frozen)) if !frozen.is_empty() => frozen.clone(),
             _ => resolve(rule.criterion, &rule.criterion_value, rows),
         },
+    };
+    if rule.target_mode == TargetMode::Rule {
+        let mut excluded: BTreeSet<String> = rule.excluded_ids.iter().cloned().collect();
+        if let Some(criterion) = rule.exclude_criterion {
+            excluded.extend(resolve(criterion, &rule.exclude_criterion_value, rows));
+        }
+        watched.retain(|terminal_id| !excluded.contains(terminal_id));
     }
+    watched
 }
 
 #[cfg(test)]
@@ -566,6 +574,47 @@ mod tests {
     fn a_pinned_rule_watches_its_ids_even_when_none_are_live() {
         let pinned = rule(TargetMode::Pinned, Criterion::AllTerminals, "", true);
         assert_eq!(ids(watched_set(&pinned, &[], None)), vec!["tm-pinned"]);
+    }
+
+    #[test]
+    fn a_pinned_rule_ignores_exclusions_entirely() {
+        let rows = vec![row(Some("tm-a"), None, None, Some("claude"))];
+        let mut r = rule(TargetMode::Pinned, Criterion::CommandContains, "claude", true);
+        r.target_ids = vec!["tm-a".into()];
+        r.excluded_ids = vec!["tm-a".into()];
+        assert_eq!(
+            ids(watched_set(&r, &rows, None)),
+            vec!["tm-a"],
+            "a hand-picked set says what it means; exclusions do not apply"
+        );
+    }
+
+    #[test]
+    fn an_exclusion_pattern_removes_everything_it_matches() {
+        let rows = vec![
+            row(Some("tm-scratch"), None, Some("~/scratch/project"), None),
+            row(Some("tm-work"), None, Some("~/work/termflow"), None),
+        ];
+        let mut r = rule(TargetMode::Rule, Criterion::AllTerminals, "", true);
+        r.exclude_criterion = Some(Criterion::WorkingFolderUnder);
+        r.exclude_criterion_value = "~/scratch".into();
+
+        assert_eq!(ids(watched_set(&r, &rows, None)), vec!["tm-work"]);
+    }
+
+    #[test]
+    fn the_two_exclusion_kinds_union_rather_than_override() {
+        let rows = vec![
+            row(Some("tm-id"), None, Some("~/work/termflow"), None),
+            row(Some("tm-pattern"), None, Some("~/scratch/project"), None),
+            row(Some("tm-kept"), None, Some("~/work/other"), None),
+        ];
+        let mut r = rule(TargetMode::Rule, Criterion::AllTerminals, "", true);
+        r.excluded_ids = vec!["tm-id".into()];
+        r.exclude_criterion = Some(Criterion::WorkingFolderUnder);
+        r.exclude_criterion_value = "~/scratch".into();
+
+        assert_eq!(ids(watched_set(&r, &rows, None)), vec!["tm-kept"]);
     }
 
     // -----------------------------------------------------------------------------------------

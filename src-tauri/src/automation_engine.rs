@@ -1970,6 +1970,67 @@ mod tests {
         assert_eq!(engine.runtime.arm_state("au-a", "tm-1"), ArmState::Fired { at_ms: 500 });
     }
 
+    /// "Un-ticking puts it back." An exclusion is a filter over the matched set, never a deletion from
+    /// it — and this must hold on a FROZEN (`follow_new: false`) rule, which is the case that can bake
+    /// the exclusion in. Spec §B3. Distinct timestamps are load-bearing: reload compares `updated_at`,
+    /// not content, so a same-millisecond save would not clear the set and the test would pass
+    /// vacuously.
+    #[test]
+    fn lifting_an_exclusion_restores_the_terminal_on_a_frozen_rule() {
+        let fake = Arc::new(
+            crate::automation_engine::test_host::FakeHost::new()
+                .with_terminal("tm-a", "pc-a", "a")
+                .with_terminal("tm-b", "pc-b", "b"),
+        );
+        let host: Arc<dyn crate::automation_engine::host::EngineHost> = fake.clone();
+        let engine = Arc::new(AutomationEngine::new(0));
+
+        let mut r = rule("au-frozen", r"ctx:(\d+)%");
+        r.target_mode = TargetMode::Rule;
+        r.criterion = Criterion::AllTerminals;
+        r.criterion_value.clear();
+        r.follow_new = false;
+        r.updated_at = 1_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 1_000).unwrap();
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 1_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string(), "tm-b".to_string()]),
+            "premise: the frozen base set contains both terminals"
+        );
+
+        r.excluded_ids = vec!["tm-b".into()];
+        r.updated_at = 2_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 2_000).unwrap();
+        assert!(
+            engine.runtime.watched_for("au-frozen").is_empty(),
+            "the changed timestamp must clear the frozen set before the next targeting pass"
+        );
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 2_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string()]),
+            "the exclusion filters tm-b from the frozen base set"
+        );
+
+        r.excluded_ids.clear();
+        r.updated_at = 3_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 3_000).unwrap();
+        assert!(
+            engine.runtime.watched_for("au-frozen").is_empty(),
+            "lifting the exclusion must also clear the filtered frozen set"
+        );
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 3_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string(), "tm-b".to_string()]),
+            "the original matched terminal returns after a real save and reload"
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // §7.8 — completion is an in-memory event first
     // -----------------------------------------------------------------------------------------
