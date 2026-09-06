@@ -44,6 +44,13 @@ fn to_string_err(e: AutomationStoreError) -> String {
     e.to_string()
 }
 
+/// Decode an IPC rule without forwarding serde's rendering of the submitted value. A malformed
+/// webhook object may contain its endpoint in that rendering, while callers only need to know that
+/// the draft was malformed.
+fn decode_automation_rule(value: serde_json::Value) -> Result<AutomationRule, String> {
+    serde_json::from_value(value).map_err(|_| "automation rule is malformed".to_string())
+}
+
 /// One rule-level log row — no terminal, so no name to carry.
 ///
 /// **The three definition kinds had no writer at all.** `Saved` is required by §3.5 and checked by GUI
@@ -298,9 +305,10 @@ fn reload_after_commit(owned: &AppState, at: i64) -> Result<(), String> {
 #[tauri::command]
 pub async fn dry_run_automation(
     state: State<'_, AppState>,
-    rule: AutomationRule,
+    rule: serde_json::Value,
     terminal_id: String,
 ) -> Result<DryRunReport, String> {
+    let rule = decode_automation_rule(rule)?;
     let owned = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let engine = owned.automations.clone();
@@ -339,11 +347,11 @@ pub struct AutomationSaveResult {
 #[tauri::command]
 pub async fn save_automation(
     state: State<'_, AppState>,
-    rule: AutomationRule,
+    rule: serde_json::Value,
     origin: String,
 ) -> Result<AutomationSaveResult, String> {
     let owned = state.inner().clone();
-    let mut rule = rule;
+    let mut rule = decode_automation_rule(rule)?;
     if rule.id.trim().is_empty() {
         // The same shape `duplicate_automation` mints, and deliberately the same prefix: one id
         // vocabulary, minted in one crate.
@@ -688,7 +696,46 @@ pub async fn rearm_automation(
 
 #[cfg(test)]
 mod source_tests {
-    use super::leaves_to_rearm;
+    use super::{decode_automation_rule, leaves_to_rearm};
+
+    #[test]
+    fn malformed_ipc_rule_errors_do_not_echo_a_webhook_url() {
+        let secret = "https://hooks.example.invalid/ipc-credential";
+        let value = serde_json::json!({
+            "id": "au-ipc",
+            "name": "bad webhook",
+            "enabled": false,
+            "runsOnce": false,
+            "targetMode": "pinned",
+            "criterion": "allTerminals",
+            "criterionValue": "",
+            "followNew": true,
+            "targetIds": [],
+            "excludedIds": [],
+            "completedAt": null,
+            "verboseUntil": null,
+            "sortOrder": 0,
+            "schemaVersion": 3,
+            "graph": { "webhook": {
+                "provider": secret,
+                "url": secret,
+                "body": "done"
+            }},
+            "createdAt": 0,
+            "updatedAt": 0
+        });
+
+        // This is the exact serde decode that Tauri used to perform for the command argument.
+        // Its real error includes the invalid provider, so accepting a typed parameter leaked it.
+        let raw = serde_json::from_value::<crate::automation_store::AutomationRule>(value.clone())
+            .expect_err("a URL is not a webhook provider")
+            .to_string();
+        assert!(raw.contains(secret), "premise: raw IPC decode did not contain the URL: {raw}");
+
+        let safe = decode_automation_rule(value).expect_err("the command rejects malformed IPC");
+        assert_eq!(safe, "automation rule is malformed");
+        assert!(!safe.contains(secret));
+    }
 
     /// `Re-arm now` reaches only pairs the rule actually watches.
     ///

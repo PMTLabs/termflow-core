@@ -21,6 +21,7 @@ import { ParsePanel } from './panels/ParsePanel';
 import { CondPanel } from './panels/CondPanel';
 import { TimerPanel } from './panels/TimerPanel';
 import { ActionPanel } from './panels/ActionPanel';
+import { redactWebhookText } from './webhookRedaction';
 
 export interface AuInspectorProps {
     draft: AutomationDraft;
@@ -160,7 +161,7 @@ const ProblemList: React.FC<{ problems: Problem[]; onFocusStep: (step: StepKind)
                 {problems.map((p) => (
                     <li key={`${p.code}-${p.message}`} className={p.severity}>
                         <button type="button" onClick={() => onFocusStep(FIELD_STEPS[p.field])}>
-                            <b>{STEP_LABELS[FIELD_STEPS[p.field]]}</b> — {p.message}
+                            <b>{STEP_LABELS[FIELD_STEPS[p.field]]}</b> — {redactWebhookText(p.message)}
                         </button>
                     </li>
                 ))}

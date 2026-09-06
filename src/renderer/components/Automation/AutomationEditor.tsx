@@ -63,6 +63,7 @@ import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
 import { AuDrawer } from './AuDrawer';
+import { redactWebhookError } from './webhookRedaction';
 import type { DrawerTab } from './AuDrawer';
 import { useAuPaletteDrag } from './useAuPaletteDrag';
 import './auToggle.css';
@@ -227,7 +228,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setTerminals(rows);
             setTerminalsError(null);
         } catch (e) {
-            setTerminalsError(e instanceof Error ? e.message : String(e));
+            setTerminalsError(redactWebhookError(e));
         } finally {
             setTerminalsLoading(false);
         }
@@ -267,7 +268,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setEntries(await api.loadAutomationLog(draft.rule.id, true, DRAWER_LOG_LIMIT));
             setLogError(null);
         } catch (e) {
-            setLogError(e instanceof Error ? e.message : String(e));
+            setLogError(redactWebhookError(e));
         }
     }, [api, draft.rule.id]);
 
@@ -365,7 +366,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the
             // error here would let a failed save close the editor and take the draft with it.
-            toast(`Could not save: ${e instanceof Error ? e.message : String(e)}`, 'error');
+            toast(`Could not save: ${redactWebhookError(e)}`, 'error');
             return false;
         } finally {
             inFlight.current = false;
@@ -442,7 +443,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setReport(await api.dryRunAutomation(writing, target));
         } catch (e) {
             setReport(null);
-            setTestError(e instanceof Error ? e.message : String(e));
+            setTestError(redactWebhookError(e));
         } finally {
             setRunning(false);
         }
@@ -490,7 +491,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             // The BACKEND owns "is this rule allowed to run" and re-checks — a refusal here is the
             // authority disagreeing with this renderer's own validation, which is exactly the case
             // the mirror exists for and must not be hidden.
-            toast(`Could not switch it ${enabled ? 'on' : 'off'}: ${e instanceof Error ? e.message : String(e)}`, 'error');
+            toast(`Could not switch it ${enabled ? 'on' : 'off'}: ${redactWebhookError(e)}`, 'error');
         }
     };
 
@@ -705,7 +706,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                                     await onChanged();
                                     toast('Duplicated — the copy is in the list, switched off.', 'success');
                                 } catch (e) {
-                                    toast(`Could not duplicate: ${e instanceof Error ? e.message : String(e)}`, 'error');
+                                    toast(`Could not duplicate: ${redactWebhookError(e)}`, 'error');
                                 }
                             })();
                         }}
@@ -789,7 +790,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                                             await onChanged();
                                             toast('Re-armed — it can fire again on the next crossing.', 'success');
                                         } catch (e) {
-                                            toast(`Could not re-arm: ${e instanceof Error ? e.message : String(e)}`, 'error');
+                            toast(`Could not re-arm: ${redactWebhookError(e)}`, 'error');
                                         }
                                     })();
                                 }
@@ -838,7 +839,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                             await onChanged();
                             onClose();
                         } catch (e) {
-                            toast(`Could not delete: ${e instanceof Error ? e.message : String(e)}`, 'error');
+                            toast(`Could not delete: ${redactWebhookError(e)}`, 'error');
                         }
                     })();
                 }}

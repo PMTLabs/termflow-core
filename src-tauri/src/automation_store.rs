@@ -892,9 +892,11 @@ fn read_rule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawRule> {
 
 fn hydrate_rule(raw: RawRule) -> Result<AutomationRule, AutomationStoreError> {
     Ok(AutomationRule {
-        graph: serde_json::from_str(&raw.graph).map_err(|e| {
-            AutomationStoreError::Invalid(format!("rule {}: bad graph blob: {e}", raw.id))
-        })?,
+        // Serde can quote the malformed value in its error, and a graph contains the webhook URL.
+        // Keep the decode boundary opaque: list_rules turns this into a skipped-row reason and
+        // reload persists that reason to the activity log.
+        graph: serde_json::from_str(&raw.graph)
+            .map_err(|_| AutomationStoreError::Invalid(format!("rule {}: bad graph blob", raw.id)))?,
         target_mode: enum_from_db(&raw.target_mode)?,
         criterion: enum_from_db(&raw.criterion)?,
         exclude_criterion: raw.exclude_criterion.as_deref().map(enum_from_db).transpose()?,
@@ -1035,6 +1037,25 @@ impl AutomationStore {
         let store = Self::new();
         *store.conn.lock().unwrap() = Some(conn);
         store
+    }
+
+    /// Insert a graph which could only have arrived from an older or corrupt store.
+    ///
+    /// This bypasses serialisation deliberately: tests need the real decode path to see whether a
+    /// malformed value reaches a user-facing skipped-row reason.
+    #[cfg(test)]
+    pub(crate) fn insert_raw_graph_for_test(&self, id: &str, graph: &str) {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().expect("in-memory store is connected");
+        conn.execute(
+            "INSERT INTO automation_rules
+               (id, name, enabled, runs_once, target_mode, criterion, criterion_value,
+                follow_new, completed_at, verbose_until, sort_order, schema_version,
+                graph, created_at, updated_at)
+             VALUES (?1, 'bad', 1, 0, 'rule', 'allTerminals', '', 1, NULL, NULL, 2, 1, ?2, 1000, 1000)",
+            rusqlite::params![id, graph],
+        )
+        .expect("insert raw graph");
     }
 
     fn schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -2509,17 +2530,7 @@ mod tests {
     /// Insert a row whose `graph` column is arbitrary text, bypassing `save_rule`'s
     /// serialisation. There is no other way to author a row this build cannot decode.
     fn write_raw_graph(store: &AutomationStore, id: &str, graph: &str) {
-        let guard = store.conn.lock().unwrap();
-        let conn = guard.as_ref().unwrap();
-        conn.execute(
-            "INSERT INTO automation_rules
-               (id, name, enabled, runs_once, target_mode, criterion, criterion_value,
-                follow_new, completed_at, verbose_until, sort_order, schema_version,
-                graph, created_at, updated_at)
-             VALUES (?1, 'bad', 1, 0, 'rule', 'allTerminals', '', 1, NULL, NULL, 2, 1, ?2, 1000, 1000)",
-            rusqlite::params![id, graph],
-        )
-        .unwrap();
+        store.insert_raw_graph_for_test(id, graph);
     }
 
     fn rule_named(name: &str) -> AutomationRule {
@@ -4340,6 +4351,42 @@ mod tests {
             0,
             "draining must clear — otherwise every reload re-logs the same row forever"
         );
+    }
+
+    #[test]
+    fn malformed_webhook_values_never_escape_decode_or_save_errors() {
+        let secret = "https://hooks.example.invalid/credential-token";
+        let malformed = format!(
+            r#"{{"webhook":{{"provider":"{secret}","url":"{secret}","body":"done"}}}}"#
+        );
+
+        // This is the producer, not a hand-written error: serde really does quote the malformed
+        // provider value, which is why forwarding its Display would leak the URL.
+        let raw = serde_json::from_str::<AutomationGraph>(&malformed)
+            .expect_err("a URL is not a webhook provider")
+            .to_string();
+        assert!(raw.contains(secret), "premise: serde produced the secret: {raw}");
+
+        let store = AutomationStore::new_in_memory();
+        write_raw_graph(&store, "au-malformed", &malformed);
+        assert!(store.list_rules().unwrap().is_empty());
+        let skipped = store.take_skipped_rows();
+        assert_eq!(skipped.len(), 1);
+        assert!(!skipped[0].1.contains(secret), "skipped row leaked: {:?}", skipped[0]);
+        assert!(skipped[0].1.contains("bad graph blob"));
+
+        // Save errors also carry the store's Display through the command layer. Exercise the real
+        // enable/save validation with a well-typed webhook rule rather than inventing an error text.
+        let mut invalid = rule("au-save");
+        invalid.graph.webhook = Some(WebhookStep {
+            provider: WebhookProvider::Discord,
+            url: secret.to_string(),
+            body: "done".to_string(),
+            substitute: false,
+        });
+        invalid.graph.action.as_mut().expect("action fixture").message.clear();
+        let error = store.save_rule(&invalid).expect_err("empty action is refused").to_string();
+        assert!(!error.contains(secret), "save error leaked: {error}");
     }
 
     // -----------------------------------------------------------------------------------------

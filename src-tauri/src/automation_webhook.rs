@@ -314,4 +314,24 @@ mod tests {
             "the error renders only its coarse class: {rendered:?}"
         );
     }
+
+    #[test]
+    fn webhook_and_graph_debug_never_render_the_endpoint() {
+        let secret = "https://hooks.example.invalid/debug-credential";
+        let step = webhook(WebhookProvider::Discord, secret.to_string(), "done");
+        let graph = AutomationGraph {
+            monitor: None,
+            parse: None,
+            cond: None,
+            timer: None,
+            action: None,
+            webhook: Some(step.clone()),
+            layout: None,
+        };
+
+        for rendered in [format!("{step:?}"), format!("{graph:?}")] {
+            assert!(rendered.contains("<redacted>"), "debug did not mark the field: {rendered}");
+            assert!(!rendered.contains(secret), "debug leaked the endpoint: {rendered}");
+        }
+    }
 }

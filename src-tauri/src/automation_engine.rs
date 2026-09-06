@@ -995,6 +995,25 @@ mod tests {
         assert!(rows[1].contains("needs a newer version"), "{}", rows[1]);
     }
 
+    #[test]
+    fn reload_logs_a_real_malformed_webhook_value_without_its_url() {
+        let secret = "https://hooks.example.invalid/reload-credential";
+        let malformed = format!(
+            r#"{{"webhook":{{"provider":"{secret}","url":"{secret}","body":"done"}}}}"#
+        );
+        let store = AutomationStore::new_in_memory();
+        store.insert_raw_graph_for_test("au-malformed", &malformed);
+
+        let engine = AutomationEngine::new(0);
+        let report = engine.reload(&store, 7_000).expect("reload malformed row");
+        assert_eq!(report.skipped.len(), 1, "the malformed row was really skipped");
+        assert!(!report.skipped[0].1.contains(secret), "reload reason leaked: {:?}", report.skipped);
+
+        let rows = log_rows(&store);
+        assert_eq!(rows.len(), 1, "reload wrote its real activity row");
+        assert!(!rows[0].contains(secret), "activity detail leaked: {}", rows[0]);
+    }
+
     /// **A schedule rule has no pattern, and no pattern is not a broken pattern** (plan 032 §6.4).
     ///
     /// `reload` used to ask `pattern_refused_at_load(&graph.parse.find)` of every rule, and a rule
