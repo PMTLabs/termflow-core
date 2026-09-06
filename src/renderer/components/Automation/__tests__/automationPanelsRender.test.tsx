@@ -24,10 +24,12 @@ import { createRoot, Root } from 'react-dom/client';
 
 import { AuInspector } from '../AuInspector';
 import { ActionPanel } from '../panels/ActionPanel';
+import * as ActionPanelModule from '../panels/ActionPanel';
 import { CondPanel } from '../panels/CondPanel';
 import { draftFromRule } from '../automationDraft';
 import type { AutomationDraft } from '../automationDraft';
 import { faceFor, panelFor } from '../automationDerive';
+import { tokensUsed } from '../automationTokens';
 import { problems } from '../automationValidation';
 import { displayedPattern } from '../automationPresets';
 import { STEP_ORDER } from '../automationSteps';
@@ -489,6 +491,41 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { message: 'fix $1' } });
     });
 
+    it('uses a braced token for group 10 and the next dead boundary, while leaving single digits bare', async () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: {
+                ...base.graph,
+                parse: {
+                    ...base.graph.parse,
+                    preset: 'custom',
+                    literal: null,
+                    find: Array.from({ length: 10 }, () => '(\\d+)').join(''),
+                },
+                action: { ...base.graph.action, message: 'send ', substitute: true },
+            },
+        };
+        const dispatch = jest.fn();
+        const draft = { ...draftFromRule(rule), selected: 'action' as StepKind };
+        await act(async () => {
+            root.render(<ActionPanel draft={draft} model={panelFor(rule, 'action', { problems: [] })} dispatch={dispatch} />);
+        });
+
+        const chips = [...container.querySelectorAll('.au-tokens .au-token')];
+        expect(chips.map((chip) => chip.textContent)).toContain('$9');
+        expect(chips.map((chip) => chip.textContent)).toContain('${10}');
+        expect(chips.filter((chip) => chip.classList.contains('dead')).map((chip) => chip.textContent))
+            .toEqual(['${11}']);
+
+        await act(async () => (chips.find((chip) => chip.textContent === '${10}') as HTMLButtonElement).click());
+        const action = dispatch.mock.calls[0][0] as { patch: { message: string } };
+        expect(action.patch.message).toBe('send ${10}');
+        expect(tokensUsed(action.patch.message)).toEqual([
+            expect.objectContaining({ kind: 'group', n: 10 }),
+        ]);
+    });
+
     /**
      * Mutation guard: the preview must read `action.message` through the resolution rule, not
      * print it verbatim regardless of `substitute`. See task-7-report.md's mutation-check note —
@@ -819,16 +856,15 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
      * that failed: an OR chain carries an unknown, and a red ✕ beside it tells the user the rule
      * will not fire when it may well.
      *
-     * The default fixture pattern is `(\d+):(\d+)`, whose worked example is `63:63` — so `$1` holds
-     * `63`, and `$3` is a group the pattern does not have (a clause written before the brackets were
-     * edited), which a NUMBER test can be told nothing about.
+     * `ctx:(\w+)` supplies `$1 = "abc"`: text comparisons give the pass/fail pair, while the
+     * declared (not stale) source is still unparseable to a number and therefore gives unknown.
      */
     it('draws a passing row, a failing row and an unknown row as three different things', async () => {
         await renderCond([
+            clause('$1', 'is', 'abc'),
+            clause('$1', 'is', 'x'),
             clause('$1', 'is over', '25'),
-            clause('$1', 'is over', '100'),
-            clause('$3', 'is over', '25'),
-        ]);
+        ], { find: 'ctx:(\\w+)' });
         const [pass, fail, unknown] = verdicts();
         expect(pass.text).toContain('passes');
         expect(fail.text).toContain('fails');
@@ -838,16 +874,46 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(unknown.text).not.toBe(fail.text);
         expect(unknown.cls).not.toBe(fail.cls);
         expect(pass.cls).not.toBe(fail.cls);
+        expect(container.querySelectorAll('.au-cheld')).toHaveLength(3);
     });
 
-    it('draws no verdict for a clause with a blocking operand or pattern', async () => {
+    it('keeps a capture reading but hides its verdict for a blocking operand or pattern', async () => {
         await renderCond([clause('$1', 'contains', '')]);
         expect(verdicts()).toEqual([]);
-        expect(container.textContent).not.toMatch(/passes|fails|unknown/);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('$1 holds "63"');
 
         await renderCond([clause('$1', 'matches', '(')]);
         expect(verdicts()).toEqual([]);
-        expect(container.textContent).not.toMatch(/passes|fails|unknown/);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('$1 holds "63"');
+    });
+
+    it('does not crash or draw a verdict when an invalidated named capture is an inherited object key', async () => {
+        // The clause was valid while the pattern declared `(?<toString>\\d+)`; after that group
+        // is removed it must stay visibly invalid, not resolve Object.prototype.toString and crash
+        // while trying to coerce a function to a number.
+        await renderCond([
+            { source: { named: 'toString' }, test: { number: { op: 'gt', value: 25 } } },
+        ], { find: '(\\d+)' });
+
+        expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
+        expect(verdicts()).toEqual([]);
+        expect(container.querySelector('.au-cheld')?.textContent).toContain('${toString} did not match');
+    });
+
+    it('still judges a declared text capture that did not participate as empty text', async () => {
+        // Unlike the stale `toString` above, `retry` is still declared. The sampler returns an
+        // ordinary capture record for a real match in which this optional group did not join, so
+        // text predicates deliberately read its missing slot as `''` and retain their verdict.
+        const sample = jest.spyOn(ActionPanelModule, 'sampleFromPattern').mockReturnValue({ '0': '' });
+        try {
+            await renderCond([
+                { source: { named: 'retry' }, test: { text: { op: 'isEmpty', value: '' } } },
+            ], { find: '(?<retry>\\d+)?' });
+            expect(container.querySelector('.au-cheld')?.textContent).toContain('${retry} did not match');
+            expect(verdicts()).toEqual([expect.objectContaining({ text: expect.stringContaining('passes') })]);
+        } finally {
+            sample.mockRestore();
+        }
     });
 
     it('says what each row\'s token holds, and says plainly when it holds nothing', async () => {
@@ -857,6 +923,8 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         // Not `holds ""` — a token that did not participate is a different fact from one that
         // captured an empty string, and it is the reason the row above it is unknown.
         expect(held[1]).toBe('$3 did not match');
+        // The stale source is invalid rather than merely unknown, so it has no verdict pill.
+        expect(verdicts()).toHaveLength(1);
     });
 
     /**
@@ -869,6 +937,7 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(container.querySelectorAll('.au-crow')).toHaveLength(1);
         expect(verdicts()).toEqual([]);
         expect(container.querySelectorAll('.au-cheld')).toHaveLength(0);
+        expect(container.querySelectorAll('.au-cread')).toHaveLength(0);
 
         await renderCond([clause('$1', 'is over', '25')], { find: 'FAILED (\\d+) tests in (\\S+)' });
         expect(container.querySelectorAll('.au-crow')).toHaveLength(1);

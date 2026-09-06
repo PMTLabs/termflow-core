@@ -383,23 +383,25 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                                 {/* §5.9's second bullet — what this token holds now, and whether this
                                     row passes, so AND / OR is concrete rather than abstract.
 
-                                    Drawn only when there is a reading to judge against: with
-                                    `caps === null` the row shows nothing rather than a default, because
-                                    a wrong verdict is worse than no verdict. `held === undefined` is the
-                                    token that did not participate — said as an absence, never as an
-                                    empty value, since that absence is the whole reason a number test
-                                    above it reads `unknown`. */}
-                                {verdict !== null && (
+                                    The reading and verdict have independent absence rules: with
+                                    `caps === null` there is no reading to draw at all, while an
+                                    unfinished or invalid clause still has a true reading but no
+                                    judgeable verdict. `held === undefined` is the token that did not
+                                    participate — said as an absence, never as an empty value, since that
+                                    absence is the whole reason a number test above it reads `unknown`. */}
+                                {caps !== null && (
                                     <div className="au-cread">
                                         <span className="au-cheld">
                                             {held === undefined
                                                 ? `${sourceText(clause.source)} did not match`
                                                 : `${sourceText(clause.source)} holds "${held}"`}
                                         </span>
-                                        <span className={`au-cv ${verdict.cls}`} title={verdict.why}>
-                                            <span aria-hidden="true">{verdict.mark}</span>
-                                            {verdict.word}
-                                        </span>
+                                        {verdict !== null && (
+                                            <span className={`au-cv ${verdict.cls}`} title={verdict.why}>
+                                                <span aria-hidden="true">{verdict.mark}</span>
+                                                {verdict.word}
+                                            </span>
+                                        )}
                                     </div>
                                 )}
                             </div>
