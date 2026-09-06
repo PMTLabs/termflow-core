@@ -18,7 +18,7 @@ use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
     ActionStep, AutomationGraph, AutomationRule, AutomationStore, Cadence, CompareOp, CondStep,
     Criterion, Finds, Keep, LogOrder, LogScope, MonitorStep, ParsePreset, ParseStep, ReadMode,
-    SendTo, TargetMode, SUPPORTED_SCHEMA_VERSION,
+    SendTo, TargetMode, TimerMode, TimerStep, SUPPORTED_SCHEMA_VERSION,
 };
 
 /// One fake for all three loops and the send.
@@ -294,6 +294,26 @@ pub(crate) fn ctx_rule_saying(id: &str, message: &str, sort_order: i64) -> Autom
     let mut rule = ctx_rule(id);
     rule.graph.action.message = message.into();
     rule.sort_order = sort_order;
+    rule
+}
+
+/// **A schedule rule (plan 032 §3.1, §6.3): no monitor, no parse, no cond — it reads NOTHING.**
+///
+/// The `DailyAt` timer is what makes this a rule rather than a rule with holes in it, and `action`
+/// stays required, so what it would eventually send is spelled out like any other rule's.
+///
+/// Targeting is untouched on purpose: §3.1 keeps `target_mode`/`criterion` as the rule's own
+/// columns, so a schedule rule still watches terminals — which is exactly what makes "it is walked
+/// by the tick and still does nothing" a thing that can be tested.
+pub(crate) fn schedule_only_rule(id: &str) -> AutomationRule {
+    let mut rule = ctx_rule(id);
+    rule.graph.monitor = None;
+    rule.graph.parse = None;
+    rule.graph.cond = None;
+    rule.graph.timer = Some(TimerStep {
+        mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+    });
+    rule.graph.action.message = "stand-up notes?".into();
     rule
 }
 

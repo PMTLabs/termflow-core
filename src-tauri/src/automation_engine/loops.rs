@@ -213,8 +213,9 @@ pub async fn evaluate_tick(
             // A schedule rule (§6.3) has no monitor step, so it has no cadence and is never due
             // for a READ — there is nothing for it to read. It joins neither `due` nor `owed`:
             // a pair that reads nothing cannot consume this terminal's dirty signal and must not
-            // hold its clear back either. Task 22's `schedule_due` branch is what makes such a
-            // rule fire, and it sits above this walk rather than inside it.
+            // hold its clear back either. Task 22's `schedule_due` branch goes in this same walk
+            // but ABOVE this line: it skips `due_now` and the whole evaluate path and pushes a
+            // `PendingSend` directly, so a rule whose minute has come never reaches here.
             let Some(monitor) = live.rule.graph.monitor.as_ref() else {
                 continue;
             };
@@ -337,18 +338,35 @@ pub fn evaluate_pair(
     let echoes = engine.runtime.echoes_for(&pair.tm, now_ms);
     let port = HostPort(host.as_ref());
 
-    // §3.1's three input steps, proved present ONCE — the pure core keeps concrete references and
-    // never learns that a step can be absent. `Unread` for a rule that has none, and `Unread` is
-    // literally true of it: nothing was read, so nothing may be spent — no arm move, no log row, no
-    // `set_last_eval`. Task 22 adds the schedule branch ABOVE this guard, which is what stops such
-    // a rule being re-examined for nothing on every tick.
-    let Some(steps) = eval::InputSteps::of(&rule.graph) else {
+    // **§3.1's three input steps and the compiled pattern, proved present ONCE.** The pure core
+    // keeps concrete references and never learns that either can be absent.
+    //
+    // `Unread` for a schedule rule (§6.3), and `Unread` is literally true of it: nothing was read,
+    // so nothing may be spent — no arm move, no log row, no `set_last_eval`. It is deliberately not
+    // `Read(None)`, which would mean *"read the output and decided not to send"* and would let this
+    // pair spend a dirty flag another pair still needs.
+    //
+    // **The two halves are ONE condition, which is why they are one `let … else`.** `reload` gives
+    // a rule `re: None` if and only if it has no `parse` step, and `InputSteps::of` refuses on
+    // exactly that — so neither `Option` is ever the deciding one on its own. Measured, not
+    // assumed: defaulting the regex here to a match-everything `""` leaves
+    // `a_schedule_rule_reads_nothing_sends_nothing_and_logs_nothing` GREEN, and so does defaulting
+    // the steps, because a third guard (the monitor-less pair never becoming due, in
+    // `evaluate_tick` above) also stands in the way. All three had to be defaulted before that test
+    // failed. Neither half is removable — `evaluate` needs a `&Regex` and a `&CondStep`, and these
+    // are `Option`s — so this is not a redundant guard to delete but one decision written once.
+    //
+    // **Task 22 adds the schedule branch ABOVE this guard**, where a rule whose minute has come is
+    // dispatched. Until then a schedule-only rule is re-examined on every tick and does nothing,
+    // which costs one map lookup per pair per tick and is the interim price of landing §6.4 on its
+    // own; task 22 removes it.
+    let (Some(steps), Some(re)) = (eval::InputSteps::of(&rule.graph), pair.rule.re.as_ref()) else {
         return Evaluated::Unread;
     };
 
     let Some(ev): Option<Evaluation> = eval::evaluate(
         steps,
-        &pair.rule.re,
+        re,
         &echoes,
         prev,
         &port,
@@ -878,7 +896,7 @@ mod tests {
     // only ever be one of each.
     use crate::automation_engine::test_host::*;
     use crate::automation::roster::RosterRow;
-    use crate::automation_store::Finds;
+    use crate::automation_store::{Finds, Keep};
 
     // =============================================================================================
     // §10.5 — the tap
@@ -1054,6 +1072,81 @@ mod tests {
         assert!(
             fake.written().iter().any(|w| w.contains("Fix the 17 failing tests in a.ts")),
             "the resolved message was never typed: {:?}",
+            fake.written()
+        );
+    }
+
+    /// **A schedule rule reads nothing, sends nothing, and logs nothing** — plan 032 §6.3, §6.4.
+    ///
+    /// **Admission is not the property that protects the user.** `reload` admitting a patternless
+    /// rule (`a_schedule_rule_with_no_pattern_is_admitted`) is equally true of one whose absent
+    /// pattern was defaulted to `""` on the way in — and an empty regex matches every position of
+    /// every string, so THAT rule fires on the first byte any watched terminal prints and types
+    /// into a live agent. This is the test that tells the two apart, so it is deliberately run
+    /// against a terminal that HAS produced output and is marked dirty: every gate upstream of the
+    /// pattern is open, and the only thing standing between this rule and a send is that it has no
+    /// pattern to match with.
+    ///
+    /// Eight ticks rather than one, so a rule that needs a second sight to cross cannot pass by
+    /// never getting one. The arm state is left `Unseen` on purpose: nothing may move it, which is
+    /// the third assertion.
+    ///
+    /// Task 22 adds the branch that actually fires such a rule at its scheduled minute. Until then
+    /// "never" is the whole specification, and after it this test still holds for every minute that
+    /// is not the scheduled one.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_rule_reads_nothing_sends_nothing_and_logs_nothing() {
+        let (engine, fake, host) = wire(vec![schedule_only_rule("au-sched")]);
+        assert_eq!(engine.snapshot_live().len(), 1, "premise: the rule IS live and IS walked");
+
+        fake.say("pc-1", "ctx:99% FAILED 3 tests
+");
+        for tick in 0..8 {
+            engine.runtime.mark_dirty("pc-1");
+            evaluate_tick(&engine, &host, 0, 1_000 + tick * 250).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(fake.written().is_empty(), "a rule with no pattern typed something: {:?}", fake.written());
+        assert!(log_rows(&fake.store).is_empty(), "and it wrote a log row: {:?}", log_rows(&fake.store));
+        assert_eq!(
+            engine.runtime.arm_state("au-sched", "tm-1"),
+            ArmState::Unseen,
+            "nothing was read, so nothing may be spent — the arm state must not have moved"
+        );
+        assert_eq!(
+            engine.runtime.last_eval("au-sched", "tm-1"),
+            None,
+            "and `set_last_eval` must not have run either"
+        );
+    }
+
+    /// The paired positive, and the reason the test above is not vacuous.
+    ///
+    /// Everything in this rig — the dirty flag, the watched set, the tick, the terminal's text —
+    /// is identical; only the pattern is present. If the rig itself were broken, this would be
+    /// silent too, and "sends nothing" would prove nothing at all.
+    #[tokio::test(start_paused = true)]
+    async fn the_same_rig_with_a_pattern_does_send()  {
+        let (engine, fake, host) = rig_with_rule(|g| {
+            g.parse_mut().find = "FAILED".into();
+            g.parse_mut().keep = Keep::Whole;
+            g.cond_mut().finds = Finds::Event;
+            g.action.message = "stand-up notes?".into();
+        });
+        engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+
+        fake.say("pc-1", "ctx:99% FAILED 3 tests
+");
+        for tick in 0..8 {
+            engine.runtime.mark_dirty("pc-1");
+            evaluate_tick(&engine, &host, 0, 1_000 + tick * 250).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+        assert!(
+            fake.written().iter().any(|w| w.contains("stand-up notes?")),
+            "the rig cannot send at all, so the schedule rule's silence proves nothing: {:?}",
             fake.written()
         );
     }

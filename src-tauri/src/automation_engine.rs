@@ -114,7 +114,15 @@ pub const STATE_EMIT_MIN_INTERVAL_MS: i64 = 1_000;
 #[derive(Debug)]
 pub struct LiveRule {
     pub rule: AutomationRule,
-    pub re: Regex,
+    /// `None` on a **schedule rule** (plan 032 §6.3, §6.4), which has no `parse` step and therefore
+    /// no pattern to compile. Every consumer of this is on the OUTPUT path and already knows it is
+    /// on the output path.
+    ///
+    /// **Not a `Regex::new("")` stand-in, and this is the whole point of the `Option`.** An empty
+    /// pattern compiles and matches every position of every string — `pattern_refused_at_load`
+    /// exists because of exactly that — so a "harmless" default here would make a rule that reads
+    /// nothing fire on the first byte any watched terminal printed.
+    pub re: Option<Regex>,
 }
 
 /// Fold a v1 `op`/`threshold`/`keep` rule into the clause list it means.
@@ -388,14 +396,16 @@ impl AutomationEngine {
                     .push((rule.id.clone(), "this rule needs a newer version of TermFlow".into()));
                 continue;
             }
-            // A rule with no parse step has no pattern to compile, and `LiveRule.re` is still a
-            // mandatory `Regex` — so until task 20 makes it optional there is nothing this loop can
-            // build for one. Unreachable today: nothing authors an absent step yet, and every rule
-            // the editor writes carries all three. Task 20 replaces this with an admission.
+            // **Both pattern gates apply only to a rule that HAS a pattern** (§6.4). A schedule
+            // rule (§6.3) has no `parse` step at all — no pattern is not a broken pattern, and
+            // refusing it here would make the whole of milestone 4 unreachable.
+            //
+            // It is admitted with `re: None`, never with a compiled `""`. `compile("")` SUCCEEDS
+            // into an expression that matches every position of every string, which is why
+            // `pattern_refused_at_load` refuses a blank pattern rather than merely an uncompilable
+            // one — and the same reasoning forbids defaulting the absence here.
             let Some(pattern) = rule.graph.parse.as_ref().map(|p| p.find.clone()) else {
-                report
-                    .skipped
-                    .push((rule.id.clone(), "this rule has no pattern to look for".into()));
+                next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re: None }));
                 continue;
             };
             // §2.7, and it is the SAME predicate the store's save gate exempts — see
@@ -408,7 +418,7 @@ impl AutomationEngine {
             match crate::automation_validation::compile(&pattern) {
                 Ok(re) => {
                     fold_v1_clauses(&mut rule.graph, &re);
-                    next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re }));
+                    next.insert(rule.id.clone(), Arc::new(LiveRule { rule, re: Some(re) }));
                 }
                 Err(e) => {
                     report.skipped.push((
@@ -690,6 +700,31 @@ mod tests {
         assert_eq!(rows.len(), 2, "a disabled or completed rule is normal, not a failure: {:?}", rows);
         assert!(rows[0].contains("could not be understood"), "{}", rows[0]);
         assert!(rows[1].contains("needs a newer version"), "{}", rows[1]);
+    }
+
+    /// **A schedule rule has no pattern, and no pattern is not a broken pattern** (plan 032 §6.4).
+    ///
+    /// `reload` used to ask `pattern_refused_at_load(&graph.parse.find)` of every rule, and a rule
+    /// with no parse step at all has no `find` to ask about — the first version of task 19 skipped
+    /// it with a refusal row, because `LiveRule.re` was a mandatory `Regex`. It is optional now, so
+    /// the two pattern gates apply only to a rule that HAS a pattern, and this rule runs.
+    #[test]
+    fn a_schedule_rule_with_no_pattern_is_admitted() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&crate::automation_engine::test_host::schedule_only_rule("au-sched")).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let report = engine.reload(&store, 0).unwrap();
+
+        assert_eq!(report.live, 1, "no pattern is not a broken pattern");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert!(log_rows(&store).is_empty(), "and nothing was written to the log about it");
+        assert_eq!(live_ids(&engine), vec!["au-sched"]);
+
+        // The absence reaches the live set as an ABSENCE, never as a defaulted match-everything
+        // pattern — which is what an `unwrap_or_default()` anywhere on this path would produce.
+        let live = engine.snapshot_live();
+        assert!(live[0].re.is_none(), "a rule with no pattern must carry no compiled regex");
     }
 
     /// §2.7: an uncompilable pattern is reported once per LOAD. The evaluator runs four times a second
