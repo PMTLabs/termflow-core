@@ -41,6 +41,7 @@ export const STEP_FIELDS: Record<StepKind, ProblemField[]> = {
     monitor: ['targets', 'monitor'],
     parse: ['parse'],
     cond: ['cond'],
+    timer: ['timer'],
     action: ['action'],
 };
 
@@ -196,13 +197,83 @@ export const KEEP_PHRASES = {
 } as const;
 
 /**
+ * The wait step's two modes, in the words the radio uses (mockup §03). **"Wait", never "Timer"** —
+ * `AutomationCadence`'s `'timer'` is the monitor's poll interval, and two controls called Timer on
+ * one screen is how the two get confused.
+ */
+export const WAIT_MODE_PHRASES = {
+    afterMatch: 'After the comparison passes',
+    dailyAt: 'At a time of day',
+} as const;
+
+/** Bits 0–6 of a `dailyAt` mask are Mon..Sun (plan 032 §3.1). Bit 7 names no day. */
+const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
+const WEEKDAY_MASK = 0b0001_1111;
+const WEEKEND_MASK = 0b0110_0000;
+const EVERY_DAY_MASK = 0b0111_1111;
+
+/** Which days a mask selects, in order. Exported so the panel's checkboxes and this agree. */
+export function daysOf(mask: number): string[] {
+    return DAY_NAMES.filter((_, i) => (mask & (1 << i)) !== 0);
+}
+
+/**
+ * A weekday mask in words — `every day`, `weekdays`, `weekends`, or the days themselves.
+ *
+ * The three named sets are not a convenience: `Mon, Tue, Wed, Thu, Fri` is 25 characters and the
+ * node's value column holds about 23 to a line (see `AU_NODE_W`), so the common case would wrap the
+ * one row the card gives this step. Returns `''` for a mask that selects nothing, which is
+ * `timer.noDays` and is reported as a missing value rather than as a set of no days.
+ */
+export function describeDays(mask: number): string {
+    const picked = mask & EVERY_DAY_MASK;
+    if (picked === 0) return '';
+    if (picked === EVERY_DAY_MASK) return 'every day';
+    if (picked === WEEKDAY_MASK) return 'weekdays';
+    if (picked === WEEKEND_MASK) return 'weekends';
+    return daysOf(picked).join(', ');
+}
+
+/**
+ * A minute-of-day as a 24-hour clock time, or `null` when it is not a time of day at all.
+ *
+ * `minuteOfDay` is a bare number on both sides of the wire and `timer.badMinute` is what refuses an
+ * out-of-range one — but validation runs beside this, not before it, so the editor draws a rule
+ * that is blocked. `null` is the honest answer for `-5`; `-1:-5` is not.
+ */
+export function clockTime(minuteOfDay: number): string | null {
+    if (!Number.isInteger(minuteOfDay) || minuteOfDay < 0 || minuteOfDay >= 24 * 60) return null;
+    const hh = String(Math.floor(minuteOfDay / 60)).padStart(2, '0');
+    const mm = String(minuteOfDay % 60).padStart(2, '0');
+    return `${hh}:${mm}`;
+}
+
+/**
+ * A delay in the largest whole unit that does not lose anything — `30 seconds`, `2 minutes`,
+ * `90 seconds`.
+ *
+ * Whole minutes only when the value IS whole minutes: rounding `90000` to *"2 minutes"* would be
+ * the card describing a rule that waits a different length of time from the one the panel's field
+ * holds, which is the disagreement this whole module exists to prevent.
+ */
+export function describeDelay(ms: number): string {
+    const seconds = ms / 1_000;
+    if (Number.isInteger(seconds) && seconds >= 60 && seconds % 60 === 0) {
+        const minutes = seconds / 60;
+        return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+    }
+    const shown = Number.isInteger(seconds) ? String(seconds) : String(Math.round(seconds * 10) / 10);
+    return `${shown} second${shown === '1' ? '' : 's'}`;
+}
+
+/**
  * **The single source.** One record per step, read by the node face AND the inspector panel.
  *
  * Keys are stable names rather than positions, because both renderers name what they want and a
  * face that silently picked `values[1]` would break the moment a row moved.
  */
 export function stepValues(rule: AutomationRule, step: StepKind): Record<string, StepValue> {
-    const { monitor, parse, cond, action } = rule.graph;
+    const { monitor, parse, cond, timer, action } = rule.graph;
     switch (step) {
         case 'monitor':
             return {
@@ -256,6 +327,29 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
                 fires,
             };
         }
+        // **Its own arm, above `action`'s `default:`.** `Record<StepKind, …>` made every other table
+        // in this milestone fail to compile until it had a `timer` entry; a switch whose last arm is
+        // `case 'action': default:` is the one place that protection does not reach, and a new kind
+        // falling through it would draw the ACTION's values under the wait step's labels.
+        case 'timer': {
+            if (!timer) return { mode: NOT_IN_THIS_RULE, when: NOT_IN_THIS_RULE };
+            if ('afterMatch' in timer.mode) {
+                return {
+                    mode: value(WAIT_MODE_PHRASES.afterMatch),
+                    when: value(`${describeDelay(timer.mode.afterMatch.delayMs)} after it matches`),
+                };
+            }
+            const { minuteOfDay, days } = timer.mode.dailyAt;
+            const at = clockTime(minuteOfDay);
+            const when = describeDays(days);
+            // Two independent missing values on one row, and the row can only show one string. The
+            // time is named first because it is the field the row is about; either way the value is
+            // marked `missing`, so the face draws it in the warning colour and the problem list
+            // carries the specific `timer.badMinute` / `timer.noDays` sentence.
+            if (at === null) return { mode: value(WAIT_MODE_PHRASES.dailyAt), when: absent('not a time of day') };
+            if (when === '') return { mode: value(WAIT_MODE_PHRASES.dailyAt), when: absent(`${at}, no days picked`) };
+            return { mode: value(WAIT_MODE_PHRASES.dailyAt), when: value(`${at}, ${when}`) };
+        }
         case 'action':
         default:
             return {
@@ -299,6 +393,13 @@ const FACE_ROWS: Record<StepKind, Array<{ label: string; key: string }>> = {
     // layout described a SINGLE comparison and has nothing to say about a clause list or its join.
     cond: [
         { label: 'Fires when', key: 'fires' },
+    ],
+    // ONE row, for the same reason `cond` has one: the two modes say different things
+    // (§6.2 *hold 30 seconds*, §6.3 *09:00, weekdays*) and `FACE_ROWS` is keyed by KIND, so a
+    // two-row layout would have to give one of them a label that lies. `when` carries the mode in
+    // its own words instead — mockup §03's `Fires` row, which is the row that section draws.
+    timer: [
+        { label: 'Fires', key: 'when' },
     ],
     action: [
         { label: 'Send', key: 'message' },

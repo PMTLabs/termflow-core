@@ -1,6 +1,6 @@
 /**
- * The four steps, their typed ports, and the one function that decides whether a wire is legal
- * (plan 028 §6.3, mockup §03).
+ * The five steps, their typed ports, and the one function that decides whether a wire is legal
+ * (plan 028 §6.3, plan 032 §6.2/§6.3/§9, mockup §03).
  *
  * **Canvas Mode's ports are undirected 4-compass geometry with no type system**, and the only
  * refusal it has rejects a null target — so `useWireDrag` is a pattern to copy, not code to reuse.
@@ -8,13 +8,18 @@
  * §10.21's ordered-pair matrix a cheap and total test rather than a sampling of the interesting
  * cases.
  *
- * **The four step KINDS are fixed; a rule having all four is not.** This file's arithmetic is over
+ * **The five step KINDS are fixed; a rule having all five is not.** This file's arithmetic is over
  * the names — the order, the ports, which pairs may be wired — and none of it reads `rule.graph`.
  * That is what keeps it true while the DTO changes underneath it: plan 032 §3.1 made `monitor`,
- * `parse` and `cond` optional, so a schedule rule (§6.3) is `action` and a `timer` and nothing else,
- * and §7 adds `'timer'` to `StepKind` itself in milestone 5 (task 23). The header used to say *"a
- * rule is always monitor → parse → cond → action, and the DTO has a field for each"*, which the DTO
- * and every schedule-rule comment in this milestone contradict.
+ * `parse` and `cond` optional, so a schedule rule (§6.3) is `action` and a `timer` and nothing else.
+ * The header used to say *"a rule is always monitor → parse → cond → action, and the DTO has a field
+ * for each"*, which the DTO and every schedule-rule comment in this milestone contradict.
+ *
+ * **The one thing here that is NOT arithmetic over the names is `defaultWires`' second argument.**
+ * The wait step has two modes and they imply different pictures — delay threads it between the
+ * verdict and the send, schedule makes it the only wire on the canvas — so the shape is passed IN
+ * rather than read off a rule. `automationDraft`'s `timerShapeOf` is the one place that reads the
+ * DTO to answer it.
  *
  * What the canvas adds is *which of them the user has put on it yet* — a brand-new rule opens on an
  * empty canvas (mockup §03's third state) and the palette is how it gets built. `present` is
@@ -23,15 +28,44 @@
  * *not in this rule* placeholder and an `absent` node tone.
  */
 
-export type StepKind = 'monitor' | 'parse' | 'cond' | 'action';
+export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
 
-/** Left to right, and also the order the palette lists them and the problem list reports them. */
-export const STEP_ORDER: readonly StepKind[] = Object.freeze(['monitor', 'parse', 'cond', 'action']);
+/**
+ * Left to right, and also the order the palette lists them and the problem list reports them.
+ *
+ * **`timer` sits fourth, between the comparison and the send**, which is where a DELAY sits — and
+ * a schedule rule, where the wait is the first thing that happens, simply has no cards to its left.
+ * A per-mode order would make the palette's list and the problem list's order depend on a field
+ * inside one of the steps they are listing, and `automation_validation` already emits its problems
+ * in this order (targets, monitor, parse, cond, timer, action) on both sides of the wire.
+ */
+export const STEP_ORDER: readonly StepKind[] = Object.freeze([
+    'monitor',
+    'parse',
+    'cond',
+    'timer',
+    'action',
+]);
 
+/**
+ * Which of the wait step's two modes a rule is in — the DTO's own two spellings (§6.2, §6.3).
+ *
+ * A string rather than the DTO type, because nothing in this module reads a rule: the caller looks
+ * at `graph.timer.mode` once (`automationDraft.timerShapeOf`) and hands the answer down.
+ */
+export type TimerShape = 'afterMatch' | 'dailyAt';
+
+/**
+ * **"Wait", never "Timer".** `AutomationCadence`'s `'timer'` already means the monitor's poll
+ * interval, and a user reading two controls called Timer on one screen has no way to tell which is
+ * which. The identifier stays `timer` — it is the DTO's own field name (§3.1) — and every string
+ * a user reads says Wait.
+ */
 export const STEP_LABELS: Record<StepKind, string> = {
     monitor: 'Watch output',
     parse: 'Read a value',
     cond: 'Compare it',
+    timer: 'Wait',
     action: 'Send to terminal',
 };
 
@@ -40,6 +74,7 @@ export const STEP_SUBTITLES: Record<StepKind, string> = {
     monitor: 'which terminals, and what to read',
     parse: 'find text, pull a number out',
     cond: 'decide yes or no',
+    timer: 'hold, or fire on the clock',
     action: 'what happens when it fires',
 };
 
@@ -75,6 +110,18 @@ export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = {
         { id: 'in', dir: 'in', type: 'value', label: 'value' },
         { id: 'true', dir: 'out', type: 'verdict', label: 'yes' },
         { id: 'false', dir: 'out', type: 'verdict', label: 'no' },
+    ]),
+    /**
+     * **Both ports carry a verdict, and both exist in both modes.** In delay mode the crossing
+     * arrives on `in` and leaves on `out` `delayMs` later; in schedule mode nothing arrives at all
+     * and `in` is simply never wired — the same deliberate empty port `cond`'s `no` output has
+     * always been. A mode-dependent port table would make `allPorts()`, `portAnchor` and
+     * `portSides` all take a mode they otherwise have no use for, to hide a dot rather than to
+     * change what a wire may do.
+     */
+    timer: Object.freeze([
+        { id: 'in', dir: 'in', type: 'verdict', label: 'verdict' },
+        { id: 'out', dir: 'out', type: 'verdict', label: 'verdict' },
     ]),
     action: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }]),
 };
@@ -154,7 +201,7 @@ export function canConnect(
     // fires when the comparison FAILS while the engine goes on firing when it succeeds. The canvas
     // would be drawing the exact opposite of what runs, which is the one thing `AuWires`' own header
     // promises it cannot do.
-    const canonical = defaultWires(STEP_ORDER);
+    const canonical = canonicalWires();
     if (!canonical.some((w) => samePort(w.from, from) && samePort(w.to, to))) {
         // Name the port that DOES drive it, not the one that was tried — a refusal that only says
         // no leaves the user guessing which of two outputs was meant.
@@ -171,11 +218,23 @@ export function canConnect(
     return null;
 }
 
-/** Which step must already be on the canvas before this one makes sense. */
-const REQUIRES: Partial<Record<StepKind, StepKind>> = {
-    parse: 'monitor',
-    cond: 'parse',
-    action: 'cond',
+/**
+ * Which step must already be on the canvas before this one makes sense — **any ONE of them**.
+ *
+ * A list rather than a single kind, because `action` has two drivers and always did in principle:
+ * the verdict from `Compare it` on a watching rule, and the wait itself on a schedule rule, which
+ * has no comparison and is not allowed one (§6.3). Named as one predecessor, the palette demanded a
+ * `Compare it` that a schedule rule must not carry, so *"a wait and a send"* — the whole of mockup
+ * §03's rule — could not be built at all.
+ *
+ * **`timer` is deliberately absent**, and that is what makes a schedule rule reachable: it reads
+ * nothing, so there is nothing for it to be downstream of. It is the only step besides `monitor`
+ * that may open an empty canvas.
+ */
+const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
+    parse: ['monitor'],
+    cond: ['parse'],
+    action: ['cond', 'timer'],
 };
 
 /**
@@ -189,9 +248,13 @@ export function canAddStep(present: readonly StepKind[], kind: StepKind): Refusa
         };
     }
     const needs = REQUIRES[kind];
-    if (needs && !present.includes(needs)) {
+    if (needs && !needs.some((n) => present.includes(n))) {
+        // Every alternative is named. A refusal that mentioned only the first would send a user
+        // building a schedule rule off to add a `Compare it` the rule may not have.
+        const names = needs.map((n) => STEP_LABELS[n]).join(' or ');
+        const tail = needs.length === 1 ? 'it is there' : 'one of them is there';
         return {
-            reason: `Add ${STEP_LABELS[needs]} first — ${STEP_LABELS[kind]} has nothing to work on until it is there.`,
+            reason: `Add ${names} first — ${STEP_LABELS[kind]} has nothing to work on until ${tail}.`,
         };
     }
     return null;
@@ -213,24 +276,81 @@ export function canAddStep(present: readonly StepKind[], kind: StepKind): Refusa
  */
 
 /**
- * The wires implied by a set of steps — the chain, plus the `yes` branch into the action.
+ * The wires implied by a set of steps and the wait's mode — the chain, plus the `yes` branch.
  *
- * Derived rather than stored for the same reason the paraphrase is: a saved rule's graph has four
- * steps and one meaning, so a wire list that could disagree with it would be a second source of
- * truth for the thing the canvas exists to draw. The `no` branch is deliberately left unwired; the
- * empty port is the point.
+ * Derived rather than stored for the same reason the paraphrase is: a saved rule's graph has one
+ * meaning, so a wire list that could disagree with it would be a second source of truth for the
+ * thing the canvas exists to draw. The `no` branch is deliberately left unwired; the empty port is
+ * the point.
+ *
+ * **The mode is an argument because the two modes are two different rules** (§6.2, §6.3):
+ *
+ * - `afterMatch` — the wait is a DELAY. It goes between the verdict and the send, so the verdict no
+ *   longer reaches the send directly: the send it triggers is the one the wait releases.
+ * - `dailyAt` — the wait is the START. §6.3's walk skips the screen read *for the whole rule*, on
+ *   every tick, so a monitor → read → compare chain drawn beside the clock would be a picture of
+ *   three steps the engine does not run. One wire, and only one, whatever else is on the canvas.
+ *   (That shape is itself a blocking problem — `timer.scheduleWithMonitor` — but the canvas has to
+ *   draw the rule truthfully while the user is looking at the error, not instead of it.)
+ *
+ * The default is `afterMatch`: it is the mode a wait step is created in, and it is the only one of
+ * the two whose wires a rule with no wait step at all is a subset of.
  */
-export function defaultWires(present: readonly StepKind[]): Wire[] {
+export function defaultWires(
+    present: readonly StepKind[],
+    shape: TimerShape = 'afterMatch',
+): Wire[] {
     const out: Wire[] = [];
     const has = (k: StepKind) => present.includes(k);
+
+    if (has('timer') && shape === 'dailyAt') {
+        if (has('action')) {
+            out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
+        }
+        return out;
+    }
+
     if (has('monitor') && has('parse')) {
         out.push({ from: { step: 'monitor', port: 'out' }, to: { step: 'parse', port: 'in' } });
     }
     if (has('parse') && has('cond')) {
         out.push({ from: { step: 'parse', port: 'out' }, to: { step: 'cond', port: 'in' } });
     }
-    if (has('cond') && has('action')) {
+    if (has('cond') && has('timer')) {
+        out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'timer', port: 'in' } });
+    }
+    if (has('timer') && has('action')) {
+        out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
+    } else if (has('cond') && has('action')) {
         out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } });
     }
     return out;
+}
+
+/**
+ * Every wire SOME legal shape of a rule implies — the set `canConnect` accepts.
+ *
+ * A union rather than one call, because there are now three shapes and a user may be drawing any of
+ * them: the four-step chain (every rule written before this milestone), the delayed one, and the
+ * scheduled one. Derived from `defaultWires` rather than typed out, so the wire the canvas DRAWS and
+ * the wire it will ACCEPT cannot be edited apart.
+ *
+ * **The four-step chain is listed first, and that decides one sentence.** `canConnect`'s shape
+ * refusal names the port that does drive the step it was dropped on, by finding the first canonical
+ * wire into it — and `action.in` has two, so the order picks which. `Compare it`'s `yes` output is
+ * the right answer for a canvas with no wait step, which is the canvas most refusals happen on.
+ *
+ * **What this deliberately does not do is ask which shape is on screen.** `canConnect` sees the
+ * wires, not the cards, so on a canvas that HAS a delay it would still accept `cond.true` →
+ * `action.in` — a picture that skips the wait. Reaching that takes deleting the wait's own output
+ * wire first, because an input takes one wire and the arity check above refuses the second; and the
+ * alternative is threading the step list and the wait's mode through every caller of a function
+ * whose whole point is that it is arithmetic over names.
+ */
+function canonicalWires(): Wire[] {
+    return [
+        ...defaultWires(STEP_ORDER.filter((s) => s !== 'timer')),
+        ...defaultWires(STEP_ORDER, 'afterMatch'),
+        ...defaultWires(STEP_ORDER, 'dailyAt'),
+    ];
 }

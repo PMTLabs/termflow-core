@@ -48,19 +48,17 @@ export interface AuInspectorProps {
  * button that then focused nothing. The exhaustive type turns the next such omission into a `tsc`
  * failure, which is the same protection `BADGES` already gives `ProblemCode`.
  *
- * **`timer` points at `action` until task 23 gives `StepKind` its own `'timer'`.** There is no
- * timer step to focus yet, and of the four that exist `action` is the only one every rule has —
- * `monitor`, `parse` and `cond` are all absent on a schedule rule (plan 032 §3.1), which is exactly
- * the rule kind these problems belong to, so pointing there would focus a card standing for nothing.
- * The wait is also part of *what happens when it fires*, which is `action`'s own subtitle. Tasks
- * 23/24 change this line to `timer: 'timer'` and the compiler will not let them forget it.
+ * **`timer` points at its own step**, since task 23 gave `StepKind` a `'timer'`. It pointed at
+ * `action` for one commit — a deliberate placeholder, because of the four kinds that existed
+ * `action` was the only one every rule has, and `monitor`/`parse`/`cond` are all absent on the
+ * schedule rule these problems belong to.
  */
 const FIELD_STEPS: Record<ProblemField, StepKind> = {
     targets: 'monitor',
     monitor: 'monitor',
     parse: 'parse',
     cond: 'cond',
-    timer: 'action',
+    timer: 'timer',
     action: 'action',
 };
 

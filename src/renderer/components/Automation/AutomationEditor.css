@@ -327,6 +327,14 @@
     color: #c08b52;
 }
 
+/* Mockup's `--n-timer`. Hardcoded hex, no custom properties, matching the four above (plan §9). */
+.au-editor .au-palitem.timer .au-palico,
+.au-editor .au-node.timer .au-nico,
+.au-editor .au-gi.timer {
+    background: rgba(196, 123, 156, 0.18);
+    color: #c47b9c;
+}
+
 .au-editor .au-palitem.action .au-palico,
 .au-editor .au-node.action .au-nico,
 .au-editor .au-gi.action {

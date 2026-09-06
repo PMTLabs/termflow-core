@@ -19,7 +19,10 @@ import {
 } from '../../Settings/Automations/automationTemplates';
 import { DEFAULT_LAYOUT, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
 import { problems } from '../automationValidation';
-import { STEP_ORDER, defaultWires } from '../automationSteps';
+import { STEP_ORDER, canAddStep, defaultWires } from '../automationSteps';
+
+/** The four steps every rule has drawn for it, whatever its graph holds — the wait is opt-in. */
+const WITHOUT_TIMER = STEP_ORDER.filter((s) => s !== 'timer');
 import type { AutomationRule } from '../../../types/electron';
 
 /** The wire hop, exactly as `invoke` performs it. */
@@ -108,6 +111,11 @@ describe('draft ⇄ row', () => {
                     monitor: { x: 11, y: 12 },
                     parse: { x: 21, y: 22 },
                     cond: { x: 31, y: 32 },
+                    // Five, since task 23 gave `StepKind` its `'timer'`. Not decoration: `layoutOf`
+                    // walks `STEP_ORDER` and fills a missing card in from `DEFAULT_LAYOUT`, so a
+                    // four-key fixture would come back five-key and this identity would be
+                    // asserting the default rather than the carried value.
+                    timer: { x: 51, y: 52 },
                     action: { x: 41, y: 42 },
                 },
             },
@@ -260,12 +268,48 @@ describe('draftFromRule', () => {
         targetIds: ['tm-9'],
     });
 
-    it('draws all four steps for a template or an existing rule', () => {
+    it('draws all four ordinary steps for a template or an existing rule', () => {
         const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
-        expect(draft.present).toEqual([...STEP_ORDER]);
-        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(draft.wires).toEqual(defaultWires(WITHOUT_TIMER));
         expect(draft.layout).toEqual(DEFAULT_LAYOUT);
         expect(draft.selected).toBe('monitor');
+    });
+
+    /**
+     * **The wait step is drawn only when the rule HAS one, and the other four never are.**
+     *
+     * The asymmetry is the point, and both halves matter. A card standing for an absent monitor
+     * reads *"not in this rule"* and is how a schedule rule shows what it is missing; a card
+     * standing for an absent WAIT would be on every rule ever written, and `canAddStep` refuses a
+     * step that is already present — so drawing it unconditionally would make the palette's only
+     * route to adding one permanently closed.
+     */
+    it('draws the wait step exactly when the rule has one', () => {
+        const withWait = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        withWait.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        const draft = draftFromRule(withWait);
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(canAddStep(draft.present, 'timer')).not.toBeNull();
+
+        // And without one, the palette can still offer it.
+        expect(canAddStep(draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0])).present, 'timer'))
+            .toBeNull();
+    });
+
+    /**
+     * A SCHEDULE rule draws its clock and its send, and the three steps it does not have (§6.3).
+     * The wires it draws are the one wire that shape runs on — a monitor → read → compare chain
+     * beside the clock would be a picture of three steps the engine skips on every tick.
+     */
+    it('draws a schedule rule with the one wire that shape runs on', () => {
+        const schedule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        schedule.graph.timer = { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } };
+        const draft = draftFromRule(schedule);
+        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.wires.map((w) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`))
+            .toEqual(['timer.out->action.in']);
     });
 
     it('draws NOTHING for a brand-new rule', () => {
@@ -408,11 +452,11 @@ describe('draftFromRule', () => {
         }
     });
 
-    it('a TEMPLATE draws all four steps, like the complete rule it is', () => {
+    it('a TEMPLATE draws all four ordinary steps, like the complete rule it is', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         const draft = draftFromRule(rule, 'template');
-        expect(draft.present).toEqual([...STEP_ORDER]);
-        expect(draft.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(draft.wires).toEqual(defaultWires(WITHOUT_TIMER));
         expect(draft.selected).toBe('monitor');
         // The RULE, absolutely — for the reason the seeded oracle is absolute: `present`/`wires`/
         // `selected` are all about the canvas, and none of them would notice this opening quietly
@@ -547,9 +591,42 @@ describe('the reducer', () => {
         for (const step of ['action', 'monitor', 'cond', 'parse'] as const) {
             d = draftReducer(d, { type: 'addStep', step });
         }
-        expect(d.present).toEqual([...STEP_ORDER]);
+        expect(d.present).toEqual(WITHOUT_TIMER);
         // And the wires follow, rather than being appended in drop order.
-        expect(d.wires).toEqual(defaultWires(STEP_ORDER));
+        expect(d.wires).toEqual(defaultWires(WITHOUT_TIMER));
+
+        // The wait step drops in fifth wherever it is dropped, and re-draws the chain THROUGH it.
+        d = draftReducer(d, { type: 'addStep', step: 'timer' });
+        expect(d.present).toEqual([...STEP_ORDER]);
+        expect(d.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+    });
+
+    /**
+     * **Adding the wait card writes the step into the rule.** Every other `addStep` is
+     * presentation-only, because `blankDraft()` already carries a monitor, a parse, a cond and an
+     * action — the card is revealed over a field that exists. `graph.timer` is absent by design on
+     * a rule that does not use one (§3.1), so a reveal with no write would give the panel no step
+     * to bind to, leave the save nothing to write, and put a card on the canvas that the rule does
+     * not have.
+     */
+    it('writes a wait step into the rule when its card is added, and leaves it alone after', () => {
+        const empty = draft();
+        expect(empty.rule.graph.timer).toBeUndefined();
+
+        const added = draftReducer(empty, { type: 'addStep', step: 'timer' });
+        expect(added.rule.graph.timer).toEqual({ mode: { afterMatch: { delayMs: 30_000 } } });
+        // A wait is only a wait if it is long enough to be one, and short enough to survive the
+        // session — the card must not be born blocked.
+        expect(problems(added.rule).some((p) => p.field === 'timer')).toBe(false);
+
+        // And a rule that already has one keeps ITS value: re-adding is a no-op, and so is adding
+        // the card back to a rule whose graph still carries the step.
+        const edited = {
+            ...added,
+            rule: { ...added.rule, graph: { ...added.rule.graph, timer: { mode: { afterMatch: { delayMs: 90_000 } } } } },
+        };
+        expect(draftReducer(edited, { type: 'addStep', step: 'timer' }).rule.graph.timer)
+            .toEqual({ mode: { afterMatch: { delayMs: 90_000 } } });
     });
 
     it('re-derives the wires as steps are added, rather than appending in drop order', () => {

@@ -1,10 +1,15 @@
 /**
- * §10.21 — the ordered-pair matrix over all four steps.
+ * §10.21 — the ordered-pair matrix over all five steps.
  *
- * Total rather than sampled: seven ports, forty-nine ordered pairs, and exactly four are legal. A
+ * Total rather than sampled: nine ports, eighty-one ordered pairs, and exactly five are legal. A
  * test that checked "monitor connects to parse" and "parse does not connect to action" would pass on
  * a `canConnect` that had lost its type check entirely — the interesting refusals are the ones
  * nobody thinks to write down.
+ *
+ * **The fifth step is `timer`, and it has two shapes rather than one** (plan 032 §6.2, §6.3), which
+ * is why `defaultWires` takes the shape as an argument and why this file asserts BOTH: in delay mode
+ * the wait sits between the verdict and the send, and in schedule mode it *starts* the rule and
+ * nothing else is wired at all.
  */
 import {
     STEP_LABELS,
@@ -25,29 +30,37 @@ import {
     portSides,
     sideOf,
 } from '../automationDraft';
-import { defaultWires } from '../automationSteps';
 
 const key = (p: PortRef) => `${p.step}.${p.port}`;
 
+/** The four steps a rule had before the wait step existed — still a real shape, and the common one. */
+const WITHOUT_TIMER: StepKind[] = STEP_ORDER.filter((s) => s !== 'timer');
+
 /**
- * The three wires a rule IMPLIES, and nothing else.
+ * The wires SOME legal shape of a rule implies, and nothing else.
  *
  * `cond.false->action.in` used to be in here, and it passed every check: right direction, matching
  * `verdict` type, a free input. It is the one accepted pair that draws a rule TermFlow does not run
  * — delete the `yes` chip, draw the `no` one, and the canvas says the rule fires when the comparison
  * FAILS while the engine goes on firing when it succeeds. `wires` is session-only canvas state and
  * no behaviour derives from it, so the drawing was the only thing that changed.
+ *
+ * **Five rather than three, because the wait step adds two and removes none.** `cond.true->action.in`
+ * stays legal: a rule with no wait step is still the ordinary rule, and refusing that pair would
+ * un-draw every rule written before this milestone.
  */
 const LEGAL = new Set([
     'monitor.out->parse.in',
     'parse.out->cond.in',
+    'cond.true->timer.in',
     'cond.true->action.in',
+    'timer.out->action.in',
 ]);
 
 describe('canConnect — the ordered-pair matrix', () => {
     const ports = allPorts();
 
-    it('has the seven ports the step table declares', () => {
+    it('has the nine ports the step table declares', () => {
         expect(ports.map(key)).toEqual([
             'monitor.out',
             'parse.in',
@@ -55,11 +68,16 @@ describe('canConnect — the ordered-pair matrix', () => {
             'cond.in',
             'cond.true',
             'cond.false',
+            // The wait step carries a verdict through: in delay mode the crossing arrives here and
+            // leaves `delayMs` later, and in schedule mode the input is simply never wired — the
+            // same "the empty port is the point" the `no` output has always made.
+            'timer.in',
+            'timer.out',
             'action.in',
         ]);
     });
 
-    it('accepts exactly three of the forty-nine ordered pairs', () => {
+    it('accepts exactly five of the eighty-one ordered pairs', () => {
         const accepted: string[] = [];
         for (const from of ports) {
             for (const to of ports) {
@@ -69,7 +87,7 @@ describe('canConnect — the ordered-pair matrix', () => {
             }
         }
         expect(accepted.sort()).toEqual([...LEGAL].sort());
-        expect(ports.length * ports.length).toBe(49);
+        expect(ports.length * ports.length).toBe(81);
     });
 
     it('refuses each pair for the RIGHT reason', () => {
@@ -105,6 +123,19 @@ describe('canConnect — the ordered-pair matrix', () => {
             `${STEP_LABELS.action} runs on ${STEP_LABELS.cond}'s yes output. The canvas draws the `
             + 'rule, and a wire the rule would not follow is a picture of something else.',
         );
+        // Shape again, on the new kind: `cond.false` into the wait is the same wrong picture one
+        // card earlier, and the reason names the `yes` output that DOES drive it.
+        expect(reason('cond.false', 'timer.in')).toBe(
+            `${STEP_LABELS.timer} runs on ${STEP_LABELS.cond}'s yes output. The canvas draws the `
+            + 'rule, and a wire the rule would not follow is a picture of something else.',
+        );
+        // Type, on the new kind: the wait carries a verdict, so a value cannot enter it and the
+        // lines a monitor prints cannot either.
+        expect(reason('parse.out', 'timer.in')).toBe(
+            `${STEP_LABELS.parse} sends a value, and ${STEP_LABELS.timer} expects a yes or no.`,
+        );
+        // Direction, on the new kind: the wait's own input is not a source.
+        expect(reason('timer.in', 'action.in')).toMatch(/output.*input/i);
     });
 
     it('refuses a second wire into an input, BEFORE it asks about shape', () => {
@@ -148,14 +179,40 @@ describe('canAddStep', () => {
         // And the whole chain accepts nothing more.
         for (const step of STEP_ORDER) expect(canAddStep(built, step)).not.toBeNull();
     });
+
+    /**
+     * **The wait step is legal on an EMPTY canvas, and that is what makes a schedule rule
+     * authorable** (plan 032 §6.3). It reads nothing, so there is nothing for it to wait on — every
+     * other step needs the one that feeds it.
+     */
+    it('accepts the wait step with nothing else on the canvas', () => {
+        expect(canAddStep([], 'timer')).toBeNull();
+    });
+
+    /**
+     * And the step after it. `Send to terminal` used to name exactly one predecessor, so a schedule
+     * rule — a wait and a send, and nothing else (mockup §03) — could not be built at all: the
+     * palette demanded a `Compare it` the rule is not allowed to have.
+     */
+    it('accepts the send after EITHER of the two steps that can drive it', () => {
+        expect(canAddStep(['timer'], 'action')).toBeNull();
+        expect(canAddStep(['monitor', 'parse', 'cond'], 'action')).toBeNull();
+        // With neither, it is still refused — and the refusal names both.
+        const refusal = canAddStep(['monitor', 'parse'], 'action');
+        expect(refusal?.reason).toContain(STEP_LABELS.cond);
+        expect(refusal?.reason).toContain(STEP_LABELS.timer);
+    });
 });
 
 describe('defaultWires', () => {
+    const drawn = (wires: ReturnType<typeof defaultWires>) =>
+        wires.map((w) => `${key(w.from)}->${key(w.to)}`);
+
     it('wires the chain and leaves the `no` branch empty', () => {
         // The unused `no` port is how a user learns nothing happens on the other path — mockup §03
         // draws it deliberately, so wiring it would be a design change, not a convenience.
-        const wires = defaultWires(STEP_ORDER);
-        expect(wires.map((w) => `${key(w.from)}->${key(w.to)}`)).toEqual([
+        const wires = defaultWires(WITHOUT_TIMER);
+        expect(drawn(wires)).toEqual([
             'monitor.out->parse.in',
             'parse.out->cond.in',
             'cond.true->action.in',
@@ -163,15 +220,47 @@ describe('defaultWires', () => {
         expect(wires.some((w) => w.from.port === 'false')).toBe(false);
     });
 
+    /**
+     * **Delay mode inserts the wait between the verdict and the send** (§6.2) — the crossing
+     * arrives, is held, and leaves. The verdict no longer reaches the action directly, because it
+     * no longer does: the send it triggers is the one the wait releases.
+     */
+    it('threads the wait between the verdict and the send in delay mode', () => {
+        expect(drawn(defaultWires(STEP_ORDER, 'afterMatch'))).toEqual([
+            'monitor.out->parse.in',
+            'parse.out->cond.in',
+            'cond.true->timer.in',
+            'timer.out->action.in',
+        ]);
+    });
+
+    /**
+     * **Schedule mode wires ONE wire, whatever else is on the canvas** (§6.3).
+     *
+     * This is the row a mode-blind `defaultWires` fails. A schedule rule's walk skips the screen
+     * read for the whole rule, so a monitor to read to compare chain drawn beside the clock would
+     * be a picture of three steps the engine does not run — the very thing `canConnect`'s shape
+     * check exists to prevent, one layer up. Passing all five kinds in is deliberate: the
+     * interesting case is the rule that HAS a monitor (which `timer.scheduleWithMonitor` blocks),
+     * not the tidy two-card one, because only the former can tell the two modes apart.
+     */
+    it('wires only the wait into the send in schedule mode, and nothing else', () => {
+        expect(drawn(defaultWires(STEP_ORDER, 'dailyAt'))).toEqual(['timer.out->action.in']);
+        expect(drawn(defaultWires(['timer', 'action'], 'dailyAt'))).toEqual(['timer.out->action.in']);
+    });
+
     it('produces only wires `canConnect` would accept, at every stage of building', () => {
         // The two are separate functions and could disagree; this is what stops the canvas drawing
-        // a wire the user could not have made.
-        const built: StepKind[] = [];
-        for (const step of STEP_ORDER) {
-            built.push(step);
-            const wires = defaultWires(built);
-            for (let i = 0; i < wires.length; i += 1) {
-                expect(canConnect({ wires: wires.slice(0, i) }, wires[i].from, wires[i].to)).toBeNull();
+        // a wire the user could not have made. Swept over BOTH shapes, because they draw different
+        // wires and `canConnect` has one answer for both.
+        for (const shape of ['afterMatch', 'dailyAt'] as const) {
+            const built: StepKind[] = [];
+            for (const step of STEP_ORDER) {
+                built.push(step);
+                const wires = defaultWires(built, shape);
+                for (let i = 0; i < wires.length; i += 1) {
+                    expect(canConnect({ wires: wires.slice(0, i) }, wires[i].from, wires[i].to)).toBeNull();
+                }
             }
         }
     });
@@ -179,6 +268,8 @@ describe('defaultWires', () => {
     it('wires nothing for a gap in the chain', () => {
         expect(defaultWires(['monitor', 'cond'])).toEqual([]);
         expect(defaultWires([])).toEqual([]);
+        // A wait with nothing to release into is a gap too.
+        expect(defaultWires(['cond', 'timer'], 'dailyAt')).toEqual([]);
     });
 });
 
@@ -244,7 +335,12 @@ describe('portAnchor', () => {
  * cards and into a left edge from the far side, because the side was fixed by the port's direction.
  */
 describe('portSides', () => {
-    const wires = defaultWires([...STEP_ORDER]);
+    // The four-step shape. This block is about GEOMETRY — which edge a dot sits on once the cards
+    // move — and the chain it needs is one where every card has exactly one peer. A wait step in
+    // the middle would make `action`'s peer the wait rather than the compare, and every assertion
+    // below about dragging `action` past `cond` would be about two cards that are no longer wired
+    // to each other. `portSides` never reads a step's KIND, so nothing here is weaker for it.
+    const wires = defaultWires(WITHOUT_TIMER);
 
     it('reads left to right for the default arrangement', () => {
         const sides = portSides(wires, DEFAULT_LAYOUT);

@@ -30,8 +30,9 @@ import type {
     AutomationMonitorStep,
     AutomationParseStep,
     AutomationRule,
+    AutomationTimerMode,
 } from '../../types/electron';
-import type { StepKind, Wire } from './automationSteps';
+import type { StepKind, TimerShape, Wire } from './automationSteps';
 import { STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
 // The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
@@ -90,7 +91,12 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     monitor: { x: 0, y: 0 },
     parse: { x: AU_GAP_X, y: 0 },
     cond: { x: AU_GAP_X * 2, y: 0 },
-    action: { x: AU_GAP_X * 3, y: 0 },
+    // Fourth, where a DELAY sits — between the verdict and the send (§6.2). A schedule rule has no
+    // cards to its left, so it opens with a wide empty gutter and its two cards on the right; that
+    // is a fit-to-content question for the viewport, which `AuCanvas` already answers from
+    // `draft.present`, not a reason to give one kind two default positions.
+    timer: { x: AU_GAP_X * 3, y: 0 },
+    action: { x: AU_GAP_X * 4, y: 0 },
 };
 
 /**
@@ -106,6 +112,29 @@ export type PortSide = 'l' | 'r';
 
 /** The map key for one port. Exported so nobody builds this string a second, different way. */
 export const portKey = (step: StepKind, port: string): string => `${step}.${port}`;
+
+/**
+ * Which of the wait step's two modes this rule is in — **the one place the DTO is read for it**.
+ *
+ * `automationSteps` is arithmetic over names and does not read a rule; it takes the answer as an
+ * argument (`defaultWires`' `shape`). This is the function that produces it, so a second reading of
+ * `graph.timer.mode` cannot drift from the first. A rule with no wait step answers `'afterMatch'`,
+ * which is the shape whose wires a rule without one is a subset of — the four-step chain.
+ */
+export function timerShapeOf(rule: AutomationRule): TimerShape {
+    const mode = rule.graph.timer?.mode;
+    return mode && 'dailyAt' in mode ? 'dailyAt' : 'afterMatch';
+}
+
+/**
+ * The wait a newly added step holds until the user says otherwise (mockup §02's own scenario).
+ *
+ * Delay mode, because that is the mode with a predecessor: dropping the card at the end of a
+ * finished rule and having it fire on a clock instead would silently stop the rule watching
+ * anything (§6.3, and `timer.scheduleWithMonitor`). Thirty seconds is the brief's own example and
+ * is comfortably inside `MIN_DELAY_MS`..`MAX_DELAY_MS`, so the card is not born blocked.
+ */
+export const DEFAULT_TIMER_MODE: AutomationTimerMode = { afterMatch: { delayMs: 30_000 } };
 
 /** Where a port sits when nothing is wired to it: the reading order, inputs left and outputs right. */
 export function defaultPortSide(dir: 'in' | 'out'): PortSide {
@@ -339,12 +368,19 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded' | 'template';
  */
 export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
     // `'blank'` alone draws nothing; `'seeded'` draws the one step it configured; `'saved'` and
-    // `'template'` are both complete rules and draw all four.
+    // `'template'` are both complete rules and draw all four of the original steps.
+    //
+    // **The wait step is the exception, and it has to be.** The other four are drawn whatever the
+    // graph holds — a saved rule shows all four cards, blank ones included, because that is the
+    // shape of a rule. A wait is genuinely optional and most rules have none, so drawing its card
+    // for every rule would (a) put a permanently *not in this rule* card on every canvas, and
+    // (b) make `canAddStep` refuse it as already present, which is the palette's only route to
+    // adding one. Drawn when the rule has it, offered by the palette when it does not.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : [...STEP_ORDER];
+            : STEP_ORDER.filter((s) => s !== 'timer' || rule.graph.timer != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -356,7 +392,7 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
     return {
         rule: resolved,
         present,
-        wires: defaultWires(present),
+        wires: defaultWires(present, timerShapeOf(resolved)),
         layout,
         // `'blank'` alone opens with nothing selected: it is the only opening with nothing on the
         // canvas to select. `'seeded'` selects the step it drew, which is what puts the pinned
@@ -624,7 +660,22 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             const present = STEP_ORDER.filter(
                 (s) => s === action.step || draft.present.includes(s),
             );
-            return { ...draft, present, wires: defaultWires(present), selected: action.step };
+            // **The wait step is the one add that MATERIALISES, and only because it is the one
+            // step `blankDraft()` does not carry.** Adding a `Read a value` reveals a card over a
+            // `graph.parse` that already exists; `graph.timer` is absent by design on every rule
+            // that does not use one (§3.1), so revealing a card over nothing would give the panel
+            // no step to bind to and the save nothing to write. Everything else about `addStep`
+            // stays presentation-only.
+            const next = action.step === 'timer' && rule.graph.timer == null
+                ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
+                : rule;
+            return {
+                ...draft,
+                rule: next,
+                present,
+                wires: defaultWires(present, timerShapeOf(next)),
+                selected: action.step,
+            };
         }
         case 'moveStep':
             return { ...draft, layout: { ...draft.layout, [action.step]: action.pos } };
