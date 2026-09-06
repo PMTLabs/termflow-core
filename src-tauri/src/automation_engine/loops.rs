@@ -11,9 +11,9 @@
 //! milestones that contain the entire engine.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::atomic::Ordering;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +24,9 @@ use crate::automation::targeting::watched_set;
 use crate::automation_engine::due::{
     due_now, select_due, settled_processes, BASE_TICK_MS, MAX_EVALS_PER_TICK, TARGETING_TICK_MS,
 };
-use crate::automation_engine::eval::{self, ArmState, Captures, Decision, Evaluation, Outcome, Read};
+use crate::automation_engine::eval::{
+    self, ArmState, Captures, Decision, Evaluation, Outcome, Read,
+};
 use crate::automation_engine::host::{EngineHost, HostPort};
 use crate::automation_engine::schedule;
 use crate::automation_engine::subst;
@@ -74,13 +76,332 @@ pub async fn run_tap(
             // so is one extra evaluation each; the cost of dropping it is a missed match with no
             // symptom. `Lagged` is exactly why the tap carries a signal instead of the bytes.
             Ok(Err(RecvError::Lagged(n))) => {
-                log::warn!("automations: tap lagged {} messages, marking every terminal dirty", n);
+                log::warn!(
+                    "automations: tap lagged {} messages, marking every terminal dirty",
+                    n
+                );
                 for pc in host.live_processes() {
                     engine.runtime.mark_dirty(&pc);
                 }
             }
             Ok(Err(RecvError::Closed)) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod task8_tests {
+    use super::*;
+    use crate::automation_engine::test_host::{ctx_rule, rig_with_rule, strip_comments, wire};
+    use crate::automation_store::{LogOrder, LogScope, WebhookProvider, WebhookStep};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::{self, Receiver, Sender};
+
+    fn pending(
+        engine: &Arc<AutomationEngine>,
+        host: &Arc<dyn EngineHost>,
+        prev: ArmState,
+        at_ms: i64,
+    ) -> PendingSend {
+        let rule = engine
+            .snapshot_live()
+            .into_iter()
+            .next()
+            .expect("live rule");
+        engine
+            .runtime
+            .set_arm(&rule.rule.id, "tm-1", ArmState::Fired { at_ms });
+        PendingSend {
+            pair: Pair {
+                rule,
+                tm: "tm-1".into(),
+                pc: "pc-1".into(),
+            },
+            prev,
+            label: host.label_for("tm-1"),
+            at_ms,
+            captures: None,
+        }
+    }
+
+    fn webhook_endpoint() -> (String, Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback webhook listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept webhook request");
+            read_webhook_request(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("reply");
+            sent.send(()).expect("record webhook request");
+        });
+        (url, received)
+    }
+
+    fn held_webhook_endpoint() -> (String, Sender<()>, Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback webhook listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let (release_sent, release_received) = mpsc::channel();
+        let (arrived_sent, arrived_received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept webhook request");
+            read_webhook_request(&mut stream);
+            arrived_sent.send(()).expect("record webhook arrival");
+            release_received.recv().expect("release webhook response");
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .expect("reply");
+        });
+        (url, release_sent, arrived_received)
+    }
+
+    fn read_webhook_request(stream: &mut TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("read timeout");
+        let mut buffer = [0_u8; 4096];
+        assert_ne!(stream.read(&mut buffer).expect("read request"), 0);
+    }
+
+    fn add_discord_webhook(graph: &mut crate::automation_store::AutomationGraph, url: String) {
+        graph.webhook = Some(WebhookStep {
+            provider: WebhookProvider::Discord,
+            url,
+            body: "webhook body".into(),
+            substitute: false,
+        });
+    }
+
+    // =============================================================================================
+    // Task 8 — one crossing, two destinations
+    // =============================================================================================
+
+    /// Normal live-terminal scenario: the terminal stays live after the crossing is decided, but
+    /// its malformed webhook endpoint fails. That failure must not suppress the terminal delivery.
+    #[tokio::test]
+    async fn a_failed_webhook_leaves_the_terminal_send_alone() {
+        let (engine, fake, host) = rig_with_rule(|graph| {
+            // reqwest rejects this while building the request; it cannot leave this machine.
+            add_discord_webhook(graph, "not a valid URL".into());
+        });
+        let send = pending(&engine, &host, ArmState::armed(), 4_000);
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        assert!(
+            fake.written()
+                .iter()
+                .any(|write| write.contains("prepare to do context-hand-off")),
+            "the terminal destination was suppressed by a failed webhook: {:?}",
+            fake.written()
+        );
+        let rows = fake
+            .store
+            .load_automation_log(&LogScope::All, LogOrder::Asc, 10)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "each destination writes its own outcome: {rows:?}"
+        );
+        assert!(rows
+            .iter()
+            .any(|row| row.kind == LogKind::Sent && row.terminal_id.as_deref() == Some("tm-1")));
+        assert!(rows
+            .iter()
+            .any(|row| row.kind == LogKind::Failed && row.terminal_id.is_none()));
+    }
+
+    /// Already-decided / terminal-closed scenario from the scope note: the leaf disappears after
+    /// the crossing exists, so the terminal fails, but the webhook still sends once and retires the
+    /// runs-once rule rather than rolling the arm back for a repeat.
+    #[tokio::test]
+    async fn a_failed_terminal_send_does_not_let_the_webhook_repeat() {
+        let (url, requested) = webhook_endpoint();
+        let mut rule = ctx_rule("au-1");
+        rule.runs_once = true;
+        add_discord_webhook(&mut rule.graph, url);
+        let (engine, fake, host) = wire(vec![rule]);
+        let send = pending(&engine, &host, ArmState::armed(), 4_000);
+        fake.close("tm-1");
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        requested
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the webhook was sent after the terminal closed");
+        assert!(
+            !engine.is_live("au-1"),
+            "the successful webhook completed the crossing once"
+        );
+        let rows = fake
+            .store
+            .load_automation_log(&LogScope::All, LogOrder::Asc, 10)
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.kind == LogKind::Failed && row.terminal_id.as_deref() == Some("tm-1")));
+        assert!(rows
+            .iter()
+            .any(|row| row.kind == LogKind::Sent && row.terminal_id.is_none()));
+    }
+
+    /// Normal live-terminal scenario: both destinations succeed for one already-decided crossing,
+    /// so its fire history increments once rather than once per destination.
+    #[tokio::test]
+    async fn a_crossing_records_one_fire_however_many_destinations_it_had() {
+        let (url, requested) = webhook_endpoint();
+        let (engine, _fake, host) = rig_with_rule(|graph| add_discord_webhook(graph, url));
+        let send = pending(&engine, &host, ArmState::armed(), 4_000);
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        requested
+            .recv_timeout(Duration::from_secs(3))
+            .expect("webhook request");
+        assert_eq!(
+            engine.runtime.fire_record("au-1", "tm-1"),
+            Some((1, 4_000)),
+            "two destinations are one crossing, not two fires"
+        );
+    }
+
+    /// Normal live-terminal scenario: the terminal has finished its 500 ms delivery while the
+    /// webhook deliberately waits for its local response. Completion must wait for that response.
+    #[tokio::test]
+    async fn completion_waits_for_every_destination_not_the_first() {
+        let (url, release, arrived) = held_webhook_endpoint();
+        let mut rule = ctx_rule("au-1");
+        rule.runs_once = true;
+        add_discord_webhook(&mut rule.graph, url);
+        let (engine, fake, host) = wire(vec![rule]);
+        let send = pending(&engine, &host, ArmState::armed(), 4_000);
+        let task = tokio::spawn(run_crossing(engine.clone(), host.clone(), send));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        arrived
+            .try_recv()
+            .expect("webhook request reached the held listener");
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert!(
+            fake.written()
+                .iter()
+                .any(|write| write.contains("prepare to do context-hand-off")),
+            "the terminal destination did not complete"
+        );
+        assert!(
+            engine.is_live("au-1"),
+            "the first completed destination retired the rule early"
+        );
+        assert!(
+            !task.is_finished(),
+            "the crossing returned before the held webhook did"
+        );
+
+        release.send(()).expect("release webhook response");
+        task.await.expect("crossing task");
+        assert!(
+            !engine.is_live("au-1"),
+            "completion did not follow both destination outcomes"
+        );
+    }
+
+    /// Normal live-terminal scenario: this is the strong two-row oracle. Both rows must name the
+    /// same rule and decision timestamp, while their terminal identity, provider identity, kind,
+    /// and observed delivery outcomes distinguish a terminal send from a webhook send.
+    #[tokio::test]
+    async fn one_crossing_with_two_destinations_writes_one_row_each() {
+        let (url, requested) = webhook_endpoint();
+        let (engine, fake, host) = rig_with_rule(|graph| add_discord_webhook(graph, url));
+        let send = pending(&engine, &host, ArmState::armed(), 4_242);
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        requested
+            .recv_timeout(Duration::from_secs(3))
+            .expect("webhook request");
+        assert!(
+            fake.written()
+                .iter()
+                .any(|write| write.contains("prepare to do context-hand-off")),
+            "the terminal delivery did not occur"
+        );
+        let rows = fake
+            .store
+            .load_automation_log(&LogScope::All, LogOrder::Asc, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 2, "not a bare count: inspect both rows below");
+        let terminal = rows
+            .iter()
+            .find(|row| row.terminal_id.as_deref() == Some("tm-1"))
+            .expect("terminal destination row");
+        assert_eq!(terminal.rule_id, "au-1");
+        assert_eq!(terminal.at, 4_242);
+        assert_eq!(terminal.kind, LogKind::Sent);
+        assert_eq!(terminal.terminal_name.as_deref(), Some("codex · core"));
+        assert_eq!(terminal.detail, "sent to codex · core");
+
+        let webhook = rows
+            .iter()
+            .find(|row| row.terminal_id.is_none())
+            .expect("webhook destination row");
+        assert_eq!(webhook.rule_id, "au-1");
+        assert_eq!(webhook.at, 4_242);
+        assert_eq!(webhook.kind, LogKind::Sent);
+        assert_eq!(webhook.terminal_name, None);
+        assert_eq!(webhook.detail, "webhook sent via Discord");
+    }
+
+    /// Source-derived rather than behavioural: the dispatch code has no clock of its own, and the
+    /// webhook sibling never takes `send_lock`. This test exercises no terminal scenario.
+    #[test]
+    fn the_webhook_path_adds_no_new_clock() {
+        let source = strip_comments(include_str!("loops.rs"));
+        let crossing_start = source
+            .rfind("async fn run_crossing(")
+            .expect("crossing function");
+        let webhook_start = source
+            .rfind("async fn run_webhook(")
+            .expect("webhook function");
+        let terminal_start = source
+            .rfind("async fn run_send(")
+            .expect("terminal function");
+        let completion_start = source
+            .rfind("fn complete_crossing(")
+            .expect("completion function");
+        let crossing = &source[crossing_start..terminal_start];
+        let webhook = &source[webhook_start..completion_start];
+        assert!(
+            crossing.contains("tokio::join!"),
+            "destinations must be aggregated together"
+        );
+        for body in [crossing, webhook] {
+            assert!(
+                !body.contains("tokio::time::interval"),
+                "a webhook path added an interval"
+            );
+            assert!(
+                !body.contains("tokio::time::sleep"),
+                "a webhook path added a sleep"
+            );
+        }
+        assert!(
+            !webhook.contains("send_lock"),
+            "a webhook must not queue behind a terminal send"
+        );
+        assert!(crossing.contains("run_send") && crossing.contains("run_webhook"));
     }
 }
 
@@ -215,7 +536,11 @@ pub async fn evaluator_step(
         // the pair's *"Waiting to send"* pill sits on a countdown that reached zero and stopped,
         // until something unrelated repaints it. Marked and not emitted: one drain point, one rate
         // limit, and `evaluate_tick` below is that point.
-        if engine.runtime.drop_stale_parked(now_ms, crate::automation_validation::MAX_DELAY_MS) > 0 {
+        if engine
+            .runtime
+            .drop_stale_parked(now_ms, crate::automation_validation::MAX_DELAY_MS)
+            > 0
+        {
             engine.mark_state_dirty();
         }
     }
@@ -255,7 +580,11 @@ pub async fn evaluate_tick(
     let now_local = schedule::local_now(now_ms);
     for live in engine.snapshot_live() {
         // Sorted, so which pairs the cap holds over is a property of the rule and not of hash order.
-        let mut leaves: Vec<String> = engine.runtime.watched_for(&live.rule.id).into_iter().collect();
+        let mut leaves: Vec<String> = engine
+            .runtime
+            .watched_for(&live.rule.id)
+            .into_iter()
+            .collect();
         leaves.sort();
         // **§6.3's two rule-level facts, decided BEFORE the leaves.**
         //
@@ -278,11 +607,17 @@ pub async fn evaluate_tick(
         // crossing as well as on the clock. `schedule_due` is deliberately false for `AfterMatch`, so
         // it cannot double as the "is this a schedule rule" question: that is what `scheduled` is.
         let scheduled = match &live.rule.graph.timer {
-            Some(TimerStep { mode: mode @ TimerMode::DailyAt { .. } }) => Some(mode),
+            Some(TimerStep {
+                mode: mode @ TimerMode::DailyAt { .. },
+            }) => Some(mode),
             _ => None,
         };
         let fires_now = scheduled.is_some_and(|mode| {
-            schedule::schedule_due(mode, engine.runtime.last_fired_day(&live.rule.id), now_local)
+            schedule::schedule_due(
+                mode,
+                engine.runtime.last_fired_day(&live.rule.id),
+                now_local,
+            )
         });
         for tm in leaves {
             // The ONE tm -> pc conversion. `None` is dormant (§4.5), not dead: no evaluation, no log
@@ -332,21 +667,22 @@ pub async fn evaluate_tick(
             // message it is about to type.
             if let Some(parked) = engine.runtime.take_parked_due(&live.rule.id, &tm, now_ms) {
                 admit(
-                    engine,
-                    host,
                     &mut sends,
                     PendingSend {
                         // **`parked.pc`, never the `pc` this tick just resolved.** The restart
                         // guard in `run_send` compares the leaf's process at lock time against
                         // this field; filled from the drain's own lookup it compares a value
                         // against itself and the whole park is unguarded.
-                        pair: Pair { rule: live.clone(), tm: tm.clone(), pc: parked.pc },
+                        pair: Pair {
+                            rule: live.clone(),
+                            tm: tm.clone(),
+                            pc: parked.pc,
+                        },
                         prev: parked.prev,
                         label: parked.label,
                         at_ms: now_ms,
                         captures: parked.captures,
                     },
-                    now_ms,
                 );
             }
             let seq = engine.runtime.dirty_seq(&pc);
@@ -376,11 +712,13 @@ pub async fn evaluate_tick(
             if scheduled.is_some() {
                 if fires_now {
                     admit(
-                        engine,
-                        host,
                         &mut sends,
                         PendingSend {
-                            pair: Pair { rule: live.clone(), tm: tm.clone(), pc },
+                            pair: Pair {
+                                rule: live.clone(),
+                                tm: tm.clone(),
+                                pc,
+                            },
                             // **Read, not assumed.** `prev` is what `run_send`'s three failure paths
                             // roll back to, and a schedule rule has no crossing to roll back to — so
                             // the only correct target is whatever is already there, which makes
@@ -402,7 +740,6 @@ pub async fn evaluate_tick(
                             // template into a live agent.
                             captures: None,
                         },
-                        now_ms,
                     );
                 }
                 continue;
@@ -432,7 +769,11 @@ pub async fn evaluate_tick(
                 engine.runtime.last_eval(&live.rule.id, &tm),
                 now_ms,
             ) {
-                due.push(Pair { rule: live.clone(), tm, pc });
+                due.push(Pair {
+                    rule: live.clone(),
+                    tm,
+                    pc,
+                });
             } else if monitor.cadence == Cadence::OnOutput {
                 // No `seq.is_some()` here, deliberately: a CLEAN process contributes no due pair, so
                 // it never reaches `due_pcs` and `settled_processes` can never name it — the extra
@@ -456,7 +797,9 @@ pub async fn evaluate_tick(
             let Some(TimerMode::DailyAt { minute_of_day, .. }) = scheduled else {
                 unreachable!("fires_now requires a daily schedule");
             };
-            engine.runtime.set_last_fired_day(&live.rule.id, now_local.day_ordinal, *minute_of_day);
+            engine
+                .runtime
+                .set_last_fired_day(&live.rule.id, now_local.day_ordinal, *minute_of_day);
         }
     }
 
@@ -472,7 +815,7 @@ pub async fn evaluate_tick(
 
     for i in &picked {
         match evaluate_pair(engine, host, &due[*i], now_ms) {
-            Evaluated::Read(Some(send)) => admit(engine, host, &mut sends, send, now_ms),
+            Evaluated::Read(Some(send)) => admit(&mut sends, send),
             // Read, decided, nothing to send: this pair has consumed the output and may spend it.
             Evaluated::Read(None) => {}
             // **The third door.** `settled_processes`'s enumeration named two and this was neither:
@@ -497,14 +840,16 @@ pub async fn evaluate_tick(
     // sends in one tick would freeze evaluation for two seconds. Serialisation is unaffected: it was
     // never the tick that provided it, it was the per-terminal lock.
     for send in sends {
-        // A webhook-only rule has no terminal destination. Never dispatch `run_send` for it: an
-        // invented empty action can submit a bare Enter to a live terminal.
-        if send.pair.rule.rule.graph.action.is_none() {
+        // A crossing owns its destinations and all of their shared bookkeeping. In particular, a
+        // webhook-only rule has no terminal destination: never manufacture an ActionStep merely to
+        // route it through `run_send`, because an empty action can submit a bare Enter.
+        if send.pair.rule.rule.graph.action.is_none() && send.pair.rule.rule.graph.webhook.is_none()
+        {
             continue;
         }
         let engine = engine.clone();
         let host = host.clone();
-        tokio::spawn(async move { run_send(engine, host, send).await });
+        tokio::spawn(async move { run_crossing(engine, host, send).await });
     }
 
     if engine.take_state_emit(now_ms) {
@@ -514,59 +859,13 @@ pub async fn evaluate_tick(
     next_cursor
 }
 
-/// Put one decided send on this tick's dispatch list, if R6 lets it through.
+/// Put one decided crossing on this tick's dispatch list.
 ///
-/// **R6 is per RULE — not per pair, and not per TICK.** A `runs_once` rule watching three terminals
-/// crosses on all three, and the send lock is per LEAF, so three tasks take three different locks
-/// and three messages go out on a rule the user asked to run once.
-///
-/// The claim is taken HERE, where the crossing is decided. The first version of this scanned the
-/// current tick's `sends` vector, which covers the three-in-one-tick case and nothing else: two
-/// terminals crossing on consecutive ticks are two separate vectors, and the only cross-tick guard
-/// was `is_live`, which does not go false until `complete_rule` runs — after `deliver` returns, two
-/// ticks later. The arm states advance either way; only the send is dropped, so a pair that did not
-/// send stays `Fired` and never sends.
-///
-/// **It is a function because there are now two routes onto that list**, and a gate written at one
-/// caller is a gate the next caller opts out of. §6.2's parked sends are the second route, and they
-/// need it more than the first: a `runs_once` rule with a delay parks on every terminal that
-/// crosses *during* the wait — the arm machine cannot stop that, because those are different pairs —
-/// and all of them come ripe on the same tick, where without this they would be three sends.
-fn admit(
-    engine: &Arc<AutomationEngine>,
-    host: &Arc<dyn EngineHost>,
-    sends: &mut Vec<PendingSend>,
-    send: PendingSend,
-    now_ms: i64,
-) {
-    let rule_id = &send.pair.rule.rule.id;
-    if !send.pair.rule.rule.runs_once || engine.runtime.claim_once(rule_id) {
-        sends.push(send);
-        return;
-    }
-    // **A dropped crossing that says nothing is a crossing the user cannot account for.** The arm
-    // state advanced at decide time and the parked entry was taken out of the map by
-    // `take_parked_due`, so this pair is finished either way — and on the delay route it had been
-    // visibly *"Waiting to send"* for up to ten minutes first. Without a row the only trace of it is
-    // a countdown that stopped.
-    //
-    // `Held` and not `Failed`, for the seeding row's reason: nothing went wrong. The rule was asked
-    // and the rule declined, which is also what keeps it out of the verbose gate. It is bounded by
-    // the claim itself — one row per losing pair per crossing, and a claimed `runs_once` rule
-    // leaves the live set as soon as its send lands.
-    //
-    // Written HERE rather than at the parked drain that found it, because `admit` is the one gate
-    // all three routes go through and a row written at one caller is a row the next caller opts out
-    // of — the same reasoning that put the claim itself in this function.
-    append(
-        host,
-        rule_id,
-        Some(&send.pair.tm),
-        send.label.clone(),
-        LogKind::Held,
-        "not sent — this rule runs once, and another terminal had already claimed its one send",
-        now_ms,
-    );
+/// Both immediate and parked crossings use this one dispatch seam. Admission, including the
+/// runs-once claim, belongs to `run_crossing`: it is crossing-wide bookkeeping rather than a
+/// property of either destination.
+fn admit(sends: &mut Vec<PendingSend>, send: PendingSend) {
+    sends.push(send);
 }
 
 /// What one pair's evaluation leaves for the tick to do.
@@ -620,15 +919,9 @@ pub fn evaluate_pair(
         return Evaluated::Unread;
     };
 
-    let Some(ev): Option<Evaluation> = eval::evaluate(
-        steps,
-        re,
-        &echoes,
-        prev,
-        &port,
-        &pair.pc,
-        now_ms,
-    ) else {
+    let Some(ev): Option<Evaluation> =
+        eval::evaluate(steps, re, &echoes, prev, &port, &pair.pc, now_ms)
+    else {
         // `host.tail` found no parser for this process — it closed between this tick's leaf
         // resolution and the read. §4.5: no evaluation, no row, arm state untouched. `set_last_eval`
         // is deliberately not reached either, so the pair is due again immediately.
@@ -649,12 +942,22 @@ pub fn evaluate_pair(
     }
 
     let repeat = engine.runtime.last_decision(&rule.id, &pair.tm) == Some(ev.decision);
-    engine.runtime.set_last_decision(&rule.id, &pair.tm, ev.decision);
+    engine
+        .runtime
+        .set_last_decision(&rule.id, &pair.tm, ev.decision);
 
     if !ev.decision.sends() {
         // Live by construction: `evaluate_pair` only runs for a pair whose leaf just resolved.
         let name = host.label_for(&pair.tm);
-        append(host, &rule.id, Some(&pair.tm), name, kind_for(&ev, repeat), &ev.detail, now_ms);
+        append(
+            host,
+            &rule.id,
+            Some(&pair.tm),
+            name,
+            kind_for(&ev, repeat),
+            &ev.detail,
+            now_ms,
+        );
         return Evaluated::Read(None);
     }
 
@@ -665,7 +968,10 @@ pub fn evaluate_pair(
     // it. `Read(None)` and not `Unread`, because this pair genuinely READ the terminal's output —
     // that read is how it found the match — so the dirty flag is spent exactly as it would have
     // been by a send.
-    if let Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } }) = &rule.graph.timer {
+    if let Some(TimerStep {
+        mode: TimerMode::AfterMatch { delay_ms },
+    }) = &rule.graph.timer
+    {
         engine.runtime.park(
             &rule.id,
             &pair.tm,
@@ -731,24 +1037,155 @@ fn kind_for(ev: &Evaluation, repeat: bool) -> LogKind {
 }
 
 // =================================================================================================
-// The send (§2.5, §2.6)
+// The crossing and its destinations (§2.5, §2.6, A8)
 // =================================================================================================
 
-/// Take the terminal's queue, re-check it is still there, write, and record what happened.
+/// The result of one destination, deliberately separate from the crossing's shared state.
+enum DestinationOutcome {
+    Sent,
+    Failed(String),
+    Stopped,
+}
+
+/// Dispatch both destinations for one already-decided crossing, then perform its bookkeeping once.
 ///
-/// **Every failure path rolls the arm state back and writes exactly one log line** — the queue timed
-/// out, the terminal closed between the decision and the write, the write itself failed. Never left
-/// `Fired`, because a crossing that produced no message must still be able to fire.
-pub async fn run_send(
-    engine: Arc<AutomationEngine>,
-    host: Arc<dyn EngineHost>,
-    send: PendingSend,
-) {
+/// A terminal delivery and a webhook are independent side effects: one failure must not prevent the
+/// other from running. Their common effects — the fire history, runs-once completion, and rollback —
+/// are therefore deliberately below the join, where there is one answer for the crossing rather than
+/// one answer per destination.
+async fn run_crossing(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>, send: PendingSend) {
+    let rule = &send.pair.rule.rule;
+    if engine.stopping.load(Ordering::Relaxed) {
+        rollback_crossing(&engine, &send);
+        return;
+    }
+
+    // R6 is per crossing, not per terminal destination. This task begins at the one shared
+    // boundary before the concurrent sends, so a second crossing cannot send either destination
+    // after the first one has claimed the rule.
+    if rule.runs_once && !engine.runtime.claim_once(&rule.id) {
+        append(
+            &host,
+            &rule.id,
+            Some(&send.pair.tm),
+            send.label.clone(),
+            LogKind::Held,
+            "not sent — this rule runs once, and another terminal had already claimed its one send",
+            send.at_ms,
+        );
+        return;
+    }
+
+    let has_action = rule.graph.action.is_some();
+    let has_webhook = rule.graph.webhook.is_some();
+    let (terminal, webhook) = tokio::join!(
+        async {
+            if has_action {
+                Some(run_send(&engine, &host, &send).await)
+            } else {
+                None
+            }
+        },
+        async {
+            if has_webhook {
+                Some(run_webhook(&engine, &send).await)
+            } else {
+                None
+            }
+        },
+    );
+
+    let outcomes = [terminal, webhook];
+    if outcomes
+        .iter()
+        .flatten()
+        .any(|outcome| matches!(outcome, DestinationOutcome::Stopped))
+    {
+        rollback_crossing(&engine, &send);
+        return;
+    }
+
+    let mut sent = false;
+    if let Some(outcome) = outcomes[0].as_ref() {
+        match outcome {
+            DestinationOutcome::Sent => {
+                sent = true;
+                append(
+                    &host,
+                    &rule.id,
+                    Some(&send.pair.tm),
+                    send.label.clone(),
+                    LogKind::Sent,
+                    &sent_detail(&send),
+                    send.at_ms,
+                );
+            }
+            DestinationOutcome::Failed(reason) => append(
+                &host,
+                &rule.id,
+                Some(&send.pair.tm),
+                send.label.clone(),
+                LogKind::Failed,
+                reason,
+                send.at_ms,
+            ),
+            DestinationOutcome::Stopped => unreachable!("stopped outcomes returned above"),
+        }
+    }
+    if let Some(outcome) = outcomes[1].as_ref() {
+        match outcome {
+            DestinationOutcome::Sent => {
+                sent = true;
+                append(
+                    &host,
+                    &rule.id,
+                    None,
+                    None,
+                    LogKind::Sent,
+                    &webhook_sent_detail(&send),
+                    send.at_ms,
+                );
+            }
+            DestinationOutcome::Failed(reason) => append(
+                &host,
+                &rule.id,
+                None,
+                None,
+                LogKind::Failed,
+                reason,
+                send.at_ms,
+            ),
+            DestinationOutcome::Stopped => unreachable!("stopped outcomes returned above"),
+        }
+    }
+
+    if !sent {
+        rollback_crossing(&engine, &send);
+        return;
+    }
+
+    // One crossing records one fire however many destinations completed. A terminal echo/settle
+    // remains owned by `run_send`, because only terminal bytes can be echoed back into a screen.
+    engine
+        .runtime
+        .record_fire(&rule.id, &send.pair.tm, send.at_ms);
+    complete_crossing(&engine, &host, &send);
+    engine.mark_state_dirty();
+}
+
+/// Take the terminal's queue, re-check it is still there, and write its destination.
+///
+/// This function has no crossing bookkeeping: `run_crossing` aggregates its result with the webhook
+/// before it records a fire, completes a runs-once rule, or rolls an arm back.
+async fn run_send(
+    engine: &Arc<AutomationEngine>,
+    host: &Arc<dyn EngineHost>,
+    send: &PendingSend,
+) -> DestinationOutcome {
     let rule = &send.pair.rule.rule;
     let tm = send.pair.tm.clone();
-    // Belt and braces for future callers that bypass the dispatch guard.
     let Some(action) = rule.graph.action.as_ref() else {
-        return;
+        return DestinationOutcome::Failed("the rule has no terminal destination".into());
     };
     // **Before the queue.** §2.6 layer 2 runs for `ECHO_SETTLE_MS` after the WRITE, and the wait for
     // this terminal's lock is up to `SEND_QUEUE_TIMEOUT_MS` of the distance between the decision and
@@ -758,21 +1195,20 @@ pub async fn run_send(
     let began = tokio::time::Instant::now();
     let lock = engine.runtime.send_lock(&tm);
 
-    let _guard = match tokio::time::timeout(
-        Duration::from_millis(SEND_QUEUE_TIMEOUT_MS),
-        lock.lock(),
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return fail(&engine, &host, &send, "another rule was still sending");
-        }
-    };
+    let _guard =
+        match tokio::time::timeout(Duration::from_millis(SEND_QUEUE_TIMEOUT_MS), lock.lock()).await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                return DestinationOutcome::Failed("another rule was still sending".into());
+            }
+        };
 
     // Inside the lock, because the terminal can close between the decision and our turn at the queue.
     let Some(pc) = host.process_for_leaf(&tm) else {
-        return fail(&engine, &host, &send, "the terminal closed before the message was sent");
+        return DestinationOutcome::Failed(
+            "the terminal closed before the message was sent".into(),
+        );
     };
 
     // **And it can close AND COME BACK, which resolving by leaf alone cannot see.** `tm-` is durable
@@ -790,7 +1226,9 @@ pub async fn run_send(
     // carries the crossing's process across that wait — built from the drain's own lookup instead,
     // this comparison would be a value against itself for every delayed rule.
     if pc != send.pair.pc {
-        return fail(&engine, &host, &send, "the terminal restarted before the message was sent");
+        return DestinationOutcome::Failed(
+            "the terminal restarted before the message was sent".into(),
+        );
     }
 
     // And so can the RULE. The queue wait is up to ten seconds, and a user who disables a rule inside
@@ -802,21 +1240,15 @@ pub async fn run_send(
     // that completed on another terminal, and told the user their rule had been turned off when
     // nobody had touched it.
     if !engine.is_live(&rule.id) {
-        return fail(&engine, &host, &send, "the rule was turned off before the message was sent");
+        return DestinationOutcome::Failed(
+            "the rule was turned off before the message was sent".into(),
+        );
     }
 
     // §2.1: checked before the FIRST write and never between the paste and the submit, so a quit
     // leaves the send either unstarted or complete — there is no half-typed line to reason about.
     if engine.stopping.load(Ordering::Relaxed) {
-        // The same rollback as `fail`, minus the row — the app is going down and the store is
-        // closing. It was the one rollback of three that announced nothing, so a pill caught
-        // mid-transition stayed on whatever it had last painted.
-        engine.runtime.restore_arm(&rule.id, &tm, send.prev);
-        if rule.runs_once {
-            engine.runtime.release_once(&rule.id);
-        }
-        engine.mark_state_dirty();
-        return;
+        return DestinationOutcome::Stopped;
     }
 
     let body = if action.substitute {
@@ -826,12 +1258,9 @@ pub async fn run_send(
             // the "unintended content" this whole feature exists to prevent, and a refusal that is
             // logged is the safe fallback it asks for instead.
             Err(e) => {
-                return fail(
-                    &engine,
-                    &host,
-                    &send,
-                    &format!("nothing sent — {e} had no value at the moment it fired"),
-                );
+                return DestinationOutcome::Failed(format!(
+                    "nothing sent — {e} had no value at the moment it fired"
+                ));
             }
         }
     } else {
@@ -843,14 +1272,17 @@ pub async fn run_send(
         &HostPort(host.as_ref()),
         &pc,
         &action.cli_type,
-        crate::automation::send::SubmitPattern { separator, end_indicator },
+        crate::automation::send::SubmitPattern {
+            separator,
+            end_indicator,
+        },
         &body,
         action.submit,
     )
     .await;
 
     if let Err(e) = outcome {
-        return fail(&engine, &host, &send, &format!("the message could not be sent: {}", e));
+        return DestinationOutcome::Failed(format!("the message could not be sent: {}", e));
     }
 
     let at = send.at_ms;
@@ -863,14 +1295,57 @@ pub async fn run_send(
     // still strips it. The needle is `body` — what actually reached the terminal — never
     // `action.message`: with substitution on, the terminal echoes the RESOLVED text, and a needle
     // still carrying `$1` would never match it.
-    engine.runtime.push_echo(&tm, &crate::automation::send::normalise(&body), landed);
+    engine
+        .runtime
+        .push_echo(&tm, &crate::automation::send::normalise(&body), landed);
     engine.runtime.settle_until(&tm, landed + ECHO_SETTLE_MS);
-    engine.runtime.record_fire(&rule.id, &tm, at);
+    DestinationOutcome::Sent
+}
 
-    let name = send.label.clone();
-    append(&host, &rule.id, Some(&tm), name, LogKind::Sent, &sent_detail(&send), at);
+/// Post the webhook destination for this crossing. It intentionally never reaches the terminal
+/// queue lock: a slow endpoint must not serialise terminal writes, and a terminal failure must not
+/// suppress an already-decided webhook.
+async fn run_webhook(engine: &Arc<AutomationEngine>, send: &PendingSend) -> DestinationOutcome {
+    let rule = &send.pair.rule.rule;
+    let Some(webhook) = rule.graph.webhook.as_ref() else {
+        return DestinationOutcome::Failed("the rule has no webhook destination".into());
+    };
+    if engine.stopping.load(Ordering::Relaxed) {
+        return DestinationOutcome::Stopped;
+    }
+    if !engine.is_live(&rule.id) {
+        return DestinationOutcome::Failed(
+            "the rule was turned off before the webhook was sent".into(),
+        );
+    }
+    let body = if webhook.substitute {
+        match subst::substitute(&webhook.body, send.captures.as_ref()) {
+            Ok(body) => body,
+            Err(e) => {
+                return DestinationOutcome::Failed(format!(
+                    "webhook not sent — {e} had no value at the moment it fired"
+                ))
+            }
+        }
+    } else {
+        webhook.body.clone()
+    };
+    match crate::automation_webhook::send_body(webhook, &body).await {
+        Ok(()) => DestinationOutcome::Sent,
+        Err(error) => DestinationOutcome::Failed(format!("webhook failed: {error}")),
+    }
+}
 
-    // §7.8 — completion is an in-memory event FIRST and a row second, in this same critical section.
+/// Complete a successful crossing once, after every destination has returned.
+fn complete_crossing(
+    engine: &Arc<AutomationEngine>,
+    host: &Arc<dyn EngineHost>,
+    send: &PendingSend,
+) {
+    let rule = &send.pair.rule.rule;
+    let tm = &send.pair.tm;
+    let at = send.at_ms;
+    // §7.8 — completion is an in-memory event FIRST and a row second, after every destination.
     // `reload` runs from mutating store commands and this is the engine, which is not one: without
     // the in-memory removal the rule stays live in `Fired`, re-arms the moment its value drops, and
     // sends a SECOND message in the same session from a row the UI already shows as Completed.
@@ -901,7 +1376,7 @@ pub async fn run_send(
             append(
                 &host,
                 &rule.id,
-                Some(&tm),
+                Some(tm),
                 None,
                 LogKind::Failed,
                 "fired, but its completion could not be recorded — it may run again after a restart",
@@ -926,7 +1401,6 @@ pub async fn run_send(
         // the thing that failed, which makes disk stale rather than true.
         host.emit_changed(vec![rule.id.clone()]);
     }
-    engine.mark_state_dirty();
 }
 
 fn sent_detail(send: &PendingSend) -> String {
@@ -936,15 +1410,25 @@ fn sent_detail(send: &PendingSend) -> String {
     }
 }
 
-/// One failure: roll the arm state back to exactly where it was, and say so once.
-fn fail(
-    engine: &Arc<AutomationEngine>,
-    host: &Arc<dyn EngineHost>,
-    send: &PendingSend,
-    reason: &str,
-) {
+fn webhook_sent_detail(send: &PendingSend) -> String {
+    let provider = send
+        .pair
+        .rule
+        .rule
+        .graph
+        .webhook
+        .as_ref()
+        .expect("a webhook outcome requires a webhook step")
+        .provider;
+    format!("webhook sent via {provider:?}")
+}
+
+/// Roll one wholly failed crossing back to exactly the arm state it had when it was decided.
+fn rollback_crossing(engine: &Arc<AutomationEngine>, send: &PendingSend) {
     let rule_id = &send.pair.rule.rule.id;
-    engine.runtime.restore_arm(rule_id, &send.pair.tm, send.prev);
+    engine
+        .runtime
+        .restore_arm(rule_id, &send.pair.tm, send.prev);
     // A rollback restores; it never creates. The claim was taken when this crossing was DECIDED, so a
     // crossing that produced no message must give it back — otherwise one queue timeout retires a
     // single-run rule that has never sent anything.
@@ -952,17 +1436,6 @@ fn fail(
         engine.runtime.release_once(rule_id);
     }
     engine.mark_state_dirty();
-    append(
-        host,
-        rule_id,
-        Some(&send.pair.tm),
-        // The label resolved at DECIDE time. This is the whole reason `PendingSend` carries one:
-        // `the terminal closed` is written when there is no name left to look up.
-        send.label.clone(),
-        LogKind::Failed,
-        reason,
-        send.at_ms,
-    );
 }
 
 /// Append one row and emit if the store says one is due.
@@ -997,7 +1470,11 @@ fn append(
     match host.store().append(&entry) {
         Ok(Some(outcome)) if outcome.emit => host.emit_activity(outcome.rule_ids),
         Ok(_) => {}
-        Err(e) => log::warn!("automations: could not write a log row for {}: {}", rule_id, e),
+        Err(e) => log::warn!(
+            "automations: could not write a log row for {}: {}",
+            rule_id,
+            e
+        ),
     }
 }
 
@@ -1015,8 +1492,10 @@ pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHo
     // BOTH halves of what `state_payload` is built from. Diffing only `missing` meant opening a
     // second terminal — adopted into `watched`, a new row in the payload — emitted nothing, so the
     // Settings page showed the rule watching one terminal until something else happened to fire.
-    let mut last: (HashMap<String, HashSet<String>>, HashMap<String, HashSet<String>>) =
-        (HashMap::new(), HashMap::new());
+    let mut last: (
+        HashMap<String, HashSet<String>>,
+        HashMap<String, HashSet<String>>,
+    ) = (HashMap::new(), HashMap::new());
     loop {
         if engine.stopping.load(Ordering::Relaxed) {
             return;
@@ -1025,7 +1504,8 @@ pub async fn run_targeting(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHo
         // `new_all()` is 50-200 ms, and `ProcSnapshot`'s own doc says this call belongs off a
         // tokio worker.
         let (e, h) = (engine.clone(), host.clone());
-        let pass = match tokio::task::spawn_blocking(move || targeting_tick(&e, &h, now_ms())).await {
+        let pass = match tokio::task::spawn_blocking(move || targeting_tick(&e, &h, now_ms())).await
+        {
             Ok(pass) => pass,
             Err(e) => {
                 // `unwrap_or_default()` here turned a panicked roster pass into an EMPTY one, which
@@ -1088,9 +1568,14 @@ pub fn targeting_tick(
     let rows = host.roster(&criteria);
     // Indexed once, outside the rule loop: the snapshot walk below wants the row for a terminal it
     // already knows it watches, and scanning the whole roster per rule made that `rules × roster`.
-    let by_id: HashMap<&str, &crate::automation::roster::RosterRow> =
-        rows.iter().filter_map(|r| r.terminal_id.as_deref().map(|t| (t, r))).collect();
-    let live_leaves: HashSet<&str> = rows.iter().filter_map(|r| r.terminal_id.as_deref()).collect();
+    let by_id: HashMap<&str, &crate::automation::roster::RosterRow> = rows
+        .iter()
+        .filter_map(|r| r.terminal_id.as_deref().map(|t| (t, r)))
+        .collect();
+    let live_leaves: HashSet<&str> = rows
+        .iter()
+        .filter_map(|r| r.terminal_id.as_deref())
+        .collect();
     let grace_over = crate::automation::roster::grace_elapsed(now_ms, engine.started_at_ms());
     let mut missing = HashMap::new();
     let mut watched: HashMap<String, HashSet<String>> = HashMap::new();
@@ -1103,7 +1588,9 @@ pub fn targeting_tick(
         // consumer.)
         let previous: BTreeSet<String> = engine.runtime.watched_for(id).into_iter().collect();
         let next = watched_set(&live.rule, &rows, Some(&previous));
-        engine.runtime.set_watched(id, next.iter().cloned().collect());
+        engine
+            .runtime
+            .set_watched(id, next.iter().cloned().collect());
 
         // §2.4: *"keys are cleared when … a terminal leaves the watch set"*. Three of that
         // sentence's four events were implemented and this one was not. A `Command contains` rule
@@ -1124,17 +1611,24 @@ pub fn targeting_tick(
             let Some(row) = by_id.get(tm.as_str()) else {
                 continue;
             };
-            let label = crate::automation::labels::label_at(&crate::automation::labels::LabelInputs {
-                display_label: row.display_label.as_deref(),
-                name: Some(row.name.as_str()),
-                shell: Some(row.shell.as_str()),
-                // Writing the snapshot, so the snapshot is not an input to it.
-                snapshot: None,
-            });
+            let label =
+                crate::automation::labels::label_at(&crate::automation::labels::LabelInputs {
+                    display_label: row.display_label.as_deref(),
+                    name: Some(row.name.as_str()),
+                    shell: Some(row.shell.as_str()),
+                    // Writing the snapshot, so the snapshot is not an input to it.
+                    snapshot: None,
+                });
             if let Err(e) =
-                host.store().touch_target(id, tm, label.as_deref(), row.cwd.as_deref(), now_ms)
+                host.store()
+                    .touch_target(id, tm, label.as_deref(), row.cwd.as_deref(), now_ms)
             {
-                log::warn!("automations: could not record {}'s view of {}: {}", id, tm, e);
+                log::warn!(
+                    "automations: could not record {}'s view of {}: {}",
+                    id,
+                    tm,
+                    e
+                );
             }
         }
 
@@ -1155,14 +1649,13 @@ pub fn targeting_tick(
     TargetingPass { missing, watched }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     // The fake, the canonical rule and the wiring are shared with the dry run's tests so there can
     // only ever be one of each.
-    use crate::automation_engine::test_host::*;
     use crate::automation::roster::RosterRow;
+    use crate::automation_engine::test_host::*;
     use crate::automation_store::{AutomationRule, Finds, Keep};
     use chrono::{Datelike, Local, NaiveDate, TimeZone, Weekday};
 
@@ -1186,17 +1679,26 @@ mod tests {
         // Twenty into a channel of four, before the tap has read any of them: the receiver is
         // guaranteed to see `Lagged`, which is the case that must not silently drop terminals.
         for i in 0..20 {
-            let _ = tx.send(ChannelPayload { id: format!("pc-{}", i % 2 + 1), data: vec![b'x'] });
+            let _ = tx.send(ChannelPayload {
+                id: format!("pc-{}", i % 2 + 1),
+                data: vec![b'x'],
+            });
         }
         let tap = tokio::spawn(run_tap(engine.clone(), host.clone(), rx));
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert!(engine.runtime.is_dirty("pc-1"), "pc-1 never marked");
-        assert!(engine.runtime.is_dirty("pc-2"), "a lagged window must mark every live terminal");
+        assert!(
+            engine.runtime.is_dirty("pc-2"),
+            "a lagged window must mark every live terminal"
+        );
 
         engine.stop();
         tokio::time::sleep(Duration::from_millis(BASE_TICK_MS * 3)).await;
-        assert!(tap.is_finished(), "the tap must return once `stopping` is set");
+        assert!(
+            tap.is_finished(),
+            "the tap must return once `stopping` is set"
+        );
         drop(tx);
     }
 
@@ -1205,15 +1707,22 @@ mod tests {
     #[test]
     fn the_tap_body_never_reads_the_payload_bytes() {
         let source = strip_comments(include_str!("loops.rs"));
-        let start = source.find("pub async fn run_tap(").expect("run_tap must exist");
+        let start = source
+            .find("pub async fn run_tap(")
+            .expect("run_tap must exist");
         let rest = &source[start..];
-        let end = rest.find("\n}\n").expect("its body must be closed at column zero");
+        let end = rest
+            .find("\n}\n")
+            .expect("its body must be closed at column zero");
         let body = &rest[..end];
         assert!(
             !body.contains(".data"),
             "the tap carries a SIGNAL, not data: the parser already has every byte, losslessly"
         );
-        assert!(body.contains("mark_dirty"), "and it must actually mark something");
+        assert!(
+            body.contains("mark_dirty"),
+            "and it must actually mark something"
+        );
     }
 
     // =============================================================================================
@@ -1235,13 +1744,19 @@ mod tests {
         let targeting = tokio::spawn(run_targeting(engine.clone(), host.clone()));
 
         // The tap does work.
-        let _ = tx.send(ChannelPayload { id: "pc-1".into(), data: vec![b'x'] });
+        let _ = tx.send(ChannelPayload {
+            id: "pc-1".into(),
+            data: vec![b'x'],
+        });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(engine.runtime.is_dirty("pc-1"), "the tap did nothing");
 
         // The targeting tick does work: it re-resolves `All terminals` and adopts tm-1.
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS)).await;
-        assert!(engine.runtime.watches("au-1", "tm-1"), "the targeting tick did nothing");
+        assert!(
+            engine.runtime.watches("au-1", "tm-1"),
+            "the targeting tick did nothing"
+        );
 
         // And the evaluator does work: with a terminal watched and dirty, the pair evaluates.
         tokio::time::sleep(Duration::from_millis(BASE_TICK_MS * 4)).await;
@@ -1273,12 +1788,21 @@ mod tests {
 
         let cursor = evaluate_tick(&engine, &host, 0, 1_000).await;
         assert_eq!(cursor, 0);
-        assert!(fake.written().is_empty(), "a first sight must arm, never type");
+        assert!(
+            fake.written().is_empty(),
+            "a first sight must arm, never type"
+        );
         assert_eq!(engine.runtime.arm_state("au-1", "tm-1"), ArmState::armed());
         // Nothing in the log, and that is the verbose gate doing its job: an ordinary check is the
         // outcome of most evaluations and would otherwise write four rows a second per pair.
-        assert!(log_kinds(&fake.store).is_empty(), "an ungated check would flood the log");
-        assert!(!engine.runtime.is_dirty("pc-1"), "the only pair on pc-1 ran, so its flag is spent");
+        assert!(
+            log_kinds(&fake.store).is_empty(),
+            "an ungated check would flood the log"
+        );
+        assert!(
+            !engine.runtime.is_dirty("pc-1"),
+            "the only pair on pc-1 ran, so its flag is spent"
+        );
 
         // The crossing. `dirty` again, and past the 250 ms floor.
         engine.runtime.mark_dirty("pc-1");
@@ -1289,7 +1813,9 @@ mod tests {
 
         let writes = fake.written();
         assert!(
-            writes.iter().any(|w| w.contains("prepare to do context-hand-off")),
+            writes
+                .iter()
+                .any(|w| w.contains("prepare to do context-hand-off")),
             "the message was never typed: {:?}",
             writes
         );
@@ -1308,10 +1834,14 @@ mod tests {
         // message had even been typed — so the next tick read the rule's own echo as organic output.
         let gap = crate::automation::send::PASTE_SUBMIT_GAP_MS as i64;
         assert!(
-            engine.runtime.is_settling("tm-1", 2_000 + ECHO_SETTLE_MS + 1),
+            engine
+                .runtime
+                .is_settling("tm-1", 2_000 + ECHO_SETTLE_MS + 1),
             "the window closed a paste-to-submit gap too early"
         );
-        assert!(!engine.runtime.is_settling("tm-1", 2_000 + gap + ECHO_SETTLE_MS + 1));
+        assert!(!engine
+            .runtime
+            .is_settling("tm-1", 2_000 + gap + ECHO_SETTLE_MS + 1));
     }
 
     // =============================================================================================
@@ -1338,7 +1868,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         assert!(
-            fake.written().iter().any(|w| w.contains("Fix the 17 failing tests in a.ts")),
+            fake.written()
+                .iter()
+                .any(|w| w.contains("Fix the 17 failing tests in a.ts")),
             "the resolved message was never typed: {:?}",
             fake.written()
         );
@@ -1365,10 +1897,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_schedule_rule_reads_nothing_sends_nothing_and_logs_nothing() {
         let (engine, fake, host) = wire(vec![schedule_only_rule("au-sched")]);
-        assert_eq!(engine.snapshot_live().len(), 1, "premise: the rule IS live and IS walked");
+        assert_eq!(
+            engine.snapshot_live().len(),
+            1,
+            "premise: the rule IS live and IS walked"
+        );
 
-        fake.say("pc-1", "ctx:99% FAILED 3 tests
-");
+        fake.say(
+            "pc-1",
+            "ctx:99% FAILED 3 tests
+",
+        );
         // **What `wire` already wrote, before the ticks run.** `wire` reloads at epoch 0 and §7's
         // seeding writes one `held` row for a schedule whose minute is already past *in the
         // runner's own zone* — 19:00 the previous evening west of UTC, midnight on it. So an
@@ -1381,7 +1920,11 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
-        assert!(fake.written().is_empty(), "a rule with no pattern typed something: {:?}", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "a rule with no pattern typed something: {:?}",
+            fake.written()
+        );
         assert_eq!(
             log_rows(&fake.store),
             before,
@@ -1406,7 +1949,7 @@ mod tests {
     /// is identical; only the pattern is present. If the rig itself were broken, this would be
     /// silent too, and "sends nothing" would prove nothing at all.
     #[tokio::test(start_paused = true)]
-    async fn the_same_rig_with_a_pattern_does_send()  {
+    async fn the_same_rig_with_a_pattern_does_send() {
         let (engine, fake, host) = rig_with_rule(|g| {
             g.parse_mut().find = "FAILED".into();
             g.parse_mut().keep = Keep::Whole;
@@ -1415,8 +1958,11 @@ mod tests {
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
 
-        fake.say("pc-1", "ctx:99% FAILED 3 tests
-");
+        fake.say(
+            "pc-1",
+            "ctx:99% FAILED 3 tests
+",
+        );
         for tick in 0..8 {
             engine.runtime.mark_dirty("pc-1");
             evaluate_tick(&engine, &host, 0, 1_000 + tick * 250).await;
@@ -1458,7 +2004,9 @@ mod tests {
 
     /// The local ordinal `at_local`'s day maps to — `last_fired_day`'s key.
     fn day_ordinal(y: i32, m: u32, d: u32) -> i32 {
-        NaiveDate::from_ymd_opt(y, m, d).expect("a real date").num_days_from_ce()
+        NaiveDate::from_ymd_opt(y, m, d)
+            .expect("a real date")
+            .num_days_from_ce()
     }
 
     /// A rig with several terminals and each rule's watched set given explicitly.
@@ -1508,7 +2056,9 @@ mod tests {
         }
         for rule in &rules {
             if bypass_enable_gate {
-                fake.store.save_rule_bypassing_the_enable_gate_for_tests(rule).unwrap();
+                fake.store
+                    .save_rule_bypassing_the_enable_gate_for_tests(rule)
+                    .unwrap();
             } else {
                 fake.store.save_rule(rule).unwrap();
             }
@@ -1516,7 +2066,9 @@ mod tests {
         let engine = Arc::new(AutomationEngine::new(0));
         engine.reload(&fake.store, 0).unwrap();
         for (id, leaves) in watched {
-            engine.runtime.set_watched(id, leaves.iter().map(|tm| tm.to_string()).collect());
+            engine
+                .runtime
+                .set_watched(id, leaves.iter().map(|tm| tm.to_string()).collect());
         }
         let host: Arc<dyn EngineHost> = fake.clone();
         (engine, fake, host)
@@ -1538,9 +2090,20 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_schedule_rule_sends_to_every_target_when_the_minute_arrives_and_reads_nothing() {
         let (engine, fake, host) = wire_targets(
-            vec![schedule_only_rule("au-sched"), ctx_rule_saying("au-read", "a reader", 2)],
-            &[("tm-1", "pc-1"), ("tm-2", "pc-2"), ("tm-3", "pc-3"), ("tm-4", "pc-4")],
-            &[("au-sched", &["tm-1", "tm-2", "tm-3"]), ("au-read", &["tm-4"])],
+            vec![
+                schedule_only_rule("au-sched"),
+                ctx_rule_saying("au-read", "a reader", 2),
+            ],
+            &[
+                ("tm-1", "pc-1"),
+                ("tm-2", "pc-2"),
+                ("tm-3", "pc-3"),
+                ("tm-4", "pc-4"),
+            ],
+            &[
+                ("au-sched", &["tm-1", "tm-2", "tm-3"]),
+                ("au-read", &["tm-4"]),
+            ],
         );
         // The reader has output and sits below its threshold, so it reads, arms, and sends nothing.
         fake.say("pc-4", "ctx:5%\n");
@@ -1570,8 +2133,16 @@ mod tests {
 
         // 6.3: a schedule rule has no arm state and must not disturb one.
         for tm in ["tm-1", "tm-2", "tm-3"] {
-            assert_eq!(engine.runtime.arm_state("au-sched", tm), ArmState::Unseen, "{tm} armed");
-            assert_eq!(engine.runtime.last_eval("au-sched", tm), None, "{tm} was evaluated");
+            assert_eq!(
+                engine.runtime.arm_state("au-sched", tm),
+                ArmState::Unseen,
+                "{tm} armed"
+            );
+            assert_eq!(
+                engine.runtime.last_eval("au-sched", tm),
+                None,
+                "{tm} was evaluated"
+            );
         }
         assert_eq!(
             engine.runtime.last_fired_day("au-sched"),
@@ -1627,7 +2198,10 @@ mod tests {
             &[("tm-1", "pc-1"), ("tm-3", "pc-3")],
             &[("au-sched", &["tm-1", "tm-2", "tm-3"])],
         );
-        assert!(host.process_for_leaf("tm-2").is_none(), "premise: tm-2 is dormant");
+        assert!(
+            host.process_for_leaf("tm-2").is_none(),
+            "premise: tm-2 is dormant"
+        );
 
         evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -1659,9 +2233,15 @@ mod tests {
     /// was killed outright.
     #[tokio::test(start_paused = true)]
     async fn a_schedule_whose_targets_were_all_asleep_does_not_nag_the_first_one_to_wake() {
-        let (engine, fake, host) =
-            wire_targets(vec![schedule_only_rule("au-sched")], &[], &[("au-sched", &["tm-1"])]);
-        assert!(host.process_for_leaf("tm-1").is_none(), "premise: nothing is awake");
+        let (engine, fake, host) = wire_targets(
+            vec![schedule_only_rule("au-sched")],
+            &[],
+            &[("au-sched", &["tm-1"])],
+        );
+        assert!(
+            host.process_for_leaf("tm-1").is_none(),
+            "premise: nothing is awake"
+        );
 
         evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -1734,11 +2314,22 @@ mod tests {
         let tuesday_afternoon = at_local(2026, 9, 8, Weekday::Tue, 14, 0);
         evaluator_step(&engine, &host, 0, Some(woke_at), tuesday_afternoon).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
-        assert!(fake.written().is_empty(), "delivered later the same day: {:?}", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "delivered later the same day: {:?}",
+            fake.written()
+        );
 
         // Wednesday, with the app genuinely awake across the minute.
         let wednesday = at_local(2026, 9, 9, Weekday::Wed, 9, 0);
-        evaluator_step(&engine, &host, 0, Some(wednesday - BASE_TICK_MS as i64), wednesday).await;
+        evaluator_step(
+            &engine,
+            &host,
+            0,
+            Some(wednesday - BASE_TICK_MS as i64),
+            wednesday,
+        )
+        .await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         assert_eq!(
             sent_to(&fake, "stand-up notes?"),
@@ -1780,14 +2371,21 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
         let rows: Vec<_> = log_rows(&fake.store).split_off(before);
-        assert_eq!(rows.len(), 1, "the wake spent Tuesday and said nothing: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the wake spent Tuesday and said nothing: {rows:?}"
+        );
         assert_eq!(rows[0].0, "Held", "{rows:?}");
         assert_eq!(
             rows[0].1,
             "09:00 went by while nothing was watching the clock, so today's run was skipped",
             "{rows:?}"
         );
-        assert_eq!(rows[0].2, None, "a schedule's suppression names no terminal: {rows:?}");
+        assert_eq!(
+            rows[0].2, None,
+            "a schedule's suppression names no terminal: {rows:?}"
+        );
         assert!(
             fake.activity.load(std::sync::atomic::Ordering::Relaxed) > emits_before,
             "the row was written and no window was told to refetch the log"
@@ -1825,7 +2423,12 @@ mod tests {
         evaluator_step(&engine, &host, 0, Some(nine - BASE_TICK_MS as i64), nine).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
-        assert_eq!(sent_to(&fake, "stand-up notes?"), vec!["pc-1"], "{:?}", fake.written());
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "{:?}",
+            fake.written()
+        );
         let rows: Vec<_> = log_rows(&fake.store).split_off(before);
         assert!(
             rows.iter().all(|(kind, _, _)| kind != "Held"),
@@ -1961,14 +2564,19 @@ mod tests {
     async fn a_failed_schedule_send_rolls_back_to_what_was_there_and_still_names_the_terminal() {
         let mut hybrid = ctx_rule_saying("au-both", "stand-up notes?", 1);
         hybrid.graph.timer = Some(TimerStep {
-            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+            mode: TimerMode::DailyAt {
+                minute_of_day: 9 * 60,
+                days: 0b0001_1111,
+            },
         });
         let (engine, fake, host) = wire_targets_bypassing_the_enable_gate(
             vec![hybrid],
             &[("tm-1", "pc-1")],
             &[("au-both", &["tm-1"])],
         );
-        engine.runtime.set_arm("au-both", "tm-1", ArmState::Fired { at_ms: 5 });
+        engine
+            .runtime
+            .set_arm("au-both", "tm-1", ArmState::Fired { at_ms: 5 });
         // `wire`'s own reload may have written §7's suppression row already, depending on the
         // runner's zone — see `a_schedule_rule_reads_nothing_sends_nothing_and_logs_nothing`. The
         // rows this test is about are the ones the tick adds.
@@ -1979,7 +2587,11 @@ mod tests {
         fake.close("tm-1");
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
-        assert!(fake.written().is_empty(), "{:?} reached a closed terminal", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "{:?} reached a closed terminal",
+            fake.written()
+        );
         assert_eq!(
             engine.runtime.arm_state("au-both", "tm-1"),
             ArmState::Fired { at_ms: 5 },
@@ -1989,7 +2601,9 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one row: {rows:?}");
         assert_eq!(rows[0].0, "Failed", "{rows:?}");
         assert!(
-            rows[0].1.contains("the terminal closed before the message was sent"),
+            rows[0]
+                .1
+                .contains("the terminal closed before the message was sent"),
             "{rows:?}"
         );
         assert_eq!(
@@ -2047,7 +2661,10 @@ mod tests {
     async fn a_schedule_rule_that_also_has_a_monitor_reads_nothing_and_fires_on_the_clock() {
         let mut hybrid = ctx_rule_saying("au-both", "stand-up notes?", 1);
         hybrid.graph.timer = Some(TimerStep {
-            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
+            mode: TimerMode::DailyAt {
+                minute_of_day: 9 * 60,
+                days: 0b0001_1111,
+            },
         });
         let (engine, fake, host) = wire_targets_bypassing_the_enable_gate(
             vec![hybrid, ctx_rule_saying("au-read", "a reader", 2)],
@@ -2068,7 +2685,11 @@ mod tests {
             "the monitor crossed on a rule the clock has not reached: {:?}",
             fake.written()
         );
-        assert_eq!(fake.tailed(), vec!["pc-4"], "and the control read a window to prove it could");
+        assert_eq!(
+            fake.tailed(),
+            vec!["pc-4"],
+            "and the control read a window to prove it could"
+        );
 
         engine.runtime.mark_dirty("pc-1");
         engine.runtime.mark_dirty("pc-4");
@@ -2111,7 +2732,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         assert!(
-            fake.written().iter().any(|w| w.contains("awk '{print $1}'")),
+            fake.written()
+                .iter()
+                .any(|w| w.contains("awk '{print $1}'")),
             "the literal message was never typed: {:?}",
             fake.written()
         );
@@ -2141,13 +2764,20 @@ mod tests {
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
-        assert!(fake.written().is_empty(), "nothing may be typed: {:?}", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "nothing may be typed: {:?}",
+            fake.written()
+        );
         let log = log_details(&fake.store);
         assert!(
             log.iter().any(|(_, detail)| detail.contains("$3")),
             "the failure row must name the token, got: {log:?}"
         );
-        assert!(log.iter().any(|(kind, _)| kind == "Failed"), "and it must be a Failed row: {log:?}");
+        assert!(
+            log.iter().any(|(kind, _)| kind == "Failed"),
+            "and it must be a Failed row: {log:?}"
+        );
     }
 
     // =============================================================================================
@@ -2171,7 +2801,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2187,7 +2819,11 @@ mod tests {
 
         evaluate_tick(&engine, &host, 0, 20_000).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert!(fake.written().is_empty(), "still holding at 19s: {:?}", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "still holding at 19s: {:?}",
+            fake.written()
+        );
 
         evaluate_tick(&engine, &host, 0, 31_001).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -2213,7 +2849,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2252,7 +2890,12 @@ mod tests {
         // `due_at_ms` is the moment it may go, not the moment after.
         evaluate_tick(&engine, &host, 0, 31_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
-        assert_eq!(times_sent(&fake, "resume"), 1, "exactly one message: {:?}", fake.written());
+        assert_eq!(
+            times_sent(&fake, "resume"),
+            1,
+            "exactly one message: {:?}",
+            fake.written()
+        );
         assert_eq!(
             engine.runtime.parked_at("au-1", "tm-1"),
             None,
@@ -2273,7 +2916,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2322,7 +2967,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 300_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2331,7 +2978,11 @@ mod tests {
         // The crossing parks a send due at 301_000 (five minutes out).
         evaluator_step(&engine, &host, 0, None, 1_000).await;
         tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(301_000), "premise: it is parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(301_000),
+            "premise: it is parked"
+        );
 
         // A resume that drops nothing: over `RESUME_GAP_MS`, and the send is not yet even due.
         let quiet = fake.states.load(std::sync::atomic::Ordering::Relaxed);
@@ -2373,7 +3024,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 300_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 300_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2393,7 +3046,11 @@ mod tests {
             Some(301_000),
             "a resume dropped a send that was not yet stale"
         );
-        assert!(fake.written().is_empty(), "the send is not due yet: {:?}", fake.written());
+        assert!(
+            fake.written().is_empty(),
+            "the send is not due yet: {:?}",
+            fake.written()
+        );
 
         // An ordinary tick, once the wait is genuinely over, must still deliver it.
         evaluator_step(&engine, &host, 0, Some(120_000), 301_001).await;
@@ -2418,7 +3075,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2469,13 +3128,18 @@ mod tests {
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume after $1".into();
             g.action_mut().substitute = true;
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
         fake.say("pc-1", "API error 529");
         evaluate_tick(&engine, &host, 0, 1_000).await;
-        assert!(fake.written().is_empty(), "the premise: the crossing parked rather than sending");
+        assert!(
+            fake.written().is_empty(),
+            "the premise: the crossing parked rather than sending"
+        );
 
         // Half a minute of build output later, nothing of the match is left anywhere.
         fake.say("pc-1", "all clear\n");
@@ -2514,7 +3178,9 @@ mod tests {
                 g.parse_mut().find = "API error".into();
                 g.cond_mut().finds = Finds::Event;
                 g.action_mut().message = "resume".into();
-                g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+                g.timer = Some(TimerStep {
+                    mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+                });
             });
             engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
             engine.runtime.mark_dirty("pc-1");
@@ -2530,7 +3196,10 @@ mod tests {
             if restarted {
                 // A spawn re-indexing a LIVE leaf, which is all `IdentityIndex::index` does. Not a
                 // `forget_terminal`, because that is the path this hazard is NOT on.
-                fake.leaves.lock().unwrap().insert("tm-1".into(), "pc-2".into());
+                fake.leaves
+                    .lock()
+                    .unwrap()
+                    .insert("tm-1".into(), "pc-2".into());
             }
 
             evaluate_tick(&engine, &host, 0, 31_001).await;
@@ -2576,7 +3245,9 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
@@ -2585,11 +3256,18 @@ mod tests {
         evaluate_tick(&engine, &host, 0, 1_000).await;
         // Guard against the vacuous version: a test that never parked anything would trivially type
         // nothing and stay green forever.
-        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "the premise: it parked"
+        );
 
         fake.store.set_enabled_checked("au-1", false).unwrap();
         engine.reload(&fake.store, 2_000).unwrap();
-        assert!(!engine.is_live("au-1"), "the premise: disabling drops it from the live set");
+        assert!(
+            !engine.is_live("au-1"),
+            "the premise: disabling drops it from the live set"
+        );
 
         evaluate_tick(&engine, &host, 0, 31_001).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -2608,18 +3286,30 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
         fake.say("pc-1", "API error");
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
-        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "the premise: it parked"
+        );
 
-        assert!(fake.store.delete_rule("au-1").unwrap(), "the premise: the rule existed to delete");
+        assert!(
+            fake.store.delete_rule("au-1").unwrap(),
+            "the premise: the rule existed to delete"
+        );
         engine.reload(&fake.store, 2_000).unwrap();
-        assert!(!engine.is_live("au-1"), "the premise: a deleted rule is not live");
+        assert!(
+            !engine.is_live("au-1"),
+            "the premise: a deleted rule is not live"
+        );
 
         evaluate_tick(&engine, &host, 0, 31_001).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -2639,17 +3329,26 @@ mod tests {
             g.parse_mut().find = "API error".into();
             g.cond_mut().finds = Finds::Event;
             g.action_mut().message = "resume".into();
-            g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+            g.timer = Some(TimerStep {
+                mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+            });
         });
         engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
         engine.runtime.mark_dirty("pc-1");
         fake.say("pc-1", "API error");
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
-        assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000), "the premise: it parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-1", "tm-1"),
+            Some(31_000),
+            "the premise: it parked"
+        );
 
-        let mut edited =
-            fake.store.get_rule("au-1").unwrap().expect("the rule must still be in the store");
+        let mut edited = fake
+            .store
+            .get_rule("au-1")
+            .unwrap()
+            .expect("the rule must still be in the store");
         edited.updated_at = 2_000;
         fake.store.save_rule(&edited).unwrap();
         engine.reload(&fake.store, 2_000).unwrap();
@@ -2662,7 +3361,9 @@ mod tests {
         // `TARGETING_TICK_MS` — that tick does not run in this harness. Re-establishing it here is
         // NOT the thing under test; skipping it would let the walk skip "tm-1" for a reason that has
         // nothing to do with §6.1, and the test would pass vacuously for the wrong reason.
-        engine.runtime.set_watched("au-1", ["tm-1".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-1", ["tm-1".to_string()].into());
 
         evaluate_tick(&engine, &host, 0, 31_001).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -2684,10 +3385,14 @@ mod tests {
         once.runs_once = true;
         once.graph.parse_mut().find = "API error".into();
         once.graph.cond_mut().finds = Finds::Event;
-        once.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        once.graph.timer = Some(TimerStep {
+            mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+        });
         let (engine, fake, host) = wire(vec![once]);
         open_second_terminal(&fake);
-        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-once", tm, ArmState::armed());
         }
@@ -2699,7 +3404,11 @@ mod tests {
         engine.runtime.mark_dirty("pc-2");
         evaluate_tick(&engine, &host, 0, 1_250).await;
         assert_eq!(engine.runtime.parked_at("au-once", "tm-1"), Some(31_000));
-        assert_eq!(engine.runtime.parked_at("au-once", "tm-2"), Some(31_250), "both parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-once", "tm-2"),
+            Some(31_250),
+            "both parked"
+        );
 
         evaluate_tick(&engine, &host, 0, 31_250).await;
         tokio::time::sleep(Duration::from_millis(4_000)).await;
@@ -2735,10 +3444,14 @@ mod tests {
         once.runs_once = true;
         once.graph.parse_mut().find = "API error".into();
         once.graph.cond_mut().finds = Finds::Event;
-        once.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        once.graph.timer = Some(TimerStep {
+            mode: TimerMode::AfterMatch { delay_ms: 30_000 },
+        });
         let (engine, fake, host) = wire(vec![once]);
         open_second_terminal(&fake);
-        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-once", tm, ArmState::armed());
         }
@@ -2750,14 +3463,27 @@ mod tests {
         engine.runtime.mark_dirty("pc-2");
         evaluate_tick(&engine, &host, 0, 1_250).await;
         assert_eq!(engine.runtime.parked_at("au-once", "tm-1"), Some(31_000));
-        assert_eq!(engine.runtime.parked_at("au-once", "tm-2"), Some(31_250), "premise: both parked");
+        assert_eq!(
+            engine.runtime.parked_at("au-once", "tm-2"),
+            Some(31_250),
+            "premise: both parked"
+        );
 
         evaluate_tick(&engine, &host, 0, 31_250).await;
         tokio::time::sleep(Duration::from_millis(4_000)).await;
 
         let sent = sent_to(&fake, "once only");
-        assert_eq!(sent.len(), 1, "premise: R6 still lets exactly one through: {:?}", fake.written());
-        let loser = if sent[0] == "pc-1" { "second" } else { "codex · core" };
+        assert_eq!(
+            sent.len(),
+            1,
+            "premise: R6 still lets exactly one through: {:?}",
+            fake.written()
+        );
+        let loser = if sent[0] == "pc-1" {
+            "second"
+        } else {
+            "codex · core"
+        };
 
         let dropped: Vec<_> = log_rows(&fake.store)
             .into_iter()
@@ -2790,14 +3516,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_dormant_terminal_produces_no_evaluation_and_no_log_line() {
         let (engine, fake, host) = wired();
-        engine.runtime.set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 5 });
+        engine
+            .runtime
+            .set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 5 });
         engine.runtime.mark_dirty("pc-1");
         // Watched, but the leaf resolves to nothing: session restore has not re-registered it.
         fake.close("tm-1");
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
 
-        assert_eq!(engine.runtime.arm_state("au-1", "tm-1"), ArmState::Fired { at_ms: 5 });
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::Fired { at_ms: 5 }
+        );
         assert_eq!(engine.runtime.last_eval("au-1", "tm-1"), None);
         assert!(log_kinds(&fake.store).is_empty());
     }
@@ -2812,7 +3543,11 @@ mod tests {
         engine.runtime.settle_until("tm-1", 5_000);
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
-        assert_eq!(engine.runtime.last_eval("au-1", "tm-1"), None, "settling means untouched");
+        assert_eq!(
+            engine.runtime.last_eval("au-1", "tm-1"),
+            None,
+            "settling means untouched"
+        );
 
         // And once the window closes it evaluates normally again.
         evaluate_tick(&engine, &host, 0, 5_001).await;
@@ -2838,9 +3573,15 @@ mod tests {
             .into_iter()
             .find(|l| l.rule.id == rule_id)
             .expect("the rule must be live for a send to have been decided");
-        engine.runtime.set_arm(rule_id, "tm-1", ArmState::Fired { at_ms });
+        engine
+            .runtime
+            .set_arm(rule_id, "tm-1", ArmState::Fired { at_ms });
         PendingSend {
-            pair: Pair { rule, tm: "tm-1".into(), pc: "pc-1".into() },
+            pair: Pair {
+                rule,
+                tm: "tm-1".into(),
+                pc: "pc-1".into(),
+            },
             prev,
             label: host.label_for("tm-1"),
             at_ms,
@@ -2889,7 +3630,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
         let writes = fake.written();
-        assert_eq!(writes.len(), 6, "two sends of three writes each: {:?}", writes);
+        assert_eq!(
+            writes.len(),
+            6,
+            "two sends of three writes each: {:?}",
+            writes
+        );
         assert_eq!(
             paste_positions(&writes),
             vec![0, 3],
@@ -2902,11 +3648,20 @@ mod tests {
         for i in [0usize, 3] {
             let alpha = writes[i].contains("alpha speaking");
             let bravo = writes[i].contains("bravo speaking");
-            assert_ne!(alpha, bravo, "one paste carried both messages: {:?}", writes);
+            assert_ne!(
+                alpha, bravo,
+                "one paste carried both messages: {:?}",
+                writes
+            );
             carried.push(if alpha { "alpha" } else { "bravo" });
         }
         carried.sort_unstable();
-        assert_eq!(carried, vec!["alpha", "bravo"], "both rules must have sent: {:?}", writes);
+        assert_eq!(
+            carried,
+            vec!["alpha", "bravo"],
+            "both rules must have sent: {:?}",
+            writes
+        );
     }
 
     /// A send that cannot take the terminal's queue within [`SEND_QUEUE_TIMEOUT_MS`] gives up: one
@@ -2923,9 +3678,12 @@ mod tests {
         let _held = lock.lock().await;
 
         let send = pending(&engine, &host, "au-1", ArmState::re_armed(), 1_000);
-        run_send(engine.clone(), host.clone(), send).await;
+        run_crossing(engine.clone(), host.clone(), send).await;
 
-        assert!(fake.written().is_empty(), "a send that never got the queue must type nothing");
+        assert!(
+            fake.written().is_empty(),
+            "a send that never got the queue must type nothing"
+        );
         assert_eq!(
             engine.runtime.arm_state("au-1", "tm-1"),
             ArmState::re_armed(),
@@ -2934,8 +3692,16 @@ mod tests {
         let rows = log_details(&fake.store);
         assert_eq!(rows.len(), 1, "exactly one row: {:?}", rows);
         assert_eq!(rows[0].0, "Failed");
-        assert!(rows[0].1.contains("another rule was still sending"), "{:?}", rows);
-        assert_eq!(engine.runtime.fire_record("au-1", "tm-1"), None, "a failed send never fired");
+        assert!(
+            rows[0].1.contains("another rule was still sending"),
+            "{:?}",
+            rows
+        );
+        assert_eq!(
+            engine.runtime.fire_record("au-1", "tm-1"),
+            None,
+            "a failed send never fired"
+        );
     }
 
     // =============================================================================================
@@ -2974,7 +3740,7 @@ mod tests {
             let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
             break_it(&fake);
 
-            run_send(engine.clone(), host.clone(), send).await;
+            run_crossing(engine.clone(), host.clone(), send).await;
             tokio::time::sleep(Duration::from_millis(1_500)).await;
 
             assert_eq!(
@@ -2984,7 +3750,12 @@ mod tests {
                 what,
                 fake.written()
             );
-            assert_eq!(engine.runtime.arm_state("au-1", "tm-1"), ArmState::armed(), "{}", what);
+            assert_eq!(
+                engine.runtime.arm_state("au-1", "tm-1"),
+                ArmState::armed(),
+                "{}",
+                what
+            );
             let rows = log_details(&fake.store);
             assert_eq!(rows.len(), 1, "{}: exactly one row, got {:?}", what, rows);
             assert_eq!(rows[0].0, "Failed", "{}: {:?}", what, rows);
@@ -3024,8 +3795,15 @@ mod tests {
         bad.graph.parse_mut().find = r"ctx:(\d+%".into();
         let (engine, fake, host) = wire(vec![bad]);
 
-        assert_eq!(log_kinds(&fake.store), vec!["Failed".to_string()], "one row, written at load");
-        assert!(engine.snapshot_live().is_empty(), "and the rule is not running");
+        assert_eq!(
+            log_kinds(&fake.store),
+            vec!["Failed".to_string()],
+            "one row, written at load"
+        );
+        assert!(
+            engine.snapshot_live().is_empty(),
+            "and the rule is not running"
+        );
 
         fake.say("pc-1", "ctx:63%\n");
         let mut cursor = 0;
@@ -3034,8 +3812,15 @@ mod tests {
             cursor = evaluate_tick(&engine, &host, cursor, t * 1_000).await;
         }
 
-        assert_eq!(log_kinds(&fake.store), vec!["Failed".to_string()], "a tick wrote a second row");
-        assert!(fake.written().is_empty(), "and an uncompilable rule must never send");
+        assert_eq!(
+            log_kinds(&fake.store),
+            vec!["Failed".to_string()],
+            "a tick wrote a second row"
+        );
+        assert!(
+            fake.written().is_empty(),
+            "and an uncompilable rule must never send"
+        );
     }
 
     // =============================================================================================
@@ -3050,9 +3835,12 @@ mod tests {
             let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
             engine.stop();
 
-            run_send(engine.clone(), host.clone(), send).await;
+            run_crossing(engine.clone(), host.clone(), send).await;
 
-            assert!(fake.written().is_empty(), "a send that started after the quit must type nothing");
+            assert!(
+                fake.written().is_empty(),
+                "a send that started after the quit must type nothing"
+            );
             assert_eq!(
                 engine.runtime.arm_state("au-1", "tm-1"),
                 ArmState::armed(),
@@ -3064,7 +3852,11 @@ mod tests {
             // the arm state is restored, the crossing is still armed, and it fires on the next launch.
             // A row here would be the only trace of a non-event, in a 200-row log §3.3 reserves for
             // decisions a user can act on.
-            assert!(log_kinds(&fake.store).is_empty(), "{:?}", log_details(&fake.store));
+            assert!(
+                log_kinds(&fake.store).is_empty(),
+                "{:?}",
+                log_details(&fake.store)
+            );
         }
 
         // Already typing: the flag is set during the paste-to-submit gap and the submit still goes
@@ -3072,10 +3864,14 @@ mod tests {
         {
             let (engine, fake, host) = wired();
             let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
-            let task = tokio::spawn(run_send(engine.clone(), host.clone(), send));
+            let task = tokio::spawn(run_crossing(engine.clone(), host.clone(), send));
 
             tokio::time::sleep(Duration::from_millis(100)).await;
-            assert_eq!(fake.written().len(), 1, "the paste must be out and the gap running");
+            assert_eq!(
+                fake.written().len(),
+                1,
+                "the paste must be out and the gap running"
+            );
             engine.stop();
             tokio::time::sleep(Duration::from_millis(1_000)).await;
             assert!(task.is_finished(), "the send must not park on the flag");
@@ -3112,8 +3908,16 @@ mod tests {
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
-        assert_eq!(fake.written().len(), 3, "the crossing must send: {:?}", fake.written());
-        assert_eq!(engine.runtime.echoes_for("tm-1", 1_000), vec!["HANDOFF now".to_string()]);
+        assert_eq!(
+            fake.written().len(),
+            3,
+            "the crossing must send: {:?}",
+            fake.written()
+        );
+        assert_eq!(
+            engine.runtime.echoes_for("tm-1", 1_000),
+            vec!["HANDOFF now".to_string()]
+        );
 
         // The real line has scrolled off. All that is left is what this rule typed.
         fake.say("pc-1", "HANDOFF now\n");
@@ -3221,7 +4025,10 @@ mod tests {
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
-        assert!(!engine.is_live("au-once"), "§7.8: completion is an in-memory event FIRST");
+        assert!(
+            !engine.is_live("au-once"),
+            "§7.8: completion is an in-memory event FIRST"
+        );
         assert_eq!(
             engine.runtime.arm_state("au-once", "tm-1"),
             ArmState::Unseen,
@@ -3254,7 +4061,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2_000)).await;
         }
 
-        assert_eq!(times_sent(&fake, "once only"), 1, "a runs-once rule fired twice in one session");
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "a runs-once rule fired twice in one session"
+        );
         assert_eq!(
             times_sent(&fake, "every time"),
             2,
@@ -3264,16 +4075,27 @@ mod tests {
         // (b) The next launch: a fresh engine loads the same store and must not run it at all.
         let next = Arc::new(AutomationEngine::new(0));
         next.reload(&fake.store, 6_000).unwrap();
-        assert!(!next.is_live("au-once"), "the reload filter is the second line of defence");
-        assert!(next.is_live("au-many"), "and only the completed rule is filtered");
+        assert!(
+            !next.is_live("au-once"),
+            "the reload filter is the second line of defence"
+        );
+        assert!(
+            next.is_live("au-many"),
+            "and only the completed rule is filtered"
+        );
 
-        next.runtime.set_watched("au-once", ["tm-1".to_string()].into());
+        next.runtime
+            .set_watched("au-once", ["tm-1".to_string()].into());
         next.runtime.set_arm("au-once", "tm-1", ArmState::armed());
         fake.say("pc-1", "ctx:77%\n");
         next.runtime.mark_dirty("pc-1");
         evaluate_tick(&next, &host, 0, 7_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
-        assert_eq!(times_sent(&fake, "once only"), 1, "a completed rule ran after a reload");
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "a completed rule ran after a reload"
+        );
     }
 
     /// **The completion nobody was told about.**
@@ -3301,14 +4123,24 @@ mod tests {
             engine.runtime.set_arm(id, "tm-1", ArmState::armed());
         }
 
-        fake.say("pc-1", "ctx:63%
-");
+        fake.say(
+            "pc-1", "ctx:63%
+",
+        );
         engine.runtime.mark_dirty("pc-1");
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
 
-        assert_eq!(times_sent(&fake, "once only"), 1, "the runs-once rule never fired");
-        assert_eq!(times_sent(&fake, "every time"), 1, "the control never fired");
+        assert_eq!(
+            times_sent(&fake, "once only"),
+            1,
+            "the runs-once rule never fired"
+        );
+        assert_eq!(
+            times_sent(&fake, "every time"),
+            1,
+            "the control never fired"
+        );
         assert_eq!(
             fake.announced(),
             vec!["au-once".to_string()],
@@ -3353,7 +4185,11 @@ mod tests {
             !engine.is_live("au-once"),
             "a failed stamp took the in-memory retirement with it, so the rule can fire again now"
         );
-        assert_eq!(fake.announced(), vec!["au-once".to_string()], "the windows were not told");
+        assert_eq!(
+            fake.announced(),
+            vec!["au-once".to_string()],
+            "the windows were not told"
+        );
         let log = log_details(&fake.store);
         assert!(
             log.iter().any(|(kind, detail)| kind == "Failed"
@@ -3387,7 +4223,10 @@ mod tests {
             // exactly that window.
             evaluate_tick(&engine, &host, 0, 1_000).await;
             if restarted {
-                fake.leaves.lock().unwrap().insert("tm-1".into(), "pc-2".into());
+                fake.leaves
+                    .lock()
+                    .unwrap()
+                    .insert("tm-1".into(), "pc-2".into());
             }
             tokio::time::sleep(Duration::from_millis(2_000)).await;
 
@@ -3417,17 +4256,30 @@ mod tests {
 
         // Before any tick, and inside the grace window, nothing is reported missing — §4.5: at t=0 the
         // live set is empty and session restore has not run.
-        assert!(!is_missing(&engine, "au-1", "tm-gone"), "reported before the grace elapsed");
+        assert!(
+            !is_missing(&engine, "au-1", "tm-gone"),
+            "reported before the grace elapsed"
+        );
         targeting_tick(&engine, &host, 1_000);
-        assert!(!is_missing(&engine, "au-1", "tm-gone"), "the grace window did not hold");
+        assert!(
+            !is_missing(&engine, "au-1", "tm-gone"),
+            "the grace window did not hold"
+        );
 
         // Past the grace, the pinned id is not in the roster and is reported — through the payload
         // first paint actually calls, not through the tick's return value.
         targeting_tick(&engine, &host, 120_000);
-        assert!(is_missing(&engine, "au-1", "tm-gone"), "first paint cannot see what the tick found");
+        assert!(
+            is_missing(&engine, "au-1", "tm-gone"),
+            "first paint cannot see what the tick found"
+        );
 
         // And it is retracted the moment the terminal comes back, rather than latching.
-        _fake.leaves.lock().unwrap().insert("tm-gone".into(), "pc-9".into());
+        _fake
+            .leaves
+            .lock()
+            .unwrap()
+            .insert("tm-gone".into(), "pc-9".into());
         _fake.roster.lock().unwrap().push(RosterRow {
             terminal_id: Some("tm-gone".into()),
             process_id: "pc-9".into(),
@@ -3439,7 +4291,10 @@ mod tests {
             command_lines: Vec::new(),
         });
         targeting_tick(&engine, &host, 130_000);
-        assert!(!is_missing(&engine, "au-1", "tm-gone"), "dormant, never dead — it came back");
+        assert!(
+            !is_missing(&engine, "au-1", "tm-gone"),
+            "dormant, never dead — it came back"
+        );
     }
 
     fn is_missing(engine: &Arc<AutomationEngine>, rule_id: &str, tm: &str) -> bool {
@@ -3477,7 +4332,11 @@ mod tests {
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
-        assert_eq!(times_sent(&fake, "bravo speaking"), 1, "the premise: B has fired once");
+        assert_eq!(
+            times_sent(&fake, "bravo speaking"),
+            1,
+            "the premise: B has fired once"
+        );
 
         // The user flips A off. Nothing about B changed.
         let mut off = ctx_rule_saying("au-a", "alpha speaking", 1);
@@ -3507,7 +4366,10 @@ mod tests {
             "the decision must be `held`, and be visible as one: {:?}",
             log_kinds(&fake.store)
         );
-        assert!(!engine.is_live("au-a"), "the premise: A really did leave the live set");
+        assert!(
+            !engine.is_live("au-a"),
+            "the premise: A really did leave the live set"
+        );
     }
 
     // =============================================================================================
@@ -3524,7 +4386,7 @@ mod tests {
         // The decision has been made and carried; NOW the terminal goes away completely.
         fake.close("tm-1");
 
-        run_send(engine.clone(), host.clone(), send).await;
+        run_crossing(engine.clone(), host.clone(), send).await;
 
         let rows = log_rows(&fake.store);
         assert_eq!(rows.len(), 1, "{:?}", rows);
@@ -3542,7 +4404,7 @@ mod tests {
         let (engine, fake, host) = wired();
         let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
 
-        run_send(engine.clone(), host.clone(), send).await;
+        run_crossing(engine.clone(), host.clone(), send).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         let rows = log_rows(&fake.store);
@@ -3560,7 +4422,9 @@ mod tests {
     async fn a_row_that_sent_nothing_carries_the_name_as_well() {
         let (engine, fake, host) = wired();
         // Fired and still true: `held`, which is a Decision-class row and so not verbose-gated.
-        engine.runtime.set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 500 });
+        engine
+            .runtime
+            .set_arm("au-1", "tm-1", ArmState::Fired { at_ms: 500 });
         fake.say("pc-1", "ctx:63%\n");
         engine.runtime.mark_dirty("pc-1");
 
@@ -3568,7 +4432,11 @@ mod tests {
 
         let rows = log_rows(&fake.store);
         assert_eq!(rows.len(), 1, "{:?}", rows);
-        assert_ne!(rows[0].0, "Sent", "the premise: nothing was sent — {:?}", rows);
+        assert_ne!(
+            rows[0].0, "Sent",
+            "the premise: nothing was sent — {:?}",
+            rows
+        );
         assert_eq!(rows[0].2.as_deref(), Some("codex · core"), "{:?}", rows);
         assert!(fake.written().is_empty());
     }
@@ -3593,12 +4461,17 @@ mod tests {
             cwd: None,
             command_lines: Vec::new(),
         });
-        fake.leaves.lock().unwrap().insert("tm-2".into(), "pc-2".into());
+        fake.leaves
+            .lock()
+            .unwrap()
+            .insert("tm-2".into(), "pc-2".into());
 
         // Both terminals match `All terminals`, and both have fired.
         targeting_tick(&engine, &host, 1_000);
         for tm in ["tm-1", "tm-2"] {
-            engine.runtime.set_arm("au-1", tm, ArmState::Fired { at_ms: 500 });
+            engine
+                .runtime
+                .set_arm("au-1", tm, ArmState::Fired { at_ms: 500 });
             engine.runtime.set_last_eval("au-1", tm, 500);
             engine.runtime.record_fire("au-1", tm, 500);
         }
@@ -3607,7 +4480,11 @@ mod tests {
         fake.close("tm-2");
         targeting_tick(&engine, &host, 3_000);
 
-        assert_eq!(engine.runtime.arm_state("au-1", "tm-2"), ArmState::Unseen, "the stale key survived");
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-2"),
+            ArmState::Unseen,
+            "the stale key survived"
+        );
         assert_eq!(engine.runtime.last_eval("au-1", "tm-2"), None);
         assert_eq!(
             engine.runtime.fire_record("au-1", "tm-2"),
@@ -3643,7 +4520,7 @@ mod tests {
                 engine.stop();
             }
 
-            run_send(engine.clone(), host.clone(), send).await;
+            run_crossing(engine.clone(), host.clone(), send).await;
 
             assert_eq!(
                 engine.runtime.arm_state("au-1", "tm-1"),
@@ -3667,7 +4544,7 @@ mod tests {
                 *fake.write_err.lock().unwrap() = Some("no writer".into());
             }
 
-            run_send(engine.clone(), host.clone(), send).await;
+            run_crossing(engine.clone(), host.clone(), send).await;
 
             assert_eq!(
                 engine.runtime.arm_state("au-1", "tm-1"),
@@ -3693,23 +4570,34 @@ mod tests {
         // mutation to `tokio::spawn` survived it. `ends_with` can only be satisfied by the characters
         // immediately before the call — by the call itself.
         let engine = strip_comments(include_str!("../automation_engine.rs"));
-        let start = engine.find("pub fn spawn<R: tauri::Runtime>").expect("spawn must exist");
+        let start = engine
+            .find("pub fn spawn<R: tauri::Runtime>")
+            .expect("spawn must exist");
         let body = &engine[start..];
         let outer = body.find("spawn({").expect("it must spawn something");
         assert!(
             body[..outer].ends_with("tauri::async_runtime::"),
             "the OUTER spawn runs from `.setup()`, where no runtime is entered, so it must go \
              through Tauri's wrapper; the call reads `{}spawn({{`",
-            body[..outer].rsplit('\n').next().unwrap_or_default().trim_start()
+            body[..outer]
+                .rsplit('\n')
+                .next()
+                .unwrap_or_default()
+                .trim_start()
         );
 
         let lib = strip_comments(include_str!("../lib.rs"));
-        let setup_start =
-            lib.find("spawn_history_flush_task(state.clone());").expect("the setup site");
+        let setup_start = lib
+            .find("spawn_history_flush_task(state.clone());")
+            .expect("the setup site");
         // Windowed by LINES rather than bytes: `strip_comments` drops comment-only lines and leaves
         // trailing ones, so a multi-byte character landing inside a fixed byte window panics with a
         // slice error instead of failing with this test's own message.
-        let setup = lib[setup_start..].lines().take(12).collect::<Vec<_>>().join("\n");
+        let setup = lib[setup_start..]
+            .lines()
+            .take(12)
+            .collect::<Vec<_>>()
+            .join("\n");
         let setup = setup.as_str();
         assert!(
             !setup.contains("tokio::spawn"),
@@ -3737,7 +4625,9 @@ mod tests {
         once.runs_once = true;
         let (engine, fake, host) = wire(vec![once]);
         open_second_terminal(&fake);
-        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-once", tm, ArmState::armed());
         }
@@ -3756,7 +4646,10 @@ mod tests {
             fake.written()
         );
         assert_eq!(
-            log_rows(&fake.store).iter().filter(|(k, _, _)| k == "Sent").count(),
+            log_rows(&fake.store)
+                .iter()
+                .filter(|(k, _, _)| k == "Sent")
+                .count(),
             1,
             "and it logged every one of them"
         );
@@ -3779,7 +4672,9 @@ mod tests {
         once.runs_once = true;
         let (engine, fake, host) = wire(vec![once]);
         open_second_terminal(&fake);
-        engine.runtime.set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-once", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-once", tm, ArmState::armed());
         }
@@ -3805,7 +4700,10 @@ mod tests {
             fake.written()
         );
         assert_eq!(
-            log_rows(&fake.store).iter().filter(|(k, _, _)| k == "Sent").count(),
+            log_rows(&fake.store)
+                .iter()
+                .filter(|(k, _, _)| k == "Sent")
+                .count(),
             1,
             "and logged both of them"
         );
@@ -3823,7 +4721,9 @@ mod tests {
         let mut once = ctx_rule_saying("au-once", "once only", 1);
         once.runs_once = true;
         let (engine, fake, host) = wire(vec![once]);
-        engine.runtime.set_watched("au-once", ["tm-1".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-once", ["tm-1".to_string()].into());
         engine.runtime.set_arm("au-once", "tm-1", ArmState::armed());
         *fake.write_err.lock().unwrap() = Some("no writer".into());
 
@@ -3836,10 +4736,16 @@ mod tests {
         // so `written()` shows the attempt either way. A `Sent` row is only written after `deliver`
         // returns `Ok`.
         let sent_rows = |f: &FakeHost| {
-            log_rows(&f.store).iter().filter(|(k, _, _)| k == "Sent").count()
+            log_rows(&f.store)
+                .iter()
+                .filter(|(k, _, _)| k == "Sent")
+                .count()
         };
         assert_eq!(sent_rows(&fake), 0, "the premise: the write was refused");
-        assert!(engine.is_live("au-once"), "a failed send must not complete the rule");
+        assert!(
+            engine.is_live("au-once"),
+            "a failed send must not complete the rule"
+        );
         assert_eq!(
             engine.runtime.arm_state("au-once", "tm-1"),
             ArmState::armed(),
@@ -3883,12 +4789,18 @@ mod tests {
             "the premise: nothing was evaluated, so no arm state moved"
         );
         assert!(log_rows(&fake.store).is_empty(), "§4.5: no read, no row");
-        assert!(engine.runtime.is_dirty("pc-1"), "the tick spent a signal no pair could read");
+        assert!(
+            engine.runtime.is_dirty("pc-1"),
+            "the tick spent a signal no pair could read"
+        );
 
         // The paired positive, so this is not satisfied by never clearing anything.
         fake.say("pc-1", "ctx:18%\n");
         evaluate_tick(&engine, &host, 0, 2_000).await;
-        assert!(!engine.runtime.is_dirty("pc-1"), "an ordinary read must still spend the signal");
+        assert!(
+            !engine.runtime.is_dirty("pc-1"),
+            "an ordinary read must still spend the signal"
+        );
     }
 
     /// The other half of B-2's fix, and it had no oracle: **only a `runs_once` rule is deduped.**
@@ -3902,7 +4814,9 @@ mod tests {
     async fn a_repeating_rule_still_sends_to_every_terminal_it_watches() {
         let (engine, fake, host) = wire(vec![ctx_rule_saying("au-many", "every one", 1)]);
         open_second_terminal(&fake);
-        engine.runtime.set_watched("au-many", ["tm-1".to_string(), "tm-2".to_string()].into());
+        engine
+            .runtime
+            .set_watched("au-many", ["tm-1".to_string(), "tm-2".to_string()].into());
         for tm in ["tm-1", "tm-2"] {
             engine.runtime.set_arm("au-many", tm, ArmState::armed());
         }
@@ -3938,7 +4852,10 @@ mod tests {
         // The first pass adopts tm-1 and says so. Drained here, so what is asserted below is the
         // SECOND change and not this one.
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS / 2)).await;
-        assert!(engine.take_state_emit(1_000), "the first pass must announce the rule's first leaf");
+        assert!(
+            engine.take_state_emit(1_000),
+            "the first pass must announce the rule's first leaf"
+        );
         assert!(engine.runtime.watches("au-1", "tm-1"));
 
         // A second terminal opens. `All terminals` + `follow_new` adopts it.
@@ -3946,7 +4863,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 2)).await;
         engine.stop();
 
-        assert!(engine.runtime.watches("au-1", "tm-2"), "the premise: it was adopted");
+        assert!(
+            engine.runtime.watches("au-1", "tm-2"),
+            "the premise: it was adopted"
+        );
         assert!(
             engine.take_state_emit(10_000),
             "the watch set grew and no window was told; only `missing` was being diffed"
@@ -3960,7 +4880,10 @@ mod tests {
         let (engine, _fake, host) = wired();
         let quiet = tokio::spawn(run_targeting(engine.clone(), host.clone()));
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS / 2)).await;
-        assert!(engine.take_state_emit(1_000), "the premise: the first pass adopted tm-1");
+        assert!(
+            engine.take_state_emit(1_000),
+            "the premise: the first pass adopted tm-1"
+        );
         tokio::time::sleep(Duration::from_millis(TARGETING_TICK_MS * 3)).await;
         engine.stop();
         assert!(
@@ -4001,7 +4924,11 @@ mod tests {
             Some(1_000),
             "the premise: A was due and ran"
         );
-        assert_eq!(engine.runtime.last_eval("au-b", "tm-1"), Some(900), "and B did not");
+        assert_eq!(
+            engine.runtime.last_eval("au-b", "tm-1"),
+            Some(900),
+            "and B did not"
+        );
         assert!(
             engine.runtime.is_dirty("pc-1"),
             "A spent the flag on B's behalf, and B never sees this output again"
@@ -4012,7 +4939,10 @@ mod tests {
         // for A instead; that is the rule working, not a second bug.)
         evaluate_tick(&engine, &host, 0, 1_300).await;
         assert_eq!(engine.runtime.last_eval("au-b", "tm-1"), Some(1_300));
-        assert!(!engine.runtime.is_dirty("pc-1"), "and now the flag is genuinely spent");
+        assert!(
+            !engine.runtime.is_dirty("pc-1"),
+            "and now the flag is genuinely spent"
+        );
     }
 
     /// **M-5: `touch_target` had no production caller**, so `automation_targets` held rows only for
@@ -4031,8 +4961,14 @@ mod tests {
         targeting_tick(&engine, &host, 1_000);
 
         let rows = fake.store.targets_for("au-1").unwrap();
-        let row = rows.iter().find(|r| r.0 == "tm-1").unwrap_or_else(|| panic!("{:?}", rows));
-        assert_eq!(row.1, "matched", "a criterion match is never pinned, so nothing else writes it");
+        let row = rows
+            .iter()
+            .find(|r| r.0 == "tm-1")
+            .unwrap_or_else(|| panic!("{:?}", rows));
+        assert_eq!(
+            row.1, "matched",
+            "a criterion match is never pinned, so nothing else writes it"
+        );
         assert_eq!(row.2.as_deref(), Some("codex · core"));
         assert_eq!(row.3.as_deref(), Some("D:/sources/work"));
     }
@@ -4045,12 +4981,22 @@ mod tests {
     #[test]
     fn the_exit_arm_stops_the_engine_before_anything_slow() {
         let lib = strip_comments(include_str!("../lib.rs"));
-        let start = lib.find("if let RunEvent::Exit = event {").expect("the Exit arm");
+        let start = lib
+            .find("if let RunEvent::Exit = event {")
+            .expect("the Exit arm");
         let arm = lib[start..].lines().take(25).collect::<Vec<_>>().join("\n");
         let arm = arm.as_str();
-        let stop = arm.find("automations.stop()").expect("Exit must stop the engine");
-        for slow in ["flush_all_history(", "shutdown_mcp_server(", "shutdown_fabric("] {
-            let at = arm.find(slow).unwrap_or_else(|| panic!("{} left the Exit arm", slow));
+        let stop = arm
+            .find("automations.stop()")
+            .expect("Exit must stop the engine");
+        for slow in [
+            "flush_all_history(",
+            "shutdown_mcp_server(",
+            "shutdown_fabric(",
+        ] {
+            let at = arm
+                .find(slow)
+                .unwrap_or_else(|| panic!("{} left the Exit arm", slow));
             assert!(stop < at, "the loops keep deciding across {}", slow);
         }
     }
@@ -4086,7 +5032,10 @@ mod tests {
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
 
-        assert!(lookups.load(Ordering::Relaxed) >= 2, "the premise: both pairs resolved their leaf");
+        assert!(
+            lookups.load(Ordering::Relaxed) >= 2,
+            "the premise: both pairs resolved their leaf"
+        );
         assert!(
             engine.runtime.is_dirty("pc-1"),
             "the tick cleared a signal that arrived after it had finished reading"
@@ -4106,8 +5055,13 @@ mod tests {
 
         targeting_tick(&engine, &host, 1_000);
 
-        let ids: Vec<String> =
-            fake.store.targets_for("au-1").unwrap().into_iter().map(|r| r.0).collect();
+        let ids: Vec<String> = fake
+            .store
+            .targets_for("au-1")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
         assert_eq!(
             ids,
             vec!["tm-1".to_string()],
@@ -4134,7 +5088,8 @@ mod tests {
         let pass = targeting_tick(&engine, &host, 1_000);
 
         assert!(
-            fake.last_roster_criteria().contains(&Criterion::CommandContains),
+            fake.last_roster_criteria()
+                .contains(&Criterion::CommandContains),
             "the exclusion must request the process scan that populates command lines"
         );
         assert_eq!(
@@ -4172,14 +5127,24 @@ mod tests {
         // inside the very loop that fills `skipped` — so this row pins THIS FUNCTION's contract, that
         // `emit` is the gate and the list is not consulted when it is closed, rather than a state the
         // engine reaches.
-        assert_eq!(refusals_to_announce(&ReloadReport { emit: false, ..refused }), None);
+        assert_eq!(
+            refusals_to_announce(&ReloadReport {
+                emit: false,
+                ..refused
+            }),
+            None
+        );
 
         // An empty `skipped` with `emit` set: also unreachable from `reload`, and also this function's
         // contract — an empty list is not `None`, because a caller with a reason to emit and no ids to
         // name still emits. *(This comment used to justify the row with "a row written by something
         // else in the same load"; `reload` has no such mechanism.)*
         assert_eq!(
-            refusals_to_announce(&ReloadReport { live: 3, skipped: vec![], emit: true }),
+            refusals_to_announce(&ReloadReport {
+                live: 3,
+                skipped: vec![],
+                emit: true
+            }),
             Some(vec![])
         );
     }
@@ -4199,8 +5164,10 @@ mod tests {
             engine.runtime.set_arm(id, "tm-1", ArmState::armed());
         }
         engine.runtime.set_last_eval("au-timer", "tm-1", 900);
-        fake.say("pc-1", "ctx:18%
-");
+        fake.say(
+            "pc-1", "ctx:18%
+",
+        );
         engine.runtime.mark_dirty("pc-1");
 
         evaluate_tick(&engine, &host, 0, 1_000).await;
@@ -4244,7 +5211,11 @@ mod tests {
         evaluate_tick(&engine, &host, 0, 1_000).await;
         tokio::time::sleep(Duration::from_millis(4_000)).await;
 
-        assert_eq!(times_sent(&fake, "first message"), 1, "the premise: both sent");
+        assert_eq!(
+            times_sent(&fake, "first message"),
+            1,
+            "the premise: both sent"
+        );
         assert_eq!(times_sent(&fake, "second message"), 1);
 
         // The first send lands one paste-to-submit gap after the decision; the second waits for the
@@ -4252,10 +5223,14 @@ mod tests {
         let gap = crate::automation::send::PASTE_SUBMIT_GAP_MS as i64;
         let second_landed = 1_000 + gap * 2;
         assert!(
-            engine.runtime.is_settling("tm-1", second_landed + ECHO_SETTLE_MS - 1),
+            engine
+                .runtime
+                .is_settling("tm-1", second_landed + ECHO_SETTLE_MS - 1),
             "the queued send's window had already been running for the length of its wait"
         );
-        assert!(!engine.runtime.is_settling("tm-1", second_landed + ECHO_SETTLE_MS + 1));
+        assert!(!engine
+            .runtime
+            .is_settling("tm-1", second_landed + ECHO_SETTLE_MS + 1));
     }
 
     /// A second live terminal, with ids that share no substring with the first (§7.4).
@@ -4297,7 +5272,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2_000)).await;
         }
 
-        let kinds: Vec<String> = log_rows(&fake.store).into_iter().map(|(k, _, _)| k).collect();
+        let kinds: Vec<String> = log_rows(&fake.store)
+            .into_iter()
+            .map(|(k, _, _)| k)
+            .collect();
         assert_eq!(
             kinds.iter().filter(|k| *k == "Sent").count(),
             1,
@@ -4311,7 +5289,12 @@ mod tests {
              again, and they evict the `sent` row: {:?}",
             kinds
         );
-        assert_eq!(kinds.len(), 2, "and nothing else was written at all: {:?}", kinds);
+        assert_eq!(
+            kinds.len(),
+            2,
+            "and nothing else was written at all: {:?}",
+            kinds
+        );
     }
 
     /// **H-2: `automation:state` is an ARM TRANSITION event** (§7.2), and it fired only from a
@@ -4343,18 +5326,29 @@ mod tests {
         fake.say("pc-1", "ctx:18%\n");
         engine.runtime.mark_dirty("pc-1");
         evaluate_tick(&engine, &host, 0, 2_500).await;
-        assert_eq!(fake.states.load(Ordering::Relaxed), 2, "a refused emit was dropped, not deferred");
+        assert_eq!(
+            fake.states.load(Ordering::Relaxed),
+            2,
+            "a refused emit was dropped, not deferred"
+        );
 
         // Out of the settle window: Fired + false is a real transition, so it is announced.
         engine.runtime.mark_dirty("pc-1");
         evaluate_tick(&engine, &host, 0, 9_000).await;
-        assert_eq!(engine.runtime.arm_state("au-1", "tm-1"), ArmState::re_armed());
+        assert_eq!(
+            engine.runtime.arm_state("au-1", "tm-1"),
+            ArmState::re_armed()
+        );
         assert_eq!(fake.states.load(Ordering::Relaxed), 3);
 
         // And still 18%: no transition at all now, so nothing to say however long we wait.
         engine.runtime.mark_dirty("pc-1");
         evaluate_tick(&engine, &host, 0, 20_000).await;
-        assert_eq!(fake.states.load(Ordering::Relaxed), 3, "a repeat is not a transition");
+        assert_eq!(
+            fake.states.load(Ordering::Relaxed),
+            3,
+            "a repeat is not a transition"
+        );
     }
 
     /// **H-6: the rule can go away during the queue wait too.** The wait is up to ten seconds; a user
@@ -4366,7 +5360,7 @@ mod tests {
         let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
         engine.complete_rule("au-1");
 
-        run_send(engine.clone(), host.clone(), send).await;
+        run_crossing(engine.clone(), host.clone(), send).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         assert!(fake.written().is_empty(), "{:?}", fake.written());
@@ -4385,12 +5379,15 @@ mod tests {
         let (engine, fake, host) = wired();
         let send = pending(&engine, &host, "au-1", ArmState::armed(), 1_000);
 
-        run_send(engine.clone(), host.clone(), send).await;
+        run_crossing(engine.clone(), host.clone(), send).await;
         tokio::time::sleep(Duration::from_millis(1_500)).await;
 
         let ids = fake.written_to();
         assert!(!ids.is_empty(), "the premise: something was written");
-        assert!(ids.iter().all(|id| id == "pc-1"), "a write was addressed by leaf id: {:?}", ids);
+        assert!(
+            ids.iter().all(|id| id == "pc-1"),
+            "a write was addressed by leaf id: {:?}",
+            ids
+        );
     }
-
 }
