@@ -252,6 +252,9 @@ export const CondPanel: React.FC<CondPanelProps> = ({
      * would put a confident ✕ on every row of a rule nobody has been able to read yet.
      */
     const caps = parse ? sampleFromPattern(parse.find, parse.keep) : null;
+    // This is the same source check that produces `cond.unknownToken`; a stale source must not
+    // receive a confident preview verdict merely because a sample exists for the revised pattern.
+    const sourceGroups = parse && compilePattern(parse.find) !== null ? groupsOf(parse.find) : null;
     // The token dropdown offers the PATTERN's groups; a rule with no parse step offers none.
     const tokens = tokenOptions(parse?.find ?? '', caps);
     const live = pairs && Object.keys(pairs).length > 0 ? automationRowState(draft.rule, pairs, now) : null;
@@ -303,7 +306,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                     {clauses.map((clause, i) => {
                         const valueNeeded = needsValue(clause.test);
                         const held = caps === null ? undefined : tokenOf(clause.source, caps);
-                        const verdict = caps === null || clauseVerdictBlocker(clause) !== null
+                        const verdict = caps === null || clauseVerdictBlocker(clause, sourceGroups) !== null
                             ? null
                             : VERDICT[clauseTruth(clause, caps)];
                         return (

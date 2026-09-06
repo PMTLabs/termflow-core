@@ -109,7 +109,10 @@ const truthOf = (held: boolean): Truth => (held ? 'true' : 'false');
 export function tokenOf(source: AutomationSource, caps: ClauseCaptures): string | undefined {
     if (source === 'whole') return caps['0'];
     if ('group' in source) return caps[String(source.group)];
-    return caps[source.named];
+    // Capture records are ordinary objects. A named capture must be an OWN key: otherwise a stale
+    // clause named after Object.prototype (for example `toString`) reads a function as capture
+    // text after that group is removed, and numeric coercion crashes trying to trim it.
+    return Object.prototype.hasOwnProperty.call(caps, source.named) ? caps[source.named] : undefined;
 }
 
 /** The text side of the table. Split out for the same reason `test_text` is: it shares nothing. */

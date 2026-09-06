@@ -238,7 +238,19 @@ function parseStep(graph: AutomationGraph): AutomationParseStep | null {
  * The validator owns this predicate and `CondPanel` reads it before drawing a verdict, so a row
  * cannot show a green or red answer beside the blocking problem that says its operand is unfinished.
  */
-export function clauseVerdictBlocker(clause: AutomationClause): 'needsValue' | 'badPattern' | null {
+export function clauseVerdictBlocker(
+    clause: AutomationClause,
+    groups: { count: number; names: Set<string> } | null = null,
+): 'unknownSource' | 'needsValue' | 'badPattern' | null {
+    // A declared capture that did not participate is still a valid source: text tests deliberately
+    // read it as empty, while number tests read it as unknown. Only a source the pattern no longer
+    // declares is invalid and cannot carry a verdict.
+    if (groups && clause.source !== 'whole') {
+        const supplied = 'group' in clause.source
+            ? tokenSupplied(groups, clause.source.group, null)
+            : tokenSupplied(groups, null, clause.source.named);
+        if (!supplied) return 'unknownSource';
+    }
     if ('number' in clause.test) {
         const { value } = clause.test.number;
         return value === null || !Number.isFinite(value) ? 'needsValue' : null;
@@ -293,7 +305,7 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
             }
         }
 
-        const blocker = clauseVerdictBlocker(clause);
+        const blocker = clauseVerdictBlocker(clause, groups);
         if (blocker === 'needsValue' && 'number' in clause.test) {
             // **Reached by the ordinary path.** `value` is `number | null`, and `null` is what
             // `CondPanel` writes the moment a row is switched from a text operator to a numeric
