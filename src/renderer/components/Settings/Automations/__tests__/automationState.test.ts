@@ -375,6 +375,31 @@ describe('the row reads as a sentence', () => {
         expect(s.detail).toBe('5');
     });
 
+    /**
+     * **The blocked shape: a reading with neither a clause list nor a complete pair.**
+     *
+     * Reachable from ordinary authoring — choosing *A reading that stays true* seeds no clause —
+     * and it never fires. The row invented `OP_WORDS[cond.op ?? 'gt']` for it, so it read *"rises
+     * above"* followed by an empty `<b>`, describing a comparison the rule does not carry. Read
+     * through `condSentence` for the same §1.1 reason the clause table above is: the node face and
+     * the row must not make opposite claims about one rule.
+     */
+    it.each([
+        ['no operator and no threshold', null, null],
+        ['an operator but no threshold', 'gt' as const, null],
+        ['a threshold but no operator', null, 25],
+    ])('never invents a comparison for a reading with %s', (_label, op, threshold) => {
+        const r = rule();
+        r.graph.cond = { kind: 'number', op, threshold, clauses: [] };
+        const s = describeRule(r);
+        expect(s.detail).toBe(condSentence(r.graph.cond));
+        expect(s.detail).toBe('the comparison is not finished');
+        // The two halves of the old defect: an invented verb, and a `detail` the row draws as an
+        // empty `<b>`.
+        expect(s.verb).not.toBe('rises above');
+        expect(s.detail).not.toBeNull();
+    });
+
     it('says "type … — no Enter" for an action that deliberately does not submit', () => {
         const r = rule();
         r.graph.action.submit = false;

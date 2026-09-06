@@ -146,6 +146,13 @@ export function condSentence(cond: AutomationCondStep): string {
     if (cond.kind === 'number' && cond.op != null && cond.threshold != null) {
         return `the value is ${OP_PHRASES[cond.op]} ${cond.threshold}`;
     }
+    // **A reading with neither a clause list nor a complete pair is not "fires on any match".** It
+    // is the shape `eval::evaluate` answers `Truth::Unknown` for — evaluated, and unable to fire —
+    // and it is reachable from ordinary authoring, because choosing *A reading that stays true*
+    // seeds no clause. Falling through to the event wording below made the node face claim it
+    // fires on every match while the left rail said *"no comparison yet no number yet"* for the
+    // same rule. The words match `dry.rs`'s own row for it, which is the third surface.
+    if (cond.kind === 'number') return 'the comparison is not finished';
     return 'the pattern matches at all';
 }
 
@@ -516,11 +523,18 @@ export function describeRule(rule: AutomationRule): RuleSentence {
     if (cond.kind !== 'number') {
         return { lead: 'when output starts matching', subject, verb: null, detail: null, ...send };
     }
+    // **The same blocked shape, on the third surface.** `OP_WORDS[cond.op ?? 'gt']` invented
+    // *"rises above"* for a comparison the rule does not carry and paired it with a `detail` of
+    // `null`, which the row draws as an empty `<b>`. One reading, through `condSentence` — §1.1:
+    // two surfaces on one screen must not make opposite claims about one rule.
+    if (cond.op == null || cond.threshold == null) {
+        return { lead: 'when', subject, verb: 'matches, but', detail: condSentence(cond), ...send };
+    }
     return {
         lead: 'when the number in',
         subject,
-        verb: OP_WORDS[cond.op ?? 'gt'] ?? 'reaches',
-        detail: cond.threshold !== null && cond.threshold !== undefined ? String(cond.threshold) : null,
+        verb: OP_WORDS[cond.op] ?? 'reaches',
+        detail: String(cond.threshold),
         ...send,
     };
 }

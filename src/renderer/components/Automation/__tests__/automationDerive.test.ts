@@ -432,4 +432,24 @@ describe('automationDerive — condSentence / condFaceText (plan 032 §5.9)', ()
         expect(condSentence(cond)).toBe('the pattern matches at all');
         expect(condFaceText(cond)).toBe('the pattern matches at all');
     });
+
+    /**
+     * **A READING with no clause and no complete pair is a different rule from an EVENT with
+     * neither, and it used to borrow the event's words.**
+     *
+     * `eval::evaluate` answers `Truth::Unknown` for this shape — evaluated, and unable to fire —
+     * so *"the pattern matches at all"* was the opposite of what it does. It is reachable from
+     * ordinary authoring: choosing *A reading that stays true* seeds no clause. A table, because
+     * a half-filled pair is as blocked as an empty one and only the empty one is obvious.
+     * `dry.rs`'s cond row is the third surface and uses the same words.
+     */
+    it.each([
+        ['neither half of the pair', null, null],
+        ['an operator but no threshold', 'gt' as const, null],
+        ['a threshold but no operator', null, 25],
+    ])('says the comparison is unfinished for a reading with %s', (_label, op, threshold) => {
+        const cond: AutomationCondStep = { kind: 'number', op, threshold };
+        expect(condSentence(cond)).toBe('the comparison is not finished');
+        expect(condFaceText(cond)).toBe('the comparison is not finished');
+    });
 });

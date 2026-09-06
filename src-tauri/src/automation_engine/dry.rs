@@ -309,8 +309,9 @@ pub fn evaluate_once(
     // WITH a failed parse row, because the only way to reach it was a read that produced no value.
     // A clause can now answer `Unknown` on a perfectly successful match — a numeric clause on a
     // non-numeric token, a group that did not participate, a `matches` clause whose own pattern
-    // will not compile — and calling that "not reached" describes a step that WAS evaluated as one
-    // that never ran.
+    // will not compile — and so can a `Reading` rule with NO clauses, which `eval::evaluate`
+    // refuses to read as "the match is the whole condition". Calling any of those "not reached"
+    // describes a step that WAS evaluated as one that never ran, so BOTH arms below consult this.
     let matched = ev.captures.is_some();
 
     let cond = match (ev.condition, &ev.outcome) {
@@ -346,6 +347,23 @@ pub fn evaluate_once(
                 // the parse row directly above already says why.
                 Truth::Unknown => skipped(COND),
             }
+        }
+        // **The same treatment, at the site the clause fix did not cover.** A `Reading` rule whose
+        // clause list is still empty AFTER the fold is the incomplete v1 shape `eval::evaluate`
+        // answers `Unknown` for on a perfectly successful match — and it is reachable from ordinary
+        // authoring, because choosing *A reading that stays true* seeds no clause. The clause arm
+        // above consults `matched`; this one did not, so the pane read `parse ✓ matched` /
+        // `cond · not reached` for a step that WAS evaluated. There is no clause to name, so the
+        // row says what is actually missing.
+        //
+        // **`folded`, not `steps`** — the one place this function reads the folded copy for
+        // anything but evaluation, and deliberately: an empty folded list is precisely the input
+        // `evaluate`'s own guard branches on, and it is what separates this shape from a COMPLETE
+        // v1 rule whose token would not coerce. That one folds to a real clause, its `Unknown`
+        // means "the comparison ran and the token was not a number", and the parse row above
+        // already says exactly that — so it keeps the `skipped` row it has always had.
+        (Truth::Unknown, _) if matched && folded.cond.clauses.is_empty() => {
+            step(COND, "unknown", "the comparison is not finished".to_string())
         }
         (Truth::Unknown, _) => skipped(COND),
         (truth, Outcome::Numeric(Read::Value(v))) => {
@@ -1012,6 +1030,44 @@ mod tests {
         assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "failed"]);
         let action = detail(&report, "action");
         assert!(action.contains("$3"), "the failure row must name the token: {action}");
+    }
+
+    /// **The same defect, at the site the clause fix did not cover.**
+    ///
+    /// A `Reading` rule with no clauses and no v1 pair answers `Truth::Unknown` on a SUCCESSFUL
+    /// match — `eval::evaluate`'s incomplete-v1 guard, which refuses to read an empty clause list
+    /// as *the match is the whole condition* for a reading. It is reachable from ordinary
+    /// authoring: choosing *A reading that stays true* seeds no clause. The clause arm consulted
+    /// `matched` and this path did not, so the pane read `parse ✓ matched` / `cond · not reached`
+    /// for a step that was evaluated — the identical sentence
+    /// `a_clause_that_could_not_be_answered_says_so_rather_than_not_reached` exists to forbid.
+    ///
+    /// The paired negative is `a_dry_run_surfaces_a_capture_that_is_not_a_number`: a COMPLETE v1
+    /// rule also answers `Unknown` on a match, its comparison IS finished, and it keeps the
+    /// `skipped` row — so this widening cannot have swallowed that case too.
+    #[test]
+    fn a_reading_rule_with_no_comparison_says_so_rather_than_not_reached() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        // The shape the editor mints for *A reading that stays true* before a clause is added:
+        // neither a clause list nor a v1 pair, so `fold_v1_clauses` has nothing to fold either.
+        rule.graph.cond = Some(CondStep {
+            finds: Finds::Reading,
+            op: None,
+            threshold: None,
+            ..Default::default()
+        });
+
+        fake.say("pc-1", "ctx:63%
+");
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        // The parse step SUCCEEDED — this is the whole point: the condition was reached and could
+        // not be answered, which is not the same as never running.
+        assert_eq!(status(&report, "parse"), "ok");
+        assert_eq!(status(&report, "cond"), "unknown");
+        assert_eq!(detail(&report, "cond"), "the comparison is not finished");
+        assert_eq!(report.verdict, WOULD_NOT_FIRE, "it still cannot fire");
     }
 
     /// A `wire` with no rules keeps the engine's live set empty, so nothing here can accidentally be
