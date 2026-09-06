@@ -367,6 +367,18 @@ pub fn extract(re: &Regex, keep: Keep, text: &str) -> (Read, Option<Captures>) {
     let Some(caps) = re.captures_iter(text).last() else {
         return (Read::NoMatch, None);
     };
+    let read = read_kept(&caps, keep);
+    let bag = bag_from(re, &caps);
+    (read, Some(bag))
+}
+
+/// The `keep` reduction of ONE match: which span is the value, and that span as a number.
+///
+/// Split out of `extract` so `evaluate_text` can populate `Outcome::Numeric` from the match §5.5
+/// step 2 already took, rather than scanning the window a second time. Two copies of this choice is
+/// exactly the drift `bag_from`'s own header refuses: the half that drifted here would be the half
+/// the activity log prints, standing beside a condition decided from the other one.
+fn read_kept(caps: &regex::Captures<'_>, keep: Keep) -> Read {
     let whole = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
     let raw = match keep {
         Keep::Whole => Some(whole),
@@ -375,15 +387,13 @@ pub fn extract(re: &Regex, keep: Keep, text: &str) -> (Read, Option<Captures>) {
             .or_else(|| caps.get(1))
             .map(|m| m.as_str()),
     };
-    let bag = bag_from(re, &caps);
-    let read = match raw {
+    match raw {
         None => Read::Unparsed(whole.to_string()),
         Some(s) => match coerce(s) {
             Some(v) => Read::Value(v),
             None => Read::Unparsed(s.to_string()),
         },
-    };
-    (read, Some(bag))
+    }
 }
 
 /// The six comparators the mockup's drop-down draws.
@@ -664,33 +674,67 @@ pub fn evaluate_text(
     read: &dyn Fn(ReadDepth) -> Option<String>,
     now_ms: i64,
 ) -> Option<Evaluation> {
+    // §5.5 step 1. `finds` is READ here and passed through unchanged — it is derived from nothing,
+    // least of all from the clause types. §5.2: `finds` answers "a reading, or an event?", which
+    // selects the READ DEPTH; a clause's `Test` answers "number, or text?", which selects the
+    // comparison. The two coincided only while there was exactly one comparison.
+    // `API error 529 . retry in 60s` is an EVENT that contains a NUMBER: deriving `Finds::Reading`
+    // from its numeric clause would hand it the deep window in both directions, `API error` would
+    // stay findable in 200 lines of a quiet terminal's scrollback, the condition would never go
+    // false, and the rule would sit in `Fired` for the rest of the session — the exact bug
+    // `depth_for`'s own header was written to prevent.
     let depth = depth_for(graph.cond.finds, graph.monitor.read, prev);
     let text = strip_echoes(&read(depth)?, echoes);
 
-    let (outcome, condition, captures) = match graph.cond.finds {
-        Finds::Event => {
-            // `captures_iter(..).last()`, NOT `is_match` and NOT `.next()`. `is_match` is what made
-            // a word rule produce no captures at all — not even group 1 — so every `$1` in spec
-            // 032's own scenarios resolved to nothing. `.last()` for the same reason the numeric
-            // branch gives: over a 200-line window the first match is the oldest.
-            let caps = re.captures_iter(&text).last();
-            let hit = caps.is_some();
-            let bag = caps.map(|c| bag_from(re, &c));
-            (Outcome::Presence(hit), Truth::from_compare(hit), bag)
-        }
-        Finds::Reading => {
-            let (value, caps) = extract(re, graph.parse.keep, &text);
-            let now = match (&value, graph.cond.op, graph.cond.threshold) {
-                (Read::Value(v), Some(op), Some(t)) => Truth::from_compare(compare(op, *v, t)),
-                // No value read, or a match whose span is not a number: nothing was learned, and
-                // `Unknown` says so rather than claiming the condition is false. A numeric rule with
-                // no operator or threshold cannot be true of anything either — that is a blocking
-                // validation problem and so unreachable through the enable path, and `Unknown` is the
-                // reading that neither fires nor spuriously re-arms if it is ever reached.
-                _ => Truth::Unknown,
-            };
-            (Outcome::Numeric(value), now, caps)
-        }
+    // §5.5 step 2 — ONE read of the window, feeding every consumer below, so the log line, the
+    // condition and the message's `$1` all describe the SAME occurrence.
+    //
+    // `captures_iter(..).last()`, NOT `is_match` and NOT `.next()`. `is_match` is what made a word
+    // rule produce no captures at all — not even group 1 — so every `$1` in spec 032's own scenarios
+    // resolved to nothing. `.last()` because over a 200-line window the first match is the OLDEST,
+    // so `captures()` would leave the canonical `ctx:NN%` rule reading a value that never rises.
+    let hit = re.captures_iter(&text).last();
+
+    // `Outcome` is UNCHANGED by the clause list, deliberately: it is what `read_detail`, `dry.rs`'s
+    // parse step and `loops.rs`'s `LogKind::NoMatch` classification read, and all three describe
+    // what the PATTERN read, not what the condition then decided from it. An event reports presence;
+    // a reading reports the `keep`-named span reduced to a number, through the same `read_kept`
+    // `extract` uses.
+    let outcome = match graph.cond.finds {
+        Finds::Event => Outcome::Presence(hit.is_some()),
+        Finds::Reading => Outcome::Numeric(match &hit {
+            None => Read::NoMatch,
+            Some(caps) => read_kept(caps, graph.parse.keep),
+        }),
+    };
+    let captures = hit.as_ref().map(|caps| bag_from(re, caps));
+
+    let condition = match &captures {
+        // §5.5 step 3 — the existing asymmetry, preserved verbatim, and NOT an inconsistency to
+        // tidy. An event that did not appear genuinely did not happen, so its absence IS the
+        // observation. A reading that produced no value learned nothing about that value — it may
+        // merely have scrolled out of the depth — and `Truth::Unknown`'s own header is the authority
+        // for why collapsing that to `false` re-introduces "once per line wearing once per
+        // crossing's clothes".
+        None => match graph.cond.finds {
+            Finds::Event => Truth::False,
+            Finds::Reading => Truth::Unknown,
+        },
+        // §5.5 steps 4 and 5. Step 4 is not a branch of its own because `fold_clauses` already
+        // answers `True` for an empty list, and it is reachable ONLY from this arm, where the
+        // pattern HAS matched — so "no clauses" means the match itself is the whole condition
+        // (§5.4's last row: today's word rule, written down). Step 5 is the Kleene fold of every
+        // clause under the one join.
+        //
+        // A v1 `op`/`threshold` rule arrives here already folded into this list, which is why
+        // neither field is read below: there is ONE folding implementation, `fold_v1_clauses`, and
+        // it is not this one. Both callers of this core apply it — `reload` before it builds the
+        // `LiveRule`, `dry::evaluate_once` on its own copy — and a third caller must too, or its
+        // v1 rules will read every match as "the match is the whole condition".
+        Some(caps) => fold_clauses(
+            &graph.cond.clauses.iter().map(|c| test_clause(c, caps)).collect::<Vec<_>>(),
+            graph.cond.join,
+        ),
     };
 
     let (next, decision) = next_state(prev, condition, now_ms);
@@ -715,7 +759,31 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------------------------
 
+    /// A rule exactly as `evaluate_text` meets it in production: **`fold_v1_clauses` applied**.
+    ///
+    /// The fold is not a convenience here, it is the fixture's correctness. **Both** production
+    /// entry points into the pure core fold first — `reload` before it builds the `LiveRule`, and
+    /// `dry::evaluate_once` on its own copy — so a fixture that skipped it would hand
+    /// `evaluate_text` a shape production never produces: `Finds::Reading` with an EMPTY clause
+    /// list, which §5.5 step 4 reads as "the match is the whole condition". Calling the real fold
+    /// rather than hand-writing the clause also keeps this honest if §5.4's `keep` mapping ever
+    /// moves: there is one folding implementation and the tests use it.
     fn graph(find: &str, finds: Finds, op: Option<CompareOp>, threshold: Option<f64>) -> AutomationGraph {
+        let mut g = graph_unfolded(find, finds, op, threshold);
+        if let Ok(re) = Regex::new(find) {
+            crate::automation_engine::fold_v1_clauses(&mut g, &re);
+        }
+        g
+    }
+
+    /// The stored v1 row, before the load-time fold. Split out only so `graph` above can be the
+    /// two-line "and then load it" that every test wants; nothing else should call it.
+    fn graph_unfolded(
+        find: &str,
+        finds: Finds,
+        op: Option<CompareOp>,
+        threshold: Option<f64>,
+    ) -> AutomationGraph {
         AutomationGraph {
             layout: None,
             monitor: MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 },
@@ -734,6 +802,15 @@ mod tests {
                 substitute: false,
             },
         }
+    }
+
+    /// A v2 graph: `finds` and a pattern, and the caller pushes whatever clauses it wants.
+    ///
+    /// Deliberately separate from `graph` above rather than a defaulted argument on it: the v1
+    /// helper's whole job is to carry `op`/`threshold` through the fold, and a clause list is the
+    /// thing that replaces them.
+    fn graph_with(finds: Finds, find: &str) -> AutomationGraph {
+        graph(find, finds, None, None)
     }
 
     fn ctx_rule() -> AutomationGraph {
@@ -1307,6 +1384,99 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
+    // §5.5 — the five steps, wired
+    // -----------------------------------------------------------------------------------------
+
+    /// §10.8c. §5.2's whole argument, as a test. If someone later "simplifies" by deriving `finds`
+    /// from the clause types, this rule gets the deep window in both directions, `API error` stays
+    /// findable in scrollback, and it never re-arms.
+    #[test]
+    fn an_event_rule_with_a_numeric_clause_still_reads_the_visible_screen_after_firing() {
+        let mut g = graph_with(Finds::Event, r"API error (\d+)");
+        g.cond.clauses.push(Clause {
+            source: Source::Group(1),
+            test: Test::Number { op: CompareOp::Gt, value: 1.0 },
+        });
+        let fired = ArmState::Fired { at_ms: 0 };
+        assert_eq!(depth_for(g.cond.finds, g.monitor.read, fired), ReadDepth::VisibleScreen);
+    }
+
+    /// §10.8c at the **wiring**, which the test above does not reach.
+    ///
+    /// That one hands `depth_for` `g.cond.finds` itself, so it pins `depth_for`'s table — already
+    /// covered — and not the call `evaluate_text` makes. A "simplification" that derived `finds`
+    /// from the clause types *inside* `evaluate_text` would leave it green. This one asks the SOURCE
+    /// which depth it was read at, which is the fact a user feels.
+    ///
+    /// The existing word-rule re-arm tests cannot stand in for it: `failed_rule` has NO clauses, so
+    /// a derivation keyed on "any numeric clause" leaves them untouched. The numeric clause is the
+    /// whole point — `API error 529 . retry in 60s` is an event that contains a number.
+    #[test]
+    fn an_event_rule_with_a_numeric_clause_is_read_at_the_screen_after_firing() {
+        let mut g = graph_with(Finds::Event, r"API error (\d+)");
+        g.cond.clauses.push(Clause {
+            source: Source::Group(1),
+            test: Test::Number { op: CompareOp::Gt, value: 1.0 },
+        });
+        let r = re(&g.parse.find);
+        let src = VtSource::new(4, 80);
+
+        src.feed("API error 529");
+        let fired = evaluate(&g, &r, NO_ECHOES, ArmState::armed(), &src, "pc-1", 1).unwrap();
+        assert_eq!(fired.decision, Decision::Sent, "premise: the clause passes and the rule fires");
+
+        // Off the visible SCREEN, still well inside the 200-line WINDOW — the gap the two depths
+        // exist to tell apart, and the one a derived `Finds::Reading` would collapse.
+        for i in 0..10 {
+            src.feed(&format!("build step {}", i));
+        }
+        src.clear_depths();
+        let ev = evaluate(&g, &r, NO_ECHOES, fired.next, &src, "pc-1", 2).unwrap();
+        assert_eq!(
+            src.depths(),
+            vec![ReadDepth::VisibleScreen],
+            "a fired EVENT re-arms off the screen, whatever its clauses happen to compare"
+        );
+        assert_eq!(
+            ev.decision,
+            Decision::ReArmed,
+            "so it lets the event go — the deep window would leave it in `Fired` for the session"
+        );
+    }
+
+    /// §10.8e, §5.5 step 3. An event that did not appear genuinely did not happen; a reading that
+    /// produced no value taught nothing. One branch for both is the mutation this kills.
+    #[test]
+    fn no_match_is_false_for_an_event_and_unknown_for_a_reading() {
+        for (finds, want) in [(Finds::Event, Truth::False), (Finds::Reading, Truth::Unknown)] {
+            let g = graph_with(finds, r"nothing");
+            let re = Regex::new(&g.parse.find).unwrap();
+            let ev = evaluate_text(&g, &re, &[], ArmState::armed(), &|_| Some("quiet".into()), 0).unwrap();
+            assert_eq!(ev.condition, want, "{finds:?}");
+        }
+    }
+
+    /// §5.5 step 5 reaching the arm machine: two clauses of DIFFERENT types over DIFFERENT tokens,
+    /// folded under one AND. Both failure rows are asserted, so an implementation that reads only
+    /// the first clause — or only the last — fails on one of them.
+    #[test]
+    fn two_clauses_under_and_need_both() {
+        let mut g = graph_with(Finds::Event, r"API error (\d+) . retry in (\d+)s");
+        g.cond.clauses = vec![
+            Clause { source: Source::Group(1), test: Test::Text { op: TextOp::Is, value: "529".into() } },
+            Clause { source: Source::Group(2), test: Test::Number { op: CompareOp::Gt, value: 30.0 } },
+        ];
+        g.cond.join = Join::And;
+        let re = Regex::new(&g.parse.find).unwrap();
+        let run = |line: &str| {
+            evaluate_text(&g, &re, &[], ArmState::armed(), &|_| Some(line.into()), 0).unwrap().condition
+        };
+        assert_eq!(run("API error 529 . retry in 60s"), Truth::True);
+        assert_eq!(run("API error 429 . retry in 60s"), Truth::False, "first clause fails");
+        assert_eq!(run("API error 529 . retry in 10s"), Truth::False, "second clause fails");
+    }
+
+    // -----------------------------------------------------------------------------------------
     // §10.2d — two depths
     // -----------------------------------------------------------------------------------------
 
@@ -1736,15 +1906,43 @@ mod tests {
         );
     }
 
-    /// A numeric rule missing its operator cannot be true of anything — the one reading that must not
-    /// be "always fires".
+    /// **This test changed meaning in M2, and the change is the point of writing it down.**
+    ///
+    /// A v1 `Finds::Reading` rule with no `op` used to read `Truth::Unknown` here — "runs, logs,
+    /// never fires" — because `evaluate_text` compared `op`/`threshold` itself and had a `_` arm for
+    /// the incomplete pair. It no longer reads either field: §5.3 makes them load-only, and
+    /// `fold_v1_clauses` is the one place they are consulted. That fold deliberately **refuses** an
+    /// incomplete pair (`"a numeric rule with no comparator is a blocking validation problem
+    /// already"`), leaving the clause list empty — and §5.5 step 4 reads an empty list on a match as
+    /// *the match is the whole condition*. So this shape now reads `True`: not "never fires" but
+    /// "fires on every match", which is the opposite direction.
+    ///
+    /// It is unreachable through the product. `cond.incomplete` (`automation_validation.rs`, severity
+    /// **blocks**, pinned by that file's own mutation table for BOTH `op: None` and
+    /// `threshold: None`) is refused by the store's enable gate and by any save with `enabled = true`,
+    /// and `reload` only builds a `LiveRule` for an enabled rule. Only a hand-edited row reaches here.
+    ///
+    /// The assertions below are therefore a **tripwire, not an endorsement**: they fail the moment
+    /// either half of that story moves — if the fold starts translating an incomplete pair, or if a
+    /// guard is put back into `evaluate_text`. Whoever trips it should re-read §5.4's table, which
+    /// gives "no clauses" to the `Finds::Event` row only, and decide deliberately.
     #[test]
-    fn a_numeric_rule_without_an_operator_is_never_true() {
+    fn an_incomplete_v1_numeric_rule_is_refused_by_the_fold_not_by_evaluate_text() {
         let g = graph(r"ctx:(\d+)%", Finds::Reading, None, Some(25.0));
+        assert!(
+            g.cond.clauses.is_empty(),
+            "the fold must not invent a comparison the stored rule never carried"
+        );
         let ev = evaluate_text(&g, &re(r"ctx:(\d+)%"), NO_ECHOES, ArmState::armed(), &|_| Some("ctx:99%".into()), 1)
             .unwrap();
-        assert_eq!(ev.condition, Truth::Unknown);
-        assert_eq!(ev.decision, Decision::Checked);
+        assert_eq!(
+            ev.condition,
+            Truth::True,
+            "an empty clause list on a match is §5.5 step 4 — validation, not this function, is what \
+             keeps an incomplete v1 rule from reaching it"
+        );
+        // And the numeric OUTCOME is untouched by any of that: the log still says what was read.
+        assert_eq!(ev.outcome, Outcome::Numeric(Read::Value(99.0)));
     }
 
     /// "Still" is a claim about a match this pair had ALREADY acted on, so the crossing itself — the

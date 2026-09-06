@@ -163,12 +163,27 @@ pub fn evaluate_once(
         }
     };
 
+    // 2b. Fold a v1 `op`/`threshold` rule into the clause list it means (§5.4), on a local copy.
+    //
+    //     `evaluate_text` reads the CLAUSE LIST and no longer looks at `op`/`threshold` at all
+    //     (§5.3 makes them load-only), and an empty clause list on a match is §5.5 step 4 — *the
+    //     match is the whole condition*. `reload` folds every rule it makes live; **this is the
+    //     other entry point into the same pure core**, and it takes a rule straight from the store
+    //     or an unsaved draft that never went near `reload`. Without this line the Test button
+    //     reports "would fire" for `ctx > 25` at `ctx:18%` — the dry run disagreeing with the
+    //     engine, which is the one thing it exists to rule out.
+    //
+    //     The same single fold implementation, on a clone so nothing the user can see is rewritten
+    //     (§3.2: a merely-loaded v1 rule is never promoted). Idempotent, so a v2 draft is untouched.
+    let mut graph = rule.graph.clone();
+    crate::automation_engine::fold_v1_clauses(&mut graph, &re);
+
     // 3. The same pure core the evaluator runs, over the same needle list, at the same depth. The arm
     //    state is READ (§2.2c picks the depth from it) and never written.
     let prev = engine.runtime.arm_state(&rule.id, tm);
     let echoes = engine.runtime.echoes_for(tm, now_ms);
     let port = HostPort(host);
-    let Some(ev) = eval::evaluate(&rule.graph, &re, &echoes, prev, &port, &pc, now_ms) else {
+    let Some(ev) = eval::evaluate(&graph, &re, &echoes, prev, &port, &pc, now_ms) else {
         return finish(
             UNREADABLE,
             vec![
