@@ -491,6 +491,13 @@ pub fn test_clause(c: &Clause, caps: &Captures) -> Truth {
             }
         }
         Test::Text { op, value } => {
+            // A text operator that needs text but has none is the same unfinished comparison as a
+            // numeric clause with no threshold above. Dry runs deliberately evaluate drafts past
+            // save-time validation, so return `Unknown` before `contains("")` can answer `True`.
+            // `IsEmpty` and `IsNotEmpty` are different: their empty value is not an operand at all.
+            if !matches!(op, TextOp::IsEmpty | TextOp::IsNotEmpty) && value.trim().is_empty() {
+                return Truth::Unknown;
+            }
             let token = match &c.source {
                 Source::Whole => caps.group(0).unwrap_or_default(),
                 Source::Group(n) => caps.group(*n as usize).unwrap_or_default(),

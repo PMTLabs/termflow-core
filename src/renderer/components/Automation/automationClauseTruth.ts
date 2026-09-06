@@ -154,5 +154,10 @@ export function clauseTruth(clause: AutomationClause, caps: ClauseCaptures): Tru
         if (read === null || value === null) return 'unknown';
         return truthOf(compare(op, read, value));
     }
-    return textTruth(clause.test.text.op, token ?? '', clause.test.text.value);
+    const { op, value } = clause.test.text;
+    // Dry runs evaluate drafts past save-time validation. Required text that has not been entered
+    // therefore cannot answer the clause — in particular, `contains('')` must not become a match.
+    // The two emptiness operators deliberately take no text operand, so they still inspect `token`.
+    if (op !== 'isEmpty' && op !== 'isNotEmpty' && value.trim().length === 0) return 'unknown';
+    return textTruth(op, token ?? '', value);
 }

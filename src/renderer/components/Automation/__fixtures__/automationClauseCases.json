@@ -46,11 +46,18 @@
       "expected": "false"
     },
     {
-      "name": "an empty needle is contained by everything",
-      "why": "Rust's `str::contains(\"\")` and JavaScript's `String.includes('')` are both true; a port that special-cased the empty operand would diverge here.",
+      "name": "contains with no text entered is unknown, not a match-all",
+      "why": "`cond.clauseNeedsValue` blocks this unfinished required operand. A dry run can still reach it, where it must withhold a verdict rather than inherit `str::contains(\"\")` / `String.includes('')` returning true.",
       "caps": { "0": "ctx:63%" },
       "clause": { "source": "whole", "test": { "text": { "op": "contains", "value": "" } } },
-      "expected": "true"
+      "expected": "unknown"
+    },
+    {
+      "name": "isEmpty has no required operand and still evaluates normally",
+      "why": "Unlike `contains`, `isEmpty` deliberately takes no text operand. Its empty wire value is not an unfinished clause, so the evaluator must test the capture rather than return `unknown` merely because that value is empty.",
+      "caps": { "0": "ctx:63%" },
+      "clause": { "source": "whole", "test": { "text": { "op": "isEmpty", "value": "" } } },
+      "expected": "false"
     },
     {
       "name": "notContains is the negation, not a second reading",
