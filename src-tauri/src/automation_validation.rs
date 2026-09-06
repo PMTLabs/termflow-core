@@ -27,7 +27,7 @@ use regex::{Regex, RegexBuilder};
 use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
-    Test, TextOp, TimerMode,
+    Test, TextOp, TimerMode, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -279,12 +279,6 @@ pub const MIN_DELAY_MS: i64 = 1_000;
 /// message goes unstripped.
 pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 
-/// Bits 0–6 of `TimerMode::DailyAt::days` are Mon..Sun (plan §3.1). `u8` has an 8th bit (0x80) that
-/// names no weekday at all — this mask is what `timer.noDays` checks against, so a hand-crafted or
-/// corrupted mask with ONLY that spare bit set is still treated as "no day selected" rather than
-/// slipping past validation into a schedule that silently never fires.
-const WEEKDAY_BITS_MASK: u8 = 0b0111_1111;
-
 /// Everything wrong with the WAIT step — §8's three `timer.*` codes (plan 032 §6.2, §12 item 1).
 ///
 /// `None` (no wait step at all) reports nothing: every rule saved before this milestone, and every
@@ -323,6 +317,9 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
             }
         }
         TimerMode::DailyAt { days, .. } => {
+            // The mask is `automation_store`'s, beside the field it describes — §6.3's
+            // `schedule_due` reads the same one, so "can this ever fire" and "does it fire now"
+            // cannot answer from two different tables.
             if days & WEEKDAY_BITS_MASK == 0 {
                 out.push(Problem::new(
                     Severity::Blocks,

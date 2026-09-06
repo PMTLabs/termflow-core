@@ -397,6 +397,15 @@ pub enum TimerMode {
     DailyAt { minute_of_day: i32, days: u8 },
 }
 
+/// The bits of `TimerMode::DailyAt::days` that name a weekday — 0–6, Mon..Sun (§3.1).
+///
+/// `u8` has an 8th bit (0x80) that names no day at all, so a hand-crafted or corrupted mask with
+/// only that bit set selects nothing. **Lives here, beside the field it describes, so validation
+/// and evaluation cannot disagree about it**: `automation_validation`'s `timer.noDays` asks whether
+/// a rule can ever fire, and §6.3's `schedule_due` asks whether it fires now — two answers to one
+/// question, and a mask re-declared in the engine is how they drift apart.
+pub const WEEKDAY_BITS_MASK: u8 = 0b0111_1111;
+
 /// The four steps, stored whole as a JSON blob in `automation_rules.graph`.
 ///
 /// Blob rather than normalised because it is never queried and never written at a different cadence
@@ -4046,10 +4055,15 @@ mod tests {
 
         // A numeric clause with NO threshold \u2014 `null`, which is what `CondPanel` puts on the wire
         // the moment a row turns numeric, and what a bare `f64` refused outright.
-        let empty: Clause =
-            serde_json::from_str(r#"{"source":"whole","test":{"number":{"op":"gt","value":null}}}"#)
-                .unwrap();
+        let empty_json = r#"{"source":"whole","test":{"number":{"op":"gt","value":null}}}"#;
+        let empty: Clause = serde_json::from_str(empty_json).unwrap();
         assert!(matches!(empty.test, Test::Number { value: None, .. }));
+        // **And back out again, like every filled row above.** `value: None` carries no
+        // `skip_serializing_if`, so it is written as `"value":null` rather than omitted — correct
+        // for this build, and now a pinned contract rather than an accident. Only the FILLED values
+        // were pinned in both directions, and the first rule saved with a half-typed threshold
+        // fixes this spelling forever.
+        assert_eq!(serde_json::to_string(&empty).unwrap(), empty_json);
         // And a MISSING key decodes the same way, which is what `#[serde(default)]` is there for.
         let absent: Clause =
             serde_json::from_str(r#"{"source":"whole","test":{"number":{"op":"gt"}}}"#).unwrap();
