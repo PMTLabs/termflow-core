@@ -631,10 +631,23 @@ function whenPhrase(rule: AutomationRule, pattern: string, cond: Record<string, 
  * Derived from the same values, so the rail cannot summarise a rule the canvas is not showing.
  */
 export function ruleSummary(rule: AutomationRule): string {
+    const timer = rule.graph.timer;
+    const action = stepValues(rule, 'action');
+    // A schedule fires on its clock even when it carries monitor/parse/cond steps (the validator
+    // reports that shape separately), so it takes the same precedence as `describeRule` below.
+    // The rail omits targets: the list row has no room for them and saying it is “watching” would
+    // describe the schedule as an absence rather than a clock-triggered send.
+    if (timer && 'dailyAt' in timer.mode) {
+        const { minuteOfDay, days } = timer.mode.dailyAt;
+        const at = clockTime(minuteOfDay);
+        const when = describeDays(days);
+        if (at !== null && when !== '') {
+            return `At ${at} on ${when} · ${rule.graph.action.submit ? 'send' : 'type'} ${action.message.text}`;
+        }
+    }
     const monitor = stepValues(rule, 'monitor');
     const parse = stepValues(rule, 'parse');
     const cond = stepValues(rule, 'cond');
-    const action = stepValues(rule, 'action');
     return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)} · ${
         rule.graph.action.submit ? 'send' : 'type'
     } ${action.message.text}`;

@@ -19,6 +19,7 @@ import {
     WIRE_CHIPS,
     condFaceText,
     condSentence,
+    describeRule,
     faceFor,
     panelFor,
     ruleSummary,
@@ -561,6 +562,34 @@ describe('automationDerive — the palette summary', () => {
         const cond: AutomationCondStep = { kind: 'number', op: 'lt', threshold: 5, clauses: [] };
         const summary = ruleSummary({ ...rule, graph: { ...rule.graph, cond } });
         expect(summary).toContain('is less than 5');
+    });
+
+    it('names a schedule by its clock and days, never as something watched', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule = {
+            ...base,
+            graph: { ...base.graph, timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } } },
+        };
+
+        const summary = ruleSummary(rule);
+        expect(summary).toContain('09:00');
+        expect(summary).toContain('weekdays');
+        expect(summary).not.toContain('nothing to watch for');
+        expect(summary).not.toContain('Watching');
+    });
+
+    it('uses the same clock and days in the rail and Settings row for a schedule', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule = {
+            ...base,
+            graph: { ...base.graph, timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } } },
+        };
+
+        const summary = ruleSummary(rule);
+        const sentence = describeRule(rule);
+        expect(sentence.lead).toBe('at');
+        expect(summary).toContain(sentence.subject);
+        expect(sentence.subject).toBe('09:00 on weekdays');
     });
 });
 
